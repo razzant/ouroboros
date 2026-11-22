@@ -9,6 +9,7 @@ host-observed evidence rather than a model claim.
 import copy
 import dataclasses
 import json
+import re
 
 import pytest
 
@@ -1075,7 +1076,8 @@ _LAST_READ_VIEW_WRITERS = {  # exact (file, enclosing def, kind); the site COUNT
     (_CORE, "_read_file", "assign"),
     (_EPISODE, "_execute_inspection_call", "assign"),
 }
-_RESET = "    ctx.last_read_view = None\n"  # the reader's entry reset inside _read_file
+# the reader's entry reset inside _read_file, one line, with or without a trailing comment
+_RESET = re.compile(r"^    ctx\.last_read_view = None(?:  #[^\n]*)?\n", re.MULTILINE)
 
 
 def _assert_three_writers(sites):
@@ -1113,9 +1115,11 @@ def test_last_read_view_has_exactly_three_writers():
     base = _last_read_view_sites(live)
     _assert_three_writers(base)
     core = live[_CORE]
-    assert core.count(_RESET) == 1
-    injected_at = core[:core.index(_RESET)].count("\n") + 2  # 1-based line of the injected reset
-    live[_CORE] = core.replace(_RESET, _RESET + _RESET.rstrip("\n") + "  # injected\n")
+    resets = list(_RESET.finditer(core))
+    assert len(resets) == 1, resets
+    reset = resets[0]
+    injected_at = core[:reset.start()].count("\n") + 2  # 1-based line of the injected reset
+    live[_CORE] = core[:reset.end()] + "    ctx.last_read_view = None  # injected\n" + core[reset.end():]
     fourth = _last_read_view_sites(live)
     assert fourth == base | {(_CORE, "_read_file", injected_at, "assign")}
     with pytest.raises(AssertionError):

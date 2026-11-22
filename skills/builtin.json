@@ -9,6 +9,8 @@
      "title": "Computer control", "pitch": "Press buttons in Windows apps by name"},
     {"name": "ui_design", "category": ["design"], "recommended": true, "default_on": true,
      "title": "Design help", "pitch": "Layouts, mockups, charts and icons"},
+    {"name": "ui_look", "category": ["design"], "recommended": true, "default_on": true,
+     "title": "Screen check", "pitch": "Sees how its own screens look"},
     {"name": "templates", "category": ["writing"], "recommended": true, "default_on": true,
      "title": "Composer buttons", "pitch": "Ready-made buttons in the message box"},
     {"name": "device_voice", "category": ["media"], "recommended": true, "default_on": true,

@@ -364,7 +364,7 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
 
     with patch.object(srv, "load_settings", side_effect=fake_load_settings), \
             patch.object(srv, "save_settings", side_effect=fake_save_settings), \
-            patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings), \
+            patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())), \
             patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings), \
             patch.object(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None), \
             patch.object(srv, "_apply_settings_to_env", lambda *_a, **_k: None), \
@@ -414,7 +414,7 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
 
     with patch.object(srv, "load_settings", side_effect=fake_load_settings), \
             patch.object(srv, "save_settings", side_effect=fake_save_settings), \
-            patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings), \
+            patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())), \
             patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings), \
             patch.object(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None), \
             patch.object(srv, "_apply_settings_to_env", lambda *_a, **_k: None), \

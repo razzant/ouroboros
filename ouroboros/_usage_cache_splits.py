@@ -52,18 +52,13 @@ def _key(task_id: str, provider: str, model: str, processing_mode: str = "") -> 
     default direct-Anthropic install miss its own split on every read, so both
     sides normalize through the identity the fence itself uses -- one leading
     ``~`` probe marker stripped first, exactly as the reservation's own
-    model-family test does. Public router slugs keep their exact spelling, and
-    named connections keep their own splits even when two keys use the same model.
+    model-family test does. The provider and its named connection scope the cache: direct and OpenRouter caches are not shared, public router slugs keep their exact spelling, and named connections keep their own splits even when two keys use the same model.
     """
-    from ouroboros.provider_models import normalize_model_identity, parse_model_route
+    from ouroboros.provider_models import connection_id, normalize_model_identity, parse_model_route
 
     model = str(model or "").strip().removeprefix("~")
-    provider = str(provider or "").strip().lower()
-    binding = parse_model_route(model)
-    route = model if binding.connection else normalize_model_identity(model)
-    if provider == "openrouter" and binding.kind == "openrouter" and not binding.connection:
-        route = binding.model
-    return (str(task_id or "").strip(), provider, route, _surface(), str(processing_mode or ""))
+    connection = connection_id(str(provider or "").strip().lower(), parse_model_route(model).connection)
+    return (str(task_id or "").strip(), connection, normalize_model_identity(model), _surface(), str(processing_mode or ""))
 
 
 def stash_task_cache_split(

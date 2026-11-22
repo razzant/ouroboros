@@ -341,6 +341,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 
 | event | raised by |
 |---|---|
+| `ouro:dashboard-subtab-hidden` | modules/dashboard.js |
 | `ouro:dashboard-subtab-shown` | modules/dashboard.js ×3 |
 | `ouro:extension-settings-mounted` | modules/settings_extension_forms.js ×2 |
 | `ouro:extension-settings-unmounted` | modules/settings_extension_forms.js |

@@ -746,7 +746,8 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
     assert out["invocation_id"] and out["pending_invocation_id"] == out["invocation_id"]
     assert out["status"] == "started_uncustodied", (
         "a start nothing outside this worker can name must not wear the plain name")
-    assert "CUSTODY IS NOT DURABLE" in out["note"]
+    assert out["note"].startswith("CUSTODY IS NOT DURABLE"), "c50-3: the custody warning goes before the receipt"
+    assert out["note"].index("CUSTODY IS NOT DURABLE") < out["note"].index("\nreceipt:")
     assert dc.lookup(tmp_path, "t-a", "run-live")[0] == dc.UNKNOWN, "the premise of the claim"
 
     entry = dc.RunCustody(run_id="run-2", task_id="t-a", route_id="r", model="m",

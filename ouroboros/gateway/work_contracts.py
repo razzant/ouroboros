@@ -171,6 +171,17 @@ class WorkReason(TypedDict):
     since: NotRequired[Any]
     by: NotRequired["PauseAuthor"]
     wake: NotRequired[List["SleepWake"]]
+    behind: NotRequired["QueuedBehind"]
+
+
+class QueuedBehind(TypedDict):
+    """The work a ``queued`` reason stands behind (``work_status.queued_reason``): its tree's id, the ``lane``
+    (``project`` or ``folder``, the latter with its ``folder`` path) and that work's ``name`` as the list shows it."""
+
+    task_id: str
+    lane: str
+    name: str
+    folder: NotRequired[str]
 
 
 class PauseAuthor(TypedDict):

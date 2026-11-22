@@ -546,3 +546,49 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     assert "my identity, life's top-level account" in shared and "originating words" not in selection
     assert ("excludes the rest of shared memory (identity, life account, room page), dialogue, inherited parent "
             "context and attachments" in " ".join(declared.split()))
+
+
+def test_the_receipt_counts_exactly_the_rows_of_my_human_the_work_order_carries():
+    """Owner item 50: the receipt counts the rows the session work order renders (one per identity, never a reply
+    target: another author's words), with no date beside them, and for a native child says the room's,
+    origin and marked rows are read at its own start instead of claiming none."""
+    from ouroboros.helper_receipt import owner_words_text
+    from ouroboros.owner_relay import _stamp_blocks
+    from ouroboros.owner_words import (ABSENT_FIELD, FIELD, OWNER_CARD_INPUT, OWNER_PRESS, REPLY_TARGET, ROOM_FIELD,
+                                       _row)
+    from ouroboros.subagent_work_order import _owner_words_section
+
+    mine = _row("Do it", source="room_message", carrier="room", ts="2026-11-21T10:00:00Z", ref="chat 1 / a")
+    target = _row("I said", source=REPLY_TARGET, carrier="room", ts="2026-11-21T09:00:00Z", ref="chat 1 / b")
+    late = _row("Also", source="room_message", carrier="room", ts="received 2026-11-01T00:00:00Z", ref="chat 1 / c")
+    task = {FIELD: [mine], ROOM_FIELD: [mine, target, late]}
+    told = owner_words_text(task, session=True)
+    assert told == "2 rows by value"
+    assert len(_stamp_blocks(_owner_words_section(task))) == 2, "the same set the work order renders"
+    assert owner_words_text({ABSENT_FIELD: "none_recorded"}, session=True) == "none by value"
+    native = owner_words_text({ABSENT_FIELD: "none_recorded"}, session=False)
+    assert native == "none by value; room, origin and marked rows read at its start"
+    # A press without words and a card input whose words are unknown are their acts: carried, never counted as words.
+    press = _row("Publish it", source=OWNER_PRESS, carrier="room", ts="2026-11-21T11:00:00Z", ref="chat 1 / d")
+    lost = _row("Card input received. Its submission is unavailable.", source=OWNER_CARD_INPUT, carrier="room",
+                ts="2026-11-21T11:01:00Z", ref="chat 1 / e")
+    typed = _row("Publish it, but shorter", source="owner_quiz_answer", carrier="room", ts="2026-11-21T11:02:00Z",
+                 ref="chat 1 / f")
+    acts = {FIELD: [press, lost]}
+    assert len(_stamp_blocks(_owner_words_section(acts))) == 2, "the work order still carries both acts"
+    assert owner_words_text(acts, session=True) == "none by value"
+    assert owner_words_text(acts, session=False).startswith("none by value;")
+    assert owner_words_text({FIELD: [press, typed]}, session=True) == "1 row by value", "a typed answer is words"
+
+
+def test_a_direct_start_never_counts_stamps_found_in_its_own_text():
+    """A direct start's receipt names no count of my human's rows: nothing ties one to this invocation's own tail
+    cheaply, and stamps the prompt itself quotes are no proof of what the host appended."""
+    from ouroboros.helper_receipt import start_facts
+    from ouroboros.owner_words import _row, render_owner_words
+    from ouroboros.subagent_work_order import START_TAIL_FACT
+
+    rows = [_row("Do it", source="room_message", carrier="room", ts="2026-11-21T10:00:00Z", ref="chat 1 / a")]
+    quoted = render_owner_words(rows, audience="session", root_task_id="r", gaps=[START_TAIL_FACT])
+    facts = start_facts({"prompt": "Check this old order:\n" + quoted, "instructions": "HOST\n\n" + quoted})
+    assert "owner_words" not in facts and set(facts) == {"assignment"}

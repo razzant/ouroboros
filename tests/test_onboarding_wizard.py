@@ -728,18 +728,13 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
     import ouroboros.gateway.settings as gw_settings
 
     secret = "sk-or-v1-super-secret-token"
-    # `server.api_settings_get` COPIES its own (patched) `load_settings` into
-    # `ouroboros.gateway.settings` so legacy `server.*` monkeypatch tests keep
-    # working. That copy is irreversible, so patching only the `server` module
-    # left a MagicMock parked on the gateway module for the rest of the pytest
-    # PROCESS — the next test to call any gateway settings route read it and
-    # saw a fabricated install (it made `GET /api/onboarding` answer 204 in
-    # `test_onboarding_complete_endpoint`). Patching BOTH namespaces makes the
-    # restore symmetric with the copy.
+    # `server.api_settings_get` copies the server module's current bindings
+    # onto `ouroboros.gateway.settings` before delegating, so the provider-defaults
+    # fake is patched in both namespaces. The gateway module binds no settings
+    # reader of its own: the route reads `settings_read_view` (patched below),
+    # and a copied loader lands on a name nothing reads.
     patches = [
-        patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
-        patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),

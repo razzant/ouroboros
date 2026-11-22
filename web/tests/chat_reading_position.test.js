@@ -1401,3 +1401,45 @@ test('an opening\'s saved-preview follow yields to a Reply that claimed the room
     f.reading.followAfterLayout(); f.frame(); f.frame();
     assert.equal(f.feed.scrollTop, f.feed.scrollHeight);
 });
+
+// A reader placed on one row of a feed whose own layout and parents the test moves: `anchors` counts the searches
+// for the row read and records where each restore puts it.
+function placedFixture(t) {
+    const previous = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = () => 0;  // a width that moves once settles in frames this test does not run
+    t.after(() => { globalThis.requestAnimationFrame = previous; });
+    const page = { offsetTop: 0, offsetParent: null }, room = { offsetTop: 0, offsetParent: page };
+    const feed = { scrollTop: 400, scrollHeight: 3000, clientHeight: 500, clientWidth: 375, offsetWidth: 375, offsetTop: 0,
+        offsetParent: room, get offsetHeight() { return this.clientHeight; }, contains: node => node?.parentElement === feed,
+        getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, height: this.clientHeight }; } };
+    const row = { isConnected: true, parentElement: feed, getBoundingClientRect: () => ({ top: 100, bottom: 160, width: 300, height: 60 }) };
+    let searches = 0;
+    const restored = [];
+    const anchors = { capture: () => { searches++; return { node: row, offset: 100, historyId: 'chat:1' }; },
+        restore: anchor => { restored.push(anchor.offset); return true; }, serialize: () => null };
+    const reading = createChatReadingPosition({ feed, anchors, visible: () => true, alive: () => true, ready: () => true,
+        changed() {}, afterWrite() {}, activity() {}, updateButton() {} });
+    reading.stick = false; reading.remember(true);
+    return { reading, feed, row, page, room, restored, searches: () => searches };
+}
+
+test('a row put back stays the row read through a passing layout; a row gone is searched again', t => {
+    // A rotation: the width changes and changes back. The row read before it is the one put back after it, not a
+    // fresh search of the band, which would land the way back a line off.
+    const f = placedFixture(t);
+    f.feed.clientWidth = f.feed.offsetWidth = 667; f.reading.reflow();
+    f.feed.clientWidth = f.feed.offsetWidth = 375; f.reading.reflow();
+    assert.deepEqual([f.searches(), f.restored], [1, [100, 100]], 'the same row, at its own offset, both ways');
+    f.row.isConnected = false;
+    f.feed.clientWidth = f.feed.offsetWidth = 667; f.reading.reflow();
+    assert.equal(f.searches(), 2, 'a row no longer placed yields to a fresh search');
+});
+
+test('the feed moved by a bar entering the flow outside its own parent shifts the place; an unmoved feed does not', t => {
+    const f = placedFixture(t);
+    f.reading.reflow();
+    assert.deepEqual(f.restored, [100], 'nothing moved: the row is put back where it was');
+    f.page.offsetTop = 56;  // a Project room's bar enters the flow above the room, outside the feed's own offsetParent
+    f.reading.reflow();
+    assert.deepEqual(f.restored, [100, 44], 'the feed moved down 56 px, so the row goes 56 px up in it and stays on the screen');
+});

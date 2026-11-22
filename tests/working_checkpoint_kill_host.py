@@ -16,14 +16,21 @@ from pathlib import Path
 TASK_ID = "t-kill"
 FIRST_MAIL = "first owner instruction: keep the audit order"
 SECOND_MAIL = "second owner instruction: also cite the receipt"
-# Each kill point and the calls of its one accepted batch. Two read-only names
-# run in the loop's shared pool; any other name forces sequential execution.
+# Each kill point and the calls of its one accepted batch (one tool name, or one per call). Consecutive reads run
+# together in the loop's pool (tool_capabilities.call_segments); any other name runs alone.
 BATCHES = {
     "inflight_effect": ("kill_probe", ["effect-1"]),
     "inflight_sequential_batch": ("kill_probe", ["effect-1", "effect-2"]),
     "inflight_parallel_batch": ("read_file", ["effect-1", "effect-2"]),
+    # Both reads of one group are inside their handlers, unfinished, when the interpreter dies.
+    "inflight_read_group": (("read_file", "knowledge_read"), ["effect-1", "effect-2"]),
     "torn_ready_write": ("kill_probe", ["effect-1"]),
 }
+
+
+def batch_names(scenario: str) -> list:
+    tool, call_ids = BATCHES[scenario]
+    return list(tool) if isinstance(tool, tuple) else [tool] * len(call_ids)
 
 
 def record_effect(root: Path, call_id: str) -> None:
@@ -57,7 +64,8 @@ def main(root: str, scenario: str) -> None:
 
     base = Path(root)
     drive = base / "drive"
-    tool, call_ids = BATCHES[scenario]
+    _tool, call_ids = BATCHES[scenario]
+    names = batch_names(scenario)
     patch = pytest.MonkeyPatch()
     registry = _registry(drive, patch, TASK_ID, 1)
     assert write_owner_message(drive, FIRST_MAIL, TASK_ID, msg_id="mail-1")
@@ -69,13 +77,16 @@ def main(root: str, scenario: str) -> None:
         if calls["model"] > 1:
             raise AssertionError("the child must be killed before a second model turn returns")
         return {"role": "assistant", "content": "", "tool_calls": [
-            {"id": call_id, "type": "function", "function": {"name": tool, "arguments": json.dumps({"path": call_id})}}
-            for call_id in call_ids]}, 0.0
+            {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps({"path": call_id})}}
+            for name, call_id in zip(names, call_ids)]}, 0.0
 
     def execute_result(name, args):
         call_id = args["path"]
-        assert name == tool and call_id in call_ids, (name, args)
+        assert call_id in call_ids and name == names[call_ids.index(call_id)], (name, args)
         record_effect(base, call_id)
+        if scenario == "inflight_read_group" and call_id != call_ids[-1]:
+            while True:  # still inside its handler when the last member parks the interpreter
+                time.sleep(60)
         if scenario.startswith("inflight") and call_id == call_ids[-1]:
             # Die inside the batch only after every earlier call's effect happened.
             while sorted(recorded_effects(base)) != sorted(call_ids):

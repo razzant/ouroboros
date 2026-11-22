@@ -155,22 +155,43 @@ def _fake_time(monkeypatch, clock):
 def test_every_wake_measures_the_whole_sleep_and_replays_it_exactly(tmp_path, monkeypatch):
     """The wake's sleep facts are the wait's own: armed then, slept this long in this mode, woken by this; the
     tick's quiet-renewal counters are gone. A replay repeats the recorded facts, nothing added since."""
+    from datetime import datetime, timezone
+
     clock = _Clock()
     _fake_time(monkeypatch, clock)
     monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, run_id, _seq, gateway=None: json.dumps(
         {"status": "completed", "run_id": run_id, "last_seq": 7}))
     ctx = _ctx(tmp_path)
+    finished = clock.now - 120  # before the wait, but well inside the recorded request TTL
+    response = {"finished_at": datetime.fromtimestamp(finished, timezone.utc).isoformat(),
+                "request_cache_ttl": "1h"}
+    ctx._accumulated_usage = {"_last_prompt_cache_ttl": "1h", "_last_round_cache_usage": {"finished_at": finished},
+                              "_last_llm_call_meta": {"ts": "2026-11-17T14:00:00+00:00"}}
     armed = {"tool": "delegate_wait", "runs": ["run-1"], "armed_at": "2026-11-09T00:00:00+00:00",
              "armed_epoch": clock.now, "mode": "cold", "since_seq": 2}
     clock.now += 15.0
     wake = json.loads(supervision._publish(ctx, armed, "run:run-1").text)
     assert wake["sleep"] == {"entered_at": "2026-11-09T00:00:00+00:00", "slept_sec": 15.0, "mode": "cold",
                              "woke_by": "run:run-1"}
+    assert wake["previous_model_response"] == response and "cache_horizon_note" not in wake
     assert wake["last_seq"] == 7 and supervision._load_state(ctx, "run-1")["journal_cursor"] == 7
     clock.now += 500.0
-    replay = json.loads(wake_now(ctx, "run-1").text)  # replayed before any new read
+    replay = json.loads(wake_now(_ctx(tmp_path), "run-1").text)  # a fresh worker has no accumulated usage
     assert replay.pop("replay_of")["fresh_observation"] is False  # labelled as a replay (#2992)
     assert replay == wake                        # recorded facts, nothing added since
+
+
+@pytest.mark.parametrize("ttl, finished, expected", [
+    ("5m", None, {"request_cache_ttl": "5m"}),  # a real tier doesn't make a missing clock known
+    ("default", 1000.0, {"finished_at": "1970-01-01T00:16:40+00:00"}),  # bare hint, no tier
+    ("", None, None),
+])
+def test_a_new_wake_never_guesses_the_response_clock_or_ttl(tmp_path, ttl, finished, expected):
+    ctx = _ctx(tmp_path)
+    ctx._accumulated_usage = {"_last_prompt_cache_ttl": ttl, "_last_round_cache_usage": {"finished_at": finished},
+                              "_last_llm_call_meta": {"ts": "2026-11-17T14:00:00+00:00", "failure_code": "refused"}}
+    wake = json.loads(wake_now(ctx, "run-1", wait_once=_settled("run-1")).text)
+    assert wake.get("previous_model_response") == expected and "cache_horizon_note" not in wake
 
 
 def test_a_quiet_status_wake_drops_the_tick_advice_but_keeps_the_paused_note(tmp_path, monkeypatch):
@@ -199,7 +220,8 @@ def test_a_quiet_status_wake_drops_the_tick_advice_but_keeps_the_paused_note(tmp
 
 def test_an_old_pending_wake_without_sleep_replays_unchanged(tmp_path):
     ctx = _ctx(tmp_path)
-    stored = {"status": "completed", "run_id": "run-1", "supervision_wake_id": "w-old"}
+    stored = {"status": "completed", "run_id": "run-1", "supervision_wake_id": "w-old",
+              "cache_horizon_note": "Recorded old cache advice, not a new reading."}
     path = supervision._state_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"schema": 1, "run_id": "run-1", "pending_wake": {
@@ -340,7 +362,9 @@ def test_expiry_absent_is_not_an_observed_null(async_only):
 def test_both_spilled_envelopes_carry_the_question_facts(tmp_path, oversize):
     payload = {"status": "no_progress", "run_id": "run-a", "state": "running", "last_seq": 1,
                "waiting_on_user": True, "async_questions_only": True, "supervision_wake_id": "wake-1",
-               "continuation": "same_session"}
+               "continuation": "same_session", "previous_model_response": {
+                   "finished_at": "2026-11-17T14:00:00+00:00", "request_cache_ttl": "5m"},
+               "receipt": "access applied readonly, requested workspace_write [observed]"}
     if oversize == "wake_events":
         payload["wake_events"] = [{"type": "addressed", "msg_id": f"m{i}", "text": "x" * 4000} for i in range(12)]
     else:
@@ -348,3 +372,5 @@ def test_both_spilled_envelopes_carry_the_question_facts(tmp_path, oversize):
     shown = json.loads(supervision._render_wake_payload(_ctx(tmp_path, "t-spill"), payload).text)
     assert shown["wake_delivery"]["complete"] is False
     assert shown["waiting_on_user"] is True and shown["async_questions_only"] is True
+    assert shown["previous_model_response"] == payload["previous_model_response"]
+    assert shown["receipt"] == payload["receipt"], "each shortening keeps the cache facts AND the helper receipt"

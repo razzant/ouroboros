@@ -647,8 +647,8 @@ test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding
 
 // A small layout model: a child's top follows its parent's top, the parent's own
 // scrollTop when the parent scrolls, and its offset in the parent's content.
-function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null } = {}) {
-    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true };
+function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null, parent = null, tag = '' } = {}) {
+    const node = { classNames: new Set(classes), attrs: { ...data }, y, height, children: [], parentElement: null, isConnected: true, tag };
     let top = 0;
     Object.defineProperty(node, 'scrollTop', { get: () => top,
         set: value => { top = scroll === null ? 0 : Math.max(0, Math.min(scroll, value)); } });
@@ -657,7 +657,7 @@ function layoutNode({ classes = [], data = {}, y = 0, height = 0, scroll = null,
     node.dataset = new Proxy({}, { get: (_, key) => node.attrs[`data-${String(key).replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`] });
     node.classList = { contains: value => node.classNames.has(value) };
     const one = selector => selector.startsWith('.') ? node.classNames.has(selector.slice(1))
-        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : false;
+        : selector.startsWith('[') ? selector.slice(1, -1).split('=')[0] in node.attrs : selector === node.tag;
     node.matches = selector => selector.split(',').some(part => one(part.trim()));
     node.getBoundingClientRect = () => {
         const parent = node.parentElement;
@@ -848,7 +848,7 @@ test('a living card straddling the top edge anchors the visible row below it and
 test('disappearing temporary cards at or straddling the top keep the reference row below stationary without ts collision', () => {
     const feed = layoutNode({ height: 750, scroll: 5000 });
     const records = new Map();
-    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
     const distantSameTs = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:early', 'data-ts': '1700000000' }, y: 200, height: 100, parent: feed });
     const tempCard = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'temp-1', 'data-ts': '1700000000' }, y: 2010, height: 98, parent: feed });
     const summary = layoutNode({ data: { 'data-live-summary-button': '1' }, y: 8, height: 40, parent: tempCard });
@@ -870,7 +870,7 @@ test('disappearing temporary cards at or straddling the top keep the reference r
 test('collapsing an expanded card whose top is above the viewport preserves the visible row below it', () => {
     const feed = layoutNode({ height: 750, scroll: 5000 });
     const records = new Map();
-    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records });
+    const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records, band: () => ({ top: 88, bottom: 750 }) });
     const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'portal-1', 'data-expanded': '1' }, y: 1700, height: 466, parent: feed });
     const timeline = layoutNode({ data: { 'data-live-timeline': '1' }, y: 80, height: 370, parent: card });
     const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 230, height: 80, parent: timeline });
@@ -886,6 +886,63 @@ test('collapsing an expanded card whose top is above the viewport preserves the 
     refRow.y = 1876;
     assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
     assert.equal(refRow.getBoundingClientRect().top - feed.getBoundingClientRect().top, 180, 'reference row moves 0 px');
+});
+
+test('an expanded live card collapsing under a floating bar keeps the row after it; with no bar its own top holds', () => {
+    // The card's top is under the bar (+20 of a band from +88): the line read inside it goes when it collapses, and
+    // the row below it holds the place. With no bar the same top is in the band, the card itself the place.
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const records = new Map();
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: records,
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const card = layoutNode({ classes: ['chat-live-card'], data: { 'data-task-id': 'open-1', 'data-expanded': '1' }, y: 2020, height: 470, parent: feed });
+        const line = layoutNode({ classes: ['chat-live-line'], data: { 'data-live-line-key': 'line-1' }, y: 90, height: 80, parent: card });
+        const after = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:after' }, y: 2500, height: 120, parent: feed });
+        records.set('open-1', { groupId: 'open-1', root: card, items: [{ lineKey: 'line-1' }] });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? line : card, bar ? 'under the bar the line inside is read' : 'the card heads the band');
+        card.attrs['data-expanded'] = '0';
+        card.height = 166;
+        line.height = 0;
+        after.y = 2196;
+        assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+        if (bar) assert.equal(after.getBoundingClientRect().top, 500, 'under the bar the row after the card stays');
+        else assert.equal(card.getBoundingClientRect().top, 20, 'with no bar the card keeps its own top');
+    }
+});
+
+test('the row read is the first in the read band, not a row under the bar', () => {
+    for (const bar of [88, 0]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(),
+            band: () => (bar ? { top: bar, bottom: 750 } : null) });
+        const under = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:under' }, y: 2000, height: 60, parent: feed });
+        const read = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:read' }, y: 2070, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        const anchor = anchors.captureVisibleTimelineAnchor();
+        assert.equal(anchor.node, bar ? read : under, bar ? 'the bar covers the first row' : 'no bar: the first row is read');
+        assert.equal(anchor.offset, bar ? 70 : 0, 'offsets stay feed-relative');
+    }
+});
+
+test('a row whose picture still loads above the band is passed over; one whose picture starts in the band holds', () => {
+    // A late picture grows when it lands: above the band's top it grows up out of view, so the row after it is read;
+    // starting in the band it grows down, and its own row stays the place.
+    for (const top of [40, 100]) {
+        const feed = layoutNode({ height: 750, scroll: 5000 });
+        const anchors = createTimelineAnchors({ messagesDiv: feed, liveCardRecords: new Map(), band: () => ({ top: 88, bottom: 750 }) });
+        const photo = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:photo' }, y: 2000 + top, height: 260, parent: feed });
+        const picture = layoutNode({ tag: 'img', y: 0, height: 200, parent: photo });
+        picture.complete = false;
+        const next = layoutNode({ classes: ['chat-bubble'], data: { 'data-history-id': 'row:next' }, y: 2310 + top, height: 100, parent: feed });
+        feed.scrollTop = 2000;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, top < 88 ? next : photo,
+            top < 88 ? 'a picture above the band grows out of it' : 'a picture in the band is the place read');
+        picture.complete = true;
+        assert.equal(anchors.captureVisibleTimelineAnchor().node, photo, 'a picture landed is no reason to pass its row');
+    }
 });
 
 test('captureVisibleTimelineAnchor ignores collapsed stack rows with zero rects before and after a straddling card', () => {

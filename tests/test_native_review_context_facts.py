@@ -240,8 +240,8 @@ def test_native_inspection_respects_reported_anthropic_input(tmp_path, monkeypat
     assert fact["prompt_tokens"] == expected
     assert fact["provider"] == "anthropic" and fact["model"] == model
     assert usage == before  # diagnostics never rewrite the billing counters
-    if expected is None:
-        assert usage["prompt_tokens"] in (0, 77)
+    if expected is None:  # the billing shape holds the fresh input alone when reported, and nothing without it
+        assert usage["prompt_tokens"] == (raw_usage or {}).get("input_tokens")
 
 
 def test_authored_note_without_inspect_applies_even_when_view_still_exceeds_old_limit(tmp_path, monkeypatch):
