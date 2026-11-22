@@ -441,5 +441,5 @@ def test_every_malformed_continuation_is_a_typed_refusal(tmp_path, bad):
     valid = re.search(r"snapshot=([0-9a-f]{64})", _read(tmp_path, words=["match"])).group(1)
     answer = _read(tmp_path, words=["match"], snapshot=bad.format(valid=valid))
     assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID") or answer.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
-    if bad.startswith("{valid}"):  # a window suffix on a scan, which issues none
+    if bad.startswith("{valid}") or ":" in bad:  # a suffix is never a snapshot
         assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID")

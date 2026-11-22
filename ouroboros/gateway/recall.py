@@ -160,8 +160,6 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
     following = None
     if current and more:  # the next page of this capture
         following = [*same, ("count", str(count)), ("offset", str(offset + len(hits))), ("snapshot", current)]
-    elif current and found["beyond"]:  # the next re-check window of a bounded read
-        following = [*same, ("count", str(count)), ("snapshot", found["beyond"])]
     notes = [_outward(note) for note in found["notes"]]
     if current is None:  # no continuation of a capture that moved or is still importing
         notes.append(UNSTABLE_READ)

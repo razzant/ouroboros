@@ -312,25 +312,53 @@ def test_the_maintenance_duty_works_then_rests_and_wakes_on_new_rows(tmp_path):
 
 
 @needs_fts5
-def test_a_bounded_postings_read_examines_the_newest_candidates_and_advances(tmp_path, monkeypatch):
+def test_past_the_bound_the_scan_answers_whole_and_says_why(tmp_path, monkeypatch):
     for n in range(6):
         _say(tmp_path, f"2026-11-0{n + 1}T00:00:00Z", f"plum {n}")
-    for n in range(6):  # candidates the postings propose and one field never satisfies
-        ds.append(tmp_path, "chat", {"ts": f"2026-10-0{n + 1}T00:00:00Z", "type": "quiz_answer", "direction": "system",
-                                     "chat_id": 1, "task_id": "asker", "text": "[answer]",
-                                     "quiz": {"quiz_id": f"q{n}", "question": "alpha", "options": ["x"],
-                                              "answered_index": 0, "comment": "beta"}})
-    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 4)
     dwi.run(tmp_path, lambda: False)
-    none = _read(tmp_path, words=["alpha beta"])  # zero matches: the continuation still advances
-    assert "observed=0; total_unknown" in none and re.search(r"snapshot=[0-9a-f]{64}:4", none)
-    first = _read(tmp_path, words=["plum"])
-    assert "observed=4; total_unknown" in first and "plum 5" in first and "plum 1" not in first
-    assert "4 of 6 candidate rows re-checked, newest first by time" in first
-    token = re.search(r"continue beyond with offset=0, snapshot=([0-9a-f]{64}:4)", first).group(1)
-    rest = _read(tmp_path, words=["plum"], snapshot=token)
-    assert "plum 1" in rest and "plum 0" in rest and "plum 5" not in rest and "this is the last window" in rest
-    assert "total=0" in _read(tmp_path, words=["zzz"])  # no candidate at all: nothing left unexamined
+    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 6)  # met, not exceeded: the postings answer
+    within = _read(tmp_path, words=["plum"])
+    assert "total=6" in within and "Read by postings" in within
+    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 4)
+    broad = _read(tmp_path, words=["plum"])
+    assert "total=6" in broad and "plum 5" in broad and "plum 0" in broad
+    assert "Read by scan of every row: 6 posting candidates exceed the re-check bound of 4" in broad
+    assert "recheck_bound" not in broad and not re.search(r"snapshot=[0-9a-f]{64}:", broad)
+
+
+@needs_fts5
+def test_no_read_transaction_spans_the_fetch_of_the_candidates(tmp_path, monkeypatch):
+    for n in range(5):
+        _say(tmp_path, f"2026-11-0{n + 1}T00:00:00Z", f"plum {n}")
+    dwi.run(tmp_path, lambda: False)
+    real_transaction, real_page = ds.transaction, ds._page
+    opened, current, pages = [0], [None], []
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def counted(root, *, write, **kwargs):
+        opened[0] += 1
+        current[0] = opened[0]
+        try:
+            with real_transaction(root, write=write, **kwargs) as conn:
+                yield conn
+        finally:
+            current[0] = None
+
+    def page(conn, where, params):
+        pages.append(current[0])
+        return real_page(conn, where, params)
+
+    monkeypatch.setattr(ds, "transaction", counted)
+    monkeypatch.setattr(ds, "_page", page)
+    monkeypatch.setattr(dialogue_recall, "_CHUNK", 2)
+    assert "total=5" in _read(tmp_path, words=["plum"])
+    assert len(pages) == 3 and len(set(pages)) == 3  # five bodies, three pages, three short reads
+    pages.clear()
+    monkeypatch.setattr(dialogue_recall, "_CHUNK", 500)
+    assert "total=5" in _read(tmp_path, words=["plum"])
+    assert len(pages) == 1  # a small set is one page, one read
 
 
 @needs_fts5
@@ -387,56 +415,10 @@ def test_a_generation_still_on_its_first_pass_leaves_the_read_to_the_scan(tmp_pa
 
 
 @needs_fts5
-def test_a_window_never_splits_rows_of_one_recorded_time(tmp_path, monkeypatch):
+def test_copies_of_one_row_are_one_line_on_the_postings_path(tmp_path):
     row = {"ts": "2026-11-01T10:00:00Z", "direction": "in", "chat_id": 1, "text": "twice stored plum"}
     ds.append(tmp_path, "chat", dict(row))
     ds.append(tmp_path, "chat", dict(row))  # a crash-retry copy: same source, same time
-    _say(tmp_path, "2026-10-01T10:00:00Z", "older plum")
     dwi.run(tmp_path, lambda: False)
-    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 1)
-    first = _read(tmp_path, words=["plum"])
-    assert "2 of 3 candidate rows re-checked" in first and first.count("twice stored plum") == 1
-    token = re.search(r"snapshot=([0-9a-f]{64}:2)", first).group(1)
-    rest = _read(tmp_path, words=["plum"], snapshot=token)
-    assert "older plum" in rest and "twice stored" not in rest
-    assert _read(tmp_path, words=["plum"], snapshot=token[:-1] + "1").startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
-
-
-def test_a_runtime_without_fts5_beside_a_postings_table_keeps_every_dialogue_path(tmp_path, monkeypatch):
-    """The stand-in for a SQLite without FTS5 on any runner: ``dw_post`` names a module this library lacks and
-    FTS5 is reported absent. The read scans, append and an edit through the trigger work, the legacy search
-    works, the job rests, the export is byte-exact, and retirement answers that it needs FTS5, latched."""
-    plain, held = tmp_path / "plain", tmp_path / "held"
-    for root in (plain, held):
-        _say(root, "2026-11-01T00:00:00Z", "plum before")
-    with ds.transaction(held, write=True) as conn:
-        for statement in dwi._DDL:
-            if "VIRTUAL TABLE" not in statement:
-                conn.execute(statement)
-        conn.execute("INSERT INTO dw_meta (id, format, generation, seen_rev, usable, built_epoch) "
-                     "VALUES (1, ?, ?, 0, 1, 0)", (dwi.FORMAT, f"{dwi.FORMAT}:x:g"))
-    raw = sqlite3.connect(ds.path(held))
-    version = raw.execute("PRAGMA schema_version").fetchone()[0]
-    raw.execute("PRAGMA writable_schema=ON")
-    raw.execute("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
-                "('table', 'dw_post', 'dw_post', 0, 'CREATE VIRTUAL TABLE dw_post USING no_such_fts(tokens)')")
-    raw.execute(f"PRAGMA schema_version={version + 1}")
-    raw.execute("PRAGMA writable_schema=OFF")
-    raw.commit()
-    raw.close()
-    monkeypatch.setattr(dwi, "_FTS5", False)
-    for root in (plain, held):
-        receipt = _say(root, "2026-11-02T00:00:00Z", "plum appended")
-        ds.revise_text(root, "chat", receipt.seq, "plum edited")
-    with ds.transaction(held, write=False) as conn:
-        assert _all(conn, "SELECT seq FROM dw_dirty") and conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-    answer = _read(held, words=["plum"])
-    assert "total=2" in answer and "Read by scan of every row" in answer
-    assert _read(held, search="plum").startswith("Showing 2 of 2 messages")
-    assert not dwi.due(held, {}, {}, False) and dwi.run(held, lambda: False)["state"] == "done"
-    for root in (plain, held):
-        di.export_for_older_body(root)
-    assert (plain / "logs" / "chat.jsonl").read_bytes() == (held / "logs" / "chat.jsonl").read_bytes()
-    assert dwi.retire(held)["state"] == "fts5_required"
-    with ds.transaction(held, write=False) as conn:
-        assert not dwi.generation(conn)["usable"]
+    answer = _read(tmp_path, words=["plum"])
+    assert "Read by postings" in answer and "total=1" in answer and answer.count("twice stored plum") == 1

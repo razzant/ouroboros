@@ -390,7 +390,7 @@ def test_a_malformed_snapshot_is_a_typed_400_and_an_unstable_one_a_409_with_its_
         _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
     first = _search(tmp_path, "archive", count=1)
     token = first["snapshot"]
-    for bad in ("nothex", token + ":x", token + ":5", token + ":0"):  # a scan issues no window suffix at all
+    for bad in ("nothex", token + ":x", token + ":5", token[:-1]):  # a suffix is never a snapshot
         assert _refused(tmp_path, ("words", "archive"), ("snapshot", bad)) == (400, {
             "code": "recall_bad_snapshot",
             "error": "Invalid snapshot. Use the snapshot from a search response or start again without it."})
@@ -401,22 +401,18 @@ def test_a_malformed_snapshot_is_a_typed_400_and_an_unstable_one_a_409_with_its_
         "code": "recall_snapshot_changed", "error": recall.UNSTABLE_READ})
 
 
-def test_the_doors_window_carries_nothing_of_a_row_it_does_not_serve_in_either_order(tmp_path, monkeypatch):
+def test_the_door_never_shows_the_time_or_address_of_a_row_it_does_not_serve(tmp_path, monkeypatch):
     from ouroboros import dialogue_word_index as dwi
 
-    if not dwi.fts5_available():
-        pytest.skip("this SQLite has no FTS5: no postings window")
     _say(tmp_path, "2026-11-01T10:00:00Z", "archive visible")
     _say(tmp_path, "2026-11-02T22:22:22Z", "archive hidden", chat_id=0)
     dwi.run(tmp_path, lambda: False)
-    monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", 1)
-    for order, served_first in (("newest", False), ("oldest", True)):
-        first = _search(tmp_path, "archive", order=order)
-        assert "22:22:22" not in json.dumps(first) and "archive hidden" not in json.dumps(first)
-        assert (len(first["rows"]) == 1) is served_first and first["next"] is not None
-        second = _ok(tmp_path, *_run(first["next"]))
-        assert "22:22:22" not in json.dumps(second)
-        assert [row["ts"] for row in first["rows"] + second["rows"]] == ["2026-11-01T10:00:00Z"]
+    for bound in (50_000, 1):  # through the postings, and handed to the scan past the bound
+        monkeypatch.setattr(dialogue_recall, "RECHECK_BOUND", bound)
+        for order in ("newest", "oldest"):
+            found = _search(tmp_path, "archive", order=order)
+            assert "22:22:22" not in json.dumps(found) and "archive hidden" not in json.dumps(found)
+            assert [row["ts"] for row in found["rows"]] == ["2026-11-01T10:00:00Z"] and found["total"] == 1
 
 
 def test_a_projects_founding_message_is_found_and_reopened_in_both_its_rooms(tmp_path):
