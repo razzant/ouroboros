@@ -2,6 +2,7 @@ import { syncShortRoom } from './composer_fold.js';
 import { currentPointer, isStackLayout, onLayoutChange, pinchMagnified } from './layout.js';
 
 const SETTLE_MS = 250;
+const QUICK_REFOCUS_MS = 1000;
 const POST_BLUR_READS = ['pointerdown', 'touchstart', 'scroll'];
 const EDITABLE = [
     'textarea', 'select', 'input:not([type])', 'input[type="text"]', 'input[type="search"]',
@@ -10,20 +11,22 @@ const EDITABLE = [
 ].join(',');
 const keyboardShort = (base, height) => base - height > Math.max(120, base * 0.25);
 const hostMode = () => document.documentElement.dataset?.telegramFullscreen || '';
+const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
 
 // Phone viewport and soft-keyboard contract:
 // - Room height (--vvh) is always visualViewport.height in stack layout (100dvh when docked, untouched while
 //   pinch-zoomed), with document scroll (window.scrollY) kept at 0 while the room is fixed.
-// - keyboard-open is cosmetic only (composer air, short-room fold, look-B chrome), derived from coarse focus + shrink
-//   and reset on blur, width change, Telegram mode change, and pageshow.
+// - keyboard-open is cosmetic only (composer air, short-room fold, look-B chrome), derived from coarse focus + shrink,
+//   held across in-session geometry resets and quick refocus while the viewport stays keyboard-short, and cleared on
+//   session end or keyboard-sized viewport growth.
 export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
     const vvhStyle = document.createElement('style');
     vvhStyle.id = 'runtime-vvh';
     document.head.appendChild(vvhStyle);
     const vv = window.visualViewport;
 
-    let keyboardOpen = false, touchStartY = 0, focusHeight = 0;
-    let lastWidth = window.innerWidth, lastMode = hostMode();
+    let keyboardOpen = false, touchStartY = 0, focusHeight = 0, heldFloor = 0, recentOpen = null;
+    let lastWidth = window.innerWidth, lastHeight = 0, lastMode = hostMode();
     let raf1 = 0, raf2 = 0, settleTimer = 0, watchingAfterBlur = false;
 
     function keyboardEditable(node) {
@@ -118,8 +121,10 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
         const width = window.innerWidth, mode = hostMode(), focused = focusedEditable();
         if (!isStackLayout()) {
             cancelChecks();
-            focusHeight = 0;
+            focusHeight = heldFloor = 0;
+            recentOpen = null;
             lastWidth = width;
+            lastHeight = h || lastHeight;
             lastMode = mode;
             const css = ':root{--vvh:100dvh}';
             const resized = css !== vvhStyle.textContent, changed = keyboardOpen;
@@ -133,18 +138,50 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
         }
         if (!h || pinchMagnified()) {
             if (h) cancelScheduled();
-            if (!focused && keyboardOpen) commitRoomChange(() => applyKeyboardState(false));
+            if (!focused) {
+                focusHeight = heldFloor = 0;
+                if (keyboardOpen) commitRoomChange(() => applyKeyboardState(false));
+            }
             return false;
         }
         if (window.scrollY) window.scrollTo(0, 0);
 
         const soft = currentPointer() !== 'fine';
-        const reset = !focused || !soft || width !== lastWidth || mode !== lastMode || event?.type === 'pageshow';
+        const prevWidth = lastWidth, prevHeight = lastHeight || h;
+        const geoReset = width !== lastWidth || mode !== lastMode || event?.type === 'pageshow';
         lastWidth = width;
+        lastHeight = h;
         lastMode = mode;
-        focusHeight = !focused || !soft ? 0 : reset ? h : Math.max(focusHeight || h, h);
 
-        const open = Boolean(focused && soft && (keyboardShort(layoutHeight, h) || keyboardShort(focusHeight, h)));
+        if (recentOpen && (
+            !soft
+            || nowMs() - recentOpen.at > QUICK_REFOCUS_MS
+            || width !== recentOpen.width
+            || mode !== recentOpen.mode
+            || keyboardShort(h, recentOpen.h)
+        )) {
+            recentOpen = null;
+        } else if (recentOpen && !focused) {
+            recentOpen.h = Math.min(recentOpen.h, h);
+        }
+
+        if (!focused || !soft) {
+            focusHeight = heldFloor = 0;
+        } else if (recentOpen) {
+            recentOpen = null;
+            focusHeight = heldFloor = h;
+        } else if (geoReset) {
+            const closedOnReset = Math.abs(width - prevWidth) > 100
+                ? !keyboardShort(prevWidth, h)
+                : keyboardShort(h, heldFloor || prevHeight);
+            heldFloor = keyboardOpen && !closedOnReset ? h : 0;
+            focusHeight = h;
+        } else {
+            if (heldFloor) heldFloor = keyboardShort(h, heldFloor) ? 0 : Math.min(heldFloor, h);
+            focusHeight = Math.max(focusHeight || h, h);
+        }
+
+        const open = Boolean(focused && soft && (heldFloor > 0 || keyboardShort(layoutHeight, h) || keyboardShort(focusHeight, h)));
         const cap = Math.max(28, Math.min(140, Math.floor(h / 4)));
         const css = `:root{--vvh:${Math.ceil(h)}px;--chat-viewport-input-cap:${cap}px}`;
         const resized = css !== vvhStyle.textContent, changed = open !== keyboardOpen;
@@ -183,19 +220,25 @@ export function bindKeyboardViewport({ shownRoom = () => null } = {}) {
 
     function onFocusOut(event) {
         if (!keyboardEditable(event.target) || keyboardEditable(event.relatedTarget)) return;
+        if (keyboardOpen && isStackLayout() && currentPointer() !== 'fine') {
+            const h = viewportHeight();
+            if (h > 0) recentOpen = { h, width: window.innerWidth, mode: hostMode(), at: nowMs() };
+        }
         // Defer clearing keyboard-open to frame 1 so tapping Send or "+" lands its click before padding shifts.
         if (isStackLayout()) {
             watchAfterBlur(true);
             scheduleSettle(true);
         } else {
-            focusHeight = 0;
+            focusHeight = heldFloor = 0;
+            recentOpen = null;
             updateVvh(event);
         }
     }
 
     function releaseKeyboardForDrawer() {
         focusedEditable()?.blur?.();
-        focusHeight = 0;
+        recentOpen = null;
+        focusHeight = heldFloor = 0;
         if (keyboardOpen) commitRoomChange(() => applyKeyboardState(false));
         else applyKeyboardState(false);
     }

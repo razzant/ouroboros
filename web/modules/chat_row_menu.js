@@ -65,7 +65,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         const copy = row.querySelector(':scope > .chat-message-copy, :scope > .chat-message-actions > .chat-message-copy');
         if (copy) items.push(['copy', tr('code.copy', 'Copy'), () => copy.click(), true]);
         if (touch && replies.canSelect?.(row, point)) items.push(['select-text', tr('chat.reply.select_text', 'Select text'),
-            () => { swallowClickUntil = 0; replies.selectText(row, point); }]);
+            () => { tail.disarm(); replies.selectText(row, point); }]);
         const view = messageRow(row);
         for (const action of view ? actions.actionsFor(view) : []) {
             items.push([action.key, presentAction(action, view).label, () => runMessageAction(action, view, { anchor: row }), true]);
@@ -153,7 +153,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         }
         doc.body.append(menu);
         // A new finger on an item is a deliberate press, even just after the long press lifted.
-        menu.addEventListener('pointerdown', () => { swallowClickUntil = 0; });
+        menu.addEventListener('pointerdown', () => tail.disarm());
         if (lift) { setPress(row, 'lift'); haptic('press'); }
         const binding = bindMenu(menu, { anchor, point, onClose: () => {
             menu.remove();

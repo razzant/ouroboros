@@ -366,7 +366,7 @@ def test_telegram_fullscreen_and_expanded_while_typing_and_after_blur(shell_ui, 
         page.evaluate("() => { window.__tg.exit(); window.__layoutViewport(424); }")
     still(page)
     assert page.evaluate('document.documentElement.dataset.telegramFullscreen') == 'expanded'
-    assert_contract(read_state(), vvh=424, reading_y=target_y, at_bottom=not reading, keyboard=(kind == 'visual'))
+    assert_contract(read_state(), vvh=424, reading_y=target_y, at_bottom=not reading, keyboard=True)
 
     # Switch expanded -> fullscreen while typing.
     if kind == 'visual':
@@ -376,7 +376,7 @@ def test_telegram_fullscreen_and_expanded_while_typing_and_after_blur(shell_ui, 
         page.evaluate("() => { window.__tg.enter(); window.__layoutViewport(508); }")
     still(page)
     assert page.evaluate('document.documentElement.dataset.telegramFullscreen') == 'active'
-    assert_contract(read_state(), vvh=508, reading_y=target_y, at_bottom=not reading)
+    assert_contract(read_state(), vvh=508, reading_y=target_y, at_bottom=not reading, keyboard=True)
 
     # Right after blur, Telegram leaves fullscreen and silently restores expanded's 760 px height before a tap.
     page.clock.install()
@@ -452,6 +452,36 @@ def test_rotation_while_typing_and_bfcache_return_after_rotation(shell_ui, first
     cached_return = read_state()
     assert_contract(cached_return, vvh=375, reading_y=target_y, keyboard=False)
     assert field.input_value() == draft
+
+
+def test_paired_keyboard_rotation_keeps_keyboard_open_and_last_line_visible(shell_ui):
+    texts = [f'Message {i}. One short line.' for i in range(30)] + ['Last message.']
+    page, field, field_id = loaded_telegram_room(shell_ui, False, False, texts, width=360, height=640)
+    field.fill('One-line draft.')
+    page.evaluate('window.__layoutViewport(380)')
+    still(page)
+    assert page.evaluate(FIT, field_id)['keyboard'] is True
+
+    # Rotate 360x380 -> 640x180 with the paired keyboard open: composer folds and the newest line stays readable.
+    page.evaluate('window.__layoutViewport(180, false)')
+    page.set_viewport_size({'width': 640, 'height': 180})
+    page.evaluate("""() => {
+        window.__layoutViewport(180);
+        window.dispatchEvent(new Event('orientationchange'));
+        visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    still(page)
+    rotated = page.evaluate(FIT, field_id)
+    assert rotated['room'] == rotated['viewport'] == 180 and rotated['scrollY'] == 0, rotated
+    assert rotated['keyboard'] and rotated['folded'] and rotated['lastLine'] and rotated['unreached'] == [], rotated
+
+    # Android Back restores landscape height (640x360) with focus kept, clearing keyboard-open.
+    page.evaluate('window.__layoutViewport(360, false)')
+    page.set_viewport_size({'width': 640, 'height': 360})
+    page.evaluate('window.__layoutViewport(360)')
+    still(page)
+    restored = page.evaluate(FIT, field_id)
+    assert restored['room'] == 360 and restored['focused'] and not restored['keyboard'], restored
 
 
 # ---- Scenario 5: Pinch zoom while the keyboard is up ----
@@ -572,16 +602,13 @@ def test_partial_restore_that_pauses_and_then_completes(shell_ui, completion):
 @pytest.mark.parametrize('surface', ['desktop-fine', 'tablet-coarse'])
 def test_desktop_and_tablet_window_resize_with_focused_field(shell_ui, surface):
     texts = [f'Saved line {i}. ' + LONG_LINE for i in range(28)]
-    if surface == 'desktop-fine':
-        page = seed_page(shell_ui, 620, 844, touch=False)
-        page.add_init_script(VIEWPORT)
-    else:
-        page = phone(shell_ui, telegram=False, width=680, height=820)
+    coarse = surface == 'tablet-coarse'
+    wrapped = {**shell_ui, 'new_page': lambda **opts: shell_ui['new_page'](is_mobile=coarse, **opts)}
+    page = seed_page(wrapped, 680 if coarse else 620, 820 if coarse else 844, touch=coarse)
     page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(texts)))
     page.goto(shell_ui['url'])
     page.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
     field, field_id = room_field(page, False)
-    page.evaluate('h => window.__layoutViewport(h)', 844 if surface == 'desktop-fine' else 820)
     still(page)
     row_idx = 12
     target_y = scroll_row_to(page, field_id, row_idx, 8, top_anchor=True)
@@ -594,24 +621,25 @@ def test_desktop_and_tablet_window_resize_with_focused_field(shell_ui, surface):
     if surface == 'desktop-fine':
         assert page.evaluate('document.documentElement.dataset.pointer') == 'fine'
         # Vertical-only shrink on a narrow fine-pointer stack window is NEVER keyboard-open.
-        page.evaluate('window.__layoutViewport(480, false)')
         page.set_viewport_size({'width': 620, 'height': 480})
-        page.evaluate('window.__layoutViewport(480)')
         still(page)
         assert_contract(read_state(), vvh=480, reading_y=target_y, keyboard=False)
         # Widening into docked layout uses 100dvh and stays keyboard=False.
-        page.evaluate('window.__layoutViewport(480, false)')
         page.set_viewport_size({'width': 1024, 'height': 480})
-        page.evaluate('window.__layoutViewport(480)')
         still(page)
         docked = read_state()
         assert docked['room'] == 480 and not docked['keyboard'] and docked['scrollY'] == 0
     else:
         assert page.evaluate('document.documentElement.dataset.pointer') == 'coarse'
         # Resizing a coarse-pointer tablet window to another width and height resets focus baseline and fits exact height.
-        page.evaluate('window.__layoutViewport(500, false)')
         page.set_viewport_size({'width': 600, 'height': 500})
-        page.evaluate('window.__layoutViewport(500)')
+        still(page)
+        assert_contract(read_state(), vvh=500, reading_y=target_y, keyboard=False)
+        # Vertical-only shrink at the same width opens, and growing back closes.
+        page.set_viewport_size({'width': 600, 'height': 320})
+        still(page)
+        assert_contract(read_state(), vvh=320, reading_y=target_y, keyboard=True)
+        page.set_viewport_size({'width': 600, 'height': 500})
         still(page)
         assert_contract(read_state(), vvh=500, reading_y=target_y, keyboard=False)
 

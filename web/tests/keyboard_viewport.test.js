@@ -264,7 +264,10 @@ test('keyboard-open is never set on a fine pointer and resets on width change, T
         w.win.emit('resize');
         assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 440, open: true });
 
-        // Width change (rotation) resets focusHeight: landscape 667x375 with hidden keyboard is not open.
+        // Android Back restores height while keeping focus, then width change (rotation) with hidden keyboard stays closed.
+        w.win.innerHeight = w.vv.height = 760;
+        w.win.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 760, open: false });
         w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 667;
         w.win.innerHeight = w.vv.height = 375;
         w.win.emit('orientationchange');
@@ -318,6 +321,183 @@ test('shownRoom remeasures the composer and reflows the reading place synchronou
         calls.length = 0;
         w.vv.emit('resize');
         assert.deepEqual(calls, []);
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard sequence 1: rotating 360x640 -> 360x380 -> 640x180 with keyboard open keeps keyboard-open', () => {
+    const w = world();
+    try {
+        w.doc.documentElement.dataset.telegramFullscreen = 'expanded';
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 640;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 380;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 380, open: true });
+
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 640;
+        w.win.innerHeight = w.vv.height = 180;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        w.win.emit('orientationchange');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 180, open: true });
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard sequence 2: switching Telegram expanded -> fullscreen (360x568 -> 360x216 -> 360x288) keeps keyboard-open', () => {
+    const w = world();
+    try {
+        w.doc.documentElement.dataset.telegramFullscreen = 'expanded';
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 568;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 216;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 216, open: true });
+
+        w.doc.documentElement.dataset.telegramFullscreen = 'active';
+        w.win.emit('ouro:host-chrome');
+        w.win.innerHeight = w.vv.height = 288;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 288, open: true });
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard sequence 3: next-frame blur and refocus at 360x236 while keyboard stays up keeps keyboard-open', () => {
+    const w = world();
+    try {
+        w.doc.documentElement.dataset.telegramFullscreen = 'active';
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 640;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 236, open: true });
+
+        w.focus(false);
+        w.frame(); // frame 1 clears the old focus session
+        assert.equal(read(w).open, false);
+        w.focus(true); // refocus on the next frame while IME height 236 still stands
+        w.run(300);
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 236, open: true });
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard sequence 4: late Telegram SDK mode report and initial pageshow at 360x236 keep keyboard-open', () => {
+    const w = world();
+    try {
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 600;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 236, open: true });
+
+        w.doc.documentElement.dataset.telegramFullscreen = 'expanded';
+        w.win.emit('ouro:host-chrome');
+        w.win.emit('pageshow', { persisted: false });
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 236, open: true });
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard negative 1: Android Back with focus kept (viewport grows back) clears keyboard-open', () => {
+    const w = world();
+    try {
+        w.doc.documentElement.dataset.telegramFullscreen = 'active';
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 640;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        // Direct open then Android Back restore at 360x640.
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        assert.equal(read(w).open, true);
+        w.win.innerHeight = w.vv.height = 640;
+        w.win.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 640, open: false });
+
+        // Hold open across rotation (360x640 -> 360x380 -> 640x180), then Android Back restores 640x360 with focus kept.
+        w.win.innerHeight = w.vv.height = 380;
+        w.win.emit('resize');
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 640;
+        w.win.innerHeight = w.vv.height = 180;
+        w.win.emit('resize');
+        assert.equal(read(w).open, true);
+
+        w.win.innerHeight = w.vv.height = 360;
+        w.win.emit('resize');
+        w.vv.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 360, open: false });
+
+        // Reopening at 640x180 still works without blurring.
+        w.win.innerHeight = w.vv.height = 180;
+        w.win.emit('resize');
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 180, open: true });
+        release.dispose();
+    } finally { w.restore(); }
+});
+
+test('paired keyboard negative 2: quick refocus after the keyboard really closed does not reopen', () => {
+    const w = world();
+    try {
+        w.doc.documentElement.dataset.telegramFullscreen = 'active';
+        w.win.innerWidth = w.vv.width = w.doc.documentElement.clientWidth = 360;
+        w.win.innerHeight = w.vv.height = 640;
+        const release = bindKeyboardViewport({ shownRoom: () => null });
+
+        w.focus(true);
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        assert.equal(read(w).open, true);
+        w.focus(false);
+        w.run(50);
+        w.win.innerHeight = w.vv.height = 640;
+        w.win.emit('resize');
+        w.focus(true);
+        w.run(300);
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 640, open: false },
+            'quick refocus after real keyboard close does not reopen');
+
+        // Same negative when the viewport silently grew back before focusin fired.
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        assert.equal(read(w).open, true);
+        w.focus(false);
+        w.frame();
+        w.win.innerHeight = w.vv.height = 640;
+        w.focus(true);
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 640, open: false },
+            'silent restore before quick refocus also drops recent-open memory');
+
+        // Timeout (> 1000 ms), width change, or mode change also drop quick-refocus memory.
+        w.win.innerHeight = w.vv.height = 236;
+        w.win.emit('resize');
+        assert.equal(read(w).open, true);
+        w.focus(false);
+        w.run(1100);
+        w.focus(true);
+        assert.deepEqual({ vvh: read(w).vvh, open: read(w).open }, { vvh: 236, open: false },
+            'refocus after timeout starts a fresh baseline');
+
         release.dispose();
     } finally { w.restore(); }
 });
