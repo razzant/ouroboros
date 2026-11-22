@@ -367,7 +367,7 @@ def test_replace_while_readers_are_enabled_reports_them_and_grants_nothing(env):
     status = _status(env, quiz_id).json()
     assert status["keys"][0]["configured"] is True
     assert status["consumers"] == [{"name": "fakeplug", "enabled": True, "reads": ["FAKEPLUG_TOKEN"],
-                                    "granted": ["FAKEPLUG_TOKEN"]}]
+                                    "granted": ["FAKEPLUG_TOKEN"], "blocked": False}]
     response = _save(env, quiz_id, {"botToken": CANARY})
     assert response.status_code == 200 and response.json()["secret_outcome"]["event"] == "secret_replaced"
     assert response.json()["secret_outcome"]["consumers"][0]["enabled"] is True

@@ -996,11 +996,11 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
 
 
 def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
-    """The execution refusal while the owner has not granted the request for these bytes: what is
-    missing, and the plain-words cause when the grant belongs to an earlier version of the files
-    (``grant_gap_sentence``). Empty when nothing is missing."""
-    missing_core = list(grants.get("missing_keys") or [])
-    missing_permissions = list(grants.get("missing_permissions") or [])
+    """The refusal while the owner has not granted what blocks these bytes, with the cause when the grant is an earlier
+    version's (``grant_gap_sentence``); empty when nothing blocks (``skill_grant_follow``: pending, waiting)."""
+    from ouroboros.skill_grant_follow import blocking_lists
+
+    missing_core, missing_permissions = blocking_lists(grants)
     if not (missing_core or missing_permissions):
         return ""
     requested = []

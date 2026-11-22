@@ -5,6 +5,7 @@ Settings, so saving a new key a skill declares (from the Settings page or the pr
 grows every declaring skill's request. The grown request must add the new key as missing and keep
 every approval the owner already gave for those bytes: the reader (``grant_status_for_skill``), the
 partial-approval writer (``save_skill_grants``) and a real consumer (a script's environment) agree.
+A key the last grant decision did not cover is pending (owner 21.11, B″): never passed, it stops nothing.
 New bytes still reset approvals, and nothing here grants a key or permission the owner did not.
 A read that exposes values classifies them from the very document it read, so an owner save landing
 mid-read (adding or deleting such a key) never hands the skill an ungranted value.
@@ -79,7 +80,9 @@ def test_a_new_shared_key_joins_the_request_missing_and_keeps_other_approvals(tm
     assert after["requested_keys"] == ["MAILER_HOST_TOKEN", "SHARED_API_KEY"]
     assert after["granted_keys"] == ["MAILER_HOST_TOKEN"], "the earlier approval of the same bytes survives"
     assert after["missing_keys"] == ["SHARED_API_KEY"], "the newly present key is never granted by itself"
-    assert after["all_granted"] is False and after["usable"] is False
+    # B″: the decision never covered it, so it is pending: not passed, and the skill keeps running.
+    assert after["all_granted"] is False and after["pending_keys"] == ["SHARED_API_KEY"]
+    assert after["blocked"] is False and after["usable"] is True
     other_after = grant_status_for_skill(drive, other)
     assert other_after["granted_keys"] == [] and other_after["missing_keys"] == ["SHARED_API_KEY"]
     assert load_skill_grants(drive, "other")["granted_keys"] == []  # reading wrote nothing

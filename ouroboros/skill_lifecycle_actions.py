@@ -144,7 +144,7 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         if not facts["executable_review"]:
             need = executable_review_requirement(facts["review_gate"], strict_review=_strict_review(skill))
             return _refusal("It turns on after a review passes.", code="acceptance", detail=need, **facts)
-        if not facts["grants"].get("all_granted", True):
+        if facts["grants"].get("blocked"):  # a pending key or a waiting permission stops nothing
             return _refusal("Grant it the keys and permissions it asks for first.", code="grants",
                             detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies

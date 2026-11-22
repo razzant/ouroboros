@@ -377,6 +377,8 @@ def reconcile_extension(
                 bundle = _extensions.get(skill_name)
             if bundle and bundle.runtime_identity:
                 was_live = bundle.runtime_identity == extension_import_identity(subject)
+            if was_live and bundle and (granted := set((state.get("grant_status") or {}).get("granted_keys") or [])):
+                was_live = all(granted <= set(api._granted_upper) for api in bundle.api_instances)  # a later grant reloads
             if was_live and bundle and bundle.catalog_identity is not None:
                 from ouroboros.extension_process_runner import extension_catalog_identity
                 was_live = bundle.catalog_identity == extension_catalog_identity(subject, drive_root, settings_reader)
@@ -536,14 +538,12 @@ def ensure_companions_running(
                 "reason": deps_reason,
             }
     grant_status = grant_status_for_skill(drive_root, skill)
-    if not grant_status.get("all_granted", True):
-        return {
-            "action": "missing_grants",
-            "started": [],
-            "missing": missing,
-            "missing_keys": list(grant_status.get("missing_keys") or []),
-            "missing_permissions": list(grant_status.get("missing_permissions") or []),
-        }
+    if grant_status.get("blocked"):
+        from ouroboros.skill_grant_follow import blocking_lists
+
+        keys, permissions = blocking_lists(grant_status)  # what stops it: a pending key or a waiting permission does not
+        return {"action": "missing_grants", "started": [], "missing": missing, "missing_keys": keys,
+                "missing_permissions": permissions}
 
     # Fix-round-6: resolved WITHOUT mkdir — the post-fence attach creates it.
     state_dir = skill_state_dir_path(drive_root, skill.name)
@@ -690,18 +690,13 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
 
             return dependency_sentence(deps_reason)  # the same sentence liveness shows for this code
 
-    # Core settings and privileged host capabilities require hash-bound grants.
+    # Core settings and privileged host capabilities require owner grants (``skill_grant_follow``).
     grant_status = grant_status_for_skill(pathlib.Path(drive_root), skill)
-    if not grant_status.get("all_granted", True):
-        missing_bits = []
-        if grant_status.get("missing_keys"):
-            missing_bits.append(f"keys={grant_status.get('missing_keys')}")
-        if grant_status.get("missing_permissions"):
-            missing_bits.append(f"permissions={grant_status.get('missing_permissions')}")
-        return (
-            f"skill {skill.name!r} is missing owner grants for "
-            f"{', '.join(missing_bits)}. Grant access on its card in Extensions → Skills."
-        )
+    if grant_status.get("blocked"):
+        from ouroboros.skill_grant_follow import blocking_items
+
+        return (f"skill {skill.name!r} is missing owner grants for {blocking_items(grant_status)}. "
+                "Grant access on its card in Extensions → Skills.")
     granted_core = list(grant_status.get("granted_keys") or [])
     if not _force_in_process:
         try:
