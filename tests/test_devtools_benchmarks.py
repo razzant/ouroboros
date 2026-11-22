@@ -40,6 +40,8 @@ from devtools.benchmarks.programbench.programbench_adapter import (
 from devtools.benchmarks.swe_bench.presets import resolve_preset
 from tests._source_scan import parse as parse_source
 from tests._cases import chosen_rows
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -56,14 +58,17 @@ def _isolate_bench_runs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("GAIA_BWRAP_ISOLATE", "0")
 
 
+def _lay_git_repo(folder: Path) -> None:
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "test@example.invalid")
+    world_git(repo, "config", "user.name", "Test")
+    (repo / "app.py").write_text("print('base')\n", encoding="utf-8")
+    world_git(repo, "add", "app.py")
+    world_git(repo, "commit", "-m", "base")
+
+
 def _git_repo(path: Path) -> str:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    (path / "app.py").write_text("print('base')\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    clone_repository(world("devtools-benchmarks-repo", _lay_git_repo) / "repo", path)
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
 
 

@@ -577,6 +577,19 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
+def keep_first_receipts(rows: list) -> None:
+    """A send confirmed while several calls of one group ran, so inside each of their windows, rides only the first
+    of their rows by request index, as one confirmation rides one row when calls run one at a time; no store read."""
+    seen: set = set()
+    for meta in (row.get("result_meta") or {} for row in rows):
+        kept = [identity for identity in meta.get("presence_delivery_confirmed", ()) if identity not in seen]
+        seen.update(kept)
+        if kept:
+            meta["presence_delivery_confirmed"] = kept
+        else:
+            meta.pop("presence_delivery_confirmed", None)
+
+
 PLACEHOLDERS = ("who", "act", "place", "when", "facts_line", "what", "event", "speak_line", "place_state", "notes",
                 "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 

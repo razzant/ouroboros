@@ -4,7 +4,6 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
-import subprocess
 
 import pytest
 
@@ -14,14 +13,17 @@ from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_status import load_effective_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._store_shared import remove_store_tree
+from tests._workspace_git import git_repository
 
 
 def _registry(tmp_path, monkeypatch, *, git=False, system_target=False):
     system, folder, child, parent = (tmp_path / name for name in ("system", "folder", "child", "parent"))
-    for directory in (system, folder, child, parent):
+    for directory in (system, child, parent):
         directory.mkdir()
     if git:
-        subprocess.run(["git", "init", "-q", str(folder)], check=True)
+        git_repository(folder, unborn=True)
+    else:
+        folder.mkdir()
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "1")
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))

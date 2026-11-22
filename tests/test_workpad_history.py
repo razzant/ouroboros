@@ -258,6 +258,17 @@ def test_the_resident_page_carries_the_revision_of_the_bytes_shown(tmp_path, sto
         f"\nRevision of this workpad: {_sha(raw)}.\n"
 
 
+def test_a_workpad_read_is_a_pure_read_without_new_parallelism():
+    """SPEC §10: a workpad read is a pure read and gains no parallelism of its own; running consecutive inert reads of
+    one response together is its own later class (its handler reads the page and publishes nothing a neighbour
+    observes). The speech classifier this test also pinned (``place_reply.may_speak``) went with the routeless note:
+    the one speech rule reads what reaches a place from its connector's declared doors."""
+    from ouroboros.tool_capabilities import INERT_READ_TOOLS, PURE_READ_TOOLS, READ_ONLY_PARALLEL_TOOLS
+
+    assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
+    assert "workpad_read" in INERT_READ_TOOLS
+
+
 def test_scope_refusals_carry_the_resolvers_own_code(tmp_path, store):
     """The project scope's refusal kind comes from its resolver (``_project_scope``), never from its text."""
     from ouroboros.tools.project_journal import _project_scope, _resolve_project_id, _workpad_write

@@ -286,3 +286,38 @@ def test_a_byok_fee_adds_and_a_missing_upstream_figure_is_unknown_never_free(mon
         assert (cost, final) == (None, False) and "cost_invalid" not in normalized, broken
         loop = _loop_usage(usage)
         assert (loop["cost"], loop["cost_estimated"], loop["cost_final"]) == (0.5, True, False), broken
+
+
+@pytest.mark.parametrize("reported,read", [
+    pytest.param({"cached_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}}, 0,
+                 id="details-zero-beside-a-top-level-count"),
+    pytest.param({"cached_tokens": 0, "prompt_cache_hit_tokens": 300}, 0, id="top-level-zero-beside-the-mirror"),
+    pytest.param({"prompt_tokens_details": {"cached_tokens": 0}, "prompt_cache_hit_tokens": 300}, 0,
+                 id="details-zero-beside-the-mirror"),
+    pytest.param({"cache_read_input_tokens": 300, "prompt_tokens_details": {"cached_tokens": 0}, "cost": 0.031}, 0,
+                 id="details-zero-beside-the-native-name-on-a-billed-reply"),
+    pytest.param({"cached_tokens": 300, "prompt_tokens_details": {"cached_tokens": 200}}, 200,
+                 id="details-count-beside-another-count"),
+    pytest.param({"cached_tokens": 0, "prompt_tokens_details": {"cached_tokens": 300}}, 300,
+                 id="details-count-beside-a-top-level-zero"),
+    pytest.param({"prompt_tokens_details": {"cached_tokens": 0}}, 0, id="details-zero-alone"),
+    pytest.param({"cached_tokens": 0}, 0, id="top-level-zero-alone"),
+    pytest.param({"prompt_cache_hit_tokens": 0}, 0, id="mirror-zero-alone"),
+    pytest.param({"prompt_cache_hit_tokens": 300}, 300, id="mirror-alone"),
+    pytest.param({}, None, id="unreported"),
+])
+def test_the_ledger_and_the_loop_read_one_cache_read_count_when_its_aliases_disagree(reported, read):
+    """A reply of 1,000 prompt tokens names its cache reads in up to four places: the details block, the native
+    ``cache_read_input_tokens``, the top-level count and DeepSeek's top-level mirror. Both lanes read them in one
+    order (the details block, then the first reported top-level name), and a reported zero is a measurement: the
+    300 of a name read after it never replaces it in the row, in the loop's counter or in the loop's event. A
+    reported $0.031 beside them stays the reply's one final amount in both lanes."""
+    from ouroboros.event_usage import event_token_counts
+
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1, **reported}
+    ledger, cost, final = ua.usage_from_response({"usage": copy.deepcopy(usage)})
+    loop = _loop_usage(usage)
+    assert ledger["cached_tokens"] == event_token_counts(loop)["cached_tokens"] == read
+    assert (loop.get("cached_tokens") or 0) == (read or 0)  # the billing-shaped counter the loop folds and prices
+    if "cost" in reported:
+        assert (cost, final) == (loop["cost"], loop["cost_final"]) == (reported["cost"], True)

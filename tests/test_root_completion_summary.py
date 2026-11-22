@@ -87,3 +87,32 @@ def test_first_sentence_keeps_the_page_boundary_without_a_length_cut(text, openi
 
     assert first_sentence(text) == opening
     assert memory_first_sentence is first_sentence
+
+
+_INITIAL_RUN = "U.S. " * 3000
+_WHOLE_SENTENCES = [
+    ("Get link types (e.g. Blocks, Duplicate, Clones, Relates). For createIssueLink use the name.",
+     "Get link types (e.g. Blocks, Duplicate, Clones, Relates)."),  # Jira's getIssueLinkTypes: initials, a capital next
+    ("Resolve the head, i.e. the latest revision. Return its ID.", "Resolve the head, i.e. the latest revision."),
+    ("Pick the default branch, i.e. Main. Then merge.", "Pick the default branch, i.e. Main."),
+    ("Set the kind (private vs. shared) on creation. It cannot change.", "Set the kind (private vs. shared) on creation."),
+    ("Найти стихи А.С. Пушкина. Вернуть ссылки.", "Найти стихи А.С. Пушкина."),
+    ("Returns max. 100 results per page. Use cursor for more.", "Returns max. 100 results per page."),
+    ("Use this tool to: 1. Search issues 2. Create issues. Then report.", "Use this tool to: 1. Search issues 2. Create issues."),
+    ("检索文档。 返回匹配的段落。", "检索文档。"),
+    ("Get one. Get two.", "Get one."),
+    ("Get unread messages across all channels.", "Get unread messages across all channels."),
+    ("Add or update a comment on a Jira issue", "Add or update a comment on a Jira issue"),
+    # Each stop looks back four characters, never at the prefix; the id keeps the node name short (Windows caps it).
+    pytest.param(_INITIAL_RUN + "End. Next.", _INITIAL_RUN + "End.", id="a-long-run-of-initials"),
+]
+
+
+@pytest.mark.parametrize("text,whole", _WHOLE_SENTENCES)
+def test_first_whole_sentence_ends_only_where_a_sentence_ends_and_never_keeps_less(text, whole):
+    """The connections map's line ends at a stop that ends a sentence: not before a lowercase letter or a digit, not at a
+    period closing single letters or a bare number. It keeps at least what ``first_sentence`` keeps."""
+    from ouroboros.text_sentences import first_sentence, first_whole_sentence
+
+    assert first_whole_sentence(text) == whole
+    assert whole.startswith(first_sentence(text))
