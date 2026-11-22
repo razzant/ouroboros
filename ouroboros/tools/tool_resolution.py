@@ -215,7 +215,35 @@ def inferred_file_root(ctx: Any, name: str, root: str | None, paths: list[str]) 
     return next(iter(selected), "active_workspace"), ""
 
 
+def _share_edit_batch_path(name: str, args: Dict[str, Any]) -> str:
+    """edit_batch's top-level ``path`` (outside its schema; the handler lists it) becomes the path of
+    each edit without a ``path`` key and leaves the call, before root inference, binding or any guard reads
+    the call, so every reader sees only per-edit targets. Returns the dispatch note."""
+    if name != "edit_batch" or "path" not in args:
+        return ""
+    shared, edits = args.pop("path"), args.get("edits")
+    if not isinstance(shared, str) or not shared.strip() or not isinstance(edits, list):
+        return f"path={shared!r} ignored: edit_batch takes each edit's path"
+    filled = [isinstance(item, dict) and "path" not in item for item in edits]  # a present path, even empty, stays
+    args["edits"] = [{**item, "path": shared} if fill else item for item, fill in zip(edits, filled)]
+    return (f"path={shared!r} named the {sum(filled)} edit(s) that had no path" if any(filled)
+            else f"path={shared!r} ignored: every edit names its own path")
+
+
 def _normalize_dispatch_path_args_result(
+    ctx: Any,
+    name: str,
+    args: Dict[str, Any],
+) -> _DispatchPathNormalization:
+    """Dispatch path normalization (below) after edit_batch's shared path is given to its edits."""
+    shared_note = _share_edit_batch_path(name, args)
+    result = _normalize_dispatch_paths(ctx, name, args)
+    if not shared_note or result.required_root:
+        return result
+    return _DispatchPathNormalization(text="\n\n".join(part for part in (result.text, shared_note) if part))
+
+
+def _normalize_dispatch_paths(
     ctx: Any,
     name: str,
     args: Dict[str, Any],
@@ -490,11 +518,12 @@ def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> st
 
     _normalize_tool_call_args(entry, args)
     public_params = set(_entry_public_params(entry))
-    # A handler may name a bounded set of execution-only legacy parameters.  They
-    # remain absent from its model-visible schema and are therefore usable only by
-    # callers replaying the former wire shape through this real registry path.  The
-    # handler still owns deterministic migration/refusal; this generic seam neither
-    # chooses a route nor special-cases a tool name.
+    # A handler may name a bounded set of execution-only parameters outside its
+    # model-visible schema: a former wire shape, or another spelling with exactly one
+    # meaning.  They stay absent from the schema, so only callers that send them
+    # reach the handler, through this real registry path.  The handler still owns
+    # the deterministic translation, named in its result, or a refusal naming the
+    # ready call; this generic seam neither chooses a route nor special-cases a tool name.
     hidden_legacy = {
         str(name)
         for name in (getattr(entry.handler, "_hidden_legacy_params", ()) or ())
