@@ -449,12 +449,23 @@ def test_an_sse_post_refused_for_sign_in_ends_the_session_at_once(loopback, monk
 
 def test_insufficient_scope_keeps_the_grant_and_shows_the_step_up(monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
-    mcp_oauth._save(cfg, {"tokens": {"access_token": "synthetic-access", "scope": "files:read"}})
-    refused = _bearer_call(cfg, lambda request: httpx.Response(403, headers={
-        "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
-    assert refused.reason == "insufficient_scope"
+    times = iter(["2026-11-22T10:00:00+00:00", "2026-11-22T11:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    grant = {"tokens": {"access_token": "synthetic-access", "scope": "files:read"}}
+    mcp_oauth._save(cfg, grant)
+
+    def write_refused():
+        return _bearer_call(cfg, lambda request: httpx.Response(403, headers={
+            "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
+    assert write_refused().reason == "insufficient_scope"
     row = mcp_oauth.status(cfg)
     assert (row["state"], row["reason"], row["required_scope"]) == ("signed_in", "insufficient_scope", "files:read files:write")
+    assert row["required_scope_since"] == "2026-11-22T10:00:00+00:00"  # the gap is dated when it opens
+    write_refused()
+    assert mcp_oauth.status(cfg)["required_scope_since"] == "2026-11-22T10:00:00+00:00"  # a repeat keeps its start
+    mcp_oauth._save(cfg, {**grant, "required_scope": "files:read files:write"})  # a file written before kept none
+    write_refused()
+    assert mcp_oauth.status(cfg)["required_scope_since"] is None  # its start stays unknown
 
 
 def test_a_403_after_a_refreshed_retry_is_still_the_typed_step_up(monkeypatch, tmp_path):

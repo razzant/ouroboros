@@ -709,11 +709,11 @@ Owner lifecycle actions share `skill_lifecycle_actions.run_skill_action`: grant/
 
 ### MCP and browser-facing external tools
 
-`mcp_client.py`: HTTP/SSE/stdio, `mcp_<server>__<tool>`, `schemas_at_start`; `mcp_schema.py`: redaction/framing; `mcp_catalog.py`: instructions/tools in `state/mcp/catalogs/`, seeded before turns. Missing catalogs never block; adoption/attempts/cache provenance: DEVELOPMENT §12. SDK causes/stderr are untrusted.
+`mcp_client.py`: HTTP/SSE/stdio, `mcp_<server>__<tool>`, `schemas_at_start`; `mcp_catalog.py`: instructions/tools, seeded before turns. Missing catalogs never block; adoption/attempts/cache provenance: DEVELOPMENT §12.
 
 `mcp_discovery.Discovery` coalesces listing and lifecycle settle off event intake. Granted-value digests bind sessions/catalogs as credentials change tools; settings fingerprints detect rotation. Save/mtime or worker `mcp_configuration_changed` relists; reads adopt without duplicate listing.
 
-Calls recheck allowlist/Cyber, grants, Presence, contract, `network=false` (`web=false` permits). Pre-Safety resolution never lists inline (`mcp_catalog.MCPNameResolution`; unready skills: `MCP_SKILL_UNAVAILABLE`). Server text: one untrusted frame per map/tool (secrets: DEVELOPMENT §12). Headers are origin-bound (`mcp_headers.py`, `MCP_REDIRECT_REFUSED`); credentialless Bearer `401` requests owner sign-in (`mcp_oauth.py`). Masks restore identities/headers; legacy pairs stay, nested secrets never migrate. Transport headers override literals; imports replace all, including legacy. Invalid fields: `MCP_CONFIG_ERROR`; unknown: warning. Import/Test never publish.
+Calls recheck allowlist/Cyber, grants, Presence, contract, `network=false` (`web=false` permits). Pre-Safety resolution never lists inline (`mcp_catalog.MCPNameResolution`; unready skills: `MCP_SKILL_UNAVAILABLE`). Server text, SDK causes, stderr: untrusted (a frame per map/tool; secrets: DEVELOPMENT §12). Headers are origin-bound (`mcp_headers.py`, `MCP_REDIRECT_REFUSED`); credentialless Bearer `401` requests owner sign-in (`mcp_oauth.py`). Masks restore identities/headers; legacy pairs stay, nested secrets never migrate. Transport headers override literals; imports replace all, including legacy. Invalid fields: `MCP_CONFIG_ERROR`; unknown: warning. Import/Test never publish.
 
 `mcp_task_session.py`: stdio `task_session` (card/Import; else per call), required by `browser_policy`. `mcp_browser_guard.py`: off-loop policy, task arm `capabilities`, `file_intake` under `read_file`. Connect binds launch/flags to accepted manifests. `skill_mcp.work_start`: in managed domains, stage verified Node servers; refuse `agent_python` (local agent interpreter, `-I -B`).
 
