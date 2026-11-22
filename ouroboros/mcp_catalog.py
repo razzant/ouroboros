@@ -140,6 +140,58 @@ def note_call(cfg: Any, *, ok: bool, code: str = "", method: str = "") -> None:
         log.debug("MCP call outcome mark failed for %s", getattr(cfg, "id", "?"), exc_info=True)
 
 
+def _leaves(exc: BaseException) -> list:
+    """``exc`` and every exception its groups carry (the SDK's task groups wrap what names a failure)."""
+    from ouroboros.mcp_schema import _ExceptionGroup
+
+    found, pending, seen = [], [exc], set()
+    while pending:
+        error = pending.pop()
+        if id(error) not in seen:
+            seen.add(id(error))
+            found.append(error)
+            if _ExceptionGroup and isinstance(error, _ExceptionGroup):
+                pending.extend(error.exceptions)
+    return found
+
+
+def failure_mark(exc: BaseException) -> tuple[bool, str] | None:
+    """What a failed call says of its server: None for a local refusal (pause, store, model wait, accounting, a
+    task session's own refusal) or an interruption anywhere in it (nothing about the server), else ``(False,
+    code)``: ``MCP_AUTH_REQUIRED``, ``MCP_TIMEOUT`` or ``MCP_ERROR`` (a transport failure before any answer)."""
+    import asyncio
+
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.mcp_oauth import MCPAuthRequired
+    from ouroboros.mcp_task_session import TaskSessionUnavailable
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.owner_pause import OwnerPauseRefused
+    from ouroboros.store import StoreError
+    from ouroboros.usage_accounting import UsageAccountingError
+
+    leaves = _leaves(exc)
+    local = (PhysicalDispatchInterrupted, TaskSessionUnavailable, ModelWaitInterrupted, OwnerPauseRefused, StoreError,
+             UsageAccountingError)
+    if any(isinstance(error, local) or not isinstance(error, Exception) for error in leaves):
+        return None
+    if any(isinstance(error, MCPAuthRequired) for error in leaves):
+        return False, "MCP_AUTH_REQUIRED"
+    if any(isinstance(error, (TimeoutError, asyncio.TimeoutError)) for error in leaves):
+        return False, "MCP_TIMEOUT"
+    return False, "MCP_ERROR"
+
+
+def note_failed_call(cfg: Any, exc: BaseException, *, method: str = "") -> None:
+    """Mark a failed call by what it says of its server (``failure_mark``); a local refusal leaves the record."""
+    try:
+        mark = failure_mark(exc)
+    except Exception:  # noqa: BLE001 - the classification never fails the call it describes
+        log.debug("MCP call outcome classification failed for %s", getattr(cfg, "id", "?"), exc_info=True)
+        return
+    if mark is not None:
+        note_call(cfg, ok=mark[0], code=mark[1], method=method)
+
+
 def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
     """Write a changed call outcome under the record's name lock; False when nothing was written (unchanged on
     disk, or the lock is busy: the next changed call writes it). The server's catalog is never touched."""

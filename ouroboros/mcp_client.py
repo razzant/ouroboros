@@ -1485,25 +1485,22 @@ class MCPManager:
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
             ) + server_stderr_note(exc)
-            mcp_catalog.note_call(cfg, ok=False, code="MCP_TIMEOUT", method=tool.raw_name)  # no answer, sent or not
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)  # no answer, sent or not
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except mcp_oauth.MCPAuthRequired as exc:  # the server ran nothing: no grant, refused refresh or token
-            mcp_catalog.note_call(cfg, ok=False, code="MCP_AUTH_REQUIRED", method=tool.raw_name)
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)
             return ToolResult(status="unavailable", code="MCP_AUTH_REQUIRED", text=f"⚠️ {exc}",
                               meta={"dynamic_provider": True, "mcp_call_not_sent": True, "sign_in_reason": exc.reason})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             if isinstance(exc, PhysicalDispatchInterrupted):
                 raise  # caller control is not a provider error; exited() already settled proven no-send custody
-            from ouroboros.model_wait import ModelWaitInterrupted
-            from ouroboros.usage_accounting import UsageAccountingError
             not_sent = unsent(exc)
             if not_sent and isinstance(exc, (OwnerPauseRefused, StoreError)):
                 from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
-            if not (not_sent and isinstance(exc, (ModelWaitInterrupted, UsageAccountingError))):
-                mcp_catalog.note_call(cfg, ok=False, code="MCP_ERROR", method=tool.raw_name)  # a local refusal says nothing of it
+            mcp_catalog.note_failed_call(cfg, exc, method=tool.raw_name)  # a local refusal or interruption says nothing
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})

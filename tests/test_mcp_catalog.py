@@ -779,3 +779,44 @@ def test_a_call_record_goes_with_its_server_at_a_configuration_event():
     changed = publisher(settings(url="https://moved.example.test/mcp"))  # another identity of the same id
     mcp_catalog.prune_catalogs([changed.server_config("demo")])
     assert not mcp_catalog.calls_path("demo").exists() and not mcp_catalog.catalog_path("demo").exists()
+
+
+def _local_refusal(kind):
+    """One local refusal or interruption as the call path raises it, never the server's doing."""
+    import asyncio
+    from ouroboros import owner_pause, store
+    from ouroboros.mcp_schema import _ExceptionGroup
+    from ouroboros.mcp_task_session import TaskSessionUnavailable
+    from ouroboros.model_wait import ModelWaitInterrupted
+    from ouroboros.usage_accounting import UsageAccountingError
+
+    def grouped(error):  # the SDK's task group wraps it, with no proof that nothing was sent
+        return _ExceptionGroup("unhandled errors in a TaskGroup", [error])
+
+    return {"oauth_lock_in_a_group": lambda: grouped(store.StoreBusy("lock busy", reason="contention")),
+            "pause_in_a_group": lambda: grouped(owner_pause.OwnerPauseRefused("owner_pause")),
+            "model_wait": lambda: ModelWaitInterrupted("owner_stop"),
+            "accounting": lambda: UsageAccountingError("ledger unavailable"),
+            "task_session": lambda: TaskSessionUnavailable("this call does not come from a task's own live loop"),
+            "cancelled": lambda: asyncio.CancelledError("worker stopped"),
+            "system_exit": lambda: SystemExit(0)}[kind]()
+
+
+@pytest.mark.parametrize("kind", ["oauth_lock_in_a_group", "pause_in_a_group", "model_wait", "accounting",
+                                  "task_session", "cancelled", "system_exit"])
+def test_a_local_refusal_or_interruption_leaves_the_record_and_a_transport_failure_opens_a_series(kind):
+    from ouroboros.tools.tool_result import ToolResult
+
+    manager = publisher()
+    assert manager.refresh_server("demo")["published"]
+    call_with(manager, _local_refusal(kind))
+    assert call_now() is None  # nothing was said about the server
+    assert call_with(manager, ToolResult(status="ok", code="OK", text="pong")).status == "ok"
+    answered = call_now()
+    call_with(manager, _local_refusal(kind))
+    assert call_now() == answered  # an answering server stays answering
+    assert call_with(manager, ConnectionError("connection refused")).code == "MCP_ERROR"
+    failing = call_now()
+    assert failing["ok"] is False and failing["code"] == "MCP_ERROR" and failing["since"] == failing["at"]
+    call_with(manager, _local_refusal(kind))
+    assert call_now() == failing  # and an open series keeps its start
