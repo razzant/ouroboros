@@ -237,18 +237,21 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
     padding-top: var(--space-3);
 }
 .nav-card {
-    padding: var(--space-2);
+    padding: var(--space-2) var(--space-1);
     border-radius: var(--radius-object);
     background: var(--surface-object);
     box-shadow: var(--elev-rest);
 }
-/* Compact: the sections two to a line, the first of each line in a cell half the card wide and the second taking the
-   rest, so the glyphs of the two lines stand under each other; Dashboard and Settings a line each. A row is as wide as
-   its words and keeps them whole on one line: no syllable hyphenation, no clipping, no unlabelled icon. A cell is as
-   wide as its name (pages.js gives each section one), so a longer name takes the room it needs and the next section
-   moves to the next line, whole; no cell is wider than the card, so a name longer than the whole card, like a longer
-   translation of a system row, wraps at a space as the last resort, its lines inside the row's own air. The chosen
-   one is the crimson capsule. */
+/* Compact: the sections two to a line, the first of each line in a cell half the card wide and the second taking
+   the rest, so the glyphs of the two lines stand under each other; Dashboard and Settings a line each. A row is as
+   wide as its words and keeps them whole on one line: no syllable hyphenation, no clipping, no unlabelled icon. A
+   cell is as wide as its name (pages.js gives each section one), so a longer name takes the room it needs and the
+   next section moves to the next line, whole; no cell is wider than the card, so a name longer than the whole card,
+   like a longer translation of a system row, wraps at a space as the last resort, its lines inside the row's own
+   air. The row keeps its 8 px start, the glyph line the version's check sits on, and takes a 4 px end; with the
+   card's own 4 px sides that holds the longest Russian pair, «Расширения» and «Виджеты», two to a line at the
+   270 px sidebar floor with room to spare for wider fonts of other systems. The chosen one is the crimson
+   capsule. */
 .nav-sections {
     display: flex;
     flex-wrap: wrap;
@@ -269,7 +272,8 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
     max-width: 100%;
     min-height: 32px;
     gap: var(--space-1);
-    padding: var(--space-1) var(--space-2);
+    padding: var(--space-1);
+    padding-inline-start: var(--space-2);
     border-radius: var(--pill-radius);
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -280,14 +284,16 @@ html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw -
 .nav-card .nav-row:not(.active) > svg { color: var(--text-meta); }
 /* Wide, from 475 px of sidebar (the column's content box less its 12 px insets and its hairline: 450 px), where the
    four sections hold one line (measured with the Russian names and «Расширения» for Extensions, the longest translation
-   so far; the rows' 8 px sides and 4 px glyph gap keep it two to a line from 270 px too,
-   tests/test_sidebar_short_window_browser.py): both
-   cards turn to one line each at once, their first rows' left edges on one line with the version, their last rows'
-   right edges on another with the update capsule's, the room between them shared evenly. */
+   so far; the rows' kept 8 px start and 4 px end and their 8 px minimum gaps leave about 13 px to spare on the widest
+   fonts measured, and the half-wide cells keep it two to a line from the 270 px floor too,
+   tests/test_sidebar_short_window_browser.py): both cards turn to one line each at once, their first rows' left edges
+   on one line with the version, their last rows' right edges on another with the update capsule's, the room between
+   them shared evenly. */
 @container (min-width: 450px) {
     .nav-sections,
-    .nav-system-rows { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-3); }
+    .nav-system-rows { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-1) var(--space-2); }
     .nav-sections > .nav-cell:nth-child(n) { flex: 0 0 auto; min-width: 0; }
+    .nav-card { padding-inline: var(--space-2); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */
