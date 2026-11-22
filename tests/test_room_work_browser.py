@@ -584,23 +584,29 @@ def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resum
 
 _ROW_OVERFLOW = """(id) => {
     const row = document.querySelector(`#page-chat .rw-row[data-id="${id}"]`);
-    const line = row.querySelector('.rw-secondary'), state = row.querySelector('.rw-state');
+    const shade = row.closest('.rw-shade'), list = row.closest('.rw-list');
+    const over = (el) => el.scrollWidth - el.clientWidth;
     const right = (el) => el.getBoundingClientRect().right;
-    return { row: row.scrollWidth - row.clientWidth, state: state.scrollWidth - state.clientWidth,
-             past: Math.max(right(line), right(state)) - right(row),
+    const inside = [...row.querySelectorAll('.rw-secondary, .rw-state, .rw-detail, .rw-detail-line')]
+        .filter((el) => el.getClientRects().length);
+    return { row: over(row), shade: over(shade), list: over(list),
+             parts: Math.max(0, ...inside.map(over)), past: Math.max(...inside.map(right)) - right(row),
              page: document.documentElement.scrollWidth - window.innerWidth };
 }"""
 
 
 @pytest.mark.parametrize("width", [581, 282])
 def test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows(room_ui, width):
-    holder = "Довести M3 PR #3761 до состояния, принимаемого ревью, и сверить все замечания"
+    """Owner 21.11.2026 («5A»), review round 1 (S5): the line and the details wrap a long unbroken name and folder path
+    inside the row; the list's own scroll width is measured, since an overflow inside it never reaches the page's."""
+    holder = "Rebuild_the_release_candidate_" * 4
+    folder = "/Users/someone/work/" + "a-very-long-folder-name-without-any-space-" * 3
+    queued_name = "Измерить старт чата и проверить ускорение на старых цитатах"
     transport = Transport(room_ui["page"], activities=[
-        activity("rw-holder", suggested_name=holder),
-        activity("rw-behind", "queued", suggested_name="Измерить старт чата и проверить ускорение на старых цитатах")])
+        activity("rw-holder", suggested_name=holder), activity("rw-behind", "queued", suggested_name=queued_name)])
     transport.raw["rw-holder"] = {"running": True, "suggested_name": holder}
-    transport.raw["rw-behind"] = {"suggested_name": "Измерить старт чата и проверить ускорение на старых цитатах",
-                                  "_lane_wait": {"lane": "project", "task_id": "rw-holder", "project_id": "nano"}}
+    transport.raw["rw-behind"] = {"suggested_name": queued_name, "lane_wait": {
+        "lane": "folder", "task_id": "rw-holder", "project_id": "other", "folder": folder}}
     page = open_app(room_ui, transport, viewport={"width": width, "height": 844})
     trigger(page).click()
     opened = wait_facts(page, "main", lambda f: row(f, "rw-behind") and row(f, "rw-behind")["secondary"],
@@ -608,13 +614,16 @@ def test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows(room_
     queued = row(opened, "rw-behind")
     assert (queued["word"], queued["secondary"]) == ("Queued", f"behind \u201c{holder}\u201d"), queued
     assert "rw-holder" not in queued["state"], "the line names the work, never its id"
+    fits = lambda m: m["row"] <= 1 and m["shade"] <= 1 and m["list"] <= 1 and m["parts"] <= 1 and m["past"] <= 1 \
+        and m["page"] <= 0  # noqa: E731
     overflow = page.evaluate(_ROW_OVERFLOW, "rw-behind")
-    assert overflow["row"] <= 1 and overflow["state"] <= 1 and overflow["past"] <= 1 and overflow["page"] <= 0, overflow
+    assert fits(overflow), overflow
     capture(page, f"queued-behind-{width}")
     row_main(page, "rw-behind").click()
     detail = wait_facts(page, "main", lambda f: "Behind" in row(f, "rw-behind")["detail"], "the queued row's details")
-    assert "Behindrw-holder keeps its Project" in row(detail, "rw-behind")["detail"], row(detail, "rw-behind")
-    assert page.evaluate(_ROW_OVERFLOW, "rw-behind")["page"] <= 0
+    assert f"Behindrw-holder keeps the folder {folder}" in row(detail, "rw-behind")["detail"], row(detail, "rw-behind")
+    overflow = page.evaluate(_ROW_OVERFLOW, "rw-behind")
+    assert fits(overflow), overflow
     capture(page, f"queued-behind-{width}-details")
 
 
