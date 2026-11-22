@@ -1,0 +1,87 @@
+# One-shot keyless verification of the fix commit (its parent here). Never merge this workflow.
+name: "#3913 focused fix-forward checks"
+on:
+  push:
+    branches: [verify/post3913-fix-final-760cb68e]
+permissions:
+  contents: read
+jobs:
+  focused:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, interpreter: shipped, journal: WAL}
+          - {os: windows-latest, interpreter: setup-python, journal: PERSIST}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 22
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test the exact product commit, excluding this verification workflow
+        run: |
+          set -euo pipefail
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/post3913-fix-check.yml"
+          git switch --detach HEAD^
+          test -z "$(git status --porcelain)"
+      - name: Put Windows test temp on the work disk
+        if: runner.os == 'Windows'
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Run the settlement, custody and contract homes
+        env:
+          EVIDENCE: ${{ runner.temp }}/post3913-fix-check
+          JOURNAL: ${{ matrix.journal }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess, sys, tempfile
+          from ouroboros import store
+          env = os.environ.copy()
+          p = pathlib.Path(env['EVIDENCE']); p.mkdir()
+          tested, base, tree = subprocess.check_output(['git','rev-parse','HEAD','HEAD^','HEAD^{tree}'], text=True).splitlines()
+          with tempfile.TemporaryDirectory() as temp:
+              probe = pathlib.Path(temp) / 'probe.sqlite'; probe.touch()
+              journal = store._journal_mode(probe, store.TIER_ENFORCED)
+          (p / 'subject.json').write_text(json.dumps({'controller':env['GITHUB_SHA'], 'candidate':tested,
+              'tree':tree, 'base':base, 'os':env.get('RUNNER_OS'), 'python':sys.version,
+              'journal':journal, 'expected_journal':env['JOURNAL']}), encoding='utf-8')
+          print('TESTED', tested, tree, base, journal, flush=True)
+          if journal != env['JOURNAL']:
+              raise SystemExit('Runner journal mode differs from the original post-merge job')
+          env['GITHUB_SHA'] = tested
+          cases = [
+              'tests/test_deepseek_pricing.py',
+              'tests/test_transport_b_stream_deadlines.py',
+              'tests/test_gateway_abi3_removals.py',
+              'tests/test_priced_response_consumers.py',
+              'tests/test_openrouter_accounting_evidence.py',
+              'tests/test_usage_response_custody.py',
+          ]
+          cmd=[sys.executable,'-I','-S','scripts/safe_test.py','--timeout','900','--',sys.executable,'-m','pytest',
+              '-q','--tb=short','--timeout=120',f'--ci-evidence-dir={p}',*cases]
+          print('COMMAND', ' '.join(cmd), flush=True)
+          code=subprocess.run(cmd,env=env).returncode
+          (p/'exit.json').write_text(json.dumps({'exit':code}), encoding='utf-8')
+          raise SystemExit(code)
+          PY
+      - name: Retain projected results and subject binding
+        if: '!cancelled()'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: post3913-fix-${{ runner.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/post3913-fix-check/
+          retention-days: 7
+          if-no-files-found: error
