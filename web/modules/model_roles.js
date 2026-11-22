@@ -17,7 +17,7 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, modelPriceWords, withoutPrice, tierPriced,
     KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
-import { modelCatalog } from './model_catalog_store.js';
+import { modelCatalog, watchModelCatalog } from './model_catalog_store.js';
 import { windowWords } from './chat_model_routes.js';
 import { fmt, translateString } from './i18n.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -777,23 +777,36 @@ const slotsOf = (settings) => (Array.isArray(settings?._meta?.setup_contract?.mo
 const wordsOf = (id) => HAND_WRITTEN.find((row) => row.id === id) || { id, keys: [], name: id, meta: '' };
 const shortModel = (model) => String(model || '').slice(String(model || '').lastIndexOf('/') + 1);
 
-/** A stored route in the owner's words: `{ name, source, mark }`; an empty one follows another role (`follows`). */
-export function routeWords(value, { local = false, account = '', follows = 'Main' } = {}) {
+/** A stored route in the owner's words: `{ name, source, mark, label }`; an empty one follows another role
+ *  (`follows`). A subscription's name comes from the held catalogue's descriptor when one exists — the opaque
+ *  source id is no readable name — and `label` is that name alone, so a caller can mark it authored
+ *  (`data-i18n-authored`) while the interface words around it stay translatable. Without a descriptor the old
+ *  generic label stands. No read starts here. */
+export function routeWords(value, { local = false, account = '', follows = 'Main', modelSources = [] } = {}) {
     const { source, model } = parseModelSource(value);
-    if (local) return { name: 'Local model', source: 'On this computer', mark: '' };
-    if (!String(value || '').trim()) return { name: `${follows} model`, source: '', mark: '', follows: true };
+    if (local) return { name: 'Local model', source: 'On this computer', mark: '', label: '' };
+    if (!String(value || '').trim()) return { name: `${follows} model`, source: '', mark: '', label: '', follows: true };
     const harness = source.startsWith('subscription:') ? source.slice(13) : '';
     const kind = source.split('@')[0];
-    return { name: shortModel(model), mark: harness, source: harness ? `${harnessPresentation(harness).label} subscription · ${account ? `account ${account}` : 'your accounts in turn'}`
-        : `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
+    if (!harness) return { name: shortModel(model), mark: '', label: '',
+        source: `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
+    // Only a descriptor names the credential harness; the opaque id itself never picks a brand (sourceMark's rule).
+    const label = (modelSources || []).find((entry) => entry?.id === harness)?.label || harnessPresentation(harness).label;
+    return { name: shortModel(model), mark: harness, label,
+        source: `${label} subscription · ${account ? `account ${account}` : 'your accounts in turn'}` };
 }
 
 // The mark of the source a route goes through: a subscription's own, a provider's own, else its initial; a local
 // model and an unset route have none. Never a generic glyph (a globe read as "the internet", owner 13.11).
-function routeMark(value, { local = false } = {}) {
+function routeMark(value, { local = false, modelSources = [] } = {}) {
     if (local || !String(value || '').trim()) return '';
     const { source } = parseModelSource(value);
-    if (source.startsWith('subscription:')) return sourceMark({ lane: 'subscription', harness: source.slice(13), label: harnessPresentation(source.slice(13)).label });
+    if (source.startsWith('subscription:')) {
+        const sourceId = source.slice(13);
+        const descriptor = (modelSources || []).find((entry) => entry?.id === sourceId);
+        const label = descriptor?.label || sourceId;
+        return sourceMark({ lane: 'subscription', credentialHarness: descriptor?.credentialHarness || '', label });
+    }
     const kind = source.split('@')[0];
     return sourceMark({ kind, label: API_PROVIDER_LABELS[kind] || kind });
 }
@@ -806,6 +819,17 @@ function mountModels(container, { path, ctx }) {
     const doors = [...ROLE_ORDER, 'websearch'].map((slot) => ({ ...wordsOf(`models:${slot}`), control: { kind: 'door', to: `models/role/${slot}` } }));
     const door = (row) => settingsRow(row).replace('data-setting-door', `data-setting-door data-entry-id="${row.id.split(':')[1]}"`);
     const plain = rowsOf('models', { fold: false }).map((row) => settingsRow(row, { custom })).join('');
+    // The catalogue a model sheet already holds: its descriptors brand the routes they name, and no read of its
+    // own starts for a mark (the home's Models door reads the same held list, settings_home.js).
+    const heldSources = () => {
+        const sources = modelCatalog.catalog()?.model_sources;
+        return Array.isArray(sources) ? sources : [];
+    };
+    // A subscription's name is an authored label (a product's or the owner's); the words around it are chrome.
+    // Two elements, never one text beside a child: a translation may rewrite the words, never the name.
+    const sourceWordsHtml = (words) => (words.label
+        ? `<span data-i18n-authored>${escapeHtml(words.label)}</span><span>${escapeHtml(words.source.slice(words.label.length))}</span>`
+        : escapeHtml(words.source));
     container.innerHTML = `<p class="settings-page-lead">Which model does which work.</p>
         <section class="ui-card settings-card" data-setting-row="models:main">
             <h3 class="settings-card-title">${escapeHtml(wordsOf('models:main').name)}</h3>
@@ -836,6 +860,8 @@ function mountModels(container, { path, ctx }) {
     const entryResult = container.querySelector('[data-entry-result]');
     let fold = null;
     let shown = '', drawnFallbacks = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
+    let mainPainted = null;                // Main's route as last drawn: { value, account, local, note }
+    let mainMetaShown = null;              // the meta line last given to the DOM (a late descriptor compares against it)
     // A row's value at its end, before its chevron: made once, then only its words change.
     const say = (id, text, follows = false) => {
         const node = container.querySelector(`[data-setting-row="${id}"]`);
@@ -858,11 +884,27 @@ function mountModels(container, { path, ctx }) {
         const meta = container.querySelector(`[data-setting-row="${id}"]`)?.querySelector('[data-setting-meta]');
         if (text) meta?.setAttribute('data-tone', 'warn'); else meta?.removeAttribute('data-tone');
     };
+    // Main's two catalogue-decided slots: the mark of its source and the source line beside it. Only these change
+    // when a descriptor arrives late; an unchanged result writes nothing (and the card is never redrawn for it).
+    const mainMetaHtml = (value, account, local, note) => {
+        if (note) return `<span>${escapeHtml(note)}</span>`;
+        const words = routeWords(value, { account, local, modelSources: heldSources() });
+        return `${routeMark(value, { local, modelSources: heldSources() })}<span>${sourceWordsHtml(words)}</span>`;
+    };
+    function paintMainMeta() {
+        if (!mainPainted) return;
+        const meta = container.querySelector('.models-main-meta');
+        if (!meta) return;
+        const html = mainMetaHtml(mainPainted.value, mainPainted.account, mainPainted.local, mainPainted.note);
+        if (html === mainMetaShown) return;
+        meta.innerHTML = mainMetaShown = html;
+    }
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
         const accounts = modelRoleMap(settings[MODEL_ACCOUNTS_KEY]);
         const local = (slot) => Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]);
-        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot], local: local(slot) });
+        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot],
+            local: local(slot), modelSources: heldSources() });
         const profiles = settings._meta?.setup_contract?.providerProfiles || {};
         const keyWords = (value, onLocal) => {
             const problem = onLocal ? '' : routeKeyProblem(value, settings, profiles);
@@ -874,21 +916,23 @@ function mountModels(container, { path, ctx }) {
         const main = route('main');
         const mainNote = labels.length ? `Choose the key it uses: ${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}.`
             : keyWords(settings[slots.main?.settingKey], local('main'));
+        mainPainted = { value: String(settings[slots.main?.settingKey] || ''), account: accounts.main || '', local: local('main'), note: mainNote };
+        mainMetaShown = mainMetaHtml(mainPainted.value, mainPainted.account, mainPainted.local, mainPainted.note);
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
         container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open${mainNote || main.source ? '' : ' data-no-meta'}>
             <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
-            <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
+            <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainMetaShown}</span>
             <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;
         const list = fallbackEntries(settings);
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
         const fallbackHtml = list.map((entry, index) => {
-            const words = routeWords(entry.value, { account: entry.account, local: localFallback });
+            const words = routeWords(entry.value, { account: entry.account, local: localFallback, modelSources: heldSources() });
             const note = keyWords(entry.value, localFallback);
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
-                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta"${note ? ' data-tone="warn"' : ''}>${escapeHtml(note || words.source)}</span></button>
+                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta"${note ? ' data-tone="warn"' : ''}>${note ? escapeHtml(note) : sourceWordsHtml(words)}</span></button>
                 <div class="ui-row-actions"><button type="button" class="btn btn-ghost btn-sm" data-fallback-move="-1" aria-label="Move fallback ${index + 1} up" ${index ? '' : 'disabled'}>↑</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;
@@ -950,11 +994,16 @@ function mountModels(container, { path, ctx }) {
     const onSaved = (event) => { if (event.detail?.source === 'settings-row') void read(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     globalThis.window?.addEventListener('ouro:settings-updated', onSaved);
+    // A descriptor adopted after the row was drawn (a model sheet's read, Read again) brands the Main route it
+    // names: only that row's mark and source line change, and the route drawn from the same settings stays the one
+    // compared, so a different Main alone reaches this row through its own read.
+    const offCatalog = watchModelCatalog(paintMainMeta);
     void read();
     return { unmount() {
         container.removeEventListener('click', onClick);
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         globalThis.window?.removeEventListener('ouro:settings-updated', onSaved);
+        offCatalog();
         bound.dispose(); fold?.dispose();
     } };
 }

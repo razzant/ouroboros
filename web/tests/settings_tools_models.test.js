@@ -9,6 +9,7 @@ import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { applyMcpSettings, collectMcpSettings, refreshStatus } from '../modules/mcp_settings.js';
 import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
+import { modelCatalog } from '../modules/model_catalog_store.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
 import { localModelStatusWords } from '../modules/settings_local_model.js';
@@ -1152,11 +1153,67 @@ test('the fallbacks\' order and removal are written on the list: the order throu
 });
 
 test('a route is said in the owner\'s words', () => {
-    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', source: 'Codex subscription · your accounts in turn' });
+    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', label: 'Codex',
+        source: 'Codex subscription · your accounts in turn' });
     assert.equal(routeWords('anthropic@work::claude-opus').source, 'Anthropic (work) · by API key');
     assert.equal(routeWords('google/gemini-pro').name, 'gemini-pro');
-    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', follows: true });
+    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', label: '', follows: true });
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
+});
+
+test('a subscription is named by its held descriptor, and keeps the old generic name without one', () => {
+    // An opaque source id is no readable name; only the catalogue's descriptor names its owner.
+    const sources = [{ id: 'claude', label: 'Claude Code', credentialHarness: 'claude' }];
+    assert.deepEqual(routeWords('claudexor::claude=claude-opus-5-5', { modelSources: sources }),
+        { name: 'claude-opus-5-5', mark: 'claude', label: 'Claude Code',
+            source: 'Claude Code subscription · your accounts in turn' });
+    assert.equal(routeWords('claudexor::future=gpt-x').label, 'future',
+        'no descriptor: the old generic label stands, never a guessed product name');
+    assert.equal(routeWords('claudexor::claude=claude-opus-5-5', { account: 'studio-01', modelSources: sources }).source,
+        'Claude Code subscription · account studio-01');
+});
+
+// The Models list's Main row: its mark and its source line come from the catalogue a model sheet already holds.
+// Nothing here reads the catalogue; a descriptor adopted later reaches only those two slots.
+test('the Models Main row wears its descriptor\'s mark and name, and a later descriptor reaches only them', async (t) => {
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    const value = 'claudexor::agy=claude-opus-5-5';
+    const page = await open(t, 'models', { values: { OUROBOROS_MODEL: value, OUROBOROS_MODEL_ACCOUNTS: { main: 'studio-01' } } });
+    const row = () => page.container.querySelector('.models-main-row');
+    const meta = () => inside(row(), '.models-main-meta');
+    const markNode = () => inside(meta(), '.model-source-mark');
+    const catalogueReads = () => page.calls.filter((url) => String(url).startsWith('/api/model-catalog')).length;
+    // Already held: the descriptor's mark and its name at the first paint, with no read of this page's own.
+    const reads = catalogueReads();
+    assert.equal(markNode().getAttribute('viewBox'), '0 0 180 180', 'a held descriptor draws its mark at first paint');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(inside(meta(), '[data-i18n-authored]').textContent, 'Antigravity work', 'the name is authored, not chrome');
+    // A held list that names no harness: the neutral initial and the old generic name, never a brand guessed from the id.
+    const rowNode = row();
+    modelCatalog.adopt({ items: [], model_sources: [] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.match(markNode().getAttribute('class'), /model-source-initial/, 'no descriptor: a neutral initial');
+    assert.match(meta().textContent, /Antigravity subscription · account studio-01/s,
+        'without a descriptor the old generic name stands, and no brand is chosen by the id alone');
+    // A descriptor adopted later brands the route it names: only the mark and its source line change.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.equal(inside(meta(), '.model-source-mark').getAttribute('viewBox'), '0 0 180 180', 'the descriptor\'s Antigravity mark');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(catalogueReads(), reads, 'no read for a mark');
+    // The same descriptor again is a no-op: the drawn nodes stay the ones the owner sees.
+    const mark = inside(meta(), '.model-source-mark');
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(inside(meta(), '.model-source-mark'), mark, 'an unchanged result writes nothing');
+    // A descriptor that names no credential harness is no evidence of one: the neutral initial stays.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: '' }] });
+    await settle();
+    assert.match(inside(meta(), '.model-source-mark').getAttribute('class'), /model-source-initial/,
+        'an unbound opaque id is never branded');
+    assert.doesNotMatch(meta().innerHTML, /viewBox="0 0 180 180"/);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {

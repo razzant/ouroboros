@@ -277,8 +277,10 @@ export function paintCardModel(record, view, deps = {}) {
     if (view.tiers) state.deps.store.adoptTiers?.(view.tiers);
     record.lead = lead;
     shapeFact(record, state, Boolean(state.view.target));
-    const mark = `${said.said.lane}|${said.said.harness}|${said.said.kind}|${said.said.sourceLabel}`;
-    if (mark !== state.markKey) { state.markKey = mark; state.mark.innerHTML = sourceMark(said.said); }
+    // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
+    // after the words it stands beside, and a key of hand-picked fields would hide that change.
+    const mark = sourceMark(said.said);
+    if (mark !== state.markKey) { state.markKey = mark; state.mark.innerHTML = mark; }
     const [leads, id, tail] = state.name.children;
     // A separator rides at the end of the span before it, so a wrapped line never starts with one.
     write(leads, `${said.parts[0]}\u00a0·`);

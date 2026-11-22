@@ -15,6 +15,7 @@ test('a door names its destination, without adding words to an internal row', ()
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { getContributions } from '../modules/contributions.js';
 import { createHostStart } from '../modules/host_starting_status.js';
+import { modelCatalog } from '../modules/model_catalog_store.js';
 import { initSettings } from '../modules/settings.js';
 import { bindSettingRows, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
@@ -349,6 +350,47 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
         ['glm-5.3', 'Empty', '1 skill · No MCP servers', 'Not measured', '']);
     await settle();
     assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
+});
+
+// The Models door says Main's source by the catalogue a model sheet already holds: a descriptor that names a
+// credential harness draws that mark, and one adopter later repaints that one glyph — never a read, never a whole list.
+test('the Models door wears its descriptor\'s mark, and a late descriptor repaints only that glyph', async (t) => {
+    // Already held when the home is first shown: the true mark at once, and nothing read for it.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200, json: async () => ({ ...ANSWERS['/api/settings'],
+        OUROBOROS_MODEL: 'claudexor::agy=claude-opus-5-5' }) }));
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh(['settings']);
+    await settle();
+    const glyph = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-glyph]');
+    const drawn = () => glyph('models').dataset.glyph;
+    assert.match(drawn(), /viewBox="0 0 180 180"/, 'a held descriptor draws its mark at first paint');
+    assert.ok(!env.calls.some((call) => String(call).startsWith('/api/model-catalog')), 'showing the home still reads no catalogue');
+    // A held list that names no harness (another window's read, a cleared one): the cube, never a brand guessed from
+    // an opaque id that happens to spell one.
+    const rules = glyph('rules').dataset.glyph, reads = env.calls.length;
+    modelCatalog.adopt({ items: [], model_sources: [] });
+    await settle();
+    assert.doesNotMatch(drawn(), /viewBox="0 0 180 180"/, 'no descriptor: the neutral cube');
+    // A descriptor adopted later brands the route it names: one glyph, nothing read, no other row touched.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
+    await settle();
+    assert.match(drawn(), /viewBox="0 0 180 180"/, 'the descriptor\'s Antigravity mark');
+    assert.equal(glyph('rules').dataset.glyph, rules, 'another row\'s glyph is untouched');
+    assert.equal(env.calls.length, reads, 'a mark reads nothing');
+    // The same descriptor again writes nothing: the drawn node stays the one the owner sees.
+    const node = glyph('models').firstChild;
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(glyph('models').firstChild, node, 'an unchanged result writes nothing');
+    // A descriptor that names no credential harness is no evidence of one: the cube returns.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: '' }] });
+    await settle();
+    assert.doesNotMatch(drawn(), /viewBox="0 0 180 180"/, 'an unbound opaque id is never branded');
 });
 
 test('the card\'s first word follows the socket: an open or a close repaints it and reads nothing', async (t) => {

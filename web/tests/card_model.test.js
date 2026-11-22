@@ -265,6 +265,18 @@ test('the fact is the first node of the line and a repaint of the line never tou
     assert.equal(c.part().querySelector('.chat-live-meta-sep').hidden, true, 'none when the fact stands alone');
 });
 
+test('a source confirmed late wears its harness mark: the card repaints the mark when the catalog names it', () => {
+    const c = card();
+    const mark = () => c.part().querySelector('.card-model-mark').innerHTML;
+    c.paint({ lead: lead(ASTRA, 'main') });
+    // The catalog has not been read: the source is an unknown one, so only its initial stands.
+    assert.match(mark(), /model-source-initial" aria-hidden="true">C</, 'an unknown source wears its initial, never an invented mark');
+    c.store.adopt(CATALOG);  // the catalog read brings the source's descriptor (id codex, credentialHarness codex)
+    c.paint({ lead: lead(ASTRA, 'main') });
+    // The same words (Codex) now stand beside the harness's own mark: the mark is what changed.
+    assert.match(mark(), /^<svg class="model-source-mark"/, 'the harness mark stands where the descriptor names it');
+});
+
 test('the meta separator stays with the last visible model fact across repaints', () => {
     const c = card();
     const separator = () => c.part().querySelector('.chat-live-meta-sep');
