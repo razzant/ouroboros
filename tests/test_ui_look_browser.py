@@ -2,11 +2,13 @@
 
 The server is the UI fixture's (isolated data, a mock model). The tool runs the ui_design stand in a child of its own
 against it, in the engine each case names: the browser tools' pinned Chromium by its executable (never Playwright's
-own build) or Playwright WebKit. The draft shrinks the text of the Files tab band to 7 px, a size the interface never
-uses, so the measured text sizes prove the draft was served. The answer covers the files place alone, in both themes,
-at the owner's window from owner_client and at a phone; each frame is a flat file in uploads/screenshots with a band
-under it naming its engine. The stand runs in this test's interpreter, or in the one LOOK_STAND_PYTHON names (a
-Python with Playwright, for a test interpreter without it).
+own build) or Playwright WebKit. The draft shrinks the text of the Files folder list (its rows, or its empty-folder
+note) to 7 px, a size the interface never uses, so the measured text sizes prove that every measured and framed screen
+ran the draft stylesheet. The list stands on every Files screen at both widths; the Files tab band does not, since a
+desk moves its location and actions into the page's bar and hides it (page_header.js bindPageHeader). The answer
+covers the files place alone, in both themes, at the owner's window from owner_client and at a phone; each frame is a
+flat file in uploads/screenshots with a band under it naming its engine. The stand runs in this test's interpreter,
+or in the one LOOK_STAND_PYTHON names (a Python with Playwright, for a test interpreter without it).
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ def test_look_measures_where_a_draft_change_stands_and_captions_each_frame(direc
     draft = tmp_path / "draft" / "web"
     shutil.copytree(Path(server["repo_dir"]) / "web", draft, ignore=shutil.ignore_patterns("tests", "node_modules"))
     with (draft / "style.css").open("a", encoding="utf-8") as sheet:
-        sheet.write("\n.files-band * { font-size: 7px !important; }\n")
+        sheet.write("\n.files-list * { font-size: 7px !important; }\n")
     data = tmp_path / "tool-data"
     api = SimpleNamespace(
         get_runtime_info=lambda: {"data_dir": str(data), "server_port": urlsplit(server["url"]).port,
@@ -60,13 +62,14 @@ def test_look_measures_where_a_draft_change_stands_and_captions_each_frame(direc
     answer = json.loads(plugin.Look(api).run(ctx, web_root=str(draft), engines=[engine], frames="first", budget_sec=900))
 
     assert answer["ok"] is True, answer
-    assert answer["places"] == ["style.css: changed rules of .files-band"]
+    assert answer["places"] == ["style.css: changed rules of .files-list"] and answer["draft_files_served"] > 0
     assert answer["engines"][0]["engine"] == engine and answer["engines"][0]["label"].startswith(LABELS[engine])
     screens = json.loads(Path(answer["report"]).read_text(encoding="utf-8"))["screens"]
     assert screens and {screen["place"] for screen in screens} == {"files"}, [screen["screen"] for screen in screens]
     assert {(screen["theme"], screen["viewport"]) for screen in screens} == {
         (theme, view) for theme in ("dark", "light") for view in ("owner", "phone")}
-    assert all(7 in (screen["text_sizes"] or []) for screen in screens), "the draft stylesheet was served"
+    sizes = [(screen["screen"], screen["theme"], screen["viewport"], screen["text_sizes"]) for screen in screens]
+    assert all(7 in (size or []) for *_, size in sizes), f"every screen ran the draft stylesheet: {sizes}"
     shots = data / "uploads" / "screenshots"
     assert Path(answer["report"]).parent == shots and len(answer["frames"]) == len(screens)
     for frame in answer["frames"]:

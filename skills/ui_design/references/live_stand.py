@@ -365,6 +365,7 @@ class Stand:
         self.sandbox, self.fallback, self.keep_intercepted = bool(sandbox), bool(fallback), bool(keep_intercepted)
         self.touch = self.width < 700 if touch is None else bool(touch)
         self.version = ""
+        self.served_from_root = 0   # requests answered from --web-root: the draft interface the page really ran
         self.intercepted: list[dict] = []
         self.dropped_ws: list[str] = []
 
@@ -423,6 +424,7 @@ class Stand:
                 self.web_root / "index.html" if path in ("/", "/index.html") else None)
             if local is not None and local.is_file():
                 route.fulfill(status=200, path=str(local))
+                self.served_from_root += 1
                 return
         if req.method in ("GET", "HEAD") and not SIDE_EFFECT_GET.search(req.url):
             route.continue_()
@@ -744,6 +746,7 @@ def _look_once(report, plan, engine, viewport, theme, known, deadline, spec, sav
     finally:
         report["writes_answered_locally"] += len(stand.intercepted)
         report["dropped_ws_frames"] += len(stand.dropped_ws)
+        report["draft_files_served"] += stand.served_from_root
         stand.__exit__(None, None, None)
 
 
@@ -772,7 +775,8 @@ def look(spec: dict, report_path) -> dict:
     report = {"schema": 1, "url": spec.get("url") or live_url(), "web_root": web_root, "served_web": served, "plan": plan,
               "viewports": spec["viewports"], "themes": spec["themes"], "frames": spec.get("frames") or "none",
               "engines": [], "screens": [], "panels": {}, "discovered": [], "not_looked": [], "notes": [],
-              "writes_answered_locally": 0, "dropped_ws_frames": 0, "playwright": True, "finished": False}
+              "writes_answered_locally": 0, "dropped_ws_frames": 0, "draft_files_served": 0, "playwright": True,
+              "finished": False}
 
     def save():
         report["elapsed_sec"] = round(time.monotonic() - started, 1)

@@ -296,6 +296,11 @@ def summary(report: dict, report_path: pathlib.Path, outcome: dict, missing: lis
               "notes": (report.get("notes") or []) + (plan.get("unplaced") or []),
               "writes_answered_locally": report.get("writes_answered_locally", 0),
               "elapsed_sec": report.get("elapsed_sec"), "note": NOTE}
+    if report.get("web_root"):  # how much of the draft web/ the page ran; none means the served interface was measured
+        answer["draft_files_served"] = report.get("draft_files_served") or 0
+        if report.get("screens") and not answer["draft_files_served"]:
+            answer["notes"].append("the draft web/ answered no request of the page, so these are measurements of the "
+                                   "served interface, not of the draft")
     if len(rows) > SUMMARY_ROWS or len(clean) > 40 or len(frames) > FRAMES_LISTED:
         answer["omitted"] = (f"{max(0, len(rows) - SUMMARY_ROWS)} rows, {max(0, len(clean) - 40)} clean screens and "
                              f"{max(0, len(frames) - FRAMES_LISTED)} frames are in the report")

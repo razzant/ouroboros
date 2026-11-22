@@ -195,7 +195,8 @@ state = {"plan": {"why": ["asked"], "unplaced": []}, "engines": [{"engine": "chr
          "label": "Chromium 158 headless"}], "screens": [screen("files", {"target-small": 2, "contrast-unknown": 1},
          [spec["frames_dir"] + "/" + spec["frame_prefix"] + "chromium-dark-1512x945-files.png"])],
          "viewports": spec["viewports"], "themes": spec["themes"], "panels": {}, "not_looked": [], "notes": [],
-         "spec_seen": spec, "spec_path": sys.argv[sys.argv.index("--spec") + 1], "playwright": True, "finished": False}
+         "spec_seen": spec, "spec_path": sys.argv[sys.argv.index("--spec") + 1], "playwright": True, "finished": False,
+         "web_root": spec["web_root"], "draft_files_served": 0 if spec["budget_sec"] > 100 else 3}
 json.dump(state, open(report, "w"))
 if spec["budget_sec"] > 100:
     time.sleep(60)  # a long look, ended by Stop
@@ -214,7 +215,9 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     monkeypatch.setattr(plugin, "_helper_python", lambda: sys.executable)
     monkeypatch.setattr(plugin, "engine_rows", lambda asked, fact, data: (
         [{"engine": "chromium", "executable_path": "/pinned/chrome-headless-shell", "sandbox": True}], [], {}))
-    data, polls = tmp_path / "data", []
+    data, polls, draft = tmp_path / "data", [], tmp_path / "draft" / "web"
+    draft.mkdir(parents=True)
+    (draft / "index.html").write_text("<!doctype html>", encoding="utf-8")
 
     def stop_state():  # Stop once the child has written what it saw so far
         polls.append(1)
@@ -225,7 +228,7 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     surface = {"viewport": {"w": 1512, "h": 945}, "device_pixel_ratio": 2, "ua": "Mozilla/5.0 (Macintosh) AppleWebKit/605"}
     ctx = SimpleNamespace(task_id="task42", task_metadata={"client_surface": surface}, repo_dir=REPO, drive_root=data)
 
-    answer = json.loads(plugin.Look(api).run(ctx, places=["files"], frames="first",
+    answer = json.loads(plugin.Look(api).run(ctx, web_root=str(draft), places=["files"], frames="first",
                                              budget_sec=300 if stop_after else 60))
 
     assert answer["ok"] is True
@@ -233,16 +236,19 @@ def test_the_tool_runs_the_stand_child_and_stop_ends_it_keeping_what_it_measured
     seen = report["spec_seen"]
     assert Path(seen["frames_dir"]) == data / "uploads" / "screenshots" and Path(answer["report"]).parent == data / "uploads" / "screenshots"
     assert seen["frame_prefix"].startswith("look-task42-") and seen["places"] == ["files"] and seen["base"] == str(REPO / "web")
+    assert seen["web_root"] == str(draft)
     assert [(view["name"], view["width"]) for view in seen["viewports"]] == [("owner", 1512), ("phone", 390)]
     assert seen["themes"] == ["dark", "light"] and seen["engines"][0]["executable_path"] == "/pinned/chrome-headless-shell"
     row = answer["summary"][0]
     assert (row["screen"], row["engine"], row["counts"]) == ("files", "Chromium", {"target-small": 2, "contrast-unknown": 1})
     assert row["examples"] == ["target-small: 18x18px hit target (button.x)"]
     assert answer["frames"][0]["engine"] == "Chromium 158 headless" and answer["frames"][0]["file"].endswith("-files.png")
+    unserved = [note for note in answer["notes"] if "draft web/ answered no request" in note]
     if stop_after:
         assert answer["screens_looked"] == 1 and any("stopped (cancelled)" in line for line in answer["not_looked"])
         assert any("before its report was complete" in line for line in answer["not_looked"])
+        assert answer["draft_files_served"] == 0 and unserved, "a draft the page never ran is said, not measured as it"
     else:
         assert answer["screens_looked"] == 2 and answer["clean_screens"] == ["files-two dark owner Chromium"]
-        assert answer["not_looked"] == []
+        assert answer["not_looked"] == [] and answer["draft_files_served"] == 3 and not unserved
     assert not Path(report["spec_path"]).exists(), "the spec folder is temporary"
