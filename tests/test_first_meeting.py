@@ -108,6 +108,19 @@ def test_nothing_is_owed_without_a_press_and_an_existing_message_of_mine_settles
     assert boot.start() == "none"
 
 
+def test_a_state_that_cannot_be_read_defers_the_meeting_and_never_fails_the_start(boot, monkeypatch):
+    """«A start never fails on this» covers the state read too: unreadable, the meeting waits for the next start with a
+    row saying why; readable again, it is admitted (rv2 C8)."""
+    from supervisor import state
+
+    readable = state.load_state
+    monkeypatch.setattr(state, "load_state", lambda: (_ for _ in ()).throw(state.StateUnavailable("no_readable_copy")))
+    assert boot.start() == "deferred" and boot.admitted == []
+    assert boot.rows()[-1]["outcome"] == "deferred" and "StateUnavailable" in boot.rows()[-1]["reason"]
+    monkeypatch.setattr(state, "load_state", readable)
+    assert boot.start() == "admitted" and len(boot.admitted) == 1
+
+
 def test_the_claim_precedes_the_admission_so_a_crash_retries_the_same_id_and_never_admits_twice(boot):
     boot.answers.append({"_admission_blocked": "worker_pool_unavailable", "_worker_pool_disabled_reason": "budget"})
     assert boot.start() == "refused"

@@ -58,12 +58,12 @@ def admit_first_meeting(drive_root: Any) -> str:
     ``none`` (nothing owed), ``not_needed``, ``deferred``, ``refused`` or ``admitted``."""
     from supervisor.state import load_state
 
-    meeting = load_state().get(FIRST_MEETING_KEY)
-    if not isinstance(meeting, dict) or meeting.get("state") not in _OPEN:
-        return "none"
-    try:
+    try:  # a start never fails on this, its state read included; the key stays as it was and the next start repeats it
+        meeting = load_state().get(FIRST_MEETING_KEY)
+        if not isinstance(meeting, dict) or meeting.get("state") not in _OPEN:
+            return "none"
         outcome, detail = _admit(drive_root, meeting)
-    except Exception as exc:  # a start never fails on this; the key stays as it was and the next start repeats it
+    except Exception as exc:
         log.warning("first meeting not admitted", exc_info=True)
         outcome, detail = "deferred", {"reason": f"{type(exc).__name__}: {exc}"}
     try:
