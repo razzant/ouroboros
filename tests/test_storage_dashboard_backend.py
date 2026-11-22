@@ -653,8 +653,10 @@ def test_cancel_kills_the_child_and_stop_refuses_a_new_count(tmp_path, monkeypat
     assert counter.start(data, tmp_path) is False, "after Stop nothing starts"
 
 
-def test_stop_reaches_a_child_spawned_moments_before(tmp_path, monkeypatch):
-    """The owner may Stop between the thread start and the spawn: the spawned child is killed."""
+@pytest.mark.parametrize("press", ["stop", "cancel"])
+def test_stop_reaches_a_child_spawned_moments_before(tmp_path, monkeypatch, press):
+    """The owner may Stop or Cancel between the thread start and the spawn: the run thread publishes the child with
+    no lock and then reads both flags, so the spawned child is killed either way."""
     data = tmp_path / "data"
     hold = threading.Event()
     counter = StorageCounter()
@@ -664,7 +666,7 @@ def test_stop_reaches_a_child_spawned_moments_before(tmp_path, monkeypatch):
     real_spawn = audit.spawn_maintenance_job
 
     def spawn_after_stop(*args, **kwargs):
-        counter.stop()  # the owner's Stop lands while the spawn is in flight
+        getattr(counter, press)()  # the owner's Stop or Cancel lands while the spawn is in flight
         return real_spawn(*args, **kwargs)
 
     monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_after_stop)
@@ -675,41 +677,49 @@ def test_stop_reaches_a_child_spawned_moments_before(tmp_path, monkeypatch):
 
 
 def test_stop_never_waits_for_a_page_read_holding_the_lock(tmp_path, monkeypatch):
-    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``): a page
-    read holding the lock across the saved file (a slow disk) delays neither Stop nor the child's kill, and the
-    count settles as stopped once the read lets go."""
+    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``). A page read
+    holding the lock across the saved file (a slow disk) from the moment the spawn returns delays neither the child's
+    publication, nor Stop, nor the kill, and the count settles as stopped once the read lets go."""
+    import ouroboros.startup_historical_audit as audit
+
     data = tmp_path / "data"
     _write(data / "observability" / "a.bin", 10)
     save_count(data, _count(data))
     hold = threading.Event()
     spawned = _fake_spawn(monkeypatch, [], hold=hold)
     counter = StorageCounter()
-    assert counter.start(data, tmp_path) is True
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not (spawned and counter.live_children() == [spawned[0][3]]):
-        time.sleep(0.01)  # the owner thread publishes the child right after the spawn returns
-    child = spawned[0][3]
-    assert counter.live_children() == [child]
     reading, release = threading.Event(), threading.Event()
-    real = storage.load_saved
+    real_load, fake_spawn = storage.load_saved, audit.spawn_maintenance_job
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    reads = []
 
     def slow_disk(root):
         reading.set()
         assert release.wait(30)
-        return real(root)
+        return real_load(root)
+
+    def spawn_then_a_page_read_stalls(*args, **kwargs):
+        child = fake_spawn(*args, **kwargs)  # the child exists from here on
+        reads.append(pool.submit(counter.projection, data))  # a new file identity: the read holds the lock across it
+        assert reading.wait(10)
+        return child
 
     monkeypatch.setattr(storage, "load_saved", slow_disk)
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_then_a_page_read_stalls)
     try:
-        read = pool.submit(counter.projection, data)
-        assert reading.wait(10) and counter._lock.locked()
+        assert counter.start(data, tmp_path) is True
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (spawned and counter._process is spawned[0][3]):
+            time.sleep(0.01)  # the run thread publishes the child right after the spawn returns, with no lock
+        child = spawned[0][3]
+        assert counter._process is child and counter._lock.locked(), "published while the read holds the lock"
         pool.submit(counter.stop).result(timeout=5)  # blocked direction: Stop returns while the read holds the lock
         assert child._killed.is_set() and counter._lock.locked(), "the child is signalled before the read lets go"
     finally:
         release.set()
         hold.set()
         pool.shutdown(wait=True)
-    assert read.result()["count"] is not None, "the read itself completes"
+    assert reads[0].result()["count"] is not None, "the read itself completes"
     _join(counter)
     projection = counter.projection(data)  # still-working direction: the stop settles exactly as an ordinary one
     assert projection["counting"] is None and projection["error"]["stopped"] is True

@@ -754,41 +754,84 @@ def test_cancel_during_listing_drops_the_plan_and_kills_the_sizing_child(tmp_pat
 
 
 def test_stop_never_waits_for_a_request_holding_the_lock(tmp_path, monkeypatch):
-    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``): a page
-    request holding the lock (a preview or run being started over a large plan) delays neither Stop nor the
-    sizing child's kill, and the listing settles as stopped once the request lets go."""
+    """Panic calls Stop on its own thread before any worker or engine request (``execute_panic_stop``). A page
+    request holding the lock (a preview or run being started over a large plan) from the moment the sizing spawn
+    returns delays neither the child's publication, nor Stop, nor the kill, and the listing settles as stopped."""
+    import ouroboros.startup_historical_audit as audit
+
     root = tmp_path / "data"
     probes = _drives(root, [("done", "direct", "completed", OLD)])
     hold = threading.Event()
     spawned = _fake_sizer(monkeypatch, hold=hold)
     owner = _owner(probes)
-    assert owner.preview(root, tmp_path) is True
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not (spawned and owner._process is spawned[0]):
-        time.sleep(0.01)  # the sizing thread publishes the child right after the spawn returns
-    assert spawned and owner._process is spawned[0]
     holding, release = threading.Event(), threading.Event()
+    fake = audit.spawn_maintenance_job
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    held = []
 
     def request():
         with owner._lock:
             holding.set()
             assert release.wait(30)
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    try:
-        held = pool.submit(request)
+    def spawn_then_a_request_holds_the_lock(*args, **kwargs):
+        child = fake(*args, **kwargs)  # the child exists from here on
+        held.append(pool.submit(request))
         assert holding.wait(10)
+        return child
+
+    monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_then_a_request_holds_the_lock)
+    try:
+        assert owner.preview(root, tmp_path) is True
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (spawned and owner._process is spawned[0]):
+            time.sleep(0.01)  # the sizing thread publishes the child right after the spawn returns, with no lock
+        assert spawned and owner._process is spawned[0] and owner._lock.locked(), "published while the request holds the lock"
         pool.submit(owner.stop).result(timeout=5)  # blocked direction: Stop returns while the request holds the lock
         assert spawned[0].killed and owner._lock.locked(), "the child is signalled before the request lets go"
     finally:
         release.set()
         hold.set()
         pool.shutdown(wait=True)
-    held.result()
+    held[0].result()
     _join(owner)
     view = owner.projection(root)  # still-working direction: the stop settles exactly as the owner's Cancel does
     assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
     assert owner.preview(root, tmp_path) is False and owner.cancel() is False, "after Stop nothing starts"
+
+
+@pytest.mark.parametrize("press", ["stop", "cancel"])
+def test_a_stop_or_cancel_reaches_a_sizing_child_spawned_moments_before(tmp_path, monkeypatch, press):
+    """Stop or Cancel lands after the sizing child is spawned and before the sizing thread publishes it: only the
+    thread's check after publishing can signal that child (published with no lock, so a flag set before is seen
+    either way), and the listing settles idle."""
+    import ouroboros.startup_historical_audit as audit
+
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    hold = threading.Event()
+    spawned = _fake_sizer(monkeypatch, hold=hold)
+    owner = _owner(probes)
+    fake = audit.spawn_maintenance_job
+
+    def spawn_then_press(*args, **kwargs):
+        child = fake(*args, **kwargs)
+        getattr(owner, press)()  # nothing is published yet: this can only set the flag
+        return child
+
+    monkeypatch.setattr(audit, "spawn_maintenance_job", spawn_then_press)
+    try:
+        assert owner.preview(root, tmp_path) is True
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (spawned and spawned[0].killed):
+            time.sleep(0.01)
+        # blocked direction: the sizing thread's check after publishing signals the child
+        assert spawned and spawned[0].killed, "the sizing thread rechecks after publishing its child"
+    finally:
+        hold.set()
+    _join(owner)
+    view = owner.projection(root)  # still-working direction: the listing settles as a Cancel leaves it
+    assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
 
 
 # ------------------------------------------------------------------- B12

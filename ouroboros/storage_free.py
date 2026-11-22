@@ -726,7 +726,7 @@ class FreeSpace:
 
     @staticmethod
     def _signal(process) -> None:
-        if process is not None:  # none published: not spawned yet, or already reaped
+        if process is not None:  # not published yet, or already reaped
             with contextlib.suppress(OSError):
                 process.kill()
 
@@ -965,8 +965,7 @@ class FreeSpace:
         if not by_path:
             return
         process = spawn_maintenance_job(root, repo_dir, PURPOSE, args=("--size-paths",), stdin=subprocess.PIPE)
-        with self._lock:
-            self._process = process
+        self._process = process  # no lock: Stop and Cancel set their flag, then read this; the check below reads theirs
         try:
             if self._closed():
                 process.kill()

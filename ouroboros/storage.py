@@ -775,7 +775,7 @@ class StorageCounter:
 
     @staticmethod
     def _signal(process) -> None:
-        if process is not None:  # none published: not spawned yet, or already reaped
+        if process is not None:  # not published yet, or already reaped
             with contextlib.suppress(OSError):
                 process.kill()  # its own process group: the signal reaches only our child
 
@@ -804,8 +804,7 @@ class StorageCounter:
 
         try:
             process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
-            with self._lock:
-                self._process = process
+            self._process = process  # no lock: Stop and Cancel set their flag, then read this; the check below reads theirs
             if self._cancel or self._stopped.is_set():
                 self._signal(process)
             exit_code = read_job_lines(process, on_line, self._signal)
