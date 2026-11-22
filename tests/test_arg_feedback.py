@@ -223,6 +223,8 @@ def test_read_file_end_line_reads_its_inclusive_window_and_an_unclear_end_names_
     world = tmp_path / "drive" / "memory" / "WORLD.md"
     world.parent.mkdir(parents=True, exist_ok=True)
     world.write_text("".join(f"w {n}\n" for n in range(1, 2002)), encoding="utf-8")
-    whole = registry.execute_result("read_file", {"root": "runtime_data", "path": "memory/WORLD.md"})
+    for default in ({}, {"max_lines": 2000}, {"start_line": 1, "max_lines": 2000}):  # asks for nothing: whole
+        whole = registry.execute_result("read_file", {"root": "runtime_data", "path": "memory/WORLD.md", **default})
+        assert "w 2001" in whole.text, default
     bounded = registry.execute_result("read_file", {"root": "runtime_data", "path": "memory/WORLD.md", "end_line": 2000})
-    assert "w 2001" in whole.text and "w 2000\n" in bounded.text and "w 2001" not in bounded.text, bounded.text[-300:]
+    assert "w 2000\n" in bounded.text and "w 2001" not in bounded.text, bounded.text[-300:]

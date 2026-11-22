@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 from collections import deque
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
@@ -589,13 +590,14 @@ def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
 def _data_read(
     ctx: ToolContext,
     path: str,
-    max_lines: Optional[int] = None,
+    max_lines: int = 2000,
     start_line: int = 1,
     start_char: int = 0,
     display_path: str | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
     extent: Optional[Dict[str, Any]] = None,
     max_chars: Optional[int] = None,
+    end_window: bool = False,
 ) -> str:
     """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
@@ -633,9 +635,9 @@ def _data_read(
     try:
         content = _read_source_text(target, extent)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit max_lines (read_file's
-        # end_line becomes one), start_char or max_chars is a bounded-view request, honored, not swallowed.
-        if (_is_cognitive_data_path(norm) and start_raw == 1 and _int_or(max_lines, None) is None
+        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit start_char, max_chars
+        # or read_file end_line is a bounded-view request and must be honored, not swallowed.
+        if (_is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000 and not end_window
                 and not _coerce_start_char(start_char) and _coerce_max_chars(max_chars) is None):
             if display_path is None:
                 return content
@@ -851,6 +853,7 @@ def _read_file(
     max_chars: Optional[int] = None,
     end_line: Any = ABSENT,
     end_char: Any = ABSENT,
+    _end_window: bool = False,
 ) -> str:
     # Reset first: a blocked or missing read must never inherit the previous
     # read's extent (the renderer fills `extent` only when it rendered).
@@ -860,7 +863,8 @@ def _read_file(
                 "start_line": start_line, "start_char": start_char}
         window, notes, refusal = read_end_spelling(ctx, call, max_lines, end_line, end_char)
         return refusal or with_argument_notes(ctx, _read_file(
-            ctx, path, root, window, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars), notes)
+            ctx, path, root, window, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars,
+            _end_window=end_line not in (None, ABSENT)), notes)
     extent: Dict[str, Any] = {}
     if not root:
         from ouroboros.tools.tool_resolution import _root_containing_absolute_path
@@ -884,7 +888,8 @@ def _read_file(
             f"⚠️ NOT_FOUND: {_root_display_path(normalized, opened)} is a directory, not a file. List it:\n"
             f"  {call})")))
     if normalized in {"active_workspace", "system_repo", "runtime_data"}:
-        reader, display_path = ((_data_read, _root_display_path(normalized, path)) if normalized == "runtime_data" else
+        reader, display_path = ((partial(_data_read, end_window=_end_window), _root_display_path(normalized, path))
+                                if normalized == "runtime_data" else
                                 (_repo_read, f"{target} (project room)" if binding.source == "project_room"
                                  else _root_display_path(normalized, opened)))
         try:
@@ -967,10 +972,6 @@ def _list_files(
         if normalized in {"active_workspace", "system_repo", "runtime_data"}:
             lister = _data_list if normalized == "runtime_data" else _repo_list
             return lister(ctx, dir=path, max_entries=max_entries, _resolved_binding=binding)
-        if normalized == "skill_payload":
-            rel = binding.target_path.relative_to(binding.base_path).as_posix() or "."
-            items = _list_dir(binding.base_path, rel, max_entries)
-            return json.dumps(items, ensure_ascii=False, indent=2)
         if normalized == "user_files":
             items = _list_user_files_dir(ctx, binding.base_path, binding.target_path, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
