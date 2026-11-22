@@ -82,7 +82,7 @@ def test_all_off_still_shows_the_section_and_a_failed_read_says_so(tmp_path, mon
 
     monkeypatch.setattr("ouroboros.skill_loader.summarize_skills", unreadable)
     failed = _section(tmp_path)
-    assert failed.full_text.endswith("The skill list could not be read (OSError); list_skills() reads it.")
+    assert failed.full_text.endswith("The skill list could not be read (OSError: disk gone); list_skills() reads it.")
     assert "quiet" not in failed.full_text
 
 
@@ -214,7 +214,7 @@ def test_a_row_that_fails_to_render_is_the_read_failure_line_not_an_exception(tm
     monkeypatch.setattr("ouroboros.skill_catalogue.off_state", broken)
     section = _section(tmp_path)
     for text in (section.full_text, section.operative_view):
-        assert text.endswith("The skill list could not be read (RuntimeError); list_skills() reads it.")
+        assert text.endswith("The skill list could not be read (RuntimeError: off record); list_skills() reads it.")
         assert "quiet" not in text
 
 
@@ -237,7 +237,9 @@ def test_a_failed_discovery_says_so_and_an_empty_readable_install_says_none(tmp_
     monkeypatch.setattr("ouroboros.skill_loader.discover_skills", unreadable)
     failed = _context_shape(tmp_path)
     for text in (failed.full_text, failed.operative_view):
-        assert text.endswith("The skill list could not be read (OSError); list_skills() reads it.")
+        # The real cause, not a generic class (RV2 D4).
+        assert text.endswith("The skill list could not be read (PermissionError: [Errno 13] Permission denied); "
+                             "list_skills() reads it.")
         assert "No skills are installed." not in text
 
 
@@ -368,3 +370,57 @@ def test_an_off_record_with_an_actor_that_is_not_text_is_unknown_and_the_other_c
     assert off_state(tmp_path, rows["odd"]) == "who turned it off is unknown"
     full = _section(tmp_path).full_text
     assert "\n- card (instruction, v1, " in full and "- odd: Purpose of odd. (Off: who turned it off is unknown)" in full
+
+
+def _build(tmp_path):
+    from ouroboros.context import build_llm_messages
+    from tests.test_doc_context import _make_env_and_memory
+
+    env, memory = _make_env_and_memory(tmp_path)
+    messages, _ = build_llm_messages(env=env, memory=memory, task={"id": "t", "type": "task", "text": "hi"})
+    return env, "\n".join(block.get("text", "") for block in messages[0]["content"] if isinstance(block, dict))
+
+
+def test_a_context_build_survives_a_failed_discovery_and_says_it(tmp_path, monkeypatch):
+    """Through the real build (``context.py``): the always-in-context block takes ``skills or []`` and the catalog the
+    failure itself (RV2 D1)."""
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", unreadable)
+    _env, text = _build(tmp_path)
+    assert "The skill list could not be read (PermissionError: [Errno 13] Permission denied)" in text
+    assert "No skills are installed." not in text
+
+
+def test_one_discovery_decides_the_catalog_and_the_always_in_context_block(tmp_path, monkeypatch):
+    """Access comes back between the two would-be reads of one build: the catalog does not read again, so no card
+    promises an always-in-context text the request lacks (RV2 DX3, D3); with access the card and the text agree."""
+    from ouroboros import skill_loader
+
+    _env, _text = _build(tmp_path)  # the drive exists; install an always-in-context guide in it
+    drive = tmp_path / "drive"
+    folder = drive / "skills" / "external" / "guide"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nname: guide\ndescription: Writing guide.\nversion: '1'\ntype: instruction\n"
+                                     "always_in_context: true\nwhen_to_use: writing\n---\nGUIDE_SENTINEL body.\n",
+                                     encoding="utf-8")
+    (drive / "state" / "skills" / "guide").mkdir(parents=True, exist_ok=True)
+    save_enabled(drive, "guide", True, actor="owner_ui")
+    [guide] = [skill for skill in discover_skills(drive) if skill.name == "guide"]
+    (drive / "state" / "skills" / "guide" / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": guide.content_hash}), encoding="utf-8")
+    _env, whole = _build(tmp_path)
+    assert "GUIDE_SENTINEL" in whole and "Context: always; its text is in the Always-in-context skills section." in whole
+    real, calls = skill_loader.discover_skills, []
+
+    def first_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Permission denied")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", first_fails)
+    _env, text = _build(tmp_path)
+    assert "GUIDE_SENTINEL" not in text and "Context: always" not in text
+    assert "The skill list could not be read (PermissionError: [Errno 13] Permission denied)" in text

@@ -18,21 +18,30 @@ import json
 import logging
 import pathlib
 from hashlib import sha256
-from typing import Any, List, Optional
+from typing import Any, List
 
 from ouroboros.tool_capabilities import tool_result_limit
 
 
-def discover_context_skills(drive_root: Any) -> Optional[List[Any]]:
-    """One fail-soft discovery shared by a context build's always-in-context block and its catalog; ``None`` when it
-    failed, so a failure is never read as an install without skills (``[]``)."""
+class SkillDiscoveryFailure(list):
+    """No skills, because discovery failed with ``error``: empty for the always-in-context block, never read as an
+    install without skills by the catalog, which names the cause."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+
+def discover_context_skills(drive_root: Any) -> List[Any]:
+    """One fail-soft discovery shared by a context build's always-in-context block and its catalog: the skills, or a
+    ``SkillDiscoveryFailure`` (empty) carrying why discovery failed."""
     from ouroboros.skill_loader import discover_skills
 
     try:
         return discover_skills(pathlib.Path(drive_root))
-    except Exception:
+    except Exception as exc:
         logging.getLogger(__name__).debug("Skill discovery for context failed", exc_info=True)
-        return None
+        return SkillDiscoveryFailure(exc)
 
 
 def unlisted_skill_sources(drive_root: Any) -> List[str]:
