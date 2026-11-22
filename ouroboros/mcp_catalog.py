@@ -5,16 +5,16 @@ loading and retain parsed bytes until atomic replacement. Policy and provider
 schema presentation belong to the client, not this store; the typed fact one
 name lookup yields (``MCPNameResolution``) and its refusal text live here.
 
-Beside the listing's ``latest_attempt`` the envelope keeps ``latest_call``: whether
-the server answered its latest observed tool call (an answer with ``isError`` is an
-answer), written by any process only when that changes, under the file's name lock,
-so a listing publication never drops it. A failed listing keeps the start of its open
+Beside each envelope a small call record (``state/mcp/calls/server-<id>.json``) keeps
+``latest_call``: whether the server answered its latest observed tool call (an answer with
+``isError`` is an answer). Any process writes it, only when that changes, under its own name
+lock; the envelope stays the server's alone (only listings publish it), so a call never
+rewrites the listing every process adopts. A failed listing keeps the start of its open
 failing series (``listing_failing_since``) and a failed call its own (``latest_call.since``)
 on repeats; a record without one has an unknown start.
 """
 from __future__ import annotations
 
-import contextlib
 import copy
 import hashlib
 import json
@@ -22,12 +22,12 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 from ouroboros import config
 from ouroboros.mcp_schema import redact_metadata, wrap_schema_text
 from ouroboros.tools.tool_result import ToolResult
-from ouroboros.utils import atomic_write_json, read_json_dict
+from ouroboros.utils import atomic_write_json, json_snapshot, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -117,43 +117,43 @@ def call_mark(current: Any, *, ok: bool, code: str, method: str, at: str) -> dic
     return mark
 
 
-@contextlib.contextmanager
-def _file_lock(server_id: str, *, wait_sec: float) -> Iterator[None]:
-    """The catalog file's cross-process name lock (``store.name_lock``; its holder removes it on release)."""
-    from ouroboros import store
-
-    with store.name_lock(config.DATA_DIR, f"mcp/catalogs/server-{server_id}.lock", timeout_sec=wait_sec):
-        yield
+def calls_path(server_id: str) -> Path:
+    """The server's call record beside its catalog (any process writes it, on a change)."""
+    return config.DATA_DIR / "state" / "mcp" / "calls" / f"server-{server_id}.json"
 
 
-def _same_record(data: Any, cfg: Any) -> bool:
-    return isinstance(data, dict) and data.get("server_id") == cfg.id and data.get("identity") == identity(cfg)
+def latest_call(cfg: Any) -> dict | None:
+    """This identity's ``latest_call`` from the stat-cached call record; None when no call was marked."""
+    data = json_snapshot(calls_path(cfg.id))
+    if isinstance(data, dict) and data.get("server_id") == cfg.id and data.get("identity") == identity(cfg):
+        return data["latest_call"] if isinstance(data.get("latest_call"), dict) else None
+    return None
 
 
-def note_call(cfg: Any, current: Any, *, ok: bool, code: str = "", method: str = "") -> None:
-    """``record_call`` for a call that just ended, only when it changes ``current`` (the adopting process's mark:
-    its call's own ``rebind`` already stat-checked it, so an unchanged outcome reads no disk). Never raises."""
-    if not call_changed(current, ok=ok, code=code):
-        return
+def note_call(cfg: Any, *, ok: bool, code: str = "", method: str = "") -> None:
+    """Mark a call that just ended when it changes ``latest_call``; an unchanged outcome costs one stat.
+    Never raises."""
     try:
-        record_call(cfg, ok=ok, code=code, method=method, at=datetime.now(timezone.utc).isoformat())
+        if call_changed(latest_call(cfg), ok=ok, code=code):
+            record_call(cfg, ok=ok, code=code, method=method, at=datetime.now(timezone.utc).isoformat())
     except Exception:  # noqa: BLE001 - a lost mark is written by the next changed call
         log.debug("MCP call outcome mark failed for %s", getattr(cfg, "id", "?"), exc_info=True)
 
 
 def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
-    """Write a changed call outcome into this server's published envelope; False when nothing was written
-    (unchanged on disk, no published envelope of this identity, or the lock is busy: the next changed call
-    writes it). Never discovers, and never replaces the listing."""
+    """Write a changed call outcome under the record's name lock; False when nothing was written (unchanged on
+    disk, or the lock is busy: the next changed call writes it). The server's catalog is never touched."""
     from ouroboros import store
 
     try:
-        with _file_lock(cfg.id, wait_sec=0):
-            data = read_json_dict(catalog_path(cfg.id))
-            if not _same_record(data, cfg) or not call_changed(data.get("latest_call"), ok=ok, code=code):
+        with store.name_lock(config.DATA_DIR, f"mcp/calls/server-{cfg.id}.lock", timeout_sec=0):
+            data = read_json_dict(calls_path(cfg.id)) or {}
+            current = data.get("latest_call") if (data.get("server_id"), data.get("identity")) == (
+                cfg.id, identity(cfg)) else None
+            if not call_changed(current, ok=ok, code=code):
                 return False
-            data["latest_call"] = call_mark(data.get("latest_call"), ok=ok, code=code, method=method, at=at)
-            atomic_write_json(catalog_path(cfg.id), data)
+            atomic_write_json(calls_path(cfg.id), {"_schema_version": 1, "server_id": cfg.id, "identity": identity(cfg),
+                                                   "latest_call": call_mark(current, ok=ok, code=code, method=method, at=at)})
             return True
     except store.StoreBusy:
         return False
@@ -194,25 +194,16 @@ class CatalogReader:
 
 
 def publish(cfg: Any, envelope: dict) -> None:
-    """Atomic replacement, including the shared Windows replace retry. Under the file's lock the call outcome
-    on disk wins over the publisher's snapshot, so a worker's concurrent call mark is never lost."""
-    from ouroboros.runtime_limits import MCP_CATALOG_LOCK_WAIT_SEC
-
-    with _file_lock(cfg.id, wait_sec=MCP_CATALOG_LOCK_WAIT_SEC):
-        current = read_json_dict(catalog_path(cfg.id))
-        if _same_record(current, cfg):
-            envelope = {key: value for key, value in envelope.items() if key != "latest_call"}
-            if isinstance(current.get("latest_call"), dict):
-                envelope["latest_call"] = current["latest_call"]
-        atomic_write_json(catalog_path(cfg.id), envelope)
+    """Atomic replacement, including the shared Windows replace retry."""
+    atomic_write_json(catalog_path(cfg.id), envelope)
 
 
 def prune_catalogs(configs: list) -> None:
-    """Server-owned boot/configuration event remover; never called by a reader."""
-    wanted = {catalog_path(cfg.id): identity(cfg) for cfg in configs}
-    directory = config.DATA_DIR / "state" / "mcp" / "catalogs"
-    for path in directory.glob("server-*.json"):
-        expected = wanted.get(path)
+    """Server-owned boot/configuration event remover of catalogs and call records; never called by a reader."""
+    wanted = {cfg.id: identity(cfg) for cfg in configs}
+    directories = (config.DATA_DIR / "state" / "mcp" / "catalogs", config.DATA_DIR / "state" / "mcp" / "calls")
+    for path in [path for directory in directories for path in directory.glob("server-*.json")]:
+        expected = wanted.get(path.name[len("server-"):-len(".json")])
         try:
             try:
                 data = json.loads(path.read_text(encoding="utf-8")) if expected else {}
