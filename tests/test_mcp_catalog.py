@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 from ouroboros import config, mcp_catalog, mcp_client, server_boot
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tool_policy import format_capability_omissions
-from tests.test_mcp_headers_loopback import loopback  # noqa: F401 -- the HTTP fixture of a real answer
+from tests._mcp_loopback import loopback  # noqa: F401 -- the HTTP fixture of a real answer
 
 
 @pytest.fixture(autouse=True)
@@ -893,9 +893,8 @@ def test_a_server_that_answered_is_answering_even_with_an_error_and_a_closed_con
 
 def test_a_task_session_server_answering_with_a_json_rpc_error_is_answering(tmp_path, monkeypatch):
     from ouroboros import mcp_task_session
-    from tests.test_batch4_producer_custody import _registry
-    from tests.test_invocation_ownership import owner
-    from tests.test_mcp_task_session import call, wire
+    from tests._invocation_harness import _registry, owner
+    from tests._mcp_task_harness import call, wire
 
     registry, _, _ = _registry(tmp_path, monkeypatch)
     wire(monkeypatch, registry, raw_server(tmp_path, task_session=True))
