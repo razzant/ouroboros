@@ -4,7 +4,7 @@ import datetime as _dt
 import pathlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 log = logging.getLogger(__name__)
@@ -73,6 +73,105 @@ def _skill_tool_identity_mapping() -> Dict[str, str]:
         str(schema["name"]): str(schema["parameters"]["required"][0])
         for schema in schemas
     }
+
+
+def note_enabled_skill_digests(ctx: Any, skills: Any) -> None:
+    """The work's first view of its enabled skills' files, taken where the Installed Skills section reads them: the
+    end-of-work fact compares against it, so an edit through a shell, a delegate or another participant is seen too
+    (``skills_changed_during_work``). Later builds keep the first view."""
+    if ctx is None or getattr(ctx, "_skill_digests_at_start", None) is not None:
+        return
+    try:
+        ctx._skill_digests_at_start = {
+            str(skill.name): str(skill.content_hash) for skill in skills or []
+            if getattr(skill, "enabled", False) and getattr(skill, "content_hash", "")
+            and not getattr(skill, "identity_collision", False)}
+    except Exception:
+        log.debug("Skill digest view not recorded", exc_info=True)
+
+
+def skills_changed_during_work(ctx: Any, drive_root: pathlib.Path, *, repo_path: Optional[str] = None) -> List[Any]:
+    """Skills enabled at the work's first view whose files differ now (this work or another participant changed them);
+    ``repo_path``: the connected skills folder, as discovery reads it."""
+    start = getattr(ctx, "_skill_digests_at_start", None) if ctx is not None else None
+    if not isinstance(start, dict) or not start:
+        return []
+    from ouroboros.skill_loader import discover_skills
+
+    now = {skill.name: skill for skill in discover_skills(pathlib.Path(drive_root), repo_path=repo_path)
+           if not skill.identity_collision}
+    return [now[name] for name, digest in start.items()
+            if name in now and now[name].content_hash and now[name].content_hash != digest]
+
+
+def _current_files_accepted(skill: Any) -> bool:
+    """Whether a recorded basis or a current verdict admits the skill's files (Cyber Pro's own authority does not)."""
+    from ouroboros.skill_review_status import ACCEPTANCE_REASONS
+
+    gate = skill.review.gate_for(skill.content_hash)
+    return bool(gate.get("executable_review")) and (gate.get("blocking_reason") in ACCEPTANCE_REASONS or (
+        not gate.get("stale") and gate.get("status") in {"clean", "warnings"}))
+
+
+def _skill_status_fact(drive_root: pathlib.Path, skill: Any, how: str) -> str:
+    """One end-of-work fact about a skill whose files changed, read from its gate, grants and files in this mode; ""
+    when nothing is owed (its current files are accepted and nothing waits). Its keys "still work" only while it runs;
+    otherwise the fact names what keeps it from running (``review_stale`` outside Cyber Pro, a missing script file)."""
+    from ouroboros.skill_loader import grant_status_for_skill
+
+    grants = grant_status_for_skill(drive_root, skill)
+    readiness = skill_readiness_for_execution(drive_root, skill)
+    waiting = ", ".join(grants.get("waiting_permissions") or [])
+    script_missing = skill.manifest.is_script() and readiness.ready and not skill.available_for_execution
+    if readiness.ready and not script_missing and not waiting and _current_files_accepted(skill):
+        return ""
+    keys = ", ".join(grants.get("granted_keys") or [])
+    parts = [f"files of skill {skill.name} {how}"]
+    if script_missing:
+        parts.append("it does not run now: its runtime or every declared script file is missing")
+    elif readiness.ready:
+        parts += [f"its keys ({keys}) still work"] if keys else []
+    else:
+        parts.append(f"it does not run now: blockers={readiness.blockers}, next_actions={readiness.next_actions}")
+    if waiting:
+        parts.append(f"its permissions on the owner's behalf ({waiting}) wait for the check of the new version "
+                     f"(skill_review {skill.name!r} or another acceptance of the current files)")
+    return "; ".join(parts)
+
+
+def changed_skill_facts(drive_root: pathlib.Path, names: List[str], ctx: Any) -> Tuple[List[str], List[str]]:
+    """B6″ (owner 1A, 21.11): ``(names, facts)`` of skills whose files changed during the work, one neutral fact each
+    (``_skill_status_fact``); running the check is the mind's call. A skill enabled at the work's first view whose
+    files differ now (``skills_changed_during_work``) qualifies; a work without a first view (a delegate, a child with
+    declared inputs) reads the skills its trace touched instead. A skill turned off during the work is the owner's
+    intended Off and stays silent. Each skill is read on its own, so one unreadable neighbour costs no other fact."""
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import find_skill
+
+    repo_path = get_skills_repo_path() or None
+    changed: List[str] = []
+    facts: List[str] = []
+    try:
+        candidates: List[Tuple[Any, str]] = [(skill, "changed during this work (by this work or another participant)")
+                                             for skill in skills_changed_during_work(ctx, drive_root, repo_path=repo_path)]
+    except Exception:
+        log.debug("Changed-skill view unavailable", exc_info=True)
+        candidates = []
+    if getattr(ctx, "_skill_digests_at_start", None) is None:
+        candidates += [(name, "were touched by this work") for name in names]
+    for subject, how in candidates:
+        try:
+            skill = find_skill(drive_root, subject, repo_path=repo_path) if isinstance(subject, str) else subject
+            if skill is None or skill.name in changed or not skill.enabled:
+                continue
+            fact = _skill_status_fact(drive_root, skill, how)
+            if fact or not isinstance(subject, str):
+                changed.append(skill.name)
+            if fact:
+                facts.append(fact)
+        except Exception:
+            log.debug("Changed-skill fact unavailable for %s", subject, exc_info=True)
+    return changed, facts
 
 
 def skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:

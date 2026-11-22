@@ -987,6 +987,10 @@ def _capture_context_core(
     installed_skills = "" if declared else _build_installed_skills_section(context_env, skills=skills)
     if installed_skills:
         dynamic_parts.append(installed_skills)
+    if not declared:  # the end-of-work fact compares against this first view; a declared child reads its trace
+        from ouroboros.skill_readiness import note_enabled_skill_digests
+
+        note_enabled_skill_digests(ctx, skills)
     dynamic_parts.extend([
         *([] if declared else [labelled_section(_drive_state_section(context_env),
                                                 lambda text: snapshot_labelled(text, captured_at))]),

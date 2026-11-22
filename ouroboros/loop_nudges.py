@@ -46,20 +46,18 @@ def _loop():
     return loop
 
 
-def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any]) -> str:
+def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any], ctx: Any = None) -> str:
     names = _loop()._skill_names_touched_by_trace(llm_trace)
-    if not names:
-        return ""
     try:
         from ouroboros.skill_loader import find_skill
-        from ouroboros.skill_readiness import skill_readiness_for_execution
+        from ouroboros.skill_readiness import changed_skill_facts, skill_readiness_for_execution
     except Exception:
         return ""
-    blockers: List[str] = []
+    changed, blockers = changed_skill_facts(pathlib.Path(drive_root), names, ctx)  # skills changed in the work first
     for name in names:
         try:
             skill = find_skill(pathlib.Path(drive_root), name)
-            if skill is None or not getattr(skill, "is_self_authored", False):
+            if skill is None or skill.name in changed or not getattr(skill, "is_self_authored", False):
                 continue
             readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
             ready = readiness.ready
@@ -76,10 +74,10 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     if not blockers:
         return ""
     return (
-        "⚠️ SKILL_NOT_FINALIZED: self-authored skills this task touched are not ready to "
-        "execute. A fresh review does not supply a missing owner grant or override an "
-        "intentional disablement, and an intentionally disabled skill may still satisfy the "
-        "task. Current facts, each with its available next actions: " + "; ".join(blockers)
+        "⚠️ SKILL_NOT_FINALIZED: skills this work changed or touched, with their facts and available next "
+        "actions. With automatic grants on, an acceptance of a skill's current files (a finished review or "
+        "another acceptance basis) grants what it requests; an intentional disablement stays the owner's, and "
+        "an intentionally disabled skill may still satisfy the task. Facts: " + "; ".join(blockers)
     )
 
 
@@ -952,8 +950,9 @@ def _maybe_inject_finalization_nudges(
 
     from ouroboros.tool_access import canonical_data_root
 
-    finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
-    if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
+    finalization_msg = "" if getattr(tools._ctx, "_skill_finalization_injected", False) else \
+        _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace, tools._ctx)
+    if finalization_msg:
         tools._ctx._skill_finalization_injected = True
         return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
     notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
