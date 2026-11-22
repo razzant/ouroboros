@@ -56,7 +56,7 @@ def test_unreadable_source_of_released_generation_does_not_republish(tmp_path, m
 
     entry, _area = _captured(tmp_path, monkeypatch)
     monkeypatch.setattr(payload_release_state, "states_under", lambda _directory: {"files/result.bin": {}})
-    monkeypatch.setattr(named, "_witness_rows", lambda _area: None)
+    monkeypatch.setattr(named, "named_evidence_witness", lambda _area: None)
     monkeypatch.setattr(named, "publish_saved", lambda *_args: pytest.fail("unverified generation published"))
     view = named.retain_named(tmp_path, entry)
     assert view["status"] == "partial" and view["reason"] == "released_generation_unreadable"
@@ -82,7 +82,7 @@ def test_unsettled_evidence_state_preserves_the_terminal_and_durable_output(tmp_
             raise StoreBusy("synthetic contention")
         return {"files/result.bin": None}
     monkeypatch.setattr(payload_release_state, "states_under", unavailable)
-    monkeypatch.setattr(named, "_witness_rows", lambda *args: pytest.fail("unknown state initiated recapture"))
+    monkeypatch.setattr(named, "named_evidence_witness", lambda *args: pytest.fail("unknown state initiated recapture"))
     assert named.run_named_evidence(tmp_path, entry, recapture=True)["reason"] == reason
     body.collect_terminal(tmp_path, entry.run_id)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
