@@ -111,7 +111,8 @@ def held_heads_fact(plan, receipt):
 def mode_words(plan, mode):
     """The facts row's mode: a Low the window took from my human's Max named so beside that choice, with its recorded
     cause (``context_measurement.mode_cause``) and, for a start's own cause, its shortfall (``memory_floor.lowered_need``);
-    a Max start whose route named no window says Max was not measured (``ContextFitPlan.start``)."""
+    a Max start whose route named no window says Max was not measured (``ContextFitPlan.start``) while the plan's window
+    is still unknown; a window learned later (a rebind, a refusal) is a measured Max."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
         from ouroboros.context_measurement import mode_cause
@@ -121,7 +122,8 @@ def mode_words(plan, mode):
         short = floor.lowered_need(room)[1] - room["window"] if isinstance(room, dict) else 0
         return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
                 + (f"; short {short:,}" if short > 0 else ""))
-    if mode == "max" and tuple(getattr(plan, "start", None) or ()) == ("max", "unmeasured"):
+    if (mode == "max" and tuple(getattr(plan, "start", None) or ()) == ("max", "unmeasured")
+            and getattr(getattr(plan, "window_record", None), "usable", None) is None):
         return "max (window not known: Max not measured)"
     return mode
 
@@ -129,8 +131,8 @@ def mode_words(plan, mode):
 _LOW_START_WHY = {
     "memory": "the whole books did not fit beside my memory even in its shortest tellings",
     "request": "even with no memory, what the request itself carries tips this start over the window",
-    "route": ("on {model} the window cannot hold the whole books beside my core and the work's room even with no "
-              "memory; folding my memory cannot change that"),
+    "route": ("on {model} the window cannot hold the whole books beside the rest of this start and the work's room "
+              "even with no memory; folding my memory cannot change that"),
 }
 
 

@@ -1329,18 +1329,20 @@ def build_context_fit_plan(
         if not (early and route_resolver.early):
             raise
         refused, contents, initial_mode, delivered = unfit, {}, "", {}
-    if (early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered))
-            or not state.known_window):
+    guard = early and route_resolver.early and (refused or narrowed_by_window(contents, initial_mode, preferred, state, delivered))
+    if guard or not state.known_window:
         # Horizon guard (W2 H4): an answer asked beside the build that would show less than the selected view, or none,
         # is asked again here, at the usual point, and that answer is used (its refusal is final); a walk that reads
         # the same frame is not repeated unless it was refused. A start whose route named no window asks it once more
-        # before its first send (F1 #10): a window then known is walked like any answer; no bound is guessed.
+        # before its first send (F1 #10): a window then known is walked like any answer, an answer that still names none
+        # (or failed) keeps the first; no bound is guessed.
         with another_pass():  # a repeat by design, not work done again (``context_health`` names only the latter)
             late = frame(*answer(lambda: route_resolver.again(task) if early else timed(
                 "fit.route", route_resolver, task, allow_fetch=True)))
-            if refused is not None or late.walked != state.walked:
-                contents, initial_mode, delivered = walk(late)
-        state = late
+            if guard or late.known_window:
+                if refused is not None or late.walked != state.walked:
+                    contents, initial_mode, delivered = walk(late)
+                state = late
     route, evidence, window_record, known_window = state.route, state.evidence, state.window_record, state.known_window
     output_reserve, working_reserve, window_basis, ratio = (state.output_reserve, state.working_reserve,
                                                             state.window_basis, state.ratio)

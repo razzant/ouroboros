@@ -199,26 +199,29 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     """The Max room of one start, the host's measure in the owner's Max frame with whole books.
 
     ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact).
-    ``floor_need`` is the books, core, my knowledge index, source registry and scratchpad, runtime facts (Health, recent
-    activity, drive state too), the skills and subagents lines, the connections map Max shows, assignment, reply
-    reserve and work room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines
-    collapsed, nothing cut): ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. ``parts``
-    read the host's sections by id as the request carries them (``addressed``: those sent in a shorter form), each part
-    by whose it is (``WHOSE``). Measures only: the start alone chooses the mode, and the mind judges what to fold.
+    ``floor_need`` is the books, core, my knowledge (its index, shared understanding, a project's journal), source
+    registry, scratchpad and held note heads, runtime facts (Health, recent activity, drive state too), the skills and
+    subagents lines, the connections map Max shows, assignment, reply reserve and work room; ``zero_need`` adds the tool
+    schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut): ``story`` (``unfolded``: its
+    pages no part or account holds yet) and ``room``. ``parts`` read the host's sections by id as the request carries
+    them (``addressed``: those sent in a shorter form), each part by whose it is (``WHOSE``), in measured tokens before
+    ``density``. Measures only: the start alone chooses the mode, and the mind judges what to fold.
     """
     if allowance is None:
         return None
     addressed = addressed or {}
 
-    def sent(sections, *ids):  # these host sections as the request carries them
-        return sum(view_tokens(addressed.get(part.section_id, part.full_text)) for part in sections if part.section_id in ids)
+    def sent(sections, *ids):  # these host sections as the request carries them; ``held_note:`` names every held note
+        return sum(view_tokens(addressed.get(part.section_id, part.full_text)) for part in sections if part.section_id in ids
+                   or ("held_note:" in ids and part.section_id.startswith("held_note:")))
     base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
     subagents, skills = sent(core.semi_stable_sections, "subagents"), sent(core.dynamic_sections, "installed_skills")
-    mine = {"knowledge index": view_tokens(core.dynamic_head_text), "source registry": sent(core.dynamic_sections, "registry"),
-            "scratchpad": sent(core.dynamic_sections, "scratchpad")}
+    mine = {"knowledge": view_tokens(core.dynamic_head_text), "source registry": sent(core.dynamic_sections, "registry"),
+            "scratchpad": sent(core.dynamic_sections, "scratchpad"), "held note heads": sent(core.dynamic_sections, "held_note:")}
     parts = {"books": max(0, sum(map(view_tokens, books)) - base),
              "core": max(0, base + view_tokens(core.semi_stable_text) - subagents),
-             "runtime facts": max(0, view_tokens(core.dynamic_text) - mine["source registry"] - mine["scratchpad"] - skills),
+             "runtime facts": max(0, view_tokens(core.dynamic_text) - skills - sum(  # the changing block's other sections
+                 mine[name] for name in ("source registry", "scratchpad", "held note heads"))),
              **{name: tokens for name, tokens in {**mine, "skills and subagents": subagents + skills}.items() if tokens},
              **({"connections": view_tokens(core.connections[0])} if core.connections[0] else {})}  # Max's map (``_system_blocks``)
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
@@ -228,7 +231,8 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     zero = math.ceil(fixed * ratio) + reserve + work
     return {"window": window, "allowance": allowance, "floor_need": math.ceil((fixed - schemas) * ratio) + reserve + work,
             "schemas": schemas, "zero_need": zero, "need": zero + math.ceil((memory["story"] + memory["room"]) * ratio),
-            **memory, "reserve": reserve, "work": work, "levels": snapshot.spec.work_room_levels if snapshot else 1,
+            **memory, "reserve": reserve, "work": work, "density": ratio,
+            "levels": snapshot.spec.work_room_levels if snapshot else 1,
             "room_id": snapshot.spec.room_id if snapshot else None,
             "folds": sum(int((snapshot.legacy_blocks or {}).get(key) or 0) for key in ("parts", "accounts")) if snapshot else 0,
             "parts": sorted(([name, tokens] for name, tokens in parts.items()), key=lambda part: -part[1])}
@@ -278,7 +282,7 @@ TEMPORARY_LOW = "Low, temporarily, for the window"
 TARGET_FLOOR, TARGET_KEEPS = TELLING_STAGES, ROOM_STEPS
 LOWERED_CAUSES = ("memory", "request", "route")  # ``lowered_cause``
 # Whose each part of a start's measure is (``measure_text``): core, the assignment and any other part stand alone.
-WHOSE = (("mine", ("knowledge index", "source registry", "scratchpad")),
+WHOSE = (("mine", ("knowledge", "source registry", "scratchpad", "held note heads")),
          ("what the request itself carries", ("connections", "runtime facts", "skills and subagents")),
          ("my human's", ("books",)))
 
@@ -379,15 +383,18 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
         listed["my human's"] += [f"reply reserve {fact['reserve']:,}", f"work room {fact['work']:,}"]
         alone = sorted((part for part in fact["parts"] if part[0] not in grouped),  # core, assignment, then the rest
                        key=lambda part: ("core", "assignment").index(part[0]) if part[0] in ("core", "assignment") else 2)
+        density = float(fact.get("density") or 1.0)  # the needs apply it; the parts are measured tokens
         text += "; " + "; ".join([f"{whose}: {', '.join(items)}" for whose, items in listed.items()]
-                                 + [f"{name} {tokens:,}" for name, tokens in alone])
+                                 + [f"{name} {tokens:,}" for name, tokens in alone]
+                                 + ([f"parts before density {density:.2f}"] if abs(density - 1.0) > 0.005 else []))
     return (f"{text}; my story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,} in ordinary forms, beside a "
             f"Max room of {fact['allowance']:,}")
 
 
 _LOWERED_WORDS = {"memory": "Whole books, my memory at the gate's level and the work's room need",
                   "request": "With no memory, whole books, what the request itself carries and the work's room need",
-                  "route": "With no memory and no tool schemas, whole books beside my core and the work's room need"}
+                  "route": ("With no memory and no tool schemas, whole books beside the rest of this start (my core, the "
+                            "host's sections and the assignment) and the work's room need")}
 
 
 def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:

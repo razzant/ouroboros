@@ -57,6 +57,42 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert "; marks in view 0" in line and "drafts awaiting" not in line and "shown only by address" not in line
 
 
+def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypatch):
+    """The split by whose part reads the host's sections by id (``memory_floor.max_room_fact``): knowledge, the source
+    registry, scratchpad and held note heads are mine; runtime facts, skills and subagents what the request itself
+    carries; the books my human's; core and the assignment alone. With the tool schemas and memory they are the start's
+    whole need at density 1, and a calibrated density is named beside them: the needs apply it, the parts do not."""
+    from ouroboros.section_floor import HostSection
+
+    stable = (HostSection("stable_0", "Identity " * 50), HostSection("subagents", "s" * 800))
+    head = (HostSection("knowledge_index", "k" * 1_200),)
+    dynamic = (HostSection("runtime", "f" * 1_000), HostSection("registry", "r" * 600), HostSection("scratchpad", "p" * 400),
+               HostSection("installed_skills", "i" * 300), HostSection("held_note:plans", "h" * 500))
+    core = dataclasses.replace(_core(), semi_stable_text="\n\n".join(stable), semi_stable_sections=stable,
+                               dynamic_head_text="\n\n".join(head), dynamic_head_sections=head,
+                               dynamic_text="\n\n".join(dynamic), dynamic_sections=dynamic)
+    plan, tok = _start(core, 2_000_000, monkeypatch), mf.view_tokens
+    fact = _fact(plan)
+    parts = dict(fact["parts"])
+    assert (parts["knowledge"], parts["source registry"], parts["scratchpad"], parts["held note heads"]) == (
+        tok("k" * 1_200), tok("r" * 600), tok("p" * 400), tok("h" * 500))
+    assert parts["skills and subagents"] == tok("s" * 800) + tok("i" * 300)
+    assert parts["runtime facts"] == tok(core.dynamic_text) - tok("r" * 600) - tok("p" * 400) - tok("i" * 300) - tok("h" * 500)
+    assert parts["core"] == tok(core.base_prompt) + tok(core.bible_md) + tok(core.semi_stable_text) - tok("s" * 800)
+    assert sum(parts.values()) + fact["schemas"] + fact["story"] + fact["room"] + fact["reserve"] + fact["work"] == fact["need"]
+    line = memory_facts(plan, "max")
+    assert (f"mine: my memory at the gate's level {fact['story'] + fact['room']:,}, knowledge {parts['knowledge']:,}, source "
+            f"registry {parts['source registry']:,}, scratchpad {parts['scratchpad']:,}, held note heads "
+            f"{parts['held note heads']:,}; what the request itself carries: tool schemas {fact['schemas']:,}, runtime facts "
+            f"{parts['runtime facts']:,}, skills and subagents {parts['skills and subagents']:,};") in line
+    assert fact["density"] == 1.0 and "parts before density" not in line
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.3)
+    dense = cf.build_context_fit_plan(None, core, {"id": "room01", "usage_category": "consciousness"},
+        preferred_mode="max", route_resolver=lambda *_a, **_kw: (
+            {"provider": "test", "model": "test"}, ce.CapabilityEvidence(2_000_000, "confirmed", "metadata", "room-route")))
+    assert _fact(dense)["density"] == 1.3 and "; parts before density 1.30; " in memory_facts(dense, "max")
+
+
 def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(monkeypatch):
     core = _core()
     held = _fact(_start(core, 2_000_000, monkeypatch))
@@ -110,7 +146,8 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     assert fact["telling_need"] >= fact["zero_need"] >= fact["floor_need"]  # the gate's need is printed for every cause
     shown = plan.low_projection.system_content_json
     assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books beside "
-            f"my core and the work's room need {fact['floor_need']:,}; the window holds 200,000; short by "
+            f"the rest of this start (my core, the host's sections and the assignment) and the work's room need "
+            f"{fact['floor_need']:,}; the window holds 200,000; short by "
             f"{fact['floor_need'] - 200_000:,}, a disclosed fact of this route: folding my memory or dropping tool schemas "
             "cannot make room here.") in shown and "may bring" not in shown
     line = memory_facts(plan, "low")
@@ -279,7 +316,10 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
 
         def resolver(*_a, **_kw):
             asked.append(1)
-            return {"provider": "test", "model": "test"}, answers[min(len(asked), len(answers)) - 1]
+            answer = answers[min(len(asked), len(answers)) - 1]
+            if isinstance(answer, Exception):
+                raise answer
+            return {"provider": "test", "model": "test"}, answer
         plan = cf.build_context_fit_plan(None, _core(), {"id": "room01", "usage_category": "consciousness"},
                                          preferred_mode="max", route_resolver=resolver)
         return plan, len(asked)
@@ -292,5 +332,11 @@ def test_a_start_without_a_known_window_asks_once_more_and_is_never_a_held_max(m
     learned, asked = build(unknown, known)
     assert asked == 2 and learned.start == ("max", "") and _fact(learned)["cause"] == "held"
     assert mode_words(learned, "max") == "max"
+    # A window learned later (a rebind, a refusal) keeps the start's record but is a measured Max in the facts row.
+    rebound = dataclasses.replace(plan, window_record=learned.window_record, window_tokens=learned.window_tokens)
+    assert rebound.start == ("max", "unmeasured") and mode_words(rebound, "max") == "max"
+    # A second ask that fails keeps the first answer: its route and evidence, never the failed read's.
+    kept, asked = build(unknown, RuntimeError("route read failed"))
+    assert asked == 2 and kept.start == ("max", "unmeasured") and kept.route_fp == "r" and kept.model == "test"
     held, asked = build(known)
     assert asked == 1 and held.start == ("max", "")  # a known window is asked once

@@ -50,7 +50,8 @@ def test_honest_max_selects_low_before_folding_story_and_keeps_window_budget(tmp
     assert floor["target_tokens"] is None and floor["budget_allowance_tokens"] is None
     assert floor["mode_switch"] == {"from": "max", "to": "low"}
     assert ("Low, temporarily, for the window; my human's mode is Max. With no memory and no tool schemas, whole books "
-            "beside my core and the work's room need ") in tight.low_projection.system_content_json
+            "beside the rest of this start (my core, the host's sections and the assignment) and the work's room need ") in (
+        tight.low_projection.system_content_json)
     assert tight.projection("low").memory_facts["max_room"]["cause"] == "route"  # the books alone overflow 200k
     assert roomy.projection("max").memory_facts["max_room"]["cause"] == "held"
     assert "word word word word" not in tight.low_projection.system_content_json
