@@ -191,10 +191,10 @@ def _skill_facts(root: pathlib.Path) -> Observed:
         key, record = f"skill:{name}", health.read_extension_health(root, name)
         if not record:
             continue
-        if record.get("status") == health.UNKNOWN:  # an unreadable record, or none observed yet: not a repair
+        text = _skill_text(record)  # a worker's break or a refused permission shows before the server's first word
+        if not text and record.get("status") == health.UNKNOWN:  # unreadable, or nothing observed yet: not a repair
             seen.unknown.add(key)
             continue
-        text = _skill_text(record)
         observed = record.get("last_observed") if isinstance(record.get("last_observed"), dict) else {}
         reason = str(observed.get("reason") or "")
         if text:

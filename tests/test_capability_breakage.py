@@ -235,6 +235,26 @@ def test_a_worker_that_cannot_run_a_skill_is_named_and_a_server_failure_keeps_it
     assert [row["error"].split(":")[0] for row in breakage.start_notice_rows(_work(tmp_path), [])] == ["desk"]
 
 
+def test_a_workers_break_shows_before_the_servers_first_observation_and_an_empty_record_stays_unknown(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=True))
+
+    def record(name, **observations):
+        path = extension_health.health_path(tmp_path, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"_schema_version": 1, "skill": name, "status": "unknown",
+                                    "observations": observations}), encoding="utf-8")
+
+    record("desk", worker={"status": "broken", "reason": "load_error", "ts": "2026-11-22T09:00:00+00:00",
+                           "process": "worker"})
+    record("pad")  # no observation at all yet
+    work = _work(tmp_path)
+    assert [row["error"] for row in breakage.start_notice_rows(work, [])] == [
+        "desk: not live in workers (load_error) since 2026-11-22T09:00:00+00:00"]
+    work.__dict__["_capability_breakage_told"]["facts"]["skill:pad"] = "pad: told before"  # what it was told stays
+    assert _round(work) is None  # pad is unknown, not repaired
+
+
 def test_a_lost_skill_binding_and_an_invalid_settings_row_reach_a_running_work_and_so_does_their_repair(
         monkeypatch, tmp_path):
     import dataclasses
