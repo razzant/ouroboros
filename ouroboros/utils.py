@@ -1360,7 +1360,7 @@ def sanitize_task_for_event(
 
         return sanitized
     except Exception:
-        return task
+        return dict(task) if isinstance(task, dict) else task  # a copy: the start record rebinds fields of the task
 
 
 def count_routing_lists(event_task: Dict[str, Any]) -> Dict[str, Any]:
