@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any
 
+from .mac_input import permission_refusal, proved, with_refusal
 from .macos_capture import window_selector
 
 _WINDOW_TIMEOUT_MS = 5000  # both ScreenCaptureKit completion handlers together (macos_capture.SPEC)
@@ -58,12 +59,17 @@ class CaptureMixin:
         display list, an app not resolved (refused, or no answer naming its ``target``) is an ``error``, uncaptured;
         without one the app is not looked up (``app_display_unread``): the default capture stays capture-only."""
         res = self._native("displays", timeout=10)
+        if res.get("screen_recording") == "denied":  # screencapture would exit 0 with the wallpaper alone
+            return {"reason": "permission_denied", **permission_refusal("screen_recording"), "note": "nothing was captured",
+                    "error": "this process may not record the screen (the Screen Recording grant); only the owner can grant it"}
         displays = res.get("displays") if res.get("ok") else None
         query = str(app or "").strip()
         if not displays:
             reason = res.get("error") or "no display list"
             return {"display_unread": reason, **({"app_display_unread": reason} if query else {})}
-        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default"}
+        # The grant as the display list read it travels with the display: only "granted" proves it.
+        chosen = {**next((d for d in displays if d.get("main")), displays[0]), "selected_by": "default",
+                  "screen_recording": res.get("screen_recording")}
         if query:
             tree = self._native("observe", json.dumps({"app": query, "max_nodes": 1, "timeout_ms": 1500}), timeout=15)
             target = tree.get("target")
@@ -74,7 +80,7 @@ class CaptureMixin:
                 cx, cy = node["x"] + node["w"] // 2, node["y"] + node["h"] // 2
                 for d in displays:
                     if d["x"] <= cx < d["x"] + d["width"] and d["y"] <= cy < d["y"] + d["height"]:
-                        return {**d, "selected_by": "app", "app": target}
+                        return {**d, "selected_by": "app", "app": target, "screen_recording": res.get("screen_recording")}
                 chosen["app_window_unread"] = f"the window's centre ({cx},{cy}) lies on no active display"
             else:
                 chosen["app_window_unread"] = str(tree.get("error") or tree.get("reason") or "the window's bounds could not be read")
@@ -117,7 +123,7 @@ class CaptureMixin:
         if rc != 0 or not answer or answer.get("ok") is not True:
             self._discard_window_output(out_path)
             if rc == 1 and answer and answer.get("ok") is False:
-                return self._json_text(answer)  # the helper's own refusal: it ended normally and says why
+                return self._json_text(with_refusal(answer))  # the helper's own refusal: it ended normally and says why
             return refuse("helper_failed", f"the capture helper ended with exit {rc} without a complete answer "
                           f"({(err or out).strip()[-300:] or 'no output'})")
         return self._accept_window_capture(answer, out_path, max_width=max_width, max_height=max_height)
@@ -155,7 +161,7 @@ class CaptureMixin:
         }
         if img_path != out_path:
             result["full_resolution_path"] = str(out_path)
-        return self._json_text(result)
+        return self._json_text(proved(result, "screen_recording"))
 
     @staticmethod
     def _discard_window_output(out_path: pathlib.Path) -> None:

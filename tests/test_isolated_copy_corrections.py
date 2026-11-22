@@ -1236,3 +1236,43 @@ def test_real_schedule_supervisor_stamps_copy_metadata(case, monkeypatch):
     assert binding == load_task_result(case[2], task["id"])["workspace_copy"]
     assert task["task_contract"]["workspace"]["root"] == task["workspace_root"]
     assert (Path(task["workspace_root"]) / "a.txt").read_bytes() == b"uncommitted source\n"
+
+
+@pytest.mark.parametrize(("mode", "grant", "capped", "admitted"), [
+    ("advanced", True, False, False), ("pro", False, False, False), ("pro", True, False, True),
+    # Owner decision 6A (21.11.2026): Cyber Pro needs no grant, as at the dispatcher; the light cap still binds.
+    ("cyber_pro", False, False, True), ("cyber_pro", False, True, False),
+])
+def test_the_copy_door_reads_the_dispatchers_protected_rule(tmp_path, monkeypatch, mode, grant, capped, admitted):
+    """The third integration door (an isolated copy's result into the Ouroboros body) asks the same
+    ``protected_write_admitted`` as the dispatcher and the two patch doors, refuses in their words (the mode
+    that refuses, or the applying task's missing grant), and keeps ordinary paths admitted."""
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.workspace_copies import protected_write_admitted
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    body = tmp_path / "body"
+    (body / "ouroboros").mkdir(parents=True)
+    drive = tmp_path / "data"
+    drive.mkdir()
+    ctx = ToolContext(repo_dir=body, drive_root=drive, system_repo_dir=body, task_id="acting",
+                      workspace_root=body, workspace_mode="self_worktree",
+                      task_metadata={"initiator": "consciousness", "consciousness_autonomy": "act",
+                                     "runtime_mode_cap": "light"} if capped else {},
+                      task_constraint=TaskConstraint(mode="acting_subagent", surface="self_worktree",
+                                                     write_root=str(body), protected_paths_grant=grant))
+    refusal = copy_apply_refusal(ctx, body, ["ouroboros/safety.py"])
+    assert (refusal == "") is admitted, refusal
+    if not admitted:
+        assert refusal.startswith("LIGHT_MODE_BLOCKED" if capped else "CORE_PROTECTION_BLOCKED"), refusal
+    if not admitted and not capped:
+        assert "ouroboros/safety.py" in refusal and f"runtime_mode={mode!r}" in refusal, refusal
+        # Pro without the grant names the grant; a mode that refuses names the mode to switch to.
+        assert ("protected_paths_grant" in refusal) is (mode == "pro"), refusal
+        assert ("Switch to runtime_mode" in refusal) is (mode != "pro"), refusal
+    if not capped:
+        assert copy_apply_refusal(ctx, body, ["README.md"]) == ""
+    effective = "light" if capped else mode
+    assert protected_write_admitted(effective, acting=True, grant=grant) is admitted
+    assert protected_write_admitted(effective, acting=False, grant=False) is (effective in ("pro", "cyber_pro"))

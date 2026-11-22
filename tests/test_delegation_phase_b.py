@@ -148,11 +148,11 @@ def test_writer3_append_reason_derives_on_the_unverified_path(monkeypatch):
     task = {"id": "c1", "delegation_role": "subagent", "requested_executor": "harness",
             "effective_executor": "harness", "executor_route": "claude"}
 
-    def _boom():
+    def _boom(namespace=""):
         raise RuntimeError("registry exploded")
 
     amended, changed = preflight_delegate_visibility(
-        SimpleNamespace(available_tools=_boom), task, dispatch)
+        SimpleNamespace(callable_rows=_boom), task, dispatch)
     assert changed is True and amended.executor == "blocked"
     delta = amended.delta.as_dict()
     assert delta["reduction_reasons"] == ["delegate_visibility_unverified"]

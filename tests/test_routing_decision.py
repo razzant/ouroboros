@@ -922,6 +922,43 @@ def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path
         (task, "unknown", "unknown", "StoreBusy") for task in ("r-bad", "r-torn", "r-stop")]
 
 
+def test_an_event_copy_keeps_each_routing_lists_length_and_the_task_keeps_the_lists(tmp_path):
+    """``task_received`` goes to ``events.jsonl``, whose archive is never deleted, and to the live log frame. It
+    repeated the turn's routing lists whole (Main's manifest alone about 70 KB a Main turn and a wake on a long-lived
+    install) while the task document keeps them and the request record a compressed copy. Once the start record holds
+    them, the event copy keeps each list's length and every other fact, a manifest that could not be built included;
+    the task keeps every list."""
+    import copy
+
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import RootSnapshot, _decision_turn_metadata
+    from ouroboros.utils import count_routing_lists, sanitize_task_for_event
+
+    room = create_project(tmp_path, "room", name="Room")
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True)
+    live = {"task_id": "live-1", "status": "running", "project_id": "room"}
+    roots = RootSnapshot(pairs=((live, frozenset({1, int(room["chat_id"])})),))
+    ctx, lists = _decision_ctx(tmp_path), ("main_routing_manifest", "project_routing_manifest", "current_chat")
+    main = _decision_turn_metadata(ctx, 1, "cm-main", {}, roots)
+    project = _decision_turn_metadata(ctx, int(room["chat_id"]), "cm-room", {"project_id": "room"}, roots)
+    assert [row["task_id"] for row in main["main_routing_manifest"]["final_results"]] == ["r-stop"]
+    assert main["current_chat"]["running_tasks"] and project["project_routing_manifest"]["active_roots"]
+    copies = []
+    for metadata in (main, project, {"main_routing_manifest": {"error": "routing_manifest_unavailable"}}):
+        task = {"id": "turn", "text": "Why did it stop?", "metadata": metadata}
+        original = copy.deepcopy(task)
+        event = count_routing_lists(sanitize_task_for_event(task, tmp_path / "logs"))["metadata"]
+        assert task == original, "the task document and the turn's context keep every list whole"
+        for key in set(lists) & set(metadata):
+            facts = metadata[key]
+            assert event[key] == {**{name: value for name, value in facts.items() if not isinstance(value, list)},
+                                  **{f"{name}_len": len(value) for name, value in facts.items() if isinstance(value, list)}}
+        assert {k: v for k, v in event.items() if k not in lists} == {k: v for k, v in metadata.items() if k not in lists}
+        copies.append(event)
+    assert copies[0]["main_routing_manifest"]["final_results_len"] == 1
+    assert copies[0]["main_routing_manifest"]["omissions"] == main["main_routing_manifest"]["omissions"]
+
+
 def _boundary(tmp_path, metadata, messages, *, delivery=None, own=None):
     from types import SimpleNamespace
 
