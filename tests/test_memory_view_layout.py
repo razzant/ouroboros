@@ -11,9 +11,10 @@ the first send reaches the cap info, the task context, one event and the trace.
 Between two works on one memory, mode, authority, catalogue and route (another work being the control), a clock, a
 restart, the queue, money, review records, route health, registration order, the actor's drive, the assignment's size
 (whole, and on a pressed fixture that frames the second start), the calendar between two framed starts, or a failed MCP
-listing moves neither the schemas (on the Claudexor wire and sorted), A', D nor any section of B, each fact checked to
-have reached the request; a leak still open is a strict xfail on its own tracker item that holds only while exactly its
-named labels move. A new page keeps B's declared head and moves only the story after it.
+listing moves neither the schemas (on the Claudexor wire and sorted), A', D nor any section of B or their order, each
+fact checked to have reached the request (a failed MCP listing reaches no row by design and is checked at its manager);
+a leak still open is a strict xfail on its own tracker item that holds only while every moved label is one it names.
+A new page keeps B's declared head and moves only the story after it.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
 """
 from __future__ import annotations
@@ -123,12 +124,12 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     assert section(main_c, "## This room (Main [chat_id=1])") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
-_CLOCKS = ("time", "time_ns", "gmtime", "localtime", "strftime", "datetime")
 _REAL_CLOCKS = {}  # the process's own clocks, taken on first use while none is moved
+_PRODUCT = ("ouroboros", "supervisor")
 
 
 class KnownLeak(AssertionError):
-    """Only labels a case's strict xfail names moved; any other moved part fails the case outright."""
+    """Every label that moved is one the case's strict xfail names; any other moved part fails the case outright."""
 
 
 class _CalendarMeta(type):
@@ -146,26 +147,39 @@ def _namespace(module):
         return {}
 
 
-def _moved_mark(value):
-    """The name of the real clock a moved one stands in for (its ``_moved_by``), or None."""
-    return _namespace(value).get("_moved_by") if value is not None else None
+@pytest.fixture(scope="module")
+def _warm(tmp_path_factory):
+    """One whole family build under the real clocks, once per module and worker, before any case moves them: every
+    module a build or a case's fact imports is loaded here, so none is first imported while a clock is moved (a module
+    imported then can hold the moved clock where no sweep finds it, e.g. a dataclass default factory)."""
+    from ouroboros import claudexor_exit_facts, mcp_client, review_ledger, review_price, reviewer_slot_config  # noqa: F401
+    from tests._scale_root import money
+    from tests.test_tool_connections import _servers
 
-
-def _moved_clocks_left():
-    import sys
-
-    return sorted(f"{name}.{attr}" for name, module in list(sys.modules.items())
-                  for attr, value in _namespace(module).items() if attr in _CLOCKS and _moved_mark(value))
+    with pytest.MonkeyPatch.context() as patch:
+        root = tmp_path_factory.mktemp("warm")
+        _one_root(patch, root / "drive")
+        _fixed_host(patch)
+        env, memory, _rooms = world(root)
+        _queue(env)
+        money(env.drive_root, "warm-task", cost=0.01, limit=100.0)  # the settlement path the budget case takes
+        mcp_client.reset_manager_for_tests()
+        try:
+            _servers()
+            _start(env, memory, dict(MAIN), ctx=_ctx(env, "tmain"), restart=True, reversed_registration=True)
+        finally:
+            mcp_client.reset_manager_for_tests()
 
 
 @pytest.fixture
-def clocks():
+def clocks(_warm):
     """``move(wall=, calendar=)``: ``time.time`` (and ``time_ns``, the no-argument ``gmtime``/``localtime``/``strftime``)
     reads ``wall`` seconds on, ``datetime.datetime.now``/``utcnow``/``today`` read ``calendar`` seconds on: the
     ``datetime`` module's class and each loaded ``ouroboros``/``supervisor`` module's own ``from datetime import
-    datetime`` name. ``date.today()`` reads ``time.time``, so it follows ``wall``. At teardown every module in
-    ``sys.modules`` that holds a moved clock under one of these names, whoever bound it while it was moved, gets the
-    real one back; then no moved clock is left in any module."""
+    datetime`` name. ``date.today()`` reads ``time.time``, so it follows ``wall``. At teardown every name this fixture
+    set gets back what it replaced, and every other module attribute that holds one of the moved objects (by identity,
+    whatever its name) gets the real clock; a module that refuses the assignment is reported. Then no moved object is
+    left anywhere, and no product module was first imported while a clock was moved (``_warm`` loads them)."""
     import datetime as dt
     import sys
     import time
@@ -174,15 +188,18 @@ def clocks():
         _REAL_CLOCKS.update(time=time.time, time_ns=time.time_ns, gmtime=time.gmtime, localtime=time.localtime,
                             strftime=time.strftime, datetime=dt.datetime)
     real = _REAL_CLOCKS
-    assert not any(_moved_mark(clock) for clock in real.values()), "an earlier test left a moved clock"
-    installed = []
+    moved = {}  # id -> (the moved object, the name of the real clock it stands in for)
+    replaced = []  # (module, name, what stood there)
+    loaded = []  # sys.modules at the first move
 
     def put(module, name, value):
-        value._moved_by = name
-        installed.append((module, name))
+        moved[id(value)] = (value, name)
+        replaced.append((module, name, vars(module).get(name)))
         setattr(module, name, value)
 
     def move(*, wall: float, calendar: float) -> None:
+        if not loaded:
+            loaded.append(set(sys.modules))
         put(time, "time", lambda: real["time"]() + wall)
         put(time, "time_ns", lambda: real["time_ns"]() + int(wall * 1e9))
         put(time, "gmtime", lambda secs=None: real["gmtime"](time.time() if secs is None else secs))
@@ -205,19 +222,29 @@ def clocks():
 
         put(dt, "datetime", Later)
         for name, module in list(sys.modules.items()):
-            held = _namespace(module).get("datetime") if name.split(".")[0] in ("ouroboros", "supervisor") else None
-            if held is real["datetime"] or _moved_mark(held) == "datetime":
+            held = _namespace(module).get("datetime") if name.split(".")[0] in _PRODUCT else None
+            if held is real["datetime"] or id(held) in moved:
                 put(module, "datetime", Later)
 
+    def holding():
+        return [(name, module, attr, moved[id(value)][1]) for name, module in list(sys.modules.items())
+                for attr, value in _namespace(module).items() if id(value) in moved and moved[id(value)][0] is value]
+
     yield move
-    for module, name in installed:
-        setattr(module, name, real[name])
-    for module in list(sys.modules.values()):  # also every name bound while the clocks were moved
-        for name, value in _namespace(module).items():
-            if name in _CLOCKS and (mark := _moved_mark(value)):
-                setattr(module, name, real[mark])
-    left = _moved_clocks_left()
-    assert not left, f"a moved clock is left in {left}"
+    for module, name, before in reversed(replaced):
+        if id(before) not in moved:  # what stood there before this case: a real clock or an enclosing patch
+            setattr(module, name, before)
+    refused = []
+    for name, module, attr, clock in holding():  # also every name bound to a moved object while it was moved
+        try:
+            setattr(module, attr, real[clock])
+        except Exception as exc:  # report, and go on restoring the others
+            refused.append(f"{name}.{attr}: {exc!r}")
+    left = sorted(f"{name}.{attr}" for name, _module, attr, _clock in holding())
+    late = sorted(name for name in set(sys.modules) - (loaded[0] if loaded else set(sys.modules))
+                  if name.split(".")[0] in _PRODUCT)
+    assert not refused and not left, f"a moved clock is left in {left}; refused: {refused}"
+    assert not late, f"first imported under a moved clock: {late}; add it to the warm-up"
 
 
 def _calendar_offsets():
@@ -232,14 +259,20 @@ def _calendar_offsets():
 
 
 def _one_root(monkeypatch, drive):
-    """One data root, as an install has: ``config``'s data and settings roots, and ``OUROBOROS_DATA_DIR``, which the
-    environment-first readers take (``config.resolve_data_dir``; ``usage_ledger._drive_root`` and through it the window
-    and density evidence store, ``capability_evidence.canonical_evidence_root``)."""
+    """The case's drive as its data root for these readers: ``config.DATA_DIR`` and ``config.SETTINGS_PATH``;
+    ``OUROBOROS_DATA_DIR``, which ``config.resolve_data_dir`` and ``usage_ledger._drive_root`` read first (and through
+    the latter the window and density evidence store, ``capability_evidence.canonical_evidence_root``); and
+    ``OUROBOROS_SETTINGS_PATH`` when the session sets it (``tests/conftest.py``), which ``usage_journal`` reads first.
+    The supervisor's state root (``supervisor.state``, bound by conftest) stays the worker's."""
+    import os
+
     from ouroboros import config
 
     monkeypatch.setattr(config, "DATA_DIR", drive)
     monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
+    if "OUROBOROS_SETTINGS_PATH" in os.environ:
+        monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(drive / "settings.json"))
 
 
 def _fixed_host(monkeypatch):
@@ -265,7 +298,8 @@ def _start(env, memory, task, *, ctx, restart=False, reversed_registration=False
     (``sanitize_function_tools``: sorted), every system block the request declares stable (A' first, B last, D the
     blocks between) and C after them, the delivered user row, and the frame's own facts: the estimate, the start
     room (the allowance beside it) and the host sections it addressed. ``restart`` first runs the startup's WORLD
-    refresh (``agent_startup_checks``), as a work after a host restart follows one."""
+    refresh (``agent_startup_checks``), as a work after a host restart follows one, and records the calendar date the
+    refresh's own clock read when it ran (``refreshed``)."""
     from types import SimpleNamespace
 
     from ouroboros.llm import LLMClient
@@ -275,6 +309,9 @@ def _start(env, memory, task, *, ctx, restart=False, reversed_registration=False
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.world_profiler import refresh_world_profile
 
+    from ouroboros import world_profiler
+
+    refreshed = world_profiler.datetime.now(world_profiler.timezone.utc).strftime("%Y-%m-%d") if restart else None
     if restart:
         refresh_world_profile(str(memory.world_path()), str(env.repo_dir), str(env.drive_root))
     registry = ToolRegistry(env.repo_dir, env.drive_root)
@@ -290,44 +327,53 @@ def _start(env, memory, task, *, ctx, restart=False, reversed_registration=False
     assert user["role"] == "user" and stable >= 2 and len(content) == stable + 1, (stable, len(content))
     b = content[stable - 1]
     view = cap.get("memory_view") or {}
-    stamp = re.search(r"## System \(measured at startup, (\S+)\)", memory.world_path().read_text(encoding="utf-8"))
     return {"wire": _request({"source": "codex", "resolved_model": "exact-model"}, messages, schemas, {})["tools"],
             "schemas (sorted)": json.dumps(LLMClient._sanitize_chat_completion_tools(schemas), ensure_ascii=False),
             "A'": content[0]["text"], "D": [block["text"] for block in content[1:stable - 1]], "B": b["text"],
-            "head": b["text"][:b[SHARED_HEAD_KEY]["chars"]] if SHARED_HEAD_KEY in b else "", "C": content[stable]["text"],
+            "head chars": b.get(SHARED_HEAD_KEY, {}).get("chars"), "C": content[stable]["text"],
+            "head": b["text"][:b[SHARED_HEAD_KEY]["chars"]] if SHARED_HEAD_KEY in b else "",
             "user": user["content"] if isinstance(user["content"], str)
             else "".join(part.get("text", "") for part in user["content"]),
             "entries": list(registry._entries), "mode": cap["context_fit"]["initial_mode"],
             "estimate": cap["context_fit"]["max_estimated_tokens"],
             "room": cap["context_fit"]["max_estimated_tokens"] + view.get("floor", {}).get("allowance_tokens", 0),
             "addressed": {row["section_id"] for row in view.get("host_sections_addressed", ())},
-            "stamp": stamp.group(1) if stamp else None}
+            "refreshed": refreshed}
 
 
 def _named(text):
-    """A block's ``## `` sections by name: the heading line cut before its first `` (`` and at 80 characters, with an
-    occurrence number where a name repeats."""
+    """A block's ``## `` sections in order, keyed by name: the heading line cut before its first `` (`` and at 80
+    characters, with its occurrence apart; the label is the name, then `` (n)`` from the second occurrence on, which no
+    cut name can hold."""
     named, seen = {}, {}
     for part in re.split(r"(?m)^(?=## )", text):
         name = part.split("\n", 1)[0].split(" (", 1)[0][:80]
         seen[name] = seen.get(name, 0) + 1
-        named[name if seen[name] == 1 else f"{name} #{seen[name]}"] = part
+        named[(name, seen[name])] = part
     return named
+
+
+def _label(key):
+    name, occurrence = key
+    return name if occurrence == 1 else f"{name} ({occurrence})"
 
 
 def _moved(first, second):
     """The labels of the shared start's parts that differ: the mode, the Claudexor wire list (``… order`` when it holds
     the same entries, every field equal, in another order), the sorted schemas, A', D as a whole, and B's sections
-    paired by name: ``B <name>`` (another body), ``B gone <name>``, ``B new <name>``."""
+    paired by name: ``B <name>`` (another body), ``B gone <name>``, ``B new <name>``, and ``B order`` when the names
+    both works hold stand in another relative order. The wire lists compare as serialized JSON, entry by entry."""
     moved = []
-    if first["wire"] != second["wire"]:
-        same = sorted(json.dumps(t, sort_keys=True) for t in first["wire"]) == sorted(
-            json.dumps(t, sort_keys=True) for t in second["wire"])
-        moved.append("schemas (Claudexor wire)" + (" order" if same else ""))
+    wire = [[json.dumps(tool, ensure_ascii=False) for tool in start["wire"]] for start in (first, second)]
+    if wire[0] != wire[1]:
+        moved.append("schemas (Claudexor wire)" + (" order" if sorted(wire[0]) == sorted(wire[1]) else ""))
     moved += [part for part in ("mode", "schemas (sorted)", "A'", "D") if first[part] != second[part]]
     old, new = _named(first["B"]), _named(second["B"])
-    return (moved + [f"B {name}" for name in old if name in new and old[name] != new[name]]
-            + [f"B gone {name}" for name in old if name not in new] + [f"B new {name}" for name in new if name not in old])
+    common = [[key for key in this if key in that] for this, that in ((old, new), (new, old))]
+    return (moved + (["B order"] if common[0] != common[1] else [])
+            + [f"B {_label(key)}" for key in old if key in new and old[key] != new[key]]
+            + [f"B gone {_label(key)}" for key in old if key not in new]
+            + [f"B new {_label(key)}" for key in new if key not in old])
 
 
 def _queue(env, tasks=()):
@@ -407,8 +453,8 @@ def _vary_datetime(env, monkeypatch, *, clocks, base, later, **_kw):
 def _vary_restart(env, monkeypatch, *, clocks, later, start, **_kw):
     clocks(wall=later, calendar=later)
     start["restart"] = True
-    return lambda first, second: (_date_reached(first, second) and first["stamp"] != second["stamp"]
-                                  and f'"context_captured_at":"{second["stamp"]}' in second["C"])
+    return lambda first, second: (_date_reached(first, second) and first["refreshed"] != second["refreshed"]
+                                  and f'"context_captured_at":"{second["refreshed"]}' in second["C"])
 
 
 def _vary_queue(env, monkeypatch, **_kw):
@@ -463,7 +509,7 @@ def _vary_fork(env, monkeypatch, *, start, **_kw):
     fork = env.drive_root.parent / "fork"
     fork.mkdir()
     start["ctx"] = _ctx(env, "another-task", fork)
-    spelled = json.dumps(str(fork.resolve()))[1:-1]
+    spelled = json.dumps(str(fork.resolve()), ensure_ascii=False)[1:-1]  # as the runtime block writes it
     return lambda first, second: spelled in second["C"] and spelled not in first["C"]
 
 
@@ -478,13 +524,14 @@ def _vary_assignment_size(env, monkeypatch, *, task, **_kw):
 
 def _vary_frame(env, monkeypatch, *, task, **_kw):
     task["text"] = _LONG
-    return lambda first, second: _regime(first, second, framed=False)
+    return lambda first, second: _LONG in second["user"] and _regime(first, second, framed=False)
 
 
 def _vary_framed_day(env, monkeypatch, *, clocks, base, later, task, **_kw):
     clocks(wall=base, calendar=later)
     task["text"] = _LONG
-    return lambda first, second: _date_reached(first, second) and _regime(first, second, framed=True)
+    return lambda first, second: (_LONG in first["user"] and _LONG in second["user"] and _date_reached(first, second)
+                                  and _regime(first, second, framed=True))
 
 
 def _vary_mcp(env, monkeypatch, **_kw):
@@ -515,7 +562,8 @@ _VARY = {"another_work": _vary_work, "time_time": _vary_time, "datetime": _vary_
 def _frame_known(memory):
     """What the one framing step of ``frame_budget`` re-forms, from the facts: WORLD's whole form (each ``## `` heading
     of the file this case wrote) becomes its headings, and ``## Review`` its one-line view."""
-    return {"B ## My World", "B ## Review", *(f"B gone {name}" for name in _named(memory.load_world_profile()) if name)}
+    return {"B ## My World", "B ## Review", *(f"B gone {_label(key)}" for key in _named(memory.load_world_profile())
+                                               if key[0].startswith("## "))}
 
 
 def _leak(item, what, *known):
@@ -562,9 +610,11 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
     refresh: a restart), across a month boundary and at another hour; the queue; money; review records; the engine's
     route health; the tools' registration order; the actor's drive (a fork); the assignment's size, whole and on a
     pressed fixture that frames the second start; the calendar between two framed starts; a failed MCP listing. The
-    schemas, A', D and every section of B keep their bytes, and each case checks that its fact reached the request
-    (C, the user row or the frame's own facts). A case whose start still moves holds a strict xfail bound to its
-    tracker item; it raises its known leak only when exactly the named labels moved, and fails outright otherwise."""
+    schemas, A', D and every section of B (and their order) keep their bytes, and each case checks its own witness of
+    the fact: in the request (C, the user row or the frame's own facts) for every case but ``mcp_liveness``, whose
+    failure reaches no row by design and is witnessed at the MCP manager. A case whose start still moves holds a strict
+    xfail bound to its tracker item; it raises its known leak only when every moved label is one the case names, and
+    fails outright otherwise."""
     from ouroboros import mcp_client
 
     _one_root(monkeypatch, tmp_path / "drive")
@@ -592,7 +642,7 @@ def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch, r
     start = {"ctx": _ctx(env, "another-task"), "window": window}
     reached = _VARY[fact](env, monkeypatch, clocks=clocks, base=base, later=later, start=start, task=task)
     second = _start(env, memory, task, **start)
-    assert reached(first, second), f"the {fact} fact never reached the request"
+    assert reached(first, second), f"the {fact} fact never reached its witness (the request; for mcp_liveness the manager)"
     moved = _moved(first, second)
     known = set(known[0](memory) if known and callable(known[0]) else known)
     unexplained = [label for label in moved if label not in known]
@@ -724,7 +774,8 @@ def test_a_knowledge_edit_changes_only_c_and_a_new_page_changes_b_but_never_a(tm
     assert f"page {page}" in after["B"] and "My page about the next request." in after["B"]
     assert "My page about the next request." not in after["C"]
     for start in (before, after):
-        assert start["head"] and start["B"][len(start["head"]):].startswith("## My story\n"), start["head"][-200:]
+        chars = start["head chars"]  # the declared count itself, never a slice that a negative count could rebuild
+        assert isinstance(chars, int) and 0 < chars < len(start["B"]) and start["B"].index("## My story\n") == chars, chars
     assert all(after[part] == before[part] for part in ("head", "wire", "schemas (sorted)", "A'", "D"))
     assert _moved(before, after) == ["B ## My story"]
     told, tail = before["B"][len(before["head"]):].rsplit("\n\nPages sealed by me: ", 1)  # the story's closing counts
