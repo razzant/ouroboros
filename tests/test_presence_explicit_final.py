@@ -391,6 +391,31 @@ def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_fi
     assert stored["result"] == FINAL and stored["wake_silent"] is True and room.h.calls == 3
     note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
     assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and FINAL not in room.transport.texts()
+    rows = room.h.inputs[-1]  # the note's request carries the words it asks to send, as the model's own row before it
+    at = next(index for index, row in enumerate(rows) if RECORD_NOTE in str(row.get("content")))
+    assert (rows[at - 1].get("role"), rows[at - 1].get("content")) == ("assistant", FINAL), rows[at - 1]
+    assert note.count(RECORD_NOTE) == 1, "the note is shown once"
+
+
+def test_a_records_only_note_lets_the_model_send_the_answer_it_wrote_once(records_room):
+    """Review round 2 (Grok, Astra 3): after an ack through the door the model writes its answer as prose; the note
+    returns it once, and the model, which can only copy what its request shows, sends those exact words through the
+    door with its finish. The person receives the answer once and the finish is the turn's silent record."""
+    room = records_room
+
+    def send_what_it_wrote(messages):
+        written = [row.get("content") for row in messages
+                   if row.get("role") == "assistant" and isinstance(row.get("content"), str)]
+        words = next((text for text in reversed(written) if text.strip()), "")
+        door = record_send(text=words, request_id="answer")["tool_calls"] if words else []
+        return {"content": None, "tool_calls": [*door, *finish(answer=FINAL)["tool_calls"]]}
+
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, send_what_it_wrote]
+    view, stored = settle(room, turn(room))
+    assert room.transport.texts() == [ACK, FINAL], "the answer reaches the person once, through the door"
+    assert (view["outcome"], view["text"]) == ("silent", "") and stored["metadata"]["presence_outcome"] == "silent"
+    assert stored["result"] == FINAL and room.h.calls == 3
+    assert [RECORD_NOTE in json.dumps(rows, ensure_ascii=False) for rows in room.h.inputs] == [False, False, True]
 
 
 def test_a_prose_final_into_a_records_only_turn_keeps_the_owed_reply(records_room):

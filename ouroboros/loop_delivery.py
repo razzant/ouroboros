@@ -1486,8 +1486,11 @@ def _no_tool_final_answer(
     noted_before = getattr(tools._ctx, "_records_only_noted", False)
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
     if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
+        note = getattr(tools._ctx, "_records_only_noted", False) and not noted_before
+        if note and str(content or "").strip() and not explicit_candidate:  # the words the note asks it to send
+            messages.append({"role": "assistant", "content": content})  # (a selection is already its own row)
         messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
-        if getattr(tools._ctx, "_records_only_noted", False) and not noted_before:
+        if note:
             _note_delivery_facts(tools, limit_ctx, llm_trace, line="")  # the record note is one-shot: the next answer stands
         else:
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
