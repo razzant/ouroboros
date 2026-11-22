@@ -443,3 +443,50 @@ def test_every_malformed_continuation_is_a_typed_refusal(tmp_path, bad):
     assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID") or answer.startswith("CHAT_HISTORY_SNAPSHOT_CHANGED")
     if bad.startswith("{valid}") or ":" in bad:  # a suffix is never a snapshot
         assert answer.startswith("CHAT_HISTORY_SNAPSHOT_INVALID")
+
+
+def test_learning_the_rooms_of_hits_never_reads_a_room(tmp_path, monkeypatch):
+    """A Project founded by an address naming only a room and a checksum (resolving it walks that room). With the
+    word index built, a miss reads no body, a hit in an unrelated room reads its own, and only the founding message
+    itself pays the walk that proves its one original; it still lists both its rooms."""
+    from ouroboros import dialogue_word_index as dwi
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
+
+    if not dwi.fts5_available():
+        pytest.skip("this SQLite has no FTS5: every words read is a scan")
+    project = create_project(tmp_path, "selected", origin="reconcile")
+    founding = {"ts": "2026-01-02T00:00:00+00:00", "direction": "in", "chat_id": 1, "client_message_id": "",
+                "text": "founding sentence"}
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts="", text=founding["text"])
+    (tmp_path / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": {"legacy": {
+        "project_id": project["id"], "project_chat_id": project["chat_id"], "source_ref": ref,
+        "source_text": founding["text"]}}}), encoding="utf-8")
+    ds.append(tmp_path, "chat", founding)
+    for n in range(96):
+        _say(tmp_path, f"2026-01-03T00:{n // 60:02d}:{n % 60:02d}Z", f"main filler {n}")
+    _say(tmp_path, "2026-01-04T00:00:00Z", "unique zebra", chat_id=777)
+    dwi.run(tmp_path, lambda: False)
+    real, read = ds._row, [0]
+
+    def counted(record):
+        read[0] += 1
+        return real(record)
+
+    monkeypatch.setattr(ds, "_row", counted)
+
+    def bodies(**kwargs):
+        read[0] = 0
+        answer = _read(tmp_path, **kwargs)
+        assert "Read by postings" in answer or "Read by scan of room" in answer, answer
+        return read[0], answer
+
+    miss, _ = bodies(words=["nothingmatches"])
+    assert miss == 0
+    zebra, answer = bodies(words=["zebra"])
+    assert zebra <= 2 and "unique zebra" in answer
+    scoped, answer = bodies(words=["zebra"], room_id="777")
+    assert scoped <= 2 and "unique zebra" in answer
+    _founder_reads, answer = bodies(words=["founding sentence"])
+    line = next(line for line in answer.splitlines() if line.startswith("row:"))
+    assert "Main" in line and f"[chat_id={project['chat_id']}]" in line

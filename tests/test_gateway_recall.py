@@ -428,16 +428,56 @@ def test_a_projects_founding_message_is_found_and_reopened_in_both_its_rooms(tmp
     assert set(reopened["row"]["rooms"]) == {"1", alpha}
 
 
-def test_an_unreadable_registry_is_one_gap_and_leaves_the_total_unknown(tmp_path, monkeypatch):
-    from ouroboros import projects_registry
+def _bound_world(root):
+    """A Project founded by an owner message whose address names only its room and checksum, and a task bound to it
+    that spoke in the hidden partition: both rows are the Project's by the room rule's sources alone."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
 
-    _say(tmp_path, "2026-11-01T10:00:00Z", "archive")
-    assert _search(tmp_path, "archive")["total"] == 1
+    project = create_project(root, "alpha", name="Alpha")
+    founding = {"ts": "2026-11-01T09:00:00Z", "direction": "in", "chat_id": 1, "client_message_id": "",
+                "text": "archive founding words"}
+    ds.append(root, "chat", founding)
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts="", text=founding["text"])
+    (root / "state").mkdir(exist_ok=True)
+    (root / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": {
+        "bound": {"project_id": project["id"], "project_chat_id": project["chat_id"], "chat_id": project["chat_id"],
+                  "source_ref": ref, "source_text": founding["text"]}}}), encoding="utf-8")
+    _say(root, "2026-11-01T10:00:00Z", "archive bound work", chat_id=0, direction="out", task_id="bound")
+    _say(root, "2026-11-01T11:00:00Z", "archive loner reply", direction="out", task_id="loner")  # its room needs lineage
+    return project
+
+
+def _break(root, monkeypatch, source):
+    from ouroboros import project_dialogue, projects_registry
 
     def broken(*_args, **_kwargs):
-        raise OSError("registry unreadable")
+        raise OSError(f"{source} unreadable")
 
-    monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
-    shaky = _search(tmp_path, "archive")
-    assert shaky["total"] is None and sum("rooms_unreadable" in gap for gap in shaky["gaps"]) == 1
+    if source == "reservations":
+        monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", broken)
+    elif source == "bindings":
+        (root / "state" / "project_task_bindings.json").write_text("{not json", encoding="utf-8")
+    elif source == "lineage":
+        monkeypatch.setattr(projects_registry, "_read_lineage", lambda *_a, **_kw: None)
+    else:
+        monkeypatch.setattr(project_dialogue, "physical_origin_refs", broken)
+
+
+@pytest.mark.parametrize("source, words", [
+    ("reservations", "archive bound"), ("bindings", "archive bound"), ("lineage", "archive loner"),
+    ("founding", "archive founding"),
+])
+def test_every_unreadable_source_of_the_room_rule_is_one_gap_and_an_undecidable_reopen(tmp_path, monkeypatch,
+                                                                                         source, words):
+    project = _bound_world(tmp_path)
+    readable = _search(tmp_path, words)
+    row, = readable["rows"]
+    assert readable["total"] == 1 and (source == "lineage") is (str(project["chat_id"]) not in row["rooms"])
+    assert _ok(tmp_path, *_run(row["reopen"]))["row"]["address"] == row["address"]
+    _break(tmp_path, monkeypatch, source)
+    shaky = _search(tmp_path, words)
+    assert shaky["total"] is None and sum("rooms_unreadable" in gap for gap in shaky["gaps"]) == 1, shaky
     assert not any("rooms_unreadable" in note for note in shaky["notes"])
+    status, body = _refused(tmp_path, *_run(row["reopen"]))
+    assert (status, body["code"]) == (503, "recall_source_unreadable")

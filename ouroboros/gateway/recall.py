@@ -113,7 +113,7 @@ def _showing(root: pathlib.Path, row: Mapping[str, Any]) -> Tuple[List[int], str
     store's own projection); with the registry unreadable, the chat it was written in, said."""
     from ouroboros.dialogue_recall import Showing
 
-    showing = Showing(root)
+    showing = Showing(root, [row])
     return showing.rooms(row), showing.gap
 
 
@@ -199,6 +199,9 @@ def reopen(root: pathlib.Path, text: str) -> Dict[str, Any]:
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     written = int(row_address(row)["chat_id"])
     rooms, rooms_note = _showing(root, row)
+    if rooms_note:  # whether a person's room shows it cannot be decided: neither the row nor "not found"
+        raise Refusal(503, "recall_source_unreadable", "part of the room rule could not be read, so this row can be "
+                                                       "neither shown nor ruled out")
     if not any(chat > 0 for chat in rooms):  # the hidden partition is no room a person reads
         raise Refusal(404, "recall_row_not_found", _NOT_FOUND)
     authors, notes = label_authors(root, [(found["seq"], row)])  # as the search names it, lineage epoch included
