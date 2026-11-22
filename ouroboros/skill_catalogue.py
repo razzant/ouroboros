@@ -364,7 +364,8 @@ def _named(rows: list, name: str, drive_root: Any = None, unread: Any = ()) -> d
     if not matches:
         return {"found": False, "name": name,
                 "message": "No installed skill has this exact name; list_skills() pages every name."}
-    out = {"found": True, "name": name, "skills": matches}
+    out = {"found": True, "name": name, "skills": matches,
+           **({"unreadable_sources": list(unread)} if unread else {})}  # the match is of the folders that were read
     if len(matches) > 1:
         out.update(ok=False, error={"code": "SKILL_IDENTITY_COLLISION", "message": (
             "Several directories claim this name, so none is selected as its manifest; "

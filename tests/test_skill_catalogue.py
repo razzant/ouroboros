@@ -624,3 +624,26 @@ def test_after_an_incomplete_walk_the_tool_names_the_unread_folder_and_claims_no
     assert "No skills are installed." not in page["hint"] and page["skills"] == []
     named = _listed(registry, name="known")
     assert named["found"] is None and named["unreadable_sources"] == [f"{hidden} (PermissionError)"]
+
+
+def test_a_named_match_found_in_an_incomplete_walk_says_what_was_not_read(registry, monkeypatch):
+    """Two folders claim "shared"; with one bucket unreadable the lookup finds one, and says the walk was partial,
+    since the other claimant may sit there (RV3 R3-5); both readable, the collision is back and nothing is unread."""
+    drive = registry._ctx.drive_root
+    _seed(registry, "shared")
+    _seed(registry, "shared", bucket="clawhub")
+    whole = _listed(registry, name="shared")
+    assert whole["found"] is True and whole["error"]["code"] == "SKILL_IDENTITY_COLLISION"
+    assert "unreadable_sources" not in whole
+    hidden = drive / "skills" / "clawhub"
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == hidden:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    partial = _listed(registry, name="shared")
+    assert partial["found"] is True and len(partial["skills"]) == 1
+    assert partial["unreadable_sources"] == [f"{hidden} (PermissionError)"]
