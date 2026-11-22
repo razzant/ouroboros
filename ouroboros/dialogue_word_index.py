@@ -334,7 +334,8 @@ def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
 # ---- retirement -----------------------------------------------------------------------------------
 
 def retire(root: Any) -> Dict[str, Any]:
-    """Drop every optional object in one write; the canonical rows are untouched. Returns the pages freed
+    """Stop the maintenance duty ``dialogue_words`` first, or its next look installs and rebuilds what was retired.
+    Drop every optional object in one write; the canonical rows are untouched. Returns the pages freed
     for reuse inside ``state/dialog.sqlite`` (the file does not shrink: no vacuum). Without FTS5 the virtual
     table cannot be dropped: the generation is latched unusable (the reader scans) and the objects stay
     coherent until a capable runtime retires them (``state="fts5_required"``)."""
