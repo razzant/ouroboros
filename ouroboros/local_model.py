@@ -162,6 +162,7 @@ class LocalModelManager:
         # even before _install_proc is assigned, closing the panic-window race.
         self._install_cancelled = threading.Event()
         self._panic_requested = False
+        self._stopping: set = set()  # children a stop detached and still awaits: Panic's request reaches them
 
     def get_status(self) -> str:
         if self._proc is not None and self._proc.poll() is not None:
@@ -641,7 +642,7 @@ class LocalModelManager:
 
         self._panic_requested = True
         self._install_cancelled.set()
-        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc)
+        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc, *self._stopping)
                     if proc is not None]
         if not request_only:
             self.stop_server()
@@ -656,6 +657,7 @@ class LocalModelManager:
             proc = self._proc
             binding, self._service_binding = self._service_binding, None
             install_proc = self._install_proc
+            self._stopping.update(child for child in (install_proc, proc) if child is not None)  # before leaving view
             self._proc = None
             self._install_proc = None
             self._status = "offline"
@@ -678,6 +680,7 @@ class LocalModelManager:
                     kill_process_tree(install_proc)
                 except Exception:
                     pass
+            self._forget_settled(install_proc)
 
         if proc is None:
             return
@@ -694,11 +697,17 @@ class LocalModelManager:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        self._forget_settled(proc)
         if binding is not None and proc.poll() is not None:
             from ouroboros.config import DATA_DIR
             from ouroboros.server_process import clear_service_binding
 
             clear_service_binding(DATA_DIR, "local_model", binding)
+
+    def _forget_settled(self, child: subprocess.Popen) -> None:
+        """An exited child leaves what Panic's request reaches; an unconfirmed one stays reachable."""
+        if child.poll() is not None:
+            self._stopping.discard(child)
 
     def health_check(self) -> Dict[str, Any]:
         """Query local server health and loaded-model info."""

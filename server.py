@@ -1379,10 +1379,9 @@ def _emergency_process_cleanup() -> dict:
     Host Service listeners close with this process: no port is swept."""
     from ouroboros.startup_historical_audit import live_background_children, stop_background_children
     background = stop_background_children()  # the maintenance child, the Storage count and Free
-    with suppress(Exception):  # a teardown cut short never reached the local model's stop: ask it, create none
-        from ouroboros.local_model import get_manager
-        if (model := get_manager(create=False)) is not None:
-            model.panic_stop(request_only=True)  # its server and an install, requested: no lock, no wait
+    with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
+        if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
+            model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
     begin_owned_stop(DATA_DIR, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:

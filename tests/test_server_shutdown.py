@@ -1014,21 +1014,16 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
     assert "crash storm" not in call["result_reason"].lower()
 
 
-def test_emergency_cleanup_requests_the_local_model_and_makes_no_manager(monkeypatch):
-    """A teardown cut short (the restart watcher's bound, a fault's census before exec) may not have reached the
-    local model's stop: the cleanup requests its captured server as Panic does, with no lock or wait, and on a
-    server that never made a model manager it makes none."""
-    import subprocess
-    import sys
-
+def _quiet_cleanup(monkeypatch):
+    """The cleanup with fresh background owners (a stop latches its owner for the process) and its other owners
+    replaced; the model module is the real one, loaded, with no manager yet."""
     import server
     from ouroboros import local_model, maintenance, storage, storage_free
-    from ouroboros.platform_layer import subprocess_new_group_kwargs
 
     for module, name, fresh in ((maintenance, "child", maintenance.MaintenanceChild()),
                                 (storage, "count", storage.StorageCounter()),
                                 (storage_free, "free", storage_free.FreeSpace())):
-        monkeypatch.setattr(module, name, fresh)  # never the process singletons: a stop latches for the process
+        monkeypatch.setattr(module, name, fresh)
     monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
     monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
@@ -1036,20 +1031,120 @@ def test_emergency_cleanup_requests_the_local_model_and_makes_no_manager(monkeyp
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
     monkeypatch.setattr(server, "_restart_requested", threading.Event())
     monkeypatch.setattr(local_model, "_manager", None)
+    return server, local_model
+
+
+def _model_child(*code):
+    """A sleeping child in its own group, as the model's server and an install are; ``code`` runs first."""
+    import subprocess
+    import sys
+
+    from ouroboros.platform_layer import subprocess_new_group_kwargs
+
+    return subprocess.Popen([sys.executable, "-c", "; ".join(("import signal, time", *code, "time.sleep(60)"))],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs())
+
+
+def _end(*children):
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+
+
+def test_emergency_cleanup_requests_the_local_model_and_makes_no_manager(monkeypatch):
+    """A teardown cut short (the restart watcher's bound, a fault's census before exec) may not have reached the
+    local model's stop: the cleanup requests both captured handles, the server's and an install's, as Panic does.
+    With the manager's lock held (a stop would wait on it) it still returns at once, and on a server that never
+    made a model manager it makes none."""
+    server, local_model = _quiet_cleanup(monkeypatch)
     server._emergency_process_cleanup()
     assert local_model._manager is None, "the cleanup provisions no model manager"
     manager = local_model.LocalModelManager()
-    manager._proc = subprocess.Popen(  # in its own group, as the model's server is
-        [sys.executable, "-c", "import time; time.sleep(60)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        **subprocess_new_group_kwargs())
+    manager._proc, manager._install_proc = _model_child(), _model_child()
     monkeypatch.setattr(local_model, "_manager", manager)
     try:
-        server._emergency_process_cleanup()
-        assert manager._proc.wait(timeout=10) is not None, "the captured model server is stopped"
+        with manager._lock:  # a start or stop in progress holds it
+            cleanup = threading.Thread(target=server._emergency_process_cleanup, daemon=True)
+            cleanup.start()
+            cleanup.join(5)
+            assert not cleanup.is_alive(), "the cleanup waited on the model manager's lock"
+        assert manager._proc.wait(timeout=10) is not None and manager._install_proc.wait(timeout=10) is not None
     finally:
-        if manager._proc.poll() is None:
-            manager._proc.kill()
-            manager._proc.wait(timeout=5)
+        _end(manager._proc, manager._install_proc)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
+def test_emergency_cleanup_reaches_a_model_child_the_graceful_stop_still_awaits(monkeypatch):
+    """The teardown's graceful stop takes the handles off the manager, sends TERM and waits up to 10 s: a child that
+    ignores TERM stays reachable, so the restart cleanup's request ends it during that wait; once it has exited the
+    stop forgets it, so no later request meets its pid."""
+    server, local_model = _quiet_cleanup(monkeypatch)
+    manager = local_model.LocalModelManager()
+    manager._proc = child = _model_child("signal.signal(signal.SIGTERM, signal.SIG_IGN)", "print('ready', flush=True)")
+    monkeypatch.setattr(local_model, "_manager", manager)
+    graceful = threading.Thread(target=manager.stop_server, daemon=True)
+    try:
+        assert child.stdout.readline() == b"ready\n"  # TERM is ignored from here on
+        graceful.start()
+        deadline = time.monotonic() + 5
+        while manager._proc is not None and time.monotonic() < deadline:  # the stop holds the handle now
+            time.sleep(0.01)
+        server._emergency_process_cleanup()
+        assert child.wait(timeout=5) is not None, "the request missed the child the graceful stop awaits"
+        graceful.join(10)
+        assert not graceful.is_alive() and manager._stopping == set()
+    finally:
+        _end(child)
+        if graceful.ident is not None:
+            graceful.join(15)
+
+
+def test_emergency_cleanup_never_waits_on_a_first_import_of_the_local_model(monkeypatch):
+    """Another thread may still be importing the optional model module (autostart, a status read): the cleanup asks
+    only a module already loaded, so it reaches its worker stop at once; once that module is loaded it is asked."""
+    import importlib
+    import importlib.abc
+    import importlib.util
+    import sys
+
+    import ouroboros
+
+    server, _local_model = _quiet_cleanup(monkeypatch)
+    label, asked = "ouroboros.local_model", []
+    entered, release, past = threading.Event(), threading.Event(), threading.Event()
+
+    class HeldFirstImport(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, path, target=None):
+            return importlib.util.spec_from_loader(fullname, self) if fullname == label else None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            entered.set()
+            assert release.wait(10)
+            manager = SimpleNamespace(panic_stop=lambda *, request_only: asked.append(request_only))
+            module.get_manager = lambda *, create: manager
+
+    monkeypatch.delitem(sys.modules, label)  # the real module and attribute come back after the test
+    monkeypatch.delattr(ouroboros, "local_model")
+    monkeypatch.setattr(sys, "meta_path", [HeldFirstImport(), *sys.meta_path])
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: past.set())
+    first = threading.Thread(target=importlib.import_module, args=(label,), daemon=True)
+    first.start()
+    try:
+        assert entered.wait(5)
+        cleanup = threading.Thread(target=server._emergency_process_cleanup, daemon=True)
+        cleanup.start()
+        assert past.wait(5), "the cleanup waited on another thread's first import of the model module"
+        cleanup.join(5)
+    finally:
+        release.set()
+        first.join(5)
+    server._emergency_process_cleanup()  # loaded now: its manager is asked
+    assert asked == [True]
 
 
 def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_path):
