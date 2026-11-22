@@ -187,6 +187,47 @@ def test_whole_jsonl_blank_lines_and_receipts(ctx):
     assert result["data"] == [{"pass": True}]
 
 
+# What POSIX `surrogateescape` reads back for the name bytes FF FE, spelled out so the value is the same on
+# every platform (Windows `os.fsdecode` refuses such bytes instead of escaping them).
+BYTE_NAME = "report_\udcff\udcfe.txt"
+
+
+def test_canonical_projections_keep_posix_name_bytes_inside_the_json_value(ctx):
+    """A stored result that names a file by non-UTF-8 POSIX bytes stays a readable document: the projection
+    escapes them inside the string value instead of failing the whole read at its UTF-8 encode."""
+    stated = f"wrote {BYTE_NAME}; обычная λ; and a literal \\udcff in prose"
+    store.update_task(ctx.drive_root, "bytey", lambda _: {"status": "completed", "result": stated})
+
+    delivery = _query_data(ctx, op="json", kind="task_result", ids=["bytey"], save_as="whole.json")
+    delivery.encode("utf-8")  # the journal, an HTTP response and the model request are all UTF-8
+    row = json.loads(delivery)
+    assert row["status"] == "ok" and row["data"]["result"] == stated == json.loads(saved(ctx, row))["result"]
+    # The name's bytes ride escaped, ordinary Unicode keeps its own bytes, a typed backslash stays doubled.
+    assert "wrote report_\\udcff\\udcfe.txt; обычная λ; and a literal \\\\udcff in prose" in delivery
+    projection = call(ctx, op="json", kind="task_result", ids=["bytey"], select="result", save_as="name.json")
+    assert json.loads(saved(ctx, projection)) == stated  # a projection is retained whatever it names
+    # `format=text` saves one selected string EXACTLY: a name with no UTF-8 carrier is refused, never rewritten.
+    refused(call(ctx, op="json", kind="task_result", ids=["bytey"], select="result", format="text"),
+            "surrogates not allowed")
+
+
+def test_receipt_rows_that_name_byte_paths_stay_readable_and_exact(ctx):
+    """The JSONL reader on the same class: a durable row holds the name escaped, a read returns the name itself,
+    the saved rows are the durable bytes, and a projection of the names is retained as well."""
+    raw = ('{"status":"pass","paths":["report_\\udcff\\udcfe.txt"]}\n'
+           '{"status":"fail","paths":["обычная λ.md"]}\n').encode("utf-8")
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", raw)
+
+    delivery = _query_data(ctx, op="jsonl", kind="verification_receipts", tail=0, save_as="rows.jsonl")
+    delivery.encode("utf-8")
+    whole = json.loads(delivery)
+    assert whole["status"] == "ok" and saved(ctx, whole) == raw
+    assert whole["data"] == [{"status": "pass", "paths": [BYTE_NAME]}, {"status": "fail", "paths": ["обычная λ.md"]}]
+    named = call(ctx, op="jsonl", kind="verification_receipts", tail=0, select="[*].paths[*]",
+                 filter={"field": "status", "op": "eq", "value": "pass"}, save_as="paths.json")
+    assert named["data"] == [[BYTE_NAME]] == json.loads(saved(ctx, named))
+
+
 def refused(result, *fragments):
     """A pre-existing typed refusal whose message carries each fragment."""
     assert (result["status"], result["code"]) == ("error", "query_failed"), result

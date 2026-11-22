@@ -375,8 +375,10 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
     assert live["task_id"] == "task-links"
     topic, payload = events[-1]
     assert topic == event_bus.CHAT_LINKS
-    # Presentation label and the stored row's invisible reply address ride along for the phone mirror.
-    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "message_origin", "task_id", "row_address"}
+    # The phone mirror also receives the stored row's reply address and author label.
+    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "message_origin", "task_id",
+                            "row_address", "reply_author_label"}
+    assert payload["reply_author_label"] == live["reply_author_label"] == "Ouroboros"
     assert payload["task_id"] == "task-links" and payload["message_origin"] == {}
     assert payload["actions"] == actions
     row = chat_rows(tmp_path)[-1]

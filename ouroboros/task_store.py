@@ -75,6 +75,16 @@ def receipt_anchor(root: Any, task_id: str) -> Optional[Tuple[str, bool]]:
     return root_id, bool(receipt is not None and receipt["kind"] not in (None, "null"))
 
 
+def result_text_at(root: Any, task_id: str, write_seq: int) -> Optional[str]:
+    """Fetch just the answer omitted from a display view, only while its source revision still matches."""
+    with open_store(root, write=False) as txn:
+        row = txn.conn.execute(
+            "SELECT json_extract(b.body, '$.result') FROM tasks t JOIN task_bodies b USING (task_id) "
+            "WHERE t.task_id=? AND t.write_seq=? AND json_type(b.body, '$.result')='text'",
+            (task_id, write_seq)).fetchone()
+    return row[0] if row else None
+
+
 def signature(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional[Tuple[int, str]]:
     """``(write_seq, updated_at)``: changes on every write; ``None`` for an absent task. The key
     the memos compare that used to compare a result file's stat."""

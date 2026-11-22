@@ -1,7 +1,7 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch, fetchJson } from './api_client.js';
 import { setResult } from './ui_primitives.js';
-import { parseModelSource } from './route_editor_primitives.js';
+import { catalogEntryIdentity } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
 const buttonRefreshes = new WeakMap();
@@ -70,6 +70,20 @@ export function catalogReadState(data = {}) {
     return Array.isArray(data.items) ? 'ok' : 'not_read';
 }
 
+/**
+ * A read that produced no usable evidence of its own: the whole read failed or never reached the server. A read
+ * that STATES its failure is one, whatever rows it carried; a read that only lists a source's errors is not — the
+ * rows that came are real, and the catalog keeps its usual life (no read per opened capsule). A successful empty
+ * read (the catalog really lists nothing) and a partial one are not failures either; both keep their rows, and only
+ * a failure asks the next opening to read again.
+ */
+export function catalogReadFailed(data = {}) {
+    const state = catalogReadState(data);
+    if (state === 'transport') return true;
+    if (state !== 'failed') return false;
+    return data?.read_state ? true : !Array.isArray(data.items);
+}
+
 /** Enrich the existing editor state; a read gap cannot erase last-known choices. */
 export function mergeModelCatalog(previous = {}, incoming = {}) {
     const read_state = catalogReadState(incoming);
@@ -122,8 +136,10 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
             code: 'scoped_catalog_unsupported', error: 'This core lists all models together. Read the full model catalog.' }] };
         if (params.has('view')) return { ...previous, items: [] };
         const provider = params.get('provider_id');
+        // A legacy row is scoped by the identity the catalog states (its `provider_id` and opaque `id` when it has
+        // them), never by reparsing a value that may hold another connection's spelling.
         return { ...previous, items: (previous.items || []).filter(item => provider === 'local' ? item.use_local
-            : !item.use_local && parseModelSource(item.value || item.id).source === provider) };
+            : !item.use_local && catalogEntryIdentity(item).source === provider) };
     }
     function reset() {
         for (const { controller } of requests.values()) controller.abort();
@@ -165,7 +181,7 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
  * An empty list replaces that source too; identical model names in other sources are unrelated. */
 export function withConnectionCatalogs(catalog = {}, connectionCatalogs = {}) {
     return { ...catalog, read_state: catalogReadState(catalog), items: [
-        ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, parseModelSource(item.value || item.id).source)),
+        ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, catalogEntryIdentity(item).source)),
         ...Object.values(connectionCatalogs).flat(),
     ] };
 }

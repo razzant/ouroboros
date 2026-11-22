@@ -131,7 +131,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
                     && summary.cardReview.revision > item.cardReview.revision);
             if (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision < item.cardRowRevision
                 || summary.cardRowRevision === item.cardRowRevision && !newerReview) return adoptedSource;
-        } else if (!Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
+        } else if (!(outcome && summary.currentOutcome) && !Number.isSafeInteger(summary.cardRowRevision) && (incomingTime < existingTime || incomingTime === existingTime
                 && compareHistoryPosition(row.history_position, existingPosition) < 0)) {
             // An older row still brings the report a newer frame of the outcome alone never carried: the line takes
             // the report and keeps its newer cause (without a report its body and fullBody are that cause's words).

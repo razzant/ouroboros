@@ -280,7 +280,7 @@ def _exact_reservations(ctx: "_RoundLimitContext", probe_messages: list, balance
     # the window leaves, not the whole ceiling (which over-reserved a wrap-up that fits).
     with bind_physical_attempt_context(_forced_physical_context(ctx, probe_messages)):
         probe = task_pacing.prospective_wrapup_attempt_request(
-            llm=ctx.llm, messages=probe_messages, model=ctx.active_model,
+            llm=ctx.llm, messages=probe_messages, model=ctx.active_model, task_id=ctx.task_id,
             reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
             allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
         )

@@ -1448,8 +1448,8 @@ def build_unreviewed_salvage_event(
     preview, omitted = salvage_preview("" if kept else body)
     outcome_text = str(outcome or "stopped")
     descendants = f" {len(children)} descendant task(s) were settled with it." if children else ""
-    # Only a receipt with a preview promises one below (new fallback ids; owed rows keep their bytes).
-    if str(settled_status or "").strip().lower() == STATUS_COMPLETED:
+    completed = str(settled_status or "").strip().lower() == STATUS_COMPLETED
+    if completed:
         # Completion-wins (owner 4=A): the kept result is the real answer, not a
         # salvage — but it still bypassed the normal delivery path, so say so.
         lines = [f"✅ Task {tid} {outcome_text}." + (" Its completed result is preserved below." if preview else "")
@@ -1494,14 +1494,13 @@ def build_unreviewed_salvage_event(
                 "runs could not be determined. Periodic reconciliation will settle "
                 "any that are still open.",
             ]
-    # GR7-4: identity digests the STABLE lines only; the mutable disclosure
-    # rides the text after the salvage body.
+    # Keep the existing fallback identity across replay; scope is a display-only disclosure.
+    did = (str(delivery_id or "").strip()
+           or _stop_episode_delivery_id(pathlib.Path(drive_root), tid)
+           or delivery_id_for(tid, "\n".join(lines)))
+    if preview and not completed:
+        lines[0] += " This saved task text may come from an earlier attempt."
     text = "\n".join(lines + disclosure_lines)
-    did = (
-        str(delivery_id or "").strip()
-        or _stop_episode_delivery_id(pathlib.Path(drive_root), tid)
-        or delivery_id_for(tid, "\n".join(lines))
-    )
     _persist_cancel_receipt(
         pathlib.Path(drive_root), tid,
         settled_status=str(settled_status or ""), outcome=outcome_text,

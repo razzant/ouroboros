@@ -510,11 +510,14 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
     # never generated again: the dead attempt is finalized from the outbox's bytes
     # and published like a saved terminal, with the answer still replayed by the
     # outbox. Only a confirmed absence of any registered answer reaches crash policy.
+    from ouroboros.terminal_time import captured_task_attempt
     from ouroboros.working_checkpoint import adopt_registered_answer
 
+    # Label the already-selected answer; the retry and checkpoint rails keep their queue ordinal.
+    physical_attempt = captured_task_attempt(task, meta.get("attempt"))
     try:
         adopted = adopt_registered_answer(
-            root, task, task_id, attempt=attempt, cause="worker_crash",
+            root, task, task_id, attempt=attempt if physical_attempt is None else physical_attempt, cause="worker_crash",
             registry_root=pathlib.Path(task.get("budget_drive_root") or root),
         )
     except Exception as exc:

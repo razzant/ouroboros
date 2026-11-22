@@ -252,13 +252,6 @@ def _sync_task_project_scope(task: Dict[str, Any], ctx: Any) -> None:
         task["project_id"] = project_id
 
 
-# The dispatched harness contract needs the whole CUSTODY verb set: a child that
-# can start a run but not wait on or cancel it is still broken. `delegate_answer`
-# is deliberately NOT part of this preflight — a nanny without it is degraded
-# (questions benign-decline at the engine timeout), never custody-broken, and
-# failing a dispatch over a missing convenience verb would cost real work.
-
-
 @dataclass(frozen=True)
 class Env:
     repo_dir: pathlib.Path
@@ -1101,6 +1094,7 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
             emit_task_results(self.env, self.memory, self.llm, self._pending_events, task, text, usage, llm_trace,
@@ -1117,6 +1111,7 @@ class OuroborosAgent:
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",
+            **({"task_attempt": n} if (n := source_task_attempt(task)) is not None else {}),
             task_type=self._current_task_type,
             task_text=str(task.get("text") or "")[:200],
             direct_chat=bool(task.get("_is_direct_chat")),

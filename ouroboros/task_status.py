@@ -54,7 +54,7 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, path_for_prose
 
 log = logging.getLogger(__name__)
 
@@ -1068,8 +1068,10 @@ def effective_task_result(
             and parent_status not in {STATUS_REQUESTED, STATUS_SCHEDULED, STATUS_RUNNING}
         )
         parent_authoritative_fields = set()
+        # The shared replica overlay already selects a settled ending. Capture has a separate owner.
+        if stale_replica:
+            parent_authoritative_fields.update(("status", "result", "_result_text_present", "error", "ts"))
         if parent_owns_terminal or stale_replica:
-            parent_authoritative_fields.update(("status", "result", "error", "ts"))
             producer_drive = None
         if producer_drive is None:
             parent_authoritative_fields |= _parent_workspace_artifact_lifecycle_fields(result)
@@ -1086,7 +1088,10 @@ def effective_task_result(
         # by a canonical pause the copyback has not yet cleared.
         if str(canonical_pause.get("state") or "") in LIVE_PAUSE_STATES and child_status not in FINAL_STATUSES:
             parent_authoritative_fields = parent_authoritative_fields | _LIVE_PAUSE_CANONICAL_FIELDS
-        child_overlay = project_replica_task_result_fields(result, child_result)
+        # A display view drops the answer's words, which the shared selector settles a contrary ending on:
+        # let the reader supply just that field, so a reloaded card decides an ending as the body does.
+        child_overlay = (reads.replica_overlay(result, child_result, drive_root, child_text)
+                         if reads is not None else project_replica_task_result_fields(result, child_result))
         for key, value in child_overlay.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
                 continue  # never from a replica: ``task_store.stated_roots`` relies on the stated root
@@ -1450,8 +1455,8 @@ def _artifact_stat_marker(path: str) -> str:
 def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps), each STAT'd
     as a GROUND-TRUTH fact (✓ present / ⚠ MISSING) so the parent absorbs whether a claimed
-    deliverable actually exists. LLM-first: this is a structural fact for the agent to react
-    to — it does NOT change the child's status or force a review (I, v6.39)."""
+    deliverable actually exists: a structural fact for the agent to react to, never a status change
+    or review (I, v6.39). The stat reads the registered path exactly; ``path_for_prose`` only spells it for UTF-8 text."""
     out: List[str] = []
     bundle = child.get("artifact_bundle") if isinstance(child.get("artifact_bundle"), dict) else {}
     arts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else (
@@ -1459,13 +1464,13 @@ def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     )
     for art in arts or []:
         if isinstance(art, dict):
-            name = str(art.get("name") or "").strip()
-            path = str(art.get("abs_path") or art.get("path") or "").strip()
+            name = str(art.get("name") or "")
+            path = str(art.get("abs_path") or art.get("path") or "")
             if path:
-                label = f"{name} -> {path}" if name else path
-                out.append(f"{label} {_artifact_stat_marker(path)}".strip())
+                label = f"{path_for_prose(name)} -> {path_for_prose(path)}" if name else path_for_prose(path)
+                out.append(f"{label} {marker}" if (marker := _artifact_stat_marker(path)) else label)
             elif name:
-                out.append(name)
+                out.append(path_for_prose(name))
     return out[:20]
 
 

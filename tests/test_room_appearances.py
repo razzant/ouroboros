@@ -1492,3 +1492,66 @@ class TestContactRepliesPass:
         monkeypatch.setattr(room_appearances, "_BATCH", 500)
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
         assert not gap(0, end) and not window(50)
+
+
+class TestStampedRoomEchoKeepsItsDisplayAddress:
+    """An accepted web echo's persisted ``kind: "room_echo"`` stamp is its display address, replay
+    included (CLIENT_CONTRACT §5): a reservation lost after the acceptance leaves the row in the room
+    it was written in — Main never guesses it back — while unstamped transport rows keep their
+    implicit Main mirror and an explicit Reply appearance survives the stamp."""
+
+    ECHO = {"direction": "in", "user_id": 1, "source": "web", "ingress_accepted": True, "kind": "room_echo"}
+
+    def test_a_stamped_echo_keeps_its_written_room_when_its_reservation_is_lost(self, tmp_path):
+        from ouroboros import memory_inventory as mi
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
+
+        nova = _project(tmp_path, "nova")
+        echo = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:00:00Z", "chat_id": nova,
+                                            "text": "Owner words stamped", "client_message_id": "echo-1",
+                                            **self.ECHO})
+        transport = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:01:00Z", "direction": "in", "chat_id": 987654,
+                                                 "user_id": 42, "text": "Via the transport",
+                                                 "source": "skill:telegram", "client_message_id": "tg-1"})
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova}
+        assert "Owner words stamped" in _texts(tmp_path, nova) and "Owner words stamped" not in _texts(tmp_path, 1)
+
+        # The reservation is lost; the registry itself stays readable.
+        registry = tmp_path / "state" / "projects.json"
+        registry.write_text(json.dumps({**json.loads(registry.read_text()), "projects": []}))
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert nova not in projects
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova}  # the stamp holds; no guessed Main
+        assert row_rooms(987654, transport.row, projects, rooms) == {987654, 1}  # the unstamped mirror is the old rule
+        facts = mi.membership_facts(tmp_path)  # canonical membership reads the same stamp from the row's metadata
+        assert mi.rooms_of_row(mi.row_meta(echo.row), facts) == {str(nova)}
+        assert mi.rooms_of_row(mi.row_meta(transport.row), facts) == {"987654", "1"}
+        assert "Owner words stamped" not in _texts(tmp_path, 1)  # Main's history honors the stamp on replay
+        assert "Via the transport" in _texts(tmp_path, 1)  # the genuine transport mirror replays as before
+        assert "Owner words stamped" in _texts(tmp_path, nova)  # its written room still reads it
+
+    def test_a_stamped_echo_keeps_its_explicit_reply_appearance(self, tmp_path):
+        from ouroboros import room_appearances
+        from ouroboros.chat_references import reference_from_row
+        from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+        from ouroboros.room_membership import row_rooms
+
+        nova, vega = _project(tmp_path, "nova"), _project(tmp_path, "vega")
+        # The accepted echo is already in the store before any key was derived (appearances=None:
+        # an older body's rows, the mark left behind), so the job below is the replay that owes
+        # the Reply its explicit appearance.
+        target = ds.append(tmp_path, "chat", {"ts": "2026-11-18T04:00:00Z", "direction": "out", "chat_id": vega,
+                                              "text": "A word in Vega", "client_message_id": "vega-1"},
+                           appearances=None)
+        echo = ds.append(tmp_path, "chat", {"ts": "2026-11-18T05:00:00Z", "chat_id": nova,
+                                            "text": "Owner words replying", "client_message_id": "echo-2",
+                                            "reply_to": reference_from_row(dict(target.row)), **self.ECHO},
+                         appearances=None)
+        projects, rooms = reserved_project_chat_ids(tmp_path), RoomResolver(tmp_path)
+        assert row_rooms(nova, echo.row, projects, rooms) == {nova, vega}
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        assert "Owner words replying" in _texts(tmp_path, vega)  # the Reply appearance reaches vega's reader
+        assert "Owner words replying" in _texts(tmp_path, nova)
+        assert "Owner words replying" not in _texts(tmp_path, 1)

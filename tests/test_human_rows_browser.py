@@ -7,6 +7,7 @@ the real history endpoint over the same data root. No runtime, provider or Teleg
 from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
+from tests._room_browser_shared import recording_chat_bridge as _host, serve_chat_history as _serve_history
 
 import json
 import os
@@ -30,40 +31,6 @@ def _evidence(tmp_path) -> Path:
     out = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or tmp_path)
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def _host(tmp_path, monkeypatch):
-    """The real bridge and send seam over a disposable data root; broadcast frames are kept."""
-    from supervisor import message_bus
-
-    (tmp_path / "logs").mkdir(exist_ok=True)
-    bridge = message_bus.LocalChatBridge({})
-    frames: list = []
-    bridge._broadcast_fn = frames.append
-    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
-    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
-    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
-    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 7, "owner_chat_id": 1})
-    return bridge, frames
-
-
-def _serve_history(page, data_root):
-    """The real history endpoint over the same data root (Playwright's routes run in its loop)."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ouroboros.gateway.history import make_chat_history_endpoint
-
-    client = TestClient(Starlette(routes=[Route("/api/chat/history", make_chat_history_endpoint(data_root))]))
-
-    def history(route):
-        url = urlsplit(route.request.url)
-        result = client.get(url.path + ("?" + url.query if url.query else ""))
-        route.fulfill(status=result.status_code, content_type="application/json", body=result.content)
-
-    page.route("**/api/chat/history**", history)
 
 
 def _push(mounted, frames, start=0):

@@ -153,6 +153,53 @@ def test_chat_history_replays_delivered_document_row(tmp_path):
     assert rec["size_bytes"] == 4096
 
 
+def test_chat_history_replays_posix_document_labels_from_live_delivery(tmp_path, monkeypatch):
+    from ouroboros.chat_chain import recorded_context
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.gateway.ws import _encode
+    from ouroboros.utils import path_for_prose
+    from supervisor import message_bus
+
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_args: None)
+    monkeypatch.setattr(message_bus, "utc_now_iso", lambda: "2026-07-09T00:00:00Z")
+    bridge, live = message_bus.LocalChatBridge(), []
+    bridge._broadcast_fn = lambda frame: live.append(json.loads(_encode(frame).encode("utf-8")))
+    deliveries = (("report-\udcff.txt", ""), (r"report-\udcff.txt", ""), ("файл🪶.txt", ""),
+                  ("report-weekly.txt", "Weekly notes — итоги"))
+    filenames = tuple(name for name, _caption in deliveries)
+    url = "/api/tasks/document/artifacts/captured.txt"
+    for name, caption in deliveries:
+        assert bridge.send_document(1, b"report\n", filename=name, caption=caption,
+                                    download_url=url, task_id="document")[0]
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={})))
+    assert response.status_code == 200
+    wire = response.body.decode("utf-8")
+    assert r'"report-\udcff.txt"' in wire and r'"report-\\udcff.txt"' in wire and "файл🪶.txt" in wire
+    rows = {row["filename"]: row for row in json.loads(wire)["messages"] if row.get("msg_type") == "document"}
+    assert set(rows) == set(filenames)
+    assert len({row["row_address"] for row in rows.values()}) == len(filenames)
+    for frame, (name, caption) in zip(live, deliveries, strict=True):
+        row = rows[name]
+        assert row["row_address"] == frame["row_address"] and frame["filename"] == name
+        assert row["caption"] == caption and row["download_url"] == url and "file_base64" not in row
+        _, source = recorded_context(tmp_path, row["row_address"])
+        record = json.loads(source.decode("utf-8"))
+        # The host-generated default text is UTF-8 prose (a byte name is spelled by path_for_prose,
+        # an authored caption is recorded as given); the exact structured filename is established
+        # independently by frame["filename"] above and by these history rows keyed on the raw name.
+        assert record["text"] == (caption or f"📎 {path_for_prose(name)}")
+
+    search = asyncio.run(make_chat_search_endpoint(tmp_path)(SimpleNamespace(query_params={"q": "report"})))
+    assert search.status_code == 200
+    candidates = json.loads(search.body.decode("utf-8"))["candidates"]
+    assert {item["filename"]: item["row_address"] for item in candidates if item.get("msg_type") == "document"} == {
+        name: row["row_address"] for name, row in rows.items()}
+
+
 def test_chat_history_replays_links_with_task_grouping_fields(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()

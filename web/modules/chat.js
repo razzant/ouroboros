@@ -22,13 +22,12 @@ import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
-import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, openCardControls, ownStopPress, reconcileWorkState, roomStatusView } from './work_status.js';
+import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, memberActivityEvidenced, openCardControls, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
-import { closingLine, historicalTerminalFacts, hydrateOpenSettledChild, hydrateRevealedCard, hydrateRevealedChildren, noteHandoverAttempt,
-    cardDetailReader, readCardDetail, readMissingCardDetail, refreshSettledCardDetail, syncClosingSentence, syncSettledItems, terminalChildFrame } from './settled_card.js';
+import { acceptLiveFrame, applyCardEnding, cardDetailReader, cardMetricFacts, closingLine, foldCardMetrics, hydrateOpenSettledChild, hydrateRevealedCard, hydrateRevealedChildren, noteHandoverAttempt, readCardDetail, readMissingCardDetail, refreshSettledCardDetail, replayedTerminalRecords, syncClosingSentence, syncSettledItems, terminalChildFrame } from './settled_card.js';
 import { noteOrigin, paintOrigin } from './task_origin.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
@@ -67,6 +66,7 @@ import {
     requestStop,
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
+import { composerHeightAtRest, syncShortRoom } from './composer_fold.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import { createChatReplies } from './chat_reply.js';
@@ -77,8 +77,10 @@ import {
     captureLiveCardPhaseState,
     censusTaskFacts,
     desiredLiveCardPhase,
+    frameObservesPhase,
     liveCardCountBits,
     markOwnerHurry,
+    observeChildPhase,
     replayTerminalPhase,
     restoreLiveCardPhaseState,
     setLiveCardPhase,
@@ -114,7 +116,7 @@ import {
     upsertToolFoldRow,
 } from './chat_render_batch.js';
 import { measure } from './layout_batch.js';
-import { placeCheckRow, placeReplayedEvidence } from './verification_presentation.js';
+import { placeToolDiagnostic, placeReplayedEvidence } from './verification_presentation.js';
 import {
     boundActivityPreview,
     authoredLine,
@@ -139,10 +141,10 @@ import {
     mergeStickyCostMeta,
     applyToolObservation,
     noteToolHostMetrics,
-    toolEvidenceIncomplete,
     partitionLocalEchoJournal,
     projectCollapsedActivity,
     positiveTaskTerminalFact,
+    TERMINAL_SUBAGENT_EVENTS,
     unkeyedFrameEndsTurn,
     stampNodeTimestamp,
     reconcileHydratedDirectActivities,
@@ -167,8 +169,7 @@ import {
 
 // Host placement: custody warns; settled reviews show results.
 const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
-const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 'completed_warn', 'failed',
-    'cancelled', 'rejected', 'interrupted']);  // a helper's narration is `progress`
+const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'interrupted', ...TERMINAL_SUBAGENT_EVENTS]);
 // Details and Reviews use the shared control glyph; ::after remains the touch hit area.
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
@@ -444,7 +445,8 @@ export function createChatInstance({
             if (!record.isSubagent || record.finished || !record.root?.isConnected) continue;
             if (workState.members.has(childId)) {
                 record.childDetailRead = undefined;
-                if (record.historicalUnavailable) withStableViewport(() => {
+                if (record.historicalUnavailable
+                        || (record.historicalUnconfirmed && memberActivityEvidenced(workState.memberStates?.get(childId)))) withStableViewport(() => {
                     setHistoricalUnavailable(record, false);
                     renderLiveCardMeta(record);
                     return true;
@@ -533,8 +535,7 @@ export function createChatInstance({
             if (!response.ok) return;
             const { queue } = await response.json();
             if (destroyed || leaving || !Array.isArray(queue?.pending) || !Array.isArray(queue?.running)) return;
-            const tasks = new Map([[queue.pending, 'queued'], [queue.running, 'working']]
-                .flatMap(([rows, phase]) => rows.map(row => [row.id, { ...row.task, phase }])));
+            const tasks = new Map([...queue.pending, ...queue.running].map(row => [row.id, row.task]));
             withStableViewport(() => {
                 for (const record of children) {
                     if (record.finished || !record.root?.isConnected || record.lastLiveObservedAt > started) continue;
@@ -542,9 +543,10 @@ export function createChatInstance({
                     if (task && 'project_admission_hold' in task) {
                         missingManagedTaskIds.delete(record.groupId);
                         restoreCardActivity(record, task.project_admission_hold);
-                        syncParkedPhase(record, ws.isConnected?.() === false ? 'unknown' : task.phase, task);
+                        if (record.projectHold && !workState.memberStates && record.censusPhase
+                                && ws.isConnected?.() !== false) syncParkedPhase(record, '');
                         record.projectHoldQueued = Boolean(record.projectHold);
-                    } else if (!task && record.projectHoldQueued) {
+                    } else if (!tasks.has(record.groupId) && record.projectHoldQueued) {
                         record.projectHoldQueued = false;
                         missingManagedTaskIds.add(record.groupId);
                         void reconcileMissingManagedTask(record.groupId);
@@ -559,9 +561,9 @@ export function createChatInstance({
         if (destroyed || leaving) return;
         if (data) void refreshChildProjectHolds();
         const before = workState;
-        workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false);
+        workState = reconcileWorkState(workState, data, chatId, ws.isConnected?.() !== false, snapshotRequestedAt);
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
-        applyCardWorkViews(liveCardRecords, workState);
+        withStableViewport(() => applyCardWorkViews(liveCardRecords, workState));
         chatDecision.syncWorks(workState);
         changedOffers(liveCardRecords, before, workState).forEach(syncCancelRunButton);
         syncHeaderControlState(data ?? { accounting: { available: false } });
@@ -742,34 +744,21 @@ export function createChatInstance({
     }
 
     // Fold host facts; absent counters stay absent.
-    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false } = {}) {
-        const rounds = Number.isInteger(metrics?.rounds) && metrics.rounds >= 0 ? metrics.rounds : null;
-        const [calls, errors, routing, completion] = ['tool_calls', 'tool_errors', 'routing_tool_calls', 'completion_tool_calls']
-            .map(key => Number.isInteger(metrics?.[key]) && metrics[key] >= 0 ? metrics[key] : null);
-        const hasToolEvidence = calls > 0 || errors > 0 || metrics.tool_evidence?.observations?.length
-            || metrics.tool_evidence?.legacy?.calls || toolEvidenceIncomplete(metrics.tool_evidence?.coverage);
-        if (rounds === null && calls === null && !hasToolEvidence) return false;
+    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false, attempt, recorded = false } = {}) {
+        const facts = taskId && cardMetricFacts(metrics);
+        if (!facts) return false;
         return withStableViewport(() => {
             const record = getLiveCardRecord(taskId);
             const before = captureLiveCardProjection(record);
-            const duration = Number(metrics.duration_sec);
-            if (rounds !== null) record.rounds = Math.max(record.rounds ?? 0, rounds);
-            if (metrics.duration_sec != null && Number.isFinite(duration)) record.durationSec = duration;
-            if (calls !== null) record.toolCalls = Math.max(record.toolCalls ?? 0, calls);
-            let changed = false;
-            // Rounds and a known zero are facts, not a tool invocation or a row of work.
-            if (hasToolEvidence) {
-                const summary = noteToolHostMetrics(record, { calls, errors, routing, completion, counts: metrics.tool_call_counts, evidence: metrics.tool_evidence });
-                if (summary.calls > 0 || record.toolCalls != null) record.toolCalls = summary.calls;
-                record.toolErrors = summary.errors;
-                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs, summarizeChatLiveEvent)
-                    && renderLiveCardTimeline(record);
-            }
+            const projection = foldCardMetrics(record, metrics, facts, attempt, recorded);
+            if (!projection) return false;
+            const { owned, summary } = projection;
+            // A dateless current-work carrier belongs last; other attempts can anchor a real call, not today's chip.
+            const anchor = owned && !Number.isFinite(Date.parse(rawTs)) ? rawTs : replayedEvidenceTs(facts.evidence, owned ? rawTs : '');
+            const changed = summary && placeReplayedEvidence(record, summary, facts.evidence, anchor, normalizeLogTs, summarizeChatLiveEvent)
+                && renderLiveCardTimeline(record);
             updateLiveCardCount(record);
             renderLiveCardMeta(record);
-            // A timestamp-free current-work carrier intentionally belongs at the page end.
-            // Dated carriers may carry earlier evidence past an intervening owner message.
-            const anchor = Number.isFinite(Date.parse(rawTs)) ? replayedEvidenceTs(metrics.tool_evidence, rawTs) : rawTs;
             reanchorTaskCard(record, anchor, { suppressDomInsert });
             ensureLiveCardVisible(record, { suppressDomInsert });
             return Boolean(changed || liveCardProjectionChanged(before, record));
@@ -1145,9 +1134,8 @@ export function createChatInstance({
     }
 
     function admitCardMetadata(row) {
-        // Carrier facts precede presentation returns.
-        if ((row.tool_evidence || Number.isInteger(row.rounds)) && row.task_id) noteToolMetrics(row.task_id, row, row.ts || row.timestamp || '');
         if (row.system_type === 'task_evidence') {
+            if (!_historyReplayActive) noteToolMetrics(row.task_id, row, row.ts);
             // The task's own evidence: mints its card at the carrier's row (zero tools included).
             const record = getLiveCardRecord(row.task_id);
             const activity = activeDirectActivities.get(row.task_id);
@@ -1161,7 +1149,7 @@ export function createChatInstance({
         }
         if (isModelWaitReference(row)) {
             const changed = modelWaits.observe(row.task_id, row);
-            return row.outcome_axes ? appendTaskSummaryToLiveCard(row) || changed : changed;
+            return row.outcome_axes && (!_historyReplayActive || row.task_phase === 'finalizing') ? appendTaskSummaryToLiveCard(row) || changed : changed;
         }
         const reference = reviewReferenceFromRow(row);
         if (!reference) return undefined;
@@ -1313,7 +1301,7 @@ export function createChatInstance({
         resetLiveCardRecord(record);
         // A card the last complete body does not name asks for a read.
         if (!_historyReplayActive && workState.complete && !workState.members.has(normalizedGroupId)) reread();
-        applyCardWorkViews(new Map([[normalizedGroupId, record]]), workState);
+        applyCardWorkViews([record], workState);
         const activity = activeDirectActivities.get(normalizedGroupId);
         if (activity) syncParkedPhase(record, activity.phase, activity);
         const ended = concludedDirectActivities.get(normalizedGroupId);
@@ -1418,8 +1406,9 @@ export function createChatInstance({
         if (promoted) {
             record.root.classList.add('subagent');
             record.root.dataset.subagent = '1';
-            // A frame that outran its lineage minted this shell root-shaped:
-            // the conversion a root earned is re-derived from the child's facts.
+            promoteChildCard(record, workState);
+            if (record.finished) setLiveCardPhase(record, replayTerminalPhase(record), record.phaseEl.textContent, record.phaseEl.className);
+            // This shell received frames before its lineage.
             syncBlockChrome(record);
             refitCollapsedActivity(record);  // a child shows one line
         }
@@ -1640,25 +1629,32 @@ export function createChatInstance({
         }
         // One tool evidence row per block.
         const foldView = summary.toolCall ? applyToolObservation(record, summary.toolCall) : null;
-        if (summary.toolCall?.fact === 'wait_ended' && record.toolFold.calls.get(summary.toolCall.key)?.settlement) {
-            summary = { ...summary, visible: false }; // wait history remains in the fold
+        const call = summary.toolCall;
+        const settlement = call && record.toolFold.calls.get(call.key)?.settlement;
+        if (settlement && (call.fact === 'wait_ended' || call.fact === 'settled'
+                && (call.status !== settlement.status || Boolean(call.hostError) !== settlement.hostError))) {
+            summary = { ...summary, visible: false }; // the accepted settlement owns the diagnostic
         }
         if (closedPhase && !initialContent) {
             if (foldView) {
                 upsertToolFoldRow(record, foldView, ts, rawTs);
-                if (summary.dedupeKey?.endsWith(':check') || summary.hostRefusedStep) placeCheckRow(record, summary, ts, rawTs);
+                // A plain error arriving after the ending stays in the fold, just as on replay.
+                const plainError = call.status === 'error' && summary.phase === 'error' && !call.hostError
+                    && !summary.hostRefusedStep && !['run_command', 'run_script'].includes(call.tool);
+                if (!plainError && call.fact === 'settled' && summary.visible && summary.headline) placeToolDiagnostic(record, summary, ts, rawTs);
                 renderLiveCardTimeline(record);
                 updateLiveCardCount(record);
+                if (!record.isSubagent) reanchorTaskCard(record, rawTs, { suppressDomInsert });
             }
             if (summary.modelExecution) record.modelExecution = summary.modelExecution;
             renderLiveCardMeta(record, summary.costProjection);
             return liveCardProjectionChanged(before, record);
         }
-        if (!closedPhase && (summary.terminal || (!_historyReplayActive && !_syncPass1Active
-                && ['working', 'thinking'].includes(summary.phase)))) {
+        if (!closedPhase && (summary.terminal
+                || frameObservesPhase(record, summary, !_historyReplayActive && !_syncPass1Active))) {
             restoreCardActivity(record);
-            if (!summary.terminal) {
-                if (record.isSubagent && record.parkedPhase === 'unknown' && ws.isConnected?.() !== false) syncParkedPhase(record, summary.phase);
+            if (!summary.terminal && (!record.isSubagent || ws.isConnected?.() !== false)) {
+                if (!record.isSubagent || observeChildPhase(record, summary.phase)) record.livePhaseAt = Date.now();
                 record.lastLiveObservedAt = Date.now();
                 missingManagedTaskIds.delete(nextGroupId);
             }
@@ -1732,7 +1728,6 @@ export function createChatInstance({
         }
         if (summary.modelExecution) record.modelExecution = summary.modelExecution;
         if (summary.effort) record.effort = summary.effort;
-        if (Number.isInteger(summary.toolCalls)) record.toolCalls = Math.max(record.toolCalls ?? 0, summary.toolCalls);
         record._lastFrameMeta = Array.isArray(summary.meta) ? summary.meta : [];
         if (rawTs) record.latestSourceTs = rawTs;
         renderLiveCardMeta(record, summary.costProjection);
@@ -1799,26 +1794,29 @@ export function createChatInstance({
             || liveCardProjectionChanged(before, record));
     }
 
-    function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
+    function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false, currentOutcome = false, drawn = true } = {}) {
         const taskId = msg?.task_id || '';
-        const rawTs = msg?.ts || new Date().toISOString();
+        const rawTs = msg?.ts || msg?.revision || '';
         if (!taskId) {
             // Unkeyed summaries keep durable/log evidence but close no card.
             return false;
         }
-        let changed = false;
+        const record = getLiveCardRecord(taskId);
+        let changed = Boolean(record.reviewController?.updateMany(reviewGroupsFromTaskDetail(msg, taskId)));
+        if (!acceptLiveFrame(msg, _historyReplayActive, () => record, (card, words) => { changed = noteTaskDetails(card, words) || changed; })) {
+            return renderLiveCardMeta(record, taskCostProjection(msg, rawTs)) || changed;
+        }
         // Restore historical task name.
         if (msg?.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         const finalizing = msg?.task_phase === 'finalizing' || msg?.outcome_final === false;
-        changed = noteToolMetrics(taskId, msg, rawTs, { suppressDomInsert }) || changed;
-        const record = getLiveCardRecord(taskId);
+        // `currentOutcome` marks the host's composed selected ending: the count it carries is a record.
+        changed = noteToolMetrics(taskId, msg, rawTs, { suppressDomInsert, recorded: currentOutcome }) || changed;
         msg = { quiet_effective: record.quietEffective ?? record.historicalTerminal?.quiet_effective, ...msg };
         const summary = taskTerminalSummary({ ...msg, task_id: taskId });
         changed = noteTaskDetails(record, msg) || changed;
-        changed = Boolean(record.reviewController?.updateMany(reviewGroupsFromTaskDetail(msg, taskId))) || changed;
         if (finalizing && !record.finished) record.finalizingHold = true;
         changed = applyLiveCardState(
-            { ...summary, costProjection: taskCostProjection(msg, rawTs) },
+            { ...summary, visible: drawn && summary.visible, currentOutcome, costProjection: taskCostProjection(msg, rawTs) },
             taskId, rawTs, { suppressDomInsert },
         ) || changed;
         if (finalizing) return changed;
@@ -1859,20 +1857,23 @@ export function createChatInstance({
         }
     }
 
-    function learnSubagentLineage(msg) {
-        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent') return '';
+    function registerChild(msg) {
+        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent') return null;
         const parentId = taskKey(msg.parent_task_id);
-        const childId = String(msg.subagent_task_id || msg.task_id || '').trim();
-        if (!parentId || !childId || parentId === childId) return '';
-        setSubagentParent(childId, {
-            parentId, role: taskKey(msg.subagent_role), model: msg.model,
-        });
+        const childId = taskKey(msg.subagent_task_id || msg.task_id);
+        if (!parentId || !childId || parentId === childId) return null;
+        const role = taskKey(msg.subagent_role);
+        setSubagentParent(childId, { parentId, role, model: msg.model });
+        return { childId, parentId, role };
+    }
+
+    function learnSubagentLineage(msg) {
+        const child = registerChild(msg);
+        if (!child) return '';
         const event = String(msg.subagent_event || '').toLowerCase();
         const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);
-        if (replayTerminal || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {
-            subagentTerminalChildren.add(childId);
-        }
-        return childId;
+        if (replayTerminal || TERMINAL_SUBAGENT_EVENTS.has(event)) subagentTerminalChildren.add(child.childId);
+        return child.childId;
     }
 
     function summarizeSubagentCardFrame(evt, childId, overrides = {}, rawTs = '') {
@@ -1907,7 +1908,7 @@ export function createChatInstance({
         const rawTs = msg?.ts || new Date().toISOString();
         if (!taskId) return false;
         modelWaits.observe(taskId, msg);
-        let changed = msg.tool_evidence || Number.isInteger(msg.rounds) ? noteToolMetrics(taskId, msg, rawTs) : false;
+        let changed = !_historyReplayActive && noteToolMetrics(taskId, msg, rawTs);
         // Only host-attested progress grants Stop authority.
         if (grantCancelAuthority && msg.cancelable === true) {
             changed = markTaskCancelable(String(taskId)) || changed;
@@ -1939,7 +1940,7 @@ export function createChatInstance({
         if (msg.suggested_name) changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         // Outcome survives a lost summary even while post-work keeps controls live.
         if (
-            (msg.task_phase === 'finalizing' || taskDoneIsTerminal(msg))
+            (msg.task_phase === 'finalizing' || (!_historyReplayActive && taskDoneIsTerminal(msg)))
             && (msg.outcome_axes || msg.review_projection || msg.reason_code)
         ) {
             changed = appendTaskSummaryToLiveCard(msg) || changed;
@@ -1948,14 +1949,10 @@ export function createChatInstance({
     }
 
     function updateSubagentCardFromEvent(evt, tsValue) {
-        // undefined = not a subagent frame: callers fall through.
-        if (!evt || String(evt.delegation_role || '').toLowerCase() !== 'subagent') return undefined;
-        const parentId = taskKey(evt.parent_task_id);
-        const childId = String(evt.subagent_task_id || evt.task_id || '').trim();
-        if (!parentId || !childId || parentId === childId) return undefined;
+        const child = registerChild(evt);
+        if (!child) return undefined;  // not a subagent frame: callers fall through
+        const { childId, parentId, role } = child;
         const event = String(evt.subagent_event || '').toLowerCase();
-        const role = taskKey(evt.subagent_role);
-        setSubagentParent(childId, { parentId, role, model: evt.model });
         // Worker narration also carries subagent_event="progress": activity, not a lifecycle row. Its key keeps a later
         // terminal frame from overwriting the only full narration disclosure.
         if (!SUBAGENT_LIFECYCLE_EVENTS.has(event)) {
@@ -2032,13 +2029,13 @@ export function createChatInstance({
     }
 
     // A child's card from its task_done or a late review's current outcome (log frames without subagent metadata).
-    function routeSubagentTerminalToCard(childId, evt, stored = false) {
+    function routeSubagentTerminalToCard(childId, evt, stored = false, phase = taskTerminalPhase(evt)) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
         const record = liveCardRecords.get(childId);
         if (stored) noteHandoverAttempt(record, evt, withStableViewport, true);
         const alreadyFinished = record?.finished;
-        const updated = Boolean(updateSubagentCardFromEvent(terminalChildFrame(childId, info, evt), evt.ts || evt.timestamp));
+        const updated = Boolean(updateSubagentCardFromEvent(terminalChildFrame(childId, info, evt, phase), evt.ts || evt.timestamp));
         if (!stored && alreadyFinished && taskDoneIsTerminal(evt)) hydrateOpenSettledChild(record, hydrateCardReviews);
         return updated;
     }
@@ -2052,35 +2049,38 @@ export function createChatInstance({
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;
         // owner_hurry.py marks an existing card, never progress.
-        if (eventType === 'owner_hurry') {
-            return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
-        }
+        if (eventType === 'owner_hurry') return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
         if (!isGroupedTaskEvent(evt)) return false;
         const taskId = getLogTaskGroupId(evt) || '', late = evt.current_outcome;
-        if (!taskId || (late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt))) return false;
+        if (!taskId) return false;
         const rawTs = late?.revision || evt.ts || evt.timestamp || new Date().toISOString();
         // Skill lifecycle belongs to its explicit owner.
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
+        let changed = false;
+        const wasFinished = liveCardRecords.get(taskId)?.finished;
+        if ((late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt)) || ((late || ['task_started', 'task_done'].includes(eventType))
+                && !acceptLiveFrame(evt, _historyReplayActive, () => getLiveCardRecord(taskId), (card, words) => { changed = noteTaskDetails(card, words); }))) {
+            const journal = evt.tool_evidence && noteToolMetrics(taskId, { tool_evidence: evt.tool_evidence }, '');
+            return renderLiveCardMeta(liveCardRecords.get(taskId), taskCostProjection(evt, rawTs)) || Boolean(journal) || changed;
+        }
+        if (wasFinished && !liveCardRecords.get(taskId)?.finished) concludedDirectActivities.delete(taskId);
+        const metrics = late || evt;
+        changed = ((metrics.tool_evidence || Number.isInteger(metrics.rounds)
+            || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)) && noteToolMetrics(taskId, metrics, rawTs)) || changed;
         const childInfo = subagentChildParents.get(taskId);
-        if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late, ts: rawTs });
+        if (childInfo && (late || eventType === 'task_done')) return routeSubagentTerminalToCard(taskId, { ...evt, ...late, ts: rawTs }) || changed;
         const summary = summarizeChatLiveEvent(evt);
         // Finished children still receive settled costs.
         if (childInfo && subagentTerminalChildren.has(taskId) && !summary?.toolCall && eventType !== 'task_cost_finalized') return false;
-        // Root/child fold: metrics, terminal and replay.
-        let changed = evt.tool_evidence || Number.isInteger(evt.rounds) || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)
-            ? noteToolMetrics(taskId, evt, rawTs) : false;
-        if (!childInfo) changed = attachTaskDetailReviews(taskId, evt) || changed;
+        if (!childInfo) changed = attachTaskDetailReviews(taskId, late ? { ...late, task_id: taskId } : evt) || changed;
         if (!summary) return changed;
         if (childInfo) {
             getSubagentCardRecord(taskId, childInfo.parentId, childInfo.role);
             changed = attachTaskDetailReviews(taskId, evt) || changed;
         }
-        const presented = withTaskCostMeta(summary, evt, {
-            replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
-            rawTs,
-        });
-        const queued = queueTaskLiveUpdate(presented, taskId, rawTs);
+        const replace = eventType === 'task_done' || eventType === 'task_cost_finalized';
+        const queued = queueTaskLiveUpdate(withTaskCostMeta(summary, evt, { replace, rawTs }), taskId, rawTs);
         if (childInfo) return Boolean(changed || queued);
         const subagentChanged = updateSubagentCardFromEvent(evt, rawTs);
         // Host-attested Stop facts also travel on tool-only turns.
@@ -2271,13 +2271,7 @@ export function createChatInstance({
                             && msg.system_type !== 'project_question_pointer') evidencedTaskIds.add(msg.task_id);
                 }
 
-                const historicalTerminalProjections = new Set();
-                for (const msg of messages) if (msg.historical_terminal && msg.task_id) {
-                    historicalTerminals.set(msg.task_id, historicalTerminalFacts(msg));
-                    if (msg.summary_kind === 'terminal_root_projection' || msg.outcome_final === true) {
-                        historicalTerminalProjections.add(msg.task_id);
-                    }
-                }
+                const endings = replayedTerminalRecords(messages, liveCardRecords, historicalTerminals);
                 // Rows pass 1 attached to a card; pass 2 mounts the card with them.
                 const cardRowsAttached = new Set();
                 // First pass builds card state without DOM insertion.
@@ -2285,8 +2279,12 @@ export function createChatInstance({
                 try { for (const msg of messages) {
                     _historyRow = msg;
                     if (['quiz_answer', 'quiz_closed'].includes(msg.system_type)) chatDecision.applyQuizStateFrame(messagesDiv, { ...msg.quiz, task_id: msg.task_id });
-                    if (msg.system_type === 'task_evidence') { admitCardMetadata(msg); continue; }
-                    if (isReplayEvidenceRow(msg) || msg.system_type === 'project_question_pointer') continue;
+                    if (msg.system_type !== 'task_evidence' && (isReplayEvidenceRow(msg) || msg.system_type === 'project_question_pointer')) continue;
+                    if (msg.role !== 'user' && (msg.is_progress
+                            || ['task_summary', 'task_evidence'].includes(msg.system_type)
+                            || ['task_metrics_event', 'task_eval', 'task_done'].includes(msg.type || msg.event))) {
+                        noteToolMetrics(msg.task_id, msg, msg.ts, { attempt: endings.get(msg.task_id)?.stamp.attempt });
+                    }
                     if (admitCardMetadata(msg) !== undefined) continue;
                     if (attachReviewFromRow(msg, msg.ts || '') !== undefined) continue;
                     if (attachCardRow(msg, msg.ts || '', { suppressDomInsert: true }) !== undefined) {
@@ -2311,8 +2309,10 @@ export function createChatInstance({
                         if (historyCard && historicalTerminals.has(taskId)) historyCard.historicalTerminal = historicalTerminals.get(taskId);
                         continue;
                     }
-                    if (msg.historical_terminal) getLiveCardRecord(taskId).quietEffective = msg.historical_terminal.quiet_effective;
-                    if (msg.system_type === 'task_summary') appendTaskSummaryToLiveCard(msg, { suppressDomInsert: true });
+                    if (msg.system_type === 'task_summary') {
+                        if (endings.has(taskId) || msg.task_phase === 'unfinished') getLiveCardRecord(taskId);
+                        else appendTaskSummaryToLiveCard(msg, { suppressDomInsert: true });
+                    }
                 } } finally { _syncPass1Active = false; _historyRow = null; }
 
                 // Pass 2 inserts cards at the first visible task message, then finishes them.
@@ -2375,12 +2375,12 @@ export function createChatInstance({
                         insertCardIfNeeded(taskId); routeSubagentProgressToCard(taskId, msg, true); continue;
                     }
                     if (taskId && replayConcludesTask(msg)) {
-                        insertCardIfNeeded(taskId);
                         const child = subagentChildParents.has(taskId);
+                        insertCardIfNeeded(taskId);
                         if (child) routeSubagentFinalMessageToCard(taskId, msg);
                         // A replayed early final must not finalize a root's card.
                         if (!child && msg.task_phase === 'finalizing') markLiveCardFinalizing(taskId, msg);
-                        else if (child || !msg.historical_terminal || positiveTaskTerminalFact(msg)) {
+                        else if (!endings.has(taskId) && (child || !msg.historical_terminal || positiveTaskTerminalFact(msg))) {
                             finishLiveCard(taskId, msg.task_terminal_status ? taskTerminalPhase(msg) : replayTerminalPhase(liveCardRecords.get(taskId)));
                         }
                         if (child) continue;
@@ -2403,32 +2403,24 @@ export function createChatInstance({
                     if (msg.role === 'user') { markIngressSaved(messagesDiv, msg); markSwarmLabel(messagesDiv, msg); replies.adopt(msg); unconfirmed.settle(msg); }
                 }
                 _historyRow = null;
-                // Durable terminal facts settle the named card, including progress-only replays.
-                const settleReplayedTerminal = (tid, terminalRecord, phase, summary = false) => {
-                    if (!taskDoneIsTerminal(terminalRecord)) return;
-                    if (subagentChildParents.has(tid)) return routeSubagentTerminalToCard(tid, terminalRecord);
+                for (const [tid, ending] of endings) {
+                    if (!ending) continue;
                     const record = liveCardRecords.get(tid);
-                    if (!record) return;
-                    if (terminalRecord.suggested_name) applySuggestedName(tid, terminalRecord.suggested_name);  // evidence names a card whose own rows lie elsewhere
-                    record.quietEffective = terminalRecord.quiet_effective ?? record.quietEffective;
-                    noteTaskDetails(record, terminalRecord);
+                    if (!record) continue;
+                    const { detail, phase, rich, stamp, drawn } = ending;
+                    _historyRow = detail;
+                    applyCardEnding(record, stamp);
+                    if (subagentChildParents.has(tid)) {
+                        routeSubagentTerminalToCard(tid, detail, false, phase);
+                        continue;
+                    }
+                    record.quietEffective = detail.quiet_effective ?? record.quietEffective;
                     insertCardIfNeeded(tid);
-                    if (summary) appendTaskSummaryToLiveCard(terminalRecord); else finishLiveCard(tid, phase);
-                };
-                const terminalTaskRecords = new Map(messages.filter((msg) => msg.task_id && msg.task_terminal_status)
-                    .map((msg) => [msg.task_id, { ...msg, status: String(msg.task_terminal_status) }]));
-                for (const [tid, terminalRecord] of terminalTaskRecords) {
-                    _historyRow = terminalRecord;
-                    settleReplayedTerminal(tid, terminalRecord, taskTerminalPhase(terminalRecord),
-                        Boolean(terminalRecord.outcome_axes || terminalRecord.review_projection || terminalRecord.reason_code));
+                    if (rich) appendTaskSummaryToLiveCard(detail, { currentOutcome: true, drawn });
+                    else { if (detail.suggested_name) applySuggestedName(tid, detail.suggested_name);
+                        noteTaskDetails(record, detail); finishLiveCard(tid, phase); }
                 }
                 _historyRow = null;
-
-                // Durable phase outranks narrative rows that may still say finalizing.
-                for (const [tid, historicalTerminal] of historicalTerminals) {
-                    if (!historicalTerminalProjections.has(tid)) continue;
-                    settleReplayedTerminal(tid, { ...historicalTerminal, task_id: tid }, historicalTerminal.phase);
-                }
 
                 // Cards without terminal or census evidence remain unconfirmed.
                 for (const [id, record] of liveCardRecords) {
@@ -2714,65 +2706,55 @@ export function createChatInstance({
     }
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
 
-    // The composer's height once its reply strip moved (chat_reply.js `data-motion`): opening, the full strip
-    // (`--reply-h`) plus the wrap's gap; leaving, none. One reserve move per motion, never per frame: each write
-    // restyles the whole room (~90 ms on a 34k-element WebKit Main; four in a row stuttered the close).
-    function composerHeightAtRest() {
-        const strips = inputArea.querySelectorAll('.chat-quote--composer[data-motion]');
-        if (!strips.length) return inputArea.offsetHeight || 0;
-        // Mid-motion heights are fractional: whole pixels would differ by one from frame to frame and write again.
-        let height = inputArea.getBoundingClientRect().height;
-        for (const strip of strips) {
-            // The room a strip takes is its box and its margins (style.css): opening it ends at --reply-room, shut at none.
-            const { marginTop, marginBottom } = getComputedStyle(strip);
-            const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
-            const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
-            height += end - now;
-        }
-        return height;
-    }
-
     function updateMessagesPadding(preserveStickiness = true) {
         // A room not displayed (Main behind a page) measures its bars as 0: it keeps the reserves it was laid out
         // with, or it would come back with its newest message under the composer.
         if (leaving || !page.getClientRects().length) return false;
-        // The room's measured layout variables, each written only when it changes (true then).
-        const layout = { setProperty: (name, value) => page.style.getPropertyValue(name) !== value
-            && (page.style.setProperty(name, value), true) };
+        // Stage only changed CSS properties; then apply the measurements in one timeline transaction.
+        const changes = [];
+        const setProperty = (name, value) => page.style.getPropertyValue(name) !== value && (changes.push([name, value]), true);
+        const shortMoved = syncShortRoom(page);
         let chromeMoved = false;
-        const mutate = () => {
-            let changed = false;
-            if (pageHeader && messagesDiv) {
-                // The bar's own height places the note under it; the transcript clears both.
-                const bar = Math.ceil(pageHeader.offsetHeight || 0);
-                const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
-                changed = layout.setProperty('--chat-header-bar', `${bar}px`);
-                changed = layout.setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`) || changed;
+        if (pageHeader && messagesDiv) {
+            // The bar's own height places the note under it; the transcript clears both.
+            const bar = Math.ceil(pageHeader.offsetHeight || 0);
+            const note = pageNote?.offsetParent ? Math.ceil(pageNote.offsetHeight || 0) : 0;
+            setProperty('--chat-header-bar', `${bar}px`);
+            setProperty('--chat-header-reserve', `${Math.max(56, bar + note)}px`);
+        }
+        if (inputArea && messagesDiv) {
+            setProperty('--chat-composer-height', `${composerHeightAtRest(inputArea)}px`);
+            // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
+            const box = el => el.getBoundingClientRect();
+            if (document.body.classList.contains('keyboard-open') && !inputArea.querySelector('[data-motion]')) {
+                const top = Math.max(readBand(messagesDiv, pageHeader, null).top,
+                    pageNote?.offsetHeight ? box(pageNote).bottom : 0);
+                chromeMoved = setProperty('--chat-keyboard-chrome', `${Math.round(top - box(pageHeader || page).top
+                    + box(inputArea).height - box(input).height)}px`);
             }
-            if (inputArea && messagesDiv) {
-                const reserve = Math.max(92, Math.ceil(composerHeightAtRest()) + 16);
-                changed = layout.setProperty('--chat-input-reserve', `${reserve}px`) || changed;
-                // Keyboard up: all but feed and field text is chrome (style.css), read at rest.
-                const box = el => el.getBoundingClientRect();
-                if (pageHeader && document.body.classList.contains('keyboard-open')
-                        && !inputArea.querySelector('[data-motion]')) {
-                    chromeMoved = layout.setProperty('--chat-keyboard-chrome', `${Math.round(box(messagesDiv).top
-                        - box(pageHeader).top + box(inputArea).height - box(input).height)}px`);
-                }
-            }
-            return changed || chromeMoved;
-        };
-        const changed = preserveStickiness ? withStableViewport(mutate) : mutate();
-        if (chromeMoved) composer?.resize();  // a grown cap sends no resize
+        }
+        if (changes.length || shortMoved) {
+            const write = () => { for (const [name, value] of changes) page.style.setProperty(name, value); };
+            const apply = () => preserveStickiness ? withStableViewport(write) : write();
+            if ((chromeMoved || shortMoved) && composer) composer.remeasureInput(apply);
+            else if (changes.length) apply();
+        }
         // The scrollbar this feed draws (none where scrollbars overlay the page): a Project's focus corners keep off it.
-        if (asPanel) layout.setProperty('--chat-feed-lane', `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`);
+        if (asPanel) {
+            const lane = `${messagesDiv.offsetWidth - messagesDiv.clientWidth}px`;
+            if (lane !== page.style.getPropertyValue('--chat-feed-lane')) page.style.setProperty('--chat-feed-lane', lane);
+        }
         updateScrollButton();
-        return changed;
     }
 
     // Kept on the instance so destroy() can disconnect it (the observer was
     // previously an unreachable closure — the P3 lifecycle leak).
     let chatResizeObserver = null;
+
+    function reflowViewport() {
+        if (destroyed || leaving) return;
+        reading.reflow(updateMessagesPadding);
+    }
 
     function installChatResizeObservers() {
         if (typeof ResizeObserver !== 'function') return;
@@ -2782,9 +2764,7 @@ export function createChatInstance({
             queued = true;
             requestAnimationFrame(() => {
                 queued = false;
-                if (destroyed || leaving) return;
-                reading.reflow();
-                updateMessagesPadding();
+                reflowViewport();
             });
         };
         chatResizeObserver = new ResizeObserver(schedule);
@@ -2794,6 +2774,8 @@ export function createChatInstance({
         if (inputArea) chatResizeObserver.observe(inputArea);
     }
 
+    const syncComposerReserve = () => updateMessagesPadding();
+    inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
 
     // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
@@ -3456,6 +3438,7 @@ export function createChatInstance({
     onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
+        workState = reconcileWorkState(workState, null, chatId);
         mainWaiting?.setConnected(false);
         withStableViewport(() => {
             for (const [id, activity] of activeDirectActivities) {
@@ -3498,6 +3481,7 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
+        reflowViewport,
         captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,
@@ -3574,6 +3558,7 @@ export function createChatInstance({
             header?.destroy();
             focusPanel?.removeEventListener('pointerdown', quietFocus);
             focusPanel?.removeEventListener('keydown', showFocus);
+            inputArea?.removeEventListener('ouro:composer-reserve', syncComposerReserve);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();

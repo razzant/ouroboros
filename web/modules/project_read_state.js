@@ -197,8 +197,12 @@ export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
     if (header?.getClientRects?.().length) {
         // The edge in the page's own scale: a phone's drawer scales the room, and the edge with it.
-        const box = header.getBoundingClientRect();
-        const edge = parseFloat(header.ownerDocument?.defaultView?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
+        const box = header.getBoundingClientRect(), view = header.ownerDocument?.defaultView;
+        // The edge material's own box (style.css: `::before`, the bar's padding box plus the reach) resolves in every
+        // engine; the property itself resolves to px only with `@property` (WebKit 16.4+), else it is its tokens.
+        const drawn = parseFloat(view?.getComputedStyle?.(header, '::before')?.height) - header.clientHeight;
+        const edge = Number.isFinite(drawn) ? Math.max(0, drawn)
+            : parseFloat(view?.getComputedStyle?.(header)?.getPropertyValue?.('--edge-reach')) || 0;
         top = Math.max(top, box.bottom + edge * (header.offsetHeight > 0 && box.height > 0 ? box.height / header.offsetHeight : 1));
     }
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);

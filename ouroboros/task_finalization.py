@@ -32,7 +32,7 @@ import pathlib
 import stat
 from typing import Any, Dict, List
 
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.utils import json_dumps_utf8, path_for_prose, sanitize_tool_result_for_log, truncate_review_artifact
 from ouroboros.observability import stamp_finalization_enqueue
 
 log = logging.getLogger(__name__)
@@ -523,7 +523,7 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
     from ouroboros.observability import redact_projection
     from ouroboros.skill_readiness import acceptance_skill_lifecycle
     from ouroboros.tool_capabilities import OWNER_DELIVERY_TOOL_NAMES
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
     calls = trace.get("tool_calls")
     displaced = [str(text) for text in trace.get(DISPLACED_ANSWER_KEY) or () if str(text) not in str(final_text or "")]
@@ -564,12 +564,12 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
                   "skill_state_omitted": max(0, len(skills) - _COMPLETION_SKILL_PREVIEW_ROWS)}
     if not deliveries and not skills and not displaced:
         return projection  # no full action record to store for an ordinary empty turn
-    text = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    text = json_dumps_utf8(snapshot, ensure_ascii=False, sort_keys=True, default=str)
     raw = text.encode("utf-8")
     if displaced:  # answers finals replaced: their bytes live in the stored source alone, apart from the final's
         answers, at = [], text.index(f'"{DISPLACED_ANSWER_KEY}": [') + len(DISPLACED_ANSWER_KEY) + 5
         for answer in snapshot[DISPLACED_ANSWER_KEY]:
-            value = json.dumps(answer, ensure_ascii=False)  # as the stored source spells it
+            value = json_dumps_utf8(answer, ensure_ascii=False)  # as the stored source spells it
             answers.append({"chars": len(answer), "source_range": [at, at + len(value)]})
             at += len(value) + 2
         projection[DISPLACED_ANSWER_KEY] = {"count": len(answers), "answers": answers}
@@ -812,7 +812,7 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
         limit=_SEALED_FINAL_TEXT_PROMPT_CHARS,
     ).strip() or "(empty final message)"
     rows = [
-        f"- {item.get('name')} ({item.get('size_bytes')} bytes)"
+        f"- {path_for_prose(str(item.get('name')))} ({item.get('size_bytes')} bytes)"
         + (f" [{item.get('status')}]" if item.get("status") not in ("", "ready", None) else "")
         for item in (sealed_final.get("artifact_manifest") or [])
         if isinstance(item, dict) and item.get("name")
@@ -821,8 +821,8 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     if omitted:
         rows.append(f"- ... {omitted} more file(s) exist in the store (list bounded)")
     manifest_text = "\n".join(rows) if rows else "(no files in the artifact store)"
-    observations = json.dumps(sealed_final.get("completion_observations") or {"status": "unavailable"},
-                              ensure_ascii=False, default=str)
+    observations = json_dumps_utf8(sealed_final.get("completion_observations") or {"status": "unavailable"},
+                                   ensure_ascii=False, default=str)
     host_notice = truncate_review_artifact(
         str(sealed_final.get("terminal_host_notice") or ""), limit=_SEALED_FINAL_TEXT_PROMPT_CHARS,
     )

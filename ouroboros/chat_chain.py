@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 from ouroboros import dialogue_store as ds, dialogue_positions as dp
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.utils import json_dumps_utf8
 
 _TEXT_ADDRESS = re.compile(r"row:(-?\d+)@(.*)#([0-9a-f]{12,64})")
 _DIGEST = re.compile(r"[0-9a-f]{12,64}")
@@ -57,7 +58,7 @@ def source_row_id(row: Dict[str, Any]) -> str:
     stored = row.get(ds.ROW_SHA_KEY)
     if isinstance(stored, str) and _FULL_DIGEST.fullmatch(stored):
         return stored
-    payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json_dumps_utf8(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -130,7 +131,7 @@ def recorded_context(root: Any, address: Any) -> Tuple[Dict[str, Any], bytes]:
     event = whole.get("presence_provenance") if isinstance(whole.get("presence_provenance"), dict) else {}
     document = {"recorded_at": whole.get("ts"), "source_event_id": event.get("source_event_id") or whole.get("client_message_id"),
                 "text": whole.get("text"), "transport": whole.get("transport")}
-    return found["address"], json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return found["address"], json_dumps_utf8(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:

@@ -8,7 +8,6 @@ to this file. WebView2's names are the documented ones: no Windows run stands be
 from __future__ import annotations
 
 import ast
-import asyncio
 import logging
 import sys
 import types
@@ -615,16 +614,18 @@ def test_qtwebkit_keeps_pywebviews_answer(backend):
 def test_mac_chat_quote_requires_the_marked_view_its_document_and_current_menu(backend, monkeypatch):
     class View:
         url = "http://127.0.0.1:4321/"
-        calls = None
+
+        def __init__(self):
+            self.calls = []
 
         def URL(self):
             return types.SimpleNamespace(absoluteString=lambda: self.url)
 
         def evaluateJavaScript_completionHandler_(self, script, reply):
+            # Fake WebKit retains completions for delivery after the menu-open call returns.
             self.calls.append((script, reply))
 
     view = View()
-    view.calls = []
     window = Window()
     lcm.enable_quote_menu(window, view.url)
     host = type("WebKitHost", (), {})
@@ -666,15 +667,12 @@ def test_mac_chat_quote_requires_the_marked_view_its_document_and_current_menu(b
         def update(self):
             self.updates += 1
 
-    async def deliver(callback, eligible):
-        asyncio.get_running_loop().call_soon(callback, eligible, None)
-        await asyncio.sleep(0)
-
     monkeypatch.setitem(sys.modules, "AppKit", types.SimpleNamespace(NSMenuItem=QuoteItem))
     lcm._restore_cocoa(gui, window)
     menu = QuoteMenu([LOOK_UP, COPY])
-    host.willOpenMenu_withEvent_(View(), menu, None)
-    assert not view.calls and menu.updates == 0
+    other_view = View()
+    host.willOpenMenu_withEvent_(other_view, menu, None)
+    assert not other_view.calls and not view.calls and menu.updates == 0
     for foreign in ("http://127.0.0.1:4322/", "http://127.0.0.1:4321/files/other", "https://outside.invalid/"):
         view.url = foreign
         host.willOpenMenu_withEvent_(view, menu, None)
@@ -683,14 +681,14 @@ def test_mac_chat_quote_requires_the_marked_view_its_document_and_current_menu(b
     host.willOpenMenu_withEvent_(view, menu, None)
     first = view.calls[-1][1]
     host.willOpenMenu_withEvent_(view, menu, None)
-    asyncio.run(deliver(first, True))
-    asyncio.run(deliver(view.calls[-1][1], False))
-    assert menu.updates == 0
+    first(True, None)
+    view.calls[-1][1](False, None)
+    assert menu.entries() == [LOOK_UP, COPY] and menu.updates == 0
     host.willOpenMenu_withEvent_(view, menu, None)
     probe, answer = view.calls[-1]
     assert 'location.origin === "http://127.0.0.1:4321"' in probe and ".available(" in probe
     assert menu.entries() == [LOOK_UP, COPY]
-    asyncio.run(deliver(answer, True))
+    answer(True, None)
     sender = menu.items[0]
     assert menu.entries() == [(lcm._QUOTE_ITEM, 0), LOOK_UP, COPY] and menu.updates == 1
     assert (sender.title, sender.action, sender.equivalent, sender.target) == ("Reply to quote", "ouroReplyToQuote:", "", view)
@@ -702,11 +700,12 @@ def test_mac_chat_quote_requires_the_marked_view_its_document_and_current_menu(b
     assert all(".activate(" not in script for script, _ in view.calls)
     host.willOpenMenu_withEvent_(view, menu, None)
     assert menu.entries() == [LOOK_UP, COPY]
-    asyncio.run(deliver(view.calls[-1][1], True))
+    view.calls[-1][1](True, None)
     host.ouroReplyToQuote_(view, sender)  # item from the earlier menu
     sender = menu.items[0]
     ticket = sender.ticket
     host.ouroReplyToQuote_(view, sender)
     host.ouroReplyToQuote_(view, sender)
-    assert sum(f'.activate("{ticket}")' in script for script, _ in view.calls) == 1
+    [activation] = [script for script, _ in view.calls if ".activate(" in script]
+    assert f'.activate("{ticket}")' in activation
     assert menu.entries() == [(lcm._QUOTE_ITEM, 0), LOOK_UP, COPY] and menu.updates == 2

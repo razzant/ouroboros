@@ -75,7 +75,8 @@ VIEW_TRACE_KEY = "memory_view"
 # request keeps only its attribution fact, a transport its ``_TRANSPORT_NESTED`` facts: ``row_meta``) stay
 # in the chain, read by address. Facts stored before a field joined this list keep their old form (the
 # stored prefix is never rewritten for it): a reader shows such a field as unknown.
-_META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
+_META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp (``stamped_room_echo``)
+                "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
@@ -109,9 +110,10 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest): a prefix of another version
-# is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 9
+# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest; 10: the row's
+# ``kind`` stamp): a prefix of another version is another source, read live until the maintenance job
+# ``memory_tail`` refills it.
+_META_VERSION = 10
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 

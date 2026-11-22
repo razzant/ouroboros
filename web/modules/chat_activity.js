@@ -872,6 +872,7 @@ export function clearStickyCardState(record) {
     record.effort = null;
     record.toolCalls = null;
     record.rounds = null;
+    record.roundsRecorded = false;  // a recycled slot inherits no recorded count
     record.toolErrors = null;
     // The folded evidence is cycle state too: a recycled slot must not count
     // the previous cycle's invocations.
@@ -881,6 +882,8 @@ export function clearStickyCardState(record) {
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;
     record.historicalTerminal = null;
+    record.replayedEnding = null;
+    record.cardAttempt = record.attemptMetrics = record.quietEffective = undefined;
     record.lastLiveObservedAt = 0;
     return record;
 }
@@ -977,19 +980,15 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
 // The page's single-flight state read lives in state_snapshots.js; its sequencer keeps this public name.
 export { createStateSnapshotSequencer } from './state_snapshots.js';
 
-/**
- * Main-thread fan-out gate for a live WS frame.
- *
- * Main adopts a frame only when the server did NOT stamp it as a Project
- * thread AND its chat_id is not a project the client already knows. The
- * server stamp (`project_thread`, set at the message_bus broadcast choke from
- * the registry) closes the race where a fresh project's frames arrive before
- * `projectChatIds` learns the project — previously Main adopted them and
- * minted an empty "Working..." card. Frames without the stamp (main, legacy
- * missing, external transports such as Telegram) route exactly as before;
- * explicit chat_id=0 remains the internal Skill Review partition. No
- * numeric-range heuristic is involved.
- */
+// A saved row's primary chat and the other rooms the host explicitly shows it in.
+function addressedToRoom(msg, chatId) {
+    return Number(msg?.chat_id ?? 1) === chatId
+        || (Array.isArray(msg?.also_rooms) && msg.also_rooms.map(Number).includes(chatId));
+}
+
+/** Main excludes known Project rooms. The bus's registry stamp covers rooms the page has yet
+ * to learn. An addressed web echo also keeps its accepted destination through a registry outage.
+ * Other positive external chats, including Telegram, retain their implicit Main mirror. */
 export function mainThreadAccepts(msg, projectChatIds) {
     if (msg && msg.project_thread) return false;
     const cid = Number(msg?.chat_id ?? 1);
@@ -999,6 +998,8 @@ export function mainThreadAccepts(msg, projectChatIds) {
     // Negative ids are reserved for synthetic A2A traffic and never enter a
     // human-facing browser stream.
     if (cid <= 0) return false;
+    if (msg?.kind === 'room_echo' && msg.type === 'chat' && msg.role === 'user' && msg.source === 'web'
+        && msg.ingress_accepted === true && !addressedToRoom(msg, 1)) return false;
     return !(projectChatIds instanceof Set && projectChatIds.has(cid));
 }
 
@@ -1017,8 +1018,7 @@ export function mainLogFrameAccepts(msg, projectChatIds) {
 /** Route one ordinary Chat frame to the current Main or Project instance. */
 export function chatThreadAccepts(msg, isMain, chatId, projectChatIds) {
     if (isMain) return mainThreadAccepts(msg, projectChatIds);
-    // One row a Project also shows (its work's notice to Main, the owner's Reply to it): `also_rooms`.
-    return Number(msg?.chat_id ?? 1) === chatId || (Array.isArray(msg?.also_rooms) && msg.also_rooms.map(Number).includes(chatId));
+    return addressedToRoom(msg, chatId);
 }
 
 /**
@@ -1040,7 +1040,7 @@ export function chatLogThreadAccepts(msg, isMain, chatId, projectChatIds) {
 export const TERMINAL_TASK_STATUSES = new Set([
     'completed', 'failed', 'cancelled', 'rejected_duplicate',
 ]);
-const TERMINAL_SUBAGENT_EVENTS = new Set([
+export const TERMINAL_SUBAGENT_EVENTS = new Set([
     'completed', 'completed_warn', 'failed', 'cancelled', 'rejected',
 ]);
 
@@ -1453,7 +1453,8 @@ function paintLiveFacts(record, rows) {
 
 export function renderLiveCardMeta(record, { agentModel = record?.agentModel || '' } = {}) {
     if (!record?.metaEl) return false;
-    const toolCalls = Number.isInteger(record.toolCalls) ? `${record.toolCalls} tool ${record.toolCalls === 1 ? "call" : "calls"}` : '';
+    const { toolCalls: count = record.toolCalls, toolErrors = record.toolErrors } = record.attemptMetrics || record;
+    const toolCalls = Number.isInteger(count) ? `${count} tool ${count === 1 ? 'call' : 'calls'}` : '';
     const rounds = Number.isInteger(record.rounds) && record.rounds >= 0 ? `${record.rounds} round${record.rounds === 1 ? '' : 's'}` : '';
     const cost = (record.costMeta && Array.isArray(record.costMeta.meta)) ? record.costMeta.meta : [];
     // A Main portal is the collapsed form of a work that lives in its Project room: tool calls ·
@@ -1505,10 +1506,10 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
             record.historyRetentionProblem || '',
             record.reviewGateLine || '',
             // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
-            record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
-                ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+            toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
+                ? `${toolErrors} error${toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
-            !supervision && record.toolCalls > 0 ? toolCalls : '',
+            !supervision && count > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
             ...cost,
             headClock ? '' : clock,
@@ -1525,7 +1526,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
         ...(!record.isSubagent && record.originRows || []),  // the place that called it, what called it and who (task_origin.js)
         ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
-        ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
+        ['Tool calls', !supervision && count === 0 ? '0' : ''],
         ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
