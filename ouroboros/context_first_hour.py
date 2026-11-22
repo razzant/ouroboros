@@ -17,7 +17,9 @@ judgement.
 - ``startup_problems``: what the newest ``startup_verification`` row found wrong, from the events tail the health
   block reads (one read serves both); present only while that row counted issues.
 - ``first_meeting``: the one line that is not a reading: the owner's words for a first meeting
-  (``prompts/FIRST_MEETING.md``), carried only while I have not written to my human and only once that file exists.
+  (``prompts/FIRST_MEETING.md``), carried only while a press of Start is on record (the state's ``first_meeting``
+  record, which only a state minted after a setup's Finish carries) and I KNOW I have not written to my human (an
+  unknown exchange carries none), and only once that file exists.
 """
 
 from __future__ import annotations
@@ -46,17 +48,19 @@ _STARTUP_READER = "its startup_verification row in logs/events.jsonl"
 
 def setup_fact(data_root: Any, repo_dir: Any = None) -> Dict[str, str]:
     """The ``setup`` key of ``data_root`` (the canonical data root); never raises, each line answers for itself.
-    While I have not written to my human, it also carries the owner's first-meeting words from ``repo_dir`` if they
-    exist (``GUIDANCE_REL``)."""
+    While a press of Start is on record and I know I have not written to my human, it also carries the owner's
+    first-meeting words from ``repo_dir`` if they exist (``GUIDANCE_REL``)."""
     root = pathlib.Path(data_root)
     fact = {"finished_at": _read(_finished_at, root), "state": _read(_state_origin, root)}
-    fact.update(_read(_controls, root, {"owner_chat": "unknown: runtime state unreadable", "consciousness": "unknown"}))
+    controls = _read(_controls, root, {"owner_chat": "unknown: runtime state unreadable", "consciousness": "unknown"})
+    pressed = controls.pop("pressed", False)
+    fact.update(controls)
     fact["exchange"], mine = _read(_exchange, root, ("unknown: unreadable", None))
     for key, reader in (("starter_skills", _starter), ("startup_problems", _startup_problems)):
         line = _read(reader, root, "")
         if line:
             fact[key] = line
-    guidance = _read(_guidance, repo_dir, "") if mine is False and repo_dir is not None else ""
+    guidance = _read(_guidance, repo_dir, "") if pressed and mine is False and repo_dir is not None else ""
     if guidance:
         fact["first_meeting"] = guidance
     return fact
@@ -114,9 +118,11 @@ def _state_origin(root: pathlib.Path) -> str:
 
 
 def _controls(root: pathlib.Path) -> Dict[str, str]:
-    """The owner chat and the consciousness switch from one state read."""
+    """The owner chat and the consciousness switch from one state read, and whether that state records a press of
+    Start (``pressed``: its ``first_meeting`` record, which only a state born after a setup's Finish carries)."""
     from ouroboros.consciousness import owner_chat_of
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from supervisor.first_meeting import FIRST_MEETING_KEY
     from supervisor.state import control_value, read_state
 
     view = read_state(root).projection()
@@ -128,7 +134,7 @@ def _controls(root: pathlib.Path) -> Dict[str, str]:
         owner = f"unknown: {exc}"
     known, enabled = control_value(view, "bg_consciousness_enabled")
     switch = "on" if known and enabled is True else "off" if known and enabled is False else "unknown"
-    return {"owner_chat": owner, "consciousness": switch}
+    return {"owner_chat": owner, "consciousness": switch, "pressed": isinstance(view.get(FIRST_MEETING_KEY), dict)}
 
 
 def _exchange(root: pathlib.Path) -> Tuple[str, Optional[bool]]:

@@ -1098,23 +1098,32 @@ def test_the_exchange_counts_only_the_words_of_my_human_and_mine_in_rooms_they_r
         assert setup_fact(tmp_path)["exchange"] == "unknown: the dialogue could not be read (StoreLost)"
 
 
-@pytest.mark.parametrize("written", [False, True])
-def test_setup_carries_the_owners_first_meeting_words_only_while_i_have_not_written_and_only_once_they_exist(
-        tmp_path, written):
+@pytest.mark.parametrize("shape", ["pressed", "written", "no_press", "unknown_exchange"])
+def test_setup_carries_the_owners_first_meeting_words_only_after_a_press_while_i_know_i_have_not_written(
+        tmp_path, shape):
     """``prompts/FIRST_MEETING.md`` waits for the owner's yes on its text: absent, nothing is carried; present, its
-    words ride the setup facts until I have written to my human, then they leave."""
+    words ride the setup facts only while a press of Start is on record (the state's ``first_meeting`` record) and I
+    know I have not written to my human. No press (Colab, headless, a legacy-adopted root) or an exchange that cannot be
+    read carries none, and once I have written they leave."""
+    from ouroboros import dialogue_store
     from ouroboros.context_first_hour import setup_fact
+    from ouroboros.store import StoreLost
 
-    (tmp_path / "data" / "state").mkdir(parents=True)
-    repo = tmp_path / "repo"
-    if written:
-        _said(tmp_path / "data", ("10:00", "out"))
-    assert "first_meeting" not in setup_fact(tmp_path / "data", repo)  # no file: nothing
+    data, repo = tmp_path / "data", tmp_path / "repo"
+    (data / "state").mkdir(parents=True)
+    _born(data, "first_boot", **({} if shape == "no_press" else
+                                 {"first_meeting": {"state": "admitted", "pressed_at": "2026-11-21T10:00:00Z"}}))
+    if shape == "written":
+        _said(data, ("10:00", "out"))
+    assert "first_meeting" not in setup_fact(data, repo)  # no file: nothing
     (repo / "prompts").mkdir(parents=True)
     (repo / "prompts" / "FIRST_MEETING.md").write_text("Owner-approved words.\n", encoding="utf-8")
-    fact = setup_fact(tmp_path / "data", repo)
-    assert fact.get("first_meeting") == (None if written else "Owner-approved words.")
-    assert "first_meeting" not in setup_fact(tmp_path / "data")  # a caller that names no repository carries none
+    with pytest.MonkeyPatch.context() as patch:
+        if shape == "unknown_exchange":
+            patch.setattr(dialogue_store, "owner_exchange", lambda root: (_ for _ in ()).throw(StoreLost("torn page")))
+        fact = setup_fact(data, repo)
+    assert fact.get("first_meeting") == ("Owner-approved words." if shape == "pressed" else None)
+    assert "first_meeting" not in setup_fact(data)  # a caller that names no repository carries none
 
 
 def test_runtime_carries_setup_for_shared_inputs_and_not_for_declared_ones(tmp_path):
