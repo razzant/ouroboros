@@ -15,37 +15,18 @@ from ouroboros.room_membership import room_membership  # noqa: F401 — public c
 import hashlib
 import json
 import logging
-import os
 import pathlib
-import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+from ouroboros.chat_annotations import (  # noqa: F401 — receipt readers and writers use this public surface
+    AGENT_RECEIPT_ID_PREFIX, ROUTING_DESTINATION_FIELDS, ROUTING_RECEIPT_FIELDS,
+    append_chat_annotation, chat_annotation_receipt, latest_chat_annotations, scoped_chat_annotations,
+)
 from ouroboros.review_records import recorded_author_stop
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE, schedule_report_run
 from ouroboros import dialogue_store
-from ouroboros.utils import iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
+from ouroboros.utils import strip_markdown
 
-_ANNOTATIONS_NAME = "chat_annotations.jsonl"
-# Receipt id for a routing act that belongs to NO owner message — the agent's
-# own steer of a task it already routed for, or of one it was told about after
-# its origin. The act still needs a durable token-bound receipt (the tool waits
-# on one through ``routing_wait``, and silence there reports a landed delivery
-# as unconfirmed), but it must annotate no owner message: the id is the act's
-# routing token, so nothing in any chat joins to it. Chat-row membership is
-# therefore the wrong retention test for these rows — compaction applies the
-# chat-retention rule only to ids that address a real message, and bounds these
-# by the newest-N cap below. Per-id dedupe cannot bound them: every steer mints
-# a fresh token, so each act has an id of its own. The colon shape cannot
-# collide with a client id: the browser mints ``msg-<epoch_ms>-<n>`` and non-web
-# ingress ``host-<uuid5>``.
-AGENT_RECEIPT_ID_PREFIX = "agent-steer:"
-# How many synthetic receipts survive a compaction. ``routing_wait`` polls for at
-# most 15 seconds, so every live waiter's row is far inside this window; without a
-# cap a long-lived install would keep the file permanently above the threshold and
-# rewrite the whole of it on every append.
-_RETAINED_AGENT_RECEIPTS = 64
-_COMPACT_AT_BYTES = 800_000
 log = logging.getLogger(__name__)
 
 
@@ -205,14 +186,14 @@ def owner_message_ref_is_valid(ref: Any) -> bool:
         "chat_id", "client_message_id", "ts", "text_sha256",
     }.issubset(ref):
         return False
-    digest = ref.get("text_sha256")
+    digests = [ref["text_sha256"]] + ([ref["row_sha256"]] if "row_sha256" in ref else [])
     return bool(
         isinstance(ref.get("chat_id"), int)
         and not isinstance(ref.get("chat_id"), bool)
         and isinstance(ref.get("client_message_id"), str)
         and isinstance(ref.get("ts"), str) and ref.get("ts")
-        and isinstance(digest, str) and len(digest) == 64
-        and all(char in "0123456789abcdef" for char in digest)
+        and all(isinstance(digest, str) and len(digest) == 64 and
+                all(char in "0123456789abcdef" for char in digest) for digest in digests)
     )
 
 
@@ -220,7 +201,7 @@ def source_refs_for_project(drive_root: Any, project_chat_id: int, *, bindings=N
     """Canonical owner-row references held by bindings for one Project lens."""
     from ouroboros.projects_registry import project_task_bindings
 
-    refs: List[Dict[str, Any]] = []
+    same: List[Dict[str, Any]] = []
     for row in (project_task_bindings(drive_root) if bindings is None else bindings).values():
         if not isinstance(row, dict):
             continue  # raw ``bindings`` keep malformed rows; project_task_bindings drops them too
@@ -228,24 +209,44 @@ def source_refs_for_project(drive_root: Any, project_chat_id: int, *, bindings=N
             same_chat = int(row.get("project_chat_id") or 0) == int(project_chat_id or 0)
         except (TypeError, ValueError):
             same_chat = False
-        ref = row.get("source_ref")
-        if same_chat and isinstance(ref, dict) and ref:
-            refs.append(dict(ref))
-    return refs
+        if same_chat:
+            same.append(row)
+    return [dict(ref) for ref in physical_origin_refs(drive_root, same) if ref]
 
 
-def project_origin_rows(drive_root: Any, project_chat_id: int, *, bindings=None) -> List[Dict[str, Any]]:
+def physical_origin_refs(root: Any, bindings: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
+    """Each binding's owner-row address, in order, or None: a physical address by value; an older partial address
+    (a room and checksum, with a client id or time when it saved one) only while it resolves to one readable
+    original, every such address of the read resolved together (``owner_message_entries``)."""
+    refs = [binding.get("source_ref") if binding.get("source_projectable", True) is True
+            and isinstance(binding.get("source_ref"), dict) else None for binding in bindings]
+    partial = [ref for ref in refs if ref is not None and "row_sha256" not in ref]
+    found = owner_message_entries(root, partial) if partial else {}
+    return [ref if ref is not None and (owner_message_ref_is_valid(ref) if "row_sha256" in ref
+                                        else found.get(_source_ref_identity(ref)) is not None) else None
+            for ref in refs]
+
+
+def project_origin_rows(drive_root: Any, project_chat_id: int, *, bindings=None, gaps=None) -> List[Dict[str, Any]]:
     """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
 
     Only bindings that carry ``source_text`` qualify (cross-thread origins — the
     binding is the retention-proof copy of the message that started the project),
-    with the attachment refs, ``source`` and placeholder mark recorded from its row.
-    Deduplicated by complete origin identity so several bindings created from one
-    owner message yield one row."""
+    with the attachment refs, ``source`` and placeholder mark recorded from its row,
+    and, for an opening that answered a card, its typed facts (``source_input``,
+    ``opening_input``; readers show it through ``opening_words``). Deduplicated by
+    complete origin identity so several bindings created from one owner message
+    yield one row. A binding that predates its recorded visibility shows only while
+    its one original is readable and visible: the read's older partial addresses
+    resolve together (``owner_message_entries``, room-and-checksum ones included),
+    an exact address one by one (``resolve_owner_message_source``); a recorded
+    visibility with an exact address reads no chat."""
+    from ouroboros.chat_chain import source_row_id
     from ouroboros.projects_registry import project_task_bindings
+    from ouroboros.room_membership import binding_origin_allowed
+    from ouroboros.store import StoreError
 
-    rows: List[Dict[str, Any]] = []
-    seen: set = set()
+    bound = []
     for row in project_task_bindings(drive_root).values() if bindings is None else bindings:
         try:
             same_chat = int(row.get("project_chat_id") or 0) == int(project_chat_id or 0)
@@ -253,23 +254,120 @@ def project_origin_rows(drive_root: Any, project_chat_id: int, *, bindings=None)
             same_chat = False
         ref = row.get("source_ref")
         text = row.get("source_text")
-        if not (same_chat and isinstance(ref, dict) and ref and isinstance(text, str) and text):
+        if not (same_chat and isinstance(ref, dict) and _source_ref_identity(ref) is not None
+                and ref.get("chat_id") is not None
+                and isinstance(text, str) and text and ref.get("text_sha256") == _text_sha256(text)):
             continue
-        identity = (
-            str(ref.get("chat_id") or ""),
-            str(ref.get("client_message_id") or ""),
-            str(ref.get("ts") or ""),
-            str(ref.get("text_sha256") or ""),
-        )
+        if "source_projectable" in row and row["source_projectable"] is not True:
+            continue
+        bound.append((row, ref, text))
+    try:  # one read for every partial address, whatever their number
+        partial = owner_message_entries(drive_root, [ref for _row, ref, _text in bound if not ref.get("row_sha256")])
+    except (OSError, StoreError):
+        partial = {}
+    rows: List[Dict[str, Any]] = []
+    seen: Dict[Any, Dict[str, Any]] = {}
+    for row, ref, text in bound:
+        found = None if ref.get("row_sha256") else partial.get(_source_ref_identity(ref))
+        original = found.row if found is not None else None
+        if ref.get("row_sha256") and "source_projectable" not in row:
+            try:
+                original = resolve_owner_message_source(drive_root, ref)
+            except (OSError, StoreError):
+                pass
+        if "source_projectable" not in row and original is None:
+            if gaps is not None:
+                gaps.add("The visibility of a retained project opening could not be verified.")
+            continue
+        if original is not None and not binding_origin_allowed(int(ref["chat_id"]), original):
+            continue
+        identity = ref.get("row_sha256") or (source_row_id(original) if original else _source_ref_identity(ref))
+        typed = opening_input(original, drive_root, retained=row.get("source_input"))
         if identity in seen:
+            old = seen[identity].get("source_input", {})
+            if ref.get("row_sha256") and typed.get("source") not in (None, "owner_card_input") and (
+                    old.get("source") in (None, "owner_card_input") or "content" not in old and "content" in typed):
+                seen[identity]["source_input"] = typed
             continue
-        seen.add(identity)
         media = row.get("source_attachments")
-        rows.append({"ref": dict(ref), "text": text, "origin_id": project_origin_identity(ref), **({
-            "attachments": media, "channel": str(row.get("source_channel") or ""),
-            "text_placeholder": row.get("source_text_placeholder") is True,
-        } if isinstance(media, list) and media else {})})
+        rows.append(seen.setdefault(identity, {"ref": dict(ref), "text": text, "origin_id": project_origin_identity(ref),
+                     **({"attachments": media} if isinstance(media, list) and media else {}),
+                     **({"channel": row["source_channel"]} if row.get("source_channel") else {}),
+                     "text_placeholder": row.get("source_text_placeholder") is True,
+                     **({"source_input": typed} if typed else {})}))
     return rows
+
+
+def opening_input(row: Optional[Dict[str, Any]], root: Any, *, retained: Any = None) -> Dict[str, Any]:
+    """A bound physical row's card fact beside its display text; ``retained`` must name that same opening.
+    A complete accepted fact survives an unavailable submission; neither a label nor a bubble supplies form words."""
+    from copy import deepcopy
+    from ouroboros.answer_facts import OWNER_CARD_INPUT, OWNER_PRESS, retained_card_input
+
+    saved = {}
+    if isinstance(retained, dict) and retained.get("source") in (OWNER_PRESS, OWNER_CARD_INPUT, "owner_quiz_answer", "owner_mailbox"):
+        saved = {key: retained[key] for key in ("source", "source_task_id", "quiz_id", "card_id", "pressed", "content")
+                 if isinstance(retained.get(key), str)}
+        if isinstance(retained.get("submitted_values"), dict):
+            saved["submitted_values"] = deepcopy(retained["submitted_values"])
+    item = retained_card_input(row, row.get("_owner_source_root") or root) if row is not None else {}
+    if not item:
+        return saved
+    if item["source"] == OWNER_CARD_INPUT and saved.get("source") not in (None, OWNER_CARD_INPUT):
+        return saved
+    reply = item.get("reply_to") if isinstance(item.get("reply_to"), dict) else {}
+    return {"source": item["source"], "source_task_id": str(item.get("source_task_id") or ""), "content": item["content"],
+            **{key: value for key, value in (("quiz_id", item.get("quiz_id")), ("card_id", reply.get("card_id")),
+                                          ("pressed", item.get("pressed") or reply.get("pressed_label")),
+                                          ("submitted_values", reply.get("submitted_values")))
+               if value}}
+
+
+def opening_words(origin: Dict[str, Any]) -> Dict[str, Any]:
+    """One ``project_origin_rows`` row as the corpus item a words reader renders (``owner_words._words_rows``):
+    its time, digest and files beside the original words or the card fact. On old living-form projections the display
+    bubble is not a substitute for missing values. The recorded option rides beside words as the asker's label."""
+    from ouroboros.answer_facts import OWNER_CARD_INPUT, OWNER_PRESS, pressed_option_record
+
+    ref = origin.get("ref") if isinstance(origin.get("ref"), dict) else {}
+    typed = origin.get("source_input") if isinstance(origin.get("source_input"), dict) else {}
+    source, content = typed.get("source") or "origin_message", typed.get("content")
+    if not isinstance(content, str):
+        if source == OWNER_PRESS:
+            content = typed.get("pressed") or ""
+        elif source == OWNER_CARD_INPUT or typed.get("card_id"):
+            source, content = OWNER_CARD_INPUT, "Card input received. Its submission is unavailable."
+        else:
+            content = "" if origin.get("text_placeholder") else str(origin.get("text") or "")
+    item = {"source": source, "ts": str(ref.get("ts") or ""), "content": content,
+            **({"row_sha256": ref["row_sha256"]} if ref.get("row_sha256") else {}),
+            **({"attachments": origin["attachments"]} if origin.get("attachments") else {}),
+            **{key: typed[key] for key in ("source_task_id", "quiz_id", "card_id", "submitted_values") if typed.get(key)}}
+    asker, card = typed.get("source_task_id"), typed.get("quiz_id") or typed.get("card_id")
+    living = bool(typed.get("card_id"))
+    if asker and card and (living or source != OWNER_PRESS) and ((pressed := typed.get("pressed")) or typed.get("quiz_id")):
+        item["reply_to"] = {"address": f"{'card' if living else 'quiz'} {card} of task {asker}",
+                            "author": f"Ouroboros, task {asker}",
+                            "text": pressed_option_record(pressed, asker) if pressed and source != OWNER_PRESS else "",
+                            **{key: typed[key] for key in ("card_id", "submitted_values") if key in typed},
+                            **({"pressed_label": pressed} if living and pressed else {})}
+    return item
+
+
+def opening_view(origin: Dict[str, Any]) -> Dict[str, Any]:
+    """A line reader's view of one retained opening (``opening_words``): ``text`` stands under my human's name, their
+    words unchanged, or the host's record of a press without words (``answer_facts.press_record``) or of an input whose
+    words are unknown. The card and submitted fields stand beside those words under ``host_lines``."""
+    from ouroboros.answer_facts import OWNER_CARD_INPUT, OWNER_PRESS, press_record, submitted_fields_line
+
+    item = opening_words(origin)
+    text = (press_record(item["content"], item.get("source_task_id")) if item["source"] == OWNER_PRESS else
+            f"(host record: {item['content']})" if item["source"] == OWNER_CARD_INPUT and item["content"] else item["content"])
+    card = item.get("reply_to")
+    fields = submitted_fields_line(item)
+    lines = [f"[{card['author']}: the card my human answered, not my human's words; "
+             f"{card['address']}] {card['text']}"] if card and card.get("text") else []
+    return {"source": item["source"], "text": text, "host_lines": lines + ([fields] if fields else [])}
 
 
 def bound_room_chat(rooms: Callable[..., int], row: Dict[str, Any]) -> int:
@@ -284,34 +382,36 @@ def _source_ref_identity(ref: Dict[str, Any]) -> Optional[tuple]:
         chat_id = int(ref.get("chat_id") or 0)
     except (TypeError, ValueError):
         return None
-    return (chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
-            str(ref.get("text_sha256") or ""))
+    key = (chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
+           str(ref.get("text_sha256") or ""))
+    if "row_sha256" in ref:
+        return (*key, ref["row_sha256"]) if owner_message_ref_is_valid(ref) else None
+    return key
 
 
 def _entry_source_identities(entry: Dict[str, Any]) -> set:
-    """An owner row's source keys: an inbound row's, or a card's recorded answer's, keyed by the owner's words, not its frame."""
-    text = entry.get("text")
-    if str(entry.get("direction") or "") != "in":
-        from ouroboros.owner_relay import owner_text, quotable_owner_row
+    """An owner row's source keys: an inbound row's, or a card's recorded answer's, keyed by the owner's words, not its
+    frame (``owner_relay.source_words``)."""
+    from ouroboros.owner_relay import source_words
 
-        text = owner_text(entry) if entry.get("type") == "quiz_answer" and quotable_owner_row(entry) else ""
-        if not text:
-            return set()
-    try:
-        chat_id = int(entry.get("chat_id", 1))
-    except (TypeError, ValueError):
-        chat_id = 1
+    text = source_words(entry)
+    if text is None:
+        return set()
+    from ouroboros.chat_chain import _row_chat_id
+    chat_id = _row_chat_id(entry)
     client_id = str(entry.get("client_message_id") or "")
     ts = str(entry.get("ts") or "")
     text_hash = _text_sha256(text)
+    from ouroboros.owner_relay import owner_row_identity
     return {(chat_id, client, stamp, text_hash) for client in (client_id, "") for stamp in (ts, "")
-            if client or entry.get("direction") == "in"}
+            if client or entry.get("direction") == "in"} | {
+                (chat_id, client_id, ts, text_hash, owner_row_identity(entry)["row_sha256"])}
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:
     """Whether ``entry`` is the original row identified by one binding ref."""
     ref_keys = {key for ref in refs if isinstance(ref, dict) if (key := _source_ref_identity(ref)) is not None}
-    return bool(_entry_source_identities(entry) & ref_keys)
+    return bool(ref_keys and _entry_source_identities(entry) & ref_keys)
 
 
 def project_origin_identity(ref: dict) -> str:
@@ -320,223 +420,81 @@ def project_origin_identity(ref: dict) -> str:
 
 
 def matching_project_origin(entry: dict, refs: list) -> str:
+    if not refs:
+        return ""
     keys = _entry_source_identities(entry)
     return next((project_origin_identity(ref) for ref in refs if _source_ref_identity(ref) in keys), "")
 
 
 def resolve_owner_message_source(drive_root: Any, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the owner source by its stored identity, checking its original text hash."""
-    from ouroboros import dialogue_store as ds
+    found = owner_message_entry(drive_root, ref)
+    return found.row if found is not None else None
 
-    ref_key = _source_ref_identity(ref)
-    if ref_key is None:
+
+def unique_inbound_message(root, rooms, client_id):
+    """An older delivery names a client id within its admitted rooms. Over the readable rows only one physical
+    identity answers: an unread line hides only itself. Nothing answers before the import is complete."""
+    from ouroboros.chat_chain import _row_chat_id, source_row_id
+    if not client_id:
         return None
-    chat_id, client_id, ts, _digest = ref_key
-    if client_id:
-        candidates = ds.iter_probes(drive_root, "chat", [("client_message_id", client_id)], newest_first=True)
-    elif ts:
-        candidates = ds.rows_by_identity(drive_root, chat_id, ts)
-        if chat_id == 1:  # the legacy owner-source convention for a missing/invalid chat id
-            candidates += ds.rows_by_identity(drive_root, None, ts)
-        candidates = sorted(candidates, key=lambda entry: entry.seq, reverse=True)
-    else:
-        # Pre-identity bindings named only a chat and a text checksum.
+    found = None
+    for entry in dialogue_store.iter_probes(root, "chat", [("client_message_id", client_id)]):
+        row = entry.row
+        if row.get("direction") == "in" and _row_chat_id(row) in rooms:
+            if found is not None and source_row_id(found) != source_row_id(row):
+                return None
+            found = row
+    return found if dialogue_store.range_coverage(root, "chat")["imported"] else None
+
+
+def owner_message_entry(drive_root, ref, *, require_imported=True):
+    """First stored occurrence of one identified source, including an identical replay (``owner_message_entries``)."""
+    key = _source_ref_identity(ref) if isinstance(ref, dict) else None
+    if key is None:
+        return None
+    found = owner_message_entries(drive_root, [ref])[key]
+    if found is None and require_imported:
+        dialogue_store.require_imported(drive_root, "chat")
+    return found
+
+
+def owner_message_entries(drive_root: Any, refs: Iterable[Any]) -> Dict[tuple, Any]:
+    """The stored original of each source of one read, keyed by its identity (``_source_ref_identity``), its rows read
+    together: client ids in one indexed probe, times by room and stamp, and a pre-identity address naming only a room
+    and a text checksum by one walk of that room's rows for every such address of the read (no index holds a checksum).
+    Each answers with its first stored occurrence (an identical replay is the same source) or None: no row, two
+    distinct rows its saved fields cannot tell apart, or a partial address while the import still runs (a row still
+    importing may share it; an unread line hides only itself). It never requires the import (``owner_message_entry``)."""
+    from ouroboros.chat_chain import source_row_id
+    from ouroboros.owner_relay import source_words
+
+    wanted = {key: ref for ref in refs if isinstance(ref, dict) and (key := _source_ref_identity(ref)) is not None}
+    answers: Dict[tuple, Any] = dict.fromkeys(wanted)
+    if any(len(key) == 4 for key in wanted) and not dialogue_store.range_coverage(drive_root, "chat")["imported"]:
+        wanted = {key: ref for key, ref in wanted.items() if len(key) == 5}
+    clients, stamps, rooms = set(), set(), {}
+    for chat_id, client_id, ts, digest, *physical in wanted:
+        if client_id and not physical:
+            clients.add(client_id)
+        elif ts:
+            stamps.update((room, ts) for room in ([chat_id, None] if chat_id == 1 else [chat_id]))  # a missing chat is 1
+        else:
+            rooms.setdefault(chat_id, set()).add(digest)
+    candidates = list(dialogue_store.iter_probes(drive_root, "chat", [("client_message_id", client) for client in sorted(clients)]))
+    for room, ts in sorted(stamps, key=str):
+        candidates += dialogue_store.rows_by_identity(drive_root, room, ts)
+    for chat_id, digests in rooms.items():
         keys = [("chat_id", chat_id)] + ([("chat_id", None)] if chat_id == 1 else [])
-        candidates = ds.iter_probes(drive_root, "chat", keys, newest_first=True)
-    for entry in candidates:
-        if ref_key in _entry_source_identities(entry.row):
-            return dict(entry.row)
-    ds.require_imported(drive_root, "chat")
-    return None
-
-
-def _latest_annotations(path: pathlib.Path) -> Dict[str, Dict[str, Any]]:
-    latest: Dict[str, Dict[str, Any]] = {}
-    for row in iter_jsonl_objects(path):
-        message_id = str(row.get("client_message_id") or "")
-        if message_id and row.get("type") == "chat_annotation":
-            latest[message_id] = dict(row)
-    return latest
-
-
-def _latest_annotations_by_token(path: pathlib.Path) -> Dict[tuple, Dict[str, Any]]:
-    """Latest row per (message, routing token): one owner message carries several
-    routing acts -- a first promote, a later steer relaying the same message, a
-    picker click -- and each act's receipt must stay readable by its own token
-    while the message's LATEST row is what the UI paints."""
-    latest: Dict[tuple, Dict[str, Any]] = {}
-    for row in iter_jsonl_objects(path):
-        message_id = str(row.get("client_message_id") or "")
-        if message_id and row.get("type") == "chat_annotation":
-            latest[(message_id, str(row.get("routing_token") or ""))] = dict(row)
-    return latest
-
-
-def latest_chat_annotations(drive_root: Any) -> Dict[str, Dict[str, Any]]:
-    """Latest presentation annotation per message; a torn tail is ignored."""
-    path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
-    return _latest_annotations(path)
-
-
-def chat_annotation_receipt(drive_root: Any, client_message_id: str, routing_token: str) -> Dict[str, Any]:
-    """The latest annotation written for one routing attempt, read BY TOKEN.
-
-    A later act under the same owner message no longer hides an earlier act's
-    receipt: the waiter that minted the token polls for its own outcome, and the
-    UI projection stays latest-per-message (``latest_chat_annotations``)."""
-    path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
-    row = _latest_annotations_by_token(path).get(
-        (str(client_message_id or ""), str(routing_token or "")),
-    )
-    return dict(row) if row else {}
-
-
-def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
-    if not path.is_file() or path.stat().st_size < _COMPACT_AT_BYTES:
-        return
-    from ouroboros import dialogue_store as ds
-
-    # Incomplete history cannot prove an annotation's source is absent. Leave the
-    # sidecar intact until its retained-message decisions can be made truthfully;
-    # over an unreadable line (a gap) no source is proven absent, but the newest
-    # act per message still replaces the older ones.
-    coverage = ds.range_coverage(drive_root, "chat")
-    if not coverage["imported"]:
-        return
-    latest = _latest_annotations(path)
-    kept_receipts = set(sorted(
-        (message_id for message_id in latest if message_id.startswith(AGENT_RECEIPT_ID_PREFIX)),
-        key=lambda message_id: str(latest[message_id].get("ts") or ""),
-    )[-_RETAINED_AGENT_RECEIPTS:])
-    named = [message_id for message_id in latest if not message_id.startswith(AGENT_RECEIPT_ID_PREFIX)]
-    retained_ids = set(named) if coverage["gaps"] else ds.carried_ids(drive_root, named)
-    # Retained per (message, token): an older act's receipt under a message that
-    # is still in the chat survives beside the message's newest act.
-    rows = [
-        row for (message_id, _token), row in _latest_annotations_by_token(path).items()
-        if message_id in retained_ids or message_id in kept_receipts
-    ]
-    rows.sort(key=lambda row: str(row.get("ts") or ""))
-    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
-    data = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode("utf-8")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o644)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view):]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    replace_atomic(tmp, path)
-
-
-# One owner-routing receipt's fields (#968): its row below, its live frame (`send_routing_ack`) and its history
-# replay state this one set; the destination part names the room and the works its words reached.
-ROUTING_DESTINATION_FIELDS = ("project_id", "project_chat_id", "project_name", "target_task_ids", "target_titles")
-ROUTING_RECEIPT_FIELDS = ("action", "target", "target_label", "status", "routing_token", "cause", "options",
-                          "attachment_manifest", "reasoning_effort", *ROUTING_DESTINATION_FIELDS)
-
-
-def append_chat_annotation(
-    drive_root: Any,
-    client_message_id: str,
-    *,
-    action: str,
-    target: str = "",
-    target_label: str = "",
-    project_id: str = "",
-    project_chat_id: int = 0,
-    status: str,
-    routing_token: str = "",
-    reason: str = "",
-    detail: str = "",
-    cause: str = "",
-    options: Any = None,
-    attachment_manifest: Any = None,
-    require_latest_status: Any = None,
-    require_latest_token: Any = None,
-    reasoning_effort: str = "",
-    project_name: str = "", target_task_ids: Any = None, target_titles: Any = None,
-) -> bool:
-    """Append one compact UI annotation.
-
-    Presentation-first with ONE named exception (#198): a routing refusal row
-    (status=needs_manual_target) is also the picker's durable decision-card
-    authority — its token+options validate the owner's click, and the
-    dispatch_pending/closing rows carry the click's first-wins/idempotency
-    facts. Routing STATE still lives in the supervisor receipts (task-result
-    admission, mailbox); the sidecar only arbitrates the card.
-
-    ``require_latest_status`` (a set of status strings) turns the append into
-    a compare-and-append under the annotations lock: the row is written only
-    while the message's CURRENT latest status is in the set — the first-wins
-    claim seam of the routing picker (#198). Absent/None keeps plain append.
-
-    """
-    message_id = str(client_message_id or "").strip()
-    if not message_id:
-        return False
-    row = {
-        "ts": utc_now_iso(),
-        "type": "chat_annotation",
-        "client_message_id": message_id[:200],
-        "action": str(action or "")[:80],
-        "target": str(target or "")[:200],
-        "status": str(status or "")[:80],
-    }
-    if target_task_ids is not None:
-        row.update(project_name=project_name, target_task_ids=list(target_task_ids), target_titles=list(target_titles or []))
-    if str(target_label or ""):
-        row["target_label"] = str(target_label)[:200]
-    if project_id and project_chat_id:
-        row.update(project_id=str(project_id), project_chat_id=int(project_chat_id))
-    if str(routing_token or ""):
-        row["routing_token"] = str(routing_token)[:128]
-    if str(reason or ""):
-        row["reason"] = str(reason)[:200]
-    if str(detail or ""):
-        row["detail"] = str(detail)[:1000]
-    if str(cause or ""):
-        # Q3=A: the host-owned owner-facing sentence for a refused act; the
-        # browser renders it verbatim on the receipt line (reason stays a code).
-        row["cause"] = str(cause)[:200]
-    if isinstance(options, list):
-        row["options"] = [dict(item) for item in options[:100] if isinstance(item, dict)]
-    if isinstance(attachment_manifest, list):
-        row["attachment_manifest"] = [
-            dict(item) for item in attachment_manifest if isinstance(item, dict)
-        ]
-    if str(reasoning_effort or ""):
-        row["reasoning_effort"] = str(reasoning_effort)[:16]
-    path = pathlib.Path(drive_root) / "logs" / _ANNOTATIONS_NAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = jsonl_append_lock_path(path)
-    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0, owner_aware_stale=True)
-    if lock_fd is None:
-        return False
-    try:
-        if require_latest_status is not None or require_latest_token is not None:
-            latest = _latest_annotations(path).get(message_id)
-            if latest is not None:
-                latest_status = str(latest.get("status") or "")
-                latest_token = str(latest.get("routing_token") or "")
-                if require_latest_status is not None and latest_status not in set(require_latest_status):
-                    return False  # lost the claim race — the caller reads the truth back
-                if require_latest_token is not None and latest_token not in set(require_latest_token):
-                    return False  # a NEWER routing attempt owns the card now
-        data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o644)
-        try:
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        _compact_annotations_locked(drive_root, path)
-        return True
-    finally:
-        release_exclusive_file_lock(lock_path, lock_fd)
+        candidates += [entry for entry in dialogue_store.iter_probes(drive_root, "chat", keys)
+                       if (words := source_words(entry.row)) is not None and _text_sha256(words) in digests]
+    for entry in sorted({entry.seq: entry for entry in candidates}.values(), key=lambda entry: entry.seq):
+        for key in wanted.keys() & _entry_source_identities(entry.row):
+            if answers[key] is None:
+                answers[key] = entry
+            elif answers[key] is not False and source_row_id(answers[key].row) != source_row_id(entry.row):
+                answers[key] = False  # the saved fields cannot distinguish the two sources
+    return {key: entry or None for key, entry in answers.items()}
 
 
 def routing_target_label(
@@ -1589,7 +1547,7 @@ def announce_project_started(
 __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "append_chat_annotation", "append_canonical_task_summary",
     "append_terminal_task_projection", "build_owner_message_ref", "chat_annotation_receipt",
-    "entry_matches_source_ref", "latest_chat_annotations",
+    "entry_matches_source_ref", "latest_chat_annotations", "scoped_chat_annotations",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",

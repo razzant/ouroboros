@@ -13,6 +13,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
+import { ownerMessageBubble } from './chat_history_replay.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -1088,14 +1089,12 @@ export function partitionLocalEchoJournal(journal, serverClientMessageIds) {
     return { confirmed, unconfirmed };
 }
 
-// ---------------------------------------------------------------------------
-// Pure message-presentation helpers (moved verbatim from chat.js — that
-// module sits at its byte ceiling).
-// ---------------------------------------------------------------------------
-
-/** Dedupe key for one rendered chat row; client_message_id wins when present. */
+/** Legacy delivery correlation; client ids are scoped to the room the owner wrote in. */
 export function buildMessageKey(role, text, timestamp, opts = {}) {
-    if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
+    if (opts.clientMessageId) {
+        const room = role === 'user' && opts.ownerChatId !== opts.chatId ? `room:${opts.ownerChatId}|` : '';
+        return `${room}client|${opts.clientMessageId}`;
+    }
     if (role !== 'user' && !opts.isProgress && opts.taskId) {
         return [
             'task',
@@ -1258,11 +1257,10 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 // В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable chat write, so that
 // client_message_id's bubble carries `Input saved` (a tick by its time) — never read or begun. `ingress_pending` keeps that note
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
-export function markIngressSaved(root, row) {
+export function markIngressSaved(root, row, bubble = ownerMessageBubble(root, row, 1)) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
     if (row?.role !== 'user' || row.ingress_accepted !== true || !cmid) return false;
-    const bubble = [...root.querySelectorAll('.chat-bubble.user[data-client-message-id]')]
-        .find((node) => node.dataset.clientMessageId === cmid), prior = bubble?.querySelector('[data-ingress-saved]');
+    const prior = bubble?.querySelector('[data-ingress-saved]');
     const level = prior?.dataset.ingressSaved;  // `Input saved` and a kept send's delivery doubt are final: only a running host's own fact (dispatched, pending) ends that doubt
     const ended = level === 'unconfirmed' && (row.ingress_dispatched === true || state === 'pending');
     if (!bubble || (prior && !ended && (level !== 'pending' || level === state))) return false;

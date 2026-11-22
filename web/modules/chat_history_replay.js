@@ -12,6 +12,127 @@ export function historyRowIds(row) {
     return [row.history_id, ...(row.review_group?.attempts || []).map(attempt => attempt.history_id)].filter(Boolean);
 }
 
+/** A stored owner row carries its physical room in its address. Old rows in their own feed can lack it. */
+export function ownerRowRoom(row, fallback) {
+    const address = /^row:(-?\d+)@/.exec(row?.row_address || '');
+    return address ? Number(address[1]) : Number(row?.chat_id ?? fallback);
+}
+
+/** Find the source bubble for a host receipt. A pending echo still belongs to its submitting room. */
+export function ownerMessageBubble(feed, row, chatId) {
+    if (!row?.client_message_id) return null;
+    const room = ownerRowRoom(row, chatId);
+    const bubble = [...(feed?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])].find(({ dataset }) => {
+        if (dataset.clientMessageId !== row.client_message_id) return false;
+        if (row.origin_projected || dataset.originProjected) return Boolean(row.origin_projected && row.origin_id && row.origin_id === dataset.originId);
+        if (dataset.rowAddress && row.row_address) return dataset.rowAddress === row.row_address;
+        return ownerRowRoom({ row_address: dataset.rowAddress }, dataset.ownerChatId ?? chatId) === room;
+    }) || null;
+    if (bubble && row.origin_projected && row.opening_input_kind) {
+        const explanation = row.opening_input_kind === 'owner_press'
+            ? 'Button pressed without words. The label is the asking task’s text.'
+            : row.opening_input_kind === 'owner_card_input'
+                ? 'Card input received. Any button label is the asking task’s text, not the owner’s words.'
+                : 'Card answer. Any button label is the asking task’s text, not part of the answer.';
+        bubble.setAttribute?.('aria-description', explanation);
+        if (!bubble.title) bubble.title = explanation;
+    }
+    return bubble;
+}
+
+/**
+ * The room a mounted owner bubble's words were written in, as the host stated it: the physical address of the row it
+ * was drawn from, else the original's room a Project's retained copy names (`data-source-chat-id`). `null` when the
+ * host stated neither (a local echo, a copy from before copies named it): never the room on screen.
+ */
+export function statedOwnerRoom(node) {
+    const address = /^row:(-?\d+)@/.exec(node?.dataset?.rowAddress || '');
+    if (address) return Number(address[1]);
+    const copy = node?.dataset?.sourceChatId;
+    return copy === undefined || copy === '' ? null : Number(copy);
+}
+
+/** A receipt whose host stated that no row wears it (`source_row_address: ""`, live and saved alike): no mounted bubble
+ * is its row, whatever its client id, and a unique match is no authority. */
+export function statesNoRow(frame) {
+    return frame?.source_row_address === '';
+}
+
+/**
+ * In a Project, the one mounted owner bubble another room's routing receipt paints: the bubble the host showed as
+ * exactly that message, by the physical address the host stated (the row's own, or its retained copy's) and its stated
+ * room. No bubble is made for it, a bubble of this room or one whose room was never stated takes nothing from it, and
+ * a hidden panel or a synthetic room has no such receipt. A frame that names no room or no address (an older one) is
+ * no other room's: a mounted client id is no placement, so only Main's own path ever read it as Main's.
+ */
+export function foreignReceiptBubble(feed, frame, chatId) {
+    if (!Number.isInteger(frame?.chat_id) || !frame.source_row_address) return null;
+    const room = frame.chat_id;
+    const id = String(frame.client_message_id || '');
+    if (!id || chatId <= 0 || room <= 0 || room === chatId) return null;
+    const found = [...(feed?.querySelectorAll('.chat-bubble.user[data-client-message-id]') || [])]
+        .filter((node) => node.dataset.clientMessageId === id && statedOwnerRoom(node) === room
+            && (node.dataset.rowAddress || node.dataset.sourceRowAddress) === frame.source_row_address);
+    return found.length === 1 ? found[0] : null;
+}
+
+/** An exact receipt cannot be painted on a pending echo that has not learned its physical address. */
+export function receiptBubble(feed, frame, chatId) {
+    if (statesNoRow(frame)) return null;
+    const room = ownerRowRoom(frame, chatId);
+    const matches = [...feed.querySelectorAll('.chat-bubble.user[data-client-message-id]')].filter((node) => {
+        const data = node.dataset;
+        if (data.clientMessageId !== frame.client_message_id) return false;
+        if (frame.source_row_address) return (data.rowAddress || data.sourceRowAddress) === frame.source_row_address;
+        return !data.originProjected && (statedOwnerRoom(node) ?? Number(data.ownerChatId ?? chatId)) === room;
+    });
+    return matches.length === 1 ? matches[0] : null;
+}
+
+/** Whether a canonical history row adopts this mounted bubble as its own: the bubble is still a retained copy
+ * (`data-origin-projected`, before the row's adoption clears it) of that exact origin identity, never matched by words
+ * or time, and names no other row's address (a resolvable copy already wears this row's own). */
+export function adoptsRetainedCopy(node, opts) {
+    const data = node?.dataset || {};
+    if (opts.originProjected || !opts.originId || data.originProjected !== '1' || data.originId !== opts.originId) return false;
+    return !data.rowAddress || data.rowAddress === String(opts.reply?.row_address || '');
+}
+
+export function matchesHistoryBubble(node, opts, legacyKey, chatId) {
+    const data = node.dataset;
+    if (opts.originId && data.originId === opts.originId) return true;
+    if (!opts.clientMessageId) return !data.historyId && data.messageKey === legacyKey;
+    if (opts.originProjected || data.originProjected || data.clientMessageId !== opts.clientMessageId) return false;
+    if (data.historyId && data.historyId !== opts.historyId) return false;
+    if (data.rowAddress && opts.reply?.row_address) return data.rowAddress === opts.reply.row_address;
+    return ownerRowRoom({ row_address: data.rowAddress }, data.ownerChatId ?? chatId) === ownerRowRoom(opts.reply, chatId);
+}
+
+/** Saved openings keep their own placement key; the old key is only for echo correlation. */
+export function messagePlacementKey(opts, legacyKey) {
+    if (opts.historyId) return `history:${opts.historyId}`;
+    if (opts.originId) return `origin|${opts.originId}`;
+    const address = opts.reply?.role === 'user' && opts.reply.row_address;
+    return address ? `row|${address}` : legacyKey;
+}
+
+/** Reuse a mounted node for its live echo without changing the attribution of a retained copy. */
+export function livePriorBubble(bubbles, opts, keys, legacyKey, chatId) {
+    if (opts.originId) return (!keys || keys.origin.has(opts.originId))
+        ? bubbles().find(node => node.dataset.originId === opts.originId) : null;
+    const row = opts.reply;
+    const address = row?.role === 'user' ? row.row_address : '';
+    const room = ownerRowRoom(row, chatId);
+    if (keys && !address && !keys.legacy.has(legacyKey)) return null;
+    return bubbles().find(({ dataset: data }) => {
+        if (address && data.rowAddress) return data.rowAddress === address;
+        if (data.messageKey !== legacyKey) return false;
+        if (row?.role !== 'user') return !data.originProjected;
+        if (data.originProjected && (address || data.rowAddress)) return false;
+        return ownerRowRoom({ row_address: data.rowAddress }, data.ownerChatId ?? chatId) === room;
+    });
+}
+
 /** During a page replay, every identity key a mounted bubble carries (a superset: keys are only added, `note`): a row
  * looks for its prior bubble only when one could be mounted, not by scanning the feed per row (O(rows²) a page). */
 export function createReplayKeys() {

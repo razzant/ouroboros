@@ -109,14 +109,16 @@ def _owner_task_origin(drive_root: object, task_id: str) -> dict:
     except Exception:
         log.debug("_owner_task_origin lookup failed", exc_info=True)
     for source in sources:
-        ref = source.get("origin_message_ref")
+        metadata = source.get("metadata") or {}
+        ref = source.get("origin_message_ref") or metadata.get("origin_message_ref")
         if isinstance(ref, dict) and ref:
-            text = source.get("origin_message_text")
+            snapshot = metadata.get("origin_message_snapshot") or {}
+            text = snapshot.get("placeholder_text") or source.get("origin_message_text") or metadata.get("origin_message_text")
             if not (isinstance(text, str) and text.strip()):
                 # A malformed record (ref without its cross-thread text copy)
                 # degrades to the typed absence — never an unhandled 500.
                 continue
-            return {"ref": dict(ref), "text": text}
+            return {"ref": dict(ref), "text": text, **({"snapshot": snapshot} if snapshot else {})}
     return {"absent": "post_hoc_unresolved"}
 
 

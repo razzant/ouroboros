@@ -767,10 +767,11 @@ def test_dequeue_reads_the_retained_row_when_a_web_item_carries_no_witness(monke
     )
     [update] = bridge.get_updates(offset=0, timeout=0)
     assert update["message"].get("accepted_source_row", {}) == {}
+    from ouroboros.chat_chain import source_row_id
     assert message_bus.record_inbound_message(
         bridge, update["message"], chat_id=1, user_id=1, client_message_id="bare-1",
         text="no witness", ts="ignored",
-    ) == ref
+    ) == {**ref, "row_sha256": source_row_id(row)}
     forged = dict(update["message"], accepted_source_ref={**ref, "text_sha256": "0" * 64})
     with pytest.raises(ValueError, match="accepted source does not match"):
         message_bus.record_inbound_message(

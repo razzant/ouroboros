@@ -35,7 +35,7 @@ import { onRefit } from './text_fit.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
-import { createReplayKeys, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
+import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, matchesHistoryBubble, messagePlacementKey, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -382,8 +382,7 @@ export function createChatInstance({
     const pendingSuggestedNames = new Map();
     // Server-confirmed direct/managed activities.
     const activeDirectActivities = new Map();
-    // Local user submissions awaiting server confirmation (clientMessageId
-    // -> { clientMessageId, timestamp }).
+    // Local user submissions awaiting server confirmation.
     const pendingSubmissions = new Map();
     const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect and a reconnect forget both
     // Bounded conclusions retain known outcomes for later cards; reusable slots clear on settlement.
@@ -765,8 +764,8 @@ export function createChatInstance({
         });
     }
 
-    // P5: task ids whose progress carried the supervisor's host-attested `cancelable` marker (queue tasks the cancel
-    // endpoint reaches), from live frames and replay alike, maybe before their card: kept beside the records.
+    // P5: task ids whose progress carried supervisor's host-attested `cancelable` marker (queue
+    // tasks cancel endpoint reaches), from live frames, replay, maybe before card: kept with records.
     const cancelableTaskIds = new Set();
 
     function queueTaskLiveUpdate(summary, taskId, rawTs) {
@@ -786,8 +785,8 @@ export function createChatInstance({
         });
     }
 
-    // Main blocks with work offer conversion unless their origin is bound (the same /api/state fact app.js
-    // reads); titles use the same work predicate. Every root work card offers Reply in its row menu.
+    // Main blocks with work offer conversion unless origin bound (same /api/state fact app.js reads);
+    // titles use that predicate. Every root work card offers Reply in its row menu.
     function syncBlockChrome(record) {
         replies.syncCard(record, !record.isSubagent && (isPortal(record) || blockHasWork(record)));
         // A child is never a convertible unit (it inherits its root's Project by
@@ -1590,8 +1589,8 @@ export function createChatInstance({
         return withStableViewport(() => applyLiveCardStateMutation(summary, groupId, rawTs, options));
     }
 
-    // Authored naming has its own clock: newer execution or a terminal outcome may own the card before its saved
-    // narration arrives here. A root's collapsed line shows narration unless a cause holds.
+    // Authored naming has own clock: newer execution or terminal outcome may own card before saved
+    // narration arrives. Root's collapsed line shows narration unless cause holds.
     function reconcileAuthoredHeadline(record, summary, rawTs) {
         if (!summary.human || !summary.headline) return;
         const previous = record.lastHumanHeadlineSource, shown = previous?.preview || '';
@@ -1985,8 +1984,7 @@ export function createChatInstance({
             content,
             text: content,
             subagent_event: 'running',
-            // A replayed progress row may follow a terminal record (the history pre-pass knows the child's final state):
-            // no contradictory `status=running` metadata then.
+            // Replay can show progress after terminal; omit `status=running` when history knows the child's final state.
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
@@ -2093,7 +2091,7 @@ export function createChatInstance({
     }
 
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
-        // Normalize the persisted identity once; the same fields label and deduplicate a row.
+        // The same stored fields label and identify a row.
         const meta = Object.fromEntries([
             'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
             'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
@@ -2101,9 +2099,10 @@ export function createChatInstance({
         ].map(key => [key, opts[key] || '']));
         const { clientMessageId } = meta;
         const ts = timestamp || new Date().toISOString();
-        const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress });
+        meta.ownerChatId = ownerRowRoom(opts.reply, chatId);
+        const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress, chatId });
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
-        const messageKey = opts.historyId ? `history:${opts.historyId}` : legacyKey;
+        const messageKey = messagePlacementKey(opts, legacyKey);
         const deliveryKey = opts.deliveryId ? `delivery:${opts.deliveryId}` : '';
         // A delivery is one bubble while that bubble is mounted; a released page mounts it again.
         const delivered = deliveryKey && seenMessageKeys.has(deliveryKey)
@@ -2117,8 +2116,7 @@ export function createChatInstance({
         const prior = opts.historyId
             ? (replayKeys && !replayKeys.history.has(opts.historyId) ? null
                 : historyNodes(opts.historyId).find(node => node.classList.contains('chat-bubble')))
-            : (replayKeys && !replayKeys.legacy.has(legacyKey) ? null
-                : Array.from(messagesDiv.querySelectorAll('.chat-bubble')).find(node => node.dataset.messageKey === legacyKey));
+            : livePriorBubble(bubbles, opts, replayKeys, legacyKey, chatId);
         if (prior && (opts.historyId || _historyReplayActive)) {
             rememberMessageKey(messageKey);
             const originChanged = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
@@ -2130,16 +2128,16 @@ export function createChatInstance({
         if (opts.historyId) {
             const mounted = !replayKeys || (clientMessageId && replayKeys.client.has(clientMessageId))
                 || (opts.originId && replayKeys.origin.has(opts.originId)) || replayKeys.legacy.has(legacyKey);
-            const prior = mounted && bubbles().find(node =>
-                (clientMessageId && node.dataset.clientMessageId === clientMessageId)
-                || (opts.originId && node.dataset.originId === opts.originId)
-                || (!node.dataset.historyId && node.dataset.messageKey === legacyKey));
+            const prior = mounted && bubbles().find(node => matchesHistoryBubble(node, opts, legacyKey, chatId));
             if (prior) {
                 stampHistoryNode(prior, opts.historyId, opts.historyPosition);
                 noteBubbleKeys(prior);
                 rememberMessageKey(messageKey);
                 chatDecision.renderRoutingDecision(prior, opts.chatAnnotation);
-                return syncSavedProjectContext(prior, opts.originProjected);
+                // Exact origin gives this room's retained copy its Reply.
+                const adopted = adoptsRetainedCopy(prior, opts) && replies.adopt(opts.reply, prior);
+                const restored = syncSavedProjectContext(prior, opts.originProjected, opts.originId);
+                return restored || adopted;
             }
         }
 
@@ -2154,16 +2152,12 @@ export function createChatInstance({
         return bubble;
     }
 
-    function updateMessageAnnotation(clientMessageId, annotation) {
-        const messageId = String(clientMessageId || '');
-        if (!messageId) return false;
-        // The journal copy carries the ack, so a re-render restores it too.
-        const journalEntry = localEchoJournal.get(messageId);
-        if (journalEntry) journalEntry.annotation = annotation || null;
-        const bubble = Array.from(messagesDiv.querySelectorAll('.chat-bubble.user[data-client-message-id]'))
-            .find((candidate) => candidate.dataset.clientMessageId === messageId);
-        const changed = chatDecision.renderRoutingDecision(bubble, annotation);
-        if (bubble && isMain) reconcilePortalNotes(messagesDiv, bubble);
+    const localOwnerRow = row => !row.origin_projected && ownerRowRoom(row, chatId) === chatId;
+
+    function confirmOwnerRow(row) {
+        const bubble = ownerMessageBubble(messagesDiv, row, chatId);
+        const changed = markIngressSaved(messagesDiv, row, bubble) | markSwarmLabel(messagesDiv, row, bubble) | replies.adopt(row);
+        if (localOwnerRow(row)) unconfirmed.settle(row);
         return changed;
     }
 
@@ -2259,7 +2253,7 @@ export function createChatInstance({
                 });
                 // Retire only local echoes this source snapshot confirms.
                 const localEcho = partitionLocalEchoJournal(localEchoJournal, new Set(messages
-                    .filter((m) => m.role === 'user' && m.client_message_id)
+                    .filter((m) => m.role === 'user' && m.client_message_id && localOwnerRow(m))
                     .map((m) => String(m.client_message_id))));
                 for (const entry of localEcho.confirmed) {
                     localEchoJournal.delete(entry.clientMessageId);
@@ -2355,7 +2349,7 @@ export function createChatInstance({
                         continue;
                     }
                     // History clears Sending; census re-links live turns.
-                    if (fromReconnect && msg.role === 'user' && msg.client_message_id) {
+                    if (fromReconnect && msg.role === 'user' && localOwnerRow(msg) && msg.client_message_id) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
                     if (msg.is_progress) {
@@ -2386,7 +2380,8 @@ export function createChatInstance({
                         if (child) continue;
                     }
                     // A durable routing receipt retires Sending like its live frame.
-                    if (msg.chat_annotation && msg.client_message_id) {
+                    if (msg.chat_annotation && localOwnerRow(msg) && msg.client_message_id &&
+                            (!msg.chat_annotation.source_row_address || msg.sender_session_id === chatSessionId)) {
                         pendingSubmissions.delete(String(msg.client_message_id));
                     }
                     addStoredRow(msg, taskId, {
@@ -2400,7 +2395,7 @@ export function createChatInstance({
                             ? { skill: msg.skill, jobId: msg.job_id, ...(msg.record_id ? { recordId: msg.record_id } : {}) }
                             : null,
                     });
-                    if (msg.role === 'user') { markIngressSaved(messagesDiv, msg); markSwarmLabel(messagesDiv, msg); replies.adopt(msg); unconfirmed.settle(msg); }
+                    if (msg.role === 'user') confirmOwnerRow(msg);
                 }
                 _historyRow = null;
                 for (const [tid, ending] of endings) {
@@ -2587,9 +2582,9 @@ export function createChatInstance({
     });
 
     const opening = (async () => {
-        // The owners below exist first: no read stands between an opening and the saved text.
+        // The owners below exist first: no read stands between opening and saved text.
         await null;
-        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(); }
+        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(true); }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
@@ -2694,8 +2689,8 @@ export function createChatInstance({
         } finally { reading.wait(current, false); }
     }
     scrollBottomBtn?.addEventListener('click', showLatest);
-    // A return keeps older reading, ↓ marked and newer messages unread (owner 2026-11-03). A follower restores its
-    // place while catching up. Leaving keeps that place and cancels the pending move.
+    // Return keeps older reading, ↓ marked, newer messages unread (owner 2026-11-03). Follower
+    // restores place while catching up. Leaving keeps it and cancels the pending move.
     function resume(arrive = false) {
         if ((reading.target || reading).stick === false) {
             _hasNewActivity ||= arrive; reading.position(); updateScrollButton(); return;
@@ -2778,9 +2773,9 @@ export function createChatInstance({
     inputArea?.addEventListener('ouro:composer-reserve', syncComposerReserve);
     installChatResizeObservers();
 
-    // An open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners (style.css): a
-    // pointer in the panel quiets them; any key in the room restores them (Back to reading from the composer too) but
-    // lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
+    // Open Project room's feed holds the keys (app.js focusProjectRoom), focus drawn as two corners
+    // (style.css): a pointer in panel quiets them; any key restores them (Back to reading from the
+    // composer too) but lone modifiers and non-scrolling shortcuts (Cmd+C, Cmd+Shift+4).
     const focusPanel = asPanel ? container.closest?.('.project-panel') : null;
     const quietFocus = () => messagesDiv.classList.add('is-quiet-focus');
     const showFocus = ({ key, metaKey, ctrlKey, altKey }) => {
@@ -2791,8 +2786,8 @@ export function createChatInstance({
     focusPanel?.addEventListener('keydown', showFocus);
 
     if (asPanel) {
-        // Late panels missed socket open; seed from the socket and latest snapshot, its works included: a working
-        // Project opened from its row said Online until its own first read (owner 20.10).
+        // Late panels missed socket open; seed from socket and latest snapshot, its works: a working
+        // Project opened from row said Online until first read (owner 20.10).
         const latest = stateSnapshots.latest?.();
         hostStart.read(latest);
         workState = reconcileWorkState(workState, latest, chatId, ws.isConnected?.() !== false);
@@ -2999,9 +2994,9 @@ export function createChatInstance({
         }
         return snapshot.error ? historyPager.retry() : loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 2026-10-05). Empty pages cross the server read
-    // ceiling: continue to rows or the chat's start. Growth re-anchors unless the reader walks the older chain;
-    // `current` guards each request.
+    // `Load more history` reads older, ↓ the present (owner 2026-09-14, 10-05). Empty pages cross
+    // server read ceiling: continue to rows or chat start. Growth re-anchors unless reader walks
+    // older chain; `current` guards each request.
     async function loadHistoryAtEdge(direction, current = () => true) {
         const { canNewer, canOlder } = historyPager.getState();
         if (direction === 'older' && current() && historyWindow?.horizonGap && !canNewer && !(canOlder && readingHistory())) {
@@ -3192,8 +3187,8 @@ export function createChatInstance({
 
     onWs('typing', (msg) => {
         if (!isMyThread(msg)) return;  // each column shows typing only for its own thread
-        // A typing frame is a submission receipt, never liveness: it re-reads the state at once and retires the linked
-        // `Sending...` only when that read answers: the room steps from Sending... to the server's word.
+        // Typing frame is submission receipt, never liveness: re-reads state at once, retires linked
+        // `Sending...` only when that read answers: room steps from Sending... to server's word.
         const cmid = String(msg.client_message_id || '');
         if (!cmid) return;
         void refreshHeaderControlState().then(() => {
@@ -3214,14 +3209,19 @@ export function createChatInstance({
         if (msg.role === 'user') {
             const clientMessageId = msg.client_message_id || '';
             const senderSessionId = msg.sender_session_id || '';
-            // 2A: the user echo is receipt of the user ROW, not turn start: it settles the bubble but must NOT retire the
-            // `Sending...` submission (a linked typing frame, snapshot turn, routing receipt or the turn's conclusion does).
-            const own = senderSessionId === chatSessionId && clientMessageId;
-            if (own) markPendingDelivered(clientMessageId);
+            // 2A: user echo is receipt of user ROW, not turn start: settles bubble but must NOT retire the
+            // `Sending...` submission (linked typing frame, snapshot turn, routing receipt or conclusion does).
+            const local = localOwnerRow(msg);
+            const own = local && senderSessionId === chatSessionId && clientMessageId;
+            if (own) {
+                markPendingDelivered(clientMessageId);
+                const pending = pendingSubmissions.get(clientMessageId);
+                if (pending && msg.row_address) pending.rowAddress = msg.row_address;
+            }
             // The custody listener can settle this room's send while away; another client's echo waits for history.
             if (leaving) {
-                if (own) markIngressSaved(messagesDiv, msg);
-                unconfirmed.settle(msg);
+                if (own) markIngressSaved(messagesDiv, msg, ownerMessageBubble(messagesDiv, msg, chatId));
+                if (local) unconfirmed.settle(msg);
                 return;
             }
             if (!own) withRemoteActivity(() => addMessage(
@@ -3235,8 +3235,7 @@ export function createChatInstance({
                 textPlaceholder: msg.text_placeholder === true, reply: msg,
                 },
             ));
-            withStableViewport(() => markIngressSaved(messagesDiv, msg) | replies.adopt(msg) | markSwarmLabel(messagesDiv, msg));
-            unconfirmed.settle(msg);
+            withStableViewport(() => confirmOwnerRow(msg));
             syncChatStatus();
             return;
         }
@@ -3320,13 +3319,17 @@ export function createChatInstance({
     });
 
     onWs('message_annotation', (msg) => {
-        if (!isMyThread(msg)) return;
         if (msg.annotation_type !== 'routing_ack') return;
-        const apply = () => updateMessageAnnotation(msg.client_message_id || '', msg);
-        (msg.status === 'needs_manual_target' ? withRemoteActivity : withStableViewport)(apply);
-        // A routing receipt ends this submission's `Sending...` phase.
+        // Only the host places relay reads, including resolved older quotes.
+        if (msg.action === 'steer_task' && msg.status === 'read' && !msg.source_row_address) return;
+        const own = isMyThread(msg);
+        const apply = () => chatDecision.applyRoutingAck(messagesDiv, msg, { own, journal: localEchoJournal });
+        (own && msg.status === 'needs_manual_target' ? withRemoteActivity : withStableViewport)(apply);
+
         const receiptCid = String(msg.client_message_id || '');
-        if (receiptCid && pendingSubmissions.delete(receiptCid)) {
+        if (own && receiptCid && Number(msg.chat_id ?? 1) === chatId &&
+                (msg.source_row_address ? msg.source_row_address === pendingSubmissions.get(receiptCid)?.rowAddress : msg.source_row_address !== '') &&
+                pendingSubmissions.delete(receiptCid)) {
             syncChatStatus();
         }
     });
@@ -3395,9 +3398,9 @@ export function createChatInstance({
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
-        // A real reconnect forgets the start as the close did: a body polled while the socket was down may be the
-        // server's from before a restart. A room's return (`resumed`) is none: `leave` forgot an outage it left in,
-        // `stay` one it slept through.
+        // A real reconnect forgets the start as the close did: a body polled while the socket was down
+        // may predate the restart. Room's return (`resumed`) is none: `leave` forgot an outage it left
+        // in, `stay` one it slept through.
         if (isReconnect && !msg?.resumed) hostStart.forget();
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
@@ -3501,8 +3504,8 @@ export function createChatInstance({
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
         closeTransient: (pause) => { roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
-        // A room leaving the screen (room_retire.js), on exit and while away: its place kept, its paint receipt and reads
-        // stopped, neither shown nor read (its reader and playback are `closeTransient`'s); `stay` returns.
+        // Room leaving screen (room_retire.js), on exit, while away: place kept, paint receipt and
+        // reads stopped, neither shown nor read (reader and playback `closeTransient`'s); `stay` returns.
         leave: () => {
             if (leaving) return;
             catchUp.cancel(recentRequest);  // its return reads, and says so, anew
@@ -3523,8 +3526,8 @@ export function createChatInstance({
         },
         // How the room was opened (app.js): pressed open by a pointer, its focus corners wait for a key.
         quietFocus: (quiet) => messagesDiv.classList.toggle('is-quiet-focus', Boolean(quiet)),
-        // Full teardown (P3): every acquired resource (ws subscriptions, window/document listeners, ResizeObserver,
-        // timers), then buffered collections, the DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
+        // Full teardown (P3): all acquired resources (ws subscriptions, window/document listeners,
+        // timers), then buffered collections, DOM last. Idempotent; late rAF/async continuations no-op on `destroyed`.
         destroy() {
             if (destroyed) return;
             destroyed = true;

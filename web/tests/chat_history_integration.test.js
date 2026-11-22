@@ -452,6 +452,64 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
 });
 
+test('an opening with its stored address keeps one bubble when the original arrives live', async t => {
+    const address = `row:2@${TS}#0123456789ab`;
+    const origin = row('chat:220', 'Original request', {
+        role: 'user', source: 'web', sender_session_id: 'another-tab', client_message_id: 'owner-opening',
+        history_id: undefined, history_position: undefined,
+        origin_projected: true, origin_id: 'binding-source-ref', row_address: address,
+    });
+    const f = fixture(t, page([origin]));
+    await f.refresh();
+    const original = f.bubbles()[0];
+    const note = original.querySelector('.saved-project-context');
+    assert.equal(original.dataset.rowAddress, address);
+    assert.ok(note);
+    f.emit({ role: 'user', content: origin.text, ts: origin.ts, source: origin.source,
+        sender_session_id: origin.sender_session_id, client_message_id: origin.client_message_id,
+        row_address: address });
+    assert.deepEqual(f.bubbles(), [original]);
+    assert.equal(original.dataset.originId, origin.origin_id);
+    assert.equal(original.querySelector('.saved-project-context'), note);
+});
+
+test('a retained card input keeps a description that does not claim lost submitted words', async t => {
+    const origin = row('chat:240', 'First note\n2', {
+        role: 'user', client_message_id: 'card-opening', source: 'web', sender_session_id: 'another-tab',
+        history_id: undefined, history_position: undefined,
+        origin_projected: true, origin_id: 'card-opening-ref', opening_input_kind: 'owner_card_input',
+    });
+    const f = fixture(t, page([origin]));
+    await f.refresh();
+    const description = f.bubbles()[0].getAttribute('aria-description');
+    assert.ok(description, 'the retained card input keeps its accessible description');
+    assert.doesNotMatch(description, /unavailable/i, 'the kind alone never says the submitted words were lost');
+    assert.match(description, /asking task’s text/, 'the description still names whose text a label is');
+});
+
+test('a history row that names its origin hands that identity to the live echo it adopts', async t => {
+    const address = `row:2@${TS}#0123456789ab`;
+    const f = fixture(t, page([]));
+    await f.refresh();
+    f.emit({ role: 'user', content: 'Original request', ts: TS, source: 'web',
+        sender_session_id: 'another-tab', client_message_id: 'owner-opening' });
+    assert.equal(f.bubbles().length, 1);
+    const physical = row('chat:230', 'Original request', {
+        role: 'user', client_message_id: 'owner-opening', origin_id: 'binding-source-ref', row_address: address,
+    });
+    await f.refresh(page([physical]));
+    assert.equal(f.bubbles().length, 1, 'the physical row adopts the mounted live echo');
+    const bubble = f.bubbles()[0];
+    assert.equal(bubble.dataset.historyId, 'chat:230');
+    assert.equal(bubble.dataset.originId, 'binding-source-ref', 'the adopted echo carries the origin identity forward');
+    const retained = row('chat:231', 'Original request', {
+        role: 'user', source: 'web', sender_session_id: 'another-tab', client_message_id: undefined,
+        history_id: undefined, history_position: undefined, origin_projected: true, origin_id: 'binding-source-ref',
+    });
+    await f.refresh(page([retained]));
+    assert.deepEqual(f.bubbles(), [bubble], 'the retained copy reuses the bubble its origin identity names');
+});
+
 test('a replayed refusal receipt shows the host cause and a later scheduled receipt patches the same note', async (t) => {
     const cause = 'Not started: the working folder can\'t be used';
     const message = row('chat:250', 'Audit the GitHub tool', {

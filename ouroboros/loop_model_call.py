@@ -1156,24 +1156,33 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
     meta = getattr(tool_ctx, "task_metadata", None)
     meta = meta if isinstance(meta, dict) else {}
     delivery = getattr(tool_ctx, "last_owner_delivery", None)
-    ids = [str(meta.get("client_message_id") or ""),
-           str(delivery.get("client_message_id") or "") if isinstance(delivery, dict) else ""]
-    ids = [value for index, value in enumerate(ids) if value and value not in ids[:index]]
+    message = meta.get("client_message_id")
+    contract = meta.get("routing_contract") if isinstance(meta.get("routing_contract"), dict) else {}
+    room, ref = contract.get("source_chat_id"), meta.get("origin_message_ref")
+    if room is None and isinstance(ref, dict) and ref.get("client_message_id") == message:
+        room = ref.get("chat_id")
+    from ouroboros.chat_annotations import receipt_source_room, routing_source_address
+    from ouroboros.chat_references import TURN_ADDRESS
+    room = receipt_source_room(ref, message, room)
+    address = routing_source_address(ref, room, message)
+    sources = ([(room, message, address)] if message and not meta.get("origin_suppressed")
+               and (address or not meta.get(TURN_ADDRESS)) else [])
+    if isinstance(delivery, dict) and delivery.get("client_message_id") and not delivery.get("origin_suppressed"):
+        sources.append((delivery.get("chat_id"), delivery["client_message_id"], delivery.get("source_row_address", "")))
     own = [ref for ref in getattr(tool_ctx, "unconfirmed_routing_acts", None) or [] if isinstance(ref, dict)]
     root = (getattr(tool_ctx, "budget_drive_root", "") or meta.get("budget_drive_root") or ctx.drive_root
             or getattr(tool_ctx, "drive_root", None))
-    if not (ids or own) or not root or str(meta.get("delegation_role") or "") == "subagent":
+    if not (sources or own) or not root or str(meta.get("delegation_role") or "") == "subagent":
         return False
     try:
-        from ouroboros.project_dialogue import _ANNOTATIONS_NAME, _latest_annotations_by_token
-        from ouroboros.routing_wait import routing_act_fields, routing_act_lines as lines
+        from ouroboros.routing_wait import message_routing_acts, recorded_act_receipt, routing_act_fields, routing_act_lines as lines
 
         root = pathlib.Path(str(root))
-        rows = _latest_annotations_by_token(root / "logs" / _ANNOTATIONS_NAME)
-        acts = [routing_act_fields(root, key[0], row) for key, row in rows.items() if key[0] in ids]
-        for ref in own:  # shown once settled: its unconfirmed tool result was already read
-            key = (str(ref.get("client_message_id") or ""), str(ref.get("routing_token") or ""))
-            act = routing_act_fields(root, key[0], rows.get(key) or ref) if key[0] not in ids else None
+        acts = message_routing_acts(root, sources)
+        for ref in own:  # the exact token answers even when no owner row carries the act
+            message = str(ref.get("client_message_id") or "")
+            row = recorded_act_receipt(root, ref) if message else {}  # in the room a note's relay named for it
+            act = routing_act_fields(root, message, row or ref)
             if act and act["status"] != "unconfirmed" and act not in acts:
                 acts.append(act)
     except Exception:
@@ -1187,7 +1196,6 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
             shown = [line for line in text.splitlines() if line.startswith("- ")]
             break
     if shown is None:  # what the turn's own metadata already showed it at start
-        contract = meta.get("routing_contract") if isinstance(meta.get("routing_contract"), dict) else {}
         startup = contract.get("message_routing_acts") or (
             [contract["message_routing_receipt"]] if isinstance(contract.get("message_routing_receipt"), dict) else [])
         shown = lines([act for act in startup if isinstance(act, dict)])

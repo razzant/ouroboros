@@ -117,8 +117,10 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             const close = card.querySelector('.chat-quiz-close');
             if (close) close.disabled = held || !ANSWERABLE_QUIZ_STATES.includes(card.dataset.state) || Boolean(String(field?.value || '').trim());
             if (reason) { reason.readOnly = held; if (held && reason.value !== record.reason) reason.value = record.reason; }
+            // The recorded choice stays inert (chat_decision.setCardState keeps it focusable for a Reply's landing).
             for (const selector of ['.chat-quiz-option', '.chat-quiz-send', '.chat-quiz-close', '.chat-quiz-close-submit', '.chat-quiz-dismiss'])
-                card.querySelectorAll(selector).forEach(button => button.setAttribute('aria-disabled', held ? 'true' : 'false'));
+                card.querySelectorAll(selector).forEach(button => button.setAttribute('aria-disabled',
+                    held || button.classList.contains('chosen') ? 'true' : 'false'));
             card.querySelectorAll('.chat-quiz-option').forEach((button, index) =>
                 { const chosen = held && attempt.option_index === index;
                     if (button.classList.contains('pending-choice') !== chosen) button.classList.toggle('pending-choice', chosen); });

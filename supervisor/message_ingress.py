@@ -296,7 +296,10 @@ def _chat_record(
             record["logical_room_chat_id"] = 1
         if direction == "out" and task_id and record_type != "relay_entry" and "reply_to" not in meta:
             from ouroboros.chat_references import origin_reply
-            meta["reply_to"] = origin_reply(root, task_id)
+            meta["reply_to"] = origin_reply(root, task_id, meta, chat_id=chat_id, display_row={**meta, **record, "quiz": quiz})
+            meta["origin_reply"] = True
+        if meta.get("origin_reply") and meta.get("reply_to"):
+            record["origin_reply"] = True
         from ouroboros.chat_references import stored_reply
         for key in ("reply_to", "relay"):
             if isinstance(meta.get(key), dict) and meta[key]:
@@ -510,7 +513,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
     then it dispatches, not ``rejoined``. ``retain_inputs`` takes custody of the request's copies
     once a write is attempted or a row is handed over; a refusal before that adopts nothing.
     """
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import owner_row_source
     from ouroboros.chat_uploads import attachment_placeholder
     from ouroboros.owner_quiz import late_answer_ref
     from supervisor import message_bus
@@ -606,7 +609,7 @@ def accept_local_message(bridge, drive_root, text: str, *, retain_inputs=None, d
         if row.get("reply_to"):
             message["task_metadata"] = with_turn_address({**(message.get("task_metadata") or {}),
                 "reply_reference": delivery_reply(row["reply_to"], reply)}, row)
-        ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=logged)
+        ref, _ = owner_row_source(row)
         # record_inbound_message gets the row witness and receipt time.
         # Dispatch only schedules/queues; slow work must not hold the ingress lock.
         (dispatch or bridge.enqueue_local_message)(text, **message, accepted_source_ref=ref, accepted_source_row=row, received_at=ts)
@@ -618,7 +621,7 @@ def recover_pending_dispatches(bridge, drive_root) -> int:
     """Perform every dispatch the store still owes (a crash between the commit and the handoff),
     exactly once each: the partial index names them, no chain is read. An obligation naming a
     dispatcher this body lacks is abandoned with that reason. Returns the number dispatched."""
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import owner_row_source
 
     root = Path(drive_root)
     dispatched = 0
@@ -637,7 +640,7 @@ def recover_pending_dispatches(bridge, drive_root) -> int:
             ts = str(row.get("ts") or "")
             text = str(payload.get("text") or "")
             message = dict(payload.get("message") or {})
-            ref = build_owner_message_ref(chat_id=chat_id, client_message_id=message_id, ts=ts, text=str(row.get("text") or text))
+            ref, _ = owner_row_source(row)
             try:
                 dispatcher(bridge, text, **message, accepted_source_ref=ref, accepted_source_row=row, received_at=ts)
             except Exception:
@@ -653,9 +656,13 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
     """Keep one canonical ingress writer for dequeued and preaccepted messages."""
     from ouroboros.project_dialogue import (
         _text_sha256, build_owner_message_ref, entry_matches_source_ref, owner_message_ref_is_valid,
+        resolve_owner_message_source,
     )
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
     from supervisor import message_bus
 
+    message.pop("_origin_snapshot", None)
+    message.pop("_origin_unkept", None)
     source = str(message.get("source") or "web")
     ref = message.get("accepted_source_ref")
     if ref:
@@ -665,12 +672,12 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
         # absent, not a row to match), re-reads the retained row.
         accepted_row = message.get("accepted_source_row")
         row = (accepted_row if source == "web" and isinstance(accepted_row, dict) and accepted_row
-               else accepted_chat_message(message_bus.DATA_DIR, chat_id, client_message_id)) if owner_message_ref_is_valid(ref) else None
+               else resolve_owner_message_source(message_bus.DATA_DIR, ref)) if owner_message_ref_is_valid(ref) else None
         if (not row or row.get("source") != source or row.get("chat_id") != chat_id
                 or row.get("client_message_id") != client_message_id or not entry_matches_source_ref(row, [ref])
                 or ref["text_sha256"] != _text_sha256(text)):
             raise ValueError("accepted source does not match the queued message")
-        ref = dict(ref)
+        ref, _ = owner_row_source(row)
         ts = ref["ts"]
         placeholder = row.get("text_placeholder") is True
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
@@ -707,7 +714,14 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
                           "text_placeholder": placeholder, "reply_to": reply,
                           **({"ui_control": control} if control is not None else {})},
         )
-        ref = build_owner_message_ref(chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
+        # A best-effort write that kept no row leaves my human's accepted words their identity by value, as every
+        # earlier ingress gave it: the four older fields, never a row digest or a visibility no row attests. This door
+        # states that fact for its router (``_origin_unkept``, process-local like ``_origin_snapshot``): only then
+        # may its receipt answer the bubble just sent by client id (``server_owner_routing._record_routing_receipt``).
+        ref = owner_row_source(row)[0] if row else build_owner_message_ref(
+            chat_id=chat_id, client_message_id=client_message_id, ts=ts, text=text)
+        if not row:
+            message["_origin_unkept"] = True
     from ouroboros.chat_references import projection_fields
     from ouroboros.room_appearances import frame_rooms
     if source != "web":
@@ -727,6 +741,8 @@ def record_inbound_message(bridge, message: dict, *, chat_id: int, user_id: int,
             **frame_rooms(message_bus.DATA_DIR, row),
             **({"subagents_mode": "swarm"} if row and row.get("subagents_mode") == "swarm" else {}),
         })
+    if row:
+        message["_origin_snapshot"] = origin_snapshot(row, message_bus.DATA_DIR)
     return ref
 
 
@@ -766,7 +782,7 @@ def handle_web_message(
     import uuid
 
     from ouroboros.process_custody import current_custody_session_id
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import owner_row_source
 
     ts = utc_now_iso()
     message_id = client_message_id or f"web-{uuid.uuid4().hex}"
@@ -779,7 +795,9 @@ def handle_web_message(
     from ouroboros.chat_uploads import attachment_placeholder
 
     log_text = clean_text or str(image_caption or "").strip() or attachment_placeholder(image_base64, metadata)
-    placeholder = call_open or not clean_text  # host facts and attachment labels are not owner words
+    # Web words arrive only as TEXT; a web caption is the gateway's own attachment label, like a host
+    # fact never owner words. A sender's caption is words on the named-source writers above.
+    placeholder = call_open or not clean_text
     # The canonical row precedes echo/dispatch: neither WS nor Queue survives restart.
     # The row, its receipt and the dispatch obligation are ONE store transaction; the
     # returned witness lets dequeue validation avoid any chat read.
@@ -830,7 +848,7 @@ def handle_web_message(
         if handed:
             if row.get("reply_to"):  # an owed dispatch carries the first acceptance's capture, not the retry's identity
                 metadata["reply_reference"] = delivery_reply(row["reply_to"], reply)
-            ref = build_owner_message_ref(chat_id=thread_id, client_message_id=message_id, ts=ts, text=log_text)
+            ref, _ = owner_row_source(row)
             message = dict(
                 chat_id=thread_id, user_id=1, source="web",
                 sender_session_id=sender_session_id, client_message_id=message_id,

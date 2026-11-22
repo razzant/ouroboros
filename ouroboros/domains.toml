@@ -230,6 +230,7 @@ D20 = "Presence"
 "ouroboros/consciousness_authority.py" = "D15"
 "ouroboros/consciousness_wake.py" = "D15"
 "ouroboros/consciousness_transitions.py" = "D15"
+"ouroboros/chat_annotations.py" = "D17"
 "ouroboros/chat_chain.py" = "D15"
 "ouroboros/chronicle_store.py" = "D15"
 "ouroboros/chronicle_quotes.py" = "D15"
@@ -1337,6 +1338,7 @@ allowed = [
   "D17->D06",
   "D17->D07",
   "D17->D08",
+  "D17->D09",
   "D17->D11",
   "D17->D12",
   "D17->D15",
@@ -1468,7 +1470,6 @@ lazy_only = [
   "D16->D11",
   "D16->D15",
   "D17->D02",
-  "D17->D09",
   "D17->D13",
   "D17->D14",
   "D17->D20",

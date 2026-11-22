@@ -405,7 +405,8 @@ def _carry_inputs(q: Any, task: Dict[str, Any], predecessor: str, inputs: List[D
         raise ValueError("continuation_inputs_unavailable") from exc
     if authority:
         task.update(authority, attachments=authority["attachment_manifest"],
-                    attachment_images=[row for row in copied if row.get("status") == "staged" and row.get("is_image")])
+                    attachment_images=[row for row in copied if row.get("status") == "staged" and row.get("is_image")
+                                       and not row.get("path_only")])  # an inherited image stays a path here too
         task["text"] = task["objective"] = f"{task['text']}\n\n{inputs_text(predecessor, copied, authority)}"
     return copied
 
@@ -490,6 +491,12 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     # contract. Merge stored carriers per field, canonical winning; don't normalize
     # an absent handbook choice into false before deciding whether to copy it.
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    origin_metadata = {key: dict(metadata[key]) for key in ("origin_message_snapshot", "client_surface")
+                       if isinstance(metadata.get(key), dict) and metadata[key]}
+    if "origin_message_snapshot" not in origin_metadata and original and original.get("placeholder_text"):
+        # The source reader verified the legacy file-only opening. This is display, not owner words.
+        origin_metadata["origin_message_snapshot"] = {key: original[key] for key in ("placeholder_text", "attachments")
+                                                      if original.get(key)}
     model_role = str(metadata.get("model_role") or "").strip()
     # The same work keeps its primary, a recorded follow included (route_choice),
     # never the room's newer choice.
@@ -546,6 +553,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             # the new objective below is still the host's continuation text.
             **({"origin_message_ref": dict(origin_ref), "origin_message_text": original["content"]}
                if isinstance(origin_ref, dict) and origin_ref else {}),
+            **origin_metadata,
             # The objective is host-composed facts; the owner corpus is seeded
             # with the owner's exact words only (loop_messages seeding).
             "objective_author": {"kind": "continuation", "predecessor_task_id": predecessor},
@@ -666,6 +674,10 @@ def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dic
         ref = bound.get("source_ref")
         origin = ({"ref": ref, **({"text": bound["source_text"]} if "source_text" in bound else {})}
                   if isinstance(ref, dict) else {"absent": bound.get("origin_absent") or "post_hoc_unresolved"})
+        if "source_projectable" in bound:
+            origin["snapshot"] = {"projectable": bound["source_projectable"], "input": bound.get("source_input"),
+                                  "attachments": bound.get("source_attachments"), "source": bound.get("source_channel"),
+                                  "placeholder_text": bound.get("source_text") if bound.get("source_text_placeholder") else ""}
         bind_task_to_project(q.DRIVE_ROOT, task["id"], task["project_id"], task["chat_id"],
                              origin=origin, admission_basis=basis)
     return basis

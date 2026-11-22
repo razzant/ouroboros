@@ -201,11 +201,17 @@ def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypat
         page.get_by_text(shown, exact=False).first.wait_for(state="attached")
 
     # 5. A message saved into a running task's mailbox: a write, not a read receipt.
+    from ouroboros.chat_references import projection_fields
+
     page.locator("#chat-input").fill("Add the appendix too.")
     page.locator("#chat-send").click()
-    cmid = page.locator(".chat-bubble.user[data-client-message-id]").last.get_attribute("data-client-message-id")
-    message_bus.log_chat("in", 1, 7, "Add the appendix too.", source="web", client_message_id=cmid,
-                         drive_root=tmp_path)
+    pending = page.locator(".chat-bubble.user[data-client-message-id]").last
+    cmid, session = (pending.get_attribute(f"data-{key}") for key in ("client-message-id", "sender-session-id"))
+    row = message_bus.log_chat("in", 1, 7, "Add the appendix too.", source="web", client_message_id=cmid,
+                               sender_session_id=session, drive_root=tmp_path)
+    frames.append({"type": "chat", "role": "user", "content": row["text"], "ts": row["ts"], "chat_id": 1,
+                   "source": "web", "client_message_id": cmid, "sender_session_id": session,
+                   "ingress_accepted": True, **projection_fields(row)})
     _record_routing_receipt(bridge, sender, chat_id=1, client_message_id=cmid, action="mailbox_delivery",
                             target="t-docs", target_label="Docs task", status="delivered")
     _push(mounted, frames, sent)

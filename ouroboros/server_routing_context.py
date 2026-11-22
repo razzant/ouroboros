@@ -668,27 +668,38 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
             log.warning("Unable to build the project routing manifest", exc_info=True)
     if client_message_id:
         md["client_message_id"] = client_message_id
+    from ouroboros.chat_annotations import receipt_source_room, routing_source_address
+    from ouroboros.chat_references import TURN_ADDRESS
+    ref = md.get("origin_message_ref")
+    source_room = receipt_source_room(ref, client_message_id, chat_id)
     routing_contract = {
         "llm_first": True,
         "source_lane": "main" if is_main_lane else "project",
+        **({"source_chat_id": source_room} if client_message_id else {}),
         "valid_actions": [
             "answer_inline", "tell_task", "start_task", "move_to_project", "continue_task",
         ],
         # Unknown, never none: the roots of this chat and of Main could not be read now.
         **({"live_roots_unavailable": roots.gap} if roots.gap else {}),
     }
-    receipt = _message_routing_receipt(ctx, client_message_id)
-    if receipt:
+    from ouroboros.routing_wait import message_routing_acts
+    try:
+        address = routing_source_address(ref, source_room, client_message_id)
+        acts = ([] if md.get("origin_suppressed") or (not address and md.get(TURN_ADDRESS)) else
+                message_routing_acts(pathlib.Path(ctx.DRIVE_ROOT), [(source_room, client_message_id, address)]))
+    except Exception:
+        log.debug("message routing receipts unreadable at turn start", exc_info=True)
+        acts = []
+    if acts:
         # DISCLOSURE, not a gate (owner decision B5=A): one owner message became a
         # task and was then steered into three more live roots, each paying its own
         # review wave, because the deciding turn was never told a receipt already
         # existed. The choice stays with the model - no host ban on a second root.
-        routing_contract["message_routing_receipt"] = receipt
-        acts = _message_routing_acts(ctx, client_message_id)
+        routing_contract["message_routing_receipt"] = acts[-1]
         if len(acts) > 1:
             # The latest row hides earlier acts on the same message (a promote, then
             # a steer): each act keeps its own receipt, read, never inferred.
-            routing_contract["message_routing_acts"] = acts
+            routing_contract["message_routing_acts"] = sorted(acts, key=lambda act: act["ts"])
             routing_contract["message_routing_acts_note"] = (
                 "Recorded routing acts already taken for THIS owner message, oldest first. "
                 "Each receipt identifies the work and its recorded outcome.")
@@ -707,49 +718,6 @@ def main_lane_routing_metadata(ctx: Any, chat_id: int) -> Dict[str, Any]:
     """
     facts = _decision_turn_metadata(ctx, int(chat_id or 0), "", {})
     return dict(facts) if isinstance(facts, dict) else {}
-
-
-def _message_routing_receipt(ctx: Any, client_message_id: str) -> Dict[str, Any]:
-    """The existing routing receipt for THIS owner message, or {} when there is none.
-
-    Read from the annotation the routing rail already writes, so no new store and no
-    new reader: the decision turn simply sees what was already decided for the same
-    message (a promote's or route's status from its admission, as every reader shows
-    it: ``routing_wait.routing_act_fields``). Fail-soft - a missing or torn
-    annotations file leaves the turn exactly as it was.
-    """
-    if not client_message_id:
-        return {}
-    try:
-        from ouroboros.project_dialogue import latest_chat_annotations
-        from ouroboros.routing_wait import routing_act_fields
-
-        row = latest_chat_annotations(ctx.DRIVE_ROOT).get(str(client_message_id)) or {}
-        return routing_act_fields(pathlib.Path(ctx.DRIVE_ROOT), str(client_message_id), row) if row else {}
-    except Exception:
-        log.debug("message routing receipt lookup failed", exc_info=True)
-        return {}
-
-
-def _message_routing_acts(ctx: Any, client_message_id: str) -> list:
-    """Every routing act recorded for THIS owner message (latest row per act), oldest first.
-
-    The routing rail already keeps one receipt per (message, routing token); this
-    only reads it. Acts keyed to a synthetic ``agent-steer:*`` id or to another
-    task's id carry no link to this message and stay unlisted (a producer gap).
-    """
-    try:
-        from ouroboros.project_dialogue import _ANNOTATIONS_NAME, _latest_annotations_by_token
-        from ouroboros.routing_wait import routing_act_fields
-
-        root = pathlib.Path(ctx.DRIVE_ROOT)
-        rows = [row for (message_id, _token), row in _latest_annotations_by_token(
-            root / "logs" / _ANNOTATIONS_NAME).items() if message_id == str(client_message_id)]
-        return [routing_act_fields(root, str(client_message_id), row)
-                for row in sorted(rows, key=lambda row: str(row.get("ts") or ""))]
-    except Exception:
-        log.debug("message routing acts lookup failed", exc_info=True)
-        return []
 
 
 def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:

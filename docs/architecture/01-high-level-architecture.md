@@ -228,7 +228,7 @@ ouroboros/ — agent core and shared runtime (§6)
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
   projects_registry.py, project_admission.py, project_closure.py, project_folder.py — registry lifecycle, admission, reversible closure and the folder door (§6 Project registry and lease)
   project_handoff.py — the Main transfer receipt owed through the terminal outbox after a durable bind (§3 Project handoff receipts)
-  project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
+  project_dialogue.py — chat lens and refusal causes; chat_annotations.py — append-only routing receipts and picker claims (§3 Chat and Projects)
   room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
   owner_words.py — a work's owner words, one dated verbatim set; schedule text as provenance; by value for roots, helpers, sessions, reviewers
   project_lease.py — one-writer lanes per Project and folder, held per tree (§6 Project registry and lease)
@@ -757,7 +757,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   ├── logs/
 │   │   ├── chat.jsonl             ← frozen at the cutover
 │   │   ├── progress.jsonl         ← frozen at the cutover
-│   │   ├── chat_annotations.jsonl ← receipts by client_message_id
+│   │   ├── chat_annotations.jsonl ← routing receipts by source room, message and token
 │   │   ├── events.jsonl           ← lifecycle, llm_round/llm_usage, errors
 │   │   ├── tools.jsonl            ← tool calls
 │   │   ├── supervisor.jsonl       ← workers/supervisor, cancel trail

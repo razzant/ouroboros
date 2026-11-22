@@ -2044,6 +2044,8 @@ the view and newest-following intent; its toast offers Try again only for retrya
 New gestures or navigation cancel the read. Only the quoted stream loads: its sibling stays
 unloaded down that chain until `Scroll to latest message`. Reading an old source reads no newer
 messages. Ouroboros quotes its addressee unless directly above, ignoring its own card.
+The answer to a new work replies to the selected row. A saved question answer lands on its recorded
+choice when present, otherwise on the answer line.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
 that it is not a reply and which room wrote to which (`chat_relay_deck.js`):

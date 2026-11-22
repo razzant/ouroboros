@@ -892,8 +892,12 @@ def test_a_later_copy_completes_a_selection_inherited_at_birth_without_an_earlie
                                 reply_to={**preview, "author": preview.get("author_label", "")})
     else:
         root = _owner_root(tmp_path)
-        root._held_owner_messages = {address: {**row, "reply_to": preview, "_owner_source_root": str(tmp_path)}}
+        root._held_owner_messages = {address: {**row, "_owner_source_root": str(tmp_path)}}
     inherited = governing_words_for_schedule(root)
+    if not renamed_row and not same_passage:
+        # The accepted row keeps its exact physical identity (unchanged digest); only its
+        # presentation-only inherited citation differs from the raw row's own excerpt.
+        inherited[FIELD][0]["reply_citation"]["excerpt"] = preview["excerpt"]
     assert inherited[FIELD][0]["reply_citation"]["reply_view"] == "unread"
     if renamed_row:
         assert inherited[FIELD][0]["ref"] == "msg mail-1"

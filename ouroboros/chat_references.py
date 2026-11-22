@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
+from typing import Any, Dict, Mapping
 
 from ouroboros.chat_chain import format_address, parse_address, resolve_row, row_address
 from ouroboros.chat_uploads import web_attachment_caption
@@ -33,6 +34,65 @@ def stored_reply(reply):
 def has_source(reply) -> bool:
     """Whether a reference carries its selected passage's source (words or files), not only its preview."""
     return isinstance(reply, dict) and bool(reply.get("text") or reply.get("attachments"))
+
+
+def _same_selection(prior: Mapping[str, Any], citation: Mapping[str, Any]) -> bool:
+    """Two carriers' records of one selected reply: the exact address and passage (offsets refer to the rendered
+    body, so the selections are compared to each other, never to raw Markdown) and one source actor. Each reader
+    labels a person its own way (``You`` and ``User [source=web]``), so the host's role for the replied row decides
+    when both recorded it, else the label itself; an identity is never read out of a label."""
+    actor = "role" if prior.get("role") and citation.get("role") else "author"
+    return all(prior.get(key) == citation.get(key) for key in ("address", "excerpt", actor))
+
+
+def reply_target(drive_root: Any, reference: Any) -> Dict[str, Any]:
+    """The whole message my human's words reply to, under its author, by the address the door resolved: one
+    sha-checked read. Unreadable: the address alone (a selected passage that carried its source keeps it); a reply
+    to a work card names work, not anyone's words. Its
+    author is signed without the places' owner snapshot on purpose: a target is context, never my human's words."""
+    reference = reference if isinstance(reference, Mapping) else {}
+    address = str(reference.get("address") or "")
+    if not address or address.startswith("task:"):
+        return {}
+    citation = {"excerpt": reference["excerpt"]} if reference.get("excerpt") else {}
+    if reference.get("unresolved"):
+        return {"address": address, "author": "", "text": "", **citation}
+    recorded_author = str((reference.get("author") if citation else "") or reference.get("author_label") or "")
+    from ouroboros.dialogue_provenance import quote_words, render_row_text, row_author
+
+    # The host's role for the replied row rides with a selection: the actor its carriers agree on (``_same_selection``).
+    recorded_role = {"role": reference["role"]} if citation and reference.get("role") in REPLY_ROLES else {}
+    try:
+        from ouroboros import chat_chain
+
+        row = chat_chain.resolve_row(drive_root, address)[0] if drive_root is not None else None
+    except (StoreError, OSError, ValueError, TypeError):
+        row = None
+    if not row:
+        # A selected passage that arrived with its source by value (a relay's quote) keeps it when history cannot be read.
+        held = reference.get("text")
+        by_value = ({"text": held, **({"attachments": reference["attachments"]} if reference.get("attachments") else {})}
+                    if citation and isinstance(held, str) and held else {})
+        return {"address": address, "author": recorded_author, "text": "", **by_value, **citation, **recorded_role}
+    if display := card_reply_display(drive_root, row):
+        return {"address": address, "author": "System", "text": display, **citation}
+    if citation:
+        files = excerpt_source_attachments(row)
+        return {"address": address, "author": "Ouroboros" if project_answer_text(row) else row_author(row)["label"],
+                "text": excerpt_source_text(row), **citation, "role": reply_role(row),
+                **({"attachments": files} if files else {})}
+    return {"address": address, "author": row_author(row)["label"],
+            "text": quote_words(row) if (row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}).get("excerpt") else render_row_text(row)}
+
+
+def selected_reply_target(root, source, matching_deliveries):
+    """Use the selected row's retained target, or later deliveries of that same address and passage."""
+    held = source.get("_owner_reply_target")
+    target = held if isinstance(held, Mapping) and held else reply_target(root, source.get("reply_to"))
+    if not target.get("address") or target.get("text"):
+        return target
+    return next((prior for prior in matching_deliveries if isinstance(prior, Mapping) and prior.get("text")
+                 and all(prior.get(key) == target.get(key) for key in ("address", "excerpt"))), target)
 
 
 def delivery_reply(stored, held):
@@ -143,6 +203,10 @@ def reference_from_row(row: dict, root=None) -> dict:
     kind = str(row.get("type") or "message")
     # The address still hashes the raw System row of an authored lifecycle answer.
     answer = project_answer_text(row)
+    # My human's recorded answer to a card reads as their choice, never the host frame the System row stores;
+    # its role and address stay the row's, which room membership and saved stamps read.
+    from ouroboros.owner_relay import owner_text, quotable_owner_row
+    chose = owner_text(row) if kind == "quiz_answer" and quotable_owner_row(row) else ""
     kind = ("question" if kind == "quiz" else "completion" if kind in
             {"project_completion_summary", "task_summary"} else
             "system" if row.get("direction") == "system" else "message")
@@ -151,8 +215,9 @@ def reference_from_row(row: dict, root=None) -> dict:
     from ouroboros.room_membership import reply_target_home
     address = row_address(row)
     return {"address": format_address(address), "row_sha256": address["row_sha256"], "chat_id": address["chat_id"],
-            "role": role, "author_label": _reply_author_label(row),
-            "kind": kind, **_preview(body or answer or row.get("text") or row.get("caption")),
+            **({"quote_role": "user"} if chose else {}),
+            "role": role, "author_label": str(row.get("sender_label") or "You") if chose else _reply_author_label(row),
+            "kind": kind, **_preview("" if row.get("text_placeholder") else body or answer or chose or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}
 
@@ -306,12 +371,151 @@ def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_
             **({"attachments": files} if files else {})}
 
 
-def origin_reply(root, task_id: str, metadata=None) -> dict:
-    """The answer's host reference to the owner message that began its turn.
+_BINDING_SOURCES = (None, {})
 
-    Best-effort enrichment: a busy or unreadable store omits the reference, never the message."""
-    row = _origin_row(root, task_id, metadata)
-    return reference_from_row(row, root) if row else {}
+
+def _checksum_only_source(source: dict) -> bool:
+    """A legacy ref that names its source only by its room and the words' checksum (no client id, no time)."""
+    digest = source.get("text_sha256")
+    return bool(isinstance(source.get("chat_id"), int) and not isinstance(source.get("chat_id"), bool)
+                and not source.get("client_message_id") and not source.get("ts")
+                and isinstance(digest, str) and len(digest) == 64
+                and all(char in "0123456789abcdef" for char in digest))
+
+
+def _origin_bindings(bindings, ts, client_id="", chat_id=None):
+    """Narrow the immutable registry snapshot to candidate bindings before checking their source and room.
+
+    A legacy ref can name its source by client id without a timestamp; one that names only its source room and
+    the words' checksum is admitted for a lookup that names that same source room. A candidate is not a match:
+    the batched physical resolver and the visibility/membership predicates decide."""
+    global _BINDING_SOURCES
+    snapshot, by_source = _BINDING_SOURCES
+    if snapshot is not bindings:
+        by_source = {}
+        for task, binding in bindings.items():
+            source = binding.get("source_ref") if isinstance(binding, dict) else None
+            if not isinstance(source, dict):
+                continue
+            if source.get("ts"):
+                key = ("ts", str(source["ts"]))
+            elif source.get("client_message_id"):
+                key = ("client_message_id", str(source["client_message_id"]))
+            elif _checksum_only_source(source):
+                key = ("chat_id", source["chat_id"])
+            else:
+                continue
+            by_source.setdefault(key, {})[task] = binding
+        _BINDING_SOURCES = bindings, by_source
+    candidates = by_source.get(("ts", str(ts or "")), {})
+    if client_id:
+        candidates = candidates | by_source.get(("client_message_id", client_id), {})
+    if chat_id is not None:
+        candidates = candidates | by_source.get(("chat_id", chat_id), {})
+    return candidates
+
+
+def visible_source_reply(root, ref, chat_id, *, reply=None, row=None, display_row=None):
+    """Main can quote its owner's local Project original. Other rooms need membership or a permitted copy.
+
+    A saved reply is a preview of the addressed row. Its words alone cannot establish room membership.
+    """
+    from ouroboros.chat_chain import _row_chat_id, parse_address
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.project_dialogue import (owner_message_ref_is_valid, project_origin_rows,
+                                            resolve_owner_message_source, source_refs_for_project)
+    from ouroboros.projects_registry import RoomResolver, reserved_project_chat_ids
+    from ouroboros.room_membership import binding_origin_allowed, room_membership, row_rooms
+
+    if row is None and not ref and not (isinstance(reply, dict) and reply.get("address")):
+        return {}
+    try:
+        supplied_row = row is not None
+        if row is None:
+            row = resolve_owner_message_source(root, ref) if ref else resolve_row(root, reply["address"])[0]
+        rooms = RoomResolver(root, strict=True)
+        projects = reserved_project_chat_ids(root, strict=True)
+        # A shared live frame has one preview for all its appearances.
+        destinations = {chat_id}
+        if display_row is not None:
+            destinations.update(row_rooms(chat_id, display_row, projects, rooms))
+        if row is not None:
+            written = _row_chat_id(row)
+            for room in destinations - row_rooms(written, row, projects, rooms):
+                if room == 1 and supplied_row:
+                    # A carried quote alone cannot establish a home in this store.
+                    row, _ = resolve_row(root, row_address(row))
+                    if row is None:
+                        return {}
+                if not binding_origin_allowed(written, row):
+                    return {}
+                if (room == 1 and (written == 1 or written in projects) and quotable_owner_row(row)
+                        and history_row_destination(root, row, 1, projects, [], rooms)["state"] == "moved"):
+                    continue
+                if room not in projects:
+                    return {}
+                bindings = _origin_bindings(rooms.bindings, row.get("ts"), str(row.get("client_message_id") or ""), written)
+                refs = source_refs_for_project(root, room, bindings=bindings)
+                if not room_membership(room, projects, refs, rooms)(written, row):
+                    return {}
+            return reference_from_row(row, root)
+        if isinstance(reply, dict) and destinations <= projects:
+            # A verified copy from another drive is visible only where its binding projects it.
+            candidates = _origin_bindings(rooms.bindings, parse_address(reply.get("address"))["ts"])
+            bindings = [b for b in candidates.values()
+                        if owner_message_ref_is_valid(source := b.get("source_ref")) and source.get("row_sha256")
+                        and (not ref or source == ref) and format_address(source) == reply.get("address")]
+            if all(project_origin_rows(root, room, bindings=bindings) for room in destinations):
+                return dict(reply)
+    except (OSError, ValueError, StoreError):
+        pass  # an unknown room or source cannot attest its visibility
+    return {}
+
+
+def projected_reply_fields(root, chat_id, row, fields, *, visibility=None):
+    """Recheck a generated quote at its history or pointer destination. Explicit relay replies keep their source."""
+    reply = fields.get("reply_to")
+    if (not isinstance(reply, dict) or not isinstance(reply.get("address"), str)
+            or row.get("reply_to_relay") or row.get("type") == "relay_entry"):
+        return fields
+    # Older task speech and file/quiz rows kept the host's owner quote without the origin marker.
+    origin = (row.get("origin_reply") or row.get("type") == "project_completion_summary" or
+              (row.get("task_id") and row.get("direction") in {"out", "system"}
+               and (reply.get("quote_role") or reply.get("role")) == "user"))
+    if origin:
+        cache = visibility if visibility is not None else {}
+        address = reply["address"]
+        if address not in cache:
+            cache[address] = visible_source_reply(root, None, chat_id, reply=reply)
+        if cache[address]:
+            fields["reply_to"] = cache[address]
+        else:
+            fields.pop("reply_to")
+    return fields
+
+
+def origin_reply(root, task_id: str, metadata=None, *, chat_id=1, binding_fallback=False, display_row=None) -> dict:
+    """Host reference to the work's origin, when its final destination can show it."""
+    if not task_id or not root:
+        return {}
+    from ouroboros.task_status import load_effective_task_result
+    try:
+        supplied = metadata if isinstance(metadata, dict) else {}
+        task = supplied if isinstance(supplied.get("metadata"), dict) else (
+            load_effective_task_result(root, task_id, materialize_artifacts=False) or {})
+        held = task.get("metadata") or {}
+        saved = task.get("origin_message_ref") or held.get("origin_message_ref")
+        ref = supplied.get("origin_message_ref") or saved
+        if not ref and binding_fallback:
+            from ouroboros.projects_registry import project_binding_for_task
+            ref = (project_binding_for_task(root, task_id, strict=True) or {}).get("source_ref")
+        if isinstance(ref, dict) and ref:
+            snapshot = held.get("origin_message_snapshot") or {}
+            reply = snapshot.get("reply") if ref == saved and isinstance(snapshot, dict) and snapshot.get("projectable") is True else None
+            return visible_source_reply(root, ref, chat_id, reply=reply, display_row=display_row)
+    except (OSError, ValueError, StoreError):
+        pass
+    return {}
 
 
 def _origin_row(root, task_id: str, metadata=None):
@@ -596,7 +800,7 @@ def delivery_transport(root, bound: dict, task_id) -> dict:
     return turn_reply_transport(root, str(task_id or "")) or bound
 
 
-def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> None:
+def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool, chat_id=1, display_row=None) -> None:
     """The send seam's quote and address for one answer of ``task_id`` (``meta``, set only where absent): it quotes
     the owner message that began its turn (``origin_reply``, best effort), and answers where that turn's own address
     says (``turn_reply_transport``), its own row read or not. A row naming another source keeps the quote it names and
@@ -604,13 +808,13 @@ def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> No
     ``live_transport``'s."""
     if is_progress:
         return
-    row = _origin_row(root, task_id, meta if meta.get("origin_message_ref") else None)
-    reply = reference_from_row(row, root) if row else {}
-    if reply:
-        meta.setdefault("reply_to", reply)
-    if (not reply or meta["reply_to"] is reply) and (exact := turn_reply_transport(root, task_id)):
+    explicit = "reply_to" in meta
+    if not explicit and (reply := origin_reply(root, task_id, meta, chat_id=chat_id, display_row=display_row)):
+        meta.update(reply_to=reply, origin_reply=True)
+    if (not explicit or not meta["reply_to"]) and (exact := turn_reply_transport(root, task_id)):
         meta.setdefault("transport", exact)
-    elif (row and telegram_chat_row(row.get("source"), row.get("chat_id"), row.get("client_message_id"))
+    elif ((row := _origin_row(root, task_id, meta if meta.get("origin_message_ref") else None))
+          and telegram_chat_row(row.get("source"), row.get("chat_id"), row.get("client_message_id"))
           and not (row.get("reply_to") or {}).get("telegram_room_chat_id")):
         meta["logical_room_chat_id"] = 1  # physical owner turn, independent of a coincident Project number
 
@@ -700,6 +904,42 @@ def resolve_history_row(root, address):
     return None, {"state": "absent"}
 
 
+def quiz_question_row(root, answer, *, answer_seq):
+    """The stored question displaying this exact answer, by asker and quiz id, never a source-ref copy."""
+    from ouroboros import dialogue_positions as dp, dialogue_store as ds
+
+    task, quiz = str(answer.get("task_id") or ""), answer.get("quiz")
+    if answer.get("type") != "quiz_answer" or not task or not isinstance(quiz, dict) or not quiz.get("quiz_id"):
+        return None
+    for entry in ds.iter_probes(root, "chat", [("task_id", task)]):
+        if (entry.row.get("type") == "quiz" and isinstance(entry.row.get("quiz"), dict)
+                and entry.row["quiz"].get("quiz_id") == quiz["quiz_id"]):
+            return entry
+    # On a miss, the question could still be in the unread history preceding its answer.
+    ds.require_imported(root, "chat", upper=answer_seq)
+    if dp.skipped_between(root, "chat", upper=answer_seq):
+        raise StoreError("Question history source unavailable")
+    return None
+
+
+def history_row_anchor(root, address, thread_id, project_ids, source_refs, rooms):
+    """Resolve the destination and keep the same question receipt for paging at an exact answer."""
+    row, target = resolve_history_row(root, address)
+    if row is None:
+        return target, None
+    if row.get("type") == "quiz_answer":
+        question = quiz_question_row(root, row, answer_seq=target["seq"] if target["source"] == "chat" else None)
+        if question is None:
+            return {"state": "unavailable"}, None
+        row, source_refs = question.row, []  # a Project selecting the answer does not host its card
+        target["question"] = question
+    try:
+        destination = history_row_destination(root, row, thread_id, project_ids, source_refs, rooms)
+    except ValueError:
+        raise StoreError("Project room authority unavailable") from None
+    return destination, target
+
+
 def history_row_destination(root, row, thread_id, project_ids, source_refs, rooms):
     """Prefer a real occurrence in this room; otherwise the row's home, without source-ref copies.
 
@@ -739,4 +979,5 @@ def origin_projection(root, ref):
         row = resolve_owner_message_source(root, ref)
     except StoreError:
         return {}
-    return projection_fields(row, root) if row else {}
+    from ouroboros.room_membership import binding_origin_allowed
+    return projection_fields(row, root) if row and binding_origin_allowed(ref["chat_id"], row) else {}

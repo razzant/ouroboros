@@ -87,6 +87,170 @@ def test_answer_row_uses_the_turns_host_origin(tmp_path, monkeypatch):
     assert echoes[-1]["reply_to"] == row["reply_to"]
 
 
+@pytest.mark.parametrize("completion", [False, True], ids=["answer", "completion"])
+def test_answer_row_of_work_a_card_answer_opened_quotes_the_owners_choice(tmp_path, monkeypatch, completion):
+    """Work started on my human's card answer (``start_task`` ``owner_source``) answers in Main under a Reply that reads
+    their choice, never the host frame its System row stores; the row's role, address and room rule stay its own,
+    and its replay is the same reference. A relay's explicit Reply keeps its own target."""
+    from ouroboros.owner_quiz import quiz_answer_frame
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.projects_registry import create_project
+    from ouroboros.room_membership import reply_target_home
+    from ouroboros.task_results import write_task_result
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    block = {"quiz_id": "q-palette", "question": "Which colors should the table legend use?",
+             "options": ["Use blue and gold", "Use gray and green"], "state": "answered",
+             "answered_index": 0, "asked_at": "2024-04-09T10:05:00+00:00", "answered_at": "2024-04-09T10:14:00+00:00"}
+    room = create_project(tmp_path, "palette")["chat_id"]
+    answer = message_bus.log_chat("system", room, 0, quiz_answer_frame(block, 0, ""), ts=block["answered_at"],
+                                  source="owner_quiz_answer", task_id="asker", client_message_id="quiz_answer:asker:q-palette",
+                                  record_type="quiz_answer", quiz=dict(block))
+    result = write_task_result(tmp_path, "work", "completed" if completion else "running",
+                               origin_message_ref=owner_row_source(answer)[0])
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    delivery = {}
+    if completion:
+        from ouroboros.project_completion_facts import completion_facts
+        facts = completion_facts(tmp_path, "work", {}, result, {})
+        assert facts["reply_to"] == reference_from_row(answer)
+        delivery = {"role": "system", "system_type": "project_completion_summary", "progress_meta": facts}
+    message_bus.send_with_budget(1, "The table legend is ready.", task_id="work", **delivery)
+    row = dialogue_test.chat_rows(tmp_path)[-1]
+    assert row["reply_to"] == {**reference_from_row(answer), "snippet": "1. Use blue and gold"}
+    assert row["reply_to"]["address"] == format_address(row_address(answer)) and "chars" not in row["reply_to"]
+    assert row["reply_to"]["quote_role"] == "user"
+    assert (row["reply_to"]["role"], row["reply_to"]["author_label"], row["reply_to"]["kind"]) == ("system", "You", "system")
+    assert row["reply_to"]["target_home"] == reply_target_home(answer) and echoes[-1]["reply_to"] == row["reply_to"]
+    assert next(r for r in _history(tmp_path) if r["text"] == row["text"])["reply_to"] == row["reply_to"]
+    assert resolve_reply(tmp_path, row["reply_to"]["address"]) == row["reply_to"]
+    secret = reference_from_row({**answer, "quiz": {**block, "secret_request": {"pluginName": "x"},
+                                                     "secret_outcome": {"event": "secret_filled"}}})
+    assert secret["snippet"].startswith("[") and secret["author_label"] == "System"  # a form's outcome: no words of theirs
+    assert "quote_role" not in secret
+    assert "quote_role" not in reference_from_row({**answer, "source": "notice", "sender_label": "You"})
+    explicit = {"address": "row:1@2024-04-09T10:15:00+00:00#0123456789ab", "role": "user", "snippet": "Relayed words"}
+    message_bus.send_with_budget(1, "Answering the relayed note.", task_id="work",
+                                 progress_meta={"reply_to": explicit, "reply_to_relay": "relay-1"})
+    assert dialogue_test.chat_rows(tmp_path)[-1]["reply_to"] == explicit
+
+
+@pytest.mark.parametrize("stored_chat,room", [(None, 1), (0, 0)])
+def test_retained_owner_row_keeps_its_original_bytes_and_normalized_room(tmp_path, stored_chat, room):
+    from types import SimpleNamespace
+    from ouroboros.owner_relay import origin_snapshot, owner_quote, owner_row_source, retain_owner_message
+    from ouroboros.owner_source import resolve_owner_source
+    from ouroboros.owner_words import carried_owner_corpus
+
+    row = {"direction": "in", "text": "Count the seedlings", "client_message_id": "garden",
+           "chat_id": stored_chat, "ts": "2024-04-08T13:45:00Z"}
+    dialogue_store.append(tmp_path, "chat", row)
+    ctx = SimpleNamespace(drive_root=tmp_path, current_chat_id=room, task_metadata={})
+    held = retain_owner_message(ctx, client_message_id="garden")
+    assert held == row
+    address = row_address(row)
+    ref, _ = owner_row_source(held)
+    quote = owner_quote(tmp_path, held)
+    snapshot = origin_snapshot(held, tmp_path, include_reply=True)
+    assert snapshot["projectable"] is True
+    assert snapshot["reply"] == reference_from_row(row)
+    assert quote["owner_row"]["chat_id"] == stored_chat
+    assert ref["row_sha256"] == address["row_sha256"]
+    assert quote["source"]["chat_id"] == ref["chat_id"] == snapshot["reply"]["chat_id"] == room
+    assert quote["source"]["address"] == snapshot["reply"]["address"] == format_address(address)
+    [opening] = carried_owner_corpus(ctx, source=held)
+    assert (opening["chat_id"], opening["row_sha256"]) == (str(room), address["row_sha256"])
+    resolved = resolve_owner_source(ctx, {"kind": "chat", "ref": ref})
+    assert resolved["ref"]["chat_id"] == room and resolved["ref"]["text_sha256"] == ref["text_sha256"]
+    ctx.current_chat_id = 73
+    assert resolve_owner_source(ctx, {"kind": "chat", "ref": ref}) == {}
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_automatic_reply_follows_source_visibility_in_the_selected_room(tmp_path, monkeypatch, private):
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source
+    from ouroboros.projects_registry import bind_task_to_project
+    from ouroboros.task_results import write_task_result
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    row = {"direction": "in", "chat_id": 1, "task_id": "seed-note", "text": "Count the seedlings",
+           "client_message_id": "garden", "ts": "2024-04-08T13:45:00Z"}
+    if private:
+        row["presence_contact"] = {"task_id": "seed-note", "binding_id": "seeds", "source_event_id": "garden"}
+    dialogue_store.append(tmp_path, "chat", row)
+    ref, text = owner_row_source(row)
+    snap = origin_snapshot(row, tmp_path, include_reply=True)
+    room = bind_task_to_project(tmp_path, "count", "garden", origin={"ref": ref, "text": text})["project_chat_id"]
+    write_task_result(tmp_path, "count", "running", origin_message_ref=ref, metadata={"origin_message_snapshot": snap})
+    assert message_bus.send_with_budget(1, "Counted", task_id="count")["chat_id"] == room
+    stored = dialogue_test.chat_rows(tmp_path)[-1]
+    live = echoes[-1]
+    file_row = message_bus.log_chat("out", room, 0, "Seed table", task_id="count", record_type="document")
+    # An older outgoing row kept just the generated preview. Read it in the task's current room.
+    dialogue_store.append(tmp_path, "chat", {"direction": "out", "chat_id": room, "task_id": "count",
+                          "ts": "2024-04-10T10:00:00Z", "text": "Earlier count", "reply_to": reference_from_row(row)})
+    history = _history(tmp_path, room)
+    replay = next(r for r in history if r["text"] == "Counted")
+    older = next(r for r in history if r["text"] == "Earlier count")
+    for projection in (stored, file_row, live, replay, older):
+        if private:
+            assert "reply_to" not in projection
+        else:
+            assert projection["reply_to"] == reference_from_row(row)
+
+
+@pytest.mark.parametrize("client_id", ["garden", ""], ids=["named", "idless"])
+def test_main_completion_quotes_the_selected_owner_message_in_its_project(tmp_path, monkeypatch, client_id):
+    from ouroboros.owner_relay import owner_row_source
+    from ouroboros.project_completion_facts import completion_facts
+    from ouroboros.project_dialogue import MAIN_NOTICE_TYPE
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    room = create_project(tmp_path, "garden")["chat_id"]
+    source = message_bus.log_chat("in", room, 1, "Count the seedlings", client_message_id=client_id)
+    ref, _ = owner_row_source(source)
+    result = write_task_result(tmp_path, "count", "completed", origin_message_ref=ref)
+    other = bind_task_to_project(tmp_path, "count", "inventory", origin={"absent": "system"})["project_chat_id"]
+    facts = completion_facts(tmp_path, "count", {}, result, {})
+    quote = reference_from_row(source)
+    assert facts["reply_to"] == quote
+    message_bus.send_with_budget(1, "Count complete", role="system", task_id="count", system_type="project_completion_summary",
+                                 progress_meta=facts)
+    assert dialogue_test.chat_rows(tmp_path)[-1]["reply_to"] == echoes[-1]["reply_to"] == quote
+    history = _history(tmp_path)
+    assert next(r for r in history if r["system_type"] == "project_completion_summary")["reply_to"] == quote
+    assert all(r.get("row_address") != quote["address"] for r in history)
+    # A notice shared with the work's Project has one live frame for both rooms.
+    message_bus.send_with_budget(1, "Inventory update", task_id="count", system_type=MAIN_NOTICE_TYPE)
+    assert other in echoes[-1]["also_rooms"] and "reply_to" not in echoes[-1]
+    assert "reply_to" not in next(r for r in _history(tmp_path, other) if r["system_type"] == MAIN_NOTICE_TYPE)
+
+
+@pytest.mark.parametrize("source", ["presence", "skill_repair", "absent"])
+def test_a_frozen_main_completion_cannot_make_an_unverified_project_quote_visible(tmp_path, monkeypatch, source):
+    from ouroboros.projects_registry import create_project
+
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    room = create_project(tmp_path, "garden")["chat_id"]
+    original = {"direction": "in", "chat_id": room, "ts": "2024-04-08T13:45:00Z", "text": "Seed count"}
+    if source != "absent":
+        original["source"] = source
+        dialogue_store.append(tmp_path, "chat", original)
+    quote = reference_from_row(original)
+    message_bus.send_with_budget(1, "Count complete", role="system", task_id="count", system_type="project_completion_summary",
+                                 progress_meta={"reply_to": quote})
+    assert "reply_to" not in dialogue_test.chat_rows(tmp_path)[-1] and "reply_to" not in echoes[-1]
+    # History from an older writer may already carry the preview.
+    dialogue_store.append(tmp_path, "chat", {"direction": "system", "type": "project_completion_summary", "chat_id": 1,
+                          "task_id": "previous", "ts": "2024-04-09T13:45:00Z", "text": "Earlier count", "reply_to": quote})
+    replay = next(row for row in _history(tmp_path) if row["task_id"] == "previous")
+    assert "reply_to" not in replay
+
+
 def _reply_to(bridge, stored, cmid):
     address = format_address(row_address(stored))
     bridge.handle_web_message("About this", client_message_id=cmid, task_metadata={"reply_to": address})
@@ -690,9 +854,9 @@ def test_d4_confirmed_project_context_goes_to_members_only_at_a_colliding_number
 
 
 def test_c5_refusal_transport_survives_an_unreadable_quote(tmp_path, monkeypatch):
+    from ouroboros import project_dialogue
     from ouroboros.projects_registry import begin_project_deletion
     from ouroboros.store import StoreBusy
-    from supervisor import message_ingress
 
     bridge, _ = _web_bridge(tmp_path, monkeypatch)
     project = _reply_world(tmp_path)
@@ -700,7 +864,7 @@ def test_c5_refusal_transport_survives_an_unreadable_quote(tmp_path, monkeypatch
     begin_project_deletion(tmp_path, project["id"])
     def busy(*_args, **_kwargs):
         raise StoreBusy("reading the display quote")
-    monkeypatch.setattr(message_ingress, "accepted_chat_message", busy)
+    monkeypatch.setattr(project_dialogue, "resolve_owner_message_source", busy)
     started, followups, receipts = _route(bridge, tmp_path, monkeypatch, row, real_ack=True)
     assert not started and not followups
     [receipt] = receipts
@@ -1058,3 +1222,28 @@ def test_a_late_answer_stored_without_its_snapshot_echoes_selectable_as_history_
     [history] = [r for r in _history(tmp_path) if r.get("client_message_id") == "late-skill"]
     assert "reply_excerpt_disabled" not in history
     assert "reply_excerpt_disabled" not in echoes[-1], "the live echo reads the same store as the replay"
+
+
+def test_a_checksum_only_legacy_binding_selects_the_main_original_in_its_project(tmp_path):
+    """An ordinary legacy Project's saved binding names its opening only by Main and the words' checksum. The
+    public in-process reader admits that candidate for the row's source room, and the batched physical resolver
+    with the membership rule decide it is the one original: the quote is selected, not dropped. A binding that
+    names another source room is not admitted for this row."""
+    from ouroboros.chat_references import visible_source_reply
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "garden")
+    original = {"direction": "in", "chat_id": 1, "client_message_id": "garden",
+                "ts": "2024-04-08T13:45:00Z", "text": "Count the seedlings"}
+    dialogue_store.append(tmp_path, "chat", original)
+    legacy_ref = build_owner_message_ref(chat_id=1, client_message_id="", ts="", text=original["text"])
+    bindings = {"legacy": {"project_id": project["id"], "project_chat_id": project["chat_id"],
+                           "source_ref": legacy_ref, "source_text": original["text"]}}
+    (tmp_path / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": bindings}), encoding="utf-8")
+    quote = visible_source_reply(tmp_path, legacy_ref, project["chat_id"])
+    assert quote["snippet"] == "Count the seedlings" and quote["role"] == "user"
+    assert quote["address"] == format_address(row_address(original))
+    bindings["legacy"]["source_ref"] = {**legacy_ref, "chat_id": 2}  # another source room: not admitted
+    (tmp_path / "state" / "project_task_bindings.json").write_text(json.dumps({"bindings": bindings}), encoding="utf-8")
+    assert visible_source_reply(tmp_path, legacy_ref, project["chat_id"]) == {}

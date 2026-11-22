@@ -505,7 +505,7 @@ class LocalChatBridge:
         routing_token: str = "",
         cause: str = "", reasoning_effort: str = "",
         project_name: str = "", target_task_ids=None, target_titles=None,
-        routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None, transport: Optional[dict] = None,
+        source_row_address: Optional[str] = None, routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None, transport: Optional[dict] = None,
     ) -> None:
         """Emit a typed routing receipt without creating an assistant bubble.
 
@@ -527,6 +527,8 @@ class LocalChatBridge:
             "suppress_bubble": True,
             "ts": utc_now_iso(),
         }
+        if isinstance(source_row_address, str):  # "" is the host's stated "no row wears this" (chat_annotations)
+            payload["source_row_address"] = source_row_address
         if target_task_ids is not None:
             payload.update(project_name=project_name, target_task_ids=list(target_task_ids), target_titles=list(target_titles or []))
         if str(target_label or ""):
@@ -1070,7 +1072,8 @@ class LocalChatBridge:
                                 "secret_request", "secret_outcome", "secret_save"):
                         if key in pointer:
                             frame[key] = pointer[key]
-                    frame.update(projection_fields(stored))
+                    from ouroboros.chat_references import projected_reply_fields
+                    frame.update(projected_reply_fields(DATA_DIR, 1, stored, projection_fields(stored)))
                     self._broadcast_fn(frame)
             except Exception:
                 # The question is already delivered. History/activity reads heal
@@ -1250,9 +1253,7 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         if narration is not None:
             meta["narration"] = bool(narration)
         meta.setdefault("narration", False)
-        from ouroboros.chat_references import answer_reference, live_transport, projection_fields
-        answer_reference(DATA_DIR, meta, task_id, is_progress=is_progress)  # an answer's quote and its address
-        progress_meta = meta
+        from ouroboros.chat_references import answer_reference, live_transport, projection_fields, visible_source_reply
         if task_id and DATA_DIR and system_type not in ROOM_FIXED_ROW_TYPES and meta.get("_is_direct_chat") is not True:
             # The one room rule (A4) at the one send seam: a task-addressed host row
             # lands in its task's Project room on the durable row, the WebSocket frame
@@ -1269,6 +1270,12 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             except Exception:
                 log.debug("room rule failed for %s; the producer's address stands", task_id, exc_info=True)
 
+        if not is_progress and task_id:
+            display = {**meta, "chat_id": chat_id, "type": system_type, "direction": "system" if role == "system" else "out", "task_id": task_id}
+            answer_reference(DATA_DIR, meta, task_id, is_progress=is_progress, chat_id=chat_id, display_row=display)
+            if system_type == "project_completion_summary" and meta.get("reply_to"):
+                meta["reply_to"] = visible_source_reply(DATA_DIR, None, chat_id, reply=meta["reply_to"], display_row=display)
+        progress_meta = meta
         if is_progress and DATA_DIR:
             progress_record = {
                 "ts": msg_ts,
@@ -1318,6 +1325,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             from ouroboros.room_appearances import frame_project, frame_rooms
             rooms = frame_rooms(DATA_DIR, stored)
             meta.update(projection_fields(stored), **rooms, **frame_project(DATA_DIR, stored, rooms.get("also_rooms", [])))
+        if not meta.get("reply_to"):
+            meta.pop("reply_to", None)
+        meta.pop("origin_reply", None)  # only the stored row needs this provenance for future room moves
         if _text.strip() in ("", "\u200b"):
             return {"chat_id": chat_id}
         if "transport" not in meta and (carried := live_transport(

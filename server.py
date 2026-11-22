@@ -483,9 +483,9 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "image_data": image_data,
                     "task_constraint": task_constraint,
                     "task_metadata": task_metadata,
-                    "log_text": log_text,
-                    "origin_message_ref": origin_message_ref,
+                    "log_text": log_text, "origin_message_ref": origin_message_ref,
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
+                    "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
                     # Match the bridge's positive identities, not the display defaults above.
                     "bound_external_owner": (is_external_transport and ext_known and owner_ext_id is not None

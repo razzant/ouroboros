@@ -97,7 +97,7 @@ def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tm
     origin = 'Original request'
     bind_task_to_project(tmp_path, 'sparse-root', project['id'], origin={
         'ref': build_owner_message_ref(chat_id=1, client_message_id='origin',
-            ts='2026-09-01T10:00:00Z', text=origin), 'text': origin})
+            ts='2026-09-01T10:00:00Z', text=origin), 'text': origin, 'snapshot': {'projectable': True}})
     write(tmp_path / 'archive/chat_20260902T000000.jsonl', [row(0, chat_id=project['chat_id'],
         direction='out', text='Later answer', ts='2026-09-02T10:00:00Z')])
     for index in range(5):
@@ -112,20 +112,14 @@ def test_sparse_project_opens_with_its_answer_and_retained_origin_in_one_read(tm
 
 
 def test_legacy_origin_identity_survives_source_label_and_cmid_absence(tmp_path):
-    import json
     from ouroboros.projects_registry import create_project, bind_task_to_project
     from ouroboros.project_dialogue import build_owner_message_ref
 
     project = create_project(tmp_path, 'origin', name='Retained context')
     canonical = row(1, direction='in', source='web', text='Original request', client_message_id='')
     ref = build_owner_message_ref(chat_id=1, client_message_id='', ts=canonical['ts'], text=canonical['text'])
-    # Current admission requires a client id; retained legacy bindings predate it.
     bind_task_to_project(tmp_path, 'origin-root', project['id'], origin={
-        'ref': {**ref, 'client_message_id': 'before-legacy-fixture'}, 'text': canonical['text']})
-    path = tmp_path / 'state/project_task_bindings.json'
-    bindings = json.loads(path.read_text())
-    bindings['bindings']['origin-root']['source_ref']['client_message_id'] = ''
-    path.write_text(json.dumps(bindings))
+        'ref': ref, 'text': canonical['text'], 'snapshot': {'projectable': True}})
     _, first = request(tmp_path, chat_id=str(project['chat_id']))
     fallback = first['messages'][0]
     assert fallback['origin_projected'] and fallback['origin_id']
