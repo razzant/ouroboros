@@ -13,7 +13,7 @@ from ouroboros.memory_waiting import text as waiting_text
 from ouroboros.utils import update_json_locked, utc_now_iso
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
-LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open episode of starts the window took to Low, if any
+LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open Main-line periods of Low starts, by cause
 SIZE_REFUSAL_KEY = "_context_size_refusal"  # in a task's usage: its round's latest size refusal, whole
 _REFUSAL_BASES = {"provider_stated": "provider stated",
                   "exact_local_count": "derived from an exact local count before sending",
@@ -160,31 +160,40 @@ def low_start_line(plan, mode, task_id):
 
 
 def low_start_episode(root, plan, mode, task_id, send):
-    """One Main line per Low episode (owner A, 07.11.2026, replacing 1B of 29.10). A fresh start that the window took
-    from whole books (``low_start_line``, any cause) opens an episode and ``send``s its line; while Low holds nothing
-    more is sent; only a start of the opener's kind that holds Max closes the episode silently: the same room
-    (``room_id``) and the same work room (a root keeps two eighths, a chat turn or wake one), so roots and turns of
-    different rooms never alternate lines; a later Low opens a new one. An episode whose room never starts again stays
-    silent. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a held room in a
-    lower mode, as a voice envelope fitted below Max) leaves it as it is. The episode is one small object,
-    ``state/low_start_episode.json``, rewritten under its lock in the terminal outbox's failure domain; ``send`` runs
-    inside that lock and opens the episode only when it queued the line."""
+    """One Main line per open period of each cause (owner A, 07.11.2026, replacing 1B of 29.10; a period per cause by
+    the coordinator's option C, 22.11.2026). ``state/low_start_episode.json`` maps each open period's key to
+    ``{since, task, levels, room}``: ``memory`` for the installation, ``request:<model>`` and ``route:<model>`` for the
+    plan's model. A fresh start that the window took from whole books (``low_start_line``) sends its line and opens its
+    key's period only when that key has none open; while it is open nothing more is sent for that key, and keys are
+    independent, so a route start never silences the memory line. A start that holds Max (it runs in Max, its room
+    held, no delegated role) silently closes every open period opened in its room (``room_id``) beside its work room
+    (a root keeps two eighths, a chat turn or wake one); the others stay open, so lines never alternate as the owner
+    moves between rooms. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a
+    held room in a lower mode, as a voice envelope fitted below Max) leaves the file as it is. The single episode
+    written before periods (a top-level ``since``) holds no period: the first lowered start replaces it. Residual, by
+    design: a period whose opener room never starts again stays open, so later starts of its cause send no line; the
+    work's own facts and task card always say Low and the cause. The file is rewritten under its lock in the terminal
+    outbox's failure domain; ``send`` runs inside that lock and a period opens only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room") or {}
     held = room.get("cause") == "held" and mode == "max" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
     levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
     place = room.get("room_id")
     line = low_start_line(plan, mode, task_id)
+    cause = floor.lowered_cause(room) if line else ""
+    key = cause if cause == "memory" else f"{cause}:{str(getattr(plan, 'model', '') or '')}"
 
-    def episode(bit):  # None leaves the file as it is
-        if held:  # an episode written before rooms were kept closes in any room
-            same = bit.get("room", place) == place and int(bit.get("levels") or 1) == levels
-            return {} if bit.get("since") and same else None
-        if bit.get("since") or not send(line):
+    def periods(bits):  # None leaves the file as it is
+        opened = {} if "since" in bits else bits  # the single episode written before periods: none open
+        if held:
+            kept = {name: bit for name, bit in opened.items()
+                    if not (bit.get("room") == place and int(bit.get("levels") or 1) == levels)}
+            return kept if len(kept) < len(opened) else None
+        if key in opened or not send(line):
             return None
-        return {"since": utc_now_iso(), "task": task_id, "levels": levels, "room": place}
+        return {**opened, key: {"since": utc_now_iso(), "task": task_id, "levels": levels, "room": place}}
     if line or held:
-        update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, episode)
+        update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, periods)
 
 
 def size_refusal_cause(usage):

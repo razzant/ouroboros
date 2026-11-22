@@ -1,13 +1,14 @@
-"""A call owes the target's Low-start line at its first adopted connection only, once per Low episode."""
+"""A call owes the target's Low-start line at its first adopted connection only, once per open period of its cause."""
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros.live_context_view import record_session_view
+from ouroboros.memory_floor import lowered_cause
 from tests.test_memory_low_start import _plan, _room, sent as sent
 
 
-@pytest.mark.parametrize('room,expected', [  # every cause opens an episode (22.11.2026); a held Max or none does not
+@pytest.mark.parametrize('room,expected', [  # every cause opens its period (22.11.2026); a held Max or none does not
     (_room(), 1), (_room('route'), 1), (_room('held'), 0),
     (_room(zero_need=1_100_000, floor_need=950_000), 1), (None, 0),
 ])
@@ -30,13 +31,15 @@ def test_adopted_call_reports_a_lowered_start_once(tmp_path, sent, room, expecte
     for n in range(3):
         record_session_view(host, evidence, f'renewed-manifest-{n}')
     assert len(sent) == expected
-    # Later calls: Low while an episode holds adds nothing, one that holds Max closes it, Low again opens a new one.
+    # Later calls: memory Low while its period holds adds nothing (another cause's period never silences it), one that
+    # holds Max closes the periods of its room and work room, Low again opens a new one.
+    memory = bool(expected) and lowered_cause(room) == 'memory'
     for task, room, mode in (('call-b', _room(), 'low'), ('call-c', _room('held'), 'max'), ('call-d', _room(), 'low')):
         later = SimpleNamespace(**{**vars(host), 'plan': _plan(room), '_session_opened': False,
                                    'ctx': SimpleNamespace(**{**vars(ctx), 'task_id': task, 'active_context_mode': mode})})
         record_session_view(later, evidence, f'{task}-manifest')
     assert [event['delivery_id'] for _root, event in sent] == ['low_start:call-low:2'] * expected + (
-        [] if expected else ['low_start:call-b:2']) + ['low_start:call-d:2']
+        [] if memory else ['low_start:call-b:2']) + ['low_start:call-d:2']
 
 
 @pytest.mark.parametrize('manifest, expected', [

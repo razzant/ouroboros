@@ -519,8 +519,9 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
 
 
 def _note_low_start(ctx: Any, plan: Any, mode: str, task_id: str, event_queue: Any) -> None:
-    """The owner's one Main line per Low episode (``context_view_facts.low_start_episode``), owed through the terminal
-    outbox under one id per task attempt; none while Low holds or when Max returns. Never raises."""
+    """The owner's one Main line per open Low period of each cause (``context_view_facts.low_start_episode``), owed
+    through the terminal outbox under one id per task attempt; none while that period is open or when Max returns.
+    Never raises."""
     from ouroboros.context_view_facts import low_start_episode
 
     try:

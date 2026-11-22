@@ -1,10 +1,11 @@
-"""One host line in Main per Low episode of fresh starts that the window took from whole books in my human's Max
-(owner A, 07.11.2026, which replaced the line per start of 1B, 29.10; every cause since 22.11.2026).
+"""One host line in Main per open period of each cause of fresh starts that the window took from whole books in my
+human's Max (owner A, 07.11.2026, which replaced the line per start of 1B, 29.10; every cause since 22.11.2026, a
+period per cause by the coordinator's option C, 22.11.2026).
 
 The start's own Max room decides (``memory_floor.lowered_cause``: memory, what the request itself carries, the route);
-the line, without numbers, goes through the terminal outbox under one id per task attempt when no episode is open; a
-start of the opener's kind (its room and work room) that holds Max closes the episode silently; a delegated child or
-nanny, the owner's Low or Nano and an unknown window neither send nor touch the episode.
+the line, without numbers, goes through the terminal outbox under one id per task attempt when its cause has no open
+period; a start of the opener's kind (its room and work room) that holds Max closes its periods silently; a delegated
+child or nanny, the owner's Low or Nano and an unknown window neither send nor touch the periods.
 """
 import json
 from types import SimpleNamespace
@@ -84,10 +85,10 @@ def test_a_measured_crowded_start_gets_its_line(monkeypatch):
     assert low_start_line(_start(core, 2_000_000, monkeypatch), "max", "wake") == ""
 
 
-def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
-    """Low, Low: one line; Max closes the episode silently; Low again: a new line. While it is open, a route or tool
-    schemas that tip a start alone add nothing; a delegated child or nanny, the owner's Low or Nano, an unknown window
-    and a held room in a lower mode send nothing and leave the episode as it is, open or closed."""
+def test_the_line_goes_through_the_outbox_once_per_low_period(tmp_path, sent):
+    """Low, Low: one line; Max closes the period silently; Low again: a new line. A delegated child or nanny, the
+    owner's Low or Nano, an unknown window and a held room in a lower mode send nothing and leave the periods as they
+    are, open or closed."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
     bit = tmp_path.resolve() / "state" / "low_start_episode.json"
@@ -96,58 +97,72 @@ def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
         loop._note_low_start(ctx, _plan(room, **plan), mode, task, None)
         return json.loads(bit.read_text(encoding="utf-8")) if bit.exists() else None
 
-    assert start("rootA", _room())["task"] == "rootA"
+    assert start("rootA", _room())["memory"]["task"] == "rootA"
     [(root, event)] = sent
     assert root == tmp_path.resolve() and event["chat_id"] == 7 and event["task_id"] == ""
     assert event["role"] == "system" and event["system_type"] == "low_start_notice" and event["type"] == "send_message"
     assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA runs in Low for now")
     opened = start("rootB", _room())
-    assert opened["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
+    assert opened["memory"]["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("nan", _room("held"), "max", {"role": "nanny"}),
-                                   ("ownerlow", None, "low", {}), ("route", _room("route"), "low", {}),
-                                   ("schemas", _room(zero_need=1_100_000), "low", {}),
+                                   ("ownerlow", None, "low", {}),
                                    ("voice", _room("held"), "low", {})):  # a held room whose envelope fit lower (Astra 8)
         assert start(task, room, mode, **plan) == opened and len(sent) == 1  # untouched, open
     assert start("rootC", _room("held"), "max") == {} and len(sent) == 1  # Max held: closed, no return line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("ownerlow", None, "low", {})):
         assert start(task, room, mode, **plan) == {} and len(sent) == 1  # untouched, closed
-    assert start("rootD", _room())["task"] == "rootD"
+    assert start("rootD", _room())["memory"]["task"] == "rootD"
     assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootD:1"]
 
 
-def test_only_a_start_with_the_opening_work_room_that_holds_max_closes_the_episode(tmp_path, sent):
+def test_only_a_start_with_the_opening_work_room_that_holds_max_closes_the_period(tmp_path, sent):
     """Opus RV1 F2: a root keeps two eighths of its window for work, a chat turn or wake one. Memory in the band
-    between lets a turn hold Max where a root cannot; that proves no room for the next root, so the episode stays open
-    and the next root's Low adds no line. A root that holds Max closes it, and a turn's own episode closes on a turn."""
+    between lets a turn hold Max where a root cannot; that proves no room for the next root, so the period stays open
+    and the next root's Low adds no line. A root that holds Max closes it, and a turn's own period closes on a turn."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
     starts = (("rootA", "crowded", 2), ("turnA", "held", 1), ("rootB", "crowded", 2),  # a turn's Max: still open
-              ("rootC", "held", 2), ("rootD", "crowded", 2),  # a root held Max: the next Low is a new episode
-              ("rootE", "held", 2), ("turnB", "crowded", 1),  # a chat turn opens its own episode
+              ("rootC", "held", 2), ("rootD", "crowded", 2),  # a root held Max: the next Low is a new period
+              ("rootE", "held", 2), ("turnB", "crowded", 1),  # a chat turn opens its own period
               ("turnC", "held", 1), ("turnD", "crowded", 1))  # and a chat turn's Max closes it
     for task, cause, levels in starts:
         loop._note_low_start(ctx, _plan(_room(cause, levels=levels)), "max" if cause == "held" else "low", task, None)
     assert [event["delivery_id"] for _root, event in sent] == [
         "low_start:rootA:1", "low_start:rootD:1", "low_start:turnB:1", "low_start:turnD:1"]
     bit = json.loads((tmp_path.resolve() / "state" / "low_start_episode.json").read_text(encoding="utf-8"))
-    assert (bit["task"], bit["levels"]) == ("turnD", 1)
+    assert (bit["memory"]["task"], bit["memory"]["levels"]) == ("turnD", 1)
 
 
-def test_only_a_held_start_of_the_openers_room_and_work_room_closes_the_episode(tmp_path, sent):
-    """Fable's seat, 22.11.2026: a Max held in another room, or beside another work room, proves nothing of the room
-    whose start went to Low; the episode stays open, so lines never alternate as the owner moves between rooms."""
+def test_each_cause_has_its_own_period_closed_by_a_held_start_of_its_openers_room_and_work_room(tmp_path, sent):
+    """The coordinator's option C, 22.11.2026: one period per cause, ``memory`` for the installation and
+    ``request:<model>`` and ``route:<model>`` per model. A route start never silences the memory line and a second start
+    of an open cause is silent. Fable's seat (22.11): a Max held in another room, or beside another work room, closes
+    nothing; one of the opener's room and work room closes its periods silently, the others stay open, and the next
+    start of that cause sends its line again. The single episode written before periods silences no first line."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
-    starts = (("rootA", "crowded", 1, "1"), ("turnB", "held", 1, "nova"), ("rootC", "crowded", 1, "1"),  # another room
-              ("rootD", "held", 2, "1"), ("rootE", "route", 1, "1"),  # another work room's Max: still open
-              ("rootF", "held", 1, "1"), ("rootG", "route", 1, "1"))  # the opener's room and work room: closed
-    for task, cause, levels, room in starts:
-        loop._note_low_start(ctx, _plan(_room(cause, levels=levels, room_id=room)), "max" if cause == "held" else "low",
-                             task, None)
-    assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootG:1"]
-    assert "on this route the window cannot hold" in sent[-1][1]["text"]
-    bit = json.loads((tmp_path.resolve() / "state" / "low_start_episode.json").read_text(encoding="utf-8"))
-    assert (bit["task"], bit["room"], bit["levels"]) == ("rootG", "1", 1)
+    bit = tmp_path.resolve() / "state" / "low_start_episode.json"
+    bit.parent.mkdir(parents=True)
+    bit.write_text(json.dumps({"since": "2026-11-21T10:00:00+00:00", "task": "old", "levels": 1}), encoding="utf-8")
+    request = {"zero_need": 1_100_000, "floor_need": 950_000}  # the books fit without the tool schemas, not with them
+    starts = (("rootA", "crowded", 1, "1", "", {}),  # the old episode holds no period: the memory line
+              ("rootB", "route", 1, "1", "opus", {}),  # the open memory period never silences the route line
+              ("rootC", "crowded", 1, "1", "", {}), ("rootD", "route", 1, "1", "opus", {}),  # both open: silent
+              ("rootE", "route", 1, "nova", "glm", {}),  # another model's route: its own period, in another room
+              ("rootF", "crowded", 1, "1", "opus", request),  # what the request carries: its own period
+              ("turnG", "held", 1, "3", "", {}), ("rootH", "held", 2, "1", "", {}),  # another room or work room
+              ("rootI", "crowded", 1, "1", "", {}),  # memory still open: silent
+              ("rootJ", "held", 1, "1", "", {}),  # the opener's room and work room: closed silently, nova's stays
+              ("rootK", "crowded", 1, "1", "", {}), ("rootL", "route", 1, "1", "glm", {}))  # a new line; glm still open
+    for task, cause, levels, room, model, numbers in starts:
+        plan = _plan(_room(cause, levels=levels, room_id=room, **numbers), model=model)
+        loop._note_low_start(ctx, plan, "max" if cause == "held" else "low", task, None)
+    assert [event["delivery_id"] for _root, event in sent] == [
+        "low_start:rootA:1", "low_start:rootB:1", "low_start:rootE:1", "low_start:rootF:1", "low_start:rootK:1"]
+    assert "on opus the window cannot hold" in sent[1][1]["text"] and "what the request itself" in sent[3][1]["text"]
+    periods = json.loads(bit.read_text(encoding="utf-8"))
+    assert sorted(periods) == ["memory", "route:glm"]
+    assert [(periods[key]["task"], periods[key]["room"]) for key in ("memory", "route:glm")] == [("rootK", "1"), ("rootE", "nova")]
 
 
 def test_a_failing_outbox_never_fails_the_start_and_keeps_the_episode_closed(tmp_path, monkeypatch, sent):
