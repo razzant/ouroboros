@@ -1011,3 +1011,24 @@ def test_the_typing_deadline_counts_the_time_the_switch_took(tmp_path, monkeypat
     host_left_ms = (mac_input.TYPE_HOST_SEC - spent) * 1000
     assert "until" not in spec and spec["budget_ms"] == (170 - spent) * 1000 - 2000, spec
     assert len(waits) == 1 and spec["budget_ms"] + 2000 <= waits[0] * 1000 <= host_left_ms - 10_000, (spec, waits)
+
+
+@pytest.mark.parametrize("second", [None, SAFARI])
+def test_a_never_policy_sequence_names_no_recipient_its_first_step_could_not_read(tmp_path, monkeypatch, second):
+    """raise_policy=never: Keynote is read in front, then the recheck before the first key of `right return` reads no
+    front. The receipt says front_unread and names nobody, not the earlier Keynote; a recheck that reads Safari names it."""
+    module, api, state = mac(tmp_path, monkeypatch, front=KEYNOTE)
+    real, reads = module._ComputerUse._front_local, []
+
+    def front_local(self, *a, **k):
+        reads.append(1)
+        if len(reads) == 1:
+            return real(self, *a, **k)
+        return None if second is None else app_dict(second)
+    monkeypatch.setattr(module._ComputerUse, "_front_local", front_local)
+    out = receipt(api.tools["key"](keys="right return", app="Keynote", raise_policy="never"))
+    assert out["ok"] is False and out["steps_done"] == 0 and inputs(state) == [], out
+    if second is None:
+        assert out["reason"] == "front_unread" and "front" not in out and "delivered_to" not in out, out
+    else:
+        assert out["reason"] == "target_lost" and out["front"] == app_dict(SAFARI), out

@@ -667,7 +667,10 @@ Backend matrix (honest limitations):
   wrapper's completion marker (a refused connection, a channel broken after
   the input may have run: `ssh_failed`) leaves the outcome unknown
   (`dispatched: null`, `transport_failed`; a clipboard marker that did come
-  back is kept as a fact), never "not sent". The programs' stderr is read the same
+  back is kept as a fact), never "not sent". An ssh that exits 0 while the
+  remote shell printed none of the wrapper's lines ran no script (ssh gave it
+  no stdin, as `StdinNull yes` for that host does): `remote_script_not_run`,
+  `dispatched: false`. The programs' stderr is read the same
   way as locally, and the wheel, the middle button and `hold_key` work as locally. `type_text` with `via=paste` writes the Mac's clipboard
   (`pbcopy`, told the text is UTF-8 whatever locale ssh forwarded) and pastes
   with the same chord program through the Mac's own `osascript` in the same

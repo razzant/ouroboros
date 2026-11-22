@@ -67,6 +67,19 @@ def type_seconds(text: str, interval_ms: int = 0) -> int:
     return min(TYPE_HOST_SEC - TYPE_RECEIPT_SEC, need)
 
 
+# An SSH input call whose ssh exited 0 while the remote sh printed none of the wrapper's lines: it ran no script.
+SCRIPT_NOT_RUN = {"dispatched": False, "reason": "remote_script_not_run",
+                  "error": "ssh exited 0 but the remote shell printed none of the input wrapper's lines, so the command never "
+                           "reached it and nothing was sent: check that ssh passes stdin to the remote command for this "
+                           "host (a StdinNull yes in the ssh configuration stops it)"}
+
+
+def typing_until(ops: list[dict[str, Any]], seconds: float) -> float | None:
+    """The deadline of an SSH Mac's program: typed text alone counts from the call's start (its counts must come
+    back before the host's deadline); every other operation keeps its own fixed timeout."""
+    return deadline_in(seconds) if any(op.get("op") == "type" for op in ops) else None
+
+
 def deadline_in(seconds: float) -> float:
     """The monotonic moment ``seconds`` from now, read when the call begins: the helper must be done by then, so the
     time its target switch takes comes out of the program's budget (``fit``), never out of the host's deadline."""

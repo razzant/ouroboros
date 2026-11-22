@@ -303,7 +303,7 @@ class RemoteBackends:
             if err:
                 return {"ok": False, "backend": backend, "error": err, "code": code}
             ssh_command = shlex.join(mac_input.argv(ops, remote=True, budget_ms=max(1000, timeout * 1000 - 3000),
-                                                     until=mac_input.deadline_in(timeout)))
+                                                     until=mac_input.typing_until(ops, timeout)))
             note = {**(note or {}), "method": mac_input.method_of(ops)} if input_effect else note
         if input_effect and ctx is None:
             refusal, ctx = self._begin(target, raise_policy=raise_policy, connection=("remote", conn))
@@ -349,16 +349,18 @@ class RemoteBackends:
                 before, after, stop = parse_markers(stdout, _info_or_none)
                 if stop:
                     return self._stopped(ctx, shared, before, backend, stop, later=later)
-                # The wrapper prints `__FRONT_BEFORE__` before the input and `__FRONT_AFTER__` after it. Both received:
-                # the wrapper completed and `rc` is the input's own exit. A reply cut short (a refused connection, a
-                # channel broken after the input may have run) leaves the outcome unknown: never "not sent".
-                # ssh returns the remote exit status only after the session ended normally: exit 0 is completion too.
-                completed = (rc == 0 or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
-                started = completed or bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
+                # The wrapper prints `__FRONT_BEFORE__` first and `__FRONT_AFTER__` after the input: the latter, or exit 0
+                # after the former (ssh returns it only once the session ended normally), is completion, `rc` the input's.
+                # A reply cut short leaves the outcome unknown, never "not sent"; exit 0 with no marker at all means sh
+                # ran no script (ssh gave it no stdin, as `StdinNull yes` does): nothing was sent.
+                started = bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
+                completed = (rc == 0 and started or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
                 payload = {"ok": rc == 0 and completed, "backend": backend, "returncode": rc, "output": strip_markers(stdout),
                            "dispatched": True if completed else None,
                            **(mac_input.answer_fields(strip_markers(stdout), stderr) if completed else {})}
-                if not completed:
+                if not completed and rc == 0:
+                    payload.update(mac_input.SCRIPT_NOT_RUN)
+                elif not completed:
                     payload.update({"transport_failed": True, "reason": "ssh_failed",
                                     "error": f"ssh ended without the wrapper's completion marker ({stderr.strip() or f'exit {rc}'}); "
                                              + ("the input stage had started when the reply was cut short" if started

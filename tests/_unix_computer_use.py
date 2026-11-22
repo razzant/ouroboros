@@ -53,6 +53,14 @@ def helper_op(argv: list[str]) -> list[str]:
 
 
 CHORD_POSTED = "paste chord: Command + key code 9 (v under Command in com.apple.keylayout.ABC)\n"
+def ran(command: str, stdout: str = "") -> str:
+    """What an SSH Mac answers when the skill's input wrapper ran: its two place lines around the program's own output
+    (unread fronts here). A reply without them is a script that never reached the remote shell."""
+    if "__FRONT_AFTER__" in command and "__FRONT_" not in stdout:
+        return f"__FRONT_BEFORE__\n{stdout}\n__FRONT_AFTER__\n"
+    return stdout
+
+
 EVENTS_POSTED = '{"posted":2}\n'  # the input program's answer on success: what it posted
 
 

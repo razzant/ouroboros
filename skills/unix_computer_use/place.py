@@ -409,9 +409,10 @@ class PlaceMixin:
     def _first_front(ctx: dict[str, Any], first: dict[str, Any], *, reread: bool) -> None:
         """The front a sequence's receipt names is its first step's own: the application that step reached, or the one
         in front when it was refused, as that step read it. ``reread``: the first step read the front again (after the
-        lookup of the sequence's characters), so an unread front there is unknown, not the earlier read."""
+        lookup of the sequence's characters), so an unread front there is unknown, not the earlier read; so is one the
+        first step reports it could not read (``front_unread``, a remote probe or a never-policy recheck)."""
         front = next((first[k] for k in ("delivered_to", "front_at_dispatch", "front") if isinstance(first.get(k), dict)), None)
-        if front is not None or reread:
+        if front is not None or reread or first.get("reason") == "front_unread":
             ctx["delivered_to"] = front  # a remote probe also reads it in the first step
 
     def _stop_before_activation(self, app: str, front: dict[str, Any] | None = None,

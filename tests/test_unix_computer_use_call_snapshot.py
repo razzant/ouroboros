@@ -11,6 +11,7 @@ import pytest
 from skills.unix_computer_use import plugin
 from skills.unix_computer_use import mac_input
 from tests.test_unix_computer_use_safety_contract import _API, guest_key_validation
+from tests._unix_computer_use import ran
 
 
 @pytest.fixture
@@ -88,7 +89,7 @@ def test_pointer_call_keeps_one_immutable_destination(desktop, monkeypatch, back
     impl._try = lambda cmd, **kw: sent.append(("local", cmd)) or (0, "", "")
     impl._osworld_execute = lambda conn, cmd, **kw: sent.append((conn["target"], cmd)) or {
         "status": 200, "result": {"status": "success", "returncode": 0, "output": ""}}
-    impl._ssh_run = lambda conn, cmd, **kw: sent.append((conn["host"], cmd)) or (0, "", "")
+    impl._ssh_run = lambda conn, cmd, **kw: sent.append((conn["host"], cmd)) or (0, ran(cmd), "")
     out = json.loads(getattr(impl, method)(**kwargs, raw=raw, observation_id="shot"))
     assert out["ok"] is True, out
     assert sent[0][0] == {"local": "local", "osworld_http": "http://a.invalid", "ssh_macos": "a.invalid"}[backend]
@@ -163,7 +164,7 @@ def test_ssh_capture_maps_exact_primary_and_validates_same_geometry(desktop, mon
         if not command.startswith("screencapture -x -m "):
             assert "osascript -l JavaScript -e" in command
             sent.append(command)
-        return 0, "", ""
+        return 0, ran(command), ""
 
     def scp(command, **_kw):
         assert command[0] == "scp" and "a.invalid:" in command[-2]
@@ -393,7 +394,7 @@ def test_a_letter_under_a_modifier_adds_no_shift_and_a_bare_letter_stays_as_writ
     assert json.loads(desktop.key(keys=keys))["ok"] is True
     assert sent == [plugin.command_chord_argv("s") if mac is None else mac_input.argv([mac])]
     select(desktop, "ssh_macos")
-    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, "", "")
+    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, ran(command), "")
     assert json.loads(desktop.key(keys=keys))["ok"] is True
     remote = shlex.join(plugin.command_chord_argv("s", remote=True) if mac is None else
                         mac_input.argv([mac], remote=True, budget_ms=28000))
@@ -608,7 +609,7 @@ def test_a_requested_switch_that_could_not_be_verified_still_says_so(tmp_path, m
 def test_ssh_super_modifier_preserves_existing_mapping(desktop):
     select(desktop, "ssh_macos")
     commands = []
-    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}' if '"op":"resolve"' in command else "", "")
+    desktop._ssh_run = lambda conn, command, **kw: commands.append(command) or (0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}' if '"op":"resolve"' in command else ran(command), "")
     out = json.loads(desktop.key(keys="super+a meta+b"))
     assert out["ok"] is True  # both name Command: the Command chord, its program and character quoted word by word
     assert '"op":"resolve"' in commands[0] and "osascript -l JavaScript -e" in commands[0], "one lookup first, over SSH"

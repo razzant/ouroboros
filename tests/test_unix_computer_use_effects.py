@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._unix_computer_use import ran
+
 PLUGIN = Path(__file__).resolve().parents[1] / "skills" / "unix_computer_use" / "plugin.py"
 TIMEOUT = subprocess.TimeoutExpired(["fixture"], 10)
 
@@ -81,6 +83,8 @@ class Transport:
         if isinstance(outcome, BaseException):
             raise outcome
         code, stdout = outcome if isinstance(outcome, tuple) else (outcome, "")
+        if argv[0] == "ssh" and code == 0:
+            stdout = ran(argv[-1], stdout)  # the remote input wrapper ran: its place lines come back
         if code == 0 and argv[0] in {"screencapture", "scp"}:
             png(Path(argv[-1]))
         return subprocess.CompletedProcess(cmd, code, stdout, "" if code == 0 else f"exit status {code} from {argv[0]}")

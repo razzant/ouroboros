@@ -435,6 +435,13 @@ def test_an_ssh_typing_deadline_counts_the_time_the_switch_took(tmp_path, monkey
     budget = (170 - spent) * 1000 - 3000
     assert len(sent) == len(waits) == 1 and f'"budget_ms":{budget}' in sent[0] and '"until"' not in sent[0], (waits, out)
     assert budget + 3000 <= waits[0] * 1000 <= (mac_input.TYPE_HOST_SEC - spent) * 1000 - 10_000, waits
+    # Only typed text counts from the call's start: a click after the same slow inventory keeps its own 30 s and the
+    # program its 27 s, as before, so an answer that takes 16 s is still a success.
+    del calls[:], waits[:]
+    clicked = receipt(api.tools["click"](x=10, y=20, raw=True, app="Keynote"))
+    assert clicked["ok"] is True, clicked
+    sent = [argv[-1] for argv in calls if is_input(argv[-1])]
+    assert waits == [30] and len(sent) == 1 and '"budget_ms":27000' in sent[0] and '"until"' not in sent[0], (waits, clicked)
 
 
 def test_a_command_longer_than_a_host_command_line_goes_on_ssh_stdin(tmp_path, monkeypatch):
@@ -942,3 +949,42 @@ def test_osworld_an_unread_front_before_a_later_step_says_so(tmp_path, monkeypat
     out = receipt(api.tools["key"](keys="right down", app="Keynote"))
     assert out["ok"] is False and out["steps_done"] == 1 and out["reason"] == "front_unread" and out["dispatched"] is False, out
     assert "before the next step" in out["error"] and "nothing more was sent" in out["error"] and "switch was requested" not in out["error"], out["error"]
+
+
+@pytest.mark.parametrize("probe", ["unread", "read"])
+def test_an_ssh_sequence_names_no_recipient_when_its_first_step_could_not_read_the_front(tmp_path, monkeypatch, probe):
+    """Keynote is verified in front, then the probe before the first key of `a b` cannot read the front: the receipt
+    says so and names no application, not the Keynote read before. A probe that reads another front names it."""
+    def script(command):
+        if "lsappinfo list" in command:
+            return 0, LISTING + "__FRONT__" + info_line(KEYNOTE)
+        if '"op":"resolve"' in command:
+            return 0, '{"layout":"com.apple.keylayout.ABC","post_events":true,"missing":[],"missing_command":[]}\n'
+        if is_input(command):
+            return (3, "\n__FRONT_BEFORE__\n__FRONT_UNREAD__\n") if probe == "unread" else \
+                (3, f"\n__FRONT_BEFORE__{info_line(SAFARI)}\n__TARGET_LOST__\n")
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["key"](keys="a b", app="Keynote"))
+    assert out["ok"] is False and out["steps_done"] == 0 and out["dispatched"] is False, out
+    if probe == "unread":
+        assert out["reason"] == "front_unread" and "front" not in out and "delivered_to" not in out, out
+    else:
+        assert out["reason"] == "target_lost" and out["front"]["app"] == "Safari", out
+
+
+@pytest.mark.parametrize("markers", [True, False])
+def test_an_ssh_input_whose_script_never_ran_is_not_a_success(tmp_path, monkeypatch, markers):
+    """ssh exits 0 in both cases. With the wrapper's lines the click ran; with none of them the remote sh read no
+    script (a StdinNull yes for this host gives it no stdin), so nothing was sent and the receipt says why."""
+    def script(command):
+        if is_input(command):
+            return (0, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n") if markers else (0, "")
+        return 0, ""
+    module, api, calls = ssh(tmp_path, monkeypatch, script)
+    out = receipt(api.tools["click"](x=10, y=20, raw=True))
+    if markers:
+        assert out["ok"] is True and out["dispatched"] is True and out["observed_effect"] is True, out
+    else:
+        assert out["ok"] is False and out["dispatched"] is False and out["reason"] == "remote_script_not_run", out
+        assert "StdinNull" in out["error"] and "transport_failed" not in out and not out.get("observed_effect"), out
