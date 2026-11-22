@@ -337,7 +337,8 @@ def test_the_draft_answers_for_its_whole_interface_and_the_pinned_build_gets_its
     assert page.served_from_root == 1
 
     launched = []
-    pinned = stand.Stand(executable_path="/pinned/chrome-headless-shell", launch_args=["--use-gl=angle"], out=tmp_path)
+    pinned = stand.Stand(executable_path="/pinned/chrome-headless-shell", launch_args=["--use-gl=angle"], out=tmp_path,
+                         url="http://127.0.0.1:9")
     pinned._pw = SimpleNamespace(chromium=SimpleNamespace(launch=lambda **kw: launched.append(kw)))
     pinned._launch()
     assert launched == [{"headless": True, "executable_path": "/pinned/chrome-headless-shell", "chromium_sandbox": True,
@@ -354,7 +355,7 @@ def test_a_frame_that_cannot_be_captioned_and_a_failed_snippet_are_named(tmp_pat
                 raise RuntimeError("measure.js threw")
             return [] if "window.__look." in script else None
 
-    found = stand.Stand(out=tmp_path).measure(page=Page())
+    found = stand.Stand(out=tmp_path, url="http://127.0.0.1:9").measure(page=Page())
     assert found["layout_error"] == "RuntimeError: measure.js threw"
     assert stand._facts(found)["unmeasured"] == "measure.js failed: RuntimeError: measure.js threw"
 
