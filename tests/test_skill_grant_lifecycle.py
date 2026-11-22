@@ -384,3 +384,31 @@ def test_a_waiting_permission_is_refused_with_its_reason_at_every_door(root, mon
     assert response.status_code == 403
     assert "waits for the check of the edited version" in response.json()["error"], response.json()
     assert "waits for the check" not in json.dumps(plain.json()), "an invalid token keeps the plain refusal"
+
+
+def test_the_end_of_work_fact_names_the_real_blocker_and_stays_silent_when_nothing_is_owed(root):
+    """S4: an edited self-authored skill outside Cyber Pro names ``review_stale``, never «its keys still work»; a
+    root work that only read an unchanged skill gets no fact; an acceptance in the same work leaves none."""
+    from ouroboros.loop_nudges import _skill_finalization_message
+    from ouroboros.skill_readiness import note_enabled_skill_digests
+
+    folder = root / "skills" / "external" / "demo"
+    settings(root, FIXTURE_KEY="example")
+    manifest(folder, keys=("FIXTURE_KEY",))
+    mark = {"schema_version": 1, "origin": "self_authored", "task_id": "t1", "created_at": "2026-05-07T00:00:00+00:00"}
+    (root / "state" / "skills" / "demo").mkdir(parents=True)
+    (root / "state" / "skills" / "demo" / "self_authored.json").write_text(json.dumps(mark), encoding="utf-8")
+    (folder / ".self_authored.json").write_text(json.dumps(mark), encoding="utf-8")
+    grant(root, keys=("FIXTURE_KEY",))
+    save_enabled(root, "demo", True, actor="owner_ui")
+    ctx = SimpleNamespace()
+    note_enabled_skill_digests(ctx, [find_skill(root, "demo")])
+    read_only = {"tool_calls": [{"tool": "skill_preflight", "args": {"skill": "demo"}}]}
+    assert _skill_finalization_message(root, read_only, ctx) == "", "an unchanged skill owes nothing"
+    (folder / "plugin.py").write_text("def register(api):\n    return None\n", encoding="utf-8")
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/external/demo/plugin.py"}}]}
+    message = _skill_finalization_message(root, trace, ctx)
+    assert "files of skill demo changed" in message and "review_stale" in message
+    assert "still work" not in message
+    accept(root)
+    assert _skill_finalization_message(root, trace, ctx) == "", "accepted in the same work: nothing is owed"

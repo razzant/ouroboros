@@ -104,6 +104,7 @@ def test_a_skill_changed_during_the_work_gets_one_neutral_fact(tmp_path, monkeyp
     from ouroboros.skill_readiness import note_enabled_skill_digests
 
     monkeypatch.setattr(config, "load_settings", lambda: {"CAL_TOKEN": "x"})
+    monkeypatch.setattr("ouroboros.skill_review_status.cyber_authority", lambda: True)  # the edited skill runs (1A)
     drive_root = tmp_path / "drive"
     skill_dir = drive_root / "skills" / "ouroboroshub" / "cal"
     skill_dir.mkdir(parents=True)
@@ -131,8 +132,8 @@ def test_a_skill_changed_during_the_work_gets_one_neutral_fact(tmp_path, monkeyp
     assert "(notify_owner) wait for the check of the new version" in message
     # A delegate's work has no first view: its trace names the skill it touched.
     touched = {"tool_calls": [{"tool": "write_file", "args": {"path": "skills/ouroboroshub/cal/plugin.py"}}]}
-    delegate = types.SimpleNamespace(_skill_digests_at_start={})
-    assert "differ from the version its permissions were granted for" in _skill_finalization_message(
+    delegate = types.SimpleNamespace()  # a delegate's work keeps no first view
+    assert "differ from the version its grants were checked for" in _skill_finalization_message(
         drive_root, touched, delegate)
     assert _skill_finalization_message(drive_root, {"tool_calls": []}, delegate) == ""
     save_enabled(drive_root, "cal", False)  # turned off during the work

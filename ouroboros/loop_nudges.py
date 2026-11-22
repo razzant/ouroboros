@@ -46,59 +46,14 @@ def _loop():
     return loop
 
 
-def _changed_skill_facts(drive_root: pathlib.Path, names: List[str], ctx: Any) -> "tuple[List[str], List[str]]":
-    """B6″ (owner 1A, 21.11): ``(names, facts)`` of skills whose files changed during the work. A skill enabled at
-    the work's first view whose files differ now (``skills_changed_during_work``: this work or another participant
-    changed them) gets one neutral fact; so does a skill the trace touched whose permissions wait for the check of
-    its current files (a delegate's work has no first view). Its keys keep working, the permissions on the owner's
-    behalf wait for the check of the new version; running the check is the mind's call. A skill turned off during
-    the work is the owner's intended Off and stays silent; a key not yet saved keeps nothing from running."""
-    from ouroboros.skill_grant_scope import blocking_items
-    from ouroboros.skill_loader import find_skill, grant_status_for_skill
-    from ouroboros.skill_readiness import skills_changed_during_work
-
-    changed: List[str] = []
-    facts: List[str] = []
-
-    def fact(skill: Any, how: str, grants: Dict[str, Any]) -> None:
-        keys = ", ".join(grants.get("granted_keys") or [])
-        waiting = ", ".join(grants.get("waiting_permissions") or [])
-        facts.append(
-            f"files of skill {skill.name} {how}" + (f"; its keys ({keys}) still work" if keys else "")
-            + (f"; its permissions on the owner's behalf ({waiting}) wait for the check of the new version "
-               f"(skill_review {skill.name!r} or another acceptance of the current files)" if waiting else "")
-            + (f"; it does not run until the owner grants {blocking_items(grants)}" if grants.get("blocked") else ""))
-
-    try:
-        for skill in skills_changed_during_work(ctx, drive_root):
-            changed.append(skill.name)
-            if skill.enabled:
-                fact(skill, "changed during this work (by this work or another participant)",
-                     grant_status_for_skill(drive_root, skill))
-        for name in names:
-            skill = find_skill(drive_root, name)
-            if skill is None or skill.name in changed or getattr(skill, "is_self_authored", False) or not skill.enabled:
-                continue
-            grants = grant_status_for_skill(drive_root, skill)
-            if grants.get("waiting_permissions"):
-                changed.append(skill.name)
-                fact(skill, "differ from the version its permissions were granted for (this work touched it)", grants)
-    except Exception:
-        log.debug("Changed-skill facts unavailable", exc_info=True)
-    return changed, facts
-
-
 def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any], ctx: Any = None) -> str:
     names = _loop()._skill_names_touched_by_trace(llm_trace)
-    changed, facts = _changed_skill_facts(pathlib.Path(drive_root), names, ctx)
-    if not names and not facts:
-        return ""
     try:
         from ouroboros.skill_loader import find_skill
-        from ouroboros.skill_readiness import skill_readiness_for_execution
+        from ouroboros.skill_readiness import changed_skill_facts, skill_readiness_for_execution
     except Exception:
         return ""
-    blockers: List[str] = list(facts)
+    changed, blockers = changed_skill_facts(pathlib.Path(drive_root), names, ctx)  # skills changed in the work first
     for name in names:
         try:
             skill = find_skill(pathlib.Path(drive_root), name)
@@ -119,11 +74,10 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     if not blockers:
         return ""
     return (
-        "⚠️ SKILL_NOT_FINALIZED: skills this work changed or touched, with their current facts and available "
-        "next actions. With automatic grants for reviewed skills on, an acceptance of a skill's current files "
-        "(a finished review or another acceptance basis) grants what it requests and carries its installation's "
-        "earlier grants; an intentional disablement stays the owner's, and an intentionally disabled skill may "
-        "still satisfy the task. Current facts: " + "; ".join(blockers)
+        "⚠️ SKILL_NOT_FINALIZED: skills this work changed or touched, with their facts and next actions. With "
+        "automatic grants on, an acceptance of a skill's current files (a finished review or another acceptance "
+        "basis) grants what it requests and carries its installation's earlier grants; an intentional disablement "
+        "stays the owner's and an intentionally disabled skill may still satisfy the task. Facts: " + "; ".join(blockers)
     )
 
 
