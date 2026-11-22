@@ -162,7 +162,8 @@ def _namespace(module):
 def _warm(tmp_path_factory):
     """One family build under the real clocks per module and worker, before any case moves one: it first imports every
     module a build or a fact imports (one loaded under a moved clock can keep it), then rebinds their copies of its root."""
-    from ouroboros import claudexor_exit_facts, config, mcp_client, review_ledger, review_price, reviewer_slot_config  # noqa: F401
+    from ouroboros import claudexor_exit_facts, config, mcp_client, review_ledger, review_price  # noqa: F401
+    from ouroboros import reviewer_slot_config, subscription_census  # noqa: F401
     from tests._scale_root import money
     from tests.test_tool_connections import _servers
 
@@ -478,7 +479,6 @@ def _vary_queue(env, monkeypatch, **_kw):
 
 def _vary_budget(env, monkeypatch, **_kw):
     from tests._scale_root import money
-
     monkeypatch.setenv("TOTAL_BUDGET", "250")
     money(env.drive_root, "other-task", cost=3.21, limit=250.0)
     return lambda first, second: '"spent_usd":3.21' in second["C"] and '"spent_usd":3.21' not in first["C"]
@@ -502,13 +502,13 @@ def _vary_reviews(env, monkeypatch, **_kw):
 
 
 def _vary_accounts(env, monkeypatch, **_kw):
-    from ouroboros.claudexor_exit_facts import record_route_health
-
-    assert record_route_health(env.drive_root, {
-        "window_days": 7, "complete": True, "generated_at": "2026-11-20T10:00:00+00:00",
-        "routes": [{"harness": "codex", "access": "full", "runs": 40, "failed": 9,
-                    "top_failures": [{"category": "quota", "code": "quota_exhausted", "count": 9}]},
-                   {"harness": "claude", "access": "readonly", "runs": 12, "failed": 0, "top_failures": []}]})
+    from ouroboros import claudexor_exit_facts, subscription_census as census
+    assert claudexor_exit_facts.record_route_health(env.drive_root, {"window_days": 7, "complete": True,
+        "generated_at": "2026-11-20T10:00:00+00:00", "routes": [{"harness": "codex", "access": "full", "runs": 40,
+        "failed": 9, "top_failures": [{"category": "quota", "code": "quota_exhausted", "count": 9}]},
+        {"harness": "claude", "access": "readonly", "runs": 12, "failed": 0, "top_failures": []}]})
+    census._write({"type": census.CENSUS_TYPE, "read": "ok", "since": "2026-11-20T10:00:00+00:00",  # never in A', D or B
+                   "read_at": "2026-11-20T10:00:00+00:00", "families": {"codex": {"at_limit": 3}}}, env.drive_root)
     return lambda first, second: "codex full 9/40" in second["C"] and "codex full 9/40" not in first["C"]
 
 
