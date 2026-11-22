@@ -382,6 +382,25 @@ def test_main_hears_at_its_next_turn_that_what_it_was_told_broke_recovered_and_a
     assert _round(second) is None and _round(turn("main-3")[0]) is None
 
 
+def test_the_owners_primary_chat_is_main_too_and_a_chat_that_is_neither_keeps_no_map(monkeypatch, tmp_path):
+    from supervisor import schedule_notes
+
+    monkeypatch.setattr(schedule_notes, "owner_chat_id", lambda root: 7)  # the owner's first chat was, say, Telegram
+    manager = _manager(monkeypatch, ("demo", True))
+    _call(manager, "demo", TimeoutError("slow"))
+
+    def wake(task, chat_id):
+        work = SimpleNamespace(drive_root=tmp_path, task_metadata={}, current_chat_id=chat_id, task_id=task,
+                               is_direct_chat=True, task_depth=0)
+        breakage.start_notice_rows(work, [])
+        return work
+
+    wake("wake-1", 7)  # told the break
+    _call(manager, "demo", ToolResult(status="ok", code="OK", text="pong"))
+    assert _round(wake("room-1", 9)) is None  # neither the web chat nor the owner's: it inherits nothing
+    assert "- MCP server demo: no longer reported broken (a call answered at" in _round(wake("wake-2", 7))
+
+
 def test_selecting_a_works_tools_again_never_adds_a_second_typed_notice(monkeypatch, tmp_path):
     from ouroboros import loop as loop_mod
     from ouroboros.context_budget import host_row_intact

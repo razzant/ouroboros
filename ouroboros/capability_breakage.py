@@ -259,9 +259,15 @@ def _blocked_surfaces(omissions: List[Dict[str, Any]]) -> set:
 
 
 def _is_main(tool_ctx: Any) -> bool:
-    """Main's own turn (a direct turn of chat 1, not a child), whose told facts outlive the turn."""
-    return (getattr(tool_ctx, "current_chat_id", None) == 1 and getattr(tool_ctx, "is_direct_chat", False) is True
-            and not getattr(tool_ctx, "task_depth", 0))
+    """Main's own turn, whose told facts outlive it: a direct depth-0 turn of the web chat or of the owner's primary
+    chat (where wakes run too); a project room's work and a child are not. Both chats share one map."""
+    if getattr(tool_ctx, "is_direct_chat", False) is not True or getattr(tool_ctx, "task_depth", 0):
+        return False
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from supervisor.schedule_notes import owner_chat_id
+
+    chat = getattr(tool_ctx, "current_chat_id", None)
+    return chat == WEB_UI_CHAT_ID or chat == owner_chat_id(_root(tool_ctx))
 
 
 def _main_path(tool_ctx: Any) -> pathlib.Path:
