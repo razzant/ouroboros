@@ -504,21 +504,151 @@ def test_a_group_whose_thread_cannot_start_runs_the_rest_alone_and_keeps_every_r
     assert sorted(entered) == ['knowledge_read', 'read_file', 'tree_read', 'write_file'], 'each call entered once'
 
 
-def test_a_delivery_confirmed_while_a_group_runs_rides_one_row(host_world, monkeypatch):
-    """A connector confirms an earlier send of this conversation while two reads run: one row carries it, the first
-    member by request index, as one call at a time would have."""
-    from ouroboros import presence_context
+@pytest.mark.parametrize('windows', ['both', 'later-only'])
+def test_a_delivery_confirmed_while_a_group_runs_rides_one_row(host_world, monkeypatch, windows):
+    """A connector confirms an earlier send of this conversation while two reads run. Each call measures its own
+    window, as one call at a time does; a confirmation inside both windows rides only the first of their rows by
+    request index, and one inside only the later member's window stays on that member."""
+    from ouroboros import loop_tool_execution as execution, presence_context
     host = host_world.host
-    confirmed = threading.Event()
-    monkeypatch.setattr(presence_context, 'confirmed_delivery_receipts',
-                        lambda ctx: frozenset({('earlier-send', '0')}) if confirmed.is_set() else frozenset())
+    confirmed, read_entered, read_closed, lock = threading.Event(), threading.Event(), threading.Event(), threading.Lock()
+    reads_on, outer = {}, {}  # receipt reads per thread; the thread each call's window is measured on
+
+    def receipts(ctx):
+        with lock:
+            me = threading.get_ident()
+            reads_on[me] = reads_on.get(me, 0) + 1
+            if outer.get('read') == me and reads_on[me] == 2:
+                read_closed.set()  # the read's own window has closed
+        return frozenset({('earlier-send', '0')}) if confirmed.is_set() else frozenset()
+    monkeypatch.setattr(presence_context, 'confirmed_delivery_receipts', receipts)
+    original = execution._execute_with_timeout
+
+    def measured(tools, call, *args):
+        outer[call['id']] = threading.get_ident()
+        return original(tools, call, *args)
+    monkeypatch.setattr(execution, '_execute_with_timeout', measured)
+
+    def reading(registry):
+        read_entered.set()
+        if windows == 'both':
+            assert confirmed.wait(10)
+        return completed('Read.')(registry)
 
     def confirming(registry):
+        assert (read_entered if windows == 'both' else read_closed).wait(10)
         confirmed.set()
         return completed('Mapped.')(registry)
-    effects(monkeypatch, {'read_file': completed('Read.'), 'memory_map': confirming})
+    effects(monkeypatch, {'read_file': reading, 'memory_map': confirming})
     results, raised = batch_of(host, [invocation('read', 'read_file', path='s'), invocation('map', 'memory_map')])
     assert raised is None
     carried = [row['tool_call_id'] for row in results if row.get('result_meta', {}).get('presence_delivery_confirmed')]
-    assert carried == ['read'], carried
-    assert results[0]['result_meta']['presence_delivery_confirmed'] == [('earlier-send', '0')]
+    assert carried == (['read'] if windows == 'both' else ['map']), carried
+    assert results[carried[0] == 'map']['result_meta']['presence_delivery_confirmed'] == [('earlier-send', '0')]
+
+
+# --- what the target did must stay so: the receipt window per call, the legacy pool's surfaced control ---------------
+
+
+@pytest.mark.parametrize('when', ['before', 'after-success', 'after-stop'])
+def test_a_presence_store_failure_keeps_the_rows_and_the_original_control(host_world, monkeypatch, when):
+    """The receipt reads sit inside each call's own error protocol: a store failure before the call or after its
+    effect ends the response as that call's control, with every row, and never escapes the batch; a Stop the call
+    already raised is never replaced, because no read follows it."""
+    from ouroboros import presence_context
+    from ouroboros.store import StoreLost
+    host = host_world.host
+    lost, stop, broken = StoreLost('Synthetic unreadable dialogue store'), ModelWaitInterrupted('owner_stop'), []
+
+    def receipts(ctx):
+        if broken:
+            raise lost
+        return frozenset()
+    monkeypatch.setattr(presence_context, 'confirmed_delivery_receipts', receipts)
+
+    def write(registry):
+        broken.append(True)  # every read from now on fails
+        if when == 'after-stop':
+            raise stop
+        return completed('Written.')(registry)
+    if when == 'before':
+        broken.append(True)
+    entered = effects(monkeypatch, {'write_file': write, 'edit_text': completed('Never.')})
+    calls = [invocation('write', 'write_file', path='s', content='c'), invocation('edit', 'edit_text', path='s')]
+    results, raised = batch_of(host, calls)
+    assert raised is (stop if when == 'after-stop' else lost), repr(raised)
+    assert entered == ([] if when == 'before' else ['write_file']), 'nothing started after the control'
+    assert [row['tool_call_id'] for row in results] == ['write', 'edit']
+    assert 'may' in results[0]['result'] and 'NOT STARTED' in results[1]['result']
+
+
+def test_the_legacy_pool_reports_the_control_its_collector_surfaced(host_world, monkeypatch):
+    """A worker records its budget refusal first but is preempted before its future settles, while a sibling's Stop
+    settles and ends the collection: the response ends with the Stop, as the old pool did; both rows stay their own."""
+    from ouroboros import loop_tool_execution as execution
+    host = host_world.host
+    budget, stop = BudgetExceeded('Synthetic spend limit reached'), ModelWaitInterrupted('owner_stop')
+    recorded, leaving = threading.Event(), threading.Event()
+    publish = Future.set_exception
+
+    def late_publish(future, error):
+        if error is budget:
+            recorded.set()
+            assert leaving.wait(10)
+        return publish(future, error)
+
+    class Pool(ThreadPoolExecutor):
+        def shutdown(self, *args, **kwargs):
+            leaving.set()
+            return super().shutdown(*args, **kwargs)
+
+    def execute(tools, call, *args):
+        if call['id'] == 'search':
+            raise budget
+        assert recorded.wait(10)
+        raise stop
+    monkeypatch.setattr(Future, 'set_exception', late_publish)
+    monkeypatch.setattr(execution, 'ThreadPoolExecutor', Pool)
+    monkeypatch.setattr(execution, '_execute_with_timeout', execute)
+    calls = [invocation('search', 'web_search', query='q'), invocation('read', 'read_file', path='s')]
+    assert execution.legacy_pool_response([call['function']['name'] for call in calls])
+    results, raised = batch_of(host, calls)
+    assert raised is stop, repr(raised)
+    assert 'BudgetExceeded' in results[0]['result'] and 'owner_stop' in results[1]['result']
+
+
+def test_a_legacy_sibling_ending_outside_exception_after_a_control_keeps_its_own_error(host_world, monkeypatch):
+    """After a Stop ended collection, an entered sibling that raised SystemExit gets its Unexpected error row, as on
+    the old pool, never NOT STARTED."""
+    from ouroboros import loop_tool_execution as execution
+    host = host_world.host
+    stop, ready, leaving = ModelWaitInterrupted('owner_stop'), threading.Event(), threading.Event()
+
+    class Pool(ThreadPoolExecutor):
+        def shutdown(self, *args, **kwargs):
+            leaving.set()
+            return super().shutdown(*args, **kwargs)
+
+    def execute(tools, call, *args):
+        if call['id'] == 'read':
+            ready.set()
+            assert leaving.wait(10)
+            raise SystemExit('Synthetic worker exit')
+        assert ready.wait(10)
+        raise stop
+    monkeypatch.setattr(execution, 'ThreadPoolExecutor', Pool)
+    monkeypatch.setattr(execution, '_execute_with_timeout', execute)
+    results, raised = batch_of(host, [invocation('read', 'read_file', path='s'), invocation('search', 'web_search', query='q')])
+    assert raised is stop
+    assert 'Unexpected error: Synthetic worker exit' in results[0]['result'], results[0]['result']
+    assert 'owner_stop' in results[1]['result'] and 'NOT STARTED' not in results[1]['result']
+
+
+def test_a_raw_call_without_a_function_does_not_stop_the_calls_before_it(host_world, monkeypatch):
+    """Naming the calls tolerates a raw call whose function is None, so the earlier call runs, as on the target,
+    which raised only when it reached that call."""
+    host = host_world.host
+    entered = effects(monkeypatch, {'write_file': completed('Written.')})
+    with pytest.raises(AttributeError):
+        batch_of(host, [invocation('write', 'write_file', path='s', content='c'), {'id': 'raw', 'function': None}])
+    assert entered == ['write_file']

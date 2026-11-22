@@ -429,11 +429,11 @@ def test_a_control_taken_during_an_ordinary_effect_starts_no_call_tool_after_it(
 
 
 def test_a_parallel_batch_refused_before_it_begins_says_so_for_every_call(host_world, monkeypatch):
-    from ouroboros.tool_capabilities import PARALLEL_SAFE_ENQUEUE_TOOLS, READ_ONLY_PARALLEL_TOOLS, call_segments
+    from ouroboros.tool_capabilities import PARALLEL_SAFE_ENQUEUE_TOOLS, READ_ONLY_PARALLEL_TOOLS, legacy_pool_response
     host = host_world.host
     names = sorted((READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS) & set(host.tools._entries))[:2]
     calls = [invocation(f'parallel-{name}', name) for name in names]
-    assert call_segments(names) == [[0, 1]]
+    assert legacy_pool_response(names), 'the response runs as the legacy pool'
     entered = []
     for name in names:
         ordinary_tool(host, name, entered)

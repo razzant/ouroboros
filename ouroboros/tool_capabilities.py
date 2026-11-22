@@ -282,13 +282,17 @@ LEGACY_POOL_TOOLS: frozenset[str] = frozenset({
 })
 
 # Every other response runs in segments (``call_segments``): consecutive inert reads run at the same time, every
-# other call alone, in written order. An inert read writes no shared context field, publishes no file or record
-# another call of the response could observe, costs no money and mutates nothing; a tool joins only by name, after
-# its handler and its observable effects are checked. Any tool not named runs alone, the safe default.
+# other call alone, in written order. An inert read costs no money, publishes no file or record under an address a
+# call of the same response names as its input, and changes no other call's result; a tool joins only by name, after
+# its handler and its observable effects are checked, and any tool not named runs alone. It MAY lazily create a
+# runtime-internal cache or one-time import (the code-intel inventory of query_code, the chronicle activation of the
+# first memory_read, the dialogue import behind chat_history and list_projects, the usage store behind
+# get_task_result and peek_task, a pack-only file read_file or search_code materializes), and read_file stamps
+# ctx.last_read_view, which only the sequential native reviewer reads: a neighbour in the same group inspecting those
+# internals may not see them yet, as every response made only of reads has behaved in the legacy pool.
 INERT_READ_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
-    "vcs_read", "service_status", "service_logs", "get_task_result", "list_projects", "memory_read",
-    "search_ui_translations", "inspect_subagent",
+    "vcs_read", "get_task_result", "list_projects", "memory_read", "search_ui_translations", "inspect_subagent",
     "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
     "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
 })

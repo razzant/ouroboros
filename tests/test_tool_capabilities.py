@@ -211,10 +211,9 @@ def test_loop_execution_parallel_tools_from_capabilities():
 
 INERT_READS = {  # a name joins only after its handler and its observable effects are checked
     "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
-    "vcs_read", "service_status", "service_logs", "get_task_result", "list_projects", "memory_read",
-    "search_ui_translations", "inspect_subagent", "knowledge_read", "knowledge_list", "workpad_read",
-    "journal_read", "tree_read", "peek_task", "live_roots", "memory_map", "list_skills", "youtube_transcript",
-    "compare_subagent_patches",
+    "vcs_read", "get_task_result", "list_projects", "memory_read", "search_ui_translations", "inspect_subagent",
+    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
+    "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
 }
 # Left out, each for a reproduced reason (review of 21.11.2026).
 KEPT_ALONE = {
@@ -232,6 +231,8 @@ KEPT_ALONE = {
     "it reads the page a neighbouring browser call leaves", "ocr_pdf": "heavy", "extract_pdf_text": "heavy",
     "codebase_health": "heavy", "skill_search": "it refreshes a source cache", "skill_sources": "it edits sources",
     "delegate_start": "a later step, with the folder registration it holds",
+    "service_status": "it advances one shared readiness cursor per service: two at once can skip the READY mark",
+    "service_logs": "it publishes the log blob whose reference it returns",
 }
 
 
@@ -251,7 +252,8 @@ def test_consecutive_inert_reads_form_groups_and_every_other_call_runs_alone():
     for alone in [*KEPT_ALONE, "ext_7_probe_read", "mcp_probe__lookup"]:
         assert call_segments(["knowledge_read", alone, "memory_read"]) == [[0], [1], [2]], alone
     for reproduced in (["query_data", "read_file", "write_file"], ["web_search", "web_search", "write_file"],
-                       ["schedule_subagent", "tree_read", "write_file"], ["review_status", "vcs_read"]):
+                       ["schedule_subagent", "tree_read", "write_file"], ["review_status", "vcs_read"],
+                       ["service_status", "service_status", "write_file"], ["service_logs", "list_files", "stop_service"]):
         assert call_segments(reproduced) == [[i] for i in range(len(reproduced))], reproduced
 
 

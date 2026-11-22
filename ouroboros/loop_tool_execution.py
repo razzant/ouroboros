@@ -1136,7 +1136,7 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
 
 
 def _call_name(tc: Dict[str, Any]) -> str:
-    return str(tc.get("function", {}).get("name") or "").strip()
+    return str((tc.get("function") or {}).get("name") or "").strip()
 
 
 def handle_tool_calls(
@@ -1232,7 +1232,7 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
 
     names = [_call_name(tc) for tc in tool_calls]
     legacy = legacy_pool_response(names)  # exactly the old pool; every other response runs in segments
-    from ouroboros.presence_context import attach_confirmed_receipts, confirmed_delivery_receipts
+    from ouroboros.presence_context import keep_first_receipts
 
     def _execute(tc: Dict[str, Any]) -> Dict[str, Any]:
         receipt = validation_by_id.get(str(tc.get("id") or ""))
@@ -1250,31 +1250,33 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "is_code_tool": fn_name in tools.CODE_TOOLS,
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
+        from ouroboros.presence_context import confirmed_delivery_receipts
         from ouroboros.tools.extension_dispatch import extension_call_scope
-        before = confirmed_delivery_receipts(tools._ctx) if legacy else frozenset()  # else read per segment below
+        before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
             from ouroboros.place_reply import note_dispatch
             note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
-        if legacy:
-            attach_confirmed_receipts(result, confirmed_delivery_receipts(tools._ctx) - before)
+        confirmed = confirmed_delivery_receipts(tools._ctx) - before
+        if confirmed and not result.get("is_error"):
+            result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)
         return result
 
     ending = (UsageAccountingError, ModelWaitInterrupted) if legacy else (Exception,)  # what ends the response
-    outcomes: Dict[int, Tuple[bool, Any]] = {}  # index -> (returned, row or exception), in the order calls settled
+    outcomes: Dict[int, Tuple[bool, Any]] = {}  # index -> (returned, row or exception)
     entered: set = set()  # a pool item a failed submit queued is cancelled or settled by the shutdown, never left
 
     def member(idx: int) -> None:
         entered.add(idx)
         try:
             outcomes[idx] = (True, _execute(tool_calls[idx]))
-        except Exception as exc:
+        except BaseException as exc:  # a sibling's own failure stays its row after a control ended collection
             outcomes[idx] = (False, exc)
             raise
 
-    def pool(segment: List[int]) -> None:  # the segment's calls at once, at most 8 threads, each in a context copy
-        executor, stopped = ThreadPoolExecutor(max_workers=min(len(segment), 8)), True
+    def pool(segment: List[int]) -> Optional[BaseException]:  # at once, at most 8 threads, each in a context copy
+        executor, stopped = ThreadPoolExecutor(max_workers=min(len(segment), 8)), True  # returns the ending surfaced
         try:
             futures = []
             for idx in segment:
@@ -1283,12 +1285,12 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 except RuntimeError:  # no thread to start (a PID-limited container): the rest run alone below
                     if legacy:
                         raise
-                    return
+                    return None
             for future in as_completed(futures):
                 try:
                     future.result()
-                except ending:
-                    return
+                except ending as exc:
+                    return exc
                 except Exception:
                     pass  # a legacy response's row
             stopped = False
@@ -1298,25 +1300,22 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
             # with budget-pause quiescence: cancel the queued ones, WAIT for the
             # started ones (each bounded by its own tool timeout) (#1196, Astra #4).
             executor.shutdown(wait=stopped, cancel_futures=True)
+        return None
 
     control: Optional[BaseException] = None
     for segment in [list(range(len(tool_calls)))] if legacy else call_segments(names):
-        before = frozenset() if legacy else confirmed_delivery_receipts(tools._ctx)
-        if len(segment) > 1:
-            pool(segment)
-        raised = [idx for idx in (outcomes if legacy else sorted(outcomes)) if idx in segment and not outcomes[idx][0]
-                  and isinstance(outcomes[idx][1], ending)]
+        surfaced = pool(segment) if len(segment) > 1 else None
+        raised = [i for i in segment if not outcomes.get(i, (True,))[0] and isinstance(outcomes[i][1], ending)]
         for idx in [] if raised else [idx for idx in segment if idx not in entered]:  # alone, in order, here
             try:
                 member(idx)
             except Exception:
                 raised = [idx]
                 break
-        if not legacy:  # what was confirmed while the segment ran rides one row, as with one call at a time
-            attach_confirmed_receipts(next((outcomes[i][1] for i in segment if outcomes.get(i, (False,))[0]
-                                   and not outcomes[i][1].get("is_error")), {}), confirmed_delivery_receipts(tools._ctx) - before)
-        if raised:
-            control = outcomes[raised[0]][1]
+        if len(segment) > 1 and not legacy:  # a send two overlapping windows saw rides the first of their rows
+            keep_first_receipts([outcomes[i][1] for i in segment if outcomes.get(i, (False,))[0]])
+        if raised:  # the legacy pool: what its collector surfaced; a group: the smallest request index raised
+            control = surfaced if legacy else outcomes[raised[0]][1]
             break
     results: List[Any] = []
     for idx, tc in enumerate(tool_calls):
