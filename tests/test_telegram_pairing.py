@@ -308,9 +308,16 @@ def test_the_connection_card_declaration_names_what_exists(tmp_path):
     assert manifest.secret_fields == {card["token"]: "TELEGRAM_BOT_TOKEN"}
     assert manifest.env_from_settings == ["TELEGRAM_BOT_TOKEN"]  # the code never reaches core Settings
     assert card["pairing"]["code"] == {"key": pairing.CODE_KEY, "store": "skill_settings", "route": "settings/save"}
-    for name in ("identity", "new_code"):
+    for name in ("identity", "new_code", "api_base"):
         path, function = card["pairing"][name].split(":")
         assert path == "lib/telegram_pairing.py" and callable(getattr(pairing, function))
+    # The core calls them as the card names them: the state folder in, the server the identity check asks out (here
+    # unreadable settings, so the answer is unreachable and nothing is sent anywhere).
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "settings.json").write_text("{", encoding="utf-8")
+    server = getattr(pairing, card["pairing"]["api_base"].split(":")[1])(unreadable)
+    assert server == pairing.UNAVAILABLE and pairing.bot_identity(TOKEN, server) == {"ok": False, "cause": "unreachable"}
     assert card["pairing"]["link"].format(username="pair_bot", code="c0de") == "https://t.me/pair_bot?start=c0de"
     registered = _registered(tmp_path)
     assert registered.routes[card["pairing"]["status_route"]] == ("GET",)
@@ -327,9 +334,11 @@ def test_the_connection_card_declaration_names_what_exists(tmp_path):
     assert option["key"] in _SETTINGS_FORM_KEYS and option["store"] == "skill_settings"
     assert "POST" in registered.routes[option["route"]]
     assert (option["on"], option["off"], option["new_connection"]) == ("on", "off", True)
-    for field in ("title", "pitch"):
-        assert isinstance(card[field], str) and card[field].strip()
-    assert isinstance(card["pairing"]["hint"], str) and card["pairing"]["hint"].strip()
+    for text in (card["title"], card["pitch"], card["pairing"]["hint"], card["pairing"]["note"], option["label"]):
+        assert isinstance(text, str) and text.strip()
     assert card["steps"] and all(isinstance(step["text"], str) and step["text"].strip() for step in card["steps"])
-    assert all(set(step) <= {"text", "link"} for step in card["steps"])
+    assert all(set(step) <= {"text", "link", "action"} for step in card["steps"])
+    # A step's button is its action with its link: an action never comes without a link to open.
+    assert all(isinstance(step["action"], str) and step["action"].strip() and "link" in step
+               for step in card["steps"] if "action" in step)
     assert [step["link"] for step in card["steps"] if "link" in step] == ["https://t.me/BotFather"]

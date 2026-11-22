@@ -13,13 +13,14 @@ secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
 connection_card:
   title: "Phone via Telegram"
-  pitch: "Write to Ouroboros and get its results on your phone"
+  pitch: "Chat with Ouroboros anywhere"
   steps:
-    - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather"}
-    - {text: "Send it /newbot"}
-    - {text: "Give the bot a name, then a username ending in \"bot\""}
+    - {text: "Open @BotFather in Telegram", action: "Open @BotFather", link: "https://t.me/BotFather"}
+    - {text: "Send /newbot"}
+    - {text: "Choose a name, then a username ending in “bot”"}
+    - {text: "BotFather replies with a token: paste it here and press Check"}
   token: botToken
-  pairing: {code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status", hint: "Scan it with your phone's camera, then press Start in Telegram."}
+  pairing: {code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}, new_code: "lib/telegram_pairing.py:new_code", api_base: "lib/telegram_pairing.py:saved_api_base", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status", hint: "Scan it with your phone’s camera, then press Start in Telegram.", note: "You can finish setup now; the bot answers once Ouroboros starts."}
   options:
     - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off", new_connection: true, store: skill_settings, route: settings/save}
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
@@ -229,9 +230,10 @@ this skill (`store: skill_settings`) that the card saves with `POST settings/sav
 `{"TELEGRAM_PAIRING_CODE": "<code>"}` from the computer running Ouroboros (as the owner chat
 itself: a Mini App or another computer is refused, `owner_ignored`), never in core Settings, never
 granted and never served by a GET (`""` clears it; a value `new_code` did not mint is refused with
-400); the standard-library `lib/telegram_pairing.py` with `new_code` and `bot_identity` (one bare
-`getMe` to the cloud or the saved `TELEGRAM_API_BASE`, never redirected, `unreachable` while the
-skill's settings cannot be read or that setting is not a server the bridge accepts; otherwise
+400); the standard-library `lib/telegram_pairing.py` with `new_code`, `saved_api_base` (called with
+the skill's state folder; its result is `bot_identity`'s second argument) and `bot_identity` (one
+bare `getMe` to the cloud or the saved `TELEGRAM_API_BASE`, never redirected, `unreachable` while
+the skill's settings cannot be read or that setting is not a server the bridge accepts; otherwise
 `refused` or `unreachable`, never naming the token or the URL); the link
 `https://t.me/{username}?start={code}`; the status route; the connection options. The card saves
 the code before the bot token, so the bridge never polls without it.
