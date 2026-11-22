@@ -77,7 +77,8 @@ def standing_rows(messages: list, released=()) -> dict:
     """Positions that stand through an ordinary fold, each with the position of the note whose rows they are (None
     for the start). One walk over the rows; nothing is hashed (it runs whenever a round's facts row is written).
 
-    The start: every row between the assignment and the first assistant answer (a note is none), typed or not. Then,
+    The start: host-typed rows between the assignment and the first assistant answer (a note is none; untyped rows
+    there, such as captured review bodies the mind folds, stay ordinary). Then,
     in order, a note (a capsule that is not a host source view) or a row no fold selects (owner words, a row that is no
     unit) continues the walk; a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every
     row from that call to the next assistant row, the whole input of the request sent after that fold, unless its
@@ -90,7 +91,7 @@ def standing_rows(messages: list, released=()) -> dict:
         return {}
     end = next((i for i in range(first + 1, len(messages)) if messages[i].get("role") == "assistant"
                 and _note_meta(messages[i]) is None), len(messages))
-    standing = {i: None for i in range(first + 1, end) if _note_meta(messages[i]) is None}
+    standing = {i: None for i in range(first + 1, end) if messages[i].get(HOST_CONTEXT_KIND_KEY)}
     i = first + 1
     while i < len(messages):
         row, meta = messages[i], _note_meta(messages[i])
