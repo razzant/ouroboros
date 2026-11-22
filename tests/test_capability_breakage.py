@@ -11,6 +11,7 @@ from ouroboros import capability_breakage as breakage
 from ouroboros import config, extension_health, mcp_client
 from ouroboros.tool_policy import format_capability_omissions
 from ouroboros.tools.tool_result import ToolResult
+from tests._live_world import host_world as host_world  # noqa: F401 -- a real call host for its tool round
 
 
 @pytest.fixture(autouse=True)
@@ -420,3 +421,27 @@ def test_the_round_appends_the_change_row_before_its_facts(monkeypatch, tmp_path
     with pytest.raises(Reached):
         _dispatch_round_model(ctx, None, attempt_cap=None)
     assert kinds == [[breakage.CHANGE_KIND]]  # the change row stands before the round's facts
+
+
+def test_a_live_call_hears_what_broke_with_its_next_tool_round_once_in_history_and_on_its_connection(
+        host_world, monkeypatch):
+    import asyncio
+
+    host = host_world.host
+    manager = _manager(monkeypatch, ("demo", True))  # configured and answering after the call was told its start
+
+    def round_of(call_id):
+        return host.tool_batch([{"id": call_id, "type": "function",
+                                 "function": {"name": "list_available_tools", "arguments": "{}"}}])
+
+    async def run():
+        calm = await round_of("calm")
+        _call(manager, "demo", TimeoutError("slow"))  # breaks while the call goes on
+        broke = await round_of("broke")
+        return calm, broke, await round_of("after")
+    calm, broke, after = asyncio.run(run())
+    told = [row for row in host.messages if row.get("_host_context_kind") == breakage.CHANGE_KIND]
+    assert len(told) == 1 and "- MCP server demo: calls not answered since" in told[0]["content"]  # history, once
+    sent = [row for row in broke if breakage.CHANGE_HEADER in str(row.get("content"))]
+    assert [row["content"] for row in sent] == [told[0]["content"]]  # and the connection, with that round's results
+    assert not any(breakage.CHANGE_HEADER in str(row.get("content")) for row in [*calm, *after])

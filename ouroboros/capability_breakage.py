@@ -8,14 +8,15 @@ permissions the skill itself reported unavailable). This module only reads them.
 
 A work is told twice, never by rebuilding a row it was already sent: at its start one typed notice
 (``START_KIND``) carries one line per broken server or skill beside the registry's omissions, written once
-even when the work's tools are selected again; then at each round of the work the current facts are compared
-with what that work was last told, and only a change appends one typed host row (``CHANGE_KIND``). What a work
-was told travels with its continuation (an owner wait, a budget pause, a checkpoint), and Main keeps its own
-across turns, so a resumed work and Main's next turn hear what broke or recovered meanwhile. A source that
-cannot be read is unknown: its lines are carried over, never reported repaired; a line closes only with an
-observation (an answer, a listing, a live extension, a skill switched off or uninstalled, a server removed).
-Times are the facts' own, in UTC; order is by key. What to tell the owner, and when, stays the mind's
-judgment: no threshold, timer or required reaction lives here.
+even when the work's tools are selected again; then at each round (a work's round tail; a live call's tool
+round, whose rows reach its connection with the results) the current facts are compared with what that
+work was last told, and only a change appends one typed host row (``CHANGE_KIND``). What a work was told
+travels with its continuation (an owner wait, a budget pause, a checkpoint), and Main keeps its own across
+turns, so a resumed work and Main's next turn hear what broke or recovered meanwhile. A source that cannot
+be read is unknown: its lines are carried over, never reported repaired; a line closes only with an
+observation (an answer, a listing, a live extension, a skill switched off or uninstalled, a server
+removed). Times are the facts' own, in UTC; order is by key. What to tell the owner, and when, stays the
+mind's judgment: no threshold, timer or required reaction lives here.
 """
 
 from __future__ import annotations
