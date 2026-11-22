@@ -192,6 +192,62 @@ def test_a_test_source_counts_patched_product_names_and_git_init_call_sites():
     assert _shape("def _loop():\n    from ouroboros import loop\n    return loop\n", path="tests/test_a.py") == {}
 
 
+def test_a_git_init_site_runs_git_init_and_a_helper_counts_by_what_its_body_runs():
+    """A runner given ``["git", "init"]``, as its first argument or ``args=``; a helper the module defines
+    counts by its body (it passes its varargs to git as the subcommand), a callable whose body is elsewhere
+    by its name; building an argument list, or running another subcommand, is no ``git init``."""
+    shape = _shape('''
+        import subprocess
+
+        from tests import _helpers as shared
+
+        IDENT = ("-c", "user.name=t")
+        GIT = ("git", "-c", "user.name=t")
+
+
+        def argv(*parts):  # builds a list and runs nothing
+            return ["git", *parts]
+
+
+        def _git_argv(*parts):  # named for git, and still runs nothing
+            return ["git", *parts]
+
+
+        def status(repo, *paths):  # runs git status with the paths it is given
+            return subprocess.run(["git", "status", "--", *paths], cwd=repo)
+
+
+        def git_status(repo, *paths):
+            return subprocess.run(["git", "status", "--", *paths], cwd=repo)
+
+
+        def _git(repo, *args):  # its own import, identity options before the varargs
+            import subprocess as sp
+            return sp.run(["git", *IDENT, *args], cwd=repo, check=True)
+
+
+        def git(repo, *args):  # named for git, behind a constant git prefix
+            return subprocess.run([*GIT, *args], cwd=repo)
+
+
+        def run(cmd, **kwargs):
+            return subprocess.run(args=cmd, **kwargs)
+
+
+        def test_y(tmp_path, git_fixture):
+            CASES = [argv("init"), _git_argv("init")]
+            status(tmp_path, "init")
+            git_status(tmp_path, "init")
+            _git(tmp_path, "init", "-q")
+            git(tmp_path, "init")
+            subprocess.run(args=["git", "init"], cwd=tmp_path)
+            run(["git", "init"])
+            shared.run_git(tmp_path, "init")  # imported: its name says what it runs
+            git_fixture("init")  # a parameter: so does this one's
+    ''', path="tests/test_y.py")
+    assert shape == {("git init",): 6}
+
+
 def test_a_name_resolves_in_its_scope_in_source_order():
     """A comprehension binds its targets inside itself alone; a scope's bindings take effect in source order,
     and a rebinding to a value the module cannot name (an assignment, a match capture) hides an import."""

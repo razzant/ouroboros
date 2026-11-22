@@ -19,10 +19,12 @@ binds that module). Counted per file and side:
   an object that resolves to such a name, a module or a class, and ``patch.object``), and each
   call site that runs ``git init``: a command runner (a ``subprocess`` call, ``os.system``, or a
   function the module defines that hands its first parameter to one) given
-  ``["git", ..., "init"]`` or a ``git init`` command string; a Git helper given ``"init"`` (one
-  the module defines around ``["git", *args]``, or any callable named for git); a ``for`` over
-  literal argument lists that a runner takes, once per list that makes ``git init``. Test data
-  (``pytest.param(["git", "init"])``) is never a run.
+  ``["git", ..., "init"]`` (as its first argument or ``args=``) or a ``git init`` command string;
+  a Git helper given ``"init"`` (one the module defines that hands a runner ``["git", ...,
+  *<its varargs>]`` with the varargs at the subcommand's place, or a callable whose body the module
+  does not hold, imported or a parameter, named for git); a ``for`` over literal argument lists that
+  a runner takes, once per list that makes ``git init``. Test data (``pytest.param(["git", "init"])``)
+  and a helper that only builds an argument list are never a run.
 
 A side that does not parse, or was not read, leaves its file unknown, never zero.
 """
@@ -52,8 +54,9 @@ _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = (*_DEFS, ast.ClassDef, ast.Lambda)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 # What a scope binds a name to: ("import", dotted name) by an import or a literal importlib call,
-# ("handle", name) a module handle, ("git", name) a Git helper or ("run", name) a command runner the
-# module defines; None any other binding, which hides an outer one.
+# ("handle", name) a module handle, ("git", name) a Git helper, ("run", name) a command runner or
+# ("def", name) any other function or class the module defines; None any other binding, which hides
+# an outer one.
 Binding = Optional[Tuple[str, str]]
 
 
@@ -177,8 +180,10 @@ def _own_bindings(scope: ast.AST, outer: Mapping[str, Binding], path: str, mark:
                     assigned.add(id(target))
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and id(node) not in assigned:
             names[node.id] = None
-        elif isinstance(node, (*_DEFS, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-            names[node.name] = mark(scope, node, seen) if isinstance(node, _DEFS) else None
+        elif isinstance(node, _DEFS):
+            names[node.name] = mark(scope, node, seen) or ("def", node.name)
+        elif isinstance(node, (ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names[node.name] = ("def", node.name) if isinstance(node, ast.ClassDef) else None
     return names
 
 
@@ -224,60 +229,81 @@ def _product_items(tree: ast.Module, path: str, lines: list[str], modules: froze
                 for base, alias in reexported_names(tree, lines, path))
 
 
-def _git_subcommand(args: list[ast.expr]) -> str | None:
-    """The subcommand of a ``git`` argument list after its global options; ``None`` when not literal."""
+def _subcommand(args: list[ast.expr]) -> ast.expr | None:
+    """The element at a ``git`` argument list's subcommand place, after its global options."""
     skip = False
     for arg in args:
         if skip:
             skip = False
             continue
         value = _string(arg)
-        if value is None:
-            return None
-        if value in _GIT_VALUE_OPTIONS:
-            skip = True
-        elif not value.startswith("-"):
-            return value
+        if value is None or not value.startswith("-"):
+            return arg
+        skip = value in _GIT_VALUE_OPTIONS
     return None
 
 
-def _git_argv(node: ast.AST) -> list[ast.expr] | None:
+def _git_argv(node: ast.AST | None) -> list[ast.expr] | None:
     """The elements after ``"git"`` of a literal ``["git", ...]`` argument list, ``None`` otherwise."""
     elements = node.elts if isinstance(node, (ast.List, ast.Tuple)) else []
     return elements[1:] if elements and _string(elements[0]) == "git" else None
 
 
+def _initializes(args: list[ast.expr] | None) -> bool:
+    """Whether a ``git`` argument list's subcommand is the literal ``init``."""
+    return _string(_subcommand(args or [])) == "init"
+
+
+def _argv(call: ast.Call) -> ast.expr | None:
+    """The command a runner call is given: its first argument, or its ``args=``."""
+    return call.args[0] if call.args else next((item.value for item in call.keywords if item.arg == "args"), None)
+
+
 def _runner(call: ast.Call, seen: Mapping[str, Binding]) -> str:
-    """``"command"`` for a call that runs the command its first argument holds (a ``subprocess``
-    function, ``os.system``, a wrapper of one defined here), ``"git"`` for a Git helper (one defined
-    here around ``["git", *args]``, or named for git), else ``""``."""
+    """``"command"`` for a call that runs the command it is given (a ``subprocess`` function,
+    ``os.system``, a wrapper of one defined here), ``"git"`` for a Git helper (one defined here whose
+    body passes its own arguments to ``git`` as the subcommand, or a callable whose body is not here,
+    imported or a parameter, named for git), else ``""``."""
     dotted = _dotted(call.func, seen)
     kind = (seen.get(call.func.id) or ("",))[0] if isinstance(call.func, ast.Name) else ""
     if dotted in _COMMAND_RUNNERS or kind == "run":
         return "command"
-    name = dotted or (call.func.id if isinstance(call.func, ast.Name) else "")
-    return "git" if kind == "git" or "git" in name.rsplit(".", 1)[-1].lower().split("_") else ""
+    name = dotted or getattr(call.func, "id", "")
+    return "git" if kind == "git" or kind != "def" and "git" in name.rsplit(".", 1)[-1].lower().split("_") else ""
 
 
 def _commands(node: ast.AST, seen: Mapping[str, Binding]) -> list[ast.expr]:
-    """The first argument of each command-runner call within ``node``."""
-    return [call.args[0] for call in ast.walk(node)
-            if isinstance(call, ast.Call) and call.args and _runner(call, seen) == "command"]
+    """The command of each command-runner call within ``node``."""
+    return [argv for call in ast.walk(node) if isinstance(call, ast.Call) and _runner(call, seen) == "command"
+            and (argv := _argv(call)) is not None]
 
 
-def _git_helper(_scope: ast.AST, node: ast.AST, seen: Mapping[str, Binding]) -> Binding:
-    """A function defined here that runs ``git`` with the arguments it is given (``["git", *args]``,
-    or a ``["git", ...]`` list beside a ``*args`` parameter), or that hands its first parameter to a
-    command runner."""
+def _passes_through(argv: ast.expr, rest: str, named: bool) -> bool:
+    """Whether a command list hands ``*rest`` to ``git`` as its subcommand: ``["git", <global options>,
+    *rest, ...]`` (another starred name there holds options), or, for a function named for git, a list
+    that a starred constant prefix (``[*GIT, *rest]``) starts."""
+    def spread(item: ast.AST | None) -> bool:
+        return isinstance(item, ast.Starred) and getattr(item.value, "id", "") == rest
+
+    head = _git_argv(argv)
+    if head is not None:
+        return spread(_subcommand([item for item in head if spread(item) or not isinstance(item, ast.Starred)]))
+    items = argv.elts if isinstance(argv, (ast.List, ast.Tuple)) else []
+    return named and bool(items) and isinstance(items[0], ast.Starred) and any(map(spread, items))
+
+
+def _git_helper(node: ast.AST, seen: Mapping[str, Binding], path: str) -> Binding:
+    """A function defined here that runs ``git`` with the subcommand it is given (it hands a command
+    runner its varargs, ``_passes_through``), or that hands its first parameter to a command runner;
+    one that only builds an argument list runs nothing. Its body is read with its own imports too."""
+    seen = collections.ChainMap({bound: ("import", target) for item in _scope_nodes(node) if isinstance(
+        item, (ast.Import, ast.ImportFrom)) for target, bound in _bindings(item, path)}, seen)
     first = ([*node.args.posonlyargs, *node.args.args][:1] or [None])[0]
-    lists, hands = [], False
-    for item in () if node.name.startswith("test_") else ast.walk(node):  # a test is collected, never called
-        if (argv := _git_argv(item)) is not None:
-            lists.append(argv)
-        elif first and isinstance(item, ast.Call) and item.args and getattr(item.args[0], "id", "") == first.arg:
-            hands = hands or _runner(item, seen) == "command"
-    if lists and (node.args.vararg or any(isinstance(element, ast.Starred) for argv in lists for element in argv)):
-        return "git", node.name
+    rest, named, hands = getattr(node.args.vararg, "arg", None), "git" in node.name.lower().split("_"), False
+    for argv in () if node.name.startswith("test_") else _commands(node, seen):  # a test is collected, never called
+        if rest and _passes_through(argv, rest, named):
+            return "git", node.name
+        hands = hands or first is not None and getattr(argv, "id", "") == first.arg
     return ("run", node.name) if hands else None
 
 
@@ -291,17 +317,16 @@ def _git_inits(node: ast.AST, seen: Mapping[str, Binding]) -> int:
         whole = any(isinstance(argv, ast.Name) and argv.id == name for argv in commands)
         spread = any(isinstance(element, ast.Starred) and getattr(element.value, "id", "") == name
                      for argv in commands for element in _git_argv(argv) or ())
-        return sum(1 for item in node.iter.elts
-                   if whole and _git_subcommand(_git_argv(item) or []) == "init"
-                   or spread and isinstance(item, (ast.List, ast.Tuple)) and _git_subcommand(item.elts) == "init")
+        return sum(1 for item in node.iter.elts if whole and _initializes(_git_argv(item))
+                   or spread and isinstance(item, (ast.List, ast.Tuple)) and _initializes(item.elts))
     kind = _runner(node, seen) if isinstance(node, ast.Call) else ""
     if kind == "command":
-        argv = node.args[0] if node.args else None
-        return int(_git_subcommand(_git_argv(argv) or []) == "init" or bool(_SHELL_GIT_INIT.search(_string(argv) or "")))
+        argv = _argv(node)
+        return int(_initializes(_git_argv(argv)) or bool(_SHELL_GIT_INIT.search(_string(argv) or "")))
     rest = list(node.args) if kind == "git" else []
     while rest and _string(rest[0]) is None and not isinstance(rest[0], ast.Starred):
         rest.pop(0)  # the repository or path a helper takes before its git arguments
-    return int(_git_subcommand(rest) == "init")
+    return int(_initializes(rest))
 
 
 def _patch_target(call: ast.Call, seen: Mapping[str, Binding], modules: frozenset[str]) -> str | None:
@@ -319,7 +344,7 @@ def _patch_target(call: ast.Call, seen: Mapping[str, Binding], modules: frozense
 
 
 def _test_items(tree: ast.Module, path: str, modules: frozenset[str]) -> Iterator[tuple]:
-    for node, seen in _scoped(tree, path, _git_helper):
+    for node, seen in _scoped(tree, path, lambda _scope, node, seen: _git_helper(node, seen, path)):
         yield from (("git init",) for _ in range(_git_inits(node, seen)))
         if isinstance(node, ast.Call) and (target := _patch_target(node, seen, modules)):
             yield "patch", target
