@@ -123,7 +123,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "            || record.items.some((item) => !item.receipt && !String(item.dedupeKey || '').startsWith('task_done|'))\n            || record.toolErrors > 0;"
+    "value": "            || record.items.some((item) => !item.receipt && (item.fullField === 'schedule_report'\n                || !String(item.dedupeKey || '').startsWith('task_done|')))\n            || record.toolErrors > 0;"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",

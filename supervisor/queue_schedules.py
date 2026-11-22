@@ -666,11 +666,25 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
     return task
 
 
-def _scan_outcomes(root, snapshot):
+def _needs_outcome_scan(row: Dict[str, Any]) -> bool:
+    task_id = str(row.get("last_task_id") or "")
+    if not task_id:
+        return False
+    previous = row.get("last_outcome") or {}
+    if previous.get("task_id") != task_id:
+        return True
+    if isinstance(previous.get("report_only"), bool):
+        return False
+    return (bool(str(previous.get("line") or "").strip()) or previous.get("chat_id") is not None
+            or (bool(row.get("enabled", True)) and not row.get("delete_requested_at"))
+            or isinstance(row.get("occurrence"), dict))
+
+
+def _scan_outcomes(root, snapshot, *, reads=None):
     """Observe canonical settled results off-lock; missing/nonterminal reads retry.
 
     Once a run's preview is classified, later enrichment does not revise it.
-    Classify pre-upgrade cached previews once, before they can ride new views.
+    Classify pre-upgrade cached previews once without backfilling empty idle rows.
     """
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
@@ -680,14 +694,19 @@ def _scan_outcomes(root, snapshot):
 
     observed = {}
     for row in snapshot.get("tasks") or []:
+        if not _needs_outcome_scan(row):
+            continue
         task_id = str(row.get("last_task_id") or "")
         previous = row.get("last_outcome") or {}
         same_run = previous.get("task_id") == task_id
-        if not task_id or (same_run and isinstance(previous.get("report_only"), bool)):
-            continue
         try:
-            with acquisition_budget(0):  # optional observation must not stall active rows
-                result = load_task_result(root, task_id, strict=True)
+            if reads is not None and (task_id in reads.rows or task_id in reads.errors):
+                if task_id in reads.errors:
+                    continue
+                result = reads.rows[task_id]
+            else:
+                with acquisition_budget(0):  # optional observation must not stall active rows
+                    result = load_task_result(root, task_id, strict=True)
             if not result or result.get("status") not in SETTLED_STATUSES:
                 continue
             report_only = schedule_report_run(result)
@@ -764,7 +783,6 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     except ScheduleStoreUnreadable:
         log.error("Scheduled task store is unreadable; skipping this scheduler pass")
         return
-    outcomes = _scan_outcomes(root, snapshot)
     observed = scan_policy(root, snapshot)
     from ouroboros.retention import age_cutoff, get_gc_retention_days
 
@@ -778,6 +796,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
             receipt_rows.append(row)
     reads = occurrences.prepare_receipts(receipt_rows, drive_root=root)
     relations = occurrences.prepare_relations(receipt_rows, reads)
+    outcomes = _scan_outcomes(root, snapshot, reads=reads)
     claims: List[Dict[str, Any]] = []
     due_notes: List[Dict[str, Any]] = []
     with schedule_transaction(root):
@@ -796,10 +815,14 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
             if not isinstance(record, dict):
                 continue
             unchanged = copy.deepcopy(record)
-            outcome = outcomes.get(str(record.get("id") or ""))
-            cached = record.get("last_outcome") or {}
+            rid = str(record.get("id") or "")
+            prior, view = observed.get(rid, (None, None))
+            outcome = outcomes.get(rid)
             if (outcome and record.get("last_task_id") == outcome["task_id"]
-                    and not (cached.get("task_id") == outcome["task_id"] and isinstance(cached.get("report_only"), bool))):
+                    and _needs_outcome_scan(record)
+                    and (prior is None or unchanged == prior)
+                    and (outcome["task_id"] not in reads.stamps
+                         or reads.unchanged((outcome["task_id"],)))):
                 record["last_outcome"] = outcome
                 changed = True
             previous_open = record.get("previous_run_open")
@@ -812,7 +835,6 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 _adopt_stored_row(root, data, record)
             except ScheduleRefused:
                 continue
-            prior, view = observed.get(str(record.get("id") or ""), (None, None))
             if (unchanged != prior or data.get("followup_restart") != snapshot.get("followup_restart")):
                 continue
             try:

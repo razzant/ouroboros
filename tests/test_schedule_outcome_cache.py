@@ -80,6 +80,77 @@ def test_old_excerpt_waits_for_classification_then_reuses_the_settled_runs_facts
     assert reads == ["busy", "settled"]
 
 
+def test_template_edits_and_active_reenable_classify_from_settled_result_without_idle_reads(q, monkeypatch):  # noqa: F811
+    from ouroboros import store as raw_store
+    from tests.test_schedule_report_door import run_metadata, ceiling
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    secret = "Private pre-upgrade schedule words."
+    history(q, enabled=False, completed_at="", trigger={"type": "cron", "expr": "0 0 * * *"},
+            next_run_at="2099-01-01T00:00:00+00:00",
+            task={"text": "Legacy check", "chat_id": 1, "metadata": run_metadata(),
+                  "task_contract": {"capability_ceiling": ceiling()}},
+            last_outcome={"task_id": "last", "state": "completed", "line": secret, "chat_id": 0, "quiet": True})
+    edited = q.queue.upsert_scheduled_task({
+        **_rows(q)["s1"], "enabled": False, "task": {"text": "Plain modern edit", "chat_id": 1},
+    })
+    assert "presence" not in edited["task"].get("metadata", {}) and "task_contract" not in edited["task"]
+    before_verify = schedule_view.decorate(_rows(q)["s1"], now)
+    assert before_verify["outcome"]["line"] == "" and "chat_id" not in before_verify["outcome"]
+    q.queue.check_scheduled_tasks()  # missing settled result keeps unclassified privacy intact
+    assert "report_only" not in _rows(q)["s1"]["last_outcome"]
+    assert schedule_view.decorate(_rows(q)["s1"], now)["outcome"]["line"] == ""
+
+    # Idle disabled cron without actionable pending display data does zero store work;
+    # once re-enabled, busy/changed defer and a single off-lock settled read verifies chat_id=0.
+    history(q, enabled=False, completed_at="", trigger={"type": "cron", "expr": "0 0 * * *"},
+            next_run_at="2099-01-01T00:00:00+00:00", task={"text": "Plain modern edit", "chat_id": 1},
+            last_outcome={"task_id": "last", "state": "completed", "line": "", "quiet": True})
+    write_task_result(q.root, "last", "completed", result=secret, chat_id=0,
+                      metadata=run_metadata(), task_contract={"capability_ceiling": {"schema_version": 1}})
+    path = q.root / "state/scheduled_tasks.json"
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    monkeypatch.setattr(raw_store.Txn, "body_text",
+                        lambda *_a, **_k: pytest.fail("idle disabled cron must not read store"))
+    q.queue.check_scheduled_tasks()
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    monkeypatch.undo()
+
+    q.queue.upsert_scheduled_task({**_rows(q)["s1"], "enabled": True, "task": {"text": "Plain modern edit", "chat_id": 1}})
+    active_before = _rows(q)["s1"]
+    real_load, calls = task_results.load_task_result, []
+
+    def busy(*_a, **_kw):
+        calls.append(("busy", q.queue._queue_lock._is_owned()))
+        raise StoreBusy("busy")
+
+    monkeypatch.setattr(task_results, "load_task_result", busy)
+    q.queue.check_scheduled_tasks()
+    assert calls == [("busy", False)] and _rows(q)["s1"] == active_before
+
+    def changed(root, tid, **kw):
+        calls.append(("changed", q.queue._queue_lock._is_owned()))
+        res = real_load(root, tid, **kw)
+        if tid == "last" and kw.get("signed") and sum(k == "changed" for k, _ in calls) == 1:
+            write_task_result(root, "last", "completed", result=secret, chat_id=0,
+                              metadata=run_metadata(), task_contract={"capability_ceiling": {"schema_version": 1}})
+        return res
+
+    monkeypatch.setattr(task_results, "load_task_result", changed)
+    q.queue.check_scheduled_tasks()
+    assert calls == [("busy", False), ("changed", False)] and _rows(q)["s1"] == active_before
+
+    def settled(root, tid, **kw):
+        calls.append(("settled", q.queue._queue_lock._is_owned()))
+        return real_load(root, tid, **kw)
+
+    monkeypatch.setattr(task_results, "load_task_result", settled)
+    q.queue.check_scheduled_tasks()
+    assert calls == [("busy", False), ("changed", False), ("settled", False)]
+    classified = schedule_view.decorate(_rows(q)["s1"], now)["outcome"]
+    assert classified["report_only"] is True and classified["line"] == "" and classified["chat_id"] == 0
+
+
 _FAILED_RUN = {"audit_status": "ok", "open_run_ids": [], "pending_invocation_ids": [], "undisposed_patch_run_ids": [],
                "terminal_runs": [{"run_id": "run-7c1", "state": "failed", "model": "leaf-m"}]}
 _FAILED_LINE = "Confirmed delegated terminal receipts: run-7c1: failed on leaf-m."
