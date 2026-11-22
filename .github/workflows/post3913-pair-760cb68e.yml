@@ -1,0 +1,105 @@
+# One-shot keyless comparison of already public trees. Not for merge.
+name: "#3913 focused parent / merge comparison"
+on:
+  push:
+    branches: [verify/post3913-pair-760cb68e]
+permissions:
+  contents: read
+jobs:
+  pair:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {"label":"browser-base","os":"ubuntu-latest","lane":"browser","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_account_resources_browser.py::test_last_more_closes_at_wheeled_position_until_reader_moves[webkit-fits-when-closed]","tests/test_dashboard_settings_browser.py::test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it[webkit-1087-740]","tests/test_project_child_hold_browser.py::test_nested_child_wait_and_same_id_recovery[chromium-cancel]","tests/test_project_work_card_browser.py::test_empty_output_recovery_preserves_failed_card_and_continue[webkit-light-mobile]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-dark-desktop-same-snapshot]","tests/test_project_work_card_browser.py::test_room_card_follows_a_continue_pressed_in_the_room[chromium-dark-mobile-room]","tests/test_settings_restart_browser.py::test_pending_survives_reconnect_draft_and_restart_request[chromium-1400]","tests/test_shell_interactions_browser.py::test_the_desktop_title_band_over_a_page_moves_the_window[webkit-skills]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[chromium-390-dark]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[webkit-390-light]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-dark-320-webkit]"]}
+          - {"label":"browser-merge","os":"ubuntu-latest","lane":"browser","sha":"b579ed44bb183c941daa0b3c96a19a745c20ebac","cases":["tests/test_account_resources_browser.py::test_last_more_closes_at_wheeled_position_until_reader_moves[webkit-fits-when-closed]","tests/test_dashboard_settings_browser.py::test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it[webkit-1087-740]","tests/test_project_child_hold_browser.py::test_nested_child_wait_and_same_id_recovery[chromium-cancel]","tests/test_project_work_card_browser.py::test_empty_output_recovery_preserves_failed_card_and_continue[webkit-light-mobile]","tests/test_project_work_card_browser.py::test_main_portal_follows_a_continue_made_in_the_project_room[webkit-dark-desktop-same-snapshot]","tests/test_project_work_card_browser.py::test_room_card_follows_a_continue_pressed_in_the_room[chromium-dark-mobile-room]","tests/test_settings_restart_browser.py::test_pending_survives_reconnect_draft_and_restart_request[chromium-1400]","tests/test_shell_interactions_browser.py::test_the_desktop_title_band_over_a_page_moves_the_window[webkit-skills]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[chromium-390-dark]","tests/test_skills_fix_r3_browser.py::test_publication_visibility_survives_saved_sources_confirmation_and_task[webkit-390-light]","tests/test_skills_host_modules_browser.py::test_skills_is_real_owner_surface_for_page_module_fault_and_hold[host_fail-dark-320-webkit]"]}
+          - {"label":"linux-base","os":"ubuntu-latest","lane":"linux","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_benchmark_provenance_v6810.py::test_every_runtime_reason_code_has_a_recorded_truncation_decision","tests/test_consciousness_client_fixture.py::test_browser_fixture_matches_the_producers","tests/test_continue_memory_drive.py::test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage","tests/test_continue_memory_drive.py::test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]","tests/test_contracts.py::test_chat_outbound_declares_progress_meta_keys_used_by_runtime","tests/test_history_physical_coverage.py::test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows","tests/test_inline_execution_status.py::test_canonical_new_attempt_stays_bound_beside_old_child[True]","tests/test_legacy_memory_notice.py::test_a_failed_chat_write_leaves_the_notice_owed","tests/test_legacy_memory_notice.py::test_a_pending_import_keeps_the_notice_owed","tests/test_legacy_memory_notice.py::test_a_written_row_without_its_marker_is_recovered_without_a_second_row","tests/test_legacy_memory_notice.py::test_an_install_with_old_memory_hears_once_how_much_and_how_to_fold_it","tests/test_legacy_memory_notice.py::test_an_unbound_owner_chat_sends_marks_and_imports_nothing","tests/test_main_project_consistency.py::test_external_owner_main_dialogue_survives_registry_fault[external_owner-missing]","tests/test_main_project_consistency.py::test_external_owner_main_dialogue_survives_registry_fault[external_owner-torn]","tests/test_nested_coordination_acceptance.py::test_depth3_control_plane_reaches_the_root_depth_summary","tests/test_quiz_display.py::test_send_quiz_broadcasts_publishes_and_persists_row[False]","tests/test_quiz_display.py::test_send_quiz_broadcasts_publishes_and_persists_row[True]","tests/test_review_session_scope_wiring.py::test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured","tests/test_subagent_reliability.py::test_replay_learns_subagent_lineage_before_merging_card_rows","tests/test_task_room_rule.py::test_a_fixed_row_type_keeps_its_producers_address_and_borrows_no_lineage","tests/test_task_room_rule.py::test_a_main_direct_task_with_a_project_id_stays_main","tests/test_task_room_rule.py::test_a_warm_frame_opens_no_store_and_a_cold_task_id_opens_at_most_once[event_queue_handler]","tests/test_task_room_rule.py::test_a_warm_frame_opens_no_store_and_a_cold_task_id_opens_at_most_once[send_with_budget]","tests/test_task_room_rule.py::test_converting_a_middle_task_moves_its_subtrees_earlier_rows_out_of_the_old_room","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[born-1-native]","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[grand-1-b]","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[kid-1-a]","tests/test_transport_b_stream_deadlines.py::test_later_free_recovery_cannot_replace_earlier_unknown_custody"]}
+          - {"label":"linux-merge","os":"ubuntu-latest","lane":"linux","sha":"b579ed44bb183c941daa0b3c96a19a745c20ebac","cases":["tests/test_benchmark_provenance_v6810.py::test_every_runtime_reason_code_has_a_recorded_truncation_decision","tests/test_consciousness_client_fixture.py::test_browser_fixture_matches_the_producers","tests/test_continue_memory_drive.py::test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage","tests/test_continue_memory_drive.py::test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]","tests/test_contracts.py::test_chat_outbound_declares_progress_meta_keys_used_by_runtime","tests/test_history_physical_coverage.py::test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows","tests/test_inline_execution_status.py::test_canonical_new_attempt_stays_bound_beside_old_child[True]","tests/test_legacy_memory_notice.py::test_a_failed_chat_write_leaves_the_notice_owed","tests/test_legacy_memory_notice.py::test_a_pending_import_keeps_the_notice_owed","tests/test_legacy_memory_notice.py::test_a_written_row_without_its_marker_is_recovered_without_a_second_row","tests/test_legacy_memory_notice.py::test_an_install_with_old_memory_hears_once_how_much_and_how_to_fold_it","tests/test_legacy_memory_notice.py::test_an_unbound_owner_chat_sends_marks_and_imports_nothing","tests/test_main_project_consistency.py::test_external_owner_main_dialogue_survives_registry_fault[external_owner-missing]","tests/test_main_project_consistency.py::test_external_owner_main_dialogue_survives_registry_fault[external_owner-torn]","tests/test_nested_coordination_acceptance.py::test_depth3_control_plane_reaches_the_root_depth_summary","tests/test_quiz_display.py::test_send_quiz_broadcasts_publishes_and_persists_row[False]","tests/test_quiz_display.py::test_send_quiz_broadcasts_publishes_and_persists_row[True]","tests/test_review_session_scope_wiring.py::test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured","tests/test_subagent_reliability.py::test_replay_learns_subagent_lineage_before_merging_card_rows","tests/test_task_room_rule.py::test_a_fixed_row_type_keeps_its_producers_address_and_borrows_no_lineage","tests/test_task_room_rule.py::test_a_main_direct_task_with_a_project_id_stays_main","tests/test_task_room_rule.py::test_a_warm_frame_opens_no_store_and_a_cold_task_id_opens_at_most_once[event_queue_handler]","tests/test_task_room_rule.py::test_a_warm_frame_opens_no_store_and_a_cold_task_id_opens_at_most_once[send_with_budget]","tests/test_task_room_rule.py::test_converting_a_middle_task_moves_its_subtrees_earlier_rows_out_of_the_old_room","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[born-1-native]","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[grand-1-b]","tests/test_task_room_rule.py::test_the_bus_and_replay_put_a_project_tasks_bare_row_in_its_room[kid-1-a]","tests/test_transport_b_stream_deadlines.py::test_later_free_recovery_cannot_replace_earlier_unknown_custody"]}
+          - {"label":"windows-base","os":"windows-latest","lane":"windows","sha":"ceb535489cdcecf3010310dbf2ab58fc59b4f611","cases":["tests/test_chat_history_lineage_anchor.py::test_receipt_lands_on_final_when_progress_rows_unread","tests/test_command_memory.py::test_every_process_of_the_largest_whole_command_outranks_any_other_and_scores_are_only_raised","tests/test_continue_memory_drive.py::test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage","tests/test_continue_memory_drive.py::test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]","tests/test_deepseek_pricing.py::test_raw_malformed_counts_do_not_discard_provider_cash[True-0.0]","tests/test_delivery_control_lineage.py::test_multi_improvement_explicit_selection_binds_exact_answer_before_single_delivery","tests/test_history_physical_coverage.py::test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows","tests/test_main_terminal_delivery.py::test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt[None-]","tests/test_main_terminal_delivery.py::test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt[receipt1-markdown]","tests/test_nested_coordination_acceptance.py::test_depth3_control_plane_reaches_the_root_depth_summary","tests/test_ws3_wedge_resilience.py::test_wall_clock_jump_neither_fabricates_nor_masks_a_chat_turn_wedge","tests/test_ws3_wedge_resilience.py::test_watchdog_alerts_on_chat_turn_wedge"]}
+          - {"label":"windows-merge","os":"windows-latest","lane":"windows","sha":"b579ed44bb183c941daa0b3c96a19a745c20ebac","cases":["tests/test_chat_history_lineage_anchor.py::test_receipt_lands_on_final_when_progress_rows_unread","tests/test_command_memory.py::test_every_process_of_the_largest_whole_command_outranks_any_other_and_scores_are_only_raised","tests/test_continue_memory_drive.py::test_a_continued_fork_reads_its_predecessors_memory_export_through_its_lineage","tests/test_continue_memory_drive.py::test_late_owner_inputs_ride_every_hop_in_each_successors_own_store[forked]","tests/test_deepseek_pricing.py::test_raw_malformed_counts_do_not_discard_provider_cash[True-0.0]","tests/test_delivery_control_lineage.py::test_multi_improvement_explicit_selection_binds_exact_answer_before_single_delivery","tests/test_history_physical_coverage.py::test_a_frozen_segment_that_changed_before_its_import_is_a_disclosed_gap_never_other_rows","tests/test_main_terminal_delivery.py::test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt[None-]","tests/test_main_terminal_delivery.py::test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt[receipt1-markdown]","tests/test_nested_coordination_acceptance.py::test_depth3_control_plane_reaches_the_root_depth_summary","tests/test_ws3_wedge_resilience.py::test_wall_clock_jump_neither_fabricates_nor_masks_a_chat_turn_wedge","tests/test_ws3_wedge_resilience.py::test_watchdog_alerts_on_chat_turn_wedge"]}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Match the Windows full-test temp volume
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Provision the same Windows POSIX utilities
+        if: runner.os == 'Windows'
+        id: posix
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"${{ steps.posix.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Install the pinned browser engines
+        if: matrix.lane == 'browser'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
+      - name: Run the identical focused selection, with subject proof
+        shell: bash
+        env:
+          SUBJECT: ${{ matrix.sha }}
+          CASES: ${{ toJSON(matrix.cases) }}
+          LANE: ${{ matrix.lane }}
+          OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+          OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+          OUROBOROS_PREFLIGHT_TEST_WORKERS: '4'
+          EVIDENCE: ${{ runner.temp }}/pair-evidence
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          env = os.environ.copy()
+          subject = env['SUBJECT']
+          observed = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+          if observed != subject:
+              raise SystemExit(f'wrong tested SHA {observed}; expected {subject}')
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          evidence = Path(env['EVIDENCE']); evidence.mkdir(exist_ok=True)
+          cases = json.loads(env['CASES']); lane = env['LANE']
+          controls = ['-n','4','--dist','loadgroup','--max-worker-restart=0']
+          if lane == 'browser':
+              env.update(OUROBOROS_RUN_UI_SMOKE='1',OUROBOROS_EXPECT_BROWSER_ENGINES='chromium,webkit',
+                         PLAYWRIGHT_BROWSERS_PATH=str(Path(env['RUNNER_TEMP'])/'ui-browsers'),
+                         PLAYWRIGHT_NODEJS_PATH=str(Path.cwd()/'node-standalone/bin/node'))
+              controls = ['-m','ui_browser']
+          (evidence/'subject.json').write_text(json.dumps({'controller':env['GITHUB_SHA'],'tested_sha':subject,
+              'runner':env.get('RUNNER_OS'),'lane':lane,'nodes':cases,'python':sys.version,'controls':controls}))
+          env['GITHUB_SHA'] = subject
+          argv=[sys.executable,'-I','-S','scripts/safe_test.py','--timeout','1400','--',sys.executable,'-m','pytest',
+                *controls,'--timeout=300','-q','--tb=short',f'--ci-evidence-dir={evidence}',*cases]
+          print('TESTED_SHA',subject,'CASE_COUNT',len(cases),flush=True)
+          done=subprocess.run(argv,env=env)
+          (evidence/'exit.json').write_text(json.dumps({'exit':done.returncode}))
+          sys.exit(done.returncode)
+          PY
+      - name: Retain only projected results and subject binding
+        if: '!cancelled()'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: post3913-pair-${{ matrix.label }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pair-evidence/
+          retention-days: 7
+          if-no-files-found: warn
