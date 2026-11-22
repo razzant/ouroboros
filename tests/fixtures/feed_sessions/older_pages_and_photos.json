@@ -1,5 +1,5 @@
 {
-  "about": "Reading back to the edge of what is loaded: an older page lands above the passage, photos above it finish loading later; the passage stays through both. ↓ then reaches the end at once and the next reply follows.",
+  "about": "Reading back to the edge of what is loaded: an older page lands above the passage, photos above it finish loading later and grow up out of view; the passage stays through both. ↓ then reaches the end at once and the next reply follows. A quote then lands on a photo still loading: the reader is on the picture, which grows down and stays where it is read.",
   "viewport": [1280, 860],
   "rooms": {
     "a": {"name": "Older pages", "rows": [
@@ -7,7 +7,10 @@
       {"photo": "p1", "height": 420},
       {"count": 4, "words": [20, 50]},
       {"photo": "p2", "height": 300},
-      {"count": 150, "words": [18, 60]}
+      {"count": 120, "words": [18, 60]},
+      {"photo": "p3", "height": 380},
+      {"count": 30, "words": [18, 60]},
+      {"reply": "on-photo", "to": 267, "words": [30, 30]}
     ]}
   },
   "events": [
@@ -18,6 +21,8 @@
     {"wheel": -600},
     {"arrive": "a", "words": 50},
     {"latest": true},
-    {"arrive": "a", "words": 30}
+    {"arrive": "a", "words": 30},
+    {"quote": "on-photo"},
+    {"image": "p3"}
   ]
 }

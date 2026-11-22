@@ -8,8 +8,9 @@ checked (``Reader``), and a session reports every rule it broke with the feed's 
 Three engines: Chromium, Playwright's WebKit, and that WebKit with ``overflow-anchor: none`` on the feeds, as the
 macOS window's WKWebView (macOS 26) has no scroll anchoring: the feed holds its place itself. Real input where the
 engine has it (wheel, keys, mouse, Chromium's touch); WebKit has no touch input to drive, so a swipe there is the
-touch events and the scroll a finger makes, written by the page. Uses the static server and the real history
-endpoint; never starts the runtime, never reads live data.
+touch events and the scroll a finger makes, written by the page only where the engine would scroll (a move nobody
+cancelled, on a feed that scrolls). Uses the static server and the real history endpoint; never starts the runtime,
+never reads live data.
 """
 from __future__ import annotations
 
@@ -26,17 +27,21 @@ from tests.ui_chat_viewport_smoke import wait_drawer_closed
 pytestmark = [pytest.mark.ui_browser]
 ENGINES = ['chromium', 'webkit', 'webkit-no-anchor']
 
-# Frames from ↓ until the feed stands at its retained end: one to handle the click, one to write the place.
-LATEST = """sel => new Promise(done => {
-    const feed = document.querySelector(sel), gaps = [];
+# Frames from ↓ until the feed stands at its retained end: one to handle the click, one to write the place. Sampled
+# from before the press (``pressed``: the samples taken before its click), so the frames right after it are seen.
+LATEST = """sel => {
+    const feed = document.querySelector(sel), run = window.__latest = {gaps: [], pressed: null};
+    feed.parentElement.addEventListener('click', () => { run.pressed = run.gaps.length; }, {capture: true, once: true});
     const tick = () => {
-        gaps.push(Math.round(feed.scrollHeight - feed.scrollTop - feed.clientHeight));
-        if (gaps.length >= 12) return done(gaps);
-        requestAnimationFrame(tick);
+        run.gaps.push(Math.round(feed.scrollHeight - feed.scrollTop - feed.clientHeight));
+        if (run.pressed === null ? run.gaps.length < 600 : run.gaps.length - run.pressed < 12) requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
-})"""
-# A finger on WebKit, which Playwright cannot drive: the touch events on the feed and the scroll the finger makes.
+}"""
+# A finger on WebKit, which Playwright cannot drive: the touch events on the feed and the scroll the finger makes, only
+# where the engine would make it: a move no listener cancelled, on a feed that scrolls. Each step lands between frames,
+# as an engine's touch scroll lands before a frame's callbacks; written inside a frame, a resize in the same frame (the
+# phone composer folding) put the place of the frame before back, and 11 of 18 steps were lost. Returns the moves held.
 TOUCH = """([sel, dy]) => new Promise(done => {
     const feed = document.querySelector(sel), rect = feed.getBoundingClientRect();
     const x = rect.left + rect.width * 0.6, y0 = rect.top + rect.height * (dy > 0 ? 0.7 : 0.3);
@@ -45,19 +50,22 @@ TOUCH = """([sel, dy]) => new Promise(done => {
         const event = new Event(type, {bubbles: true, cancelable: true});
         Object.defineProperty(event, 'touches', {value: touches});
         Object.defineProperty(event, 'changedTouches', {value: [{clientX: x, clientY: y, identifier: 1, target: feed}]});
-        feed.dispatchEvent(event);
+        return feed.dispatchEvent(event);
     };
-    const steps = 18;
+    const steps = 18, held = {cancelled: 0, unscrollable: 0};
     let step = 0;
     send('touchstart', y0);
     const move = () => {
         step += 1;
-        send('touchmove', y0 - dy * step / steps);
-        feed.scrollTop += dy / steps;
-        if (step < steps) requestAnimationFrame(move);
-        else { send('touchend', y0 - dy); done(); }
+        const go = send('touchmove', y0 - dy * step / steps);
+        const scrolls = /auto|scroll|overlay/.test(getComputedStyle(feed).overflowY);
+        if (!go) held.cancelled += 1;
+        else if (!scrolls) held.unscrollable += 1;
+        else feed.scrollTop += dy / steps;
+        if (step < steps) setTimeout(move, 16);
+        else { send('touchend', y0 - dy); done(held); }
     };
-    requestAnimationFrame(move);
+    setTimeout(move, 16);
 })"""
 
 
@@ -82,10 +90,20 @@ class Player:
             return '#chat-messages'
         return f'[id="panel-pchat-{self.stand.rooms[room]["project_id"]}"] .chat-messages'
 
-    def facts(self, room: str, named: str = ''):
+    def facts(self, room: str, named: str = '', photo: str = ''):
         place = (self.reader.place.get(room) or {}).get('id')
         reply = self.stand.newest_reply(room) if room else ''
-        return self.page.evaluate(FACTS, [self.feed(room), place, named, reply]) if room else None
+        return self.page.evaluate(FACTS, [self.feed(room), place, named, reply, photo]) if room else None
+
+    def marked(self, room: str, unread: bool) -> bool:
+        """Whether the room's row in the list comes to show (``unread``) or lose its unread mark, the row's own
+        attribute (tests/_room_browser_shared.py ``_unread``), within the state poll's reach."""
+        row = f'.nav-project-row[data-project-id="{self.stand.rooms[room]["project_id"]}"]'
+        try:
+            self.page.locator(f'{row}[data-unread]').wait_for(state='attached' if unread else 'detached', timeout=5000)
+            return True
+        except Exception:  # Playwright's TimeoutError: the mark did not come (or did not go)
+            return False
 
     def read(self, room: str, after: dict | None) -> bool:
         """Whether the room's read receipt reached its revision: waited for when its newest reply shows (the client
@@ -102,18 +120,27 @@ class Player:
 
     def play(self):
         for event in self.session['events']:
-            before = self.facts(self.reader.room)
+            photo = f'Photo {event["image"]}' if 'image' in event else ''
+            before = self.facts(self.reader.room, photo=photo)
             seen = dict(self.stand.seen)
             problems = len(self.reader.problems)
             kind = next(iter(event))
             extra = getattr(self, f'_{kind}')(event)
             room = self.reader.room
-            after = self.facts(room, (extra or {}).get('named', ''))
+            after = self.facts(room, (extra or {}).get('named', ''), photo)
             # A room with something unread is read once its reader is shown its newest reply, and not before: checked
-            # where that can change (an opening, a reply here, ↓, a held read let go). A read room stays read.
+            # where that can change (an opening, a reply here, ↓, a held read let go). A read room stays read, and
+            # its row in the list keeps the unread mark exactly while the room is not read.
             if (kind in ('open', 'latest', 'release') or event.get('arrive') == room) \
                     and seen.get(room, 0) < self.stand.revision(room):
                 extra = {**(extra or {}), 'read': self.read(room, after)}
+                if room != 'main':
+                    extra['marked'] = self.marked(room, not extra['read'])
+            # A reply in a Project room not shown leaves it unread (no receipt reaches it) and marks its row.
+            away = event.get('arrive')
+            if away and away not in (room, 'main') and event.get('role') != 'owner':
+                extra = {**(extra or {}), 'away': {'room': away, 'read': self.read(away, None),
+                                                   'marked': self.marked(away, True)}}
             self.reader.check(event, before, after, extra)
             self.trace.append({'event': event, 'extra': extra, 'before': _brief(before), 'after': _brief(after),
                                'problems': self.reader.problems[problems:]})
@@ -193,9 +220,9 @@ class Player:
             finally:
                 cdp.detach()
         else:
-            self.page.evaluate(TOUCH, [self.feed(self.reader.room), dy])
+            held = self.page.evaluate(TOUCH, [self.feed(self.reader.room), dy])
         self.rest(self.reader.room)
-        return {'touch': 'cdp' if self.engine == 'chromium' else 'page events'}
+        return {'touch': 'cdp'} if self.engine == 'chromium' else {'touch': 'page events', 'held back': held}
 
     def _key(self, event):
         # Keys scroll the room the reader last pressed in: a press on the text being read, as the owner does.
@@ -281,8 +308,12 @@ class Player:
         held = any(not h['caught'] or not h['event'].is_set() for h in self.stand.holds)
         button = self.page.locator(f'{self.feed(self.reader.room)} ~ .chat-input-area .chat-scroll-bottom-btn')
         box = button.bounding_box()
+        self.page.evaluate(LATEST, self.feed(self.reader.room))
         self.page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-        gaps = self.page.evaluate(LATEST, self.feed(self.reader.room))
+        self.page.wait_for_function('() => window.__latest.pressed !== null'
+                                    ' && window.__latest.gaps.length - window.__latest.pressed >= 12')
+        run = self.page.evaluate('() => window.__latest')
+        gaps = run['gaps'][run['pressed']:]
         frames = next((i for i, gap in enumerate(gaps) if gap <= 2), None)
         self.rest(self.reader.room, held=held)
         return {'gaps': gaps, 'frames': frames, 'held': held}
@@ -296,7 +327,7 @@ def _brief(facts):
     if not facts:
         return None
     return {key: facts.get(key) for key in ('scrollTop', 'scrollHeight', 'clientHeight', 'gap', 'band', 'first',
-                                            'place', 'named', 'newest', 'rows', 'latest', 'reads')}
+                                            'place', 'named', 'picture', 'newest', 'rows', 'latest', 'reads')}
 
 
 @pytest.mark.parametrize('engine', ENGINES)

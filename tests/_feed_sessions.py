@@ -16,9 +16,11 @@ photo's bytes wait for the session's ``image`` event. Time is real: no fake cloc
 
 After every event the player reads the feed (``FACTS``) and ``Reader`` checks the rules of docs/DESIGN.md the event
 touches: a room first opens at its newest message, an unread one on its newest arrival, and is read once its newest
-reply is shown, never before; a return finds it as left; a quote lands on its row; the live edge follows replies while
-a passage being read stays put through replies, older pages, photos, width, height and the keyboard; a gesture moves
-the text by its own way; ↓ reaches the retained end at once. The checks hold for every engine, the WebKit without
+reply is shown, never before (a reply in a room not shown leaves it unread and marked in the list, a read room loses
+the mark); a return finds it as left; a quote lands on its row; the live edge follows replies while a passage being
+read stays put through replies, older pages, photos, width, height and the keyboard; a late picture grows away from
+the place read (up out of view above it, down when read); a gesture moves the text by its own way, as far as it went;
+↓ reaches the retained end at once. The checks hold for every engine, the WebKit without
 scroll anchoring that the macOS window runs too (``overflow-anchor: none``).
 """
 from __future__ import annotations
@@ -182,7 +184,8 @@ class Stand:
         identity = {'client_message_id': f'feed-owner-{self.minute + 1}'} if owner else {}
         row = self.append(key, {'direction': 'in' if owner else 'out', 'text': words(10_000 + self.minute, count),
                                 **identity})
-        self.revise(key)
+        if not owner:  # the owner's own message is nothing unread (DESIGN "Unread")
+            self.revise(key)
         return {'type': 'chat', 'role': 'user' if owner else 'assistant', 'content': row['text'], 'markdown': False,
                 'is_progress': False, 'ts': row['ts'], 'task_id': '', 'chat_id': row['chat_id'], **identity,
                 **({'sender_session_id': 'another-tab'} if owner else {})}
@@ -373,9 +376,10 @@ NO_ANCHOR = """(() => {
 
 # The room's feed as the reader sees it, in the page's coordinates: the read band between the bar's reach and the
 # composer (project_read_state.js readBand), the row at its top, the row read before (``place``, by its identity), a
-# message named by its words (``named``: an unread room's newest arrival, a quote's target), whether the newest reply
-# starts in the band, the live edge, the newest row, ↓ and the rows shown twice (a defect).
-FACTS = """([sel, place, words, reply]) => {
+# message named by its words (``named``: an unread room's newest arrival, a quote's target), a photo's picture named
+# by its caption (``picture``), whether the newest reply starts in the band, the live edge, the newest row, ↓ and the
+# rows shown twice (a defect). A row is a keyed bubble, or the keyed item inside an unkeyed one (a photo's).
+FACTS = """([sel, place, words, reply, photo]) => {
     const feed = document.querySelector(sel);
     if (!feed || !feed.getClientRects().length) return null;
     const page = feed.parentElement, rect = feed.getBoundingClientRect();
@@ -388,19 +392,25 @@ FACTS = """([sel, place, words, reply]) => {
         top = Math.max(top, box.bottom + (parseFloat(getComputedStyle(header).getPropertyValue('--edge-reach')) || 0));
     }
     if (composer?.getClientRects().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);
-    const rows = [...feed.querySelectorAll('[data-history-id], [data-client-message-id]')]
-        .filter(node => node.closest('.chat-bubble') === node || !node.closest('.chat-bubble'))
+    const keyed = '[data-history-id], [data-client-message-id]';
+    const rows = [...feed.querySelectorAll(keyed)]
+        .filter(node => { const bubble = node.closest('.chat-bubble'); return !bubble || bubble === node || !bubble.matches(keyed); })
         .filter(node => node.getClientRects().length);
     const id = node => node.dataset.historyId || 'client:' + node.dataset.clientMessageId;
     const at = node => {
         const box = node.getBoundingClientRect();
-        return {id: id(node), y: box.top, top: box.top - top, bottom: box.bottom - top};
+        return {id: id(node), y: box.top, top: box.top - top, bottom: box.bottom - top, height: box.height};
     };
     const first = rows.find(node => node.getBoundingClientRect().bottom > top + 1);
     const held = place && rows.find(node => id(node) === place);
-    const bubble = text => text && [...feed.querySelectorAll('.chat-bubble')]
-        .find(node => node.querySelector('.message')?.textContent.includes(text));
+    // A message by its words: its keyed bubble, or the keyed item in an unkeyed one (a photo's), the row a landing aims at.
+    const bubble = text => {
+        const node = text && [...feed.querySelectorAll('.chat-bubble')].find(item => item.querySelector('.message')?.textContent.includes(text));
+        return node && !node.matches(keyed) ? [...node.querySelectorAll(keyed)].find(item => item.textContent.includes(text)) || node : node;
+    };
     const named = bubble(words), newestReply = bubble(reply);
+    const item = photo ? [...feed.querySelectorAll('.chat-gallery-item')].find(node => node.textContent.includes(photo)) : null;
+    const img = item?.querySelector('img')?.getBoundingClientRect();
     const shown = node => Boolean(node) && node.getBoundingClientRect().top >= top - 1
         && node.getBoundingClientRect().top < bottom;
     const newest = rows.at(-1), button = page.querySelector('.chat-scroll-bottom-btn');
@@ -412,6 +422,7 @@ FACTS = """([sel, place, words, reply]) => {
     return {scrollTop: feed.scrollTop, scrollHeight: feed.scrollHeight, clientHeight: feed.clientHeight,
         gap: feed.scrollHeight - feed.scrollTop - feed.clientHeight, band: {top, bottom, height: bottom - top},
         first: first ? at(first) : null, place: held ? at(held) : null, named: named ? at(named) : null,
+        picture: img ? {top: img.top - top, bottom: img.bottom - top, height: img.height} : null,
         replyShown: shown(newestReply),
         newest: newest ? {...at(newest), shown: newest.getBoundingClientRect().bottom <= bottom + 1} : null,
         rows: rows.length, resizing: feed.hasAttribute('data-resizing'), twice,
@@ -464,17 +475,29 @@ class Reader:
         """The row that was at the read band's top is where it was, by its identity, within subpixel rounding."""
         place, now = self.place.get(room), after.get('place')
         if not place:
-            return True, ''
+            return False, 'no row read was recorded before this event (a stand error)'
         if not now:
             return False, f'the row read ({place["id"]}) is gone from the feed'
         # On the screen: when the bar enters the flow under a phone keyboard the band's top moves, the text must not.
         moved = now['y'] - place['y']
         return abs(moved) <= TOLERANCE, f'the row read ({place["id"]}) moved {moved:+.1f}px on the screen'
 
+    def picture(self, before: dict, after: dict):
+        """A late picture grows away from the place read (DESIGN "History edges"): up out of view when it starts above
+        the band's top (its bottom stays), down when the reader is on it (its top stays)."""
+        was, now = before.get('picture'), after.get('picture')
+        if not (was and now):
+            self.note('image: the picture loading is in the feed', False, after, f'picture before {was}, after {now}')
+            return
+        above = was['top'] < 0
+        moved = now['bottom'] - was['bottom'] if above else now['top'] - was['top']
+        self.note('image: a picture above the passage grows up out of view' if above else 'image: a picture read grows down',
+                  abs(moved) <= TOLERANCE, after, f'its {"bottom" if above else "top"} moved {moved:+.1f}px')
+
     def landed(self, after: dict) -> bool:
         """The named message shows its start in the read band, clear of the bar and of the composer."""
         named = after.get('named')
-        return bool(named) and -TOLERANCE <= named['top'] < after['band']['height']
+        return bool(named) and -TOLERANCE <= named['top'] <= after['band']['height'] - min(24, named['height'])
 
     def settle(self, room: str, after: dict, edge: float = TOLERANCE):
         """What the reader is doing once an event has settled: following when the feed rests at its live edge (a
@@ -489,6 +512,14 @@ class Reader:
             self.problems.append(f'{kind}: the room {room!r} shows no feed')
             return
         self.note('a row shows once', not after['twice'], after, f'rows shown twice: {after["twice"]}')
+        away = (extra or {}).get('away')
+        if away:  # a reply in a Project room not shown
+            self.note('a reply in a room not shown leaves it unread', not away['read'], after,
+                      f'{away["room"]}: its read receipt reached the new revision')
+            self.note('a room not shown with a new reply is marked unread in the list', away['marked'], after, away['room'])
+        if 'marked' in (extra or {}):
+            self.note('a room read loses its unread mark in the list, one still unread keeps it', extra['marked'], after,
+                      f'read receipt {extra["read"]}')
         if 'read' in (extra or {}):
             # Read only once its newest reply shows in the band, clear of the bar and the composer; never before.
             self.note('the room is read once its newest reply is shown, and only then',
@@ -522,6 +553,8 @@ class Reader:
             else:
                 ok, detail = self.kept(room, after)
                 self.note(f'{kind}: the passage being read stays where it was', ok, after, detail)
+                if kind == 'image':
+                    self.picture(before, after)
                 if kind == 'arrive' and event['arrive'] == room:
                     self.note('arrive: a new reply stays below the passage', after['gap'] > TOLERANCE, after)
                     self.note('arrive: ↓ stays shown while reading', after['latest']['shown'], after)
@@ -537,12 +570,14 @@ class Reader:
             self.note(f'{kind}: the gesture scrolls the feed', at_edge or (moved < 0 if delta < 0 else moved > 0), after,
                       f'scrollTop {before["scrollTop"]} -> {after["scrollTop"]} for {delta}')
             # The text moves by the gesture's own way, never by a jump the page adds (a page landing above moves
-            # scrollTop, not the text): the row read before it travels about as far as the gesture went.
+            # scrollTop, not the text): the row read before it travels its way, at most as far as the wheel or the
+            # finger went (a swipe ends at rest, no fling) or a page key's screen, give or take a line.
             place, now = self.place.get(room), after.get('place')
             if place and now and event.get('key') not in ('End', 'Home'):
                 travelled = place['y'] - now['y']
-                reach = 1.5 * before['clientHeight'] if kind == 'key' else abs(delta) + before['clientHeight'] / 2
-                self.note(f'{kind}: the text travels by the gesture, never a jump', abs(travelled) <= reach, after,
+                reach = (before['clientHeight'] if kind == 'key' else abs(delta)) + 24
+                self.note(f'{kind}: the text travels by the gesture, never a jump',
+                          travelled * delta >= -TOLERANCE and abs(travelled) <= reach, after,
                           f'the row read travelled {travelled:+.0f}px for a gesture of {delta}')
         elif kind == 'quote':
             self.note('quote: a quote lands on the row it quotes', self.landed(after), after,
@@ -562,4 +597,4 @@ def _brief(facts: dict | None) -> dict:
     if not facts:
         return {}
     return {key: facts.get(key) for key in ('scrollTop', 'scrollHeight', 'clientHeight', 'gap', 'first', 'place', 'named',
-                                            'newest', 'rows', 'resizing', 'latest', 'reads', 'inflight')}
+                                            'picture', 'newest', 'rows', 'resizing', 'latest', 'reads', 'inflight')}
