@@ -300,23 +300,75 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
     assert not wc.checkpoint_path(tmp_path, "t-wait", 1).exists(), "the consumer retired the captured file"
 
 
-def test_an_unusable_frozen_source_starts_over_disclosed_never_silently(tmp_path, monkeypatch):
+@pytest.mark.parametrize("start", ["first", "restored", "unfrozen", "unusable"])
+def test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery(tmp_path, monkeypatch, start):
     from ouroboros import loop
+    from ouroboros.owner_mailbox import _ack_path, PROVENANCE_INDEPENDENT_TASK, write_task_message
     from tests.test_loop_transport_wait import _loop_kwargs
 
-    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
-    handoff = _saved_working_state(tmp_path, monkeypatch, "t-wait")
-    registry = _registry(tmp_path, monkeypatch, "t-wait", 2)
-    registry._ctx.working_recovery = {**handoff, "from_attempt": 9}  # identity mismatch
-    seen = []
+    task_id = "t-wait"  # the existing loop fixture supplies this same admitted id
+    write_task_result(tmp_path, task_id, "running")
+    assert write_task_message(tmp_path, "exact ordinary note", task_id,
+                              source_task_id="parent-task", msg_id="ordinary")
+    assert write_task_message(tmp_path, "exact relayed note", task_id, source_task_id="parent-task",
+                              provenance="peer_via_ancestor", relayed_from_task_id="peer-task", msg_id="relayed")
+    assert write_task_message(tmp_path, "exact independent note", task_id, source_task_id="other-root",
+                              provenance=PROVENANCE_INDEPENDENT_TASK, msg_id="independent")
+    task = {"id": task_id}
+    ack_path = _ack_path(tmp_path, task_id)
+    if start != "first":
+        dead = _registry(tmp_path, monkeypatch, task_id, 1)
+        messages, ids = _loop_kwargs(tmp_path, dead, [])["messages"], set()
+        loop._drain_incoming_messages(messages, queue.Queue(), tmp_path, task_id, None, ids,
+                                      owner_ctx=dead._ctx, defer_content_ack=True)
+        wc.save_ready(SimpleNamespace(tools=dead, messages=messages, llm_trace={"tool_calls": []},
+                                     accumulated_usage={}, round_idx=1, tool_schemas=[], owner_msg_seen=ids,
+                                     budget_tail="no_tool"))
+        assert {json.loads(line)["msg_id"] for line in ack_path.read_bytes().splitlines()} == {
+            "ordinary", "relayed", "independent"}
+        if start == "unfrozen":
+            wc.checkpoint_path(tmp_path, task_id, 1).unlink()
+        assert wc.attach_recovery(tmp_path, task, source_task_id=task_id, from_attempt=1,
+                                  cause="worker_crash") is (start != "unfrozen")
+        if start == "unusable":
+            task["_working_recovery"]["from_attempt"] = 9  # identity mismatch
+    before = ack_path.read_bytes() if ack_path.exists() else b""
+    registry = _registry(tmp_path, monkeypatch, task_id, 1 if start == "first" else 2)
+    registry._ctx.working_recovery = task.get("_working_recovery")
+    seen, events = [], queue.Queue()
 
     def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
-        seen.extend(call.messages)
-        return {"role": "assistant", "content": "fresh", "tool_calls": []}, 0.0
+        seen.append("\n".join(loop._extract_plain_text_from_content(row.get("content"))
+                              for row in call.messages if row.get("role") == "user"))
+        call.tools._ctx._round_response_facts = {
+            "finish_reason_present": True, "finish_reason": "commentary" if len(seen) == 1 else "stop",
+        }
+        return {"role": "assistant", "content": "working" if len(seen) == 1 else "done"}, 0.0
 
+    monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
-    assert any("could not be restored" in str(row.get("content")) for row in seen)
+    result, _usage, _trace = loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []), task_type="task", event_queue=events)
+    assert result == "done"
+    ordinary = "[Message from ancestor task parent-task]\nexact ordinary note"
+    relayed = "[Message from task peer-task, relayed by ancestor parent-task]\nexact relayed note"
+    history = "[Previous-attempt mailbox history; not a new delivery]\n"
+    assert len(seen) == 2
+    for text in seen:
+        assert text.count(ordinary) == text.count(relayed) == 1
+        assert text.index(ordinary) < text.index(relayed)
+        assert text.count(history) == 2 * int(start in {"unfrozen", "unusable"})
+        if start in {"unfrozen", "unusable"}:
+            assert history + ordinary in text and history + relayed in text
+    assert [text.count("[Message from independent task other-root]\nexact independent note") for text in seen] == [
+        int(start in {"first", "restored"})] * 2
+    assert ("could not be restored" in seen[0]) is (start == "unusable")
+    assert ("continued from its working checkpoint" in seen[0]) is (start == "restored")
+    injections = [row["source_task_id"] for row in events.queue if row.get("type") == "task_message_injected"]
+    if start == "first":
+        assert injections == ["parent-task", "parent-task", "other-root"]
+        assert len(ack_path.read_bytes().splitlines()) == 3
+    else:
+        assert injections == [] and ack_path.read_bytes() == before
 
 
 def test_representative_checkpoint_io_is_measured_not_promised(tmp_path):

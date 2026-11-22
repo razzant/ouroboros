@@ -457,7 +457,8 @@ def _reset_turn_state(ctx: Any) -> None:
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
-                         route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float]) -> tuple:
+                         route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float],
+                         *, retry_mail_root: Optional[pathlib.Path] = None) -> tuple:
     """Restore whichever saved continuation this start carries (at most one); then the start has entered.
 
     Returns ``(*route, round_idx, cost_ceiling, pending_tool_budget,
@@ -487,6 +488,9 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             apply_current(tools._ctx)
             from ouroboros.place_reply import seed_no_send
             seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
+            if carried is None and retry_mail_root is not None:
+                from ouroboros.loop_messages import restore_acknowledged_task_mail
+                restore_acknowledged_task_mail(tools._ctx, retry_mail_root, messages, seen)
         if carried is not None:
             carried.reentered(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt
@@ -578,6 +582,7 @@ def run_llm_loop(
     continuation = saved or saved_pause or saved_working
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode, gateway=True)
+    retry_mail_root = drive_root if task_type == "task" and task_id and task_id == getattr(ctx, "task_id", None) else None
     ctx.event_queue, ctx.task_id, ctx.messages = event_queue, task_id, messages
     stateful_executor = StatefulToolExecutor()
     exit_ctx = _LoopExitContext(
@@ -594,7 +599,7 @@ def run_llm_loop(
          pending_tool_budget, pending_no_tool_budget, free_redial) = _resume_continuation(
             tools, (saved, saved_pause, saved_working), messages, llm_trace, accumulated_usage, _owner_msg_seen,
             (active_model, active_effort, active_use_local, active_context_mode, round_idx, context_fit_plan),
-            cost_ceiling, budget_remaining_usd)
+            cost_ceiling, budget_remaining_usd, retry_mail_root=retry_mail_root)
         pending_candidate = resume_delivery_candidate(tools, saved_working or saved_pause, tool_schemas)
         candidate_tail = ((continuation.get("resume_point") or continuation.get("working") or {}).get("budget_tail")
                           if pending_candidate else None)
