@@ -502,6 +502,14 @@ def test_the_door_tells_an_import_still_running_from_an_observed_edit(tmp_path, 
     assert importing["snapshot"] is None and importing["notes"] == [recall.IMPORT_INCOMPLETE]
     assert _refused(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1")) == (409, {
         "code": "recall_snapshot_changed", "error": recall.IMPORT_INCOMPLETE})
+    assert recall.IMPORT_FAILED == ("A history segment could not be imported. Retry without snapshot or offset after "
+                                    "the import is repaired.")
+    monkeypatch.setattr(ds, "range_coverage",
+                        lambda *a, **kw: {**real(*a, **kw), "imported": False, "pending": 0, "mismatch": 1})
+    failed = _search(tmp_path, "archive", count=1)
+    assert failed["snapshot"] is None and failed["notes"] == [recall.IMPORT_FAILED]
+    assert _refused(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1")) == (409, {
+        "code": "recall_snapshot_changed", "error": recall.IMPORT_FAILED})
     monkeypatch.setattr(ds, "range_coverage", real)
     revisions = iter([1, 2])
     monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 2))

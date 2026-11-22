@@ -425,6 +425,8 @@ UNSTABLE_GAP = ("capture_unstable: the conversation changed during this read (an
 _REFUSALS = {
     "malformed": "CHAT_HISTORY_SNAPSHOT_INVALID: this snapshot was not issued by a words read; start again with "
                  "offset=0 and no snapshot.",
+    "import_failed": "CHAT_HISTORY_SNAPSHOT_CHANGED: a history segment could not be imported; no mixed page was "
+                     "returned; retry with offset=0 and no snapshot after the import is repaired.",
     "importing": "CHAT_HISTORY_SNAPSHOT_CHANGED: history import is incomplete; no mixed page was returned; "
                  "restart with offset=0 and no snapshot after it completes.",
     "unstable": "CHAT_HISTORY_SNAPSHOT_CHANGED: the conversation changed during this read; no mixed page was "
@@ -451,7 +453,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     ``text``, ``speaker`` (``author|asker|owner|closer|host``), ``label``), ``seals`` (``[(room, page)]``));
     ``total`` (exact, else ``None``) and ``observed``; ``offset``, ``more``; ``gaps``, ``notes``, ``seal_gap``;
     ``snapshot`` (this page's token, ``None`` when the capture did not stabilize) and ``unstable`` (why not:
-    ``edit`` or ``import``, else ``None``); ``path``.
+    ``edit``, ``import`` (still running) or ``import_failed``, else ``None``); ``path``.
     ``visible_only`` (the neighbour door) keeps only rows a visible room shows now (a positive room id: Main, a
     Project, a place), resolved by the room rule before counting and paging; the mind's reads keep every row."""
     from ouroboros.chat_chain import format_address, row_address, source_row_id
@@ -516,6 +518,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     if visible_only:  # the hidden partition (0) and synthetic traffic are no room a person reads
         hits_all = [(seq, row) for seq, row in hits_all if any(chat > 0 for chat in showing.rooms(row))]
     moved = _text_revision(root) != revision
+    failed = any(gap.get("kind") == "history_import_failed" for gap in coverage.get("gaps") or [])
     stable = bool(coverage.get("snapshot_stable")) and not moved
     normalized = {**normalized_chat_history_query(filters, ""), "words": list(query.items),
                   "room_id": "" if room is None else str(room), "voice": voice, "order": order or "newest",
@@ -523,9 +526,10 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
                   **({"visible_only": True} if visible_only else {})}
     current = _snapshot(coverage, normalized)
     if requested and (not stable or requested != current):
-        return _refusal("changed" if stable else "unstable" if moved else "importing")
+        return _refusal("changed" if stable else "unstable" if moved else "import_failed" if failed else "importing")
     result: Dict[str, Any] = {"refused": None, "refused_kind": None, "path": read["path"],
-                              "unstable": "edit" if moved else None if stable else "import"}
+                              "unstable": "edit" if moved else None if stable else "import_failed" if failed
+                              else "import"}
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + gaps_extra
     if showing.gap or scope_gap:
