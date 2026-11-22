@@ -166,8 +166,13 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
         Object.assign(viewport, {width:390,height:844,offsetLeft:0,offsetTop:0,scale:1});
         Object.defineProperty(window,'visualViewport',{value:viewport,configurable:true});
         window.testViewport = viewport;
+        const realMatchMedia = window.matchMedia.bind(window);
+        window.matchMedia = (q) => q === '(pointer: coarse)'
+            ? {matches: true, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}}
+            : realMatchMedia(q);
     })();""")
     page, field = select_model_field(role_ui, 'Models')
+    page.evaluate("document.documentElement.dataset.pointer = 'coarse'")
     field.click()
     field.fill('choice')
     popup = page.locator('[id="' + field.get_attribute('aria-controls') + '"]')

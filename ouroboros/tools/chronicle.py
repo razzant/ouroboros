@@ -201,7 +201,8 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
     ``source_ref`` and the latest promote annotation naming the task. Owner messages
     no fact binds are not here; a ``from``/``to`` range covers them.
     """
-    from ouroboros.project_dialogue import entry_matches_source_ref, latest_chat_annotations
+    from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_entries, owner_message_ref_is_valid
+    from ouroboros.chat_annotations import addressed_chat_annotations
     from ouroboros.projects_registry import project_task_bindings  # D15->D17 is lazy-only
 
     wanted = {str(task).strip() for task in task_ids if str(task or "").strip()}
@@ -209,8 +210,8 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
         raise ValueError("covers.task_ids names at least one task")
     refs = [row["source_ref"] for task, row in project_task_bindings(root).items()
             if task in wanted and isinstance(row.get("source_ref"), dict)]
-    messages = {message for message, row in latest_chat_annotations(root).items()
-                if str(row.get("target") or "") in wanted}
+    messages = {address for (_room, _message, address), row in addressed_chat_annotations(root).items()
+                if address and str(row.get("target") or "") in wanted}
     selected, owner = [], []
     for address, row, pos in chat_chain.iter_room_rows(root, room):
         if wanted & {str(row.get(field) or "") for field in _LINEAGE}:
@@ -219,8 +220,13 @@ def _task_rows(root: Path, room: str, task_ids: Iterable[Any]) -> List[Tuple[Dic
                 refs.append(row["origin_message_ref"])
         elif str(row.get("direction") or "") == "in":
             owner.append((address, row, pos))
-    selected += [entry for entry in owner if entry_matches_source_ref(entry[1], refs)
-                 or str(entry[1].get("client_message_id") or "") in messages]
+    exact = [ref for ref in refs if "row_sha256" in ref and owner_message_ref_is_valid(ref)]
+    partial = [ref for ref in refs if "row_sha256" not in ref]
+    found = owner_message_entries(root, partial) if partial else {}
+    legacy_rows = {chat_chain.source_row_id(hit.row) for hit in found.values() if hit is not None}
+    selected += [entry for entry in owner if entry[0].get("row_sha256") in legacy_rows
+                 or entry_matches_source_ref(entry[1], exact)
+                 or chat_chain.format_address(entry[0]) in messages]
     return sorted(selected, key=lambda entry: entry[2])
 
 

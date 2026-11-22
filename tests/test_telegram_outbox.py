@@ -98,6 +98,9 @@ class _Origin:
             body = {"ok": False, "error_code": 429, "description": f"Too Many Requests: retry after {wait}",
                     "parameters": {"retry_after": wait}}
             return 429, json.dumps(body).encode()
+        if action == "missing":  # Telegram refusing a strict native reply whose message is gone
+            return 400, json.dumps({"ok": False, "error_code": 400,
+                                    "description": "Bad Request: message to be replied not found"}).encode()
         if action != "ok":
             return int(action), json.dumps({"ok": False, "error_code": int(action), "description": "No"}).encode()
         if method == "editMessageText":
@@ -692,6 +695,98 @@ def test_what_no_bot_took_yet_goes_out_whole_through_the_token_in_force(tmp_path
             "bot654321:OTHER-BOT-TOKEN"}
         assert bridge.records() == []  # delivered whole: the old bot never took a part of it
         await bridge.stop()
+    _run(scenario)
+
+
+def _exact(card_message_id=0):
+    """An accepted exact Reply's own turn as the host addresses it (``chat_references.exact_reply_transport``)."""
+    return {"kind": "telegram", "conversation_id": "42", "bot_id": _BOT, "host_address": "reply", "exact_reply": {
+        "owner_message_id": 10, "child_task_id": "helper",
+        **({"card_message_id": card_message_id} if card_message_id else {})}}
+
+
+def test_an_exact_replys_parts_keep_their_first_anchor_and_a_delivered_part_is_never_resent(tmp_path):
+    async def scenario():
+        async with _Origin(close_after=1) as first, _Origin() as second:
+            bridge = _Bridge(tmp_path / "state", first.base)
+            state = bridge.module("telegram_state")
+            state._set_subagent_msg(bridge.api, _BOT, 42, "helper", 77)  # the helper's card as the answer leaves
+            await bridge.publish("chat.outbound", {"text": _LONG, "transport": _exact(), "row_address": "row:answer"})
+            [record] = bridge.records()
+            assert [part["state"] for part in record["parts"]] == ["confirmed", "retry_wait"]
+            assert (record["native_reply_id"], record["reply_fallback_id"]) == (77, 10)
+            state._set_subagent_msg(bridge.api, _BOT, 42, "helper", 99)  # the card moved while the rest waited
+            bridge.serve(second.base)
+            await bridge.drain()
+        sent = first.sent() + second.sent()
+        assert len(first.sent()) == 1 and len(sent) == 3, "the delivered part is never resent"
+        assert {(form["reply_to_message_id"], form["allow_sending_without_reply"]) for form in sent} == {("77", "false")}
+        await bridge.stop()
+    _run(scenario)
+
+
+@pytest.mark.parametrize("script, expected", [
+    (["missing"], [("77", "false"), ("10", "false")]),        # gone before anything arrived: his own message, once
+    (["ok", "missing"], [("77", "false"), ("77", "false")]),  # after a delivered part no other anchor: refused
+], ids=["before-any-part", "after-a-delivered-part"])
+def test_a_missing_helper_card_gives_way_to_the_owners_message_only_before_any_part(tmp_path, script, expected):
+    async def scenario():
+        async with _Origin(script) as origin:
+            bridge = _Bridge(tmp_path / "state", origin.base)
+            text = "Short answer." if len(script) == 1 else _LONG
+            await bridge.publish("chat.outbound", {"text": text, "transport": _exact(77), "row_address": "row:answer"})
+            await bridge.drain()
+        assert [(form["reply_to_message_id"], form["allow_sending_without_reply"]) for form in origin.sent()] == expected
+        if len(script) == 1:
+            assert bridge.records() == []  # confirmed through the one fallback
+            assert bridge.module("telegram_state")._message_ref(bridge.api, _BOT, 42, 501)["native_reply_id"] == 10
+        else:
+            [record] = bridge.records()
+            assert record["state"] == "refused" and [part["state"] for part in record["parts"]] == ["confirmed", "refused"]
+        await bridge.stop()
+    _run(scenario)
+
+
+def test_an_exact_replys_turn_never_leaves_through_another_bot_or_chat(tmp_path):
+    async def scenario():
+        async with _Origin() as origin:
+            bridge = _Bridge(tmp_path / "state", origin.base)
+            other_bot, other_chat = {**_exact(), "bot_id": "654321"}, {**_exact(), "conversation_id": "43"}
+            for transport in (other_bot, other_chat):
+                await bridge.publish("chat.outbound", {"text": "Not through this one.", "transport": transport})
+            await bridge.drain()
+        assert origin.sent() == [], "the client of the token in force refuses both where it is built"
+        assert [(record["state"], record["reason"], record["parts"]) for record in bridge.records()] == [
+            ("failed", "telegram_destination_unavailable", [])] * 2, "the journal says not delivered, never accepted"
+        assert sum("is not the current one" in message for _level, message in bridge.api.logs) == 2
+        await bridge.stop()
+    _run(scenario)
+
+
+def test_a_message_whose_handler_ends_before_its_next_part_is_never_confirmed_whole(tmp_path):
+    """A stop fell between the first part's answer and the next part's request; after it another bot is in force,
+    so the exact Reply's turn ends before asking for anything: its delivered part keeps its receipt and the rest
+    stays content, kept and shown, never counted delivered (only a handler that finished confirms the whole)."""
+    async def scenario():
+        async with _Origin(close_after=1) as origin:
+            bridge = _Bridge(tmp_path / "state", origin.base)
+            await bridge.publish("chat.outbound", {"text": _LONG, "transport": _exact(), "row_address": "row:answer"})
+            [record] = bridge.records()
+            await bridge.stop()
+        path = tmp_path / "state" / "outbox" / f"{record['id']}.json"
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["parts"][0]["state"] == "confirmed"
+        saved.update(state="sending", parts=saved["parts"][:1])  # as written just before the next part's request
+        path.write_text(json.dumps(saved), encoding="utf-8")
+        async with _Origin() as later:
+            again = _Bridge(tmp_path / "state", later.base, token="654321:OTHER-BOT-TOKEN")
+            await again.drain()
+        [ended] = again.records()
+        assert (ended["state"], ended["reason"]) == ("failed", "telegram_destination_unavailable")
+        assert [(part["state"], part["message_id"]) for part in ended["parts"]] == [("confirmed", 501)]
+        assert ended["held"] is True and f"{record['id']}.event.json" in again.files(), "the rest stays content"
+        assert later.sent() == [] and again.outbox.summary()["delivered"] == 0
+        await again.stop()
     _run(scenario)
 
 

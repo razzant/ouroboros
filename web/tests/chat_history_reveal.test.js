@@ -169,22 +169,25 @@ test('an exact reference cannot fall back to a task, portal, retained origin or 
         const retained = env.el('div', { dataset: { rowAddress: address, originProjected: '1' } });
         const portal = env.el('div', { dataset: { portal: '1' } }, env.el('div', { dataset: { historyId: 'chat:100' } }));
         feed.append(card, retained, portal);
-        const records = new Map([['t-card', { root: card, items: [{ historyId: 'chat:100' }] }]]);
+        const records = new Map([['t-card', { groupId: 't-card', root: card, items: [{ historyId: 'chat:100' }] }]]);
+        const hydrated = [];
         let mounted = false;
         const reveal = createHistoryReveal({ feed, records, present: () => true,
             reading: { claim: () => () => true },
             pager: { around: async () => ({ status: 'applied', anchor: { state: 'found', row_address: address, history_id: 'chat:100' } }) },
             expand(record) {
                 if (mounted && record) card.append(env.el('div', { dataset: { historyId: 'chat:100' }, text: 'Exact line' }));
-            } });
+            }, hydrate: (record, wasOpen) => hydrated.push([record.groupId, wasOpen]) });
         assert.equal(reveal.exact(address), null);
         assert.deepEqual(await reveal.reference(address, () => true), { state: 'unavailable', left: true },
             'its page was drawn: the reader is no longer where they were');
+        assert.deepEqual(hydrated, [], 'an unreachable source opens no detail read');
         mounted = true;
         const answer = await reveal.reference(address, () => true);
         assert.equal(answer.target.dataset.historyId, 'chat:100');
         assert.equal(answer.target.textContent, 'Exact line');
         assert.equal(await reveal.reference(address, () => false), null);
+        assert.deepEqual(hydrated, [['t-card', false]], 'only the shown card is passed to the detail owner');
     } finally { env.restore(); }
 });
 

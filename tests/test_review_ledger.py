@@ -257,6 +257,34 @@ def test_session_seat_observed_model_comes_from_its_execution_record():
     assert row["observed_model"] == "unknown" and row["effective"]["source"] == "requested"
 
 
+def test_a_send_never_left_records_absence_not_the_requested_route():
+    """A slot-execution row that witnessed no send carries ``effective={route:'', model:''}``
+    (reviewer_slot_config's released-reservation record): the ledger row keeps that absence —
+    never the requested route dressed up as the executed one — and the card's actor mints no
+    execution for it, while a projection row written before that fact (no route key) keeps the
+    legacy requested-route reading."""
+    from ouroboros.review_projection import ledger_record_panel
+
+    plans = [_plan("s1", "claude"), _plan("s2", "claude=opus", route="agent_session", session_target="claude=opus")]
+    released = {"s1": {"ts": "2026-10-07T00:00:01+00:00", "effective": {"route": "", "model": ""}}}
+    settled = {"s2": {"ts": "2026-10-07T00:00:01+00:00",
+                      "effective": {"route": "agent_session:claude", "model": "claude-opus-5", "verdict_method": "structured"}}}
+    record = rl.build_commit_gate_record(
+        _facts([_raw("s1", "claude", status="error"), _raw("s2", "claude=opus")],
+               rows=plans, slot_executions={**released, **settled}))
+    rows = {row["seat_id"]: row for row in record.to_dict()["rows"]}
+    assert rows["s1"]["effective"]["route"] == "" and rows["s1"]["effective"]["model"] == ""
+    assert rows["s1"]["effective"]["source"] == "reviewer_slot_last_execution"
+    assert rows["s1"]["requested"]["route"] == "api_chat" and rows["s1"]["requested"]["model"] == "claude"
+    actors = {actor["slot_id"]: actor for actor in ledger_record_panel(record.to_dict())["actors"]}
+    assert actors["s1"]["executions"] == [], "a send that never left ran nothing"
+    assert actors["s2"]["executions"] == [{"kind": "harness", "harness_id": "claude", "model": "claude-opus-5"}]
+    legacy = {"s1": {"ts": "2026-10-07T00:00:01+00:00", "effective": {"model": "gpt-5.6-sol"}}}
+    old = rl.build_commit_gate_record(
+        _facts([_raw("s1", "claude")], rows=plans[:1], slot_executions=legacy)).to_dict()["rows"][0]
+    assert old["effective"]["route"] == "api_chat" and old["effective"]["model"] == "gpt-5.6-sol"
+
+
 # --- verdict reduction -----------------------------------------------------
 
 
@@ -942,6 +970,33 @@ def test_slot_executions_carry_and_bind_the_record_id(tmp_path, monkeypatch):
     assert cfg.reviewer_slot_last_executions()["s1"]["review_record_id"] == "rl-4"
     cfg.bind_reviewer_slot_record_id(theirs, "")
     assert cfg.reviewer_slot_last_executions()["s1"]["review_record_id"] == "rl-4"
+
+
+def test_explicitly_unsent_api_seat_is_requested_only_in_dated_row_and_card(tmp_path, monkeypatch):
+    from ouroboros import reviewer_slot_config as cfg
+    from ouroboros.review_execution_projection import review_executions_from_actor_usage
+    from ouroboros.review_projection import ledger_record_panel
+    from ouroboros.review_substrate import ReviewActorRecord, ReviewSlot
+
+    monkeypatch.setattr(cfg, "_last_execution_path", lambda: tmp_path / "last.json")
+    model = "example/requested"
+    slot = ReviewSlot("seat", model, effort="high")
+    actor = ReviewActorRecord("seat", model, "not_dispatched", operation_state="not_dispatched")
+    own = cfg.record_reviewer_slot_executions("commit_gate", [actor], {"seat": slot}, record_id="rl-fixture")
+    entry = cfg.public_slot_executions(cfg.reviewer_slot_last_executions())["seat"]
+    assert entry["effective"] == {"route": "", "model": ""}
+    assert entry["requested"]["model"] == model and entry["review_record_id"] == "rl-fixture"
+    raw = _raw("seat", model, "not_dispatched", operation_state=actor.operation_state, cost_usd=None)
+    record = rl.build_commit_gate_record(_facts([raw], slot_executions=own)).to_dict()
+    [seat] = record["rows"]
+    assert seat["requested"]["route"] == "api_chat"
+    assert seat["requested"]["model"] == model
+    assert (seat["effective"]["route"], seat["effective"]["model"]) == ("", "")
+    [card] = ledger_record_panel(record)["actors"]
+    assert (card["requested_model"], card["observed_model"], card["executions"]) == (model, "", [])
+    legacy = {"usage": {"resolved_model": model}}
+    assert review_executions_from_actor_usage([legacy]) == [{"kind": "api", "model": model}]
+    assert review_executions_from_actor_usage([{**legacy, "operation_state": actor.operation_state}]) == []
 
 
 def test_a_passed_critical_item_is_a_clean_answer_and_only_a_failed_one_is_a_finding():

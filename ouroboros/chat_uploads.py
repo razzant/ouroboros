@@ -57,9 +57,9 @@ _PENDING_LOCK = threading.Lock()
 PLACEHOLDER_TEXTS = ("(image attached)", "(file attached)")
 
 
-def attachment_placeholder(image_base64: Any, metadata: dict | None) -> str:
+def attachment_placeholder(image_base64: Any, metadata: Any) -> str:
     """The same canonical empty-caption text at acceptance and batch dispatch."""
-    metadata = metadata or {}
+    metadata = metadata if isinstance(metadata, dict) else {}
     image_ref = any(isinstance(ref, dict) and ref.get("kind") == "image"
                     for ref in metadata.get("chat_attachments") or ())
     return ("(image attached)" if image_base64 or image_ref else
@@ -368,6 +368,20 @@ def attachment_view(ref: Any) -> Dict[str, Any]:
     return {"name": name, "kind": kind, "mime": str(ref.get("mime") or "application/octet-stream"),
             "size": size if type(size) is int else None, "available": True,
             "url": DOWNLOAD_ROUTE + quote(upload, safe="")}
+
+
+def web_attachment_caption(row: dict) -> str:
+    """Words before the exact web composer tail (``attachmentCaption``); no file access."""
+    text = str(row.get("text") or "")
+    refs = row.get("attachments")
+    if row.get("source") != "web" or not isinstance(refs, list) or not refs:
+        return text
+    lines = [f"[Attached file: {attachment_view(ref)['name']}]" for ref in refs[:25]]
+    if len(refs) > 25:
+        lines.append(f"[{len(refs) - 25} more attached files]")
+    tail = "\n".join(lines)
+    # An author who typed the same line still has the generated tail after it. Remove only one.
+    return "" if text == tail else text.removesuffix("\n\n" + tail)
 
 
 def _still_stored(ref: Dict[str, Any], data_dir: Any) -> bool:

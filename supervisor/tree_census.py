@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 # What a census reads from a member's document; a held row keeps these, never the body it was decoded from.
 MEMBER_FIELDS = ("launch_handoffs", "merge_receipts", "retired_model_consumers", "review_operations")
 # What a census reads from an observed run.
-RUN_FIELDS = ("run_id", "invocation_id", "review_owned", "state", "stop_outcome", "source", "independent_review")
+RUN_FIELDS = ("run_id", "invocation_id", "review_owned", "state", "stop_outcome", "source", "independent_review",
+              "ordinary_start", "resume_decisions")
 # A physical memory bound, never a judgment: an evicted tree is read again by whoever asks next.
 MEMO_TREES = 256
 
@@ -147,14 +148,14 @@ def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any,
         # A member whose result has been collected can still own a remote start.
         facts.tree_ids = list(tree_task_ids(root, tree))  # the store answers or raises
     except Exception as exc:
-        facts.tree_error = str(exc)[:200]
+        facts.tree_error = str(exc)[:200] or type(exc).__name__
     try:
         census = tree_member_results(root, tree, linked={*links, *facts.tree_ids}, known=known)
         facts.rows = {task_id: {name: row[name] for name in MEMBER_FIELDS if name in row}
                       for task_id, row in census.members.items()}
         facts.unresolved = dict(census.unresolved)
     except Exception as exc:
-        facts.census_error = str(exc)[:200]
+        facts.census_error = str(exc)[:200] or type(exc).__name__
     return facts
 
 
@@ -289,8 +290,9 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
     try:
         from ouroboros.owner_pause import tree_model_requests
         attempts = tree_model_requests(custody_root, predecessor)  # read once for both uses
-    except Exception:
-        attempts, links_known = None, False  # model_handoffs below reads again and names the unreadable custody
+    except Exception as exc:
+        attempts, links_known = [], False
+        blockers.append({"kind": "attempt_custody_unreadable", "detail": str(exc)[:200] or type(exc).__name__})
     # The tree's durable facts come from the one memo; what depends on the moment is derived below.
     facts = writer_facts(custody_root, predecessor, linked={
         *members, *(str(attempt.get("task_id") or "") for attempt in attempts or ())})
@@ -305,7 +307,10 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
         for task_id, row in facts.rows.items():
             members.add(task_id)
             # A blocker carries its claim outward: the held row stays this census's own.
-            blockers.extend(retained_tool_custody(custody_root, task_id, copy.deepcopy(row)))
+            try:
+                blockers.extend(retained_tool_custody(custody_root, task_id, copy.deepcopy(row)))
+            except Exception as exc:
+                blockers.append({"kind": "member_record_unreadable", "task_id": task_id, "detail": str(exc)[:200]})
         for task_id, fact in facts.unresolved.items():
             if fact["linked"] or not links_known:  # its runs and processes are still observed by id below
                 members.add(task_id)
@@ -315,7 +320,10 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
     except Exception as exc:
         blockers.append({"kind": "tree_census_unreadable", "detail": str(exc)[:200]})
     for member in sorted(members):
-        observed = facts.observed(member)
+        try:
+            observed = facts.observed(member)
+        except Exception:
+            observed = {}  # this member's custody read failed
         if observed.get("custody_read") != "ok":
             blockers.append({"kind": "custody_unreadable", "task_id": member})
         else:
@@ -324,6 +332,7 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
                              "invocation_id": str(run.get("invocation_id") or ""),
                              # The owner Pause's consumers read it; Continue's hold does not.
                              "review_owned": bool(run.get("review_owned")),
+                             **{k: run[k] for k in ("ordinary_start", "resume_decisions") if run.get(k)},
                              # The observer's own facts (#1721): running, or a start/stop outcome unknown.
                              **{key: str(run.get(key) or "") for key in ("state", "stop_outcome", "source")}}
                             for run in observed.get("runs") or [] if isinstance(run, dict)
@@ -332,16 +341,42 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
         from ouroboros.launch_custody import unsettled_rows
         from ouroboros.tool_custody import task_process_blockers
         blockers.extend(task_process_blockers(custody_root, members))
-        for row, state in unsettled_rows(custody_root, members):
+        process_gaps = []
+        for row, state in unsettled_rows(custody_root, members, gaps=process_gaps):
             pid = int(row.get("pid") or 0)
             blockers.append({"kind": "owned_process", "task_id": row.get("owner_task"), "pid": pid}
                             if state == "live" else
-                            {"kind": "process_custody_unreadable", "detail": f"launch of process {pid} unobserved"})
+                            {"kind": "process_custody_unreadable", "task_id": row.get("owner_task"),
+                             "detail": f"launch of process {pid} unobserved"})
+        blockers.extend({"kind": "process_custody_unreadable", "detail": gap} for gap in process_gaps)
     except Exception as exc:
         blockers.append({"kind": "process_custody_unreadable", "detail": str(exc)[:200]})
     blockers.extend(model_handoffs(custody_root, predecessor, member_results=facts.rows,
                                    for_continue=for_continue, attempts=attempts))
     return blockers
+
+
+def _model_handoff(attempt, member_results, for_continue):
+    from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason, retired_unbound_send
+
+    if attempt.get("state") not in {"dispatched", "unresolved"}:
+        return None
+    consumer = attempt.get("local_answer_consumer_id")
+    retirements = member_results.get(str(attempt.get("task_id") or ""), {}).get("retired_model_consumers") or {}
+    retired = retirements.get(consumer) if consumer else None
+    if (isinstance(retired, dict) and retired.get("retired_at")
+            and type(attempt.get("local_answer_task_attempt")) is int
+            and retired.get("task_attempt") == attempt["local_answer_task_attempt"]):
+        return None
+    if ended_unbound_model_request(attempt) or retired_unbound_send(attempt, retirements):
+        return None
+    # Only the review substrate's per-slot attribution proves a read-only send.
+    # The owner Pause shows it finishing; Continue does not wait for its reader.
+    review_owned = bool(attempt.get("review_slot_id") or attempt.get("review_skill"))
+    if for_continue and review_owned:
+        return None
+    return {"kind": "model_handoff", "attempt_id": attempt.get("attempt_id"), "task_id": attempt.get("task_id"),
+            "review_owned": review_owned, "reason": receiver_reason(attempt)}
 
 
 def model_handoffs(custody_root, predecessor, *, member_results=None, for_continue=False, attempts=None):
@@ -350,7 +385,6 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
     none reads no member; one with some reads them from the census's memo (``tree_census``)."""
     blockers = []
     try:
-        from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason, retired_unbound_send
         from ouroboros.owner_pause import tree_model_requests
         if attempts is None:  # the root's open attempts only (the store's open-set index)
             attempts = tree_model_requests(custody_root, predecessor)
@@ -360,29 +394,12 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
                 raise ValueError(facts.census_error)
             member_results = facts.rows
         for attempt in attempts:
-            if attempt.get("state") in {"dispatched", "unresolved"}:
-                consumer = attempt.get("local_answer_consumer_id")
-                retirements = (member_results.get(str(attempt.get("task_id") or ""), {})
-                               .get("retired_model_consumers") or {})
-                retired = retirements.get(consumer) if consumer else None
-                if (isinstance(retired, dict) and retired.get("retired_at")
-                        and type(attempt.get("local_answer_task_attempt")) is int
-                        and retired.get("task_attempt") == attempt["local_answer_task_attempt"]):
-                    continue
-                if ended_unbound_model_request(attempt) or retired_unbound_send(attempt, retirements):
-                    continue
-                # A reviewer's own send (its slot/skill attribution) is review
-                # custody: the owner Pause's readers list it as still finishing.
-                review_owned = bool(attempt.get("review_slot_id") or attempt.get("review_skill"))
-                # Only the review substrate's per-slot scope binds that attribution,
-                # and every send there reads the candidate without writing it, whatever
-                # ``source`` its route stamps (llm.anthropic, web_search.*, extraction).
-                # A review ``source`` without it has no current producer and holds.
-                if for_continue and review_owned:
-                    continue
-                blockers.append({"kind": "model_handoff", "attempt_id": attempt.get("attempt_id"),
-                                 "task_id": attempt.get("task_id"), "review_owned": review_owned,
-                                 "reason": receiver_reason(attempt)})
+            try:
+                if blocker := _model_handoff(attempt, member_results, for_continue):
+                    blockers.append(blocker)
+            except Exception as exc:
+                blockers.append({"kind": "attempt_custody_unreadable", "task_id": attempt.get("task_id"),
+                                 "detail": str(exc)[:200]})
     except Exception as exc:
         blockers.append({"kind": "attempt_custody_unreadable", "detail": str(exc)[:200]})
     return blockers

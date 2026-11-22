@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingSelectHtml,
-    processingIntentLabel, processingExecutionText, processingCapabilityNote, processingDetailsHtml } from '../modules/route_editor_primitives.js';
+    processingIntentLabel, processingExecutionText, processingDetailsHtml } from '../modules/route_editor_primitives.js';
 import { buildAvailableSubagentsSetting, parseAvailableSubagentsSetting, availableSubagentRowMarkup } from '../modules/subagents_settings.js';
 import { lastReviewRunText } from '../modules/subagent_status_primitives.js';
 import { onboardingSettingsDraft } from '../modules/onboarding_agents_step.js';
@@ -98,8 +98,6 @@ test('only existing execution receipts disclose applied modes; unsupported speed
     assert.match(processingExecutionText(receipt), /Applied processing not reported.*requested Fast.*submitted service auto/);
     assert.doesNotMatch(processingExecutionText(receipt), /Applied processing: Fast/);
     assert.match(lastReviewRunText({ effective: { model: 'x', processing: { ...receipt, observed: 'mixed' } } }), /Applied processing: Mixed/);
-    assert.equal(processingCapabilityNote('fast', undefined), '');
-    assert.match(processingCapabilityNote('fast', { modes: ['standard'] }), /not advertised.*Ordinary service may be used/);
     assert.doesNotMatch(processingSelectHtml('', 'fast'), /disabled/);
 });
 

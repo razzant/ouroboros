@@ -10,9 +10,12 @@ that resolve the root from the tool context.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict
+
+log = logging.getLogger(__name__)
 
 PROMOTE_CONFIRM_POLL_SEC = 0.05
 
@@ -57,6 +60,43 @@ def is_emitted_admission_stub(result: Any, routing_token: str = "") -> bool:
     )
 
 
+_FILE_ROW_FIELDS = ("ordinal", "status", "reason", "label")
+
+
+def admitted_files(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The files an admitted start recorded, from the task result already read: the inline rows its admission wrote
+    (a long list is cut to a preview), how many files it declared, and the descriptor of the complete list when it
+    saved one. Only each row's outcome (ordinal, status, reason, label) is kept, never a path."""
+    contract = result.get("task_contract") if isinstance(result.get("task_contract"), dict) else {}
+    listed = result.get("attachment_manifest") or contract.get("attachment_manifest")
+    rows = [{key: row[key] for key in _FILE_ROW_FIELDS if key in row}
+            for row in (listed if isinstance(listed, list) else []) if isinstance(row, dict)]
+    ref = contract.get("attachment_manifest_ref")
+    ref = ref if isinstance(ref, dict) else {}
+    count = ref.get("count")
+    return {"attachment_manifest": rows, "attachment_declared": max(len(rows), count if type(count) is int else 0),
+            **({"attachment_manifest_ref": ref} if ref else {})}
+
+
+def complete_admitted_files(root: Path, task_id: str, receipt: Dict[str, Any]) -> list:
+    """The rows of an admitted start that declared more files than its inline view holds, read once from the
+    descriptor its admission saved (verified by size and digest; ``resolve_attachment_manifest`` reaches a forked
+    drive's retained source from the canonical root); the inline rows when it cannot be read. Nothing is read for a
+    start whose inline rows are all it declared."""
+    inline = list(receipt.get("attachment_manifest") or [])
+    ref, declared = receipt.get("attachment_manifest_ref"), receipt.get("attachment_declared")
+    if not isinstance(ref, dict) or type(declared) is not int or declared <= len(inline):
+        return inline
+    from ouroboros.artifacts import resolve_attachment_manifest
+
+    try:
+        return [{key: row[key] for key in _FILE_ROW_FIELDS if key in row}
+                for row in resolve_attachment_manifest(root, task_id, {"attachment_manifest_ref": ref})]
+    except Exception:
+        log.debug("complete attachment manifest of %s not readable", task_id, exc_info=True)
+        return inline
+
+
 def wait_for_promotion_admission(
     root: Path,
     task_id: str,
@@ -67,7 +107,8 @@ def wait_for_promotion_admission(
     poll_sec: float = PROMOTE_CONFIRM_POLL_SEC,
 ) -> Dict[str, Any]:
     """Wait for matching-token admission in the canonical task-result SSOT. A timeout carries
-    the wait it measured (``waited_sec``, monotonic): reads can overrun the configured bound."""
+    the wait it measured (``waited_sec``, monotonic): reads can overrun the configured bound.
+    A ``scheduled`` outcome also carries the files that admission recorded (``admitted_files``)."""
     from ouroboros.task_results import load_task_result
 
     started = time.monotonic()
@@ -90,6 +131,7 @@ def wait_for_promotion_admission(
                     **admission,
                     "task_status": str(result.get("status") or ""),
                     "effective_project_id": str(result.get("project_id") or ""),
+                    **(admitted_files(result) if status == "scheduled" else {}),
                 }
         # A duplicate id must never overwrite the existing task_result merely
         # to report the loser.  The exact-token chat annotation is therefore a
@@ -113,6 +155,37 @@ def wait_for_promotion_admission(
         time.sleep(poll_sec)
 
 
+def relay_receipt_scope(event: Dict[str, Any]) -> dict:
+    """The primary quote's own room and physical address, to read the same act after a timeout or restart."""
+    if (str(event.get("type") or "") != "steer_task" or not event.get("relay_id") or event.get("owner_source")
+            or event.get("chat_id") is None):
+        return {}
+    room = int(event["chat_id"])
+    scope = {"source_chat_id": room}
+    from ouroboros.owner_relay import quote_receipt_address
+    for quote in event.get("quotes") or []:
+        source = quote.get("source") or {}
+        if str(source.get("chat_id")) == str(room) and source.get("client_message_id") == event.get("client_message_id"):
+            if address := quote_receipt_address(source, quote.get("owner_row") or {}):
+                scope["source_row_address"] = address
+            break
+    return scope
+
+
+def recorded_act_receipt(root: Path, act: Dict[str, Any]) -> Dict[str, Any]:
+    """One recorded act's latest receipt row, read by its exact token: in the room its record names
+    (``source_chat_id``: a note's relay, ``relay_receipt_scope``), else by its id alone, as a record made before
+    records named a room reads it; between two rooms that read names neither."""
+    from ouroboros.project_dialogue import chat_annotation_receipt
+
+    room = act.get("source_chat_id")
+    scope = {"source_chat_id": room} if type(room) is int else {}
+    if scope and act.get("source_row_address"):
+        scope["source_row_address"] = act["source_row_address"]
+    return chat_annotation_receipt(root, str(act.get("client_message_id") or ""), str(act.get("routing_token") or ""),
+                                   **scope)
+
+
 def wait_for_routing_annotation(
     root: Path,
     client_message_id: str,
@@ -120,8 +193,11 @@ def wait_for_routing_annotation(
     *,
     timeout_sec: float | None = None,
     poll_sec: float = PROMOTE_CONFIRM_POLL_SEC,
+    source_chat_id: int | None = None,
+    source_row_address: str = "",
 ) -> Dict[str, Any]:
-    """Wait for an exact existing chat-annotation receipt (manual/steer).
+    """Wait for an exact existing chat-annotation receipt (manual/steer). ``source_chat_id``: the room of the
+    message the act keys its receipt on, when the waiter knows it (an act quoting two rooms' same-id messages).
 
     ``rejected`` is a SETTLED outcome exactly like ``needs_manual_target``, and is
     accepted as one — the cancel-pending refusal (``supervisor/steering.py``) is
@@ -132,13 +208,13 @@ def wait_for_routing_annotation(
     to retry a steer the host will refuse again. The timeout keeps its one
     meaning: no matching receipt exists yet.
     """
-    from ouroboros.project_dialogue import chat_annotation_receipt
-
     if not str(client_message_id or "").strip():
         return {"status": "unconfirmed", "reason": "client_message_id_missing"}
+    act = {"client_message_id": client_message_id, "routing_token": routing_token,
+           "source_chat_id": source_chat_id, "source_row_address": source_row_address}
     deadline = time.monotonic() + _confirm_wait_sec(timeout_sec)
     while True:
-        receipt = chat_annotation_receipt(root, client_message_id, routing_token)
+        receipt = recorded_act_receipt(root, act)
         status = str(receipt.get("status") or "")
         if status in {"delivered", "read", "needs_manual_target", "rejected", "unconfirmed"}:
             return receipt
@@ -177,6 +253,14 @@ def routing_act_fields(root: Path, client_message_id: str, row: Dict[str, Any]) 
         **({"reason": reason} if reason and status in {"rejected", "needs_manual_target"} else {}),
         **({"files_not_attached": rejected} if rejected else {}),
     }
+
+
+def message_routing_acts(root: Path, sources: list) -> list:
+    """Confirmed message identities -> their latest receipt per act, in journal order.
+    A legacy delivery with no room can name a row only when the chat history identifies it uniquely.
+    """
+    from ouroboros.chat_annotations import message_receipts
+    return [routing_act_fields(root, message, row) for message, row in message_receipts(root, sources)]
 
 
 def routing_act_lines(acts: Any) -> list:

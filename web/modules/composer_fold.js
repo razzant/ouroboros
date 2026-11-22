@@ -7,10 +7,10 @@
  * brings the row back, and so does any other layout. Like Safari's bars, a direction decides: FOLD.run px one way.
  * A press on ☰, ↓, 📎 or Send is that control's own: the row stays as it is, so nothing slides under the finger
  * before the tap lands. While the owner writes, or the field holds the focus, the row never folds, but in a short
- * keyboard room (style.css --keyboard-short: Telegram fullscreen's band over a tall keyboard) the row would leave the
- * feed no line of a message: there it folds while the keyboard is up, the field keeping its focus, until the keyboard
- * goes down or the room grows. The room says so by resizing the feed, and the capsules' owner once a capsule has
- * settled closed; a capsule being worked keeps the row.
+ * keyboard room (measured room height below the bar under 164px, such as Telegram fullscreen's band over a tall keyboard)
+ * the row would leave the feed no line of a message: there it folds while the keyboard is up, the field keeping its
+ * focus, until the keyboard goes down or the room grows. The room says so by resizing the feed, and the capsules' owner
+ * once a capsule has settled closed; a capsule being worked keeps the row.
  *
  * Only the owner's own scroll is a step. It is read from where the newest row stands below the feed's visible
  * bottom, and only between two reads of the same content: older history paged in or let go, a message or a newer
@@ -35,12 +35,41 @@ export const FOLD = Object.freeze({
     settle: 340,  // ms of the fold's own motion (style.css), after which an unfolded row lets go of its height
 });
 
-// The short keyboard room's step as the composer inherits it (style.css registers it as a length: 0px or 1px).
-const shortRoom = (win, el) => parseFloat(win?.getComputedStyle?.(el)?.getPropertyValue?.('--keyboard-short')) > 0;
+// A keyboard room whose measured height below its bar cannot hold the unfolded composer (104px) and 60px of feed.
+export const shortRoom = (el) => {
+    const room = el?.closest?.('#page-chat, .project-panel') || el;
+    const height = room?.getBoundingClientRect?.().height || 0;
+    if (!height) return false;
+    const bar = room?.querySelector?.('.chat-page-header, .project-panel-bar')?.getBoundingClientRect?.().height;
+    return height - (bar > 0 ? bar : 56) < 164;
+};
+
+export const syncShortRoom = (room) => {
+    if (!room?.toggleAttribute) return false;
+    const next = Boolean(isStackLayout() && room.ownerDocument?.body?.classList?.contains?.('keyboard-open') && shortRoom(room));
+    if (room.hasAttribute('data-short-room') === next) return false;
+    room.toggleAttribute('data-short-room', next);
+    return true;
+};
+
+// The composer's rounded rest height across a reply strip's open/close motion (chat_reply.js `data-motion`), so the
+// room's reserve moves once at the start of the motion and matches `offsetHeight` when the motion ends.
+export function composerHeightAtRest(inputArea) {
+    const strips = inputArea?.querySelectorAll?.('.chat-quote--composer[data-motion]');
+    if (!strips?.length) return inputArea?.offsetHeight || 0;
+    let height = inputArea.getBoundingClientRect().height;
+    for (const strip of strips) {
+        const { marginTop, marginBottom } = getComputedStyle(strip);
+        const now = strip.getBoundingClientRect().height + (parseFloat(marginTop) || 0) + (parseFloat(marginBottom) || 0);
+        const end = strip.dataset.motion === 'open' ? (parseFloat(strip.style.getPropertyValue('--reply-room')) || 0) : 0;
+        height += end - now;
+    }
+    return Math.round(height);
+}
 
 export function createComposerFold({ feed, wrap, row, win = globalThis.window, doc = globalThis.document,
     isStack = () => isStackLayout(), onLayout = (sync) => onLayoutChange(() => sync(), { w: win }),
-    readingBack = () => true, short = () => shortRoom(win, wrap) } = {}) {
+    readingBack = () => true, short = () => shortRoom(wrap) } = {}) {
     if (!feed || !wrap || !row) return { destroy() {}, sync() {}, folded: () => false };
     let destroyed = false;
     let folded = false;
@@ -79,7 +108,7 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
         return Boolean(focused && row.contains?.(focused) && !menu?.contains?.(focused))
             || Boolean(row.dataset?.ownerSolo) || Boolean(row.dataset?.ownerSheet) || Boolean(row.querySelector?.('[data-open="true"]'));
     };
-    // While the owner writes or works a capsule the row stays: the keyboard is up (app.js's keyboard-open), the field
+    // While the owner writes or works a capsule the row stays: the keyboard still occupies the viewport, the field
     // holds the focus (with or without a keyboard), or a capsule is worked.
     const busy = () => keyboard() || Boolean(field && doc?.activeElement === field) || working();
     // But a short room with the keyboard up has no line of a message to spare for the row (owner 9.11).

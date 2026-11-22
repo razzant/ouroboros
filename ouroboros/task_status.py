@@ -54,7 +54,7 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
-from ouroboros.utils import iter_jsonl_objects
+from ouroboros.utils import iter_jsonl_objects, path_for_prose
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +303,7 @@ def _resolved_root(root: str) -> pathlib.Path:
 
 def task_execution_observation(
     drive_root: Any, result: Dict[str, Any], *, queue_snapshot: Optional[Dict[str, Any]] = None,
+    reads: Any = None,
 ) -> Dict[str, Any]:
     """Recorded ownership and a separately dated positive live observation.
 
@@ -340,9 +341,11 @@ def task_execution_observation(
         return {**observation, "state": "terminal", "reason": "recorded_terminal"}
     if kind == "unknown":
         return observation
-    snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
+    snapshot = queue_snapshot if queue_snapshot is not None else (
+        reads.queue_snapshot(drive_root) if reads is not None else _load_queue_snapshot(root))
     queue_seen = queue_snapshot_observation(snapshot)
-    queued, _task = _queue_task_status(snapshot, tid)
+    queued, _task = (reads.queue_task_status(drive_root, tid) if reads is not None and queue_snapshot is None
+                     else _queue_task_status(snapshot, tid))
     # The queue never owns a Presence turn's carried body: it runs in a conversation-lane carrier (or the
     # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
     # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
@@ -423,19 +426,9 @@ def task_subtree_has_live_queue_rows(drive_root: pathlib.Path, task_id: str) -> 
 def _queue_task_status(snapshot: Dict[str, Any], task_id: str) -> tuple[str, Dict[str, Any]]:
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return "unknown", {}
-    for row in snapshot.get("running") or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("id") or row.get("task_id") or "") == task_id:
-            task = row.get("task") if isinstance(row.get("task"), dict) else {}
-            return STATUS_RUNNING, task
-    for row in snapshot.get("pending") or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("id") or row.get("task_id") or "") == task_id:
-            task = row.get("task") if isinstance(row.get("task"), dict) else {}
-            return STATUS_SCHEDULED, task
-    return "", {}
+    from ouroboros.task_reads import queue_task_rows
+
+    return next((fact for name, fact in queue_task_rows(snapshot) if name == task_id), ("", {}))
 
 
 def observe_cancellation_target(
@@ -1068,8 +1061,10 @@ def effective_task_result(
             and parent_status not in {STATUS_REQUESTED, STATUS_SCHEDULED, STATUS_RUNNING}
         )
         parent_authoritative_fields = set()
+        # The shared replica overlay already selects a settled ending. Capture has a separate owner.
+        if stale_replica:
+            parent_authoritative_fields.update(("status", "result", "_result_text_present", "error", "ts"))
         if parent_owns_terminal or stale_replica:
-            parent_authoritative_fields.update(("status", "result", "error", "ts"))
             producer_drive = None
         if producer_drive is None:
             parent_authoritative_fields |= _parent_workspace_artifact_lifecycle_fields(result)
@@ -1086,7 +1081,10 @@ def effective_task_result(
         # by a canonical pause the copyback has not yet cleared.
         if str(canonical_pause.get("state") or "") in LIVE_PAUSE_STATES and child_status not in FINAL_STATUSES:
             parent_authoritative_fields = parent_authoritative_fields | _LIVE_PAUSE_CANONICAL_FIELDS
-        child_overlay = project_replica_task_result_fields(result, child_result)
+        # A display view drops the answer's words, which the shared selector settles a contrary ending on:
+        # let the reader supply just that field, so a reloaded card decides an ending as the body does.
+        child_overlay = (reads.replica_overlay(result, child_result, drive_root, child_text)
+                         if reads is not None else project_replica_task_result_fields(result, child_result))
         for key, value in child_overlay.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
                 continue  # never from a replica: ``task_store.stated_roots`` relies on the stated root
@@ -1106,7 +1104,8 @@ def effective_task_result(
     if parent_status not in FINAL_STATUSES:
         queue_snapshot = (reads.queue_snapshot(drive_root) if reads is not None
                           else _load_queue_snapshot(pathlib.Path(drive_root)))
-        queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
+        queue_status, queue_task = (reads.queue_task_status(drive_root, task_id) if reads is not None
+                                   else _queue_task_status(queue_snapshot, task_id))
         # The queue never owns a Presence turn (its body runs in a conversation-lane carrier or the
         # disclosed degraded executor, admitted to a RUNNING snapshot row): a stale lane row a dead
         # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
@@ -1175,7 +1174,8 @@ def effective_task_result(
     # A legacy ``cancel_requested`` status (old files awaiting boot migration)
     # projects the same pending state.
     _apply_cancel_state_projection(pathlib.Path(drive_root), task_id, merged, reads)
-    merged["execution_observation"] = task_execution_observation(drive_root, merged, queue_snapshot=queue_snapshot)
+    merged["execution_observation"] = task_execution_observation(
+        drive_root, merged, queue_snapshot=None if reads is not None else queue_snapshot, reads=reads)
     observed = merged["execution_observation"]
     if observed.get("reason") == "queue_ownership" and observed.get("status") == STATUS_SCHEDULED:
         held = (merged.get("current_stop") or {}).get("state")
@@ -1204,19 +1204,17 @@ def effective_task_result(
         merged["workspace_capture"] = publication
     try:
         from ouroboros.outcomes import artifact_bundle_from_result
+        from ouroboros.payload_release_state import overlay
         from ouroboros.task_custody import own_child_drives, store_artifact_view
 
-        # In this artifact view, canonical admission/copy-back facts authorize child store
-        # reads, never scratch existence. Keep child claims even after cancellation; the
-        # view copies, hashes and registers nothing.
+        # Canonical admission/copy-back facts authorize child store reads, never scratch existence. Keep child
+        # claims even after cancellation; the view copies, hashes and registers nothing; released files are said.
         child_rows = {}
         for drive in own_child_drives(drive_root, task_id, store_row=result):
             rows = (child_result if drive == producer_drive else (load_task_result(drive, task_id) or {})).get("artifacts")
             child_rows[drive / "task_results" / "artifacts" / task_id] = rows if isinstance(rows, list) else []
         recorded = [item for item in (merged.get("artifacts") or []) if isinstance(item, dict)]
-        listed = store_artifact_view(drive_root, task_id, recorded, child_rows)
-        if publication and not listed:
-            publication["read_error"] = "current capture has no artifact records"
+        listed = overlay(drive_root, merged, store_artifact_view(drive_root, task_id, recorded, child_rows), task_id)
         if listed:
             merged["artifacts"] = listed
             merged["artifact_bundle"] = artifact_bundle_from_result(merged)
@@ -1450,8 +1448,8 @@ def _artifact_stat_marker(path: str) -> str:
 def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps), each STAT'd
     as a GROUND-TRUTH fact (✓ present / ⚠ MISSING) so the parent absorbs whether a claimed
-    deliverable actually exists. LLM-first: this is a structural fact for the agent to react
-    to — it does NOT change the child's status or force a review (I, v6.39)."""
+    deliverable actually exists: a structural fact for the agent to react to, never a status change
+    or review (I, v6.39). The stat reads the registered path exactly; ``path_for_prose`` only spells it for UTF-8 text."""
     out: List[str] = []
     bundle = child.get("artifact_bundle") if isinstance(child.get("artifact_bundle"), dict) else {}
     arts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else (
@@ -1459,13 +1457,13 @@ def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     )
     for art in arts or []:
         if isinstance(art, dict):
-            name = str(art.get("name") or "").strip()
-            path = str(art.get("abs_path") or art.get("path") or "").strip()
+            name = str(art.get("name") or "")
+            path = str(art.get("abs_path") or art.get("path") or "")
             if path:
-                label = f"{name} -> {path}" if name else path
-                out.append(f"{label} {_artifact_stat_marker(path)}".strip())
+                label = f"{path_for_prose(name)} -> {path_for_prose(path)}" if name else path_for_prose(path)
+                out.append(f"{label} {marker}" if (marker := _artifact_stat_marker(path)) else label)
             elif name:
-                out.append(name)
+                out.append(path_for_prose(name))
     return out[:20]
 
 

@@ -51,22 +51,34 @@ def _derived_identity(client_message_id: str, token: str, option_index: int) -> 
     return dispatch_token, task_id
 
 
-def _origin_message(drive_root: pathlib.Path, client_message_id: str) -> Dict[str, Any]:
+# The card's original is not among the readable rows of a history holding an unread line.
+_ORIGIN_GAP = "_origin_gap"
+
+
+def _origin_message(drive_root: pathlib.Path, client_message_id: str, room=None) -> Dict[str, Any]:
     """Recover the owner's ORIGINAL message row by client_message_id.
 
     The picker transports the owner's exact ingress bytes to the chosen
     destination (the same rule the steer tool follows: a paraphrase must
-    never replace the owner's text). Only rows carrying this id are read."""
+    never replace the owner's text). Only rows carrying this id are read.
+    A card written before receipts named their room (``room`` None) is placed by the one readable owner row
+    with its id. Two distinct readable rows with one id are told apart by nothing the card saved, and an unread
+    line hides only itself: while no single readable row answers, the card stays open."""
     from ouroboros import dialogue_store as ds
+    from ouroboros.project_dialogue import unique_inbound_message
 
     target = str(client_message_id or "")
     if not target:
         return {}
     try:
-        for entry in ds.iter_probes(drive_root, "chat", [("client_message_id", target)], newest_first=True):
-            if entry.row.get("direction") == "in":
-                return entry.row
+        if room is None:
+            room = ds.annotation_rooms(drive_root, [target]).get(target)
+        found = unique_inbound_message(drive_root, {room}, target) if room is not None else None
+        if found:
+            return found
         ds.require_imported(drive_root, "chat")
+        if ds.range_coverage(drive_root, "chat")["gaps"]:
+            return {_ORIGIN_GAP: "the original message is not among its readable rows"}
     except ds.StoreError:
         raise
     except Exception:
@@ -87,7 +99,6 @@ def handle_routing_decision(
         ROUTING_DESTINATION_FIELDS,
         append_chat_annotation,
         chat_annotation_receipt,
-        latest_chat_annotations,
         routing_refusal_cause,
     )
 
@@ -95,7 +106,8 @@ def handle_routing_decision(
     # receipts are kept per token, but a newer routing attempt on the same
     # message supersedes the picker, so the click reads the latest row and
     # settles instead of retrying when the token no longer matches.
-    latest = latest_chat_annotations(drive_root).get(client_message_id, {})
+    from ouroboros.chat_annotations import latest_picker_annotation
+    room, latest = latest_picker_annotation(drive_root, client_message_id, token)
     receipt = latest if str(latest.get("routing_token") or "") == token else {}
     if not receipt:
         return 409, {"ok": False, "error": "decision_superseded",
@@ -151,7 +163,16 @@ def handle_routing_decision(
     from ouroboros.store import StoreError, StoreMigrating
 
     try:
-        origin = _origin_message(drive_root, client_message_id)
+        address = receipt.get("source_row_address")
+        if address:
+            from ouroboros.chat_chain import _row_chat_id, resolve_row
+            row, _ = resolve_row(drive_root, address)
+            origin = row if (row and _row_chat_id(row) == room and row.get("direction") == "in"
+                             and row.get("client_message_id") == client_message_id) else {}
+        else:
+            origin = _origin_message(drive_root, client_message_id, room)
+    except ValueError:
+        origin = {}  # a malformed recorded address identifies no owner row
     except StoreMigrating as exc:
         return 503, {"ok": False, "error": "history_importing", "decision_id": decision_id,
                      "state": "open", "reason": str(exc)}
@@ -161,21 +182,19 @@ def handle_routing_decision(
     # VERBATIM contract: the dispatched message is the owner's exact ingress
     # bytes; strip() is only the emptiness CHECK, never a rewrite.
     raw_origin_text = str(origin.get("text") or "")
-    origin_text = raw_origin_text
     if not raw_origin_text.strip():
         # The card stays OPEN and truthful: nothing was dispatched, and the
         # durable refusal row still says needs_manual_target.
         return 409, {"ok": False, "error": "origin_text_unavailable",
                      "decision_id": decision_id, "state": "open",
-                     "reason": "the original message could not be recovered"}
-    if comment:
-        origin_text = f"{origin_text}\n\n[Owner picker comment] {comment}"
-    chat_id = int(origin.get("chat_id") or 0)
+                     "reason": (f"The history holds an unread line, so {origin[_ORIGIN_GAP]}. "
+                                "You can send a new request naming the intended work."
+                                if _ORIGIN_GAP in origin else "the original message could not be recovered")}
+    picker_note = f"[Owner picker comment] {comment}" if comment else ""
+    from ouroboros.chat_chain import format_address, row_address
+    physical = row_address(origin)
+    chat_id, address = physical["chat_id"], format_address(physical)
 
-    attachment_uploads = (
-        [dict(row) for row in receipt.get("attachment_manifest") if isinstance(row, dict)]
-        if isinstance(receipt.get("attachment_manifest"), list) else []
-    )
     dispatch_token, derived_task_id = _derived_identity(client_message_id, token, option_index)
     from ouroboros.settings_scales import EFFORT_SCALE
 
@@ -186,46 +205,41 @@ def handle_routing_decision(
     card_effort = card_effort if card_effort in EFFORT_SCALE else ""
     # Origin provenance BY VALUE from the canonical row itself (the same rail
     # the LLM promote path rides): identity ref + full text + surface fact.
-    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.owner_relay import origin_snapshot, owner_row_source, upload_specs
 
-    provenance: Dict[str, Any] = {
-        "source_ref": build_owner_message_ref(
-            chat_id=chat_id, client_message_id=client_message_id,
-            ts=str(origin.get("ts") or ""), text=raw_origin_text,
-        ),
+    manifest = receipt.get("attachment_manifest")
+    evt: Dict[str, Any] = {
+        "routing_token": dispatch_token, "chat_id": chat_id, "client_message_id": client_message_id,
+        "attachment_uploads": upload_specs(origin, drive_root) if origin.get("attachments") else
+                              [dict(row) for row in (manifest or []) if isinstance(row, dict)],
+        "ts": utc_now_iso(),
+        "source_ref": owner_row_source(origin)[0],
+        "origin_message_snapshot": origin_snapshot(origin, drive_root),
         "source_text": raw_origin_text,
     }
     if isinstance(origin.get("client_surface"), dict) and origin.get("client_surface"):
-        provenance["client_surface"] = dict(origin["client_surface"])
+        evt["client_surface"] = dict(origin["client_surface"])
     if action == "steer_task":
         from ouroboros.owner_relay import owner_quote
 
-        evt: Dict[str, Any] = {
+        evt.update({
             "type": "steer_task",
-            "routing_token": dispatch_token,
             "target_task_id": str(chosen.get("task_id") or ""),
             # His click names this live work for his own retained message: the words
             # travel as a verified quote with his force (D7); the note is only his comment.
-            "message": f"[Owner picker comment] {comment}" if comment else "",
+            "message": picker_note,
             "quotes": [owner_quote(drive_root, origin)],
-            "chat_id": chat_id,
-            "client_message_id": client_message_id,
             # The owner clicked: an owner turn by construction. The option list
             # was host-built for this exact message's lane, and the room veto
             # reads that lane from the origin chat (Main sees every root).
             "issuer": {"kind": "owner_turn"},
-            "attachment_uploads": attachment_uploads,
-            **provenance,
-            "ts": utc_now_iso(),
-        }
+        })
     else:
-        evt = {
+        evt.update({
             "type": "promote_chat_to_task",
             "task_id": derived_task_id,
-            "routing_token": dispatch_token,
-            "objective": origin_text,
+            "objective": f"{raw_origin_text}\n\n{picker_note}" if picker_note else raw_origin_text,
             "project_id": str(chosen.get("project_id") or ""),
-            "chat_id": chat_id,
             # Label-only provenance for the receipt: the picker click IS a
             # routing decision on a refused message, so it wears the
             # route_to_project receipt label regardless of source chat.
@@ -233,12 +247,8 @@ def handle_routing_decision(
             # The owner's click, not a model turn, issued this promote: a
             # refusal is told by the handler's typed System row (no narrator).
             "host_initiated": True,
-            "client_message_id": client_message_id,
-            "attachment_uploads": attachment_uploads,
             **({"reasoning_effort": card_effort} if card_effort else {}),
-            **provenance,
-            "ts": utc_now_iso(),
-        }
+        })
 
     def _reopen_refusal() -> None:
         """Restore the actionable refusal as the LATEST row (same token)."""
@@ -248,7 +258,7 @@ def handle_routing_decision(
             # no-op (the allowed set covers only our claim and our dispatch
             # receipt, never a foreign token).
             append_chat_annotation(
-                drive_root, client_message_id, action="route_decision",
+                drive_root, client_message_id, source_chat_id=chat_id, source_row_address=address, action="route_decision",
                 status="needs_manual_target", routing_token=token,
                 options=options,
                 attachment_manifest=receipt.get("attachment_manifest"),
@@ -265,7 +275,7 @@ def handle_routing_decision(
     # authority (its own claim is already latest, so it skips this step).
     if status == "needs_manual_target":
         claimed = append_chat_annotation(
-            drive_root, client_message_id, action="route_decision",
+            drive_root, client_message_id, source_chat_id=chat_id, source_row_address=address, action="route_decision",
             status="dispatch_pending", routing_token=token,
             detail=f"request:{request_id}", options=options,
             reason=f"claimed_option:{int(option_index)}",
@@ -331,7 +341,7 @@ def handle_routing_decision(
             except OSError:  # the closing row is still written, without the destination, as before
                 landed = {}
             append_chat_annotation(
-                drive_root, client_message_id,
+                drive_root, client_message_id, source_chat_id=chat_id, source_row_address=address,
                 action="steer_task" if action == "steer_task" else "promote_chat_to_task",
                 target=str(chosen.get("task_id") or chosen.get("project_id") or ""),
                 target_label=str(chosen.get("label") or chosen.get("title") or chosen.get("project_name") or ""),

@@ -266,6 +266,8 @@ def test_terminal_projection_row_of_a_presence_turn_carries_the_room_facts(tmp_p
                if json.loads(line).get("type") == "task_summary")
     assert row["presence_provenance"]["conversation_id"] == "-100"
     assert RoomLabelResolver(projects=[]).label(row) == f"Place telegram -100 [chat_id={chat_id}]"
+    from ouroboros.room_membership import row_rooms
+    assert row_rooms(chat_id, row, set(), lambda *_: 0) == frozenset({chat_id})
     # A non-presence terminal row carries no presence facts at all.
     write_task_result(tmp_path, "plain-task", "completed", result="Done")
     plain = __import__("ouroboros.task_results", fromlist=["load_task_result"]).load_task_result(tmp_path, "plain-task")
@@ -273,3 +275,24 @@ def test_terminal_projection_row_of_a_presence_turn_carries_the_room_facts(tmp_p
                                            {"status": "completed", "chat_id": 5})
     rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert "presence_provenance" not in next(r for r in rows if r.get("task_id") == "plain-task")
+
+
+def test_a_main_schedules_saved_report_card_is_not_a_place_reply(tmp_path):
+    from ouroboros.dialogue_provenance import row_provenance
+    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.room_membership import row_rooms
+    from ouroboros.task_results import load_task_result, write_task_result
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    tid = "main-schedule"
+    text = "The reference report retained for this run."
+    write_task_result(tmp_path, tid, "completed", result=text, wake_summary=text, metadata=run_metadata(tid),
+                      task_contract={"capability_ceiling": ceiling()})
+    stored = load_task_result(tmp_path, tid)
+    assert append_terminal_task_projection(tmp_path, tid, {"id": tid, "chat_id": 1}, stored,
+                                           {"status": "completed", "chat_id": 1})
+    row = next(r for r in dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl") if r.get("type") == "task_summary")
+    assert row_provenance(row) == "place", "the frozen speaker is still preserved as provenance"
+    assert row["schedule_report_only"] is True and row["quiet_effective"] is True
+    assert text not in json.dumps(row) and row["result_ref"]["task_id"] == tid
+    assert row_rooms(1, row, set(), lambda *_: 0) == frozenset({1})

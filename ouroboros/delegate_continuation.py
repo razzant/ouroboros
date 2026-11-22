@@ -146,7 +146,7 @@ _UNDECIDED_OFFERS = frozenset({"execution_budget_unknown", "deadline_unknown", "
 
 
 def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable_handles=(),
-                      every_offer: bool = False) -> bool:
+                      every_offer: bool = False, ownership: Any = None) -> bool:
     """Retain a registration until its owner line and every root's Continue offer end.
 
     Each root of the recorded Continue chain (the original root and every
@@ -154,14 +154,17 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
     the offer is read at every settled member the walk reaches, not only at the
     run's own root; child tasks never carry an offer. An author's stop is offered Continue, but that offer adds
     no hold here: its line keeps a finished root's ordinary retention (every other check below still applies),
-    and its successor's work order says so. An admitted claim is followed below, like any other.
+    and its successor's work order says so. An admitted claim is followed below, like any other. A row-only offer
+    adds no lifetime hold; retention, Keep, custody and successor holds remain.
     ``every_offer`` is the stricter reading a managed document's release needs (``delegate_documents``): any
     offer holds, an author's stop included, and so does one whose eligibility a later fact may still decide
     (``_UNDECIDED_OFFERS``); the registration reading above never passes it.
 
     The sweep supplies its live census and exact reserved handles. Addressed result
     reads validate retry and Continue edges; missing/changed evidence keeps the
-    registration. This observation grants no continuation or execution authority.
+    registration. A caller rechecking under the queue lock passes the signed
+    reads its unlocked check prepared, not the earlier verdict. This observation
+    grants no continuation or execution authority.
     """
     if entry.review_owned or not entry.run_id:
         return False
@@ -185,7 +188,7 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
             and row.get('superseded_by') == row.get('retry_task_id')))
 
     live = set(live_task_ids)
-    reads = TaskOwnershipRead(drive)
+    reads = ownership if ownership is not None else TaskOwnershipRead(drive)
     root = entry.root_task_id or entry.task_id
     pending, seen = [entry.task_id, root], set()
     try:

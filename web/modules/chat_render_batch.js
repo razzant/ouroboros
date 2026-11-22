@@ -1,6 +1,6 @@
 // Chat timeline ordering, keyed item reconciliation and reading anchors.
 // These helpers own no history source, navigation or task authority.
-import { compareHistoryPosition } from './chat_history_replay.js';
+import { compareHistoryPosition, timelineReadFields } from './chat_history_replay.js';
 import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
@@ -161,24 +161,13 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
  * the relative floor removed the storm by size.
  */
 export function createLiveCardBound(cap) {
-    let armed = false;
-    let floor = 0;
-    let inherited = false;
-    let raisedInFlight = false;
+    let armed = false, floor = 0, inherited = false, raisedInFlight = false;
     return {
         isArmed: () => armed,
         observe(size) { if (size > floor + cap) armed = true; },
-        begin() {
-            inherited = armed;
-            raisedInFlight = false;
-            return inherited;
-        },
+        begin() { inherited = armed; raisedInFlight = false; return inherited; },
         beginReplay() { raisedInFlight = armed && !inherited; },
-        settle({ rebuilt, size }) {
-            if (!rebuilt) return;
-            armed = raisedInFlight;
-            floor = size;
-        },
+        settle({ rebuilt, size }) { if (rebuilt) { armed = raisedInFlight; floor = size; } },
     };
 }
 
@@ -194,11 +183,8 @@ export function createLiveCardBound(cap) {
  * [GPT#12]: a lost task_done is healed only by refetching.
  */
 export function createHistoryResyncScheduler({
-    isReplayActive,
-    run,
-    debounceMs = 700,
-    setTimer = (fn, ms) => setTimeout(fn, ms),
-    clearTimer = (id) => clearTimeout(id),
+    isReplayActive, run, debounceMs = 700,
+    setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id),
 }) {
     let timer = null;
     return {
@@ -220,17 +206,10 @@ export function createHistoryResyncScheduler({
                 if (keepPending) return true;
                 clearTimer(timer);
             }
-            timer = setTimer(() => {
-                timer = null;
-                run();
-            }, debounceMs);
+            timer = setTimer(() => { timer = null; run(); }, debounceMs);
             return true;
         },
-        cancel() {
-            if (timer == null) return;
-            clearTimer(timer);
-            timer = null;
-        },
+        cancel() { if (timer != null) { clearTimer(timer); timer = null; } },
     };
 }
 
@@ -534,17 +513,14 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
 
 // A live card's header chrome: a saved role inside its owner card.
 const CARD_HEADER = [
-    '[data-live-summary-button]',
-    '[data-live-title]',
-    '[data-live-activity]',
-    '[data-live-meta]',
-    '.chat-live-actions',
-    '.chat-live-project-card-btn',
+    '[data-live-summary-button]', '[data-live-title]', '[data-live-activity]',
+    '[data-live-meta]', '.chat-live-actions', '.chat-live-project-card-btn',
 ];
 
 // The feed's bounded, separately scrolling boxes: a card timeline, a fetched
 // full output, a Reviews group's Record facts. Each clips what it holds.
 const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
+const TRANSIENT_NOTE = '.msg-routing-annotation, .msg-routing-actions, .msg-pending, [data-ingress-unconfirmed]';
 
 /** An explicit exact-line landing scrolls every clipping owner before the feed. */
 export function revealTimelineNode(node, feed, clearance) {
@@ -569,15 +545,13 @@ function innerBox(node) {
  * Pure over the passed feed element.
  */
 export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () => null }) {
-    function captureVisibleTimelineAnchor(excludeNode = null) {
+    function captureVisibleTimelineAnchor(excludeNode = null, { inPlace = true } = {}) {
         // The Load-older control is excluded like .typing-bubble [GPT#13]:
         // anchoring must land on the first visible TIMESTAMPED node, or a
         // Load-older restore would pin the button itself and drift the view.
         const nodes = Array.from(messagesDiv.children).filter(
-            (node) => node !== excludeNode
-                && !excludeNode?.contains?.(node)
-                && !node.classList.contains('typing-bubble')
-                && !node.classList.contains('chat-load-older')
+            (node) => node !== excludeNode && !excludeNode?.contains?.(node)
+                && !node.classList.contains('typing-bubble') && !node.classList.contains('chat-load-older'),
         );
         const messagesRect = messagesDiv.getBoundingClientRect();
         // The phone drawer scales the room card. Anchors are in scroll pixels, not transformed screen pixels.
@@ -585,12 +559,32 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         // The row read is the first in the read band, below the bar's reach (the feed runs on under the bar); a row
         // whose picture still loads grows when it lands, so the row after it holds the place. Offsets stay feed-relative.
         const bandTop = Math.max(messagesRect.top, band()?.top ?? messagesRect.top);
-        const inBand = (item, rect = item.getBoundingClientRect()) => rect.bottom > bandTop && rect.top < messagesRect.bottom;
-        const startsInBand = (item, { top } = item.getBoundingClientRect()) => top >= bandTop && top < messagesRect.bottom;
+        const inBand = (item, rect = item.getBoundingClientRect()) => rect.width > 0 && rect.height > 0
+            && rect.bottom > bandTop && rect.top < messagesRect.bottom;
         let topNode = nodes.find(item => inBand(item) && ![...item.querySelectorAll('img')].some(img => !img.complete))
             || nodes.find(item => inBand(item)) || null;
         if (!topNode) return null;
         const firstShown = nodes.indexOf(topNode);
+        const followingVisible = () => nodes.find((item, index) => {
+            if (index <= firstShown) return false;
+            const rect = item.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && rect.top >= bandTop && rect.top < messagesRect.bottom;
+        }) || null;
+        const transientAtTop = (el) => [...(el.querySelectorAll?.(TRANSIENT_NOTE) || [])].some((note) => {
+            if (note.parentElement?.classList?.contains?.('msg-time')) return false;
+            const rect = note.getBoundingClientRect();
+            if (!(rect.width > 0 && rect.height > 0)) return false;
+            if (rect.top <= bandTop) return true;
+            const siblings = note.parentElement?.children;
+            const prev = siblings ? siblings[Array.from(siblings).indexOf(note) - 1] : null;
+            return Boolean(prev && prev.getBoundingClientRect().bottom <= bandTop);
+        });
+        // Interactive cards swap faces/frames and transient foot notes clear: step to what follows when the card
+        // straddles the top edge or the transient note itself has reached the top edge (never when still below the passage).
+        if (inPlace && topNode.getBoundingClientRect().top < bandTop
+            && (topNode.classList?.contains?.('chat-card-bubble') || transientAtTop(topNode))) {
+            topNode = followingVisible() || topNode;
+        }
 
         // A live-card can span several screens while the reader is inside a
         // child summary or timeline line. Preserve that visible boundary, not
@@ -599,45 +593,29 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         if (!topNode.dataset?.historyId && !topNode.classList.contains('chat-live-card')) {
             // Media owns a layout wrapper around keyed bubbles, the saved preview (chat_preview.js) its rows.
             // Save the physical child being read, not an unidentifiable wrapper.
-            node = [...topNode.querySelectorAll('[data-history-id], [data-preview-history-id]')]
+            node = [...(topNode.querySelectorAll?.('[data-history-id], [data-preview-history-id]') || [])]
                 .find(child => child.getBoundingClientRect().bottom > bandTop) || topNode;
         }
         if (topNode.classList.contains('chat-live-card')) {
             const selector = [
-                '.chat-live-card',
-                '[data-live-summary-button]',
-                '[data-live-title]',
-                '[data-live-activity]',
-                '[data-live-meta]',
-                '.chat-live-actions',
-                '.chat-live-line',
-                '[data-review-section]',
-                '[data-review-hydrate-status]',
-                '[data-review-group]',
-                '[data-review-attempt]',
-                '[data-review-attempt-detail]',
-                '.chat-live-project-card-btn',
+                '.chat-live-card', '[data-live-summary-button]', '[data-live-title]', '[data-live-activity]',
+                '[data-live-meta]', '.chat-live-actions', '.chat-live-line', '[data-review-section]',
+                '[data-review-hydrate-status]', '[data-review-group]', '[data-review-attempt]',
+                '[data-review-attempt-detail]', '.chat-live-project-card-btn',
             ].join(',');
             const candidates = [topNode, ...topNode.querySelectorAll(selector)]
                 .map((candidate) => {
-                    let depth = 0;
-                    let parent = candidate === topNode ? null : candidate.parentElement;
+                    let depth = 0, parent = candidate === topNode ? null : candidate.parentElement;
                     while (parent && topNode.contains(parent) && parent !== topNode) {
-                        depth += 1;
-                        parent = parent.parentElement;
+                        depth += 1; parent = parent.parentElement;
                     }
                     return { node: candidate, rect: candidate.getBoundingClientRect(), depth };
                 })
                 .filter(({ node: candidate, rect }) => candidate.getClientRects().length
-                    && rect.width > 0
-                    && rect.height > 0
-                    && rect.bottom > bandTop
-                    && rect.top < messagesRect.bottom);
-            const belowTop = candidates
-                .filter(({ rect }) => rect.top >= bandTop)
+                    && rect.width > 0 && rect.height > 0 && rect.bottom > bandTop && rect.top < messagesRect.bottom);
+            const belowTop = candidates.filter(({ rect }) => rect.top >= bandTop)
                 .sort((a, b) => (a.rect.top - b.rect.top) || (b.depth - a.depth));
-            const crossing = candidates
-                .filter(({ rect }) => rect.top <= bandTop && rect.bottom > bandTop)
+            const crossing = candidates.filter(({ rect }) => rect.top <= bandTop && rect.bottom > bandTop)
                 .sort((a, b) => b.depth - a.depth);
             node = belowTop[0]?.node || crossing[0]?.node || topNode;
             // Header chrome heads what it discloses: when it is all that precedes
@@ -646,12 +624,12 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
             const header = candidate => candidate.classList.contains('chat-live-card') || CARD_HEADER.some(role => candidate.matches(role));
             const content = header(node) ? belowTop.find(({ node: candidate }) => !header(candidate))?.node : null;
             if (content?.matches('.chat-live-line') && content.dataset?.expanded === '1') node = content;
-            if (node === topNode && topNode.getBoundingClientRect().top < bandTop) {
+            if (inPlace && node === topNode && topNode.getBoundingClientRect().top < bandTop) {
                 // The card's visible part holds nothing anchorable (a wait row, a
                 // block without work): keep the reader's view of what FOLLOWS the
                 // card. Pinning the card's own top, far above the viewport, would let
                 // the card's shrink or growth move the content the reader is on.
-                const following = nodes.find(item => item !== topNode && startsInBand(item));
+                const following = followingVisible();
                 if (following) { topNode = following; node = following; }
             }
         }
@@ -690,14 +668,24 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
             topNode = nodes.find(item => item.contains(reading));
         }
 
+        const fallbacks = [];
+        for (let i = nodes.indexOf(topNode) + 1; i < nodes.length && fallbacks.length < 4; i += 1) {
+            const item = nodes[i], rect = item.getBoundingClientRect();
+            if (rect.top >= messagesRect.bottom) break;
+            if (rect.width > 0 && rect.height > 0 && rect.bottom > bandTop) {
+                fallbacks.push({
+                    node: item, historyId: item.dataset?.historyId || '',
+                    clientMessageId: item.dataset?.clientMessageId || '',
+                    offset: (rect.top - messagesRect.top) / scale,
+                });
+            }
+        }
+        const scrollBox = node?.closest?.(BOUNDED_BOX) || null;
         const cardChain = [];
-        let card = node.classList.contains('chat-live-card')
-            ? node
-            : node.closest?.('.chat-live-card');
+        let card = node.classList.contains('chat-live-card') ? node : node.closest?.('.chat-live-card');
         while (card && messagesDiv.contains(card)) {
             cardChain.push({
-                node: card,
-                taskId: card.dataset?.taskId || '',
+                node: card, taskId: card.dataset?.taskId || '',
                 offset: (card.getBoundingClientRect().top - messagesRect.top) / scale,
             });
             card = card.parentElement?.closest?.('.chat-live-card') || null;
@@ -730,6 +718,10 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
             lineExpanded: node.matches?.('.chat-live-line') && node.dataset?.expanded === '1',
             anchorRole,
             topNode,
+            fallbacks,
+            scrollBox,
+            boxScrollTop: scrollBox ? scrollBox.scrollTop : 0,
+            shift() { const out = { delta: 0 }; restoreVisibleTimelineAnchor(this, { out }); return out.delta; },
             clientMessageId: topNode.dataset?.clientMessageId || '',
             ts,
             ordinal: ts ? nodes.filter((item) => item.dataset?.ts === ts).indexOf(topNode) : -1,
@@ -738,8 +730,9 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         };
     }
 
-    function restoreVisibleTimelineAnchor(anchor, { exact = false, cardOnly = false } = {}) {
+    function restoreVisibleTimelineAnchor(anchor, { exact = false, cardOnly = false, out = null } = {}) {
         if (!anchor) return false;
+        const inPlace = !exact && !cardOnly;
         const isRendered = (node) => {
             if (!node?.isConnected || !messagesDiv.contains(node)) return false;
             const rect = node.getBoundingClientRect();
@@ -748,12 +741,38 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         const restoreNode = (node, offset) => {
             if (!isRendered(node)) return false;
             const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
-            const currentOffset = (node.getBoundingClientRect().top - rect.top) / scale;
+            const nodeRect = node.getBoundingClientRect();
+            let targetOffset = inPlace && offset < 0 && (node.classList?.contains?.('chat-card-bubble')
+                || node.classList?.contains?.('chat-live-card')) && nodeRect.height / scale + offset <= 0 ? 0 : offset;
+            if (inPlace && node === anchor.node && anchor.scrollBox && anchor.scrollBox !== node
+                && anchor.scrollBox.contains?.(node)) {
+                targetOffset -= anchor.scrollBox.scrollTop - (anchor.boxScrollTop || 0);
+            }
+            const delta = (nodeRect.top - rect.top) / scale - targetOffset;
             // A node still in place leaves the feed alone: even a write of the
             // same scrollTop stops a scroll the engine animates (WebKit's End).
             // Subpixel transform noise rounds down in WebKit's scrollTop setter; writing it every frame drifts.
-            if (Math.abs(currentOffset - offset) > 0.5) messagesDiv.scrollTop += currentOffset - offset;
+            if (Math.abs(delta) > 0.5) {
+                if (out) out.delta = delta;
+                else messagesDiv.scrollTop += delta;
+            }
             return true;
+        };
+        const restoreFallback = () => {
+            if (exact || !Array.isArray(anchor.fallbacks)) return false;
+            for (const entry of anchor.fallbacks) {
+                let candidate = isRendered(entry.node) ? entry.node : null;
+                if (!candidate && entry.historyId) {
+                    candidate = Array.from(messagesDiv.querySelectorAll?.('[data-history-id]') || [])
+                        .find((item) => item.dataset?.historyId === entry.historyId) || null;
+                }
+                if (!candidate && entry.clientMessageId) {
+                    candidate = Array.from(messagesDiv.children || [])
+                        .find((item) => item.dataset?.clientMessageId === entry.clientMessageId) || null;
+                }
+                if (restoreNode(candidate, entry.offset)) return true;
+            }
+            return false;
         };
 
         if (restoreNode(anchor.node, anchor.offset)) return true;
@@ -788,9 +807,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
             if (isRendered(node)) return restoreSaved(node);
         }
 
-        const cardChain = Array.isArray(anchor.cardChain) && anchor.cardChain.length
-            ? anchor.cardChain
-            : [];
+        const cardChain = Array.isArray(anchor.cardChain) && anchor.cardChain.length ? anchor.cardChain : [];
         const resolveCard = (entry) => {
             if (isRendered(entry?.node)) return entry.node;
             if (!entry?.taskId) return null;
@@ -820,9 +837,10 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
         if (exact && cardChain.length && restoreNode(ownerCard, anchor.offset)) return true;
         if (exact && !anchor.clientMessageId) return false;
         for (const entry of cardChain) {
+            if (inPlace && entry.offset < 0 && restoreFallback()) return true;
             if (restoreNode(resolveCard(entry), entry.offset)) return true;
         }
-        if (cardOnly) return false;
+        if (cardOnly) return restoreFallback();
 
         let node = isRendered(anchor.topNode) ? anchor.topNode : null;
         if (!node && anchor.clientMessageId) {
@@ -830,20 +848,30 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () 
                 (item) => item.dataset?.clientMessageId === anchor.clientMessageId
             ) || null;
         }
-        if (!node && anchor.ts && !exact) {
-            const matches = Array.from(messagesDiv.children).filter((item) => item.dataset?.ts === anchor.ts);
+        if (restoreNode(node, anchor.topOffset ?? anchor.offset)) return true;
+        if (restoreFallback()) return true;
+        if (!anchor.cardChain?.length && anchor.ts && !exact) {
+            const matches = Array.from(messagesDiv.children).filter(
+                (item) => !item.classList?.contains?.('chat-live-card') && item.dataset?.ts === anchor.ts,
+            );
             node = matches[anchor.ordinal] || matches[0] || null;
         }
         return restoreNode(node, anchor.topOffset ?? anchor.offset);
     }
 
-    function serializeTimelineAnchor(anchor = captureVisibleTimelineAnchor()) {
+    function serializeTimelineAnchor(anchor = captureVisibleTimelineAnchor(null, { inPlace: false })) {
         if (!anchor) return null;
-        const { node, topNode: _topNode, cardChain, ...fields } = anchor;
+        const {
+            node, topNode: _topNode, cardChain, fallbacks,
+            scrollBox: _scrollBox, boxScrollTop: _boxScrollTop, shift: _shift, ...fields
+        } = anchor;
+        const savedFallbacks = (fallbacks || []).filter((f) => f.historyId || f.clientMessageId)
+            .map(({ historyId, clientMessageId, offset }) => ({ historyId, clientMessageId, offset }));
         // A bounded box scrolls on its own: the node keeps its offset inside its
         // owner timeline, and its own full output or Review detail its scroll.
         const timeline = node?.closest?.('[data-live-timeline]'), inner = node && innerBox(node);
         return { ...fields, cardChain: (cardChain || []).map(({ taskId, offset }) => ({ taskId, offset })),
+            ...(savedFallbacks.length ? { fallbacks: savedFallbacks } : {}),
             ...(timeline && messagesDiv.contains(timeline) ? { timelineOffset:
                 node.getBoundingClientRect().top - timeline.getBoundingClientRect().top } : {}),
             ...(inner ? { innerTop: inner.scrollTop } : {}) };
@@ -889,80 +917,52 @@ export function updateLiveTimelineItem(record, summary, { ts, rawTs, syntheticKe
     const lastIdx = record.items.length - 1;
     // Full-array dedup keeps routine history syncs from growing Notes.
     const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey || it.occurrenceKey === syntheticKey);
-    if (existingIdx !== -1 && inPlaceByKey) {
+    if (existingIdx !== -1 && (inPlaceByKey || summary.serviceStop)) {
         const it = record.items[existingIdx];
         if (Number.isSafeInteger(it.cardRowRevision)
             && (!Number.isSafeInteger(summary.cardRowRevision) || summary.cardRowRevision <= it.cardRowRevision)) {
             return { timelineUpdate: 'duplicate-skip', patchIndex };
         }
         const patch = {
-            cardRowRevision: summary.cardRowRevision,
-            phase: summary.phase || it.phase,
-            headline: headline || it.headline,
-            fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
-            body: summary.body || '',
-            fullBody: summary.fullBody || summary.body || it.fullBody || '',
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            cardRowRevision: summary.cardRowRevision, phase: summary.phase || it.phase,
+            headline: headline || it.headline, fullHeadline: summary.fullHeadline || headline || it.fullHeadline,
+            body: summary.body || '', fullBody: summary.fullBody || summary.body || it.fullBody || '',
+            ...timelineReadFields(summary, it),
             evidenceRef: summary.evidenceRef || it.evidenceRef || null,
-            // A call's failure frame replaces its receipt start: the row is
-            // content again once it reports an error.
-            receipt: Boolean(summary.receipt),
-            ts: ts || it.ts,
-            // Replay compares the child's current status with older pages.
-            // Its source time advances with the live status, not with narration.
+            // A call's failure frame replaces its receipt start: the row is content again once it reports an error.
+            receipt: Boolean(summary.receipt), ts: ts || it.ts,
+            // Replay compares the child's current status with older pages: source time advances with live status, not narration.
             ...(syntheticKey.startsWith('subagent-lifecycle:') && rawTs ? { sourceTs: rawTs } : {}),
             // A replaced note's row now holds this frame; the saved copy of the one it replaced stands as its own row.
             ...(summary.occurrenceKey ? { occurrenceKey: summary.occurrenceKey, sourceTs: rawTs } : {}),
         };
         if (Object.entries(patch).some(([key, value]) => it[key] !== value)) {
-            Object.assign(it, patch);
-            patchIndex = existingIdx;
-            timelineUpdate = 'patch-at';
-        } else {
-            timelineUpdate = 'duplicate-skip';
-        }
+            Object.assign(it, patch); patchIndex = existingIdx; timelineUpdate = 'patch-at';
+        } else timelineUpdate = 'duplicate-skip';
     } else if (existingIdx === lastIdx && existingIdx !== -1) {
         const it = record.items[existingIdx];
         const patch = {
-            ts: ts || it.ts,
-            fullHeadline: summary.fullHeadline || it.fullHeadline || it.headline,
+            ts: ts || it.ts, fullHeadline: summary.fullHeadline || it.fullHeadline || it.headline,
             fullBody: summary.fullBody || it.fullBody || it.body,
-            fullRef: summary.fullRef || it.fullRef || '',
-            truncated: summary.truncated || it.truncated || false,
+            ...timelineReadFields(summary, it),
         };
-        if (Object.entries(patch).every(([key, value]) => it[key] === value)) {
-            timelineUpdate = 'duplicate-skip';
-        } else {
-            Object.assign(it, patch);
-            it.count += 1;
-            timelineUpdate = 'patch-last';
-        }
+        if (Object.entries(patch).every(([key, value]) => it[key] === value)) timelineUpdate = 'duplicate-skip';
+        else { Object.assign(it, patch); it.count += 1; timelineUpdate = 'patch-last'; }
     } else if (existingIdx !== -1) {
         // An older duplicate only refreshes its timestamp.
-        const it = record.items[existingIdx];
-        it.ts = ts || it.ts;
+        record.items[existingIdx].ts = ts || record.items[existingIdx].ts;
         timelineUpdate = 'duplicate-skip';
     } else {
         const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         record.items.push({
-            cardRowRevision: summary.cardRowRevision,
-            phase: summary.phase || 'working',
-            headline: headline || 'Update',
-            fullHeadline: summary.fullHeadline || headline || 'Update',
-            body: summary.body || '',
-            fullBody: summary.fullBody || summary.body || '',
-            fullRef: summary.fullRef || '',
-            truncated: summary.truncated || false,
+            cardRowRevision: summary.cardRowRevision, phase: summary.phase || 'working',
+            headline: headline || 'Update', fullHeadline: summary.fullHeadline || headline || 'Update',
+            body: summary.body || '', fullBody: summary.fullBody || summary.body || '',
+            ...timelineReadFields(summary),
             // A late-review row's exact record link (#1369); null on every other row.
-            evidenceRef: summary.evidenceRef || null,
-            receipt: Boolean(summary.receipt),
-            ts: ts || '',
-            sourceTs: rawTs,
-            count: 1,
-            dedupeKey: syntheticKey,
-            occurrenceKey: summary.occurrenceKey,
-            lineKey,
+            evidenceRef: summary.evidenceRef || null, receipt: Boolean(summary.receipt),
+            ts: ts || '', sourceTs: rawTs, count: 1,
+            dedupeKey: syntheticKey, occurrenceKey: summary.occurrenceKey, lineKey,
         });
         timelineUpdate = 'append';
     }

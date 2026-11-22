@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -80,5 +81,6 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     # genuinely-settled server task_terminal_status; interrupted stays retryable.
     assert "const replayTerminal = msg.task_terminal_status" in src
     assert "const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);" in src
-    assert "if (replayTerminal || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {" in src
-    assert "subagentTerminalChildren.add(childId);" in src
+    # Which events end a child is one shared set (chat_activity.js); its members, and `interrupted` staying out of it,
+    # run as behaviour in web/tests/chat_instance_dom.test.js and chat_continuity.test.js. Only the wiring is read here.
+    assert re.search(r"replayTerminal \|\| TERMINAL_SUBAGENT_EVENTS\.has\(event\)\)\s*\{?\s*subagentTerminalChildren\.add\(", src)

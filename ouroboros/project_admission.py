@@ -206,16 +206,21 @@ def reserved_project_for_chat(drive_root: Any, chat_id: int) -> dict:
     return next((_routing_row(row) for row in rows if row["chat_id"] == chat_id), {})
 
 
-def display_registry_snapshot(drive_root: Any) -> dict:
+def display_registry_snapshot(drive_root: Any, *, require_readable: bool = False, sidebar: bool = False) -> dict:
     """Identity/history projection, never execution authority or a repair writer.
 
     Healthy rows survive an invalid neighbor. Retain identifiable chat reservations
     even when their routing fields are invalid; never turn invalid lifecycle active.
+    The sidebar selects active and deleting rooms and carries ``sidebar_complete``
+    for this read. Known tombstones are exclusions, not gaps. Only ``require_readable``
+    checks the commit witness for absent files and refuses unproved emptiness.
     """
-    from ouroboros.projects_registry import PROJECT_ACTIVE
+    from ouroboros.projects_registry import PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED, _registry_witness_path
 
-    data, _ = _registry_snapshot(drive_root, allow_missing=True)
-    rows = []
+    data, present = _registry_snapshot(drive_root, allow_missing=True)
+    if require_readable and not present and _registry_witness_path(drive_root).exists():
+        raise FileNotFoundError("Project registry is missing beside its commit witness")
+    rows, tombstones, invalid_lifecycle = [], 0, False
     for raw in data["projects"]:
         if not isinstance(raw, dict):
             continue
@@ -225,6 +230,13 @@ def display_registry_snapshot(drive_root: Any) -> dict:
         row = {"lifecycle": PROJECT_ACTIVE, "chat_id": project_chat_id(pid), **raw}
         if type(row["chat_id"]) is not int or row["chat_id"] <= 0:
             continue  # invalid identity cannot mint a substitute chat reservation
+        if sidebar:
+            if row["lifecycle"] == PROJECT_TOMBSTONED:
+                tombstones += 1
+                continue
+            if row["lifecycle"] not in (PROJECT_ACTIVE, PROJECT_DELETING):
+                invalid_lifecycle = True
+                continue
         if not isinstance(row["lifecycle"], str):
             row["lifecycle"] = "invalid"
         for field in ("routing_generation", "visible_revision"):
@@ -235,7 +247,14 @@ def display_registry_snapshot(drive_root: Any) -> dict:
         if not isinstance(row.get("working_dir", ""), str):
             row["working_dir"] = ""
         rows.append(row)
-    return {**data, "projects": rows}
+    complete = (present or require_readable) and len(data["projects"]) == len(rows) + tombstones
+    if require_readable and not rows and not complete:
+        if invalid_lifecycle:
+            raise ValueError("Project registry contains a room with an invalid lifecycle")
+        if tombstones:
+            raise ValueError("Project registry contains unreadable sidebar rows")
+        raise ValueError("Project registry contains no readable room")
+    return {**data, "projects": rows, **({"sidebar_complete": complete} if sidebar else {})}
 
 
 def validate_project_admission(view: Any) -> dict:

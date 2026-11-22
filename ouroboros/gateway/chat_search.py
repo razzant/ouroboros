@@ -65,7 +65,7 @@ from ouroboros.gateway.history_paging import (
 )
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import is_conversation_card_content, is_task_card_message, subagent_message_meta
-from ouroboros.utils import strip_markdown
+from ouroboros.utils import json_dumps_utf8, strip_markdown
 
 # The stored chat rows one request reads, at most, and the stored bytes after which it ends (the row crossing
 # them is read whole): the cursor carries the search on, so these bound the request's latency, its decoding
@@ -387,7 +387,7 @@ def make_chat_search_endpoint(data_dir: pathlib.Path):
             thread_id = 1
         query, cursor = params.get("q", ""), params.get("cursor") or None
         try:
-            body = await asyncio.to_thread(lambda: json.dumps(
+            body = await asyncio.to_thread(lambda: json_dumps_utf8(
                 search_room(data_dir, thread_id, query, cursor),
                 ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         except (HistoryCursorError, OSError, StoreError) as exc:
