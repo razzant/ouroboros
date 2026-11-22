@@ -278,6 +278,20 @@ def test_a_lost_skill_binding_and_an_invalid_settings_row_reach_a_running_work_a
     assert _round(work) is None
 
 
+def test_an_invalid_settings_row_under_mcp_off_is_off_or_disabled_never_removed(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, ("demo", True))
+    monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_kw: None)  # keep the edited state
+    work = _work(tmp_path)
+    breakage.start_notice_rows(work, [])
+    manager._configuration_errors = [{"id": "lost", "enabled": True, "code": "MCP_CONFIG_ERROR", "last_error": "no url"}]
+    assert "- MCP server lost: its settings are invalid" in _round(work)
+    manager._enabled = False  # the owner turns MCP off and that row with it
+    manager._configuration_errors = [{**manager._configuration_errors[0], "enabled": False}]
+    off = _round(work)
+    assert "- MCP server lost: no longer reported broken (disabled in Extensions → MCP servers)" in off
+    assert "removed from" not in off and "its 2 configured servers are not offered" in off
+
+
 def test_an_unavailable_write_scope_stays_broken_through_an_answered_read_until_the_grant_widens(monkeypatch, tmp_path):
     from ouroboros import mcp_oauth
 

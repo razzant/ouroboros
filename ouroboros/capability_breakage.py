@@ -119,10 +119,14 @@ def _mcp_facts() -> Observed:
     records = mcp_client.get_manager().server_records()
     seen = Observed()
     servers = sorted(records["servers"], key=lambda record: record[0].id)
+    invalid = [row for row in records["invalid"] if row.get("id")]  # a Settings row that does not parse
     if not records["enabled"]:
-        if servers:
-            seen.broken["mcp-config:off"] = f"MCP is off in {_PAGE}; its {len(servers)} configured servers are not offered"
+        if servers or invalid:
+            seen.broken["mcp-config:off"] = (f"MCP is off in {_PAGE}; its {len(servers) + len(invalid)} configured "
+                                             "servers are not offered")
         seen.working.update({f"mcp:{cfg.id}": f"MCP is off in {_PAGE}" for cfg, _catalog in servers})
+        seen.working.update({f"mcp:{row['id']}": f"MCP is off in {_PAGE}" if row.get("enabled") else
+                             f"disabled in {_PAGE}" for row in invalid})
         return seen
     seen.working["mcp-config:off"] = f"MCP is on in {_PAGE}"
     disabled = [cfg.id for cfg, _catalog in servers if not cfg.enabled]
