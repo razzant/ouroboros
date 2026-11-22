@@ -1,0 +1,18 @@
+{
+  "about": "Main read with keys: Page Up reads back and a reply stays below; End, which the engine animates, reaches the live edge and the next reply follows; Page Down back to the end follows again.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "main": {"rows": [{"count": 80, "words": [20, 100]}]}
+  },
+  "events": [
+    {"open": "main"},
+    {"key": "PageUp", "expect": "reading"},
+    {"key": "PageUp", "expect": "reading"},
+    {"arrive": "main", "words": 40},
+    {"key": "End", "expect": "following"},
+    {"arrive": "main", "words": 40},
+    {"key": "PageUp", "expect": "reading"},
+    {"key": "PageDown", "expect": "following"},
+    {"arrive": "main", "words": 20}
+  ]
+}
