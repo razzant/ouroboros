@@ -18,8 +18,8 @@ import { startingStatus } from './host_starting_status.js';
 import { chipWord, desiredLiveCardPhase, observeChildPhase, setLiveCardPhase } from './task_phase_chip.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW, REUSABLE_TASK_IDS,
-    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumeTaskAction, taskControlActions,
-    taskControlBusy,
+    hurryTaskAction, openTaskControlMenu, openTaskControls, requestStop, requestStopAll, resumePending, resumeTaskAction,
+    taskControlActions, taskControlBusy,
 } from './task_control_menu.js';
 
 // A known outcome keeps its word's tone, its dot beside it (status_mark.js): Done and Done with warnings succeed (the
@@ -616,18 +616,23 @@ export function openCardControls(anchor, record, work, { activity = null, stop, 
  * Open the shared menu on a work's controls: each action reaches the existing request owner at its exact target;
  * Stop and Stop earlier attempt stop each of their targets in order and say one combined result. `stopOne` is the
  * caller's own stop path for a target (a loaded card keeps its optimistic chip); `canAct` re-checks the current
- * controls before any effect; `afterAction` re-reads the state once an effect settled.
+ * controls before any effect; `afterAction` re-reads the state once an effect settled. A Resume's re-read is part of
+ * its own request, which keeps the task pending until that read has settled (`resumeTaskAction`): it runs there, once.
+ * Through that read the menu keeps its Stop enabled and offers no second Resume (`resumePending`).
  */
 export function openWorkControls(anchor, work, { cancelPending = false, canAct = () => true, stopOne = requestStop,
     afterAction = null, withResume = false } = {}) {
     const grouped = workControls(work);
-    const actions = workMenuActions(grouped, { cancelPending, resume: withResume });
+    const actions = workMenuActions(grouped, { cancelPending,
+        resume: withResume && !resumePending(grouped.resume) });
     if (!actions.length) return null;
     const stopAll = (targets, action) => requestStopAll(targets, action, { stopOne });
+    const reconcile = afterAction ? () => afterAction(ACTION_RESUME) : null;
     return openTaskControlMenu(anchor, {
-        actions, pauseTarget: grouped.pause, busy: taskControlBusy(grouped.pause || work?.episode?.task_id), canAct, afterAction,
+        actions, pauseTarget: grouped.pause, busy: taskControlBusy(grouped.pause || work?.episode?.task_id), canAct,
+        afterAction: afterAction && ((action) => (action === ACTION_RESUME ? undefined : afterAction(action))),
         onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(grouped.hurry)
-            : action === ACTION_RESUME ? resumeTaskAction(grouped.resume)
+            : action === ACTION_RESUME ? resumeTaskAction(grouped.resume, { settle: reconcile })
                 : action === ACTION_FINALIZE ? stopAll([grouped.wrapUp], ACTION_FINALIZE)
                     : stopAll(action === ACTION_STOP_EARLIER ? grouped.stopEarlier : grouped.stop, ACTION_STOP_NOW)),
     });

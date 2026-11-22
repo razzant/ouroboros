@@ -480,8 +480,12 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     // Known-outcome chips of the last queue render; paintTaskPhase writes them into
     // their slots once the markup is mounted. The words come from the translation seam.
     let phaseViews = [];
-    // The body the queue was last drawn from: a work's controls come from it, at their exact targets.
+    // The body the queue was last drawn from — set the moment the accepted state settles, so a work's controls
+    // (the door that reads it, at their exact targets) never wait for a repaint unrelated reads could hold.
     let lastCensus = null;
+    // The state read the last refresh performed: the ONE accepted state. A Resume settles against this very
+    // read — the same one its repaint draws from — never a second GET of its own.
+    let stateRead = Promise.resolve(null);
     const phaseSlot = (view) => `<span class="activity-phase" data-i18n-skip><span data-activity-phase="${
         phaseViews.push(view) - 1}"></span><span class="chat-live-phase-secondary" hidden></span></span>`;
     // A group of one list by its records' state (paused work, finished schedules): its label and count from the caller.
@@ -657,6 +661,14 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         target.focus?.({ preventScroll: true });
     }
 
+    // Each section's renderer, over what its own reads produced: the queue's rows with the accepted state,
+    // Background's state with the kept services, the schedules' list.
+    const renderers = [
+        ({ rows, census }) => renderQueue(rows?.queue, census),
+        ({ state, kept }) => renderBg(state, kept),
+        renderSchedules,
+    ];
+
     async function refresh() {
         if (destroyed) return;
         clearTimeout(migrationTimer); migrationTimer = null;
@@ -668,32 +680,40 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             root.setAttribute('aria-busy', 'true');
             if (!loaded) setInlineStatus(status, 'Loading…');
         });
-        const results = await Promise.allSettled([
-            // This view renders only the queue; queue_only skips the whole
-            // task-results scan server-side (v6.9x P2).
-            getJson('/api/tasks?queue_only=1'),
-            readStateJson(),
+        // One read per endpoint. Each section paints from its own reads as they settle — the queue from its rows
+        // and the accepted state, Background from the state and the kept services, Scheduled from its list — so no
+        // section waits for a read it does not consume: a slow schedules or kept read never holds the queue's rows
+        // (and the control rights their buttons carry) for state a Resume has already accepted.
+        stateRead = readStateJson();
+        // This view renders only the queue; queue_only skips the whole task-results scan server-side (v6.9x P2).
+        const reads = [
+            Promise.allSettled([getJson('/api/tasks?queue_only=1'), stateRead]).then(([queue, state]) => {
+                if (queue.status === 'rejected') throw queue.reason;  // an unreadable queue is unknown, never empty
+                return { rows: queue.value, census: state.status === 'fulfilled' ? state.value : null };
+            }),
+            Promise.allSettled([stateRead, getJson('/api/services/kept')]).then(([state, kept]) => {
+                if (state.status === 'rejected') throw state.reason;  // Background reads the state; kept degrades to null
+                return { state: state.value, kept: kept.status === 'fulfilled' ? kept.value : null };
+            }),
             getJson('/api/schedules'),
-            getJson('/api/services/kept'),
-        ]);
-        if (destroyed || revision !== refreshRevision) return;
-        // Keep the control focused now: a return may have restored it while this read was pending.
-        const focused = focusedControl();
-        const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
-        const census = results[1].status === 'fulfilled' ? results[1].value : null;
-        const kept = results[3].status === 'fulfilled' ? results[3].value : null;
-        const renderers = [(data) => renderQueue(data?.queue, census), (data) => renderBg(data, kept), renderSchedules];
-        sections.forEach((section, index) => {
+        ];
+        // The accepted state, applied the moment it settles: the work-controls door reads `lastCensus` before any
+        // repaint lands, so a control the fresh snapshot withdrew is withdrawn at once, not after unrelated reads.
+        stateRead.then((census) => { if (!destroyed && revision === refreshRevision) lastCensus = census; }, () => {});
+        const paintSection = (index, outcome) => {
+            const section = sections[index];
             const { root, status, content } = section;
+            // Keep the control focused now: a return may have restored it while this section's read was pending.
+            const focused = focusedControl();
+            const focusedKey = focused && { act: focused.dataset.act, id: focused.dataset.id || '', holdId: focused.dataset.holdId || '' };
             root.removeAttribute('aria-busy');
             try {
-                const result = results[index];
-                if (result.status === 'rejected') throw result.reason;
+                if ('reason' in outcome) throw outcome.reason;
                 // Disclosure is an owner choice too.  Capture it at the render
                 // boundary, after the async reads, so opening/closing a group or
                 // a row's Details while a poll is pending is not undone by a stale snapshot.
                 rememberDisclosure();
-                content.innerHTML = renderers[index](result.value);
+                content.innerHTML = renderers[index](outcome.value);
                 content.querySelectorAll('[data-activity-phase]').forEach((el) => paintTaskPhase(
                     el, phaseViews[Number(el.dataset.activityPhase)], el.nextElementSibling));
                 section.loaded = true;
@@ -702,15 +722,35 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 if (isStoreMigrating(error)) {
                     setInlineStatus(status, 'Saved tasks are being upgraded…');
                     migrationTimer ??= setTimeout(refresh, 700);
-                    return;
+                } else {
+                    setInlineStatus(status, section.loaded
+                        ? 'Could not refresh. Previously loaded values shown; current state is unknown. Reopen Activity to try again.'
+                        : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
                 }
-                setInlineStatus(status, section.loaded
-                    ? 'Could not refresh. Previously loaded values shown; current state is unknown. Reopen Activity to try again.'
-                    : 'Could not load. Current state is unknown. Reopen Activity to try again.', 'error');
             }
-        });
-        restoreFocus(focusedKey);
+            restoreFocus(focusedKey);
+        };
+        await Promise.all(reads.map(async (read, index) => {
+            let outcome;
+            try { outcome = { value: await read }; } catch (reason) { outcome = { reason }; }
+            if (destroyed || revision !== refreshRevision) return;
+            paintSection(index, outcome);
+        }));
     }
+
+    // A Resume's confirmation is the state read its own refresh performs (`readStateJson`): the ONE accepted
+    // state — no second GET beside the repaint — and none of the unrelated sections' reads prolongs a pending
+    // Resume (that read's own lifetime bounds it). The queue repaints from that same accepted state as soon as
+    // its own rows arrive, so both doors — a work's controls from `lastCensus`, a row button's repainted
+    // dataset — read what the fresh snapshot said, never the state before the press.
+    const resumeSettled = () => {
+        refresh();
+        return stateRead;
+    };
+
+    // A task control's afterAction: a Resume settles against the bounded read; every other action repaints through
+    // the full refresh once its own effect has settled.
+    const afterTaskControl = (action) => (action === 'resume' ? resumeSettled() : refresh());
 
     // One seam for every lifecycle button: the owner NAMES the action and why.
     // The server applies and audits it; nothing here infers a command from text.
@@ -756,7 +796,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 : btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
             if (work) {
                 openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
-                    afterAction: refresh });
+                    afterAction: afterTaskControl });
                 return;
             }
             if (tail) return; // A vanished tail never falls back to the generic live-task menu.
@@ -769,6 +809,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 busy: taskControlBusy(id),
                 onAction: async (action) => {
                     busy = true;
+                    let reread = false;
                     try {
                         if (action === ACTION_HURRY) {
                             // Local toast acknowledgement only — never a chat message.
@@ -776,7 +817,10 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                             return;
                         }
                         if (action === ACTION_RESUME) {
-                            await resumeTaskAction(id);
+                            // The task stays pending until its own bounded read has settled (the request owner holds it);
+                            // the full repaint runs beside it, never inside the confirmation.
+                            await resumeTaskAction(id, { settle: resumeSettled });
+                            reread = true;
                             return;
                         }
                         // Same declared semantics as the chat card (v6.82): the
@@ -794,7 +838,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                         }
                     } finally {
                         busy = false;
-                        await refresh();
+                        if (!reread) await refresh();
                     }
                 },
             });

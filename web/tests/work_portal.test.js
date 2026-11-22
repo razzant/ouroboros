@@ -173,6 +173,32 @@ test('a census row naming the work\'s Project binds it too; detached work says i
     } finally { f.close(); }
 });
 
+test('a Main-addressed row\'s Project ID is a folder lease, not a room: the card stays Main\'s own', async () => {
+    // The scope/census twin of the server rule (gateway/main_decisions.py): a Main start in a registered
+    // room's folder carries that room's own ID as its lease scope while its census row keeps Main's
+    // address. The ID alone binds nothing; a real move re-homes the row's address with its binding.
+    const f = fixture();
+    try {
+        f.narrate('w-1', 'Reading the logs before the audit.');
+        const node = f.card('w-1');
+        f.state({ projects: [{ id: 'p-2', name: 'Second room' }],
+            active_chat_activities: [room({ chat_id: 1, project_id: 'p-2', project_name: 'Second room' })] });
+        await settle();
+        assert.ok(f.card('w-1') === node, 'the SAME card stays mounted in Main');
+        assert.ok(node.dataset.portal !== '1', 'a lease is no move: the card is no portal');
+        assert.equal(node.querySelectorAll('[data-intent="open-project"]').length, 0,
+            'the scope alone draws no Project reference');
+        // The host re-homes the row's address with its durable binding: now the same ID is the room.
+        f.state({ task_bindings: { 'w-1': { project_id: 'p-2', chat_id: 7 } },
+            projects: [{ id: 'p-2', name: 'Second room' }],
+            active_chat_activities: [room({ chat_id: 7, project_id: 'p-2', project_name: 'Second room' })] });
+        await settle();
+        assert.ok(f.card('w-1') === node, 'a real move keeps the work\'s one card');
+        assert.equal(node.dataset.portal, '1');
+        assert.equal(reference(node).getAttribute('aria-label'), 'Open project Second room');
+    } finally { f.close(); }
+});
+
 test('beside a title that already says its name the reference reads Project; its accessible name stays whole (owner 26.10, B)', async () => {
     const f = fixture();
     try {

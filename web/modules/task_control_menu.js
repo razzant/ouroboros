@@ -54,8 +54,21 @@ export function cancelRunEligibility({
         && !REUSABLE_TASK_IDS.has(String(groupId || ''));
 }
 
+// The reconciling reads of answered Resumes (`resumeTaskAction`'s `settle`): not requests out — a menu stays enabled
+// through one and its Stop stays available — but the task stays pending to every Resume door until its own read settles.
+const resumeReads = new Set();
+
+// Whether a Resume door may act now: its caller's current authority and no pending control of its task. A press, a
+// repaint of the button, a settled button and a focus landing read this, never the button's own enabled mark: a census
+// older than the press still says the task can be resumed, and no door may take that for leave to send it again.
+// `resumePending` is the task's one pending fact to a Resume door: a request of its own awaiting its answer
+// (`taskControlBusy`, which a menu reads) or the reconciling read its answered Resume still awaits.
+export const resumePending = (taskId) => taskControlBusy(taskId) || resumeReads.has(String(taskId || '').trim());
+export const resumeEligible = (taskId, canResume) => Boolean(canResume?.()) && !resumePending(taskId);
+
 // The direct button and the menu use the same request owner. Only a work's Resume control enables this door
 // (the server offers it where the Resume door accepts now); the caller re-checks that control on click.
+// `onSettled` is the read that reconciles the press: the task stays pending until it has settled.
 export function createTaskResumeButton(taskId, { canResume, onSettled = () => {} } = {}) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -65,10 +78,11 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
     button.textContent = tr('task.control.resume', 'Resume');
     button.addEventListener('click', async (event) => {
         event.stopPropagation();
-        if (!canResume?.() || taskControlBusy(taskId)) return;
+        if (!resumeEligible(taskId, canResume)) return;
         button.disabled = true;
-        try { await resumeTaskAction(taskId); await onSettled(); }
-        finally { button.disabled = false; }
+        // Settling gives back the authority held now: a connection that dropped meanwhile has withdrawn it.
+        try { await resumeTaskAction(taskId, { settle: onSettled }); }
+        finally { button.disabled = !resumeEligible(taskId, canResume); }
     });
     return button;
 }
@@ -172,8 +186,8 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
  */
 export async function pauseTaskAction(taskId, { pause = pauseTask, toast = showToast, wait = sleep } = {}) {
     const id = String(taskId || '').trim();
-    if (!id || inFlight.has(id)) return false;
-    inFlight.add(id);
+    if (!id || taskControlBusy(id)) return false;
+    const release = holdControl(id);
     try {
         const requestId = pauseRequestId(id);
         let ack = await pause(id, requestId);
@@ -208,7 +222,7 @@ export async function pauseTaskAction(taskId, { pause = pauseTask, toast = showT
         toast(`Pause refused: ${exc?.message || exc}`, 'error');
         return false;
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
@@ -326,10 +340,21 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
         : KEPT_PAUSED;
 }
 
-export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog } = {}) {
+/**
+ * The Resume press, the one owner of its request. The task is PENDING from the press until the answer is known and
+ * the read that reconciles it (`settle`, the door's own re-read of `/api/state`) has settled, applied or failed.
+ * `resumePending` says so to every Resume door, so a census read before the answer (still naming the task resumable)
+ * lends no second press, repaint or focus the leave to send again. The request lease covers only the answer
+ * (`taskControlBusy`, which a menu reads): through the reconciling read a menu stays enabled and its Stop stays
+ * available. Whatever the answer (a refusal, an unknown acknowledgement, a network failure, a declined "Resume
+ * anyway") the pending ends when that read does, never before it and never without it: its own lifetime bounds it
+ * (`readState`), and a closed socket retires it. A second press of the same task while pending sends nothing.
+ */
+export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog,
+    settle = null } = {}) {
     const id = String(taskId || '').trim();
-    if (!id || inFlight.has(id)) return;
-    inFlight.add(id);
+    if (!id || resumePending(id)) return;
+    const release = holdControl(id);
     try {
         const ack = await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
         if (ack === KEPT_PAUSED) return;
@@ -353,7 +378,9 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
             ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`, 'error');
     } finally {
-        inFlight.delete(id);
+        release();
+        resumeReads.add(id);
+        try { await settle?.(); } finally { resumeReads.delete(id); }
     }
 }
 
@@ -384,12 +411,24 @@ export function hurryRequestId(taskId) {
     return hurryRequestIds.get(id);
 }
 
-// One action in flight per task: the menu disables items while a request is
-// awaiting, so a double click cannot race two controls.
-const inFlight = new Set();
+// One action in flight per task: the menu disables items while a request is awaiting its answer, so a double click
+// cannot race two controls. Each pending control is a lease its own operation gives back, and only that one — two
+// Stops of the same task end separately, and none frees a Resume's reconciling read (`resumeReads`). This map is
+// the ONE pending fact a menu reads: every door (a button's press and repaint, a focus landing, a menu opened later)
+// reads `taskControlBusy`, a Resume door `resumePending`; none keeps its own mark.
+const inFlight = new Map();
+
+function holdControl(taskId) {
+    const id = String(taskId || '').trim();
+    inFlight.set(id, (inFlight.get(id) || 0) + 1);
+    return () => {
+        const left = (inFlight.get(id) || 1) - 1;
+        if (left > 0) inFlight.set(id, left); else inFlight.delete(id);
+    };
+}
 
 export function taskControlBusy(taskId) {
-    return inFlight.has(String(taskId || '').trim());
+    return Boolean(inFlight.get(String(taskId || '').trim()));
 }
 
 /**
@@ -402,11 +441,11 @@ export function taskControlBusy(taskId) {
  */
 export async function requestHurry(taskId) {
     const id = String(taskId || '').trim();
-    inFlight.add(id);
+    const release = holdControl(id);
     try {
         return await hurryTask(id, hurryRequestId(id));
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
@@ -450,7 +489,7 @@ export async function requestStop(taskId, action) {
             || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
         pendingStopActions.set(key, `stop-${uuid}`);
     }
-    inFlight.add(id);
+    const release = holdControl(id);
     try {
         const result = await cancelTask(id, { cascade: true, stopPolicy: stopPolicyFor(action),
             stopActionId: pendingStopActions.get(key) });
@@ -458,7 +497,7 @@ export async function requestStop(taskId, action) {
         pendingStopActions.delete(key);
         return result;
     } finally {
-        inFlight.delete(id);
+        release();
     }
 }
 
