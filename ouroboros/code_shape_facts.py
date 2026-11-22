@@ -3,8 +3,9 @@
 Pure functions over source text. ``review.diff_pulse`` reads both sides of each changed Python
 file and the tree's module names; ``pulse_line`` states what the change added and removed, a
 fact for the mind and never a gate (BIBLE P5, P7; DEVELOPMENT "Module Size & Complexity").
-A name resolves in its lexical scope: the module's bindings, then each enclosing function's own
-(a parameter or other assignment hides an outer name; ``importlib.import_module("literal")``
+A name resolves in its lexical scope: the module's bindings, then each enclosing function's own,
+each scope holding a name's last binding in source order (a parameter or other assignment hides an
+outer name, a comprehension's targets bind inside it alone; ``importlib.import_module("literal")``
 binds that module). Counted per file and side:
 
 - a module handle: a module-level zero-argument function whose body, after a docstring, is one
@@ -49,6 +50,7 @@ _LINE_FACTS = {False: (("module handles", "handle"), ("calls through them", "cal
                True: (("patched product-module names", "patch"), ("git init call sites", "git init"))}
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = (*_DEFS, ast.ClassDef, ast.Lambda)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 # What a scope binds a name to: ("import", dotted name) by an import or a literal importlib call,
 # ("handle", name) a module handle, ("git", name) a Git helper or ("run", name) a command runner the
 # module defines; None any other binding, which hides an outer one.
@@ -109,13 +111,16 @@ def _is_handle(node: ast.stmt, path: str, modules: frozenset[str]) -> bool:
 
 
 def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
-    """The nodes of one scope, without the bodies of the functions, classes and lambdas it defines."""
-    nodes, pending = [], list(scope.body) if isinstance(scope.body, list) else [scope.body]
+    """The nodes of one scope in source order, without the bodies of the functions, classes and lambdas it
+    defines or the comprehensions it holds (they bind their own targets; a first iterable runs here)."""
+    nodes, pending = [], list(reversed(scope.body if isinstance(scope.body, list) else [scope.body]))
     while pending:
         node = pending.pop()
         nodes.append(node)
-        if not isinstance(node, _SCOPES):
-            pending.extend(ast.iter_child_nodes(node))
+        if isinstance(node, _COMPREHENSIONS):
+            pending.append(node.generators[0].iter)
+        elif not isinstance(node, _SCOPES):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
     return nodes
 
 
@@ -153,27 +158,27 @@ Mark = Callable[[ast.AST, ast.AST, Mapping[str, Binding]], Binding]
 
 
 def _own_bindings(scope: ast.AST, outer: Mapping[str, Binding], path: str, mark: Mark) -> dict[str, Binding]:
-    """The names one scope binds itself (its parameters, imports, assignments and definitions);
-    ``mark(scope, function, seen)`` binds a function that is more than a name hiding an outer one."""
-    nodes = _scope_nodes(scope)
+    """The names one scope binds itself (its parameters, imports, assignments, definitions and other
+    targets), each as its last binding in source order leaves it: a rebinding to a value the module
+    cannot name hides an earlier import; ``mark(scope, function, seen)`` binds a function that is more
+    than a name."""
     args = getattr(scope, "args", None)
     names: dict[str, Binding] = {} if args is None else {
         arg.arg: None for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg) if arg}
-    for node in nodes:
-        name = (node.id if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-                else node.name if isinstance(node, (*_DEFS, ast.ClassDef, ast.ExceptHandler)) else None)
-        if name:
-            names[name] = None
-    names.update((bound, ("import", target)) for node in nodes if isinstance(node, (ast.Import, ast.ImportFrom))
-                 for target, bound in _bindings(node, path))
-    seen = collections.ChainMap(names, outer)
-    for node in nodes:
-        if isinstance(node, _DEFS) and (binding := mark(scope, node, seen)):
-            names[node.name] = binding
+    seen, assigned = collections.ChainMap(names, outer), set()
+    for node in _scope_nodes(scope):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((bound, ("import", target)) for target, bound in _bindings(node, path))
         elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
             value = _assigned(node.value, seen)
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names.update((target.id, value) for target in targets if value is not None and isinstance(target, ast.Name))
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name):
+                    names[target.id] = value
+                    assigned.add(id(target))
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and id(node) not in assigned:
+            names[node.id] = None
+        elif isinstance(node, (*_DEFS, ast.ClassDef, ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names[node.name] = mark(scope, node, seen) if isinstance(node, _DEFS) else None
     return names
 
 
@@ -194,6 +199,13 @@ def _scoped(tree: ast.Module, path: str, mark: Mark) -> Iterator[tuple[ast.AST, 
             inner = seen.new_child(_own_bindings(node, seen, path, mark))
             outside = [*node.decorator_list, *node.bases, *node.keywords]
             pending += [(child, seen, nested) for child in outside] + [(child, inner, nested) for child in node.body]
+        elif isinstance(node, _COMPREHENSIONS):  # its targets bind inside it alone; its first iterable runs outside
+            first, *rest = node.generators
+            inner = nested.new_child({name.id: None for generator in node.generators
+                                      for name in ast.walk(generator.target) if isinstance(name, ast.Name)})
+            within = [child for child in ast.iter_child_nodes(node) if not isinstance(child, ast.comprehension)]
+            pending += [(first.iter, seen, nested)] + [(child, inner, inner) for child in
+                                                       (*within, first.target, *first.ifs, *rest)]
         else:
             pending += [(child, seen, nested) for child in ast.iter_child_nodes(node)]
 

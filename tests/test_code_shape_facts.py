@@ -192,6 +192,46 @@ def test_a_test_source_counts_patched_product_names_and_git_init_call_sites():
     assert _shape("def _loop():\n    from ouroboros import loop\n    return loop\n", path="tests/test_a.py") == {}
 
 
+def test_a_name_resolves_in_its_scope_in_source_order():
+    """A comprehension binds its targets inside itself alone; a scope's bindings take effect in source order,
+    and a rebinding to a value the module cannot name (an assignment, a match capture) hides an import."""
+    shape = _shape('''
+        import importlib
+        import subprocess
+
+        from ouroboros import config
+        from ouroboros import loop
+
+        real_run = subprocess.run
+
+
+        def run(cmd):  # a command runner through the alias bound above it
+            return real_run(cmd)
+
+
+        def test_x(monkeypatch):
+            monkeypatch.setattr(config, "DATA_DIR", None)
+            [config for config in ()]  # the comprehension's own target
+            [monkeypatch.setattr(config, "LOADED", n) for n in range(2)]  # the enclosing binding, inside one
+            [monkeypatch.setattr(item, "x", 1) for item in (loop,)]  # its target is no module
+            m = importlib.import_module("ouroboros.loop")
+            m2 = m
+            monkeypatch.setattr(m2, "LIMIT", 3)
+            run(["git", "init"])
+
+
+        def test_rebound(monkeypatch, value):
+            from ouroboros import loop
+            loop = object()
+            monkeypatch.setattr(loop, "STEP", 3)
+            match value:
+                case config:
+                    monkeypatch.setattr(config, "OTHER", 1)
+    ''', path="tests/test_scope.py")
+    assert shape == {("patch", "ouroboros.config.DATA_DIR"): 1, ("patch", "ouroboros.config.LOADED"): 1,
+                     ("patch", "ouroboros.loop.LIMIT"): 1, ("git init",): 1}
+
+
 def test_the_line_states_what_the_change_added_and_removed_and_names_what_it_could_not_read():
     leaf_before = "def _loop():\n    from ouroboros import loop\n    return loop\n\n\ndef f():\n    _loop().a\n"
     leaf_after = leaf_before + "    _loop().b\n    _loop().b\n"
