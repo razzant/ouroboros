@@ -1,23 +1,31 @@
-"""What the model is shown and may call, pinned per actor context (п.84, step 1).
+"""What the model is shown and may call, pinned per actor context (п.84).
 
 One catalog state (this tree's built-ins, one live extension tool, one pinned and
 one unpinned MCP server) is read through every visibility reader of the registry
-in a matrix of contexts. Per context the fixture keeps the three arrays a request
-is built from: the canonical array (``schemas()``: each schema as ``name@hash`` of
-its bytes) with its omission rows; the initial selection the loop really starts
-from (``tool_policy.initial_tool_schemas``) for Nano, Low and Max; and what each
+in a matrix of contexts. Per context the record keeps the decisions a request is
+built from, never schema bytes: the canonical array (``schemas()``, names in
+order) with its omission rows; the initial selection the loop really starts from
+(``tool_policy.initial_tool_schemas``) for Nano, Low and Max; and what each
 transport is passed after its route restriction (``fit_tool_schemas_to_limit``
-under the route's own ``tool_schema_limit``, then the transport's own projection:
+under the route's own ``tool_schema_limit``, then the transport's own order:
 OpenAI-compatible and Anthropic sort by name, local and Claudexor keep the
-registry order) as names plus one digest of the exact bytes. Beside them:
-``available_tools``, ``policy_hidden_reason`` of every name it answers for,
-``get_schema_by_name`` of every registered built-in and both dynamic surfaces, and
-``callable_rows``. A consciousness wake also pins equality with an owner turn and
-the dispatch refusal of a withheld name (owner decision В31=B: it sees Main's
-tools; a call outside its level is refused).
+registry order) with what it left out. Beside them: ``available_tools``,
+``policy_hidden_reason`` of every name it answers for, which names
+``get_schema_by_name`` does not answer or answers otherwise than the canonical
+array, ``callable_rows``, the parameter names and narrowed enums of every tool
+whose call schema differs from Main's (narrowing in ``_schema_for_entry`` is a
+visibility decision), and whether a child's substituted description replaced the
+entry's. A consciousness wake also pins equality with an owner turn and the
+dispatch refusal of a withheld name (owner decision В31=B). A description edit
+does not move the record.
 
-A deliberate change of what any context sees regenerates the fixture with
-``OURO_TOOL_VISIBILITY_GOLDEN=write`` (then review the diff); an unintended one
+Byte identity was proven once, for the change that unified the five readers:
+the record of that time held every schema's bytes, was written on the unchanged
+base (b9513746d) and stayed green, untouched, through the unification
+(165089dc6). What stays pinned is the decisions.
+
+A deliberate change of what any context sees or may call regenerates the record
+with ``OURO_TOOL_VISIBILITY_GOLDEN=write``; name it in the PR. An unintended one
 fails here with the arrays that moved.
 """
 
@@ -29,7 +37,6 @@ import hashlib
 import json
 import os
 import pathlib
-from collections import Counter
 
 import pytest
 
@@ -53,6 +60,8 @@ ROUTES = {
 }
 # Names discovery is asked about besides the registered built-ins.
 EXTRA_NAMES = ("definitely_not_a_tool", "calendar")
+# Tools whose description a child profile replaces (``ToolRegistry._schema_for_entry``).
+CHILD_DESCRIBED = ("verify_and_record", "browse_page", "browser_action", "review_change")
 
 
 def _h(value) -> str:
@@ -95,7 +104,7 @@ def _presence_contract() -> dict:
 
 def _contexts(root: pathlib.Path) -> dict:
     worktree = root / "wt"
-    worktree.mkdir(exist_ok=True)
+    worktree.mkdir(parents=True, exist_ok=True)
     main = {"task_id": "turn-1", "is_direct_chat": True, "task_metadata": {"client_message_id": "cm-1"}}
     readonly = {"task_id": "child-r", "task_metadata": {"delegation_role": "subagent"},
                 "task_constraint": TaskConstraint(mode="local_readonly_subagent")}
@@ -163,7 +172,6 @@ def catalog(name: str, spec: dict, root: pathlib.Path):
     from ouroboros import extension_registry_state as state
     from ouroboros.tools import extension_dispatch, github, search
 
-    spec = dict(spec)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
         mp.setenv("OUROBOROS_CONTEXT_MODE", "max")
@@ -215,28 +223,35 @@ def catalog(name: str, spec: dict, root: pathlib.Path):
         yield registry
 
 
-def _canonical_rows(schemas) -> list:
-    return [f"{s['function']['name']}@{_h(s)[:10]}" for s in schemas]
-
-
 def _names(schemas) -> list:
     return [s["function"]["name"] for s in schemas]
 
 
-def _transport_bytes(transport: str, schemas: list) -> list:
+def _transport_order(transport: str, schemas: list) -> list:
+    """The tool names in the order each transport sends them, from the transport's own projection."""
     from ouroboros.llm import LLMClient
 
     if transport == "openai_direct":
-        return LLMClient._sanitize_chat_completion_tools(schemas)
-    if transport == "anthropic":
-        return LLMClient._build_anthropic_tools(schemas)
-    if transport == "local":  # llm_local: only cache marks are dropped, the registry order is sent
-        return [{k: v for k, v in tool.items() if k != "cache_control"} for tool in schemas]
-    return copy.deepcopy(schemas)  # llm_claudexor deep-copies the array as built
+        sent = LLMClient._sanitize_chat_completion_tools(schemas)
+    elif transport == "anthropic":
+        sent = LLMClient._build_anthropic_tools(schemas)
+    elif transport == "local":  # llm_local: only cache marks are dropped, the registry order is sent
+        sent = [{k: v for k, v in tool.items() if k != "cache_control"} for tool in schemas]
+    else:
+        sent = copy.deepcopy(schemas)  # llm_claudexor deep-copies the array as built
+    return [tool.get("name") or tool["function"]["name"] for tool in sent]
+
+
+def _shape(schema: dict) -> dict:
+    """What a call schema lets the model ask for: its parameter names and every enum, never its prose."""
+    properties = (schema["function"].get("parameters") or {}).get("properties") or {}
+    return {"params": sorted(properties),
+            "enums": {key: list(value["enum"]) for key, value in sorted(properties.items())
+                      if isinstance(value, dict) and isinstance(value.get("enum"), list)}}
 
 
 def snapshot(registry: ToolRegistry) -> dict:
-    """Every visibility answer of one registry, in the fixture's compact form."""
+    """Every visibility answer of one registry; ``shapes`` stay whole here (the record keeps Main's differences)."""
     from ouroboros.provider_models import tool_schema_limit
     from ouroboros.tool_policy import fit_tool_schemas_to_limit, initial_tool_schemas
 
@@ -249,35 +264,51 @@ def snapshot(registry: ToolRegistry) -> dict:
     passed = {}
     for transport, (model, use_local) in ROUTES.items():
         fitted, left_out = fit_tool_schemas_to_limit(own, tool_schema_limit(model, use_local=use_local))
-        sent = _transport_bytes(transport, fitted)
-        passed[transport] = {"names": [t.get("name") or t["function"]["name"] for t in sent],
-                             "left_out": list(left_out), "bytes": _h(sent)[:16]}
-    canonical_hash = {s["function"]["name"]: _h(s)[:10] for s in canonical}
+        passed[transport] = {"names": _transport_order(transport, fitted), "left_out": list(left_out)}
+    by_canonical = {s["function"]["name"]: s for s in canonical}
     asked = [*registry._entries, _ext_name(), _legacy_name(), MCP_PINNED, MCP_LAZY, *EXTRA_NAMES]
-    by_name = {}
-    for name in asked:
-        schema = registry.get_schema_by_name(name)
-        if schema is None:
-            by_name[name] = None
-        elif canonical_hash.get(name) != _h(schema)[:10]:
-            by_name[name] = _h(schema)[:10]
+    answers = {name: registry.get_schema_by_name(name) for name in asked}
     hidden = {name: reason for name in asked if (reason := registry.policy_hidden_reason(name))}
     rows = registry.callable_rows()
     return {
-        "canonical": _canonical_rows(canonical),
+        "canonical": _names(canonical),
         "omissions": omissions,
         "initial": {mode: _names(schemas) for mode, schemas in initial.items()},
         "passed": passed,
         "available_tools": list(registry.available_tools()),
         "policy_hidden_reason": hidden,
-        # Only answers that differ from the canonical array: None (not found or hidden) or other bytes.
-        "get_schema_by_name": {name: value for name, value in by_name.items()
-                               if value is not None or name in canonical_hash},
-        "get_schema_by_name_absent": sorted(name for name, value in by_name.items()
-                                            if value is None and name not in canonical_hash),
+        # Named discovery agrees with the canonical array: shown names answer the same schema, others none.
+        "get_schema_by_name_absent": sorted(name for name, schema in answers.items()
+                                            if schema is None and name not in by_canonical),
+        "get_schema_by_name_differs": sorted(name for name, schema in answers.items()
+                                             if name in by_canonical and schema != by_canonical[name]
+                                             or name not in by_canonical and schema is not None),
         # A built-in row is its name; an MCP row keeps its raw name and marks.
         "callable_rows": [row["name"] if set(row) == {"name"} else row for row in rows],
+        "shapes": {name: _shape(schema) for name, schema in by_canonical.items()},
+        "child_described": {name: registry._entries[name].schema.get("description")
+                            != by_canonical[name]["function"].get("description")
+                            for name in CHILD_DESCRIBED if name in by_canonical},
     }
+
+
+def _against_main(records: dict) -> dict:
+    """The record form: each tool's call schema only where it differs from Main's (params, changed enums)."""
+    main = records["main"]["shapes"]
+    result = {}
+    for name, record in records.items():
+        record = dict(record)
+        shapes = record.pop("shapes")
+        narrowed = {}
+        for tool, shape in shapes.items():
+            if shape == main.get(tool):
+                continue
+            usual = (main.get(tool) or {}).get("enums", {})
+            changed = {key: values for key, values in shape["enums"].items() if usual.get(key) != values}
+            narrowed[tool] = {"params": shape["params"], **({"enums": changed} if changed else {})}
+        record["narrowed_against_main"] = narrowed
+        result[name] = record
+    return result
 
 
 def _diff(expected: dict, actual: dict) -> str:
@@ -298,7 +329,7 @@ def _diff(expected: dict, actual: dict) -> str:
 def _flatten(record: dict, prefix: str = "") -> dict:
     flat = {}
     for key, value in record.items():
-        if isinstance(value, dict) and key not in ("policy_hidden_reason", "get_schema_by_name"):
+        if isinstance(value, dict) and key not in ("policy_hidden_reason", "narrowed_against_main", "child_described"):
             flat.update(_flatten(value, f"{prefix}{key}."))
         else:
             flat[f"{prefix}{key}"] = value
@@ -315,15 +346,7 @@ def _snapshots(root: pathlib.Path, names=None) -> dict:
 
 
 def _pool(records: dict) -> dict:
-    """The stored form, made for review diffs: each schema's usual bytes once (``schema_hashes``), a
-    context's canonical array as names plus only the hashes that differ there, and every other array
-    stored once by the digest of its content (a record refers to it as ``@digest``). A changed schema
-    description then moves one ``schema_hashes`` line and the transports' byte digests."""
-    counts = Counter(item for record in records.values() for item in record["canonical"])
-    usual: dict = {}
-    for item, _count in counts.most_common():
-        name, _, digest = item.rpartition("@")
-        usual.setdefault(name, digest)
+    """The stored form: every array stored once by the digest of its content; a record refers to it as ``@digest``."""
     arrays: dict = {}
 
     def put(value):
@@ -338,18 +361,12 @@ def _pool(records: dict) -> dict:
             return {key: walk(value, depth + 1) for key, value in node.items()}
         return put(node)
 
-    contexts = {}
-    for name, record in records.items():
-        record = dict(record)
-        split = [item.rpartition("@") for item in record.pop("canonical")]
-        record["canonical_names"] = [tool for tool, _, _digest in split]
-        record["canonical_bytes"] = {tool: digest for tool, _, digest in split if usual[tool] != digest}
-        contexts[name] = {key: walk(value, 1) for key, value in record.items()}
-    return {"schema_hashes": dict(sorted(usual.items())), "arrays": arrays, "contexts": contexts}
+    contexts = {name: {key: walk(value, 1) for key, value in record.items()} for name, record in records.items()}
+    return {"arrays": arrays, "contexts": contexts}
 
 
 def _expand(pooled: dict) -> dict:
-    arrays, usual = pooled["arrays"], pooled["schema_hashes"]
+    arrays = pooled["arrays"]
 
     def walk(node):
         if isinstance(node, str) and node.startswith("@") and node[1:] in arrays:
@@ -358,17 +375,11 @@ def _expand(pooled: dict) -> dict:
             return {key: walk(value) for key, value in node.items()}
         return node
 
-    result = {}
-    for name, record in pooled["contexts"].items():
-        record = walk(record)
-        names, own = record.pop("canonical_names"), record.pop("canonical_bytes")
-        record["canonical"] = [f"{tool}@{own.get(tool, usual[tool])}" for tool in names]
-        result[name] = record
-    return result
+    return {name: walk(record) for name, record in pooled["contexts"].items()}
 
 
 def test_what_every_context_sees_and_may_call_is_pinned(tmp_path):
-    actual = _snapshots(tmp_path)
+    actual = _against_main(_snapshots(tmp_path))
     if WRITE:
         FIXTURE.write_text(json.dumps(_pool(actual), ensure_ascii=False, indent=0, sort_keys=True) + "\n",
                            encoding="utf-8")
@@ -382,15 +393,16 @@ def test_what_every_context_sees_and_may_call_is_pinned(tmp_path):
 
 @pytest.mark.parametrize("level", ["act", "observe", "full"])
 def test_a_wake_sees_an_owner_turns_tools_and_is_refused_at_the_call(tmp_path, level):
-    """В31=B on the real arrays: the wake's request carries Main's schemas, selection and bytes; its level binds at dispatch."""
+    """В31=B on the real arrays: the wake's request carries Main's schemas and selection; its level binds at dispatch."""
     main = _snapshots(tmp_path, {"main"})["main"]
     name = f"consciousness_{level}"
     with catalog(name, _contexts(tmp_path)[name], tmp_path) as wake_registry:
         wake = snapshot(wake_registry)
-        for key in ("canonical", "omissions", "initial", "passed", "available_tools", "get_schema_by_name",
-                    "get_schema_by_name_absent", "policy_hidden_reason"):
+        for key in ("canonical", "omissions", "initial", "passed", "available_tools", "get_schema_by_name_absent",
+                    "get_schema_by_name_differs", "policy_hidden_reason", "shapes", "child_described"):
             assert wake[key] == main[key], key
         withheld = set(ca.disabled_tools_for(level))
+
         def callable_names(record):
             return {row if isinstance(row, str) else row["name"] for row in record["callable_rows"]}
 
@@ -403,7 +415,31 @@ def test_a_wake_sees_an_owner_turns_tools_and_is_refused_at_the_call(tmp_path, l
         assert "RESOURCE_CONSTRAINT_BLOCKED" in refusal and "toggle_evolution" in refusal
 
 
-def test_the_fixture_is_compact():
-    """Names, order and a hash per schema, not dumps of the schemas themselves."""
+def test_the_record_holds_decisions_not_bytes():
+    """Names, order, reasons and parameter shapes: no schema prose and no byte digests, so a description edit
+    does not move it."""
+    text = FIXTURE.read_text(encoding="utf-8")
     assert FIXTURE.stat().st_size < 200_000
-    assert "\"description\"" not in FIXTURE.read_text(encoding="utf-8")
+    assert "\"description\"" not in text and "schema_hashes" not in text and "\"bytes\"" not in text
+
+
+
+def test_a_description_edit_does_not_move_the_record(tmp_path, monkeypatch):
+    """The record pins decisions: rewording every tool's description, as most tool changes do, leaves it as it was,
+    child-profile substitutions included."""
+    from dataclasses import replace
+
+    from ouroboros.tools.tool_catalog import ToolCatalog
+
+    names = {"main", "readonly_helper", "acting_helper"}
+    before = _against_main(_snapshots(tmp_path / "before", names))
+    real = ToolRegistry._load_modules
+
+    def reworded(self):
+        loaded = real(self)
+        return ToolCatalog((loaded.origin_for(name), replace(entry, schema={
+            **entry.schema, "description": f"{entry.schema.get('description', '')} Reworded."}))
+            for name, entry in loaded.entries.items())
+
+    monkeypatch.setattr(ToolRegistry, "_load_modules", reworded)
+    assert _against_main(_snapshots(tmp_path / "after", names)) == before
