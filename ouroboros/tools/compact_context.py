@@ -19,8 +19,8 @@ _OBSERVATION_LOCK = threading.Lock()  # Only exchanges observation and map refer
 _NOTE_REQUIRED = ("authored_note_required: supply your own working_note "
                   "(keep_unit_ids or keep_last_n select what stays raw, fold_last_n what folds); "
                   "no helper writes it for you.")
-# What a fold's own call carries once its note is written (``point_call_at_note``); ``_points_at`` recognises it.
-NOTE_POINTER = "[in note {unit_id} above]"
+# How the host's row after a context view begins (``loop_round_limits._run_authored_context_view`` writes it).
+RECEIPT_ROW_PREFIX = "[Context view receipt]"
 
 
 def _own_call_arguments(messages: list, index: int):
@@ -41,30 +41,6 @@ def _own_call_arguments(messages: list, index: int):
     return arguments if isinstance(arguments, dict) else None
 
 
-def _points_at(messages: list, index: int, note_id) -> bool:
-    arguments = _own_call_arguments(messages, index)
-    return bool(note_id) and arguments is not None and arguments.get("working_note") == NOTE_POINTER.format(
-        unit_id=note_id)
-
-
-def point_call_at_note(messages: list, receipt: dict, working_note) -> list:
-    """After an applied authored fold, the view with the fold's own call, when it directly follows the note this
-    fold wrote and repeats ``working_note``, carrying ``NOTE_POINTER`` in that argument instead; else unchanged."""
-    from ouroboros.context_compaction import _capsule_metadata
-
-    if receipt.get("status") != "applied" or not receipt.get("selection_fingerprint"):
-        return messages
-    note_id = "view:" + receipt["selection_fingerprint"]
-    at = next((i for i, row in enumerate(messages) if (_capsule_metadata(row)[1] or {}).get("unit_id") == note_id), None)
-    arguments = _own_call_arguments(messages, at + 1) if at is not None else None
-    if arguments is None or arguments.get("working_note") != working_note:
-        return messages
-    row = copy.deepcopy(messages[at + 1])
-    arguments["working_note"] = NOTE_POINTER.format(unit_id=note_id)
-    row["tool_calls"][0]["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
-    return [*messages[:at + 1], row, *messages[at + 2:]]
-
-
 def _note_meta(row) -> dict | None:
     """A capsule row's own metadata, read without validating or hashing it ({} when unreadable); None otherwise."""
     content = row.get("content") if row.get("role") in {"assistant", "user"} else None
@@ -73,39 +49,74 @@ def _note_meta(row) -> dict | None:
     return (blocks[0]["_context_capsule"] if isinstance(blocks[0]["_context_capsule"], dict) else {}) if blocks else None
 
 
-def standing_rows(messages: list, released=()) -> dict:
-    """Positions that stand through an ordinary fold, each with the position of the note whose rows they are (None
-    for the start). One walk over the rows; nothing is hashed (it runs whenever a round's facts row is written).
+def _note_body(row) -> str:
+    """A note's text after its label line, as ``context_compaction._authored_view`` reads it ("" when unreadable)."""
+    content = row.get("content")
+    text = content[0].get("text") if isinstance(content, list) and content and isinstance(content[0], dict) else None
+    return text.partition("\n")[2] if isinstance(text, str) else ""
 
-    The start: every row between the assignment and the first assistant answer (a note is none), typed or not, except
-    review-history sources (``_review_source_ref``): captured dispute bodies the mind folds by an ordinary fold, which
-    records its selected review view (``review_history_view.capture_review_history_messages``). Then, in order, a note (a capsule that is not a host source view) or a row no fold selects (owner words, a row that is no
-    unit) continues the walk; a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every
-    row from that call to the next assistant row, the whole input of the request sent after that fold, unless its
-    position is in ``released``; anything a full fold would take (a tool unit, prose, a host source view) ends it."""
+
+def _handed_over(row) -> bool:
+    """An account its producer hands over for the mind to fold (typed keys, presence only): a review-history source,
+    a predecessor's notes or a late answer's asker notes."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.context_compaction import REVIEW_HISTORY_MESSAGE_KEY
+    from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
+
+    return REVIEW_HISTORY_MESSAGE_KEY in row or row.get(HOST_CONTEXT_KIND_KEY) in {PREDECESSOR_NOTES_NAME,
+                                                                                   LATE_ANSWER_NOTES_NAME}
+
+
+def standing_rows(messages: list, released=()) -> dict:
+    """Positions that stand through an ordinary fold (default selectors), each with the position of the note whose
+    own rows they are (None for the start). One walk; nothing is hashed and only the calls the walk reaches are
+    parsed (it runs whenever a round's facts row is written).
+
+    The start: every row between the assignment and the model's first answer (or a host source view, whichever comes
+    first), typed or not, except capsules and the accounts handed over for the mind to fold (``_handed_over``), which
+    an ordinary fold takes as before. Then, in order: a note (a capsule that is not a host source view) is
+    remembered by its text unless its position is in ``released``; a start row, owner words or a row that is no unit
+    continue the walk; a lone ``compact_context`` call with its result whose ``working_note`` is a remembered note's
+    text is that note's own call: when the rows after its result, up to the next assistant row, capsule or handed-over
+    account, hold the host's receipt row (``RECEIPT_ROW_PREFIX``), the call, its result and those rows (the input of
+    the request sent after that fold) stand, owned by that note. A fold that left something foldable between its note
+    and its call, or shared its row with another call, leaves nothing that stands, and neither does a reviewer
+    session's fold, whose notice is not the host's receipt row. Anything else a full fold takes (a tool unit, prose,
+    a host source view, a handed-over account) ends the walk."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS
-    from ouroboros.context_compaction import REVIEW_HISTORY_MESSAGE_KEY, _is_dialogue_prose_row, _review_source_ref
+    from ouroboros.context_compaction import _is_dialogue_prose_row
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
     if first is None:
         return {}
-    end = next((i for i in range(first + 1, len(messages)) if messages[i].get("role") == "assistant"
-                and _note_meta(messages[i]) is None), len(messages))
-    standing = {i: None for i in range(first + 1, end) if _note_meta(messages[i]) is None
-                and not (REVIEW_HISTORY_MESSAGE_KEY in messages[i] and _review_source_ref(messages[i]))}
-    i = first + 1
+    end = next((i for i in range(first + 1, len(messages)) if (_note_meta(messages[i]) or {}).get("retention")
+                == "source_view" or messages[i].get("role") == "assistant" and _note_meta(messages[i]) is None),
+               len(messages))
+    standing = {i: None for i in range(first + 1, end)
+                if _note_meta(messages[i]) is None and not _handed_over(messages[i])}
+    notes, i = {}, first + 1
     while i < len(messages):
         row, meta = messages[i], _note_meta(messages[i])
-        if meta is not None and meta.get("retention") != "source_view":
-            if i not in released and _points_at(messages, i + 1, meta.get("unit_id")):
-                stop = next((j for j in range(i + 2, len(messages)) if messages[j].get("role") == "assistant"),
-                            len(messages))
-                standing.update(dict.fromkeys(range(i + 1, stop), i))
+        if meta is not None:
+            if meta.get("retention") == "source_view":
+                break
+            if i not in released and _note_body(row).strip():
+                notes[_note_body(row)] = i
+        elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS):
+            calls = row.get("role") == "assistant" and bool(row.get("tool_calls"))
+            if _handed_over(row) or calls or _is_dialogue_prose_row(row):
+                arguments = (_own_call_arguments(messages, i) if calls and notes else None) or {}
+                note = arguments.get("working_note")
+                owner = notes.get(note.strip()) if isinstance(note, str) and note.strip() else None
+                stop = owner is not None and next((j for j in range(i + 2, len(messages)) if messages[j].get(
+                    "role") == "assistant" or _note_meta(messages[j]) is not None or _handed_over(messages[j])),
+                    len(messages))
+                if owner is None or not any(str(messages[j].get("content") or "").startswith(RECEIPT_ROW_PREFIX)
+                                            for j in range(i + 2, stop)):
+                    break  # what a full fold takes: no later rows stand
+                standing.update(dict.fromkeys(range(i, stop), owner))
                 i = stop
                 continue
-        elif not (i in standing or row.get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS or meta is None and not (
-                row.get("role") == "assistant" and row.get("tool_calls") or _is_dialogue_prose_row(row))):
-            break  # what a full fold takes: no later anchor stands
         i += 1
     return standing
 
@@ -533,8 +544,9 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     words are listed but never eligible. Earlier notes leave only when ``replace_note_ids``
     names them; host source views and emergency records follow ``keep_unit_ids``.
     ``keep_last_n`` keeps every unnamed capsule; ``fold_last_n`` folds from its N-th most recent
-    tool unit onward under a non-blank note. Without an explicit non-empty ``keep_unit_ids`` list the rows that stand
-    (``standing_rows``) stay; a replaced note releases its own. Standalone restoration
+    tool unit onward and needs a non-blank note. Without an explicit non-empty ``keep_unit_ids`` list
+    the rows that stand (``standing_rows``) stay; a replaced note releases the rows it owns and no
+    other note's. No call the model sent is rewritten. Standalone restoration
     keeps current units/schemas and authors no note. A count-only request (no note, no
     restore) is refused: no helper writes the note.
     """
@@ -612,7 +624,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             + " Current context is unchanged."))
     rows, literal = observed["messages"], bool(keep_unit_ids)  # an explicit non-empty list is the mind's whole choice
     units = context_units(rows, scope="dialogue")
-    standing = standing_rows(rows, released={unit.start for unit in units if unit.unit_id in named})
+    whole, named_at = standing_rows(rows), {unit.start for unit in units if unit.unit_id in named}
+    standing = {i: owner for i, owner in whole.items() if owner not in named_at}  # a replaced note releases its own
     stand = _standing_unit_ids(units, standing, named)
     if fold_last_n is not None:
         # The newest N completed tool units that do not stand fold, with everything from the first of them
@@ -634,7 +647,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
                          and (unit.start >= anchor or unit_kind(rows, unit) == "capsule")]
     elif keep_unit_ids is None and named:
         # Omitted selectors keep everything, except the own rows of a note this one replaces.
-        released = set(standing_rows(rows)) - set(standing)
+        released = set(whole) - set(standing)
         keep_unit_ids = [unit.unit_id for unit in units if unit.unit_id not in named
                          and not any(i in released for i in range(unit.start, unit.end + 1))]
         keep_unit_ids = None if len(keep_unit_ids) + len(named) == len(units) else keep_unit_ids
@@ -672,9 +685,11 @@ def get_tools() -> List[ToolEntry]:
                     "the keep selection; replacement occupies the first replaced unit. "
                     "Batch usefully, shorter than sources: rewriting loses signed reasoning from the earliest change. "
                     "How much is re-read after a fold depends on the nearest cache boundary before its first change. "
-                    "Round facts report the measured re-read. Start rows and a full fold's own rows stand: an "
-                    "explicit keep_unit_ids list takes them, replacing that fold's note releases its rows. "
-                    "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
+                    "Round facts report the measured re-read. Through folds stand the first request's host rows "
+                    "and each full fold's own call, result and receipt; a non-empty keep_unit_ids list is literal "
+                    "and takes what it omits; replacing a fold's note releases its rows. Native review ignores "
+                    "schema_names, review_notes and review_transfers, and its folds keep no rows of their own; "
+                    "its inspection reports "
                     "window evidence, serialized characters and previous input, never current free tokens."
                 ),
                 "parameters": {

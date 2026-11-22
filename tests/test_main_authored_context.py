@@ -639,11 +639,10 @@ def _plain(rows):
 
 def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(main_loop):
     """Test 1 of the cheap-folds order: a full fold leaves the request's start rows byte-identical and writes its note
-    after them; its own call carries a pointer to the note, whose capsule holds the exact text; the next full fold
+    after them; its own call keeps the arguments the model sent, the note's exact text included; the next full fold
     leaves every row of the request sent after the first fold, up to its last row before the model's answer, as
     that request carried it, and writes its note after them."""
     from ouroboros.context_compaction import _capsule_metadata
-    from ouroboros.tools.compact_context import NOTE_POINTER
 
     f = main_loop
     first_note, second_note = "The first read holds the conclusion.", "The second read agrees with the first."
@@ -659,8 +658,7 @@ def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(mai
     assert at == len(start) and after_first[:at] == start  # the start's host rows stand, the note follows them
     own = after_first[at + 1]
     assert own["tool_calls"][0]["id"] == "fold-1"
-    assert json.loads(own["tool_calls"][0]["function"]["arguments"]) == {
-        "working_note": NOTE_POINTER.format(unit_id=meta["unit_id"]), "keep_unit_ids": []}
+    assert json.loads(own["tool_calls"][0]["function"]["arguments"]) == {"working_note": first_note, "keep_unit_ids": []}
     assert after_first[at]["content"][0]["text"].endswith("\n" + first_note)
     assert after_second[:len(after_first)] == after_first  # that whole request stands, superseded facts included
     second = after_second[len(after_first)]

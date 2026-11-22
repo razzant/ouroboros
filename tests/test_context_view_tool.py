@@ -575,9 +575,9 @@ def test_a_receipt_transfer_that_does_not_complete_keeps_the_round_and_names_its
     assert "source_retention" in ctx._round_prologue["sections_ms"], ctx._round_prologue
 
 
-# --- cheap folds: what stands through a fold, the own call's pointer, the tail selector ------------------------------
+# --- cheap folds: what stands through a fold (recognised by the note's text), the tail selector -------------------
 
-def _read(call_id, text="Long exact evidence "):
+def _long_read(call_id, text="Long exact evidence "):
     return [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
         "name": "read_file", "arguments": json.dumps({"path": f"{call_id}.py"})}}]},
         {"role": "tool", "tool_call_id": call_id, "content": text * 200}]
@@ -590,17 +590,20 @@ def _facts(text):
     return bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] " + text)
 
 
-def _fold(tmp_path, monkeypatch, ctx, view, call_id, *, arrivals=(), own=None, **selector):
+def _own_call(call_id, arguments):
+    return {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function",
+            "function": {"name": "compact_context", "arguments": json.dumps(arguments)}}]}
+
+
+def _fold(tmp_path, monkeypatch, ctx, view, call_id, *, arrivals=(), own=None, root=None, **selector):
     """One fold the way Main applies it: the mind's call on the view it saw, its result, the boundary."""
     record_context_view(ctx, view, [])
     arguments = {"working_note": f"Note written by {call_id}.", **selector}
     response = _compact_context(ctx, **arguments)
     assert "requested" in response, response
-    call_row = own or {"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function",
-                       "function": {"name": "compact_context", "arguments": json.dumps(arguments)}}]}
-    current = [*copy.deepcopy(view), call_row, {"role": "tool", "tool_call_id": call_id, "content": response},
-               *arrivals]
-    folded = _run_round_compaction(current, _context(tmp_path / call_id, ctx, [], monkeypatch))
+    current = [*copy.deepcopy(view), own or _own_call(call_id, arguments),
+               {"role": "tool", "tool_call_id": call_id, "content": response}, *arrivals]
+    folded = _run_round_compaction(current, _context(root or tmp_path / call_id, ctx, [], monkeypatch))
     assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
     return folded
 
@@ -621,78 +624,118 @@ def _start():
     return [*_source()[:2], _facts("round 1")]
 
 
+def _calls(rows):
+    return {call.get("id") for row in rows for call in row.get("tool_calls") or ()}
+
+
 def test_a_full_fold_stands_after_the_start_and_releasing_its_note_or_omitting_it_takes_its_rows(tmp_path, monkeypatch):
-    """Tests 1 and 2 of the order at the tool's own seam. A full fold keeps the start's host rows and writes its
-    note after them, and its own call names the note; the next full fold keeps that note's whole request (call,
-    result, receipt, the next facts row) and writes after it. Both directions: replacing the note takes its rows in
-    the same fold, and an explicit keep_unit_ids list that omits a standing unit removes it."""
-    from ouroboros.context_compaction import _capsule_metadata
-    from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
+    """A full fold keeps the start's host rows and writes its note after them; its own call keeps the arguments the
+    model sent, and the next full fold keeps that note's whole request (call, result, receipt, the next facts row)
+    and writes after it. Both directions: replacing the note with keep_unit_ids [] takes its rows; replacing it with
+    omitted selectors takes only its rows (a later fold's own rows and an ordinary read stay); an explicit
+    keep_unit_ids list that omits a standing unit removes it."""
+    from ouroboros.tools.compact_context import standing_rows
 
     ctx = SimpleNamespace(active_context_mode="low")
     start = _start()
-    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
+    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_long_read("one")], "fold-1", keep_unit_ids=[])
     at, = _notes(first)
     assert first[:at] == start and at == len(start)
-    meta = _capsule_metadata(first[at])[1]
     assert first[at]["content"][0]["text"].endswith("\nNote written by fold-1.")
-    assert json.loads(first[at + 1]["tool_calls"][0]["function"]["arguments"]) == {
-        "working_note": NOTE_POINTER.format(unit_id=meta["unit_id"]), "keep_unit_ids": []}
+    assert first[at + 1] == _own_call("fold-1", {"working_note": "Note written by fold-1.", "keep_unit_ids": []})
     request = [*first, _facts("round 3")]  # the request sent after that fold, up to the model's answer
-    assert sorted(standing_rows(request)) == [2, *range(at + 1, len(request))]
+    assert standing_rows(request) == {2: None, **dict.fromkeys(range(at + 1, len(request)), at)}
 
-    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-2", keep_unit_ids=[])
     assert second[:len(request)] == request and _notes(second) == [at, len(request)]
 
     note_id = _unit_at(request, at).unit_id
-    released = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-3", keep_unit_ids=[],
+    released = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-3", keep_unit_ids=[],
                      replace_note_ids=[note_id])
     assert released[:at] == start and _notes(released) == [at]  # its rows went with it
-    assert not any(row.get("tool_call_id") == "fold-1" for row in released)
-    alone = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-5", replace_note_ids=[note_id])
-    assert not any(row.get("tool_call_id") == "fold-1" for row in alone)  # omitted selectors: only its own rows go
-    assert alone[:at] == start and any(row.get("tool_call_id") == "two" for row in alone)
-    omitted = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-4",
+    assert "fold-1" not in _calls(released)
+    later = [*second, _facts("round 5")]
+    alone = _fold(tmp_path, monkeypatch, ctx, [*later, *_long_read("three")], "fold-5", replace_note_ids=[note_id])
+    assert "fold-1" not in _calls(alone) and alone[:at] == start  # omitted selectors: only its own rows go
+    assert {"fold-2", "three"} <= _calls(alone)  # the later note's call and an ordinary read stay
+    assert [row for row in later[len(request):] if row in alone] == later[len(request):]  # fold-2's rows, its receipt
+    omitted = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-4",
                     keep_unit_ids=[_unit_at(request, at + 1).unit_id])
     assert request[2] not in omitted and request[at + 1] in omitted  # the mind's explicit choice still decides
+    tail = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-6", fold_last_n=2)
+    assert "fold-1" in _calls(tail) and "two" not in _calls(tail)  # fold_last_n selects no standing tool unit
+    from ouroboros.context_source_view import superseded_host_fact
+    # The facts line counts a superseded row that does not stand (round 4 after the read, which the row being written
+    # supersedes) and not the standing rounds 1 and 3 before it.
+    assert superseded_host_fact([*request, *_long_read("two"), _facts("round 4")]).startswith("superseded host rows 1 ")
+
+
+def test_the_owners_words_inside_a_folded_stretch_leave_the_fold_standing_and_a_shared_call_row_does_not(
+        tmp_path, monkeypatch):
+    """A full fold over ``read A, [Message from my human], read B`` writes its note at read A and keeps the owner's
+    words between the note and its own call: that fold's rows stand and the next full fold keeps its whole request,
+    the owner row byte-identical throughout. Other direction: a fold whose call shares its assistant row with another
+    call leaves nothing that stands, and the next full fold takes its rows."""
+    from ouroboros.tools.compact_context import standing_rows
+    from tests._context_reclaim_fixtures import _owner
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    owner = _owner("[Message from my human]\nKeep the migration plan as it is.")
+    view = [*_start(), *_long_read("a"), owner, *_long_read("b")]
+    first = _fold(tmp_path, monkeypatch, ctx, view, "fold-1", keep_unit_ids=[])
+    assert _notes(first) == [3] and first[4] == owner and "fold-1" in _calls([first[5]])
+    request = [*first, _facts("round 3")]
+    assert sorted(standing_rows(request)) == [2, 4, *range(5, len(request))]  # the owner row lies before the first answer
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("c")], "fold-2", keep_unit_ids=[])
+    assert second[:len(request)] == request and second[4] == owner
+
+    arguments = {"working_note": "Note written by shared.", "keep_unit_ids": []}
+    shared = _own_call("shared", arguments)
+    shared["tool_calls"].append({"id": "beside", "type": "function", "function": {
+        "name": "read_file", "arguments": json.dumps({"path": "beside.py"})}})
+    folded = _fold(tmp_path, monkeypatch, ctx, view, "shared", own=shared, keep_unit_ids=[],
+                   arrivals=[{"role": "tool", "tool_call_id": "beside", "content": "Another result."}])
+    after = [*folded, _facts("round 3")]
+    assert sorted(standing_rows(after)) == [2, 4]  # the start and the owner row only
+    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_long_read("c")], "fold-3", keep_unit_ids=[])
+    assert not {"shared", "beside"} & _calls(full) and owner in full
 
 
 def test_keep_last_n_leaves_no_anchor_and_the_next_full_fold_takes_its_tail(tmp_path, monkeypatch):
-    """Test 3: a keep_last_n fold keeps an earlier full fold's standing rows untouched, writes its note after them
-    and leaves no anchor of its own (its call keeps its argument); the next full fold folds its kept tail and its
+    """A keep_last_n fold keeps an earlier full fold's standing rows untouched, writes its note after them and leaves
+    no rows that stand (raw units sit between its note and its call); the next full fold folds its kept tail and its
     own rows, and writes its note right after the keep_last_n fold's note."""
     from ouroboros.tools.compact_context import standing_rows
 
     ctx = SimpleNamespace(active_context_mode="low")
-    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[])
     request = [*first, _facts("round 3")]
-    view = [*request, *_read("two"), *_read("three"), *_read("four")]
+    view = [*request, *_long_read("two"), *_long_read("three"), *_long_read("four")]
     tail = _fold(tmp_path, monkeypatch, ctx, view, "keep", keep_last_n=2)
     assert tail[:len(request)] == request and _notes(tail) == [3, len(request)]
-    own = next(row for row in tail if (row.get("tool_calls") or [{}])[0].get("id") == "keep")
-    assert json.loads(own["tool_calls"][0]["function"]["arguments"])["working_note"] == "Note written by keep."
     after = [*tail, _facts("round 5")]
     assert max(standing_rows(after)) == len(request) - 1  # nothing of the keep_last_n fold stands
-    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("five")], "fold-2", keep_unit_ids=[])
+    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_long_read("five")], "fold-2", keep_unit_ids=[])
     assert full[:len(request) + 1] == after[:len(request) + 1] and _notes(full) == [3, len(request), len(request) + 1]
-    assert not any(row.get("tool_call_id") in ("three", "four", "keep", "five") for row in full)
+    assert not {"three", "four", "keep", "five"} & _calls(full)
 
 
 def test_fold_last_n_changes_only_the_tail_and_refuses_what_it_cannot_select(tmp_path, monkeypatch):
-    """Test 4: fold_last_n folds the newest N tool units and everything after the first of them; every row before
-    the first folded unit stays byte-identical, a superseded host row and a typed row that is no unit included (a
-    fold changes nothing before its first replaced unit), and the tail fold leaves no anchor. Its argument errors
-    change nothing."""
+    """fold_last_n folds the newest N tool units and everything after the first of them; every row before the first
+    folded unit stays byte-identical, a superseded host row and a typed row that is no unit included (a fold changes
+    nothing before its first replaced unit), and raw units before its note leave no rows that stand. It needs the
+    mind's note: a missing or blank working_note is an argument error, with view_address too, while a written note
+    applies. Its argument errors queue nothing."""
     from ouroboros.tools.compact_context import standing_rows
 
     ctx = SimpleNamespace(active_context_mode="low")
     typed = {**_facts("round 2"), "msg_id": "facts-2"}  # a host row the dialogue scope does not address
-    view = [*_start(), *_read("one"), typed, *_read("two"), _facts("round 3"), *_read("three")]
+    view = [*_start(), *_long_read("one"), typed, *_long_read("two"), _facts("round 3"), *_long_read("three")]
     first_folded = len(view) - 2
     folded = _fold(tmp_path, monkeypatch, ctx, view, "tail", arrivals=[_facts("round 4")], fold_last_n=1)
     assert folded[:first_folded] == view[:first_folded] and _notes(folded) == [first_folded]
-    assert not any(row.get("tool_call_id") == "three" for row in folded)
-    assert sorted(standing_rows([*folded, _facts("round 5")])) == [2]  # raw units before it: no anchor
+    assert "three" not in _calls(folded)
+    assert sorted(standing_rows([*folded, _facts("round 5")])) == [2]  # raw units before it
     two = _fold(tmp_path, monkeypatch, ctx, view, "tail-2", fold_last_n=2)
     assert two[:5] == view[:5] and _notes(two) == [6] and typed in two
     record_context_view(ctx, view, [])
@@ -710,11 +753,11 @@ def test_fold_last_n_changes_only_the_tail_and_refuses_what_it_cannot_select(tmp
 
 
 def test_inspect_lists_standing_units_as_not_eligible_and_says_why(tmp_path, monkeypatch):
-    """Test 5 (inspect): a unit of the start and a unit of a full fold's own rows are listed as not eligible with the
-    fact of why; an ordinary unit stays eligible with no such fact."""
+    """Inspect: a unit of the start and a unit of a full fold's own rows are listed as not eligible with the fact of
+    why; an ordinary unit stays eligible with no such fact."""
     ctx = SimpleNamespace(active_context_mode="low")
-    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
-    view = [*first, _facts("round 3"), *_read("two")]
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[])
+    view = [*first, _facts("round 3"), *_long_read("two")]
     record_context_view(ctx, view, [])
     units = {unit["unit_id"]: unit for unit in json.loads(_compact_context(ctx, inspect=True))["units"]}
     note = _unit_at(view, 3).unit_id
@@ -725,83 +768,100 @@ def test_inspect_lists_standing_units_as_not_eligible_and_says_why(tmp_path, mon
     assert ordinary["eligible"] and "stands" not in ordinary
 
 
-@pytest.mark.parametrize("route", ["anthropic", "responses"])
-def test_the_own_calls_pointer_leaves_native_replay_and_keeps_a_complete_unit(tmp_path, monkeypatch, route):
-    """Test 6: with a direct-Anthropic or a direct-Responses receipt on the fold's own call, the pointer edit makes
-    the row project canonically (its receipt no longer validates) and the call with its result is one complete tool
-    unit. Before the edit the same row validates (the guard's other direction)."""
-    from ouroboros.anthropic_native_custody import _validated_receipt, retain_native_assistant_content
+@pytest.mark.parametrize("route", ["anthropic", "responses", "claudexor"])
+def test_a_fold_keeps_its_own_call_as_sent_with_its_native_envelope_and_its_rows_stand(tmp_path, monkeypatch, route):
+    """A fold rewrites no call the model sent. With a direct-Anthropic receipt, a direct-Responses receipt or a
+    Claudexor ``nativeContinuation`` envelope on the fold's own call, the call row after the fold equals the row
+    before it key for key, the direct receipts still validate, and the call with its result is one complete tool
+    unit. Other direction: that fold's rows stand, and the next full fold keeps the whole earlier request."""
+    from ouroboros.anthropic_native_custody import (_validated_receipt, anthropic_tool_unit_active,
+                                                    retain_native_assistant_content)
     from ouroboros.context_compaction import context_units
-    from ouroboros.openai_responses_custody import retain_items, validated_items
+    from ouroboros.openai_responses_custody import responses_tool_unit_active, retain_items, validated_items
+    from ouroboros.tools.compact_context import standing_rows
 
     arguments = {"working_note": "Note written by native.", "keep_unit_ids": []}
-    row = {"role": "assistant", "content": "", "tool_calls": [{"id": "native", "type": "function", "function": {
-        "name": "compact_context", "arguments": json.dumps(arguments)}}]}
+    row, valid = _own_call("native", arguments), lambda message: True  # noqa: E731
     if route == "anthropic":
         row = retain_native_assistant_content(row, [
             {"type": "thinking", "thinking": "private thought", "signature": "signature"},
             {"type": "tool_use", "id": "native", "name": "compact_context", "input": arguments}],
             {"provider": "anthropic", "base_url": "https://anthropic.example/v1", "resolved_model": "test-model"})
         valid = lambda message: _validated_receipt(message) is not None  # noqa: E731
-    else:
+    elif route == "responses":
         row = retain_items(row, [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"},
                                  {"type": "function_call", "call_id": "native", "name": "compact_context",
                                   "arguments": json.dumps(arguments)}],
                            {"provider": "openai", "api_surface": "responses", "base_url": "https://api.openai.com/v1",
                             "resolved_model": "gpt-test"}, "completed")
         valid = lambda message: validated_items(message) is not None  # noqa: E731
+    else:  # the envelope Claudexor returns with a Codex turn (tests/fixtures/llm_wire/claudexor_capability)
+        row["nativeContinuation"] = {"route": {"source": "codex", "credentialProfileId": "a", "accountFingerprint": "f",
+                                               "model": "gpt-test"}, "format": "codex.responses.v1", "payload": [
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"},
+            {"type": "function_call", "call_id": "native", "name": "compact_context",
+             "arguments": json.dumps(arguments)}]}
     assert valid(row)
+    sent = copy.deepcopy(row)
     ctx = SimpleNamespace(active_context_mode="low")
-    folded = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "native", own=row, keep_unit_ids=[])
-    at = next(i for i, message in enumerate(folded) if (message.get("tool_calls") or [{}])[0].get("id") == "native")
-    assert not valid(folded[at]) and "working_note" in folded[at]["tool_calls"][0]["function"]["arguments"]
-    assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue"))
+    folded = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "native", own=row, keep_unit_ids=[])
+    at = next(i for i, message in enumerate(folded) if "native" in _calls([message]))
+    assert folded[at] == sent and valid(folded[at]) and folded[at + 1]["tool_call_id"] == "native"
+    # One complete tool unit; a direct receipt keeps it an active native replay until a later answer consumes it.
+    assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue")) or (
+        anthropic_tool_unit_active if route == "anthropic" else responses_tool_unit_active)(folded, at, at + 1)
+    request = [*folded, _facts("round 3")]
+    assert set(range(at, len(request))) <= set(standing_rows(request))
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-2", keep_unit_ids=[])
+    assert second[:len(request)] == request
 
 
-def test_the_start_stands_typed_or_not_and_its_review_bodies_stay_foldable(tmp_path, monkeypatch):
-    """Every row between the assignment and the first answer stands, typed or not, except review-history sources (the
-    captured dispute bodies an ordinary fold takes). Both directions: an untyped host notice stands, the first full
-    fold folds the review body beside it and that fold's own call follows its note, so it leaves an anchor; an
-    explicit keep_unit_ids list that omits the notice takes it. Where the body comes before the other start rows (as
-    capture places it), the note lands at the body, that fold leaves no anchor, and the next full fold leaves one."""
-    from ouroboros.context_compaction import _capsule_metadata
+def test_the_start_stands_typed_or_not_and_its_handed_over_accounts_stay_foldable(tmp_path, monkeypatch):
+    """Every row between the assignment and the first answer stands, typed or not, except the accounts handed over
+    for the mind to fold (review-history sources, a predecessor's notes, a late answer's asker notes). Both
+    directions: an untyped host notice stands while keep_unit_ids [] takes a review body, a predecessor_notes row and
+    a late_answer_asker_notes row, the other start rows byte-identical, and that fold's rows stand; an explicit
+    keep_unit_ids list that omits the notice takes it. Where the body comes first (as capture places it), the start
+    rows that survive between the note and its call do not end the walk: the first fold's rows stand already."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.main_context_authority import LATE_ANSWER_NOTES_NAME, PREDECESSOR_NOTES_NAME
     from ouroboros.review_history_view import _body_message
-    from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
+    from ouroboros.tools.compact_context import standing_rows
 
     ctx = SimpleNamespace(active_context_mode="low", drive_root=tmp_path, task_id="view-task")  # a fold over a review body
     notice = {"role": "user", "content": "[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]\n- tools: missing credentials"}
     body = _body_message({"binding": {"kind": "review_history_body", "field": "findings", "content_sha256": "b" * 64,
                                       "source_ref": {"path": "reviews/wave-1.json", "size": 10, "sha256": "a" * 64}},
                           "value": "Reviewer finding: the plan skips the migration."}, "view-task")
-    start = [*_source()[:2], notice, _facts("round 1"), body]
-    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
-    assert first[:4] == start[:4] and _notes(first) == [4] and body not in first
-    assert json.loads(first[5]["tool_calls"][0]["function"]["arguments"])["working_note"] == NOTE_POINTER.format(
-        unit_id=_capsule_metadata(first[4])[1]["unit_id"])
+    inherited = [{"role": "user", HOST_CONTEXT_KIND_KEY: kind, "content": text} for kind, text in (
+        (PREDECESSOR_NOTES_NAME, "[Predecessor notes]\nThe earlier work chose the slow path."),
+        (LATE_ANSWER_NOTES_NAME, "[Late answer: the asker's notes]\nThe asker wanted the numbers."))]
+    start = [*_source()[:2], notice, _facts("round 1"), body, *inherited]
+    assert sorted(standing_rows([*start, *_long_read("one")])) == [2, 3]
+    first = _fold(tmp_path, monkeypatch, ctx, [*start, *_long_read("one")], "fold-1", keep_unit_ids=[])
+    assert first[:4] == start[:4] and _notes(first) == [4] and not [row for row in (body, *inherited) if row in first]
     request = [*first, _facts("round 3")]
     assert sorted(standing_rows(request)) == [2, 3, *range(5, len(request))]
-    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-2", keep_unit_ids=[])
     assert second[:len(request)] == request and _notes(second) == [4, len(request)]
-    omitted = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-3",
+    omitted = _fold(tmp_path, monkeypatch, ctx, [*start, *_long_read("one")], "fold-3",
                     keep_unit_ids=[_unit_at(start, 3).unit_id])
     assert notice not in omitted and start[3] in omitted
 
     captured = [*_source()[:2], body, notice, _facts("round 1")]  # capture writes the bodies right after the assignment
-    early = _fold(tmp_path, monkeypatch, ctx, [*captured, *_read("one")], "early-1", keep_unit_ids=[])
+    early = _fold(tmp_path, monkeypatch, ctx, [*captured, *_long_read("one")], "early-1", keep_unit_ids=[])
     assert _notes(early) == [2] and early[3:5] == captured[3:5]  # the note at the body, before the other start rows
-    assert "Note written by early-1." in early[5]["tool_calls"][0]["function"]["arguments"]  # no pointer, no anchor
     after = [*early, _facts("round 3")]
-    assert sorted(standing_rows(after)) == [3, 4]
-    later = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("two")], "early-2", keep_unit_ids=[])
-    assert later[:5] == after[:5] and _notes(later) == [2, 5]
-    assert sorted(standing_rows([*later, _facts("round 5")])) == [3, 4, *range(6, len(later) + 1)]
+    assert sorted(standing_rows(after)) == [3, 4, *range(5, len(after))]
+    later = _fold(tmp_path, monkeypatch, ctx, [*after, *_long_read("two")], "early-2", keep_unit_ids=[])
+    assert later[:len(after)] == after and _notes(later) == [2, len(after)]
 
 
 def test_a_host_source_view_ends_the_standing_rows_and_the_next_full_fold_takes_what_follows_it(tmp_path, monkeypatch):
     """A restored source or an emergency record (a capsule with retention source_view) follows the keep selection, so
     a full fold removes it and writes its note there: it ends the standing rows like any removable unit. Both
-    directions: the anchor before it stands, and the next full fold keeps that whole earlier request; the anchor after
-    it (here a tail fold's own call, which points at its note) does not stand, and the next full fold takes its rows."""
+    directions: the rows that stand before it stand, and the next full fold keeps that whole earlier request; a fold
+    after it does not stand, and the next full fold takes its rows."""
     from ouroboros.context_compaction import _capsule_metadata
     from ouroboros.tools.compact_context import standing_rows
     from tests._working_notes import _note
@@ -813,19 +873,86 @@ def test_a_host_source_view_ends_the_standing_rows_and_the_next_full_fold_takes_
     meta.update(retention="source_view", authorship="host")
     meta.pop("written_at", None)
     assert _capsule_metadata(restored)[1]["retention"] == "source_view"
-    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_read("one")], "fold-1", keep_unit_ids=[])
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[])
     request = [*first, _facts("round 3")]
-    view = [*request, older, restored, *_read("two")]
+    view = [*request, older, restored, *_long_read("two")]
     tail = _fold(tmp_path, monkeypatch, ctx, view, "tail", fold_last_n=1)
     assert tail[:len(view) - 2] == view[:-2] and _notes(tail) == [3, len(request), len(request) + 1, len(request) + 2]
     after = [*tail, _facts("round 5")]
     assert sorted(standing_rows(after)) == [2, *range(4, len(request))]  # the tail's own rows after it do not stand
-    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("three")], "fold-2", keep_unit_ids=[])
+    full = _fold(tmp_path, monkeypatch, ctx, [*after, *_long_read("three")], "fold-2", keep_unit_ids=[])
     assert full[:len(request) + 1] == [*request, older] and restored not in full
-    assert not any(row.get("tool_call_id") in ("tail", "three") for row in full)
+    assert not {"tail", "three"} & _calls(full)
 
 
-from tests.test_review_view_integration import harness  # noqa: E402,F401 -- the recorded plan-review fixture
+def test_a_source_view_a_fold_restores_after_earlier_rows_that_stand_stays_foldable(tmp_path, monkeypatch):
+    """A fold with restore_unit_refs writes the restored source view before its note, after an earlier fold's rows:
+    the source view does not stand (inspect lists it eligible), and neither do that fold's own rows; the next full
+    fold removes the source view and those rows. Other direction: the earlier fold's rows before it stand and the
+    next full fold keeps them."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.tools.compact_context import standing_rows
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[],
+                  root=tmp_path)
+    stored = ctx._context_view_receipt
+    ref = {"checkpoint_ref": stored["restore_checkpoint"], **stored["bodies_removed"][0]["address"]}
+    request = [*first, _facts("round 3")]
+    second = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-2", keep_unit_ids=[],
+                   restore_unit_refs=[ref], root=tmp_path)
+    source = len(request)
+    assert second[:source] == request and _capsule_metadata(second[source])[1]["retention"] == "source_view"
+    view = [*second, _facts("round 5")]
+    standing = standing_rows(view)
+    assert set(range(4, source)) <= set(standing) and not set(range(source, len(view))) & set(standing)
+    record_context_view(ctx, [*view, *_long_read("three")], [])
+    units = {unit["unit_id"]: unit for unit in json.loads(_compact_context(ctx, inspect=True))["units"]}
+    assert units[_unit_at(view, source).unit_id]["eligible"] and "stands" not in units[_unit_at(view, source).unit_id]
+    third = _fold(tmp_path, monkeypatch, ctx, [*view, *_long_read("three")], "fold-3", keep_unit_ids=[], root=tmp_path)
+    assert third[:source] == request and second[source] not in third and "fold-2" not in _calls(third)
+
+
+def test_a_folds_leftover_rows_after_an_emergency_record_took_its_call_are_not_start_rows(tmp_path, monkeypatch):
+    """When an emergency record (a host source view) replaced a fold's own call and result, the receipt and facts
+    rows left after it are not start rows: replacing the note takes them. Other direction: the start's own rows
+    before the note stay."""
+    from ouroboros.tools.compact_context import standing_rows
+    from tests._working_notes import _note
+
+    ctx = SimpleNamespace(active_context_mode="low")
+    first = _fold(tmp_path, monkeypatch, ctx, [*_start(), *_long_read("one")], "fold-1", keep_unit_ids=[])
+    at, = _notes(first)
+    record = copy.deepcopy(_note(tmp_path, "Exact source of the fold's call.", "emergency"))
+    record["content"][0]["_context_capsule"].update(retention="source_view", authorship="host")
+    view = [*first[:at + 1], record, *first[at + 3:], _facts("round 3")]  # its call and result became the record
+    leftover = [row for row in view[at + 2:] if str(row.get("content")).startswith(("[Context view receipt]",
+                                                                                    "[CONTEXT_FACTS]"))]
+    assert len(leftover) == 2
+    assert sorted(standing_rows(view)) == [2]
+    folded = _fold(tmp_path, monkeypatch, ctx, [*view, *_long_read("two")], "fold-2", keep_unit_ids=[],
+                   replace_note_ids=[_unit_at(view, at).unit_id])
+    assert folded[:at] == view[:at] and not [row for row in leftover if row in folded]
+
+
+def test_a_reviewer_style_notice_after_an_own_call_stands_nothing_of_that_fold(tmp_path):
+    """A fold's own call followed by a notice that is not the host's receipt row (a reviewer session's fold) leaves
+    nothing of that fold standing; the same rows with the host's receipt row stand (the other direction)."""
+    from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX, standing_rows
+    from tests._working_notes import _note
+
+    note = {**_note(tmp_path, "Note written by reviewer."), "role": "assistant"}
+    rows = [*_start(), note, _own_call("reviewer", {"working_note": "Note written by reviewer."}),
+            {"role": "tool", "tool_call_id": "reviewer", "content": "Working view requested."}]
+    reviewer = [*rows, {"role": "user", "content": "[Review context view]\n{}"}, _facts("round 3")]
+    host = [*rows, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n{}"}, _facts("round 3")]
+    assert sorted(standing_rows(reviewer)) == [2]
+    assert sorted(standing_rows(host)) == [2, *range(4, len(host))]
+
+
+from tests.test_review_view_integration import harness as _review_harness  # noqa: E402 -- the recorded plan-review fixture
+
+harness = _review_harness
 
 
 def test_no_fold_changes_a_review_index_before_its_note_and_a_stale_one_after_it_leaves(harness, tmp_path, monkeypatch):
@@ -840,16 +967,16 @@ def test_no_fold_changes_a_review_index_before_its_note_and_a_stale_one_after_it
     now = next(row for row in _capture(ctx) if rv.REVIEW_CONTEXT_INDEX_KEY in row)
     old = rv._index_message({"decision_rows": []}, "plan", task_id=ctx.task_id)
     assert old != now
-    view = [*_source()[:2], old, _facts("round 1"), *_read("r0")]
+    view = [*_source()[:2], old, _facts("round 1"), *_long_read("r0")]
     first = _fold(tmp_path, monkeypatch, ctx, view, "fold-1", keep_unit_ids=[])
     at = _notes(first)[0]
     assert first[:at] == view[:at] and old in first
-    view = [*first, _facts("round 3"), *_read("r1"), now, *_read("r2")]
+    view = [*first, _facts("round 3"), *_long_read("r1"), now, *_long_read("r2")]
     second = _fold(tmp_path, monkeypatch, ctx, view, "fold-2", keep_unit_ids=[])
     at = _notes(second)[-1]
     assert second[:at] == view[:at] and old in second
     late = {**copy.deepcopy(old), "content": old["content"]}
-    view = [*second, _facts("round 5"), *_read("r3"), *_read("r4"), late]
+    view = [*second, _facts("round 5"), *_long_read("r3"), *_long_read("r4"), late]
     tail = _fold(tmp_path, monkeypatch, ctx, view, "tail", fold_last_n=1)
     at = _notes(tail)[-1]
     assert tail[:at] == view[:at] and at == len(view) - 3

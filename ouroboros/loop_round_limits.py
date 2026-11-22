@@ -676,8 +676,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         candidate = copy.deepcopy(candidate)
         update_resident_notice(ctx.tools, schemas, candidate)
     if pending is not None:  # an applied view's facts, kept with the receipt they appear in
-        from ouroboros.tools.compact_context import fold_receipt_facts, point_call_at_note
-        candidate = point_call_at_note(candidate, receipt, proposal.get("working_note"))  # the own call names its note
+        from ouroboros.tools.compact_context import fold_receipt_facts
         receipt.update(fold_receipt_facts(proposal["observed"]["messages"], candidate, receipt))
     receipt_source, retained_receipt = None, None
     if receipt["status"] != "no_op":
@@ -727,7 +726,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
         if exceptions:
             notice["request_exceptions"] = exceptions
-        with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n" + json.dumps(notice, ensure_ascii=False)}]
+        from ouroboros.tools.compact_context import RECEIPT_ROW_PREFIX
+        with_receipt = [*candidate, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n" + json.dumps(notice, ensure_ascii=False)}]
         try:
             final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
             for detail in ("request_exceptions", "bodies_removed", "notes_kept"):
@@ -736,7 +736,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 notice[f"{detail}_omitted"] = len(notice.pop(detail))  # an inline list (no address); notes stay in view
                 if detail == "bodies_removed":
                     notice.pop("restore_checkpoint", None)
-                with_receipt = [*candidate, {"role": "user", "content": "[Context view receipt]\n"
+                with_receipt = [*candidate, {"role": "user", "content": RECEIPT_ROW_PREFIX + "\n"
                     + json.dumps(notice, ensure_ascii=False)}]
                 final_fit = fit_candidate(copy.deepcopy(with_receipt), copy.deepcopy(schemas))
         except Exception as exc:
