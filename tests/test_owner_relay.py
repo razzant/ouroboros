@@ -45,6 +45,36 @@ def test_only_held_rows_can_be_quoted_and_note_is_never_substituted(tmp_path, mo
     assert events[1]["message"] == "later note" and events[1]["quotes"] == []
 
 
+def test_a_note_quoting_several_messages_keys_its_receipt_on_one_quote_s_own_room_and_id(tmp_path, monkeypatch):
+    """The note's receipt names ONE quoted message: an id-less first quote never lends its room to a later one's id."""
+    from ouroboros.tools.control_relay import _tell_task
+    quotes = [{"text": "Words without an id", "source": {"chat_id": 1, "client_message_id": "", "address": "first"}},
+              {"text": "Words in the room", "source": {"chat_id": 42, "client_message_id": "owner-2", "address": "second"}}]
+    monkeypatch.setattr("ouroboros.owner_relay.quote_rows", lambda ctx, handles: (quotes, ""))
+    events = []
+    monkeypatch.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
+                        lambda ctx, evt: (events.append(evt) or "live", {"status": "delivered"}))
+    _tell_task(context(tmp_path), "receiver", "context", ["first", "second"])
+    assert (events[0]["chat_id"], events[0]["client_message_id"]) == (42, "owner-2")
+
+
+def test_each_quoted_message_gets_one_receipt_under_its_own_room_and_id(tmp_path):
+    """Two rooms' messages may share an id: a steer quoting both writes each its own pair's receipt, the act's own
+    message none twice, and a second quote of one message adds none; a quote that names no room gets none in Main."""
+    import json
+    from supervisor.steering import _steer_receipt
+    quotes = [{"source": {"chat_id": 1, "client_message_id": "owner-1"}},
+              {"source": {"chat_id": 42, "client_message_id": "owner-1"}},
+              {"source": {"chat_id": 42, "client_message_id": "owner-1"}},
+              {"source": {"client_message_id": "owner-unplaced"}}]
+    evt = {"routing_token": "r1", "relay_id": "r1", "chat_id": 1, "client_message_id": "owner-1", "quotes": quotes,
+           "issuer": {"kind": "owner_turn"}}
+    _steer_receipt(SimpleNamespace(DRIVE_ROOT=tmp_path), evt, "receiver", target_label="Receiver", status="delivered")
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "chat_annotations.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert sorted((row["source_chat_id"], row["client_message_id"]) for row in rows) == [(1, "owner-1"), (42, "owner-1")]
+    assert {row["routing_token"] for row in rows} == {"r1"}
+
+
 def test_atomic_relay_is_idempotent_and_note_never_enters_owner_corpus(tmp_path):
     row, handle = source(tmp_path)
     sender = context(tmp_path, row)
@@ -396,6 +426,41 @@ def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
     assert "The label «Publish it» is the text of task asker" in words
 
 
+@pytest.mark.parametrize("shape", ["words", "file_only", "card_answer"])
+def test_a_held_row_names_its_source_by_the_words_its_checksum_covers(tmp_path, shape):
+    """A start opened by a held row (``start_task`` ``owner_source``) carries that row's identity by value and the
+    words its checksum covers: an inbound row's stored text, a file-only row's host placeholder included, a card
+    answer's recorded choice without its frame. The pair finds the row again and passes a cross-room binding's
+    integrity check; one text rule for every shape does not (a file-only row hashed by its owner words is lost)."""
+    from ouroboros.owner_quiz import quiz_answer_frame
+    from ouroboros.owner_relay import owner_row_source, owner_text
+    from ouroboros.project_dialogue import build_owner_message_ref, resolve_owner_message_source
+    from ouroboros.projects_registry import _validated_origin
+
+    block = {"quiz_id": "q-palette", "question": "Which colors should the table legend use?",
+             "options": ["Use blue and gold", "Use gray and green"], "state": "answered",
+             "answered_index": 0, "asked_at": "2024-04-09T10:05:00+00:00", "answered_at": "2024-04-09T10:14:00+00:00"}
+    row = {"words": {"chat_id": 1, "direction": "in", "ts": "2024-04-08T13:45:00+00:00", "client_message_id": "owner-b",
+                     "text": "  Check the seed table;\nverify its totals  "},
+           "file_only": {"chat_id": 1, "direction": "in", "ts": "2024-04-08T13:46:00+00:00", "client_message_id": "owner-f",
+                         "text": "(file attached)", "text_placeholder": True,
+                         "attachments": [{"upload": "0" * 32 + "_seed-counts.csv", "name": "seed-counts.csv", "kind": "file"}]},
+           "card_answer": {"chat_id": 412, "direction": "system", "ts": block["answered_at"], "type": "quiz_answer",
+                           "source": "owner_quiz_answer", "task_id": "asker", "quiz": block,
+                           "client_message_id": "quiz_answer:asker:q-palette",
+                           "text": quiz_answer_frame(block, 0, "")}}[shape]
+    dialogue_store.append(tmp_path, "chat", row)
+    ref, words = owner_row_source(row)
+    assert words == {"words": row["text"], "file_only": "(file attached)",
+                     "card_answer": "1. Use blue and gold"}[shape]
+    assert "[Owner quiz answer]" not in words
+    assert resolve_owner_message_source(tmp_path, ref)["client_message_id"] == row["client_message_id"]
+    assert _validated_origin({"ref": ref, "text": words}, 4242)["source_ref"] == ref  # another room: the copy's check
+    lost = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row["client_message_id"], ts=row["ts"],
+                                   text=owner_text(row))  # the owner's words alone, for every shape
+    assert (resolve_owner_message_source(tmp_path, lost) is None) == (shape == "file_only")
+
+
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):
     """F4: the named return is owed in the terminal outbox under a stable id before the queue sees it; a
     send that fails after enqueue leaves it owed (deferred), and the receipt never claims it was sent."""
@@ -528,6 +593,48 @@ def test_a_carried_entry_renders_the_carried_line_and_holds_the_row_outside_corp
     assert "owner_quote_handles held by this turn" in str(root_messages) and address in str(root_messages)
     section = json.loads(build_runtime_section(env, {"id": "teller", "metadata": root.task_metadata}, ctx=root).split("\n\n", 1)[1])
     assert section["owner_quote_handles"] == [address]
+
+
+@pytest.mark.parametrize("selected", [False, True], ids=["plain", "selected-reply"])
+def test_a_carried_row_told_on_keeps_the_address_its_store_answers_to(tmp_path, selected):
+    """A row the host carried is held with its carriage fact beside it. Told on to another work, and on again, it
+    is the same stored row: each holder keeps it under the address the store's sha-checked read answers to, as a
+    row that reached that work, and a selected reply keeps its passage."""
+    from ouroboros.chat_chain import resolve_row
+    from ouroboros.owner_relay import inject_relay, owner_quote, owner_row_address
+
+    excerpt = {"text": "owner", "start_utf16": 6}
+    _, replied = source(tmp_path)
+    reply = {"reply_to": {"address": replied, "role": "user", "author_label": "You", "excerpt": excerpt}} if selected else {}
+    stored = dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z",
+                                                     "text": "Carry this on.", "client_message_id": "owner-2", **reply}).row
+    address = format_address(row_address(stored))
+    assert resolve_row(tmp_path, address)[0] == stored
+    child = tmp_path / "child"
+    child.mkdir()
+    _carried_entry(tmp_path, child, "helper", owner_quote(tmp_path, stored, address=address), went_to="sibling")
+    holder = _helper(child)
+    _drain_incoming_messages([], queue.Queue(), child, "helper", None, set(), owner_ctx=holder)
+    carried = held_owner_messages(holder)[address]
+    assert carried["carried"]["went_to"] == "sibling" and owner_row_address(carried) == address
+    for hop in ("second", "third"):
+        quotes, error = quote_rows(holder, [address])
+        assert not error
+        entry, created = write_relay(tmp_path, hop, relay_id=f"onward-{hop}", note="note", quotes=quotes, chat_id=1,
+                                     teller_task_id=holder.task_id)
+        assert created
+        assert all("carried" not in owned for owned in entry["owner_rows"]), "where it reached the sender stays with the sender"
+        holder, frames = context(tmp_path), []
+        holder.task_id = hop
+        inject_relay(holder, entry, frames)
+        held = held_owner_messages(holder)
+        assert list(held) == [address] and "carried" not in held[address]
+        assert [row["msg_id"] for row in holder._owner_directives] == [address]
+        assert resolve_row(tmp_path, next(iter(held)))[0] == stored, "the address is the stored row's own"
+        assert f"handle {address}]" in frames[0]["content"]
+        if selected:
+            assert holder._owner_directives[0]["reply_to"]["excerpt"] == excerpt
+            assert f"Sender-selected passage of You at {replied}" in frames[0]["content"]
 
 
 def test_one_address_is_one_entry_and_a_row_held_under_the_same_fact_renders_nothing(tmp_path):
@@ -1093,6 +1200,7 @@ def test_a_carried_corpus_answer_keeps_its_card_without_a_room_row(tmp_path):
     child = _helper(tmp_path, "reed-reader")
     frames = []
     for _, _, quote, _, _ in _rows_to_carry(ctx, tmp_path):
+        assert quote["owner_row"]["_owner_corpus_rebuilt"] is True
         entry, created = _carried_entry(tmp_path, tmp_path, child.task_id, quote, went_to=ctx.task_id)
         assert created
         inject_relay(child, entry, frames)
@@ -1228,3 +1336,227 @@ def test_reference_only_relay_quotes_one_read_of_the_askers_store(tmp_path, monk
         assert "accepted answer is unavailable" in quote["text"] and quote["text"] in history
         assert "Owner words quoted" not in history
     assert reads == [(str(source_drive), asker)]
+
+
+def test_a_held_selection_with_only_a_preview_takes_a_later_source_once_and_an_addressed_flip_keeps_it(tmp_path):
+    """A carried entry that completes a held selected reply keys on the source itself: a held ``_owner_reply_target``
+    with preview fields only is completed like one with none, by a copy of the same address and passage alone, once.
+    Another passage's source, or an address this work never held, changes nothing; a context row an addressed copy
+    flips keeps the source it already held. The row's standing never moves with its source."""
+    from ouroboros.owner_relay import inject_relay, owner_quote, owner_row_address, relay_envelope
+
+    excerpt = {"text": "North", "start_utf16": 0}
+    reference = {"address": "row:1@source#0123456789ab", "author_label": "Mira", "role": "user",
+                 "snippet": "North trail…", "excerpt": excerpt}
+    owner = {"chat_id": 1, "direction": "in", "source": "web", "user_id": 1, "ts": "2026-11-04T09:01:00Z",
+             "client_message_id": "owner-held", "text": "Which trail?", "reply_to": reference}
+    address = owner_row_address(owner)
+    files = [{"name": "trail.pdf", "mime": "application/pdf", "size": 55}]
+    full = {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user",
+            "text": "North trail. The full body.", "attachments": files}
+    preview = {"address": reference["address"], "author": "Mira", "excerpt": excerpt, "role": "user", "snippet": "North trail…"}
+    standing = {"from": "root", "went_to": "routed:head", "at": "2026-11-04T09:02:00Z"}
+
+    def entry(*, went, enrich, target):
+        quote = owner_quote(tmp_path, {**owner, "_owner_source_root": str(tmp_path),
+                                       **({"_owner_reply_target": target} if target else {})}, address=address)
+        return {"kind": "relay_entry", "msg_id": f"relay:carry-source:{address}:member", "ts": "2026-11-04T09:03:00Z", "text": "",
+                "relay": relay_envelope("carry-source", [quote], chat_id=1), "owner_rows": [quote["owner_row"]],
+                "source_task_id": "root", "relay_canonical_root": str(tmp_path),
+                "host_carried": {"went_to": went, **({"enrich": True} if enrich else {})}}
+
+    member = context(tmp_path)
+    member.task_id = "member"
+    member._held_owner_messages = {address: {**owner, "_owner_reply_target": preview, "carried": dict(standing)}}
+    messages = []
+    inject_relay(member, entry(went="", enrich=True, target=full), messages)
+    held = member._held_owner_messages[address]
+    assert held["_owner_reply_target"] == full and held["carried"] == standing, "the source moved; the standing did not"
+    assert messages == [], "no words are shown again"
+    inject_relay(member, entry(went="routed:head", enrich=True, target={**full, "text": "A different body."}), messages)
+    assert member._held_owner_messages[address]["_owner_reply_target"] == full, "once: the held source is not replaced"
+
+    member._held_owner_messages = {address: {**owner, "carried": dict(standing)}}
+    other_passage = {**full, "excerpt": {"text": "trail", "start_utf16": 6}}
+    inject_relay(member, entry(went="routed:head", enrich=True, target=other_passage), messages)
+    assert "_owner_reply_target" not in member._held_owner_messages[address], "another passage's source completes nothing"
+
+    member._held_owner_messages = {}
+    inject_relay(member, entry(went="", enrich=True, target=full), messages)
+    assert member._held_owner_messages == {} and messages == [], "an address this work never held: nothing held or shown"
+
+    member._held_owner_messages = {address: {**owner, "_owner_reply_target": full, "carried": dict(standing)}}
+    inject_relay(member, entry(went="", enrich=False, target=None), messages)
+    flipped = member._held_owner_messages[address]
+    assert flipped["carried"]["went_to"] == "" and flipped["_owner_reply_target"] == full, "addressed now, source kept"
+    assert "Which trail?" in str(messages), "the flip shows its words once, as it always did"
+
+
+# --- files of the message a work answers: inherited by value, named when they cannot be copied ------------------
+
+def _held_file(root, name, data, **row):
+    from ouroboros.chat_uploads import store_upload
+
+    _path, ref = store_upload(data, name, data_dir=root)
+    return {"chat_id": 1, "direction": "in", "ts": "2024-04-08T13:45:00+00:00", "client_message_id": "owner-b",
+            "text": "Check the totals in the seed table", "attachments": [ref], **row}
+
+
+def test_a_file_of_another_store_is_inherited_only_from_the_callers_own_verified_copy(tmp_path):
+    """B lives in another data root: the snapshot a start carries names its file without an upload id. Work the
+    first work starts receives the first work's own staged copy of exactly those bytes, and the work that one
+    starts receives the second's (a chain); a later file of the caller never travels. Without such a copy, with one
+    of other bytes, or with one gone by the admission, the file is named ``outside_store``."""
+    import pathlib
+
+    from ouroboros.artifacts import attachment_manifest_projection, stage_task_attachments
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.owner_relay import origin_snapshot, source_upload_specs, upload_specs
+
+    teller, recipient = tmp_path / "teller", tmp_path / "recipient"
+    row = _held_file(teller, "seed-counts.csv", b"bed,seeds\nwest,3\n", _owner_source_root=str(teller))
+    [ref] = origin_snapshot(row, recipient)["attachments"]
+    assert ref["unavailable"] == "outside_store" and "upload" not in ref
+    later_path, _later = store_upload(b"bed,seeds\neast,1\n", "seed-counts.csv", data_dir=recipient)
+    first = stage_task_attachments(recipient, "first-work", [*upload_specs(row, teller), {"path": str(later_path)}])
+    assert [item["status"] for item in first] == ["staged", "staged"]
+
+    def caller(task_id, manifest):
+        return SimpleNamespace(drive_root=recipient, task_id=task_id,
+                               task_contract=attachment_manifest_projection(recipient, task_id, manifest))
+
+    holder = first
+    for task_id, new_id in (("first-work", "second-work"), ("second-work", "third-work")):
+        [spec] = source_upload_specs(caller(task_id, holder), [ref])
+        assert pathlib.Path(spec["path"]).samefile(holder[0]["abs_path"])
+        assert (spec["label"], spec["inherited"], spec["path_only"]) == ("seed-counts.csv", True, True)
+        holder = stage_task_attachments(recipient, new_id, [spec])
+        assert [(item["status"], item["label"]) for item in holder] == [("staged", "seed-counts.csv")]
+        assert pathlib.Path(holder[0]["abs_path"]).read_bytes() == b"bed,seeds\nwest,3\n"
+    [spec] = source_upload_specs(caller("third-work", holder), [ref])
+    pathlib.Path(spec["path"]).unlink()  # the caller's copy is gone by the new work's admission
+    [gone] = stage_task_attachments(recipient, "fourth-work", [spec])
+    assert (gone["status"], gone["reason"]) == ("rejected", "outside_store")
+    for bare in (SimpleNamespace(drive_root=recipient, task_id="other-work", task_contract={}),
+                 caller("third-work", holder)):  # no copy declared; then a declared copy that is gone
+        [spec] = source_upload_specs(bare, [ref])
+        assert spec["path"] == "" and spec["unavailable"] == "outside_store"
+        [named] = stage_task_attachments(recipient, "fifth-work", [spec])
+        assert (named["status"], named["reason"], named["label"]) == ("rejected", "outside_store", "seed-counts.csv")
+    pathlib.Path(first[0]["abs_path"]).write_bytes(b"other bytes under the same name")
+    [spec] = source_upload_specs(caller("first-work", first), [ref])
+    assert spec["path"] == "", "a copy of other bytes is not that file"
+
+
+def test_a_local_upload_is_inherited_by_its_id_and_a_missing_one_is_named(tmp_path):
+    """The snapshot's ref of a file saved in this store stages from that upload by its id and saved identity; a ref
+    that names no saved upload is named ``missing``; nothing is looked up by the message's text or client id."""
+    import pathlib
+
+    from ouroboros.artifacts import stage_task_attachments
+    from ouroboros.chat_uploads import unavailable_ref, uploads_dir
+    from ouroboros.owner_relay import origin_snapshot, source_upload_specs
+
+    row = _held_file(tmp_path, "seed-counts.csv", b"bed,seeds\nnorth,8\n")
+    [ref] = origin_snapshot(row, tmp_path)["attachments"]
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="first-work")
+    saved, lost = source_upload_specs(ctx, [ref, unavailable_ref("old-notes.txt")])
+    assert pathlib.Path(saved["path"]).samefile(uploads_dir(tmp_path) / ref["upload"]) and "unavailable" not in saved
+    assert (lost["path"], lost["unavailable"], lost["inherited"]) == ("", "missing", True)
+    staged, named = stage_task_attachments(tmp_path, "second-work", [saved, lost])
+    assert staged["status"] == "staged" and pathlib.Path(staged["abs_path"]).read_bytes() == b"bed,seeds\nnorth,8\n"
+    assert (named["status"], named["reason"], named["label"]) == ("rejected", "missing", "old-notes.txt")
+    assert stage_task_attachments(tmp_path, "third-work", [{"path": "", "label": "bare"}])[0]["reason"] == "invalid_path"
+
+
+def test_a_helper_copies_every_row_it_copied_before_and_leaves_only_the_displaced_source_named(tmp_path):
+    """At a helper's birth the files of its tree rows, held rows of both kinds, room rows, Project origin rows and
+    marked rows are staged on its own drive as before. Only the message its root's start displaced (carried in
+    beside the one the work answers) keeps its file named with the host's mark and the act that gives it."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.owner_relay import NOT_GIVEN, mark_context_files, stage_birth_files
+    from ouroboros.owner_words import attachments_line
+
+    def row(carrier, source, name, data):
+        _path, ref = store_upload(data, name, data_dir=tmp_path)
+        return {"text": f"words of {name}", "source": source, "carrier": carrier, "task_id": "root", "ts": "t",
+                "ref": f"chat 1 / {name}", "attachments": [ref]}
+
+    copied = [row("ctx", "origin_message", "source.csv", b"source"), row("held", "owner_mailbox", "held.csv", b"held"),
+              row("went to other-work", "owner_mailbox", "context.csv", b"context"),
+              row("room", "room_message", "room.csv", b"room"), row("origin", "origin_message", "project.csv", b"project"),
+              row("marked", "marked_message", "marked.csv", b"marked")]
+    displaced = row("ctx", "origin_message", "displaced.csv", b"displaced")
+    opening = {"client_message_id": "owner-b", "chat_id": "1", "ts": "2024-04-08T13:45:00+00:00", "row_sha256": "b" * 64}
+    item = {"source": "origin_message", "client_message_id": "owner-a", "chat_id": "1", "carried": True,
+            "ts": "2024-04-08T13:20:00+00:00", "row_sha256": "a" * 64}
+    mark_context_files([({**opening, "source": "origin_message", "carried": True}, copied[0]), (item, displaced)], opening)
+    assert "staged" not in copied[0]["attachments"][0], "the message the work answers is never marked"
+    handle = "row:1@2024-04-08T13:20:00+00:00#aaaaaaaaaaaa"
+    assert displaced["attachments"][0]["staged"] == (
+        f"{NOT_GIVEN}: owner_source='{handle}' at start_task, or tell_task(quote=['{handle}']) to a running work, gives it")
+    held = {**item, "row_sha256": "c" * 64}
+    reached = row("ctx", "origin_message", "relayed.csv", b"relayed")
+    mark_context_files([(held, reached)], opening, {"c" * 64})
+    assert "staged" not in reached["attachments"][0], "a row the work holds had its files staged here"
+    stage_birth_files(tmp_path, {"id": "helper", "drive_root": str(tmp_path)}, "helper", [*copied, displaced])
+    store = task_artifact_dir_path(tmp_path, "helper") / "attachments"
+    assert sorted(path.read_bytes() for path in store.iterdir()) == sorted(
+        [b"source", b"held", b"context", b"room", b"project", b"marked"])
+    assert all(item["attachments"][0]["staged"].startswith("read_file(root='artifact_store', path='attachments/")
+               for item in copied)
+    line = attachments_line(displaced["attachments"])
+    assert line.startswith("[Host-retained attachments: displaced.csv (") and NOT_GIVEN in line
+
+
+def test_a_helper_holds_its_roots_inherited_file_once_and_a_rejected_root_row_as_a_gap(tmp_path):
+    """The root's input manifest reaches a helper through the existing parent-manifest inheritance: the staged copy
+    once, a row the root could not stage as the same named gap, never a refused start. The helper's birth staging of
+    the source row then finds that copy and adds no second file."""
+    from ouroboros.artifacts import materialize_inherited_attachment_manifest, stage_task_attachments, task_artifact_dir_path
+    from ouroboros.owner_relay import origin_snapshot, source_upload_specs, stage_birth_files
+
+    row = _held_file(tmp_path, "seed-counts.csv", b"bed,seeds\nnorth,8\n")
+    refs = [*origin_snapshot(row, tmp_path)["attachments"], {"name": "old-notes.txt", "unavailable": "outside_store"}]
+    root = stage_task_attachments(tmp_path, "root-work", source_upload_specs(
+        SimpleNamespace(drive_root=tmp_path, task_id="caller"), refs))
+    assert [(item["status"], item["reason"]) for item in root] == [("staged", ""), ("rejected", "outside_store")]
+    copied, error = materialize_inherited_attachment_manifest(root, tmp_path, "helper")
+    assert not error and [(item["status"], item["reason"]) for item in copied] == [("staged", ""), ("rejected", "outside_store")]
+    source = {"text": row["text"], "source": "origin_message", "carrier": "ctx", "task_id": "root-work", "ts": row["ts"],
+              "ref": "chat 1 / owner-b", "attachments": [dict(row["attachments"][0])]}
+    stage_birth_files(tmp_path, {"id": "helper", "drive_root": str(tmp_path)}, "helper", [source])
+    store = task_artifact_dir_path(tmp_path, "helper") / "attachments"
+    assert [path.read_bytes() for path in store.iterdir()] == [b"bed,seeds\nnorth,8\n"], "one copy, not a second"
+    assert source["attachments"][0]["staged"] == f"read_file(root='artifact_store', path='{copied[0]['relpath']}')"
+
+
+def test_a_relayed_quote_that_carried_only_a_file_keeps_its_descriptor_in_the_corpus(tmp_path):
+    """The quote's row enters the recipient's corpus with its file named by saved identity, no path; carried on
+    into work the recipient starts, that file is named as not given."""
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.owner_relay import NOT_GIVEN, mark_context_files, retain_owner_message
+    from ouroboros.owner_words import carried_owner_corpus
+    _path, ref = store_upload(b"bed,seeds\nwest,3\n", "seed-counts.csv", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+    row = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:00:00Z", "text": "(file attached)",
+           "text_placeholder": True, "client_message_id": "owner-file", "attachments": [ref]}
+    dialogue_store.append(tmp_path, "chat", row)
+    sender = context(tmp_path)
+    retain_owner_message(sender, row)
+    quotes, error = quote_rows(sender, [format_address(row_address(row))])
+    assert not error
+    write_relay(tmp_path, "receiver", relay_id="file-only", note="context", quotes=quotes, chat_id=1, teller_task_id="teller")
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "receiver", None, set(), owner_ctx=receiver)
+    [kept] = receiver._owner_directives
+    assert (kept["source"], kept["content"], kept["carried"]) == ("owner_mailbox", "", True)
+    [named] = kept["attachments"]
+    assert (named["name"], named["upload"]) == ("seed-counts.csv", ref["upload"]) and not {"path", "abs_path"} & set(named)
+    [carried] = carried_owner_corpus(receiver)
+    assert carried["content"] == "" and carried["attachments"] == kept["attachments"]
+    shown = {"attachments": [dict(named)]}
+    mark_context_files([(carried, shown)], {"client_message_id": "owner-b", "chat_id": "1", "row_sha256": "b" * 64})
+    assert shown["attachments"][0]["staged"].startswith(NOT_GIVEN)

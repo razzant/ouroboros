@@ -21,10 +21,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._owner_continue_helpers import NONCE, _interrupted
 from tests.test_budget_pause_holds import _idle_worker
 from tests.test_continue_blocker_diagnostics import RUNNING, _held, _http
 from tests.test_continue_independent_review import PRED, _current_pool  # noqa: F401 - pytest fixture
-from tests.test_owner_continue import NONCE
 from tests.test_presence_moved_lifecycle import root as root  # pytest fixture
 from tests.test_resume_attempt_history import (
     _events, _paused_held_continue, _restart_held, _settle_leaf, _stored, _work,
@@ -117,6 +117,101 @@ def test_a_newer_pause_while_it_waits_replaces_the_wait(tmp_path, monkeypatch):
     assert (work["activity"], work["because"][0]["code"]) == ("paused", "paused_by_owner") and "resume" in _actions(work)
     status, resumed = _http(api_task_resume, successor)
     assert status == 200 and resumed["ok"] and not resumed.get("held"), "its writers settled: Resume releases it"
+
+
+@pytest.mark.parametrize("rail", ["none", "predecessor", "predecessor_local", "source", "deadline"])
+def test_a_paused_admitted_continue_names_only_its_own_start(tmp_path, monkeypatch, rail):
+    from ouroboros import delegate_custody as custody, owner_pause, working_checkpoint
+    from ouroboros.gateway.task_continue import api_task_continue
+    from ouroboros.gateway.task_pause import api_task_pause
+    from ouroboros.gateway.tasks import api_task_resume
+    from supervisor.queue_transitions import queued_admitted_dispatch
+    from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
+    from tests._delegated_transport_shared import _rows as custody_events
+    from tests._owner_pause_ended_helpers import REASON, _Engine, _pending
+    from tests._tool_claim_custody_helpers import _claim, _platform, _retired
+    from tests._worker_recovery_helpers import _crash, _pool_events
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
+    engine = _Engine()
+    monkeypatch.setattr("ouroboros.gateways.claudexor.ClaudexorGateway", engine)
+    _interrupted(tmp_path, PRED, origin={"source": "owner_restart", "reason": "owner_restart", "scope": "single"})
+    status, result = _http(api_task_continue, PRED, {"action_nonce": NONCE})
+    assert status == 200 and not result["held"], result
+    successor = result["successor_task_id"]
+    sent = []
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [t["id"] for t in sent] == [successor]
+    _ctx, limit = _loop_ctx(tmp_path, successor)
+    working_checkpoint.save_round(limit, "pre_effect")
+    _pending(tmp_path, successor, "lost-here", tree=successor)
+    _crash(queue, workers, monkeypatch, successor)
+    task = _row(workers, successor)
+    assert queued_admitted_dispatch(task) and task["_working_recovery"]["from_attempt"] == 1
+    status, paused = _http(api_task_pause, successor, {"request_id": "own-start", "actor": "owner"})
+    assert status in {200, 202} and paused["ok"]
+
+    status, offer = _http(api_task_resume, successor)
+    assert status == 409 and offer["error"] == "owner_pause_effects_unsettled", offer
+    choice, = offer["acceptable_unknown"]
+    assert choice.startswith(f"delegate_start:{successor}/{successor}/lost-here/{successor}/")
+    body = {"accept_unknown": [choice], "reason": REASON}
+    if rail != "none":
+        with monkeypatch.context() as fault:
+            if rail == "predecessor":
+                _pending(tmp_path, PRED, "lost-before", tree=PRED)
+            elif rail == "predecessor_local":
+                _platform(fault, kernel={})
+                _claim(tmp_path, PRED, "local-before", pid=63888, tree=PRED)
+                body = {**body, "accept_unknown": ["local-before"]}
+            elif rail == "source":
+                fault.setitem(task["_working_recovery"]["source_ref"], "sha256", "0" * 64)
+            else:
+                fault.setitem(task, "deadline_at", "1970-01-01T00:00:00Z")
+            code, refusal = _http(api_task_resume, successor, body)
+        assert code == 409 and refusal["error"] == {"predecessor": "predecessor_writers_unsettled",
+                                                     "predecessor_local": "predecessor_writers_unsettled",
+                                                     "source": "selection_authority_changed",
+                                                     "deadline": "deadline_passed"}[rail], refusal
+        assert owner_pause.fence_closed(owner_pause.read_fence(tmp_path, successor))
+        assert not custody_events(tmp_path, custody.START_RISK_ACCEPTED)
+        if rail == "predecessor":
+            assert not refusal.get("acceptable_unknown")
+            assert custody.invocation_record(tmp_path, "lost-before")["state"] == "pending"
+            return
+        if rail == "predecessor_local":
+            assert not refusal.get("acceptable_unknown") and "local-before" not in _retired(tmp_path, PRED)
+            return
+    status, resumed = _http(api_task_resume, successor, body)
+    assert status == 200 and resumed["ok"], resumed
+    assert owner_pause.read_fence(tmp_path, successor)["resume_grant"]["accepted_start_risks"] == (
+        resumed["accepted_start_risks"])
+    assert not owner_pause.read_fence(tmp_path, PRED)
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert [(t["id"], t["_attempt"]) for t in sent] == [(successor, 1), (successor, 2)]
+    assert sent[-1]["_working_recovery"]["source_ref"] == task["_working_recovery"]["source_ref"]
+    assert not engine.starts
+
+
+def test_a_never_dispatched_held_continue_can_still_name_a_predecessor_local_call(tmp_path, monkeypatch):
+    from ouroboros.gateway.tasks import api_task_resume
+    from tests._owner_pause_ended_helpers import REASON
+    from tests._tool_claim_custody_helpers import _claim, _platform, _retired
+
+    queue, _workers, successor = _paused_held_continue(tmp_path, monkeypatch, "running_delegated_leaf")
+    _settle_leaf(tmp_path)
+    _platform(monkeypatch, kernel={})
+    _claim(tmp_path, PRED, "local-before", pid=63888, tree=PRED)
+    status, offer = _http(api_task_resume, successor)
+    assert status == 409 and offer["acceptable_unknown"] == ["local-before"], offer
+    status, resumed = _http(api_task_resume, successor, {"accept_unknown": ["local-before"], "reason": REASON})
+    assert status == 200 and resumed["ok"], resumed
+    assert _retired(tmp_path, PRED)["local-before"]["effect_outcome"] == "unknown_accepted"
+    assert successor not in queue.BUDGET_ROOT_FENCES
 
 
 def test_stop_while_it_waits_ends_it_and_nothing_starts(tmp_path, monkeypatch):
@@ -642,7 +737,6 @@ def test_the_callers_named_decision_stays_with_the_door_it_was_named_at(tmp_path
 def _moved_continue(root, monkeypatch, *, settled=False):
     """A moved autonomous Presence turn with its producer allowance, a Continue under an application stop."""
     from tests.test_continue_independent_review import _rows
-    from tests.test_owner_continue import _interrupted
     from tests.test_presence_moved_allowance import _behind_grantless_door, _focus_built
     from supervisor import state
 

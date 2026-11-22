@@ -14,6 +14,33 @@ import pytest
 from tests.worker_pool_support import fixed_pool
 
 
+def _install_fresh_supervisor_memory(monkeypatch):
+    """The owner-Pause settlement pass's memory-only book, fresh per test.
+
+    ``supervisor.owner_pause_control`` keeps ``_LOOK_OWED`` / ``_CHANGED`` / ``_RECOVERED`` /
+    ``_AT_REST`` / ``_UNWRITTEN_STOPS`` as plain module globals its producers mutate in place
+    (``mark_tree_changed``, ``request_settlement_look``). One left set by an earlier test makes
+    the next tick's ``settlement_look_owed`` true, so a later test's maintenance tick starts the
+    ``owner_pause_settlement`` duty thread out of turn (#3428's cross-test leak). Rebinding
+    fresh objects lets monkeypatch teardown restore whatever preceded the test."""
+    from supervisor import owner_pause_control
+
+    # _LOOK_OWED keeps the module's boot value: a process's first look reads every fenced tree once.
+    monkeypatch.setattr(owner_pause_control, "_LOOK_OWED", [True])
+    monkeypatch.setattr(owner_pause_control, "_CHANGED", set())
+    monkeypatch.setattr(owner_pause_control, "_RECOVERED", {})
+    monkeypatch.setattr(owner_pause_control, "_DISCOVERY_OWED", set())
+    monkeypatch.setattr(owner_pause_control, "_AT_REST", {})
+    monkeypatch.setattr(owner_pause_control, "_UNWRITTEN_STOPS", {})
+    # task_lifecycle's cancellation-fence registries are per-PROCESS but keyed by task id alone,
+    # so a cancel of a fixture id (e.g. "root-1") in one test fences the same id in the next
+    # (#3428's cross-file leak). Fresh objects per test; monkeypatch teardown restores the prior ones.
+    from supervisor import task_lifecycle
+
+    monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {})
+    monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {})
+
+
 def _install_queue(tmp_path, monkeypatch):
     from supervisor import queue, state, workers
 
@@ -33,6 +60,7 @@ def _install_queue(tmp_path, monkeypatch):
     # test's snapshot and fence its root at restore.
     monkeypatch.setattr(queue, "ACCEPTANCE_FENCES", {})
     queue.BUDGET_ROOT_FENCES.clear()
+    _install_fresh_supervisor_memory(monkeypatch)
     queue.init_queue_refs(workers.PENDING, workers.RUNNING, workers.QUEUE_SEQ_COUNTER_REF)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})
     monkeypatch.setattr(queue, "load_state", lambda: {"owner_chat_id": 0}, raising=False)

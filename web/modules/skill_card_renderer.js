@@ -1,5 +1,5 @@
 import { tr } from './i18n.js';
-// Installed skill cards (Skills → Installed): one head shared with Browse and the
+// Installed skill cards (Extensions › Skills): one head shared with Browse and the
 // detail sheet (name that opens the sheet, marks, purpose, who line), the switch,
 // with a chip beside it only for a state the switch cannot show, Details right
 // under the head (a phone keeps the switch above it), and at most two attention trays,
@@ -243,14 +243,14 @@ function requiredTray(required) {
 }
 
 /**
- * The organization's required extensions that are not running, above the list (``/api/extensions`` ``deployment``):
+ * The organization's required extension skills (type extension; MCP servers are not under this policy) that are not running, above the list (``/api/extensions`` ``deployment``):
  * a missing package has no card, so its row is said here. '' when every requirement runs or nothing is required.
  */
 export function renderRequirementNotice(deployment) {
     const rows = (deployment?.required || []).filter((row) => row?.state === 'unmet');
     if (!rows.length) return '';
     const items = rows.map((row) => `<li data-required-name="${escapeHtml(row.name)}"><code data-i18n-authored>${escapeHtml(row.name)}</code> · ${escapeHtml(boundedText(row.detail || row.reason || '', 240))}</li>`).join('');
-    const subject = rows.length === 1 ? 'an extension that isn’t' : `${rows.length} extensions that aren’t`;
+    const subject = rows.length === 1 ? 'an extension skill that isn’t' : `${rows.length} extension skills that aren’t`;
     const process = rows[0]?.process?.role ? `Seen by the ${escapeHtml(rows[0].process.role)} process; each worker checks its own before it starts work.` : '';
     return `<section class="skills-org-requirements" data-tone="warn" aria-label="Required by your organization" data-skills-org-requirements>
         <p class="skills-org-requirements-lead">Your organization requires ${subject} running here.</p>
@@ -326,8 +326,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         // The organization's choice, not the owner's move: a neutral fact with nothing here that would make it run.
         if (!skill.lifecycle_pending) chip = chipHtml('Doesn’t run here', 'neutral');
         trays.push(trayHtml({ sentence: escapeHtml(boundedText(trustOf(skill).detail || '', 240)),
-            note: 'New extensions and their versions come from your organization’s administrator.' }));
-        lockReason = 'Only extensions your organization delivers run here.';
+            note: 'New extension skills and their versions come from your organization’s administrator.' }));
+        lockReason = 'Only extension skills your organization delivers run here.';
     } else if (install?.pending_update) {
         chip = chipHtml('Reviewing…', 'neutral', { work: true });
         trays.push(trayHtml({ sentence: `Updating to ${escapeHtml(install.pending_update.version)}: it stays off until the review finishes.` }));
@@ -420,7 +420,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         const failed = servers.find((server) => server.configured && server.error);
         if (blocked) {
             trays.push(trayHtml({ sentence: `Settings already has an MCP server named ${escapeHtml(blocked.id)} that isn’t this skill’s, so its tools can’t be connected.`,
-                note: 'Remove or rename that server in Settings → Tools → MCP servers.' }));
+                note: 'Remove or rename that server in Extensions → MCP servers.' }));
         } else if (servers.some((server) => !server.configured)) {
             trays.push(trayHtml({ sentence: servers.every((server) => server.bound)
                 ? 'Its tools are off. Connect them to turn them on.'
@@ -973,8 +973,17 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
             else if (selector === '[data-skill-detail-contributions]') card.querySelector('[data-skill-detail-overflow]')?.after(source);
         } else if (target && !source) target.remove();
         else if (target && source && selector === '[data-skill-detail-contributions]') patchContributionRows(target, source);
-        else if (target && source && selector === '[data-skill-trays]') patchSkillTrays(target, source);
-        else if (target && source && target.innerHTML !== source.innerHTML) target.innerHTML = source.innerHTML;
+        else if (target && source && target.innerHTML !== source.innerHTML) {
+            // Returning to a control marks it for keyboard or pointer focus. That local mark alone is not a
+            // change in the host's facts: leave the live control (and its blur listener) where it is.
+            if (target.querySelector('[data-return-focus]')) {
+                const copy = target.cloneNode(true);
+                for (const anchor of copy.querySelectorAll('[data-return-focus]')) anchor.removeAttribute('data-return-focus');
+                if (copy.innerHTML === source.innerHTML) continue;
+            }
+            if (selector === '[data-skill-trays]') patchSkillTrays(target, source);  // a changed tray keeps its focused action
+            else target.innerHTML = source.innerHTML;
+        }
     }
     const publication = card.querySelector('[data-skill-detail-publication]'), nextPublication = next.querySelector('[data-skill-detail-publication]');
     if (publication && nextPublication && publication.dataset.skillDetailPublication !== nextPublication.dataset.skillDetailPublication) {

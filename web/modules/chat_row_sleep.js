@@ -145,7 +145,7 @@ export function createRowSleep({ feed, win = globalThis.window, onRestyle } = {}
         const now = feed.clientWidth;
         shown = now > 0;
         if (!shown) return;
-        if (width && now !== width) { width = now; held = 0; wakeAll(); return; }
+        if (width && now !== width) { width = now; held = 0; wakeAll(); onRestyle?.(); return; }
         width = now;
         if (due.size && !ticking) { ticking = true; win.requestAnimationFrame(tick); }
     }) : null;

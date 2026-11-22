@@ -16,6 +16,7 @@ import sys
 import pytest
 
 from ouroboros.tools.registry import ToolRegistry
+from tests._workspace_git import git_repository
 
 # Spawns real OS subprocesses (git, the `sys.executable` Python, and a POSIX `sh` in one guarded
 # case) via _tracked_subprocess_run — not parallel-safe under `pytest -n auto` (DEVELOPMENT.md
@@ -26,10 +27,7 @@ from ouroboros.tools.registry import ToolRegistry
 # ----------------------------------------------------------------------------- helpers
 def _git_ws(parent, name="proj"):
     """A git worktree under user_files (scratch requires a git-worktree cwd)."""
-    ws = parent / name
-    ws.mkdir()
-    _git(ws, "init", "-q")
-    return ws
+    return git_repository(parent / name, unborn=True)
 
 
 def _reg(tmp_path, monkeypatch):

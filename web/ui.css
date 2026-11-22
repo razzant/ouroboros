@@ -470,7 +470,7 @@
     --tone-chosen-answer: var(--tone-green);
     --tone-chosen-answer-ink: var(--status-ok-fg);
     --tone-chosen-answer-detail: var(--text-meta);
-    --tone-chosen-answer-shadow: none;
+    --tone-chosen-answer-shadow: 0 0 transparent;  /* flat, yet a shadow layer: a quote's ring can join it */
     --chosen-answer-cue-display: none;
     --tone-recommended: var(--status-ok-fg);
     --tone-recorded-answer: var(--text-meta);

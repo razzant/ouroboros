@@ -562,7 +562,8 @@ def test_automatic_local_executor_stop_finalizes_declared_outputs(project, missi
         if missing:
             assert "missing output" in stopped[0]["artifact_outputs"] and not records
         else:
-            assert len(records) == 1 and Path(records[0]["path"]).read_text() == "service-bytes"
+            assert {row["kind"] for row in records} == {"process_output", "service_output_version"}
+            assert all(Path(row["path"]).read_text() == "service-bytes" for row in records)
     finally:
         services._stop_service(ctx, "automatic-output")
 

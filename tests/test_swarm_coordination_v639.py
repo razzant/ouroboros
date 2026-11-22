@@ -6,6 +6,10 @@ durable project journal), and I-b (stat child artifact pointers as a ground-trut
 
 from __future__ import annotations
 
+import json
+import os
+
+import pytest
 
 import ouroboros.tools.project_journal as pj
 from ouroboros.task_status import _artifact_stat_marker, _child_artifact_pointers
@@ -46,6 +50,46 @@ def test_child_artifact_pointers_flags_missing(tmp_path):
     pointers = _child_artifact_pointers(child)
     assert any("page" in p and "✓ present" in p for p in pointers)
     assert any("ghost" in p and "⚠ MISSING" in p for p in pointers)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a Windows name cannot end in a space")
+def test_child_artifact_pointers_stat_the_exact_registered_path(tmp_path):
+    """A registered path is the file's identity: padding is part of the name, so the stat reads that very file,
+    never its trimmed sibling, which is another file of another size."""
+    padded = tmp_path / "note.txt "
+    padded.write_text("hello", encoding="utf-8")
+    (tmp_path / "note.txt").write_text("the trimmed sibling is longer", encoding="utf-8")
+    assert _child_artifact_pointers({"artifact_bundle": {"artifacts": [{"name": "kept", "abs_path": str(padded)}]}}) == [
+        f"kept -> {padded} [✓ present, 5 bytes]"]
+
+
+def test_child_artifact_pointers_keep_a_valid_unicode_name_as_it_is(tmp_path):
+    present = tmp_path / "отчёт-雪.txt"
+    present.write_text("данные", encoding="utf-8")
+    pointers = _child_artifact_pointers({"artifact_bundle": {"artifacts": [{"name": present.name, "abs_path": str(present)}]}})
+    assert pointers == [f"{present.name} -> {present} [✓ present, {len('данные'.encode())} bytes]"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX filename bytes")
+def test_a_finished_handoff_names_a_registered_byte_artifact_by_an_exact_literal(tmp_path):
+    """The parent reads a child's artifact pointer as UTF-8 text: a POSIX byte name is a JSON string literal there,
+    distinct from a real name that spells the same escape. The marker is the stat of the registered path, whatever
+    this volume answers for a name it cannot hold."""
+    from ouroboros.task_status import format_subagent_absorption_message
+
+    byte_name = b"report-\xff.txt".decode("utf-8", "surrogateescape")  # constructed: the fixture volume need not store it
+    spelled = r"report-\udcff.txt"
+    child = {"task_id": "c1", "parent_task_id": "P", "status": "completed", "role": "a", "result": "Report written.",
+             "artifact_bundle": {"artifacts": [{"name": byte_name, "abs_path": str(tmp_path / byte_name)},
+                                               {"name": spelled, "abs_path": str(tmp_path / spelled)}]}}
+    handoff = format_subagent_absorption_message([child], parent_task_id="P")
+    handoff.encode("utf-8")
+    [line] = [row for row in handoff.splitlines() if row.startswith("artifacts: ")]
+    decoder, body = json.JSONDecoder(), line.removeprefix("artifacts: ")
+    shown_name, end = decoder.raw_decode(body)
+    shown_path, end = decoder.raw_decode(body, end + len(" -> "))
+    assert (shown_name, shown_path) == (byte_name, str(tmp_path / byte_name))
+    assert f"; {spelled} -> {tmp_path / spelled} " in line
 
 
 # ----------------------------------------------------- F3: journal fail-loud

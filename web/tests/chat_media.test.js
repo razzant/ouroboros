@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { bindComposerFileTargets, decorateContactSource, safeHttpUrl } from '../modules/chat_media.js';
+import { documentMessageKey } from '../modules/chat_activity.js';
+import { bindComposerFileTargets, decorateContactSource, fileNames, safeHttpUrl } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
@@ -292,6 +293,43 @@ test('file dialog and photo menu expose no Share action (owner removal)', async 
         });
         assert.ok(photo.querySelector('[data-photo-action="copy"]'));
         assert.equal(photo.querySelector('[data-photo-action="share"]'), null);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a delivered file named by a raw POSIX byte reads as text on its card, dialog and search words; identity stays exact', async () => {
+    const fx = fixture();
+    try {
+        // The browser's view of non-UTF-8 name bytes is a lone surrogate (the host keeps each as a JSON escape).
+        const frame = (filename) => ({ type: 'document', role: 'assistant', filename, mime: 'application/pdf',
+            file_base64: 'aGVsbG8=', size_bytes: 5, ts: '2026-08-30T00:00:00Z', task_id: 'task-1' });
+        const msg = frame('fixture-\uDCFF.pdf');
+        const card = fx.controller.buildDocumentBubble(msg);
+        assert.ok(card.innerHTML.includes(String.raw`<span class="chat-file-name">fixture-\xff.pdf</span>`));
+        assert.ok(card.innerHTML.includes('PDF · 5 B'));
+        assert.doesNotMatch(card.innerHTML, /[\uD800-\uDFFF]/u, 'no raw byte reaches the markup');
+        await card.querySelector('.chat-file-card').click();
+        assert.equal(globalThis.document.body.querySelector('.chat-file-dialog-title').textContent, String.raw`fixture-\xff.pdf`);
+        // A byte in the suffix is no file type: the chip reads as a plain file, the name still spells the byte.
+        const suffixed = fx.controller.buildDocumentBubble(frame('fixture.t\uDCFExt'));
+        assert.ok(suffixed.innerHTML.includes(String.raw`>fixture.t\xfext</span>`) && suffixed.innerHTML.includes('FILE · 5 B'));
+        // Display only: the row keeps the exact name, and two names that differ by a byte stay two rows.
+        assert.equal(msg.filename, 'fixture-\uDCFF.pdf');
+        assert.deepEqual(fileNames(msg), { full: 'fixture-\uDCFF.pdf', shown: String.raw`fixture-\xff.pdf`,
+            download: String.raw`fixture-\xff.pdf` });
+        assert.notEqual(documentMessageKey(msg), documentMessageKey(frame('fixture-\uDCFE.pdf')));
+        const spelled = frame(String.raw`fixture-\xff.pdf`);
+        const spelledCard = fx.controller.buildDocumentBubble(spelled);
+        assert.ok(spelledCard.innerHTML.includes(String.raw`<span class="chat-file-name">fixture-\\xff.pdf</span>`));
+        assert.notEqual(fileNames(msg).shown, fileNames(spelled).shown);
+        assert.notEqual(documentMessageKey(msg), documentMessageKey(spelled));
+        assert.equal(fileNames(spelled).download, String.raw`fixture-\xff.pdf`);
+        for (const name of ['report.pdf', 'файл🪶.txt', '"quoted" notes.md']) {
+            assert.equal(fileNames({ filename: name }).shown, name);
+        }
+        assert.equal(fileNames({ filename: 'x'.repeat(250) }).shown.length, 200);
     } finally {
         fx.controller.destroy();
         fx.restore();

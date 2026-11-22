@@ -235,7 +235,9 @@ def test_a_refusal_that_offers_resume_closes_with_the_ended_work(env, reason):
 @pytest.mark.parametrize("marks", [
     {"_continuation_prepared": True}, {"_owner_hold": {"reason": "owner"}},
     {"_budget_pause_hold": {"reason": "dispatch_outcome_unknown"}},
-], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown"])
+    {"_budget_pause": {"refusal": {"reason": "dispatch_outcome_unknown", "dispatch_unknown": True,
+                                  "refusal_basis": "saved_work_unverified"}}},
+], ids=["publication_unconfirmed", "owner_hold", "dispatch_unknown", "saved_source_unverified"])
 def test_an_unknown_dispatch_or_an_owner_hold_keeps_the_helper(env, marks):
     _work_root(env.root)
     write_task_result(env.root, CHILD, "scheduled", root_task_id=ROOT, parent_task_id=ROOT, delegation_role="subagent")
@@ -351,6 +353,38 @@ def test_capture_runs_before_the_cancelled_write_and_natural_completion_wins(env
     assert seen["status"] == "scheduled"
     assert load_task_result(env.root, CHILD)["result"] == "finished by itself"
     assert _pending(env) is None and not ci.active_intent(env.root, CHILD)
+
+
+def test_a_busy_terminal_file_copy_keeps_the_helpers_own_end_for_the_next_pass(env, monkeypatch):
+    """The helper's own settled end waits on its child drive while another publisher holds the store; the
+    closure must not spend that wait as its cancel. Given back, the watchdog's next pass completes the same
+    publication and the real ending stands."""
+    import ouroboros.headless as headless
+    from ouroboros.task_custody import CustodyBusy
+
+    _work_root(env.root)  # the work truly ended: without this, discovery owes the helper no closure at all
+    child = headless.prepare_task_drive(env.root, CHILD, "empty")
+    _paused_helper(env.root, monkeypatch, extra={
+        "drive_root": str(child), "budget_drive_root": str(env.root),
+        "task_constraint": {"mode": "local_readonly_subagent"}})
+    write_task_result(child, CHILD, "completed", result="the helper's own answer")
+    calls, real_copy = {"n": 0}, headless.copy_child_task_result
+
+    def busy_once(parent_drive_root, task):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the store's other publisher: the copy waits, nothing failed
+            raise CustodyBusy(f"custody lock of {task['id']} is held by another publisher")
+        return real_copy(parent_drive_root, task)
+
+    monkeypatch.setattr(headless, "copy_child_task_result", busy_once)
+    assert _sweep(env)[1] == {CHILD: "failed"} and calls["n"] == 1  # a busy copy is no ending to replace with this cancel
+    assert _pending(env) is not None and ci.active_intent(env.root, CHILD)  # given back, never withdrawn
+    assert load_task_result(env.root, CHILD)["status"] == "scheduled"
+    assert load_task_result(child, CHILD)["result"] == "the helper's own answer"
+    assert _sweep(env)[1] == {CHILD: "already_settled"}  # the freed store completes the same publication
+    row = load_task_result(env.root, CHILD)
+    assert row["status"] == "completed" and row["result"] == "the helper's own answer"
+    assert not row.get("cancel_origin") and _pending(env) is None and not ci.active_intent(env.root, CHILD)
 
 
 def test_workspace_patch_and_external_custody_are_taken_before_the_close(env, monkeypatch):
@@ -1369,13 +1403,17 @@ def _closures_capture_stands(row, first):
 
 
 def _entered(env, task):
-    """The resumed worker's entry, as ``loop._resume_continuation`` makes it once the continuation is consumed and
-    before any effect (that order, through the real handover, is pinned in test_resume_handover): on the canonical
-    row the loop names, its budget root, else its own drive."""
+    """The resumed worker's entry. Its start first records itself on its own drive, naming its attempt (the ``agent``
+    start write): for a split helper that is the child drive its end then extends, as the dispatch mirror named the
+    attempt on the canonical row. Then ``loop._resume_continuation`` reopens the capture once the continuation is
+    consumed and before any effect (that order, through the real handover, is pinned in test_resume_handover): on the
+    canonical row the loop names, its budget root, else its own drive."""
     import pathlib
 
     from ouroboros.headless import reopen_capture_at_entry
 
+    if task.get("drive_root"):  # only a split helper runs on a drive of its own
+        write_task_result(task["drive_root"], CHILD, "running", task_attempt=task["_attempt"])
     reopen_capture_at_entry(pathlib.Path(task.get("budget_drive_root") or task.get("drive_root") or env.root), CHILD)
 
 
@@ -1397,7 +1435,7 @@ def test_a_resumed_helper_hands_in_its_new_work_not_the_withdrawn_closures_captu
     env.workers.assign_tasks()
     assert [launched["id"] for launched in sent] == [CHILD]
     _closures_capture_stands(load_task_result(env.root, CHILD), first)  # put: nothing reopened before the worker
-    _entered(env, task)
+    _entered(env, sent[0])
     entered = load_task_result(env.root, CHILD)
     assert entered["artifact_status"] == entered["artifact_bundle"]["status"] == "pending"  # the new execution owes one
     assert set(first) <= {item["path"] for item in entered["artifacts"] if item.get("kind") == "workspace_capture_history"}

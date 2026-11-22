@@ -931,8 +931,7 @@ def _working_folder(ui, project_id):
                   "clientX": box["x"] + box["width"] / 2, "clientY": box["y"] + box["height"] / 2}
         target.dispatch_event("pointerdown", finger)
         ui.page.locator(MENU).wait_for()  # the long press, held still
-        target.dispatch_event("pointerup", finger)
-        ui.page.wait_for_timeout(450)  # the lifting finger's click guard
+        target.dispatch_event("pointerup", finger)  # the next press acts at once (gesture_tail.js)
     else:
         row.hover()
         row.locator(".nav-project-kebab").click()

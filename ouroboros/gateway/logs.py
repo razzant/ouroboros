@@ -29,6 +29,7 @@ from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.confined_files import physical_path, root_spellings
 from ouroboros.dialogue_positions import ordinals_of
 from ouroboros.gateway._helpers import (
+    UTF8JSONResponse,
     coerce_int,
     json_error,
     read_rotated_jsonl_entries,
@@ -41,7 +42,7 @@ from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_custody import child_drive_candidates
 from ouroboros.task_reads import TaskReads
 from ouroboros.task_results import validate_task_id
-from ouroboros.utils import JsonlChainUnreadable
+from ouroboros.utils import JsonlChainUnreadable, json_dumps_utf8
 
 _ALLOWED_LOGS = {
     "chat": "chat.jsonl",
@@ -173,8 +174,8 @@ def _logs_tail(request: Request) -> JSONResponse:
     rows.sort(key=lambda item: (str(item.get("ts") or ""), str(item.get("_source_root") or ""), int(item.get("_line") or 0)))
     seen: set = set()
     rows = [row for row in rows if (key := replica_key(row)) is None or not (key in seen or seen.add(key))]
-    return JSONResponse({"name": name, "entries": rows[-limit:],
-                         **({"view": "compact", "gaps": [], "skipped_rows": 0} if view == "compact" else {})})
+    return UTF8JSONResponse({"name": name, "entries": rows[-limit:],
+                             **({"view": "compact", "gaps": [], "skipped_rows": 0} if view == "compact" else {})})
 
 
 def _dialogue_tail(root: pathlib.Path, stream: str, limit: int, task_ids: Optional[set],
@@ -249,7 +250,7 @@ def _public(row: dict) -> dict:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return json_dumps_utf8(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
 def _source_ref(source: dict) -> str:
@@ -346,8 +347,8 @@ def _compact_tail(request: Request, name: str) -> JSONResponse:
             entries.append(item)
     except (ValueError, RecursionError):
         return json_error("log source cannot be projected", 400, reason_code="invalid_log_source")
-    return JSONResponse({"name": name, "entries": entries, "view": "compact",
-                         "gaps": sorted(gaps), "skipped_rows": skipped_rows})
+    return UTF8JSONResponse({"name": name, "entries": entries, "view": "compact",
+                             "gaps": sorted(gaps), "skipped_rows": skipped_rows})
 
 
 def _decode_ref(value: str, name: str) -> dict:
@@ -483,10 +484,10 @@ def _logs_raw(request: Request) -> Response:
     end = min(len(payload), offset + limit)
     while end < len(payload) and payload[end] & 0xC0 == 0x80:
         end -= 1
-    return JSONResponse({"source": source, "representation": representation, "sha256": digest,
-                         "total_bytes": len(payload), "offset": offset, "next_offset": end,
-                         "has_more": end < len(payload), "text": payload[offset:end].decode("utf-8"),
-                         "unavailable_fields": unavailable, "unavailable_reason": reason}, headers=headers)
+    return UTF8JSONResponse({"source": source, "representation": representation, "sha256": digest,
+                             "total_bytes": len(payload), "offset": offset, "next_offset": end,
+                             "has_more": end < len(payload), "text": payload[offset:end].decode("utf-8"),
+                             "unavailable_fields": unavailable, "unavailable_reason": reason}, headers=headers)
 
 
 __all__ = ["api_logs_tail", "api_logs_raw", "LogRowSource", "LogRawReference", "LogRawResponse",

@@ -125,6 +125,22 @@ def test_accounts_is_passive_and_provider_activation_is_explicit(accounts_ui):
     expect(settings_page(page, "accounts/key/openrouter").locator("[data-editor-save]")).to_be_visible()
 
 
+def test_openai_compatible_key_form_explains_opencode_go(subscription_ui):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    page.goto(ui["url"])
+    open_settings(page, "accounts").locator('[data-open-path="accounts/key/new"]').click()
+    editor = settings_page(page, "accounts/key/new")
+    editor.get_by_label("Provider", exact=True).select_option("openai-compatible")
+    expect(editor.get_by_role("textbox", name="OpenAI Compatible Base URL", exact=True)).to_be_editable()
+    hint = editor.locator(".settings-card-note").filter(has_text="OpenCode Go")
+    expect(hint).to_be_visible()
+    expect(hint.locator("code").first).to_have_text("https://opencode.ai/inference/go/openai/v1")
+    assert not ui["posts"]  # reading setup guidance needs neither a save nor a provider test
+    setup_browser.capture(page, "settings-opencode-go-connection")
+
+
 def test_key_switch_save_test_and_confirmed_removal(accounts_ui):
     from playwright.sync_api import expect
     ui, page = accounts_ui, accounts_ui["page"]

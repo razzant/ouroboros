@@ -76,9 +76,8 @@ the same binding. A resumed session may keep earlier instructions, so each acces
 line scopes run facts (access; edit, evidence, scratch, copy-local places; a copy's
 read-only target) to one run and finds the current binding by identity, not position:
 this turn's host facts, at the harness's starting directory; quoted ones are history.
-Each ordinary continuation's prompt restates its access and binding (else its directory). The binding, the `workspace_write`
-access line and the unproven-boundary sentence state one write rule, because
-verification needs writes no copy may hold: disposable process state (test
+Ordinary Continue restates access and binding (or directory). The binding, `workspace_write` access
+line and boundary disclosure share the rule for verification output: disposable process state (test
 scratch, package-manager temporaries, build or dependency output that only serves
 checks) goes outside every Git working tree, the
 binding naming safe_test's default parent through the launcher's own predicate,
@@ -103,10 +102,9 @@ The host adds only these workspaces, never containers, markers or records, as
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
 sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
-Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
-captured, released when its task ends (`workspace_preflight.release_finished_scratch`) or its seat copy goes
-(`session_scratch.release_seat_scratch`), nothing
-reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
+The binding declares scratch disposable before use (`DISPOSABLE_SCRATCH`). Create one-off measurement
+snapshots there. Return the report, script, results, source and hash; explicitly return needed exact
+bytes as evidence. Scratch follows its seat or task and parent decision through Continue.
 Native profile rights are unchanged; the managed allocator makes only new container/marker metadata
 service-readable, without widening the workspace grant. IPC or process inspection may still refuse;
 keep its command and diagnostics. After inspecting the candidate, the integrating mind may run it through
