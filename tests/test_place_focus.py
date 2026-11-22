@@ -1026,17 +1026,22 @@ def test_only_the_focus_turns_record_owes_my_humans_reply_first(focus, monkeypat
         assert ctx._presence_completion["outcome"] == "silent" and not getattr(ctx, "_focus_record_only", False)
 
 
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
 @pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
-def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_finish_into_words(focus, monkeypatch, door):
+def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_finish_into_words(focus, monkeypatch, door,
+                                                                                              named):
     """The selection reads the place twice (``records_only_now``, then ``reply_hold``). Silent at the first and Active
     at the second (the owner reactivates it meanwhile): a door connector's finish stays its record, unchecked and
-    unposted; a doorless one keeps its automatic reply through the ``place_reply`` check."""
+    unposted; a doorless one keeps its automatic reply through the ``place_reply`` check. Retained bytes that never
+    named their connector (``unnamed``) read the place's own (review round 2, Astra 1)."""
     from ouroboros import place_reply
     from tests.test_place_reply_revision import promoted
     root, place, _admission, _event = focus
     if door:
         _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
     task = promoted(task_for(focus))
+    if not named:
+        task["metadata"]["presence"].pop("transport_skill")
     checks = []
     monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
@@ -1056,21 +1061,25 @@ def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_fini
     assert checks == ([] if door else ["place_reply"])
 
 
+@pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
 @pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
-def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, monkeypatch, door):
+def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, monkeypatch, door, named):
     """Pre-migration task bytes name the place only by its old ``binding_id``: a new selection resolves it through the
     place store as ``reply_hold`` does, so a door connector's finish is its record (the live result builder included)
-    and a doorless one meets the ``place_reply`` check; a final stored before it is replayed as stored."""
-    from ouroboros.place_reply import carrier_now, prepare_focus_reply, records_only, reply_carrier
+    and a doorless one meets the ``place_reply`` check; a final stored before it is replayed as stored. Bytes that
+    never named their connector either (``unnamed``) read the resolved place's own (review round 2, Astra 1)."""
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply, records_only, reply_carrier, riding_sends
     from ouroboros.presence_runner import build_presence_result_event, presence_result_from_stored
     from tests.test_place_reply_revision import promoted
     root = focus[0]
-    if door:
-        _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    name = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel") if door else ""
     task = promoted(task_for(focus))
     presence = task["metadata"]["presence"]
     presence["binding_id"] = presence.pop("place_id")
+    presence["event"]["conversation_key"] = "chat:a:r:0"  # the key a connector's event carries, thread part included
     task["metadata"].pop("focus", None)  # pre-migration bytes carry no focus frame either
+    if not named:
+        presence.pop("transport_skill")
     assert reply_carrier(task["metadata"]) == {} and records_only(task["metadata"]) is False  # metadata names no place
     checks = []
     monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
@@ -1085,6 +1094,13 @@ def test_a_retained_legacy_binding_meets_its_place_at_a_new_selection(focus, mon
     event = build_presence_result_event({**task, "metadata": task["metadata"]}, "Hello", built,
                                         terminal_origin="model_final")
     assert (event["outcome"], event["text"]) == (("silent", "") if door else ("message", "Hello"))
+    if door:  # the riding send and the record note read the same door
+        call = {"tool": name, "args": {"channel": "r"}, "is_error": False}
+        assert riding_sends(ctx, [call]) == [call], "a send through the door rides with the finish"
+        noted = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                                _completion_riding_send=False)
+        allowed, note = prepare_focus_reply(noted, "Hello")
+        assert not allowed and f"only when you send them, through {name} (" in note, note
     stored = {"status": "completed", "terminal_origin": "model_final", "result": "Hello",
               "metadata": {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Hello"}}
     replay = presence_result_from_stored(stored, task["id"])

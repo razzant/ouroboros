@@ -66,16 +66,34 @@ def resolved_carrier(root, metadata) -> dict:
 
 
 def carrier_now(ctx, metadata=None) -> dict:
-    """The carrier a run selects its finish by (``resolved_carrier`` at its canonical root): a new selection of a
-    retained legacy binding meets its place like any other, while a stored result replays as it was selected. A run
-    under a frozen Presence ceiling keeps its own outward choice, the forced declaration (owner Q4)."""
+    """The carrier a run selects its finish by (``resolved_carrier`` at its canonical root), with the connector whose
+    doors it reads (``transport_skill``): a new selection of a retained legacy binding meets its place like any other,
+    and retained bytes that never named their connector read the resolved place's own, as the work poll authenticates
+    it; a stored result replays as it was selected. A run under a frozen Presence ceiling keeps its own outward
+    choice, the forced declaration (owner Q4)."""
     if metadata is None:
         metadata = getattr(ctx, "task_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return {}
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+    connector, carrier = str(presence.get("transport_skill") or ""), reply_carrier(metadata)
     frozen = isinstance((getattr(ctx, "task_contract", None) or {}).get("capability_ceiling"), dict)
-    if frozen or not _legacy_binding(metadata):
-        return reply_carrier(metadata) if isinstance(metadata, dict) else {}
-    from ouroboros.tool_access import canonical_data_root
-    return resolved_carrier(canonical_data_root(ctx), metadata)
+    if not frozen and (_legacy_binding(metadata) or (carrier and not connector)):
+        from ouroboros.tool_access import canonical_data_root
+        root = canonical_data_root(ctx)
+        carrier = resolved_carrier(root, metadata)
+        connector = connector or (_place_connector(root, carrier["place_id"]) if carrier else "")
+    return {**carrier, "transport_skill": connector} if carrier else {}
+
+
+def _place_connector(root, place_id) -> str:
+    """The connector of the place a carrier resolves to; ``""`` when the store names none or cannot be read (no door:
+    the held path says so). A root without place state is not migrated by this read."""
+    from ouroboros.places import places_path
+    try:
+        return get_place(root, place_id).connector if places_path(root).exists() else ""
+    except Exception:
+        return ""
 
 
 def reply_addresses(metadata, anchor=None) -> tuple:
@@ -256,20 +274,19 @@ def records_only_now(ctx) -> bool:
     metadata = getattr(ctx, "task_metadata", {}) or {}
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.tool_access import canonical_data_root
-    if not _door_declared(metadata) or is_observe_origin(metadata):
+    if is_observe_origin(metadata):
         return False
     try:
         carrier = carrier_now(ctx, metadata)
-        return bool(carrier) and get_place(canonical_data_root(ctx), carrier["place_id"]).state == "active"
+        return _door_declared(carrier) and get_place(canonical_data_root(ctx), carrier["place_id"]).state == "active"
     except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
         return False
 
 
-def _door_declared(metadata) -> bool:
-    """Whether the run's own connector declares an in-conversation message door (``records_only`` without the
-    carrier, which a selection resolves)."""
-    presence = metadata.get("presence") if isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict) else {}
-    return bool(conversation_send_tools(str(presence.get("transport_skill") or "")))
+def _door_declared(carrier) -> bool:
+    """Whether the run's own connector (``carrier_now``'s ``transport_skill``) declares an in-conversation message door:
+    ``records_only`` with the carrier a selection resolves."""
+    return bool(carrier) and bool(conversation_send_tools(str(carrier.get("transport_skill") or "")))
 
 
 def riding_sends(ctx, calls) -> list:
@@ -284,7 +301,7 @@ def riding_sends(ctx, calls) -> list:
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = carrier_now(ctx, metadata)
-    connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
+    connector = str(carrier.get("transport_skill") or "")
     sends, gestures = dict(conversation_send_tools(connector)), dict(conversation_gesture_tools(connector))
     delivered = (getattr(ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
     riding = []
@@ -361,18 +378,19 @@ def place_state_now(root, metadata):
         return None
 
 
-def speak_line(metadata, *, state=None) -> str:
+def speak_line(metadata, *, state=None, connector=None) -> str:
     """How words and declared gestures reach this place: every declared door with its own arguments, ids prefilled
     from the event (the host picks none: a pick would be a verdict), and the finish's fate. A connector with a send
     door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words. ``state``
-    is the place's state now (``place_state_now``); the FOCUS frame keeps the event's snapshot."""
+    is the place's state now (``place_state_now``); the FOCUS frame keeps the event's snapshot. ``connector`` is the one
+    a selection resolved (``carrier_now``), else the event's."""
     from ouroboros.consciousness_authority import is_observe_origin
 
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
     event, place = presence.get("event") or {}, presence.get("place") or {}
     label = place.get("label") or place.get("provider") or presence.get("place_id") or "this place"
-    connector = str(presence.get("transport_skill") or "")
+    connector = str(presence.get("transport_skill") or "") if connector is None else connector
     tools, gestures = conversation_send_tools(connector), conversation_gesture_tools(connector)
     if not tools and not gestures:
         return f"Your non-silent finish is posted in {label} as your words."
@@ -423,9 +441,10 @@ def record_note(ctx) -> str:
     sends = this_turn_sends(ctx, carrier["conversation_key"])
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"
+    doors = speak_line(metadata, state="active", connector=carrier["transport_skill"])
     return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
             f"people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
-            f"there without a receipt yet: {pending}. {speak_line(metadata, state='active')} Send it now, or finish "
+            f"there without a receipt yet: {pending}. {doors} Send it now, or finish "
             "again to keep this text as your record.")  # shown only while records_only_now reads the place Active
 
 
@@ -445,7 +464,7 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    door, records, focus = _door_declared(metadata), records_only_now(ctx), _focus_turn(metadata)
+    door, records, focus = _door_declared(carrier), records_only_now(ctx), _focus_turn(metadata)
     if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
         if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does
