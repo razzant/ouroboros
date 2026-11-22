@@ -460,7 +460,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     census ties to no tree.
     """
     from ouroboros.control_actor import control_actor, observed_control_stop
-    from ouroboros.work_stop import clear_refusal, release_refusal, selection_record, unsafe_replay_response
+    from ouroboros.work_stop import SELECTION_KEY, clear_refusal, release_refusal, selection_record, unsafe_replay_response
     q = _queue_module()
     task_id = str(task_id or "").strip()
     if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT), control_actor()):
@@ -468,10 +468,11 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     if not task_id:
         return {"ok": False, "error": "missing_task_id"}
     from supervisor.events_budget import (
-        _held_selection_authority, observe_held_budget_selection, select_held_budget_row,
+        _held_selection_authority, budget_resume_dispatch_allowed, observe_held_budget_selection,
+        select_held_budget_row,
     )
 
-    external = observation = None
+    external = observation = current = None
     with q._queue_lock:
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
         if refusal := release_refusal(observed_control_stop(
@@ -573,6 +574,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if "owner_pause_blockers" in (observation or {}):  # a ``latch_pending`` Pause: the fence revalidated above
             from supervisor.owner_pause_control import complete_owner_pause_latch
             complete_owner_pause_latch(candidate_root, observation["authority"]["owner_fence"])
+            current = None
         candidate_fence = q.BUDGET_ROOT_FENCES.get(candidate_root)
         if (not selected_by and (task_id == candidate_root or "owner_pause_blockers" in (observation or {}))
                 and isinstance(candidate_fence, dict) and candidate_fence.get("cause") == "owner_pause"):
@@ -582,7 +584,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if names_start() and not hold:
             return {"ok": False, "error": "selection_authority_changed"}
         if hold:
-            return select_held_budget_row(q, task, hold, selected_by=selected_by, observation=observation)
+            return select_held_budget_row(q, task, hold, selected_by=selected_by, observation=observation, current=current)
         if not pause:
             if not isinstance(candidate_fence, dict):
                 return {"ok": False, "error": "task_not_budget_paused"}
@@ -625,6 +627,10 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                 expected = _held_selection_authority(q, task)
             except Exception:
                 return {"ok": False, "error": "selection_authority_unavailable"}
+        elif selected_by:
+            if authority["root_actor"]:
+                return {"ok": False, "error": "not_a_budget_paused_descendant"}
+            return select_held_budget_row(q, task, hold, selected_by=selected_by, observation=observation, current=current)
         else:
             from ouroboros.presence_carrier import owner_resume_lift
             if refusal := owner_resume_lift(task, result_root):  # the owner's Resume of a moved Presence turn (#2566)
@@ -634,6 +640,8 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
             task.pop("_budget_pause", None)
             task.pop("_budget_pause_hold", None)
             clear_refusal(task)
+            if budget_resume_dispatch_allowed(q, task) is False:  # dispatch's own check: only a stale choice leaves
+                task.pop(SELECTION_KEY, None)
             task["budget_resumed_at"] = resumed_at
             q.persist_queue_snapshot(reason="budget_pause_explicit_resume")
     if root_scope:

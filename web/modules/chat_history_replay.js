@@ -71,6 +71,7 @@ export function timelineReadFields(summary, previous = {}) {
         fullRef: summary.fullRef || previous.fullRef || '',
         fullField: summary.fullField || previous.fullField,
         truncated: summary.truncated || previous.truncated || false,
+        ...(summary.serviceStop ? { serviceStop: summary.serviceStop } : {}),
         childCause: cause && before && JSON.stringify(cause) === JSON.stringify(before) ? before : cause,
     };
     if (!stated) return previous.fullOutput ? { ...read, fullOutput: '', outputPreview: '' } : read;

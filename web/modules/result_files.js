@@ -62,7 +62,7 @@ export function projectResultArtifacts(taskId, records, archives = null, wrapUp 
     const files = [];
     const folders = new Map();
     for (const row of Array.isArray(records) ? records : []) {
-        if (!row || typeof row !== 'object') continue;
+        if (!row || typeof row !== 'object' || row.kind === 'service_output_version') continue;
         const parts = String(row.relpath || '').split('/').filter((part) => part && part !== '.');
         const size = Number(row.size);
         const bytes = row.size !== null && row.size !== '' && Number.isFinite(size) && size >= 0 ? size : null;

@@ -28,8 +28,8 @@ from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 from ouroboros.work_stop import hold_fact as budget_hold_fact  # noqa: F401
 from ouroboros.work_stop import (
-    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, direct_selection, reason_policy, record_policy,
-    release_refusal, resume_selection, selection_record, stop_record, writer_wait,
+    SELECTION_KEY, clear_refusal, continuation_refusal, declare_stop, direct_selection, pause_marker, reason_policy,
+    record_policy, release_refusal, resume_selection, selection_record, stop_record, writer_wait,
 )
 
 log = logging.getLogger(__name__)
@@ -343,19 +343,14 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
         return
     task_id = str(evt.get("task_id") or "")
     pause = evt.get("resource_limit") if isinstance(evt.get("resource_limit"), dict) else {}
-    exact = bool(pause.get("exact_continuation")) and isinstance(pause.get("checkpoint"), dict)
-    if exact:
+    if pause.get("exact_continuation") and isinstance(pause.get("checkpoint"), dict):
         from ouroboros.budget_pause import BudgetPauseSuperseded
         try:
             install_exact_budget_pause(ctx, task_id, pause["checkpoint"], evt=evt)
         except BudgetPauseSuperseded:
             log.debug("A newer queue transition owns %s", task_id)
         return
-    if (
-        not task_id
-        or not bool(pause.get("replay_safe"))
-        or pause.get("physical_calls") != 0
-    ):
+    if not task_id or not pause.get("replay_safe") or pause.get("physical_calls") != 0:
         raise ValueError("budget pause requires a replay-safe zero-dispatch task")
     prestart = bool(pause.get("before_task_start"))
     with _parking_lock() as revoked:
@@ -403,7 +398,6 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
         if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
             ctx.WORKERS[worker_id].busy_task_id = None
     from ouroboros.pause_notices import notice_fields
-    import uuid
     episode_id = uuid.uuid4().hex
     try:
         write_task_result(
@@ -466,7 +460,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     from ouroboros.budget_pause import (
         BudgetPauseSuperseded, STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
     )
-    from ouroboros.model_detach import detached_fields
+    from ouroboros.model_detach import detached_fields, is_detach
     from ouroboros.task_carrier import INLINE_EXECUTORS
     from supervisor import queue as queue_mod
     from supervisor.queue import _queue_lock
@@ -558,6 +552,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
             paused_task["_attempt"] = attempt  # the attempt this pause row was just checked against
             paused_task["_is_direct_chat"] = True
         if pending is None:
+            if (not direct_turn and row.get("reason") == "sleep" and not is_detach(row.get("sleep"))
+                    and (paused_task.get("_budget_pause_resume") or {}).get("pause_id") != pause_id):
+                paused_task.pop("_budget_pause_resume", None)
             ctx.PENDING.append(paused_task)
             sort_pending()
         worker_id = evt.get("worker_id") if evt else meta.get("worker_id")
@@ -1163,14 +1160,12 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
         return {"error": "selection_observation_unavailable"}
 
 
-def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
-                           *, selected_by: str, observation: Dict[str, Any]) -> Dict[str, Any]:
-    """Record an explicit selection on a held row (queue lock held).
+def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any], *, selected_by: str,
+                           observation: Dict[str, Any], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Record an explicit selection on a held or globally paused row (queue lock held).
 
-    Release requires current saved-continuation or never-dispatched evidence.
-    A model-issued selection additionally needs the live
-    owner-derived Resume grant of its root: lifting a fence granted eligibility,
-    never continuation.
+    Release requires current saved-continuation or never-dispatched evidence. A model-issued
+    selection also needs its root's live owner Resume grant (fence lift grants eligibility only).
     """
     task_id = str(task.get("id") or "")
     result_root = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
@@ -1178,7 +1173,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
     if observation.get("error"):
         return {"ok": False, "error": observation["error"]}
     try:
-        current = _held_selection_authority(q, task)
+        current = _held_selection_authority(q, task) if current is None else current
     except Exception:
         return {"ok": False, "error": "selection_authority_unavailable"}
     if (task is not observation.get("candidate") or not any(row is task for row in q.PENDING)
@@ -1259,7 +1254,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         return refusal
     task.pop("_budget_pause", None)
 
-    rebound, invalidated, exact_rebound = [], [], []
+    rebound, invalidated = [], []
     if not native_read_gap and actor and not q.BUDGET_ROOT_FENCES.get(root_task_id):
         from supervisor.budget_resume import revoke_exact_budget_resume
 
@@ -1280,7 +1275,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                     # Preserve the owner's existing choice, as for an unbound
                     # selection below. Only its queue dispatch binding
                     # changes; the exact single-use grant is not reissued.
-                    exact_rebound.append((member, handoff))
+                    rebound.append((member, '_budget_pause_resume', handoff))
                     continue
                 # As at fenced root Resume, revocation remains safe even if
                 # publication fails: an unused continuation is never replayed.
@@ -1309,8 +1304,6 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         for member, prior in invalidated:
             member.pop(BUDGET_HOLD_KEY, None)
             member[SELECTION_KEY] = prior
-        for member, prior in exact_rebound:
-            member['_budget_pause_resume'] = prior
         # A failed write can land part of its bundle: this goes back over it now, else with the tick's rewrite.
         q.publish_queue_snapshot(reason='budget_hold_selection_withdrawn')
 
@@ -1319,19 +1312,12 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         task.pop(BUDGET_HOLD_KEY, None)
         if not native_read_gap:  # A native repair rejoins its wait without creating a money or child grant.
             task[SELECTION_KEY] = selection
-        for member, prior in exact_rebound:
-            member['_budget_pause_resume'] = {
-                **prior, 'root_grant_id': selection['root_grant_id'],
-                'root_resume_generation': selection['root_resume_generation'],
-                'root_resume_basis': current['root_resume_basis'],
-            }
         for member, key, prior in rebound:
-            member[key] = {
-                **prior, 'root_grant_id': selection['root_grant_id'],
-                'root_resume_generation': selection['root_resume_generation'],
-                'root_resume_basis': current['root_resume_basis'],
-            }
-            member[key].pop('fence_id', None)
+            member[key] = {**prior, 'root_grant_id': selection['root_grant_id'],
+                           'root_resume_generation': selection['root_resume_generation'],
+                           'root_resume_basis': current['root_resume_basis']}
+            if key != '_budget_pause_resume':
+                member[key].pop('fence_id', None)
         for member, _prior in invalidated:
             hold_budget_row(
                 member, reason=HOLD_ROOT_FENCE_LIFTED,
@@ -1352,10 +1338,12 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
 
         if observation.get("prestart_proof_unreadable"):
             raise RuntimeError("the pre-body proof was unreadable when this selection was observed")
+        prior_pause = ({**prior, "resumed_at": selection["selected_at"]}  # keep dated global stop for post-cancel
+                       if (prior := pause_marker(prior_points)).get("scope") == "global" else {})
         proof = observation.get("prestart_proof") or {}  # a read gap at restore left it in its original result
         write_task_result(result_root, task_id, STATUS_SCHEDULED, reason_code="",
-                          resource_limit={"status": "resumed", "auto_resume": False,
-                                          "exact_continuation": False, **selection,
+                          resource_limit={**prior_pause, **selection, "status": "resumed", "auto_resume": False,
+                                          "exact_continuation": False,
                                           # a held pre-body return keeps its proof for a later stop (#2555)
                                           **({PRESTART_PROOF: proof} if proof else {})})
     except Exception:
@@ -1425,6 +1413,12 @@ def resume_basis(actor: str, pause: Dict[str, Any], owner: Dict[str, Any]) -> Di
     }
 
 
+def _explicit_resume_grant(grant: Dict[str, Any]) -> bool:
+    """Positive durable provenance for lending a new child selection."""
+    return (grant.get('authority') == 'explicit_resume' if 'authority' in grant
+            else direct_selection(grant))
+
+
 def _root_resume_grants(state: Dict[str, Any]) -> tuple:
     """Return (lendable grant, comparable durable grant).
 
@@ -1480,28 +1474,29 @@ def _root_resume_grants(state: Dict[str, Any]) -> tuple:
               if warm.get('grant_id') and not warm.get('revoked_at')
               and warm_ordered else {})
     durable = {} if exact and warmed else exact or warmed
+    exact_lendable = exact if exact and _explicit_resume_grant(grant) else {}
+    warm_lendable = warmed if warmed and _explicit_resume_grant(warm) else {}
     handoff = current.get('_budget_pause_resume') or {}
-    if exact and handoff.get('grant_id') == exact['grant_id']:
-        return exact, durable
+    if exact_lendable and handoff.get('grant_id') == exact_lendable['grant_id']:
+        return exact_lendable, durable
     if (selection and direct_selection(selection) and not selection.get('fence_id')
             and not handoff):
         if selection.get('grant_id'):
-            if (exact and row.get('state') == STATE_RESUMED and grant.get('consumed_at')
-                    and grant.get('authority') == 'explicit_resume'
-                    and selection['grant_id'] == grant.get('grant_id')
+            if (exact_lendable and row.get('state') == STATE_RESUMED and grant.get('consumed_at')
+                    and selection['grant_id'] == exact_lendable['grant_id']
                     and selection.get('grant_generation') == grant.get('generation')):
-                return exact, durable
+                return exact_lendable, durable
         elif (selection.get('root_grant_id') and int(selection.get('root_resume_generation') or 0) > 0
               and (selection.get('root_resume_basis') == basis
                    or 'root_resume_basis' not in selection and not row and not owner)):
             return {'grant_id': str(selection['root_grant_id']),
                     'generation': int(selection['root_resume_generation']), 'pause_id': ''}, durable
 
-    if warmed and (current or warm.get('tree_only')):
+    if warm_lendable and (current or warm.get('tree_only')):
         # A terminal tree's explicit Resume lends only to individually selected children.
-        return warmed, durable
-    if exact and row.get('state') == STATE_RESUME_GRANTED and not grant.get('consumed_at'):
-        return exact, durable
+        return warm_lendable, durable
+    if exact_lendable and row.get('state') == STATE_RESUME_GRANTED and not grant.get('consumed_at'):
+        return exact_lendable, durable
     return {}, durable
 
 

@@ -988,8 +988,9 @@ export function createRoomWork({
         arrive(row, target, departure());
     }
 
-    const departure = () => (history ? history.departure(captureVisibleTimelineAnchor())
-        : { anchor: captureVisibleTimelineAnchor() });
+    const captureReturnAnchor = () => captureVisibleTimelineAnchor(null, { inPlace: false });
+    const departure = () => (history ? history.departure(captureReturnAnchor())
+        : { anchor: captureReturnAnchor(), present: reading?.stick === true && reading.nearBottom?.() === true });
 
     function arrive(row, target, place) {
         close({ restoreFocus: false });
@@ -1030,11 +1031,15 @@ export function createRoomWork({
     // Goes to the exact waited question and focuses the question itself, never its answer field.
     async function viewQuestion(row) {
         const intent = ++navigationIntent;
-        const anchor = captureVisibleTimelineAnchor();
+        const place = departure();
         close({ restoreFocus: false });
         // The task that asked (a Continue or a helper), never the work's first root.
         const shown = await revealQuestion?.(row.question.taskId || row.id, row.question.quizId, { focus: 'question' });
-        if (shown && !destroyed && intent === navigationIntent && !page.hidden && page.isConnected) showBack(anchor);
+        // Its Back returns to the passage, or to the present the reader followed; it never reads a let-go page
+        // again (DESIGN "Room work status"): only a work's own Back revisits one.
+        if (shown && !destroyed && intent === navigationIntent && !page.hidden && page.isConnected) {
+            showBack(place.anchor, place.present ? { present: true } : null);
+        }
     }
 
     function showBack(anchor, place = null) {

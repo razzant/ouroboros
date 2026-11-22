@@ -19,7 +19,6 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import pathlib
 import queue
@@ -42,6 +41,7 @@ from ouroboros.tools.join_ledger import _child_disposition_state, _load_direct_c
 from ouroboros.tools.join_ledger import _child_result_sha256
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
+from ouroboros.utils import json_dumps_utf8
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
@@ -748,7 +748,7 @@ def _service_finalization_projection(
 
 def _service_finalization_text(llm_trace: Dict[str, Any], *, drive_root: Any = None, task_id: str = "") -> str:
     shown = _service_finalization_projection(llm_trace, drive_root=drive_root, task_id=task_id)
-    return json.dumps(shown, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if shown else ""
+    return json_dumps_utf8(shown, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if shown else ""
 
 
 def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> None:
@@ -761,7 +761,7 @@ def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str,
     projection = _loop()._service_finalization_evidence(llm_trace)
     if not projection:
         return
-    payload = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json_dumps_utf8(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     if ctx.forced_service_evidence_fingerprint == fingerprint:
         return

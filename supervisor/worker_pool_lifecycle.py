@@ -241,8 +241,8 @@ def _write_failure_result(
             if final_status != STATUS_CANCELLED or not (standing or lifted) or not pause.get("paused_at"):
                 return fields  # no dated record of a global budget pause, standing or kept by a Resume: nothing is guessed
             # An observation only, never the cause and never read by Continue: the budget pause this work recorded, standing
-            # or lifted since (the explicit Resume keeps its dated record whole, sets ``resumed`` and clears the code; a held
-            # selection replaces it with identities only, so nothing is claimed). No attempt is named: the record carries none.
+            # or lifted since (explicit Resume and global selection keep its dated record, set ``resumed`` and clear the code;
+            # other held selections write identities only, so nothing is claimed). No attempt is named: the record carries none.
             return {**fields, "outcome_axes": observed_cancel_axes(fields["outcome_axes"], earlier_stop="budget_exhausted")}
 
         stored = write_task_result(
