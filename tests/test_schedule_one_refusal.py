@@ -139,10 +139,10 @@ def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path
     assert event["task_contract"]["resource_policy"]["allowed_origins"] == ["https://studio.example:443"]
 
 
-def test_title_labels_the_child_where_objective_names_the_work(tmp_path, monkeypatch):
-    """`title` is outside the schema; it is start_task's spelling of the label that role carries here. Beside an
-    objective and no role it becomes the role, said in the result; beside a role it is ignored, said too; with no
-    objective the shape refusal names objective and the ready call; a plain call reads as it always did."""
+def test_title_is_one_refusal_naming_the_call_that_works(tmp_path, monkeypatch):
+    """`title` is outside the schema: start_task's card name. Here no field means it (role becomes part of
+    the child's assignment), so it reaches the handler only to be refused once with the call that works,
+    beside the call's other shape problems; nothing is queued, and the same call without title schedules."""
     from ouroboros.tools.registry import ToolRegistry
 
     selected = configure_test_subagent(monkeypatch)
@@ -151,18 +151,17 @@ def test_title_labels_the_child_where_objective_names_the_work(tmp_path, monkeyp
     registry.set_context(ctx)
     base = {"subagent_id": selected, "objective": "Examine the change", "expected_output": "Findings"}
 
-    labelled = registry.execute("schedule_subagent", {**base, "title": "Change review"})
-    assert "title='Change review' taken as role, the child's lineage/UI label" in labelled, labelled
-    named = registry.execute("schedule_subagent", {**base, "role": "reviewer", "title": "Change review"})
-    assert "title='Change review' ignored: role names the child" in named, named
-    plain = registry.execute("schedule_subagent", base)
-    assert "title" not in plain
-    assert [(event["type"], event.get("role")) for event in ctx.pending_events] == [
-        ("schedule_subagent", "Change review"), ("schedule_subagent", "reviewer"), ("schedule_subagent", "")]
-
-    refused = registry.execute("schedule_subagent", {"subagent_id": selected, "title": "Change review"})
-    assert refused == (
-        "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required: title='Change review' names no work here; "
-        "the work is the objective and the child's label its role: schedule_subagent(objective=<the work>, "
-        "expected_output=<the result>, role='Change review'); expected_output is required.")
-    assert len(ctx.pending_events) == 3
+    for extra in ({}, {"role": "reviewer"}):
+        refused = registry.execute("schedule_subagent", {**base, **extra, "title": "Change review"})
+        assert refused == (
+            "⚠️ TOOL_ARG_ERROR (schedule_subagent): title='Change review' is no schedule_subagent field: objective "
+            "names the work, and the optional role becomes part of the child's assignment; send the call without "
+            "title.")
+    untitled = registry.execute("schedule_subagent", {"subagent_id": selected, "title": "Change review"})
+    assert untitled == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): title='Change review' is no schedule_subagent field: objective "
+        "names the work and is required, and the optional role becomes part of the child's assignment; send the "
+        "call without title; expected_output is required.")
+    assert not ctx.pending_events
+    registry.execute("schedule_subagent", base)
+    assert [(event["type"], event.get("role")) for event in ctx.pending_events] == [("schedule_subagent", "")]

@@ -115,30 +115,40 @@ def repair_call_available(ctx: Any, tool: str) -> bool:
         return False
 
 
-def read_end_spelling(ctx: Any, path: str, start_line: Any, max_lines: Any,
-                      end_line: Any, end_char: Any) -> tuple[Any, str, str]:
-    """``(max_lines, note, refusal)`` for read_file's ``end_line``/``end_char``, outside its schema.
 
-    ``end_line`` is the inclusive last line of the window. ``end_char`` could count from the window
-    or from the file, so it is refused with the call that reads the window's characters.
+ABSENT: Any = object()  # a handler default that tells an omitted key from an explicit null
+
+
+def read_end_spelling(ctx: Any, call: dict, max_lines: Any, end_line: Any, end_char: Any) -> tuple[Any, list, str]:
+    """``(max_lines, notes, refusal)`` for read_file's ``end_line``/``end_char``, outside its schema.
+
+    ``end_line`` is the inclusive last line, counted from the start the renderer uses (``start_line``
+    floored at 1). ``end_char`` could count from the window or from the file, so it is refused with the
+    call that reads the window's characters. A null takes the omitted path; ``call`` keeps the read's
+    other arguments so each named call reads the same file from the same cursor.
     """
-    def number(value: Any, default: int) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    start = number(start_line, 1)
-    call = f"read_file(path={json.dumps(path)}, start_line={start}, "
-    if end_char is not None:
-        return max_lines, "", argument_refusal(ctx, "TOOL_ARG_ERROR", [
+    try:
+        start = max(1, int(call.get("start_line", 1)))
+    except (TypeError, ValueError):
+        start = 1
+    kept = "".join(f", {key}={json.dumps(call[key])}" for key in ("root", "bucket", "skill_name", "start_char")
+                   if call.get(key) not in (None, "", 0))
+    ready = f"read_file(path={json.dumps(call['path'])}{kept}, start_line={start}, "
+    notes = [ignored_argument_note(name, None, "empty optional value")
+             for name, value in (("end_line", end_line), ("end_char", end_char)) if value is None]
+    if end_char not in (None, ABSENT):
+        return max_lines, notes, argument_refusal(ctx, "TOOL_ARG_ERROR", [
             f"end_char={end_char!r} could count from the window or from the file; max_chars counts the window's "
-            f"characters after start_char: {call}max_chars=<characters>), with start_line=1 for the file's"],
+            f"characters after start_char: {ready}max_chars=<characters>), with start_line=1 for the file's"],
             effect="Nothing was read.")
-    want = number(end_line, 0) - start + 1
-    if want < 1 or max_lines not in (None, want):
-        conflict = (f"is before start_line={start}" if want < 1 else
-                    f"asks for {want} lines from start_line={start}, max_lines={max_lines!r} for another number")
-        return max_lines, "", argument_refusal(ctx, "TOOL_ARG_ERROR", [
-            f"end_line={end_line!r} {conflict}; {call}max_lines=<lines>)"], effect="Nothing was read.")
-    return want, f"end_line={end_line!r} read as max_lines={want} from start_line={start}", ""
+    if end_line in (None, ABSENT):
+        return max_lines, notes, ""
+    text = str(end_line).strip() if isinstance(end_line, (int, str)) and not isinstance(end_line, bool) else ""
+    end = int(text) if text.lstrip("-").isdigit() else None
+    want = None if end is None else end - start + 1
+    if want is None or want < 1 or max_lines not in (None, 2000, want):
+        conflict = ("is not a whole line number" if want is None else f"is before start_line={start}" if want < 1
+                    else f"asks for {want} lines from start_line={start}, max_lines={max_lines!r} for another number")
+        return max_lines, notes, argument_refusal(ctx, "TOOL_ARG_ERROR", [
+            f"end_line={end_line!r} {conflict}; {ready}max_lines=<lines>)"], effect="Nothing was read.")
+    return want, notes + [f"end_line={end} read as max_lines={want} from start_line={start}"], ""

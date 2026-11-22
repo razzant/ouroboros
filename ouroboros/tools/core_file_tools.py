@@ -33,6 +33,7 @@ from ouroboros.tool_access import (
     user_files_path_block_reason,
 )
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
+from ouroboros.tools.arg_feedback import ABSENT, read_end_spelling, with_argument_notes
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import safe_relpath
 
@@ -588,7 +589,7 @@ def _normalize_data_read_path(ctx: ToolContext, path: str) -> str:
 def _data_read(
     ctx: ToolContext,
     path: str,
-    max_lines: int = 2000,
+    max_lines: Optional[int] = None,
     start_line: int = 1,
     start_char: int = 0,
     display_path: str | None = None,
@@ -632,9 +633,9 @@ def _data_read(
     try:
         content = _read_source_text(target, extent)
         start_raw, max_raw = _coerce_line_window(start_line, max_lines)
-        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit
-        # start_char or max_chars is a bounded-view request and must be honored, not swallowed.
-        if (_is_cognitive_data_path(norm) and start_raw == 1 and max_raw == 2000
+        # The cognitive full-read shortcut only applies to a DEFAULT read: an explicit max_lines (read_file's
+        # end_line becomes one), start_char or max_chars is a bounded-view request, honored, not swallowed.
+        if (_is_cognitive_data_path(norm) and start_raw == 1 and _int_or(max_lines, None) is None
                 and not _coerce_start_char(start_char) and _coerce_max_chars(max_chars) is None):
             if display_path is None:
                 return content
@@ -848,18 +849,18 @@ def _read_file(
     skill_name: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
     max_chars: Optional[int] = None,
-    end_line: Any = None,
-    end_char: Any = None,
+    end_line: Any = ABSENT,
+    end_char: Any = ABSENT,
 ) -> str:
-    if end_line is not None or end_char is not None:
-        from ouroboros.tools.arg_feedback import read_end_spelling, with_argument_notes
-
-        max_lines, note, refusal = read_end_spelling(ctx, path, start_line, max_lines, end_line, end_char)
-        return refusal or with_argument_notes(ctx, _read_file(ctx, path, root, max_lines, start_line, start_char,
-                                                              bucket, skill_name, _resolved_binding, max_chars), [note])
     # Reset first: a blocked or missing read must never inherit the previous
     # read's extent (the renderer fills `extent` only when it rendered).
     ctx.last_read_view = None
+    if end_line is not ABSENT or end_char is not ABSENT:  # outside the schema (arg_feedback.read_end_spelling)
+        call = {"path": path, "root": root, "bucket": bucket, "skill_name": skill_name,
+                "start_line": start_line, "start_char": start_char}
+        window, notes, refusal = read_end_spelling(ctx, call, max_lines, end_line, end_char)
+        return refusal or with_argument_notes(ctx, _read_file(
+            ctx, path, root, window, start_line, start_char, bucket, skill_name, _resolved_binding, max_chars), notes)
     extent: Dict[str, Any] = {}
     if not root:
         from ouroboros.tools.tool_resolution import _root_containing_absolute_path

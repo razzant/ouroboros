@@ -90,11 +90,10 @@ Recoverable tool failures are evidence for the next model turn, not triggers for
 host-authored recovery workflow: return a typed, redacted result naming the failed
 stage, the completed external effects and a repair hint, and let the model decide; host
 code owns deterministic integrity, authority boundaries and truthful receipts only.
-Naming a documented default, or a key outside the schema with one meaning, takes that
-meaning, schema unchanged, disclosed in the result; a value asking for more, or a key
-with two readings, is refused typed at the earliest layer able to judge it, naming
-field, value and repair in one reply, since restated rules invite unchanged retries
-(`tools/arg_feedback`).
+A value that means what omission means, or a key outside the schema with one meaning, takes that
+meaning, disclosed in the result; a value that asks for something, or a key with two readings, is
+refused typed at the earliest layer with authority to judge it, naming field, value and repair in one
+reply, as restated rules invite unchanged retries (`tools/arg_feedback`).
 
 A producer that knows its call failed publishes that fact typed
 (`tool_result._publish_tool_result`, or a first-line `⚠️ IDENTIFIER`): identifier-less
