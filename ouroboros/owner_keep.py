@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import pathlib
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple
@@ -39,6 +40,8 @@ try:  # Python 3.11+
     from typing import TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import TypedDict  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
 
 OWNER_KEEP = "owner_keep"
 SCOPE_TASK = "task"
@@ -401,9 +404,13 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
         releases.update(documents)
         try:  # fresh canonical facts under the same custody lock as the owner's keep
             payloads = keep_places(base, task_id, row, places)
-        except (OSError, ValueError):  # an unreadable store or a malformed release record (``release_record``)
+        except Exception as exc:  # noqa: BLE001 - the rule: an explicit keep is saved whatever this reader does
+            # A protective action must not depend on the evidence it protects: an unreadable store or a malformed
+            # release record answers ``canonical_payloads`` unknown and the owner's keep is still saved. A release
+            # (keep=False) still raises.
             if not keep:
                 raise
+            log.warning("owner keep of %s saved without canonical release facts: %s", task_id, type(exc).__name__)
             store = store_of(base, task_id)  # the listed store files: nothing is claimed about them, the keep is saved
             payloads = {place: ("unknown", None) for place in places if pathlib.Path(place).is_relative_to(store)}
             if "canonical_payloads" not in unknown:

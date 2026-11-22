@@ -263,6 +263,27 @@ def test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved(ro
     assert _prune(root)["held"] == {"owner_keep": len(copies)}
 
 
+@pytest.mark.parametrize("operation", ["unreadable", {"state": "accounted", "files": 1}])
+def test_a_malformed_release_record_still_saves_keep_and_the_next_pass_leaves_the_saved_states(root, operation):
+    """A protective action does not depend on the evidence it protects: whatever the release record holds, an explicit
+    Keep is saved and the next eligible pass leaves the saved states; a release on the same record raises."""
+    from ouroboros.owner_keep import set_owner_keep
+    from ouroboros.payload_release_state import KEY
+    from ouroboros.task_store import patch_document, read_document
+
+    handles = _task(root, "malformed")
+    copies = _copies(handles)
+    patch_document(root, "malformed", lambda row: {**row, KEY: {"operations": {"old-record": operation}}})
+    with pytest.raises(ValueError):
+        set_owner_keep(root, "malformed", keep=False, source={"basis": "test"})
+    answer = set_owner_keep(root, "malformed", keep=True, source={"basis": "test"})
+    assert answer["keep"] and answer["unknown"] == ["canonical_payloads"], answer
+    assert read_document(root, "malformed").get("owner_keep")
+    report = _prune(root)
+    assert report["held"] == {"owner_keep": len(copies)} and report["removed"] == 0, report
+    assert all(path.is_file() for path in copies)
+
+
 @pytest.mark.parametrize("walk", ["missed", "raised"])
 def test_keep_names_a_saved_state_by_what_it_is_even_when_the_folder_walk_misses_it(root, monkeypatch, walk):
     """Keep's per-file listing leaves a saved state out by its folder and its writer's name, not by the earlier walk:

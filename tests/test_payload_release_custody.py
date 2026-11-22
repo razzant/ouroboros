@@ -328,7 +328,7 @@ def test_keep_endpoint_keeps_last_canonical_material_after_drive_retirement(real
     assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
 
 
-@pytest.mark.parametrize("failure", ["unreadable", "malformed"])
+@pytest.mark.parametrize("failure", ["unreadable", "malformed", "accounted_shape"])
 def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch, failure):
     """From f6bfcc318, in this branch's per-file format: a canonical store that cannot be read (OSError) or a release
     record that is malformed (ValueError from ``release_record``) still saves an explicit Keep; the listed store files
@@ -342,8 +342,12 @@ def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch, fai
 
         monkeypatch.setattr(release_state, "keep_places", unreadable_store)
         expected = PermissionError
-    else:
+    elif failure == "malformed":
         patch_document(root, TASK, lambda row: {**row, "payload_release": {"released": []}})
+        expected = ValueError
+    else:  # an accounted operation whose files are no list: the reader answers its own ValueError
+        patch_document(root, TASK, lambda row: {**row, "payload_release": {
+            "operations": {"old": {"state": "accounted", "files": 1}}}})
         expected = ValueError
     with _client(root) as client:
         answer = _keep(client)
