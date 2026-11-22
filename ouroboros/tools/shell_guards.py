@@ -652,10 +652,10 @@ def direct_utility_target_rows(raw_cmd: Any, *, certain_only: bool = False) -> L
 
 
 def writer_target_tokens(argv: List[str]) -> List[str]:
-    """Write TARGETS of a (possibly compound) command line, flattened.
-
-    Unlike the row view, the light/protected lanes keep unfiltered code-body
-    signals (XG-7B3.1); only the workspace path lane subtracts them."""
+    """Write TARGETS of a (possibly compound) command line, flattened; an inline
+    code body contributes the targets its parser finds, and a ``perl`` or ``ruby``
+    body is also returned whole. Its one runtime caller is the undeclared-output
+    audit (``shell_audit``)."""
     targets: List[str] = []
     for segment in shell_segments(argv):
         _assignments, segment_argv = collect_leading_env(segment)

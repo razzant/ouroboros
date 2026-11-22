@@ -1360,7 +1360,20 @@ def sanitize_task_for_event(
 
         return sanitized
     except Exception:
-        return task
+        return dict(task) if isinstance(task, dict) else task  # a copy: the start record rebinds fields of the task
+
+
+def count_routing_lists(event_task: Dict[str, Any]) -> Dict[str, Any]:
+    """The event copy of a task whose start record already holds its routing lists whole (``agent``): each list
+    of a decision turn's routing facts (``server_routing_context._decision_turn_metadata``: Main's manifest, a
+    Project room's manifest, this chat's live roots) becomes its length ``<name>_len``; every other fact stays."""
+    metadata = event_task.get("metadata") if isinstance(event_task, dict) else None
+    counted = {}
+    for key in ("main_routing_manifest", "project_routing_manifest", "current_chat"):
+        if isinstance(metadata, dict) and isinstance(metadata.get(key), dict):
+            counted[key] = {(f"{name}_len" if isinstance(value, list) else name):
+                            (len(value) if isinstance(value, list) else value) for name, value in metadata[key].items()}
+    return {**event_task, "metadata": {**metadata, **counted}} if counted else event_task
 
 
 _SECRET_KEYS = frozenset([
