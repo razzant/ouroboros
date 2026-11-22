@@ -47,12 +47,12 @@ from .lib.telegram_outbox import outbox_for
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
-    InjectNotAccepted, PollCursor, bot_id, handle_poll_batch, park_until_settings_change,
+    HostRefused, InjectNotAccepted, PollCursor, bot_id, handle_poll_batch, park_until_settings_change,
     saved_server as _saved_server, server_fingerprint, update_key,
 )
 from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .lib.telegram_token import _report_failure, _wait_for_bot_token, binding_for, make_token_observer
-from .lib.telegram_owner import note_identity, owner_gate, register_pairing  # the owner: pairing code or first writer
+from .lib.telegram_owner import dispatch_panic, note_identity, owner_gate, register_pairing  # the owner and its Panic
 from .lib.telegram_connection import (  # status of the token, the bridge and the Mini App
     _COMMAND_MODE_FULL, _COMMAND_MODE_STRICT, _VALID_COMMAND_MODES, _fail_permanent_poll_rejection,
     _make_status, _save_bridge_status, connection_components, poll_failure_reason, register_connection,
@@ -396,7 +396,7 @@ async def _inject(api, payload: Dict[str, Any]) -> None:
     if status == 503 and body.get("code") == "not_accepted":
         raise InjectNotAccepted("Host inject did not record this attempt")
     if status >= 400:
-        raise RuntimeError(f"Host inject returned HTTP {status}")
+        raise HostRefused(status)
     # A new user turn starts here — break the silent-mode chain so the next
     # outbound message begins a fresh bubble rather than overwriting the last.
     try:
@@ -500,7 +500,7 @@ async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, key
 
 async def _validate_bot(api, client, command_mode: str, lang: str, generation: int | None = None) -> None:
     """Validate the token (getMe) and finish bridge startup bookkeeping; ready names the exact binding proved."""
-    note_identity(api, client.bot_id, await client.call("getMe"))  # the bot's username, for pairing/status
+    note_identity(api, client.token, await client.call("getMe"))  # the bot's username, for pairing/status
     # Menu discovery follows command mode; owner Panic has its own immediate door.
     try:
         await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang))})
@@ -865,10 +865,10 @@ async def _handle_owner_message(
             return
         try:
             sender_label = f"Telegram ({_extract_sender_label(sender, chat_id)})"
-            await asyncio.wait_for(_inject(api, {**_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id),
-                "text": "/panic", "chat_id": chat_id,
+            panic = {**_owner_ingress_fields(api, client.bot_id, chat_id, message, update_id), "text": "/panic", "chat_id": chat_id,
                 "sender_label": sender_label, "transport": {"kind": "telegram", "conversation_id": str(chat_id), "sender_label": sender_label},
-                "user_id": int(sender.get("id") or chat_id), "source": "telegram"}), timeout=2)
+                "user_id": int(sender.get("id") or chat_id), "source": "telegram"}
+            await dispatch_panic(api, chat_id, lambda: asyncio.wait_for(_inject(api, panic), timeout=2), _host_post)
         except InjectNotAccepted:
             raise
         except Exception:
@@ -1437,7 +1437,7 @@ def register(api):
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     register_connection(api)  # Connection's status and its kept-copies form
-    register_pairing(api)  # pairing/status: the bot's name, owner bound, a pairing code waiting (never the code)
+    register_pairing(api, _host_post)  # pairing/status, and the owner's registration with the emergency stop
     api.register_settings_section(
         "telegram",
         title="Telegram",

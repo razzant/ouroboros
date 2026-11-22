@@ -1,17 +1,16 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.19
+version: 1.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
 runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
-env_from_settings: [TELEGRAM_BOT_TOKEN, TELEGRAM_PAIRING_CODE]
+env_from_settings: [TELEGRAM_BOT_TOKEN]
 secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
-  pairingCode: TELEGRAM_PAIRING_CODE
 connection_card:
   title: "Phone via Telegram"
   pitch: "Write to Ouroboros and get its results on your phone"
@@ -20,7 +19,7 @@ connection_card:
     - {text: "Send it /newbot"}
     - {text: "Give the bot a name, then a username ending in \"bot\""}
   token: botToken
-  pairing: {code: pairingCode, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status", hint: "Scan it with your phone's camera, then press Start in Telegram."}
+  pairing: {code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}, new_code: "lib/telegram_pairing.py:new_code", link: "https://t.me/{username}?start={code}", identity: "lib/telegram_pairing.py:bot_identity", status_route: "pairing/status", hint: "Scan it with your phone's camera, then press Start in Telegram."}
   options:
     - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off", new_connection: true, store: skill_settings, route: settings/save}
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
@@ -61,7 +60,8 @@ answered by tapping an option or by replying to the card with a free-form
 answer; both reach the same host decision ingress as the web UI. Owner `/panic`
 is available in every command mode, including strict: it sends once through the emergency door,
 never queues or replays. The first one already stops: the bridge registers its owner with that
-door when it binds them, or at their next message on an install bound before 1.4.18. Telegram
+door when it pairs them and, for an owner bound otherwise, from its load on; a `/panic` the door
+refused before that registration settled is sent once more after it. Telegram
 dates before the host's whole-second import time are refused; their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
 until Telegram reaches that second; a host behind can accept retained commands. Dates in the
 boundary second are accepted. Other slash commands keep their command-mode rules even in replies; quote a literal command
@@ -223,23 +223,38 @@ buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice
 slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
 bare `/language` and `/panic`.
 
-Pairing (1.4.18). The manifest's `connection_card` tells the core's Telegram card what it uses:
-the token field (`botToken`), the pairing code field (`pairingCode`, `TELEGRAM_PAIRING_CODE`), the
-standard-library `lib/telegram_pairing.py` with `new_code` and `bot_identity` (one bare `getMe` to
-the cloud or a saved `TELEGRAM_API_BASE`, never redirected; otherwise `refused` or `unreachable`,
-never naming the token or the URL), the link `https://t.me/{username}?start={code}`, the status
-route and the connection options. The card saves the code in Settings and then grants it to this
-skill: a newly saved key is one the bridge may read only with its grant, and until then it sees no
-code. While the bridge reads a code it has not consumed, only a private chat's `/start <code>`
-binds: that chat becomes the owner (replacing an earlier one), the code's SHA-256 digest goes to
-`pairing_consumed.json` so the link never binds again, the owner is registered with the emergency
-door, and one greeting follows, with the Mini App's Open button when the Mini App is ready; the
-command never reaches the Main chat. Any other message binds nothing, and a private `/start` whose
-code binds nothing gets one line saying the link is no longer valid. The bridge answers `/start`
-itself in every command mode, greeting its owner again. `GET pairing/status` answers
-`{bot_username, owner_bound, pending}` (`bot_username` once the bridge validated its token; never
-the code or the token). An option with `store: skill_settings` is this skill's own setting, saved
-once the skill answers through `POST settings/save`, for example `{"TELEGRAM_NOTIFY_TASKS": "on"}`.
+Pairing (1.5.0). The manifest's `connection_card` tells the core's Telegram card what it uses:
+the token field (`botToken`); the pairing code, `TELEGRAM_PAIRING_CODE`, a write-only setting of
+this skill (`store: skill_settings`) that the card saves with `POST settings/save`
+`{"TELEGRAM_PAIRING_CODE": "<code>"}` from the computer running Ouroboros (as the owner chat
+itself: a Mini App or another computer is refused, `owner_ignored`), never in core Settings, never
+granted and never served by a GET (`""` clears it; a value `new_code` did not mint is refused with
+400); the standard-library `lib/telegram_pairing.py` with `new_code` and `bot_identity` (one bare
+`getMe` to the cloud or the saved `TELEGRAM_API_BASE`, never redirected, `unreachable` while the
+skill's settings cannot be read; otherwise `refused` or `unreachable`, never naming the token or the
+URL); the link `https://t.me/{username}?start={code}`; the status route; the connection options.
+While a code waits, only a private chat's `/start <code>` (typed, from the link, or as a photo's
+caption) binds. The bridge first asks the core to make that chat its emergency stop's owner: when
+the core's slot was empty or already holds that chat, one write of the skill's settings binds the
+chat, clears the code and keeps its SHA-256 digest (the link, and the same code saved again, never
+bind again), and one greeting follows, with the Mini App's Open button when it is ready. When
+another Telegram account holds the emergency stop nothing changes: the bridge keeps its owner, whose
+messages and `/panic` keep working, the code keeps waiting, the scanner is told that only an owner
+Reset moves the emergency stop, and `pairing/status` says `blocked`. When the core cannot answer, nothing changes
+and the scanner is asked to open the link again. Nothing else binds while a code waits; with no
+code, the first private chat binds as before, and the digest of its `/start` payload is kept the
+same way, so that code, saved by the card just after the bridge started, binds nothing a second
+time. `/start` never reaches the Main chat: its owner is greeted again, an owner's `/start` with a
+code that binds nothing is told the link is no longer valid, and while a code waits so is anyone
+else; with an owner bound and none waiting, someone else's `/start` gets no answer. These replies
+go out beside the update loop, so none delays an owner's `/panic`. `GET pairing/status` answers
+`{bot_username, owner_bound, pending, blocked}` (`bot_username` once the bridge validated the token
+in force with a `getMe` naming this bot; `blocked`: `"emergency_stop_owner"` or null; never the
+code or the token; 409 while the settings cannot be read). An option with `store: skill_settings`
+is this skill's own setting, saved through `POST settings/save`, for example
+`{"TELEGRAM_NOTIFY_TASKS": "on"}`. Not covered: the emergency stop's owner is written once, so
+moving the bridge to another Telegram account takes an owner Reset, also when the first owner was a
+first writer who reached a brand-new bot before the card saved its code.
 
 The bridge marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.

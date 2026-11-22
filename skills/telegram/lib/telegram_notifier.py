@@ -63,6 +63,16 @@ def _pinned_chat_id(settings: Dict[str, Any]) -> int:
         return 0
 
 
+def _owner_moved(api, chat_id: int) -> bool:
+    """Whether the bridge's owner is now another chat than the one this cycle read (a pairing moved it), or cannot
+    be read: nothing addressed to the former owner goes out, and the next cycle sends to the owner then in force."""
+    try:
+        current = _pinned_chat_id(_load_settings(api))
+    except Exception:  # noqa: BLE001 — unreadable now: the notification waits for the next cycle
+        return True
+    return bool(current) and current != int(chat_id)
+
+
 async def _push_notification(
     api, chat_id: int, text: str, *, trust_env: bool = False, event=None,
 ) -> Tuple[str, Optional[BaseException]]:
@@ -81,6 +91,8 @@ async def _push_notification(
     accepted_token(api)
     token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
     state_dir = Path(api.get_state_dir())
+    if _owner_moved(api, chat_id):  # a quiet wait, as for a replaced token: unsent, never marked seen
+        return "transient", TelegramBindingChanged()
     try:
         if not token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")

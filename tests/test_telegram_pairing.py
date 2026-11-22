@@ -160,11 +160,21 @@ def test_the_declared_base_is_read_as_the_bridge_reads_it():
             pairing.canonical_api_base(value)
 
 
-def test_saved_api_base_reads_the_skills_own_settings(tmp_path):
+def test_saved_api_base_reads_the_skills_own_settings_and_never_falls_back_to_the_cloud(tmp_path, bot_api):
+    """No settings, or none naming a server: the cloud (None). A saved server: that origin. Settings that cannot
+    be read: ``UNAVAILABLE``, which ``bot_identity`` answers as unreachable without sending the token anywhere."""
     assert pairing.saved_api_base(tmp_path) is None
-    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": " http://127.0.0.1:8081 "}),
-                                            encoding="utf-8")
-    assert pairing.saved_api_base(tmp_path) == "http://127.0.0.1:8081"
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
+    assert pairing.saved_api_base(tmp_path) is None
+    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_API_BASE": f" {bot_api.origin} "}), encoding="utf-8")
+    assert pairing.saved_api_base(tmp_path) == bot_api.origin
+    bot_api.answers[ME] = (200, b'{"ok":true,"result":{"id":123456,"username":"pair_bot"}}', {}, 0)
+    assert pairing.bot_identity(TOKEN, pairing.saved_api_base(tmp_path))["ok"] is True and bot_api.paths == [ME]
+    for broken in ("{broken", "[1, 2]"):
+        (tmp_path / "settings.json").write_text(broken, encoding="utf-8")
+        assert pairing.saved_api_base(tmp_path) == pairing.UNAVAILABLE
+        assert pairing.bot_identity(TOKEN, pairing.saved_api_base(tmp_path)) == {"ok": False, "cause": "unreachable"}
+    assert bot_api.paths == [ME]  # nothing was sent while the server could not be known
 
 
 @pytest.mark.parametrize("text,payload", [
@@ -176,67 +186,122 @@ def test_start_and_its_deep_link_payload(text, payload):
     assert pairing.start_command(text) == payload
 
 
-def test_a_code_is_what_a_start_parameter_carries_exactly():
+def test_a_code_is_what_new_code_mints_never_a_short_typed_value():
     fresh = pairing.new_code()
     assert pairing.normalize_code(fresh) == fresh and len(fresh) == 32 and fresh != pairing.new_code()
-    assert pairing.normalize_code("A" * 64) == "A" * 64
-    for bad in ("", "A" * 65, "two words", " padded", "ünicode", "a/b", None, 123):
+    assert pairing.normalize_code("A" * 22) == "A" * 22 and pairing.normalize_code("A" * 64) == "A" * 64
+    for bad in ("", "1234", "A" * 21, "A" * 65, "two words " * 3, " " + "A" * 30, "ü" * 30, "a/" * 15, None, 123):
         assert pairing.normalize_code(bad) == ""
 
 
-def test_a_code_waits_until_it_binds_once_and_never_matches_another_payload(tmp_path):
+def test_a_code_waits_until_it_binds_once_and_its_one_write_keeps_only_its_digest():
+    code, other = pairing.new_code(), pairing.new_code()
+    waiting = {pairing.CODE_KEY: code}
+    assert pairing.pending_code(waiting) == code and pairing.pending_code({}) == ""
+    assert pairing.pending_code({pairing.CODE_KEY: "1234"}) == "" and pairing.pending_code(None) == ""
+    assert pairing.matching_digest(waiting, code) == pairing.code_digest(code)
+    assert pairing.matching_digest(waiting, other) == "" and pairing.matching_digest(waiting, None) == ""
+    assert pairing.matching_digest({}, code) == ""
+    # The pairing's write: the owner, the code cleared and its digest kept, so the same code never waits again.
+    patch = pairing.paired(waiting, chat_id=42, digest=pairing.code_digest(code))
+    after = {**waiting, **patch}
+    assert patch == {"TELEGRAM_CHAT_ID": "42", pairing.CONSUMED_KEY: pairing.code_digest(code), pairing.CODE_KEY: ""}
+    assert code not in json.dumps(after) and pairing.pending_code({**after, pairing.CODE_KEY: code}) == ""
+    # A new code saved meanwhile stays waiting: the write clears only the code it consumed.
+    kept = pairing.paired({pairing.CODE_KEY: other}, chat_id=42, digest=pairing.code_digest(code))
+    assert pairing.CODE_KEY not in kept and pairing.pending_code({pairing.CODE_KEY: other, **kept}) == other
+
+
+def test_the_first_writer_binds_only_while_nothing_waits_and_its_start_payload_spends_that_code():
     code = pairing.new_code()
-    assert pairing.pending(tmp_path, code) and not pairing.pending(tmp_path, "") and not pairing.pending(tmp_path, "no!")
-    assert pairing.matching_digest(tmp_path, code, code) == pairing.code_digest(code)
-    assert pairing.matching_digest(tmp_path, code, code + "x") == ""
-    assert pairing.matching_digest(tmp_path, "", "") == "" and pairing.matching_digest(tmp_path, code, None) == ""
     assert not pairing.first_writer_may_bind(True) and pairing.first_writer_may_bind(False)
-    pairing.record_consumed(tmp_path, pairing.code_digest(code))
-    stored = (tmp_path / pairing.CONSUMED_FILE).read_text(encoding="utf-8")
-    assert code not in stored  # only its digest is kept
-    assert not pairing.pending(tmp_path, code) and pairing.matching_digest(tmp_path, code, code) == ""
-    fresh = pairing.new_code()
-    assert pairing.pending(tmp_path, fresh) and pairing.matching_digest(tmp_path, fresh, fresh)  # a new code binds
-    (tmp_path / pairing.CONSUMED_FILE).write_text("{broken", encoding="utf-8")
-    assert pairing.pending(tmp_path, code)  # an unreadable record never leaves the owner unable to pair
-    assert pairing.local_status(tmp_path, code) == {"owner_bound": False, "pending": True}
-    (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
-    assert pairing.local_status(tmp_path, "") == {"owner_bound": True, "pending": False}
+    assert pairing.first_written({}, chat_id=42) == {"TELEGRAM_CHAT_ID": "42"}
+    assert pairing.first_written({pairing.CODE_KEY: code}, chat_id=42, payload=code) == {}  # a code waits
+    assert pairing.first_written({"TELEGRAM_CHAT_ID": "7"}, chat_id=42) == {}  # an owner is bound meanwhile
+    bound = pairing.first_written({}, chat_id=42, payload=code)  # the backlog's /start <code>, before the code
+    assert bound == {"TELEGRAM_CHAT_ID": "42", pairing.CONSUMED_KEY: pairing.code_digest(code)}
+    assert pairing.pending_code({**bound, pairing.CODE_KEY: code}) == ""  # the code delivered after it: spent
+    assert pairing.pending_code({**bound, pairing.CODE_KEY: pairing.new_code()})  # any other code waits
+    assert pairing.first_written({}, chat_id=42, payload="not-a-code") == {"TELEGRAM_CHAT_ID": "42"}
+    assert pairing.owner_chat({"TELEGRAM_CHAT_ID": " 42 "}) == 42
+    assert pairing.owner_chat({"TELEGRAM_CHAT_ID": "x"}) == pairing.owner_chat(None) == 0
 
 
-def test_the_connection_card_declaration_names_what_exists():
-    """The card the core reads: the token and code are declared secret fields; the functions it names are this
-    module's; its status route and its option's route are the ones the bridge registers; an option's key is one
-    the skill's own settings form owns, and its "on"/"off" keys stay text in YAML."""
+def _registered(tmp_path):
+    """What the shipped entry point registers, collected from ``plugin.register(api)`` itself: its routes (with
+    their methods) and its supervised tasks, up to the settings form, which comes after every route."""
+    from tests.test_telegram_bridge_safety import FakeApi, _load_plugin
+
+    plugin = _load_plugin(tmp_path)
+
+    class Registered(Exception):
+        pass
+
+    class RegistrationApi(FakeApi):
+        def __init__(self, state_dir):
+            super().__init__(state_dir)
+            self.routes, self.tasks = {}, []
+
+        def get_runtime_info(self):
+            return {"data_dir": str(tmp_path / "data")}
+
+        def register_supervised_task(self, name, *_args, **_kwargs):
+            self.tasks.append(name)
+
+        def subscribe_event(self, *_args, **_kwargs):
+            pass
+
+        def register_route(self, path, handler, methods=("GET",)):
+            self.routes[path] = tuple(methods)
+
+        def register_settings_section(self, *_args, **_kwargs):
+            raise Registered
+
+    (tmp_path / "state").mkdir()
+    api = RegistrationApi(tmp_path / "state")
+    try:
+        plugin.register(api)
+    except Registered:
+        pass
+    finally:
+        plugin.telegram_i18n.configure(None)
+    return api
+
+
+def test_the_connection_card_declaration_names_what_exists(tmp_path):
+    """The card the core reads: the token is the one secret field; the pairing code is this skill's own setting,
+    saved through a route the entry point registers, never a core Settings key; the functions it names are this
+    module's; the status route and the option's route are registered by ``plugin.register``; the option's key is
+    one the skill's settings form owns. Field types and links, not wording, are the contract."""
     from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
     manifest = parse_skill_manifest_text((SKILL / "SKILL.md").read_text(encoding="utf-8"))
     card = manifest.raw_extra["connection_card"]
-    assert manifest.secret_fields[card["token"]] == "TELEGRAM_BOT_TOKEN"
-    assert manifest.secret_fields[card["pairing"]["code"]] == pairing.CODE_KEY
-    assert pairing.CODE_KEY in manifest.env_from_settings
+    assert manifest.secret_fields == {card["token"]: "TELEGRAM_BOT_TOKEN"}
+    assert manifest.env_from_settings == ["TELEGRAM_BOT_TOKEN"]  # the code never reaches core Settings
+    assert card["pairing"]["code"] == {"key": pairing.CODE_KEY, "store": "skill_settings", "route": "settings/save"}
     for name in ("identity", "new_code"):
         path, function = card["pairing"][name].split(":")
         assert path == "lib/telegram_pairing.py" and callable(getattr(pairing, function))
     assert card["pairing"]["link"].format(username="pair_bot", code="c0de") == "https://t.me/pair_bot?start=c0de"
-    assert card["pairing"]["status_route"] == "pairing/status"
-    plugin_source = (SKILL / "plugin.py").read_text(encoding="utf-8")
-    owner_source = (SKILL / "lib" / "telegram_owner.py").read_text(encoding="utf-8")
-    assert 'api.register_route("pairing/status"' in owner_source and "register_pairing(api)" in plugin_source
+    registered = _registered(tmp_path)
+    assert registered.routes[card["pairing"]["status_route"]] == ("GET",)
+    assert "POST" in registered.routes[card["pairing"]["code"]["route"]]
+    assert "owner_registration" in registered.tasks
     scripts = str(SKILL / "scripts")
     sys.path.insert(0, scripts)
     try:
-        from telegram_settings import _SETTINGS_FORM_KEYS
+        from telegram_settings import _PAIRING_CODE_KEY, _SETTINGS_FORM_KEYS
     finally:
         sys.path.remove(scripts)
+    assert _PAIRING_CODE_KEY == pairing.CODE_KEY and pairing.CODE_KEY not in _SETTINGS_FORM_KEYS  # never served
     [option] = card["options"]
     assert option["key"] in _SETTINGS_FORM_KEYS and option["store"] == "skill_settings"
-    assert option["route"] == "settings/save" and 'api.register_route("settings/save"' in plugin_source
+    assert "POST" in registered.routes[option["route"]]
     assert (option["on"], option["off"], option["new_connection"]) == ("on", "off", True)
-    # The card's words are English text the UI translation layer renders; the token row is drawn from `token`.
-    assert card["title"] == "Phone via Telegram" and isinstance(card["pitch"], str) and card["pitch"]
-    assert [step["text"] for step in card["steps"]] == [
-        "Open @BotFather in Telegram", "Send it /newbot", 'Give the bot a name, then a username ending in "bot"']
-    assert [step.get("link") for step in card["steps"]] == ["https://t.me/BotFather", None, None]
-    assert card["pairing"]["hint"] == "Scan it with your phone's camera, then press Start in Telegram."
-    assert all(isinstance(value, str) for row in card["steps"] for value in row.values())
+    for field in ("title", "pitch"):
+        assert isinstance(card[field], str) and card[field].strip()
+    assert isinstance(card["pairing"]["hint"], str) and card["pairing"]["hint"].strip()
+    assert card["steps"] and all(isinstance(step["text"], str) and step["text"].strip() for step in card["steps"])
+    assert all(set(step) <= {"text", "link"} for step in card["steps"])
+    assert [step["link"] for step in card["steps"] if "link" in step] == ["https://t.me/BotFather"]

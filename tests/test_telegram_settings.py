@@ -226,6 +226,33 @@ def test_settings_route_get_hydrates_only_stored_form_keys(tmp_path: Path) -> No
     assert load_settings(tmp_path)["UNRELATED_KEY"] == "keep-private"
 
 
+def test_the_pairing_code_is_a_write_only_setting_only_this_computer_saves(tmp_path: Path) -> None:
+    """The Telegram card's one-time code arms an owner change, so it is saved like the owner chat: from the
+    computer running Ouroboros only (a Mini App or another computer is ignored, ``owner_ignored``), only a value
+    the card mints (a typed short one is refused), never served back by the form's read; "" clears it."""
+    plugin = _load_plugin()
+    code = "Pair-Code_0123456789abcdefghijkl"
+    handler = plugin._make_settings_save(_RouteApi(tmp_path))
+
+    def save(value, **request):
+        response = asyncio.run(handler(_RouteRequest({"TELEGRAM_PAIRING_CODE": value}, **request)))
+        return response.status_code, json.loads(response.body)
+
+    for request in ({"host": "127.0.0.1", "marker": "1"}, {"host": "192.168.1.9"}, {}):
+        status, body = save(code, **request)
+        assert status == 200 and body["owner_ignored"] is True
+        assert "TELEGRAM_PAIRING_CODE" not in load_settings(tmp_path)
+    status, body = save(code, host="127.0.0.1")
+    assert status == 200 and body["owner_ignored"] is False
+    assert load_settings(tmp_path)["TELEGRAM_PAIRING_CODE"] == code
+    hydrated = asyncio.run(handler(_RouteRequest(None, method="GET")))
+    assert code.encode() not in hydrated.body and b"TELEGRAM_PAIRING_CODE" not in hydrated.body
+    for typed in ("1234", "x" * 21, "two words and more of them", 42):
+        assert save(typed, host="127.0.0.1")[0] == 400
+    assert load_settings(tmp_path)["TELEGRAM_PAIRING_CODE"] == code
+    assert save("", host="::1")[0] == 200 and load_settings(tmp_path)["TELEGRAM_PAIRING_CODE"] == ""
+
+
 def test_settings_route_get_on_empty_store_is_an_empty_document(tmp_path: Path) -> None:
     plugin = _load_plugin()
     response = asyncio.run(

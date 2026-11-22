@@ -35,6 +35,14 @@ class InjectNotAccepted(RuntimeError):
     """The host proves this attempt did not enter the dialogue store."""
 
 
+class HostRefused(RuntimeError):
+    """The Host Service answered an inject with an HTTP error, ``status`` (a refused Panic is 503)."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"Host inject returned HTTP {status}")
+        self.status = int(status)
+
+
 def saved_server(api) -> tuple[str, str | None]:
     """The saved Bot API server origin and its file store, read fresh for every client."""
     state_dir = Path(api.get_state_dir())

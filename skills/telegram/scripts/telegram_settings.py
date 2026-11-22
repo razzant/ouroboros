@@ -229,7 +229,8 @@ def miniapp_enabled(state_dir: Path) -> bool:
     return raw in _TRUE
 
 
-def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
+def merge_settings(state_dir: Path, patch: Any) -> dict[str, Any]:
+    """Apply ``patch`` (a dict, or a function of the current settings returning one, decided under the lock)."""
     path = _settings_path(state_dir)
     lock_path = path.with_name(_LOCK_NAME)
     if path_is_link_or_reparse(lock_path):
@@ -241,7 +242,7 @@ def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
         current = load_settings(path.parent)
-        current.update(patch)
+        current.update(patch(dict(current)) if callable(patch) else patch)
         encoded = json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True)
         tmp.write_text(encoded, encoding="utf-8")
         try:
@@ -279,6 +280,20 @@ _SETTINGS_FORM_KEYS = (
     "TELEGRAM_NOTIFY_BUDGET", "TELEGRAM_MINIAPP_ENABLED", "TELEGRAM_PROXY",
     "TELEGRAM_API_BASE", "TELEGRAM_API_FILES_DIR",
 )
+# The connection card's one-time pairing code (lib/telegram_pairing.py): saved here, never served by a GET, and
+# like the owner chat it arms an owner change, so only the computer running Ouroboros saves it.
+_PAIRING_CODE_KEY = "TELEGRAM_PAIRING_CODE"
+
+
+def _pairing_code(value: Any) -> str:
+    """The code to save: "" clears it; ValueError for a value no connection card mints."""
+    from ..lib.telegram_pairing import normalize_code  # this route runs inside the bridge's package
+
+    code = normalize_code(value)
+    if value not in (None, "") and not code:
+        raise ValueError("TELEGRAM_PAIRING_CODE must be a code the Telegram card made (22-64 letters, digits, _ or -).")
+    return code
+
 
 def make_settings_save(api):
     async def _settings_save(request):
@@ -330,6 +345,8 @@ def make_settings_save(api):
                 payload["TELEGRAM_API_BASE"] = validate_telegram_api_base(raw) if raw else ""
             if "TELEGRAM_API_FILES_DIR" in payload:
                 payload["TELEGRAM_API_FILES_DIR"] = validate_telegram_files_dir(payload["TELEGRAM_API_FILES_DIR"]) or ""
+            if _PAIRING_CODE_KEY in data:
+                payload[_PAIRING_CODE_KEY] = _pairing_code(data.get(_PAIRING_CODE_KEY))
         except ValueError as exc:
             return JSONResponse({"ok": False, "message": str(exc), "error": str(exc)}, status_code=400)
         # The saved values in the form a Save would store them, so a hand-edited spelling of
@@ -348,9 +365,10 @@ def make_settings_save(api):
             saved_files_dir = None
         owner_ignored = server_ignored = False
         if not request_may_change_owner(request):
-            if "TELEGRAM_CHAT_ID" in payload:
-                payload.pop("TELEGRAM_CHAT_ID", None)
-                owner_ignored = True
+            for key in ("TELEGRAM_CHAT_ID", _PAIRING_CODE_KEY):
+                if key in payload:
+                    payload.pop(key, None)
+                    owner_ignored = True
             # The saved server supplies every update and the sender IDs the owner check
             # trusts, so changing it is owner binding too; an unchanged value passes quietly.
             if "TELEGRAM_API_BASE" in payload:

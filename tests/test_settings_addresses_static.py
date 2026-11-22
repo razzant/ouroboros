@@ -24,7 +24,7 @@ PROTECTED_KNOWN = {
     ('skills/telegram/lib/telegram_connection.py', 146): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 204): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 450): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_token.py', 216): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_token.py', 214): _TELEGRAM_DEBT,
     ('skills/telegram/plugin.py', 1449): _TELEGRAM_DEBT,
     ('skills/telegram/scripts/companion.py', 519): _TELEGRAM_DEBT,
 }

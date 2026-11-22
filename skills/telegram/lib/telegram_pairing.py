@@ -5,13 +5,15 @@ Standard library only and free of relative imports: the core loads this one file
 
 Pairing. A connection card (the setup wizard's phone card, or the skill's card later) mints a code
 (``new_code``), shows ``https://t.me/<bot>?start=<code>`` as a QR code, an Open in Telegram button and a copyable
-``/start <code>``, and saves the code in Settings as ``TELEGRAM_PAIRING_CODE`` (the manifest's secret field
-``pairingCode``), then grants that key to this skill: a newly saved key is one the bridge may read only with its
-grant. The bridge reads it as it needs it, so a saved, replaced or cleared code applies at once. A code is pending
-while the bridge can read it and has not consumed it; the bridge records the SHA-256 digest of the code it consumed
-in ``pairing_consumed.json`` in its own state folder. While a code is pending only a private chat's ``/start <code>``
-binds the owner (``first_writer_may_bind``); with none, or one this skill may not read, the first positive private
-chat binds, as before.
+``/start <code>``, and saves the code as ``TELEGRAM_PAIRING_CODE`` through the skill's own ``settings/save``
+route, from the computer running Ouroboros: a write-only setting of the skill, never in core Settings and never
+read back. A code is what ``new_code`` mints (``normalize_code``), so a typed short value is no code. It waits
+(``pending_code``) until it binds the owner; the binding's one settings write clears it and keeps its SHA-256
+digest as ``TELEGRAM_PAIRING_CONSUMED`` (``paired``), so the link never binds again, also when the same code is
+saved once more. While a code waits only a private chat's ``/start <code>`` binds the owner
+(``first_writer_may_bind``); with none, the first positive private chat binds, as before (``first_written``), and
+the digest of a code-shaped ``/start`` payload that bound it is kept the same way, so that code, delivered after
+that message, binds nothing a second time.
 
 Identity. ``bot_identity`` sends one bare ``getMe`` and says which bot a token names, or why it could not:
 Telegram refused the token, or Telegram could not be reached from here. Nothing it returns carries the token or
@@ -23,12 +25,9 @@ import contextlib
 import hashlib
 import hmac
 import json
-import os
 import re
 import secrets
 import ssl
-import tempfile
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,10 +35,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 CODE_KEY = "TELEGRAM_PAIRING_CODE"
+CONSUMED_KEY = "TELEGRAM_PAIRING_CONSUMED"  # the digest of the code that bound the owner last
 CLOUD_API_BASE = "https://api.telegram.org"
-CONSUMED_FILE = "pairing_consumed.json"
+UNAVAILABLE = "unavailable"  # saved_api_base: the skill's settings cannot be read, so no server is known
 SETTINGS_FILE = "settings.json"  # the skill's own settings (scripts/telegram_settings.py)
-_CODE = re.compile(r"[A-Za-z0-9_-]{1,64}")  # what Telegram carries in a start parameter
+_CODE = re.compile(r"[A-Za-z0-9_-]{22,64}")  # what new_code mints (32), within what a start parameter carries
 _TOKEN = re.compile(r"(\d{1,20}):[A-Za-z0-9_-]{1,128}")
 _USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -49,7 +49,8 @@ _MAX_ANSWER_BYTES = 65536
 
 
 def normalize_code(value: Any) -> str:
-    """``value`` when a ``start`` parameter can carry it exactly (1-64 letters, digits, ``_`` or ``-``), else ""."""
+    """``value`` when it can be a minted code (22-64 letters, digits, ``_`` or ``-``: a start parameter carries it
+    exactly, and it is too long to guess), else ""."""
     return value if isinstance(value, str) and _CODE.fullmatch(value) else ""
 
 
@@ -98,8 +99,12 @@ def canonical_api_base(value: Any = None) -> str:
 
 
 def saved_api_base(state_dir: Any) -> Optional[str]:
-    """The ``TELEGRAM_API_BASE`` saved in the skill's own settings, or None (the cloud) when none is saved."""
-    _status, settings = _read_json(Path(state_dir) / SETTINGS_FILE)
+    """The ``TELEGRAM_API_BASE`` saved in the skill's own settings; None (the cloud) when none is saved;
+    ``UNAVAILABLE`` while those settings cannot be read, which ``bot_identity`` answers as unreachable (a
+    self-hosted install never sends its token to the cloud because its settings could not be read)."""
+    status, settings = _read_json(Path(state_dir) / SETTINGS_FILE)
+    if status == "unreadable":
+        return UNAVAILABLE
     value = settings.get("TELEGRAM_API_BASE")
     return value.strip() if isinstance(value, str) and value.strip() else None
 
@@ -122,15 +127,17 @@ def bot_identity(token: Any, api_base: Any = None, *, timeout: float = 8.0) -> d
 
     ``{"ok": True, "username": str, "id": int}``; ``{"ok": False, "cause": "refused"}`` when Telegram rejected
     the token (HTTP 401 or 404, or ``ok: false`` with error 401) or it cannot be a token at all;
-    ``{"ok": False, "cause": "unreachable"}`` for anything else: an invalid base, a transport failure, a
-    timeout, a server error, a redirect (never followed) or an answer that names no bot of this token. Proxies of
-    the environment (on macOS also the system's) apply as for any Python request; the skill's ``TELEGRAM_PROXY``
-    does not, so an install that reaches Telegram only through it reads unreachable here.
+    ``{"ok": False, "cause": "unreachable"}`` for anything else: an invalid or ``UNAVAILABLE`` base, a transport
+    failure, a timeout, a server error, a redirect (never followed) or an answer that names no bot of this token.
+    Proxies of the environment (on macOS also the system's) apply as for any Python request; the skill's
+    ``TELEGRAM_PROXY`` does not, so an install that reaches Telegram only through it reads unreachable here.
     """
     text = token.strip() if isinstance(token, str) else ""
     matched = _TOKEN.fullmatch(text)
     if not matched:
         return {"ok": False, "cause": "refused"}
+    if api_base == UNAVAILABLE:
+        return {"ok": False, "cause": "unreachable"}
     try:
         url = f"{canonical_api_base(api_base)}/bot{text}/getMe"
         opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=_tls()))
@@ -174,43 +181,49 @@ def _read_json(path: Path) -> tuple[str, dict]:
     return ("ok", value) if isinstance(value, dict) else ("unreadable", {})
 
 
-def _consumed(state_dir: Any) -> str:
-    """The digest of the code that bound the owner last; "" when none, or when its record cannot be read (a code
-    then stays usable until it binds again, rather than leaving the owner unable to pair)."""
-    _status, data = _read_json(Path(state_dir) / CONSUMED_FILE)
-    digest = data.get("digest")
-    return digest if isinstance(digest, str) and _DIGEST.fullmatch(digest) else ""
+def owner_chat(settings: Any) -> int:
+    """The owner chat the skill's settings name (``TELEGRAM_CHAT_ID``), or 0 when none is bound."""
+    try:
+        value = int(str((settings or {}).get("TELEGRAM_CHAT_ID") or "").strip() or 0)
+    except (AttributeError, ValueError):
+        return 0
+    return value if value > 0 else 0
 
 
-def pending(state_dir: Any, code: Any) -> bool:
-    """Whether ``code`` (the saved ``TELEGRAM_PAIRING_CODE`` the bridge can read; "" when none) still waits."""
-    code = normalize_code(code)
-    return bool(code) and not same_digest(code_digest(code), _consumed(state_dir))
+def pending_code(settings: Any) -> str:
+    """The saved code that still waits, from the skill's settings: "" when none is saved, when it cannot be a code,
+    or when it is the code that bound the owner last (``CONSUMED_KEY``)."""
+    code = normalize_code(settings.get(CODE_KEY)) if isinstance(settings, dict) else ""
+    return code if code and not same_digest(code_digest(code), settings.get(CONSUMED_KEY)) else ""
 
 
-def matching_digest(state_dir: Any, code: Any, payload: Any) -> str:
-    """The digest of ``code`` when a ``/start`` ``payload`` is that code and it still waits, else ""."""
-    code, sent = normalize_code(code), normalize_code(payload)
-    if not code or not sent or not pending(state_dir, code):
+def matching_digest(settings: Any, payload: Any) -> str:
+    """The digest of the waiting code when a ``/start`` ``payload`` is that code, else ""."""
+    code, sent = pending_code(settings), normalize_code(payload)
+    if not code or not sent:
         return ""
     digest = code_digest(code)
     return digest if same_digest(code_digest(sent), digest) else ""
 
 
-def record_consumed(state_dir: Any, digest: str) -> None:
-    """The bridge's own record that the code of ``digest`` bound the owner: it never binds again. Replaces the
-    file atomically; ``mkstemp`` creates it readable by this user alone."""
-    path = Path(state_dir) / CONSUMED_FILE
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"digest": digest, "consumed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, stream)
-        os.replace(temporary, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(temporary)
-        raise
+def paired(current: dict, *, chat_id: int, digest: str) -> dict:
+    """The one settings write of a pairing, decided under the write's lock: the owner chat and the consumed code's
+    digest, and the code cleared while it is still that code (one saved meanwhile keeps waiting)."""
+    patch = {"TELEGRAM_CHAT_ID": str(chat_id), CONSUMED_KEY: digest}
+    saved = normalize_code(current.get(CODE_KEY))
+    if saved and same_digest(code_digest(saved), digest):
+        patch[CODE_KEY] = ""
+    return patch
+
+
+def first_written(current: dict, *, chat_id: int, payload: Any = None) -> dict:
+    """The one settings write of a first writer's binding, decided under the write's lock: nothing once an owner is
+    bound or while a code waits (one saved meanwhile is seen here); else the owner chat, and the digest of a
+    code-shaped ``/start`` payload, so that code binds nothing when it arrives after this binding."""
+    if owner_chat(current) or not first_writer_may_bind(bool(pending_code(current))):
+        return {}
+    sent = normalize_code(payload)
+    return {"TELEGRAM_CHAT_ID": str(chat_id), **({CONSUMED_KEY: code_digest(sent)} if sent else {})}
 
 
 def first_writer_may_bind(code_pending: bool) -> bool:
@@ -219,18 +232,8 @@ def first_writer_may_bind(code_pending: bool) -> bool:
     return not code_pending
 
 
-def local_status(state_dir: Any, code: Any) -> dict:
-    """``{"owner_bound", "pending"}`` from the skill's own files and the saved code the caller read."""
-    _status, settings = _read_json(Path(state_dir) / SETTINGS_FILE)
-    try:
-        owner = int(str(settings.get("TELEGRAM_CHAT_ID") or "").strip() or 0)
-    except ValueError:
-        owner = 0
-    return {"owner_bound": owner > 0, "pending": pending(state_dir, code)}
-
-
 __all__ = [
-    "CLOUD_API_BASE", "CODE_KEY", "CONSUMED_FILE", "bot_identity", "canonical_api_base", "code_digest",
-    "first_writer_may_bind", "local_status", "matching_digest", "new_code", "normalize_code", "pending",
-    "record_consumed", "same_digest", "saved_api_base", "start_command", "username_ok",
+    "CLOUD_API_BASE", "CODE_KEY", "CONSUMED_KEY", "UNAVAILABLE", "bot_identity", "canonical_api_base",
+    "code_digest", "first_writer_may_bind", "first_written", "matching_digest", "new_code", "normalize_code",
+    "owner_chat", "paired", "pending_code", "same_digest", "saved_api_base", "start_command", "username_ok",
 ]

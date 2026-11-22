@@ -467,9 +467,8 @@ def _connection_fields(api) -> Dict[str, Any]:
         mini_words = "Applying the token once the old Mini App has stopped"
     elif binding.companion == "start_failed":
         mini_words = "Couldn't start with the saved token; retrying"
-    from .telegram_owner import saved_code  # while a pairing code waits only its link binds, not a private message
-    from .telegram_pairing import pending
-    if not bridge.get("owner_bound") and pending(api.get_state_dir(), saved_code(api) or ""):
+    from .telegram_owner import waiting_code  # while a pairing code waits only its link binds, not a private message
+    if not bridge.get("owner_bound") and waiting_code(api):
         bridge_words = ("Connected; waiting for the pairing link (the QR code on the Telegram card) to be opened"
                         if bridge["state"] == "waiting_owner" else bridge_words)
         mini_words = "Waiting for the pairing link to be opened in Telegram" if mini_state == "waiting_owner" else mini_words
