@@ -16,7 +16,7 @@ from ouroboros.tools.registry import ToolEntry
 log = logging.getLogger(__name__)
 _CANONICAL_OBSERVATION = object()
 _OBSERVATION_LOCK = threading.Lock()  # Only exchanges observation and map references.
-_NOTE_REQUIRED = ("authored_note_required: inspect the working view, then supply your own working_note "
+_NOTE_REQUIRED = ("authored_note_required: supply your own working_note "
                   "(keep_unit_ids or keep_last_n select what stays raw, fold_last_n what folds); "
                   "no helper writes it for you.")
 # What a fold's own call carries once its note is written (``point_call_at_note``); ``_points_at`` recognises it.
@@ -533,7 +533,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     words are listed but never eligible. Earlier notes leave only when ``replace_note_ids``
     names them; host source views and emergency records follow ``keep_unit_ids``.
     ``keep_last_n`` keeps every unnamed capsule; ``fold_last_n`` folds from its N-th most recent
-    tool unit onward. Without an explicit non-empty ``keep_unit_ids`` list the rows that stand
+    tool unit onward under a non-blank note. Without an explicit non-empty ``keep_unit_ids`` list the rows that stand
     (``standing_rows``) stay; a replaced note releases its own. Standalone restoration
     keeps current units/schemas and authors no note. A count-only request (no note, no
     restore) is refused: no helper writes the note.
@@ -557,7 +557,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         working_note = ""
     if working_note is None and view_address:
         working_note = ""
-    if working_note is None:
+    if working_note is None or fold_last_n is not None and not (isinstance(working_note, str) and working_note.strip()):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=_NOTE_REQUIRED))
     # This invocation is a response to the actor's recorded physical send.
     # The host already owns that causal binding; echoing its hash is only

@@ -700,6 +700,10 @@ def test_fold_last_n_changes_only_the_tail_and_refuses_what_it_cannot_select(tmp
                             ({"fold_last_n": 1, "keep_last_n": 2}, "keep_last_n both select"),
                             ({"fold_last_n": 1, "keep_unit_ids": []}, "keep_unit_ids both select")):
         assert words in _compact_context(ctx, working_note="A note.", **selector)
+    for arguments in ({"working_note": "   ", "fold_last_n": 1}, {"working_note": "", "fold_last_n": 1},
+                      {"fold_last_n": 1}, {"view_address": ["F5:page-000"], "fold_last_n": 1}):
+        assert _compact_context(ctx, **arguments).startswith("authored_note_required"), arguments
+    assert ctx._pending_compaction is None
     record_context_view(ctx, _start(), [])
     assert "no completed tool unit" in _compact_context(ctx, working_note="A note.", fold_last_n=1)
     assert ctx._pending_compaction is None  # no refused request was queued
