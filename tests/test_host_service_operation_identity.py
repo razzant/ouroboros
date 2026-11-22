@@ -354,7 +354,10 @@ def test_chat_crash_preserves_only_the_host_accepted_operation(tmp_path, monkeyp
     assert final.get("origin_message_ref") == (ref if host_operation else None)
     # The lane row carries the turn's complete ingress origin: the operation's authority, host op or not.
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
-    assert result["status"] == "failed" and result["text"] == "This turn stopped on an unexpected error."
+    # The raw error stays reachable: a host-accepted row answers with its phrase and its notice, any other turn
+    # from its record.
+    assert result["status"] == "failed" and "test chat execution failed" in (
+        result["notice"]["details"] if host_operation else result["text"])
 
 
 def test_real_server_consumes_one_source_and_authors_only_its_operation_marker(tmp_path, monkeypatch):
