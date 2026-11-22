@@ -108,6 +108,24 @@ def test_unpinned_slots_keep_the_route_wide_answer(monkeypatch):
     assert "route-wide" in rows[0]["error"] and "pins no credential profile" in rows[0]["error"]
 
 
+def test_a_seat_the_fan_out_drops_on_a_spent_route_asks_the_subscription_census_for_a_read(monkeypatch, tmp_path):
+    """The seat the fan-out drops asks for a read; the health snapshot itself only reads, and a healthy seat that
+    dispatches asks nothing."""
+    from ouroboros import config
+    from ouroboros import subscription_census as census
+    from ouroboros.tools.plan_review_runtime import plan_health_skip_rows, plan_panel_health_snapshot
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _patch_snapshot_health(monkeypatch, lambda rid, model, pin: _SPENT if pin == "spent-acct" else _HEALTHY)
+    healthy = _profile_slots(("s2", "codex=gpt-5.6-sol", "live-acct"))
+    assert plan_health_skip_rows(healthy, plan_panel_health_snapshot(healthy)) == (healthy, [])
+    spent = _profile_slots(("s1", "codex=gpt-5.6-sol", "spent-acct"))
+    evidence = plan_panel_health_snapshot(spent)
+    assert census.request_mtime() is None  # the snapshot is a passive reader
+    _live, rows = plan_health_skip_rows(spent, evidence)
+    assert len(rows) == 1 and census.request_mtime() is not None
+
+
 def test_transient_and_unknown_health_still_fail_open_for_a_pinned_slot(monkeypatch):
     """Fail-open is unchanged by the narrowing: an undated exhaustion, a transient
     daemon state and an unknown reason on a PINNED row all dispatch (no skip row)."""

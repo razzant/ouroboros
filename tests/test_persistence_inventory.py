@@ -1028,7 +1028,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``record_call`` and the configuration-event remover ``prune_catalogs``); its own row beside the catalogs row.
 # 487 -> 488: what Main was last told of broken capabilities, ``state/capability_breakage_main.json``
 # (``ouroboros/capability_breakage.py`` ``_keep_main``), so Main's next turn hears a repair.
-EXPECTED_SCAN_PATHS = 488
+# 488 -> 490: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
+# its row.
+EXPECTED_SCAN_PATHS = 490
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

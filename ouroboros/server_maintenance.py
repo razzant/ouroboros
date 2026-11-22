@@ -1,5 +1,5 @@
-"""Generation startup and periodic upkeep: custody, delegated runs, cancel latches,
-owed deliveries, orphaned results, held Continues and post-task synthesis. History-sized work runs
+"""Generation startup and periodic upkeep: custody, delegated runs, cancel latches, owed deliveries,
+orphaned results, held Continues, post-task synthesis and the subscription census. History-sized work runs
 off-loop; delegated-snapshot GC fails closed on an unreadable log."""
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ _LAST_COLD_CUSTODY_SWEEP = [0.0]
 _CUSTODY_SWEEP_LOCK = threading.Lock()
 _RECONCILE_SWEEP_LOCK = threading.Lock()
 _SCHEDULE_SWEEP_LOCK = threading.Lock()
+_CENSUS_SWEEP_LOCK = threading.Lock()  # the subscription census duty (``subscription_census.dispatch``)
 CUSTODY_SWEEP_SEC = 600  # the custody block's cadence (stamped at dispatch)
 RECONCILE_SWEEP_SEC = 300  # the reconcile block's cadence (stamped when its pass ends, issue #1230)
 
@@ -118,6 +119,12 @@ def _run_cold_custody(stop_event: Any, latch: Any) -> None:
         log.warning("Cold custody pass unavailable; existing ownership retained", exc_info=True)
     finally:
         latch.release()
+
+
+def _run_census_duty(stop_event: Any, latch: Any) -> None:
+    """One subscription census pass on this module's root (``subscription_census.duty_pass``; never raises)."""
+    from ouroboros.subscription_census import duty_pass
+    duty_pass(lambda: _stop_requested(stop_event), latch, root=DATA_DIR)
 
 
 @contextmanager
@@ -398,6 +405,10 @@ def _periodic_supervisor_maintenance(
         _LAST_COLD_CUSTODY_SWEEP[0] = now
         _start_maintenance_thread(_COLD_CUSTODY_SWEEP_LOCK, "cold-custody", _run_cold_custody,
                                   (stop_event, _COLD_CUSTODY_SWEEP_LOCK))
+    from ouroboros.subscription_census import dispatch  # its own clock; running or direct actors, never a pending-only queue
+    dispatch(now, bool(queue.RUNNING or get_direct_activity_registry().actors()), _CENSUS_SWEEP_LOCK, DATA_DIR,
+             lambda: _start_maintenance_thread(_CENSUS_SWEEP_LOCK, "subscription-census", _run_census_duty,
+                                               (stop_event, _CENSUS_SWEEP_LOCK)), _duty_busy)
     # A cheap scheduling hint. The off-loop owner re-reads the exact fences and reads
     # nothing for a tree at rest; a network stop must never run on the assignment tick.
     from supervisor.owner_pause_control import settlement_look_owed
@@ -1183,6 +1194,7 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("reconcile-maintenance", _RECONCILE_SWEEP_LOCK, _run_periodic_reconcile_sweep),
     HostDuty("maintenance-child", None, _tick_maintenance_child),
     HostDuty("schedule-admission", _SCHEDULE_SWEEP_LOCK, _run_schedule_duty),
+    HostDuty("subscription-census", _CENSUS_SWEEP_LOCK, _run_census_duty),
 )
 TWENTY_SECOND_DUTIES = HOST_DUTIES[:6]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
 

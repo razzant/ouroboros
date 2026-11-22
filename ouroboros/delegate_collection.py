@@ -170,6 +170,9 @@ def record_terminal_money(root, entry, detail: dict, *, failures=None) -> dict:
             "credential_profile_id": profile, "access_profile": access, "engine_locator": engine_locator(detail)})
         if entry.settled:
             entry.engine_locator = engine_locator(detail)
+            from ouroboros.subscription_census import note_limit_failure
+
+            note_limit_failure(failed.get("failure_code"))  # a limit code asks the census duty for a pass
             try:
                 from ouroboros.subagent_history import record_session_execution
                 record_session_execution(root, entry, detail, observed)
