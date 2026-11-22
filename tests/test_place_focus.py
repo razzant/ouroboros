@@ -1028,13 +1028,15 @@ def test_only_the_focus_turns_record_owes_my_humans_reply_first(focus, monkeypat
 
 @pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
 @pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
-def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_finish_into_words(focus, monkeypatch, door,
-                                                                                              named):
-    """The selection reads the place twice (``records_only_now``, then ``reply_hold``). Silent at the first and Active
-    at the second (the owner reactivates it meanwhile): a door connector's finish stays its record, unchecked and
-    unposted; a doorless one keeps its automatic reply through the ``place_reply`` check. Retained bytes that never
-    named their connector (``unnamed``) read the place's own (review round 2, Astra 1)."""
-    from ouroboros import place_reply
+def test_a_place_reactivated_during_a_selection_keeps_its_read_and_never_turns_a_door_finish_into_words(
+        focus, monkeypatch, door, named):
+    """A selection reads its place once (review round 2, Astra 4): the records decision, the record note and the hold
+    meet the same state. Silent at that read, the owner's reactivation before the hold changes nothing for this
+    selection: the draft is held for my human, unchecked and unposted, door or not. The pipeline's next selection reads
+    the place as it is: a door connector's finish stays its record, unchecked; a doorless one meets the ``place_reply``
+    check and is words. Retained bytes that never named their connector (``unnamed``) read the place's own (Astra 1)."""
+    from ouroboros import dialogue_store, place_reply
+    from ouroboros.presence_runner import build_presence_result_event
     from tests.test_place_reply_revision import promoted
     root, place, _admission, _event = focus
     if door:
@@ -1042,22 +1044,28 @@ def test_a_place_reactivated_between_the_two_state_reads_never_turns_a_door_fini
     task = promoted(task_for(focus))
     if not named:
         task["metadata"]["presence"].pop("transport_skill")
-    checks = []
+    checks, holds = [], []
     monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda name, *_a, **_kw: checks.append(name) or (True, ""))
     p.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
     real_hold = place_reply.reply_hold
 
     def reactivated_then_hold(*args, **kwargs):
-        p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
+        if not holds:
+            p.edit_place(root, place.place_id, "set_state", author="owner", state="active")
+        holds.append(True)
         return real_hold(*args, **kwargs)
 
     monkeypatch.setattr(place_reply, "reply_hold", reactivated_then_hold)
     ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
                           _completion_riding_send=False)
     assert place_reply.prepare_focus_reply(ctx, "Hello") == (True, "")
-    assert p.get_place(root, place.place_id).state == "active", "the second read saw the reactivated place"
-    assert ctx._presence_completion["outcome"] == ("silent" if door else "message")
+    assert p.get_place(root, place.place_id).state == "active", "the owner reactivated the place before the hold"
+    held = [entry.row for entry in dialogue_store.iter_rows(root, "chat") if entry.row.get("held")]
+    assert [row["held_text"] for row in held] == ["Hello"] and held[0]["text"] == "Reply held: chat is Silent"
+    assert ctx._presence_completion["outcome"] == "silent" and checks == [], "a held draft buys no check"
+    event = build_presence_result_event({**task, "metadata": task["metadata"]}, "Hello", ctx, terminal_origin="model_final")
+    assert (event["outcome"], event["text"]) == (("silent", "") if door else ("message", "Hello"))
     assert checks == ([] if door else ["place_reply"])
 
 

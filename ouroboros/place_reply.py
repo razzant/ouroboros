@@ -120,22 +120,35 @@ def reply_addresses(metadata, anchor=None) -> tuple:
     return {"source_event_id": str(anchor.get("source_event_id") or ""), "reply_targets": [dict(row) for row in found]}, ""
 
 
-def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
+_UNREAD = object()  # no read of the place given: read the store now
+
+
+def _place_read(root, place_id):
+    """One read of a place: the Place, or None when the store names none (``disconnected``); an unreadable store
+    raises."""
+    try:
+        return get_place(root, place_id)
+    except PlaceError as exc:
+        if exc.code != "place_not_found":
+            raise
+        return None
+
+
+def reply_hold(root, metadata, task_id, text: str, *, anchor=None, place=_UNREAD) -> str:
     """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
     (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them. Pre-migration task bytes
-    retain the old binding id, resolved through the existing place store (``resolved_carrier``)."""
+    retain the old binding id, resolved through the existing place store (``resolved_carrier``). ``place`` is a
+    selection's one read of the place (``_place_read``, or the error that read raised), which its records decision
+    read too; replay and the poll read the store now."""
     carrier = resolved_carrier(root, metadata) if text else {}
     if not carrier:
         return ""
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.place_guard import reply_address_hold
-    try:
-        place = get_place(root, carrier["place_id"])
-        state, label = place.state, place.label
-    except PlaceError as exc:
-        if exc.code != "place_not_found":
-            raise
-        place, state, label = None, "disconnected", carrier["place_id"]
+    place = _place_read(root, carrier["place_id"]) if place is _UNREAD else place
+    if isinstance(place, Exception):
+        raise place
+    state, label = (place.state, place.label) if place is not None else ("disconnected", carrier["place_id"])
     message = (f"Reply held: {label} is {state.title()}" if state in {"silent", "paused", "disconnected"}
                else "Reply held: autonomy is Advises" if is_observe_origin(metadata) else "")
     addresses, problem = reply_addresses(metadata, anchor)
@@ -268,9 +281,10 @@ def final_followed(metadata) -> bool:
     return final_is_speech(metadata) and _focus_turn(metadata)
 
 
-def records_only_now(ctx) -> bool:
+def records_only_now(ctx, place=_UNREAD) -> bool:
     """``records_only`` for an Active place under Acts or Evolves. A Silent or Paused place and Advises keep today's
-    held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too."""
+    held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too. ``place`` is a
+    selection's one read of it (``prepare_focus_reply``); otherwise the store is read now."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     from ouroboros.consciousness_authority import is_observe_origin
     from ouroboros.tool_access import canonical_data_root
@@ -278,7 +292,10 @@ def records_only_now(ctx) -> bool:
         return False
     try:
         carrier = carrier_now(ctx, metadata)
-        return _door_declared(carrier) and get_place(canonical_data_root(ctx), carrier["place_id"]).state == "active"
+        if not _door_declared(carrier):
+            return False
+        place = get_place(canonical_data_root(ctx), carrier["place_id"]) if place is _UNREAD else place
+        return getattr(place, "state", "") == "active"
     except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
         return False
 
@@ -456,15 +473,20 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     own response returns once with the facts (``record_note``), the next is accepted. Only the focus turn also owes
     my human's reply first (R3) and ends its wake quiet; a root it handed off keeps the final its Project reads. An
     admitted handoff stays deferred either way; words that are not speech never ride it (``quiet`` in the completion).
-    A door connector's final is never words, whatever the place state read a moment ago: a hold that a reactivated
-    place no longer makes leaves it the record, unchecked and unposted (``door``)."""
+    A door connector's final is never words (``door``). The selection reads its place once: the records decision, the
+    note and the hold meet the same state, so a reactivation meanwhile changes only the next selection."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = carrier_now(ctx, metadata)
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
-    door, records, focus = _door_declared(carrier), records_only_now(ctx), _focus_turn(metadata)
+    root = canonical_data_root(ctx)
+    try:
+        place = _place_read(root, carrier["place_id"])
+    except Exception as exc:  # unreadable: no record (``records_only_now``), and the hold raises it as before
+        place = exc
+    door, records, focus = _door_declared(carrier), records_only_now(ctx, place), _focus_turn(metadata)
     if records and focus and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
         if owner_reply_owed(ctx):  # R3 at the common exit: a focus's record owes my human's reply as a silent one does
@@ -476,7 +498,6 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     if records and focus:
         ctx._focus_record_only = True  # the focus's wake_silent usage follows the transport (R7); a root keeps its final
     quiet = quiet or records
-    root = canonical_data_root(ctx)
     held = ""
     if not quiet and text:
         # The selected input this reply answers names its further addresses: the hold, Safety and the digest read
@@ -485,7 +506,7 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
         addresses, _problem = reply_addresses(metadata, anchor)
         subject = _reply_subject(carrier, text, addresses)
         digest = _reply_digest(carrier, text, addresses)
-        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor)
+        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor, place=place)
         if held:
             ctx._focus_reply_hold = held
         elif not door and getattr(ctx, "_focus_checked_reply", None) != digest:
