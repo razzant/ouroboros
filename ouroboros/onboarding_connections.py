@@ -15,7 +15,8 @@ host:
 - adds the token alone to the completion's one settings write (``completion_settings``); the completion's route
   (``guard_completion``) refuses a card's values from the Telegram Mini App, since a code names the account's owner,
   and once the write is saved records the owner's consent (the code and the options included) in the starter marker
-  (``record_consent``); the code is never written to Settings or a log;
+  (``record_consent``); the code is never written to Settings or a log. A card carries its code and options only when
+  the wizard drew the QR and the link that hold that code; without them the token comes alone and nothing is posted;
 - makes ONE post of every skill-settings value of the card (the code with the options) to the route they declare,
   from this server over loopback: the owner's local session as the route's guard reads it, reachable only from that
   recorded consent (``settle``, one run at a time). It grants nothing: where reviewed skills are granted
@@ -219,8 +220,9 @@ async def api_connection_identity(request: Any) -> Any:
         return JSONResponse({"ok": False, "error": "no built-in skill declares a connection card by that name"},
                             status_code=404)
     token = body.get("token")
-    if not isinstance(token, str) or not token.strip() or len(token) > _TOKEN_MAX:
-        return JSONResponse({"ok": False, "cause": "refused"})
+    if not _token_shaped(token):  # this host's refusal, never the service's («refused» is the service's own answer)
+        return JSONResponse({"ok": False, "error": f"a token is 1 to {_TOKEN_MAX} characters with no spaces inside"},
+                            status_code=400)
     state_dir = skill_state_dir_path(request_drive_root(request), card["skill"])  # read, never made, by the reader
     try:
         answer = await asyncio.wait_for(asyncio.to_thread(check_identity, card, token.strip(), state_dir),
@@ -233,12 +235,19 @@ async def api_connection_identity(request: Any) -> Any:
     return JSONResponse(answer)
 
 
+def _token_shaped(token: Any) -> bool:
+    """Whether ``token`` could be a token at all: 1 to ``_TOKEN_MAX`` characters with no space or line break inside."""
+    return (isinstance(token, str) and bool(token.strip()) and len(token) <= _TOKEN_MAX
+            and not any(c.isspace() for c in token.strip()))
+
+
 # -- the completion ----------------------------------------------------------------------------------------------
 
 def parse_connections(raw: Any) -> List[Tuple[Dict[str, Any], str, str, Dict[str, str]]]:
     """The completion's ``connections`` ({skill: {fields: {token field: token}, code, options: {key: value}}}) as
     (card, token, code, options), each skill a built-in one that declares a card; raises ValueError on anything else
-    so the completion saves nothing. No message names a value."""
+    so the completion saves nothing. No message names a value. The code and the options come together or not at all:
+    a card whose QR was never drawn sends its token alone (code "")."""
     if raw in (None, {}):
         return []
     if not isinstance(raw, dict) or len(raw) > 4:
@@ -254,15 +263,17 @@ def parse_connections(raw: Any) -> List[Tuple[Dict[str, Any], str, str, Dict[str
         if not isinstance(fields, dict) or set(fields) != {card["token"]} or not isinstance(options, dict):
             raise ValueError(f"connections.{card['skill']} must carry exactly its {card['token']}.")
         token = fields[card["token"]]
-        if not isinstance(token, str) or not token.strip() or len(token) > _TOKEN_MAX or any(c.isspace() for c in token.strip()):
+        if not _token_shaped(token):
             raise ValueError(f"connections.{card['skill']}.{card['token']} must be a token.")
-        if not isinstance(code, str) or not _CODE.fullmatch(code):
+        if code is not None and (not isinstance(code, str) or not _CODE.fullmatch(code)):
             raise ValueError(f"connections.{card['skill']}.code must be a minted pairing code (22-64 letters, digits, _ or -).")
+        if code is None and options:
+            raise ValueError(f"connections.{card['skill']}.options come only with its pairing code.")
         declared = {option["key"]: option for option in card["options"]}
         if any(key not in declared or value not in (declared[key]["on"], declared[key]["off"])
                for key, value in options.items()):
             raise ValueError(f"connections.{card['skill']}.options names only its declared options and their values.")
-        parsed.append((card, token.strip(), code, {str(key): str(value) for key, value in options.items()}))
+        parsed.append((card, token.strip(), code or "", {str(key): str(value) for key, value in options.items()}))
     return parsed
 
 
@@ -310,12 +321,13 @@ def _saved(response: Any) -> bool:
 
 def record_consent(drive_root: pathlib.Path, raw: Any) -> List[Dict[str, Any]]:
     """Note each card the completion saved in the starter marker (``connections``) for ``settle``: the code and the
-    options it will post, until it has; never raises, never logs a value."""
+    options it will post, until it has (a card that sent its token alone records neither); never raises, never logs a
+    value."""
     from ouroboros.skill_starter import read_marker, write_marker
 
     try:
-        records = [{"skill": card["skill"], "token_key": card["token_key"], "code": code, "options": options,
-                    "at": utc_now_iso(), "post": "pending"}
+        records = [{"skill": card["skill"], "token_key": card["token_key"], **({"code": code} if code else {}),
+                    "options": options, "at": utc_now_iso(), "post": "pending"}
                    for card, _token, code, options in parse_connections(raw)]
         if records:
             kept = [old for old in read_marker(drive_root).get("connections") or []
@@ -350,8 +362,10 @@ def _server_port() -> int:
 
 
 def _bodies(card: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
-    """Every skill-settings value of the card by the route it declares: the code and the chosen options together."""
-    bodies: Dict[str, Dict[str, str]] = {card["code"]["route"]: {card["code"]["key"]: str(record["code"])}}
+    """Every skill-settings value of the card by the route it declares: the code and the chosen options together
+    (none for a card that sent its token alone)."""
+    bodies: Dict[str, Dict[str, str]] = {card["code"]["route"]: {card["code"]["key"]: str(record["code"])}} \
+        if record.get("code") else {}
     for option in card["options"]:
         if option["key"] in record.get("options", {}):
             bodies.setdefault(option["route"], {})[option["key"]] = record["options"][option["key"]]
@@ -362,14 +376,18 @@ Answer = Tuple[int, Dict[str, Any]]  # a route's HTTP status and its JSON object
 
 
 def _post(record: Dict[str, Any], *, post: Optional[Callable[[str, Dict[str, str]], Answer]] = None) -> str:
-    """ONE post per declared route of the card's skill-settings values: «posted», «waiting» (the route does not serve
-    yet: the next event tries again), or «failed: …» (the route refused it, or answered that it left the owner's
-    values unchanged: ``owner_ignored``, which saved nothing of them)."""
+    """ONE post per declared route of the card's skill-settings values: «posted», «none» (the card sent its token
+    alone: nothing to post), «waiting» (the route does not serve yet: the next event tries again), or «failed: …» (the
+    route refused it, or answered that it left the owner's values unchanged: ``owner_ignored``, which saved nothing of
+    them)."""
     card = declared_card(record["skill"])
     if card is None:
         return "failed: the skill no longer declares its card"
     send = post or _loopback_post
-    for route, body in _bodies(card, record).items():
+    bodies = _bodies(card, record)
+    if not bodies:
+        return "none"
+    for route, body in bodies.items():
         status, answer = send(f"/api/extensions/{card['skill']}/{route}", body)
         if status in _NOT_LIVE:
             return "waiting"

@@ -144,7 +144,14 @@ def test_the_token_check_runs_the_declared_function_of_a_built_in_skill_and_name
     client = _client(Route("/check", endpoint=cards.api_connection_identity, methods=["POST"]))
     assert client.post("/check", json={"skill": "demo", "token": " 1:abc "}).json() == {"ok": True, "username": "demo_bot"}
     assert client.post("/check", json={"skill": "demo", "token": "2:abc"}).json() == {"ok": False, "cause": "refused"}
-    assert client.post("/check", json={"skill": "demo", "token": ""}).json() == {"ok": False, "cause": "refused"}
+    # No token at all is this host's refusal, never the service's «refused»: the function is not called.
+    module = cards._declared_function(cards.declared_card("demo")).__globals__
+    calls = len(module["CALLS"])
+    for draft in ("", "   ", "1:a b", "1:a\nb", "1:" + "a" * 511):
+        refused = client.post("/check", json={"skill": "demo", "token": draft})
+        assert refused.status_code == 400 and "cause" not in refused.json() and "1:a" not in refused.text, draft
+    assert len(module["CALLS"]) == calls
+    assert client.post("/check", json={"skill": "demo", "token": "1:" + "a" * 510}).json()["ok"] is True, "512 is a token"
     failed = client.post("/check", json={"skill": "demo", "token": "1:boom"})
     assert failed.status_code == 500 and "1:boom" not in failed.text and "example.test" not in failed.text
     assert client.post("/check", json={"skill": "nope", "token": "1:abc"}).status_code == 404
@@ -188,13 +195,19 @@ def test_finish_saves_the_token_alone_and_refuses_anything_else(skills):
     assert cards.completion_settings(body) == {"DEMO_TOKEN": "1:abc"}, "the code and the options stay out of Settings"
     assert skill_starter.onboarding_skill_choices(body, {}) == {"DEMO_TOKEN": "1:abc"}
     assert cards.completion_settings({}) == {} and cards.completion_settings({"connections": {}}) == {}
+    # A card whose QR was never drawn sends its token alone: saved, with no code and no options.
+    alone = {"demo": {"fields": {"botToken": "1:abc"}}}
+    assert cards.completion_settings({"connections": alone}) == {"DEMO_TOKEN": "1:abc"}
+    assert cards.parse_connections(alone)[0][1:] == ("1:abc", "", {})
+    assert cards.parse_connections({"demo": {"fields": {"botToken": "1:abc"}, "options": {}}})[0][2] == ""
     for bad in ({"nope": _entry()["demo"]},
                 _entry(fields={}),
                 _entry(fields={"botToken": "1:a", "pairingCode": CODE}),
                 _entry(fields={"botToken": "1 a"}),
                 _entry(code="short_code"),  # not the shape a skill mints
                 _entry(code=CODE + "!"),
-                {"demo": {"fields": {"botToken": "1:a"}, "options": {}}},
+                {"demo": {"fields": {"botToken": "1:a"}, "options": {"DEMO_NOTIFY": "on"}}},  # options without their code
+                _entry(code=None),
                 _entry(options={"DEMO_NOTIFY": "yes"}),
                 _entry(options={"OTHER": "on"}),
                 ["demo"]):
@@ -258,6 +271,19 @@ def test_after_finish_the_code_is_posted_once_the_skill_serves_and_the_card_gran
     assert "code" not in skill_starter.read_marker(drive)["connections"][0], "the code leaves the host's record"
     cards.settle(drive, post=post)
     assert len(posts) == 2, "settled cards are not settled again"
+
+
+def test_a_card_that_sent_its_token_alone_records_no_code_and_posts_nothing(skills, tmp_path, monkeypatch):
+    drive = tmp_path / "data"
+    monkeypatch.setattr(cards, "_installed", lambda _drive, _name: True)
+    record = cards.record_consent(drive, {"demo": {"fields": {"botToken": "1:abc"}}})[0]
+    assert "code" not in record and record["options"] == {} and record["post"] == "pending"
+    posts = []
+    settled = cards.settle(drive, post=lambda path, body: (posts.append(path), (200, {}))[1])[0]
+    assert (settled["post"], posts) == ("none", []), "no code was armed: the skill's own first-writer rule applies"
+    cards.record_consent(drive, _entry())  # with its drawn QR the code goes out as before
+    assert cards.settle(drive, post=lambda path, body: (posts.append(path), (200, {}))[1])[0]["post"] == "posted"
+    assert posts == ["/api/extensions/demo/settings/save"]
 
 
 def test_failures_are_recorded_never_raised_and_a_refused_post_drops_the_code(skills, tmp_path, monkeypatch):

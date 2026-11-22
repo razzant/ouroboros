@@ -981,8 +981,11 @@ token) or `{"ok": False, "cause": "unreachable"}`; the host calls it from the ap
 little longer than `timeout`, and never passes on its errors' text. With `api_base` declared, the host first calls
 it with the skill's state directory and passes its answer as `identity`'s second argument; a reader that fails asks
 nobody. The page mints the code (24 random bytes,
-base64url, the form a skill's own minting gives). Finish saves the token alone in its one settings write, never the
-code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
+base64url, the form a skill's own minting gives) and sends it, with the options, only once it drew the QR and the
+link that hold it: a check that failed, is still running or never ran sends the token alone, so no code nobody saw is
+armed. A draft that is no token (a space or line break inside, more than 512 characters) is said so in the page and
+never checked or sent; the identity route answers it 400, never `refused`. Finish saves the token alone in its one
+settings write, never the code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
 Once that write is saved, the owner's consent (the code and the options) is noted in `state/skill_starter.json`
 (`connections`), never in Settings or a log. Once the skill serves, the host makes one post of every
 `store: skill_settings` value of the card that shares a route (here the code and the option) to

@@ -260,12 +260,12 @@
 
 /**
  * One skill's entry in the completion's `connections`: its card's token by the token field's name (saved to
- * Settings), the one-time code the page minted and its options by key (the code and options go to the skill's own
- * settings, never the core's).
+ * Settings), the one-time code the page minted and its options by key, those two only once the page drew the QR that
+ * holds the code (the code and options go to the skill's own settings, never the core's).
  * @typedef {Object} CompletionConnection
  * @property {Object} fields
- * @property {string} code
- * @property {Object} options
+ * @property {string=} code
+ * @property {Object=} options
  */
 
 /**

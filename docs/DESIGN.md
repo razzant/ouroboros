@@ -3013,9 +3013,13 @@ host's identity check names the account, a QR of the skill's link with a one-tim
 device and the skill's options (Telegram's «Send results and errors of work here», on for a new connection). On a phone
 the Check button sits under the field. The QR is drawn on the device by
 the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token. A failed check
-says only its own cause («Could not reach Telegram from here», «Telegram did not accept this token») and blocks neither
-Continue nor Finish; a refused token is not saved, an unchecked one is. The code is made once per card and kept until
-Finish, which saves the token; the code and the options go to the skill once it runs, never into Settings. Where the
+says only its own cause («Could not reach Telegram from here, so there is no QR code», «Telegram did not accept this
+token»; only the service's refusal says it did not accept), a draft that is no token (a space or line break inside,
+more than 512 characters) says so in the page's own words and is never checked, and none blocks Continue or Finish; a
+refused token or a non-token is not saved, an unchecked one is, alone. The code is made once per card and goes out only
+with the QR and the link that show it: Finish saves the token, and once the QR was drawn the code and the options go
+to the skill once it runs, never into Settings; without it no code is armed and the skill's own rule for a bot with
+no code applies (Telegram: the first person to write becomes its owner). Where the
 install grants skills nothing on its own, the card's outcome line reads «Telegram starts after you allow it in
 Extensions» instead of the skill's note, since nothing in the card allows it. Summary
 shows the card's row when a token will be saved. The

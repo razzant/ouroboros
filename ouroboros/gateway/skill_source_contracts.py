@@ -324,12 +324,13 @@ class ConnectionIdentityResponse(TypedDict, total=False):
     error: str
 
 
-class CompletionConnection(TypedDict):
+class CompletionConnection(TypedDict, total=False):
     """One skill's entry in the completion's ``connections`` ({skill: CompletionConnection}): its card's token by the
     token field's declared name (saved to Settings), the one-time pairing code the page minted and its options by key
-    (the declared on or off value); the code and the options go to the skill's own settings, never the core's."""
+    (the declared on or off value), those two only once the page drew the QR that holds the code; the code and the
+    options go to the skill's own settings, never the core's."""
 
-    fields: Dict[str, str]
+    fields: Required[Dict[str, str]]
     code: str
     options: Dict[str, str]
 

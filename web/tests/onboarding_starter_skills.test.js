@@ -438,14 +438,55 @@ test('each failure says only its own cause and never blocks; a token the service
         paste(host, TOKEN);
         await settle();
         words[answer.status] = text(cardOf(host.innerHTML)).replace(/^.* Check /, '');
-        assert.doesNotMatch(host.innerHTML, /<svg/);
-        assert.equal(Boolean(step.payload().connections), answer.status !== 'refused');
+        assert.doesNotMatch(host.innerHTML, /<svg|data-connection-option/, 'no QR, and no options without it');
+        // No QR was drawn, so no code is armed: the token alone rides the completion (the service's refusal: nothing).
+        assert.deepEqual(step.payload().connections, answer.status === 'refused' ? undefined : { telegram: { fields: { botToken: TOKEN } } });
     }
     assert.match(words.refused, /^Telegram did not accept this token; it is not saved\.$/);
-    assert.match(words.unreachable, /^Could not reach Telegram from here\. The token is still saved when you finish\. Send results and errors of work here$/);
-    assert.match(words.unavailable, /^The token could not be checked \(HTTP 404\)\. It is still saved when you finish\. Send results and errors of work here$/);
+    assert.match(words.unreachable, /^Could not reach Telegram from here, so there is no QR code\. The token is still saved when you finish\.$/);
+    assert.match(words.unavailable, /^The token could not be checked \(HTTP 404\), so there is no QR code\. The token is still saved when you finish\.$/);
     assert.doesNotMatch(words.refused, /reach|checked/);
     assert.doesNotMatch(words.unreachable, /accept/);
+});
+
+test('a code is armed only with the QR that shows it: none while the check runs, never ran or failed', async () => {
+    let answer = null;
+    const { step, host, checks } = await cardStep(withCard(), () => new Promise((done) => { answer = done; }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    host.handlers.input({ target: target({ '[data-connection-token]': { value: TOKEN } }), inputType: 'insertText' });
+    assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN } } }, 'typed, never checked: the token alone');
+    host.handlers.click({ target: target({ '[data-connection-check]': {} }) });
+    assert.equal(checks.length, 1);
+    assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN } } }, 'still checking: the token alone');
+    answer({ status: 'ok', username: 'my_ouro_bot' });
+    await settle();
+    assert.match(host.innerHTML, /<svg/);
+    const { code } = step.snapshot().connection;
+    assert.deepEqual(step.payload().connections, { telegram: { fields: { botToken: TOKEN }, code, options: { TELEGRAM_NOTIFY_TASKS: 'on' } } },
+        'the QR drawn: its code and the options ride with the token');
+});
+
+test('a draft that is no token is said here, never checked and never sent; the service’s words stay its own', async () => {
+    for (const [draft, words] of [[`${TOKEN} more`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],
+        [`${TOKEN}\nsecond line`, /^A token has no spaces or line breaks inside, so this one is not saved\.$/],
+        ['x'.repeat(513), /^A token is at most 512 characters, so this one is not saved\.$/]]) {
+        const { step, host, checks } = await cardStep(withCard(), () => ({ status: 'ok', username: 'my_ouro_bot' }));
+        host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        paste(host, draft);
+        await settle();
+        assert.deepEqual(checks, [], 'nothing went to the check');
+        assert.match(text(cardOf(host.innerHTML)).replace(/^.* Check /, ''), words);
+        assert.doesNotMatch(host.innerHTML, /did not accept/);
+        assert.equal(step.payload().connections, undefined, 'a completion never carries it');
+        host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+        assert.match(text(cardOf(host.innerHTML)), /^Phone via Telegram Not a token · not saved Change$/);
+    }
+    // At the bound and without inner spaces, a draft is checked as usual (the ends are trimmed).
+    const { checks, host } = await cardStep(withCard(), () => ({ status: 'refused' }));
+    host.handlers.click({ target: target({ '[data-connection-toggle]': {} }) });
+    paste(host, ` ${'x'.repeat(512)} `);
+    await settle();
+    assert.deepEqual(checks, [['telegram', 'x'.repeat(512)]]);
 });
 
 test('where the install grants skills nothing on its own, the card says the skill starts once allowed, never «connects»', async () => {

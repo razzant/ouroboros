@@ -3,14 +3,20 @@
 // `connection`: CLIENT_CONTRACT §12); nothing here knows which service a card is for. Closed, it is one row like the
 // others, its box the skill's starter tick, with Connect. Open: the skill's own steps, its token field and, once the
 // host's identity check names the account, a QR of the skill's link with a one-time code made here, the account's
-// @name, the same link for this device and the skill's options. Nothing is saved here: the token, the code and the
-// options ride the one completion (the token into Settings; the code and options the host posts to the skill once it
-// runs), and a failed check never blocks Continue or Finish. Each failure names only its own cause.
+// @name, the same link for this device and the skill's options. Nothing is saved here: the token rides the one
+// completion into Settings, and the code and the options ride with it only once the QR and the link that carry the
+// code were drawn (the host posts them to the skill once it runs): a code nobody saw would leave the skill waiting for
+// a scan nobody can make. A failed or unfinished check never blocks Continue or Finish; the token alone is saved then.
+// A draft no service takes (a space or line break inside, or longer than any token) is never checked or sent. Each
+// failure names only its own cause, and only the service's own refusal says it did not accept the token.
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { qrEncoder, qrSvg } from './qr_svg.js';
 
 const ACCOUNT = /^[A-Za-z0-9_]{1,64}$/;
+const MAX_TOKEN = 512;  // the host's own bound on a token (onboarding_connections._TOKEN_MAX)
+// What makes a draft no token at all, before any check: a space or line break inside, or more than any token holds.
+const flaw = (value) => (value.length > MAX_TOKEN ? 'long' : /\s/.test(value) ? 'spaced' : '');
 const https = (value) => (/^https:\/\/[^\s"'<>]+$/.test(String(value || '')) ? String(value) : '');
 const text = (value) => String(value ?? '').trim();
 // A declared field name in words: `botToken` → "Bot token".
@@ -66,14 +72,17 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     const own = (value) => (value ? ' data-i18n-authored' : '');  // the skill's words stay its own
     let sent = 0;
     const token = () => card.token.trim();
-    const settled = () => (card.check && card.check.token === token() ? card.check : null);
+    // Where the token stands: a local flaw first (never checked), else the host's answer for exactly this token.
+    const settled = () => (flaw(token()) ? { token: token(), status: flaw(token()) }
+        : card.check && card.check.token === token() ? card.check : null);
     const link = (account) => declaration.link.replace('{username}', encodeURIComponent(account)).replace('{code}', encodeURIComponent(card.code));
-    const saved = () => Boolean(token()) && settled()?.status !== 'refused';
+    const saved = () => Boolean(token()) && !['refused', 'spaced', 'long'].includes(settled()?.status);
     // Where the install grants nothing on its own, the skill starts only once allowed: that, never «connects».
     const later = declaration.allow ? 'starts after you allow it in Extensions' : 'connects when you finish setup';
 
     async function run() {
         const value = token();
+        if (flaw(value)) { repaint(); return; }  // no token at all: said here, never sent to the check
         if (!value || ['checking', 'ok', 'refused'].includes(settled()?.status)) return;  // a transport failure may retry
         const mine = ++sent;
         card.check = { token: value, status: 'checking' };
@@ -87,9 +96,11 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
     function statusWords(state) {
         return {
             checking: 'Checking…',
+            spaced: 'A token has no spaces or line breaks inside, so this one is not saved.',
+            long: 'A token is at most 512 characters, so this one is not saved.',
             refused: `${service} did not accept this token; it is not saved.`,
-            unreachable: `Could not reach ${service} from here. The token is still saved when you finish.`,
-            unavailable: `The token could not be checked (${state?.reason || 'no answer'}). It is still saved when you finish.`,
+            unreachable: `Could not reach ${service} from here, so there is no QR code. The token is still saved when you finish.`,
+            unavailable: `The token could not be checked (${state?.reason || 'no answer'}), so there is no QR code. The token is still saved when you finish.`,
         }[state?.status] || '';
     }
 
@@ -127,6 +138,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
         if (!token()) return '';
         if (state?.status === 'ok') return `@${state.username} · ${later}`;
         if (state?.status === 'refused') return `${service} did not accept the token`;
+        if (state?.status === 'spaced' || state?.status === 'long') return 'Not a token · not saved';
         return state?.status === 'checking' ? 'Checking the token…' : 'Token not checked · saved when you finish';
     }
 
@@ -152,7 +164,7 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
                         ${declaration.steps.length ? '' : `<li class="skills-connection-token">${fieldHtml(field, false)}</li>`}
                     </ol>
                     ${state && state.status !== 'ok' ? `<p class="skills-starter-sub" role="status" data-connection-status="${state.status}">${escapeHtml(statusWords(state))}</p>` : ''}
-                    ${state?.status === 'ok' ? pairHtml(state.username) : ['unreachable', 'unavailable'].includes(state?.status) ? optionsHtml() : ''}
+                    ${state?.status === 'ok' ? pairHtml(state.username) : ''}
                 </div>` : ''}
             </div>`;
         },
@@ -192,14 +204,14 @@ export function createConnectionCard(item, declaration, { check = checkIdentity,
             void run();
             return true;
         },
-        /** `{skill: {fields: {token}, code, options}}` for the one completion, or null: nothing typed, or a token the
-         * service refused. */
+        /** `{skill: {fields: {token}, code, options}}` for the one completion once the QR and the link were drawn,
+         * `{skill: {fields: {token}}}` while they were not (a check that failed, is still running or never ran), or
+         * null: nothing typed, no token at all, or a token the service refused. */
         payload() {
             if (!ticked() || !saved()) return null;
-            return { [declaration.skill]: {
-                fields: { [declaration.token]: token() }, code: card.code,
-                options: Object.fromEntries(declaration.options.map((option) => [option.key, card.options[option.key] ? option.on : option.off])),
-            } };
+            const shown = settled()?.status === 'ok';  // the code this card drew is the only one it may arm
+            return { [declaration.skill]: { fields: { [declaration.token]: token() }, ...(shown ? { code: card.code,
+                options: Object.fromEntries(declaration.options.map((option) => [option.key, card.options[option.key] ? option.on : option.off])) } : {}) } };
         },
         /** Summary's row while a token will be saved: [title, where it stands]. */
         summary: () => (ticked() && saved() ? [title, settled()?.status === 'ok' ? `@${settled().username}` : 'Token not checked'] : null),
