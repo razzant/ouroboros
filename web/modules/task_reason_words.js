@@ -348,3 +348,11 @@ export function reasonCodesNote(codes = []) {
     return codes.length ? fmt(codes.length === 1 ? 'Recorded reason: {code}' : 'Recorded reasons: {code}', { code: codes.join(', ') }) : '';
 }
 
+/** A refused send's two counts as its producer worded them (`size_refusal.counts_text`): the host's estimate of the
+ *  bytes it sent beside what that send's own answer gave, the sentence the next request reads too; '' for any other row. */
+export function refusedSendWords(evt = {}) {
+    if (!['llm_api_error', 'llm_round_error', 'local_context_overflow', 'remote_context_overflow'].includes(evt.type || evt.event)) return '';
+    const text = evt.refused_send?.text;
+    return typeof text === 'string' ? text.trim() : '';
+}
+

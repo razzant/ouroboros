@@ -11,11 +11,14 @@ and sets ``retry_only`` when no token window is stated; Z.ai's 1214 parameter re
 is no size refusal when size wording belongs only to what it cites or to an earlier attempt.
 ``meaning`` distinguishes total, input_plus_reply, input and unknown. Units stay explicit; a unitless
 number never becomes a token window. No IO: ``window_learning`` owns recovery and ``context_window`` storage.
+``send_counts`` and ``response_counts`` lay one refused send's two calculations side by side for Logs and the next
+request (``counts``); they read the same answer again for display and teach nothing.
 """
 from __future__ import annotations
 
+import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 #: The usage key the failed call's parsed refusal is stamped under (``stamp``), cleared by the next failure.
@@ -333,14 +336,19 @@ def answer_fact(answer, status) -> Optional[SizeRefusal]:
     return recorded(*_read_numbers(answer, status))
 
 
-def _exception_numbers(exc: Any):
+def _exception_read(exc: Any):
+    """``(answer, status, printed form, typed values)`` of a provider exception, as the host's classifier reads it."""
     from ouroboros._usage_response import provider_answer, typed_values
     from ouroboros.context_budget import LocalContextTooLargeError
     from ouroboros.loop_llm_call import _exception_status_code
 
     answer = provider_answer(exc)
     status = None if isinstance(exc, LocalContextTooLargeError) else _exception_status_code(exc)
-    return _read_numbers(answer, status, message=repr(exc), typed=typed_values(exc, answer))
+    return answer, status, repr(exc), typed_values(exc, answer)
+
+
+def _exception_numbers(exc: Any):
+    return _read_numbers(*_exception_read(exc))
 
 
 def from_exception(exc: Any) -> Optional[SizeRefusal]:
@@ -404,3 +412,285 @@ def refusal_sentence(usage: Dict[str, Any]) -> str:
     if found is not None and found.upstream:
         return found.upstream
     return str((usage or {}).get("_last_llm_provider_message") or "")
+
+
+# One refused send's two counts (#3669; owner, 18.11.2026: keep the context, and on a refusal show both calculations).
+# Display only: the parser's reads above, ``recorded`` and ``window_learning`` are unchanged by anything below.
+
+#: An HTTP-body limit's own codes and words: bytes, never a token count.
+_BODY_LIMIT_CODES = frozenset({"413", "payload_too_large", "request_entity_too_large"})
+_BODY_LIMIT_WORDS = re.compile(r"(?:body|payload|request entity) too large", re.I)
+# Counts an already typed refusal stated on its own path. In particular a following unitless limit teaches nothing.
+_REPORTED_INPUT = re.compile(
+    rf"(?:^input too long:\s*|^you requested {_N} output tokens and your prompt contains )"
+    rf"(at least )?{_N} input tokens\b", re.I)
+#: How the host counted a sent request (``PhysicalAttemptContext.measurement_basis``); without one, the raw count.
+_HOST_BASES = {"fresh_route_usage": "this route's measured density", "fresh_model_usage": "this model's measured density",
+               "refused_input": "an earlier refusal's density", "cold_estimate": "cold estimate"}
+
+
+def _stated_number(patterns, text: str) -> Optional[int]:
+    """The first pattern's number in ``text``, a stated 0 kept; None when none states one."""
+    for pattern in patterns:
+        if match := pattern.search(text):
+            return int(match.group(1).replace(",", ""))
+    return None
+
+
+def given_counts(fact: SizeRefusal) -> Dict[str, Any]:
+    """What one refusal's answer gave, read again from the sentence its numbers came from (``fact.upstream``) with the
+    parser's own patterns, never a new wording, so a stated 0 stays 0 and each count says how it was given: ``input``
+    with ``input_given`` -- ``stated``, ``at_least`` (a lower bound), ``parts`` (the sum of its stated shares, quoted in
+    ``input_parts``) or ``total_less_reply`` (the host's arithmetic on a stated total and reply, only where it states
+    no input) --, a ``total`` (``total_about`` where it said "about"), the ``reply`` and the ``window``; a bound in no
+    stated unit is ``bound``. A count the answer did not give is absent: no ``input`` means none was established."""
+    from ouroboros.capability_evidence import (
+        _CTX_INPUT_PART,
+        _CTX_INPUT_PATTERNS,
+        _CTX_REPLY_PATTERNS,
+        _CTX_TOTAL_PATTERN,
+    )
+
+    if fact.units != "tokens":
+        return {"bound": fact.window} if fact.window else {}
+    text = " ".join(str(fact.upstream or "").split())
+    given: Dict[str, Any] = {}
+    if fact.source == "text:reported-input":
+        given.update(input=fact.requested, input_given="at_least" if " at least " in text.lower() else "stated")
+        if fact.reply:
+            given["reply"] = fact.reply
+        return given
+    form, match = next(((candidate, found) for candidate, pattern in _COMPILED
+                        if fact.source == f"text:{candidate.id}" and (found := pattern.search(text))), (None, None))
+    if form is not None:
+        numbers = {name: int(value.replace(",", "")) for name, value in zip(form.groups, match.groups())}
+        given.update({key: numbers[key] for key in ("reply", "window") if key in numbers})
+        if "requested" in numbers:
+            given.update(input=numbers["requested"],
+                         input_given="at_least" if "at least" in match.group(0).lower() else "stated")
+    elif fact.source == "text:shared-vocabulary":
+        whole, reply = _stated_number(_CTX_INPUT_PATTERNS, text), _stated_number(_CTX_REPLY_PATTERNS, text)
+        total, parts = _CTX_TOTAL_PATTERN.search(text), list(_CTX_INPUT_PART.finditer(text))
+        if reply is not None:
+            given["reply"] = reply
+        if total is not None:
+            given["total"] = int(total.group(1).replace(",", ""))
+            if re.search(r"\babout\b", total.group(0), re.I):
+                given["total_about"] = True
+        if whole is not None:
+            given.update(input=whole, input_given="stated")
+        elif parts:
+            given.update(input=sum(int(part.group(1).replace(",", "")) for part in parts), input_given="parts")
+        elif total is not None and reply is not None and given["total"] >= reply:
+            given.update(input=given["total"] - reply, input_given="total_less_reply")
+    else:  # a structured count or a numberless refusal: the parser's own fields, where it stated them
+        given.update({key: value for key, value in (("input", fact.requested), ("reply", fact.reply),
+                                                    ("total", fact.requested_total)) if value})
+        if "input" in given:
+            given["input_given"] = "stated"
+    if fact.token_window and not given.get("window"):
+        given["window"] = fact.token_window
+    return given
+
+
+def _status_notes(codes, http_413: bool) -> Tuple[str, ...]:
+    """How a 413 stands in one answer: its received HTTP status, or that answer's own code under no such status."""
+    return ("HTTP 413",) if http_413 else ("its answer's own code 413, not an HTTP status",) if "413" in codes else ()
+
+
+def _other_cause(codes) -> bool:
+    """Display-only precedence of exact typed causes, not a new recovery classification."""
+    from ouroboros.loop_llm_call import _RETRYABLE_PROVIDER_CODES, NON_RETRYABLE_PROVIDER_MARKERS
+
+    generic = {"400", "badrequest", "bad request", "badrequesterror", "invalidrequest", "invalidrequesterror", "error"}
+    return any(code not in generic | _BODY_LIMIT_CODES and (
+        code in OTHER_CAUSE_CODES or code in _RETRYABLE_PROVIDER_CODES or code == "429"
+        or code in NON_RETRYABLE_PROVIDER_MARKERS or code in ("codex_content_policy_denied", "rate_limit_error")
+        or any(code in markers for markers in NON_RETRYABLE_PROVIDER_MARKERS.values())) for code in codes)
+
+
+def _answer_read(answer, status, message="", typed=(), *, http_413=False):
+    """One current refusal's display fact, distinct from its window-learning stamp."""
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, size_refusal
+
+    recognized = size_refusal(answer, status, typed, printed=message)
+    basis, code, speaker, sentence = recognized or ("status_413", "", *answer.innermost())
+    if basis == "status_413" and not http_413:
+        return None  # the body's own 413 is not an HTTP status and, alone, gives no size diagnosis
+    subtree = _recognized_subtree(answer, basis, code, speaker, sentence)
+    pair = paired_size_refusal(answer)
+    if pair and (basis, code, speaker, sentence) == ("typed", pair[2], pair[1], pair[3]):
+        subtree = [pair[0]]  # the official paired refusal reads only its own object
+    objects = [answer.objects[i] for i in subtree if not answer.objects[i].inline]
+    codes = {str(value).strip().lower() for value in (*typed, *answer.own_codes())}
+    if _other_cause(codes):
+        return None
+    texts = [text for obj in objects for text in obj.sentences]
+    byte_limit = bool(codes & (_BODY_LIMIT_CODES - {"413"})) or any(_BODY_LIMIT_WORDS.search(text) for text in texts)
+    notes = _status_notes(codes, http_413)
+    if byte_limit or basis == "status_413":
+        return (SizeRefusal(units="unstated"), notes + (("a byte limit",) if byte_limit else ())) if http_413 else None
+    if not objects and code.lower() not in codes & (CONTEXT_OVERFLOW_CODES | {LLAMA_CPP_TYPE}):
+        return None  # a cited/historical/printed-only sentence supplies no comparison
+    found = from_answer(answer, status, message, typed)
+    if found is None and "413" in codes and sentence in texts:
+        found = _from_text(sentence)  # the token statement and its in-band code belong to this same answer
+        if found is not None:
+            found = replace(found, upstream=sentence)
+    if basis == "typed" and (found is None or "input" not in given_counts(found)):
+        for text in texts:
+            if match := _REPORTED_INPUT.search(text):
+                return SizeRefusal(requested=int(match[3].replace(",", "")), source="text:reported-input", upstream=text,
+                                   reply=int((match[1] or "0").replace(",", ""))), notes
+        for obj in objects:
+            if LLAMA_CPP_TYPE in (value.lower() for value in obj.codes) and obj.value.get("n_prompt_tokens") == 0 \
+                    and type(obj.value["n_prompt_tokens"]) is int:
+                return replace(found or SizeRefusal(), source="text:reported-input", requested=0), notes
+    return found or SizeRefusal(source=basis), notes
+
+
+def send_counts(capture: Any, error: Any) -> Optional[Dict[str, Any]]:
+    """``counts`` of one send that ended with ``error``, from that send alone: None for a send that never left the host
+    or an answer whose own object names another cause. An actual HTTP 413 with no contrary typed cause yields the
+    host's count beside an unknown provider answer (a body code 413 is not an HTTP status and keeps its typed token
+    evidence through the ordinary read)."""
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    if not _observed(capture):
+        return None
+    answer, status, message, typed = _exception_read(error)
+    http_413 = getattr(getattr(error, "response", None), "status_code", None) == 413  # a received HTTP status
+    if classify_llm_exception(error).kind != "context_overflow":
+        from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
+
+        if getattr(error, "stream_rejected", False) and any(code.lower() in CONTEXT_OVERFLOW_CODES for code in typed):
+            status = None  # rejected SSE frame; only its exact typed cause qualifies it for display
+        elif not http_413:
+            return None
+    read = _answer_read(answer, status, message, typed, http_413=http_413)
+    return None if read is None else counts(capture, *read)
+
+
+def body_counts(capture: Any, body_error: Any) -> Optional[Dict[str, Any]]:
+    """Read a received body's error, whose own codes are never the HTTP status."""
+    from ouroboros._usage_response import provider_answer
+
+    if not _observed(capture):
+        return None
+    answer = provider_answer({"error": body_error})
+    read = _answer_read(answer, answer.status)
+    return None if read is None else counts(capture, *read)
+
+
+def _observed(capture: Any) -> bool:
+    from ouroboros.physical_attempt_context import OBSERVED
+
+    return bool(getattr(capture, "attempt_id", "")) and getattr(capture, "state", "") in OBSERVED
+
+
+def response_counts(capture: Any, payload: dict) -> Optional[Dict[str, Any]]:
+    """Read one retained response before an inner retry, or after its receiver left; no routing or settlement here."""
+    from ouroboros._usage_response import (
+        _first_chat_choice,
+        provider_body_error,
+        reply_usability,
+        response_finish_reason,
+    )
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES
+
+    if not _observed(capture):
+        return None
+    if capture.provider == "claudexor" and "outcome" in payload:
+        from ouroboros.llm_claudexor import ClaudexorModelError
+        from ouroboros.loop_llm_call import classify_llm_exception
+
+        if payload.get("outcome") == "failed" and isinstance(problem := payload.get("problem"), dict):
+            error = ClaudexorModelError(problem)
+            if classify_llm_exception(error).basis == "typed":
+                return send_counts(capture, error)
+        return None
+    if body := provider_body_error(payload):
+        return body_counts(capture, body)
+    first = _first_chat_choice(payload)
+    finish = response_finish_reason({}, first or payload)[1]
+    if str(finish or "").strip().lower() not in CONTEXT_OVERFLOW_CODES:
+        return None
+    msg = first.get("message") or {}
+    if not first:  # native Messages: only text and tool-use blocks count as a reply
+        blocks = [block for block in payload.get("content") or () if isinstance(block, dict)]
+        msg = {"content": "".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"),
+               "tool_calls": any(block.get("type") == "tool_use" for block in blocks)}
+    text, tools = msg.get("content"), msg.get("tool_calls")
+    if not tools and isinstance(text, str) and (
+            capture.provider == "local" and not msg.get("reasoning_content") or capture.provider == "openai-compatible"
+            and not any(msg.get(key) for key in ("reasoning_content", "reasoning", "reasoning_details"))):
+        from ouroboros.llm_local import _split_leading_reasoning
+
+        text = _split_leading_reasoning(text)[0]
+    if reply_usability(finish, None, msg) == "unusable" or not (tools or str(text or "").strip()):
+        return counts(capture, SizeRefusal(source="finish_reason"))  # the finish states no count
+    return None
+
+
+def counts(capture: Any, fact: SizeRefusal, notes: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """One refused send's two calculations side by side: the host's count of the bytes THAT send carried beside what
+    that send's own answer gave (``given_counts``, under ``provider_counts``) and how its status stands (``notes``).
+    ``provider`` keeps the capture's route locality (``local``/loopback included), never the answer's numbers. The
+    host count is the serving tokenizer's exact input/window when this capture bound one (a true 0
+    kept), else its fit-estimator count at the density its round measured with; None where neither was recorded.
+    Nothing comes from another send, a later answer or a guessed attempt id; two sends with equal numbers stay two
+    rows."""
+    try:
+        sent = int(getattr(capture, "prompt_tokens_bounded_estimate", 0) or 0)
+        reply = int(getattr(capture, "max_completion_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        sent = reply = 0
+    physical = getattr(capture, "physical_context", None)
+    density = float(getattr(physical, "measurement_density", None) or 1.0)
+    exact, window = getattr(capture, "prompt_tokens_exact", None), getattr(capture, "context_window_tokens_exact", None)
+    if exact is not None:
+        host = {"input": exact, "basis": "exact_local_count", "density": 1.0, **({"window": window} if window else {})}
+    elif sent > 0:
+        host = {"input": math.ceil(sent * density), "basis": str(getattr(physical, "measurement_basis", "") or "raw"),
+                "density": density}
+    else:
+        host = None
+    row = {"physical_attempt_id": str(getattr(capture, "attempt_id", "") or "") or None,
+           "model": str(getattr(capture, "model", "") or ""), "provider": str(getattr(capture, "provider", "") or ""),
+           "route_is_loopback": bool(getattr(capture, "route_is_loopback", False)),
+           "host": host, **({"host_reply_allowance": reply} if reply > 0 else {}),
+           "provider_counts": given_counts(fact), **({"notes": list(notes)} if notes else {})}
+    return {**row, "text": counts_text(row)}
+
+
+def counts_text(row: Dict[str, Any]) -> str:
+    """``counts`` in one sentence, the same in Logs and in the next request; what the host or the answer lacks is said
+    missing, never shown as 0."""
+    host, given = row.get("host"), row.get("provider_counts") or {}
+    if host:
+        if host["basis"] == "exact_local_count":
+            mine = f"host exact local count {host['input']:,} input tokens"
+            if host.get("window"):
+                mine += f" in a {host['window']:,}-token serving window"
+        else:
+            measured = f" {host['density']:.2f}" if host["basis"] in _HOST_BASES and host["basis"] != "cold_estimate" else ""
+            mine = f"host estimate ~{host['input']:,} input tokens ({_HOST_BASES.get(host['basis'], 'raw count')}{measured})"
+    else:
+        mine = "no host estimate of its bytes on record"
+    if row.get("host_reply_allowance"):
+        mine += f", reply allowance {row['host_reply_allowance']:,}"
+    how = given.get("input_given")
+    if "input" not in given:
+        words = ["input not established"]
+    else:
+        qualifier = "at least " if how == "at_least" else "about " if how == "total_less_reply" and given.get("total_about") else ""
+        words = [f"input {qualifier}{given['input']:,}" + {
+            "parts": " (sum of its stated parts)", "total_less_reply": " (derived: total less reply)"}.get(how, "")]
+    if "total" in given:
+        words.append(f"total {'about ' if given.get('total_about') else ''}{given['total']:,}")
+    words += [f"{key} {given[key]:,}" for key in ("reply", "window") if key in given]
+    words += [f"a bound of {given['bound']:,} in no stated unit"] if "bound" in given else []
+    notes = f" ({', '.join(row['notes'])})" if row.get("notes") else ""
+    attempt = row.get("physical_attempt_id")
+    return (f"Refused send {attempt if attempt else '(attempt not observed)'}: {mine}; "
+            f"provider answer{notes}: {', '.join(words)}.")

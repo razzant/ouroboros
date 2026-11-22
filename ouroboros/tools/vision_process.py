@@ -75,6 +75,7 @@ _CAPTURE = _object({
     "prompt_tokens_bounded_estimate": {"type": "integer", "minimum": 0},
     "provider_reported_cost_only": {"type": "boolean"},
 })
+_CAPTURE["properties"].update(prompt_tokens_exact=_NULL_INT, context_window_tokens_exact=_NULL_INT)  # optional on older receipts
 _CUSTODY = _object({
     "operation_id": _STRING, "invocation_id": {"type": "string", "minLength": 1},
     "request_ref": _DICT, "request_manifest_ref": _DICT,

@@ -556,6 +556,9 @@ def _prepare_forced_prompt(
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The typed facts sit BEFORE the owner-source observation so that one-shot block
     # stays the tail of the message (the prompt-cache prefix rule).
+    from ouroboros.context_view_facts import append_refused_sends
+
+    append_refused_sends(ctx.accumulated_usage, ctx.messages)  # price the same host rows the final send keeps
     head = prompt + _loop()._forced_delegation_note(tools_ctx, llm_trace) + _forced_state_facts(ctx, llm_trace)
     presence = _presence_forced_contract(ctx, tools_ctx)
     return head + presence + _forced_subject_prompt(ctx, llm_trace, presence_armed=bool(presence))
@@ -879,11 +882,14 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
+    from ouroboros.context_view_facts import append_refused_sends
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
     if admitted_request is None and _loop()._retire_main_reasoning(ctx):
         from ouroboros.transcript_prefix import append_reasoning_retirement_fact
         append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), ctx.messages)
+    if admitted_request is None and initial_messages is None:
+        append_refused_sends(ctx.accumulated_usage, ctx.messages)
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The admitted send reuses the lookahead's one measurement (``task_pacing.prepared_wrapup_candidate``);
     # a direct, drift or owner-refresh send measures its own final input afresh.
