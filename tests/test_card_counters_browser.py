@@ -73,9 +73,11 @@ window.child = session => {
         model: 'gpt-6-astra', ...(session ? {executor_route: 'claude'} : {})});
     log({type: 'task_metrics_event', task_id: 'counter-child', tool_calls: 7, rounds: 3});
 };
+// The work moved to its Project's room: the host re-homes the row's chat_id with its project_id (a Main-addressed
+// row's project_id alone is no room, work_portal.js rowRoomProject, #3944).
 window.portal = () => { window.__ouroTaskBindings = {'counter-root': {project_id: 'p', project_name: title}};
     chat.hydrateStateSnapshot({...state, active_chat_activities: state.active_chat_activities.map(r =>
-        ({...r, project_id: 'p', project_name: title, tool_calls: 31}))}, Infinity, ++generation); };
+        ({...r, chat_id: 7, project_id: 'p', project_name: title, tool_calls: 31}))}, Infinity, ++generation); };
 window.textOnly = () => {
     log({type: 'llm_round_finished', task_id: 'plain', rounds: 1});
     say({task_id: 'plain', content: 'Hello.', task_terminal_status: 'completed'});

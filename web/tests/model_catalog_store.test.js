@@ -757,3 +757,234 @@ test('a cold chooser that answers HTTP 200 with a stated failure reads again; an
     await partial.read();
     assert.deepEqual([partialReads, partial.status().failed], [1, false], 'a partial read is not a failure');
 });
+
+// #3493: the corrective read is per attempted read. Two ways a held figure can end up of another tier without
+// this store having read for it: the tier swings away and back across one read (the server answers under the
+// middle name), and another reader's answer of an older tier is handed over late. Each owes exactly one read;
+// where that read cannot bring the named tier's figure the catalog keeps its usual life.
+
+test('a tier that swings away and back across a read owes one corrective read, then the catalog keeps its life', async () => {
+    const priced = (figure, tier) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure, cache_write_ttl: tier } }] });
+    const said = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
+    let reads = 0;
+    let release = null;
+    const answers = [() => priced(8, '1h'), () => new Promise((resolve) => { release = () => resolve(priced(5, '5m')); }),
+        () => priced(8, '1h')];
+    const store = createModelCatalogStore({ readCatalog: () => { reads += 1; return answers[reads - 1](); } });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await store.read();
+    assert.deepEqual([reads, said(store)], [1, 'Cache write: $8 per 1M tokens.']);
+    const late = store.read({ force: true });
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });   // 1h→5m→1h across the read
+    release();
+    await late;
+    assert.equal(said(store), '', 'the read answered under the middle name: its figure is unsaid under 1h');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [3, 'Cache write: $8 per 1M tokens.'], 'exactly one corrective read');
+    await store.read();
+    assert.equal(reads, 3, 'and no read per opened capsule');
+});
+
+test('a corrective read that still cannot bring the named tier\'s figure is the one owed read', async () => {
+    const priced = (figure, tier) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure, cache_write_ttl: tier } }] });
+    const said = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
+    let reads = 0;
+    let release = null;
+    const answers = [() => priced(8, '1h'), () => new Promise((resolve) => { release = () => resolve(priced(5, '5m')); }),
+        () => priced(5, '5m')];
+    const store = createModelCatalogStore({ readCatalog: () => { reads += 1; return answers[reads - 1](); } });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await store.read();
+    const late = store.read({ force: true });
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    release();
+    await late;
+    await store.read();                       // the corrective read answers 5m's figure again
+    assert.deepEqual([reads, said(store)], [3, '']);
+    await store.read();
+    await store.read();
+    assert.equal(reads, 3, 'the one owed read was made; the unsaid figure keeps the catalog\'s usual life');
+});
+
+test('a late answer handed over by another reader owes one corrective read even where this store read under the named tier', async () => {
+    const priced = (figure, tier) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure, cache_write_ttl: tier } }] });
+    const said = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return priced(8, '1h'); } });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await store.read();
+    assert.deepEqual([reads, said(store)], [1, 'Cache write: $8 per 1M tokens.']);
+    // Settings' own reader answers late with figures fetched under an older tier name.
+    store.adopt(priced(5, '5m'));
+    assert.equal(said(store), '', 'another tier\'s figure is unsaid at once');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [2, 'Cache write: $8 per 1M tokens.'], 'exactly one corrective read');
+    await store.read();
+    assert.equal(reads, 2);
+});
+
+// The same sequences with an answer that states no cache-write figure, which cannot show the tier it was read under.
+// 'a/one' states a five-minute write figure and no hourly one, so an answer read under 1h carries no figure for it.
+const figureless = () => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20 } }] });
+const stamped = (figure, tier) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure, cache_write_ttl: tier } }] });
+const saidBy = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
+const MINUTE = 60 * 1000;
+
+// On the store's own clock, which starts at one second (a stamp of 0 would pass for fresh there): the answer that
+// lands leaves the catalog stale at that very instant, the next ordinary open reads once under the named tier, and
+// that read is fresh within the same window and for the catalog's usual five minutes, never longer.
+function noFigureRig() {
+    const rig = { clock: 1_000, reads: 0, release: null, next: () => stamped(5, '5m') };
+    rig.store = createModelCatalogStore({ now: () => rig.clock, readCatalog: () => { rig.reads += 1; return rig.next(); } });
+    // A read begun now stays out until `release(answer)`; the reads after it answer under the five-minute tier.
+    rig.outstanding = () => {
+        rig.next = () => new Promise((resolve) => { rig.release = resolve; });
+        const reading = rig.store.read();
+        rig.next = () => stamped(5, '5m');
+        return reading;
+    };
+    rig.readUnder1h = async () => {
+        rig.next = figureless;
+        await rig.store.read();
+        rig.next = () => stamped(5, '5m');
+    };
+    return rig;
+}
+const NO_FIGURE_SEQUENCES = {
+    'the first catalog read lands before Settings names a tier': async (rig) => {
+        const opened = rig.outstanding();
+        rig.release(figureless());
+        await opened;
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    },
+    'Settings first names a tier while the initial catalog read is out': async (rig) => {
+        const opened = rig.outstanding();
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+        rig.release(figureless());
+        await opened;
+    },
+    'a sheet\'s read is out when the tier moves': async (rig) => {
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+        const opened = rig.outstanding();                              // a Model sheet opens: its read is begun under 1h
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' }); // the owner saves 5 min while it is out
+        rig.release(figureless());
+        await opened;
+    },
+    'the tier swings away and back across that read': async (rig) => {
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+        await rig.store.read();
+        rig.clock += 6 * MINUTE;                                       // its life is over: the next open reads
+        const opened = rig.outstanding();
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' }); // back, before the read lands under the middle name
+        rig.release(figureless());
+        await opened;
+    },
+    'another reader\'s answer begun under the old tier lands after the move': async (rig) => {
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+        await rig.readUnder1h();
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' }); // Settings › Models' refresh is out meanwhile
+        rig.store.adopt(figureless());
+    },
+    'that answer lands after a read under the new tier': async (rig) => {
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+        await rig.readUnder1h();
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+        await rig.store.read();                                        // a Model capsule already read under 5 min
+        assert.equal(saidBy(rig.store), 'Cache write: $5 per 1M tokens.');
+        rig.store.adopt(figureless());                                 // and the late refresh unsays its figure
+    },
+};
+for (const [sequence, land] of Object.entries(NO_FIGURE_SEQUENCES)) {
+    test(`an answer that states no figure leaves the catalog stale where ${sequence}; one read follows`, async () => {
+        const rig = noFigureRig();
+        await land(rig);
+        const landed = rig.reads;
+        assert.equal(saidBy(rig.store), '', 'the answer that landed states no figure');
+        await rig.store.read();                                        // an open at the very instant it landed
+        assert.deepEqual([rig.reads - landed, saidBy(rig.store)], [1, 'Cache write: $5 per 1M tokens.'],
+            'it never stamped the catalog fresh: one read under the named tier');
+        rig.clock += 5 * 1000;
+        await rig.store.read();                                        // the same window, seconds later
+        assert.equal(rig.reads - landed, 1, 'that read made it fresh');
+        rig.clock += 4 * MINUTE;
+        await rig.store.read();
+        assert.equal(rig.reads - landed, 1, 'and keeps it fresh from its own answer');
+        rig.clock += 2 * MINUTE;
+        await rig.store.read();
+        assert.equal(rig.reads - landed, 2, 'for the catalog\'s usual life, never longer');
+    });
+}
+
+for (const prior of ['1h', null]) {
+    test(`an open while a read begun under ${prior ?? 'no tier'} is out waits for it, then reads once under the named tier`, async () => {
+        const rig = noFigureRig();
+        if (prior) rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: prior });
+        const opened = rig.outstanding();
+        rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+        const meanwhile = [rig.store.read(), rig.store.read()];       // the sheet opened again, twice, before it lands
+        assert.equal(rig.reads, 1, 'the new opens join the old read before correcting it');
+        rig.release(figureless());
+        await Promise.all([opened, ...meanwhile]);
+        assert.deepEqual([rig.reads, saidBy(rig.store)], [2, 'Cache write: $5 per 1M tokens.'], 'one read for every open meanwhile');
+        await rig.store.read();
+        assert.equal(rig.reads, 2);
+    });
+}
+
+test('with the tier unchanged an answer that states no figure, this store\'s or handed over, keeps the usual life', async () => {
+    const rig = noFigureRig();
+    rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await rig.readUnder1h();
+    rig.store.adopt(figureless());                                     // Settings › Models' own refresh, same tier
+    rig.store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });     // a save of another setting
+    rig.clock += 4 * MINUTE;
+    await rig.store.read();
+    assert.equal(rig.reads, 1, 'no read the tier does not owe');
+    rig.clock += 2 * MINUTE;
+    await rig.store.read();
+    assert.equal(rig.reads, 2, 'and the usual one when its life ends');
+});
+
+test('a settings read out when Settings applies a newer document never stands over it, answered or failed', async () => {
+    const connection = (name, enabled) => ({ id: `openai@${name}`, kind: 'openai', name, display: `OpenAI · ${name}`, enabled,
+        configured: true });
+    for (const late of ['answers', 'fails']) {
+        let settle;
+        let reads = 0;
+        const store = createModelCatalogStore({ readCatalog: async () => stamped(5, '1h'), readSettings: () => {
+            reads += 1;
+            return new Promise((resolve, reject) => { settle = { resolve, reject }; });
+        } });
+        const reading = store.readConnections();
+        await flush();
+        assert.equal(reads, 1, 'the store\'s own first read is out');
+        store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_PROCESSING_PREFERENCE: 'economy',
+            OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}', _meta: { connections: [connection('new', true)] } });
+        if (late === 'answers') {
+            settle.resolve({ OUROBOROS_PROMPT_CACHE_TTL: '5m', OUROBOROS_PROCESSING_PREFERENCE: 'standard',
+                _meta: { connections: [connection('old', false)] } });
+        } else settle.reject(new Error('offline'));
+        await reading;
+        await store.read();
+        assert.deepEqual(store.tiers(), { main: 'fast', default: 'economy' }, `${late}: the applied document's tiers stay`);
+        assert.deepEqual(store.index().connections.map((entry) => [entry.id, entry.enabled]), [['openai@new', true]], late);
+        assert.equal(saidBy(store), 'Cache write: $5 per 1M tokens.', `${late}: the applied cache tier keeps its figure said`);
+        await store.readConnections();
+        assert.equal(reads, 1, `${late}: the document is held, so nothing is read again`);
+    }
+});
+
+test('with no newer document the store\'s own settings read is the one adopted', async () => {
+    let settle;
+    const store = createModelCatalogStore({ readSettings: () => new Promise((resolve) => { settle = resolve; }) });
+    const reading = store.readConnections();
+    await flush();
+    settle({ OUROBOROS_PROCESSING_PREFERENCE: 'standard', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"fast"}' });
+    await reading;
+    assert.deepEqual(store.tiers(), { main: 'fast', default: 'standard' });
+});

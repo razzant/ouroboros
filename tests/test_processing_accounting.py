@@ -262,11 +262,17 @@ def test_loop_and_helper_display_keep_the_observed_price_qualifier(monkeypatch, 
         calls.append(kwargs.get("processing_mode"))
         return None if kwargs.get("processing_mode") == "unknown" else 0.1
     monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional", price)
-    monkeypatch.setattr(search, "estimate_cost_optional", price)
+    monkeypatch.setattr(ua, "estimate_cost_optional", price)
     usage = {"cost": None, "provider": "openrouter", "prompt_tokens": 10, "completion_tokens": 2,
              "processing": {"observed": observed, "observedNative": modes}}
     cost, _, _, _ = loop_llm_call._normalize_usage_cost(usage, model="openai/same", use_local=False)
     ctx = SimpleNamespace(pending_events=[], task_metadata={}, task_id="helper")
-    search._emit_simple_usage(ctx, provider="openrouter", model="openai/same", usage={**usage, "cost": None})
+    # The helper display prices nothing: it states what its attempt settled, and settlement keeps the qualifier.
+    attempt = SimpleNamespace(provider="openrouter", model="openai/same", processing_preference="",
+                              submitted_processing_mode="", provider_reported_cost_only=False,
+                              unpriced_add_on=False)
+    settled = ua._settlement_fields(attempt, {**usage, "cost": None}, None, False)
+    search._emit_simple_usage(ctx, provider="openrouter", model="openai/same", usage={**usage, "cost": None},
+                              settled={"cost": settled["cost_usd"], "cost_estimated": settled["cost_estimated"]})
     assert calls == [expected, expected]
     assert ctx.pending_events[0]["cost"] == cost == (None if expected == "unknown" else 0.1)

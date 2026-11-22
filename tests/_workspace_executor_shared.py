@@ -1,9 +1,10 @@
 """Helpers shared by the workspace-executor suites.
 
-The git-repo builder was split verbatim out of ``tests/test_workspace_executor.py``
-when that module was divided by theme, so every sibling suite keeps the exact
-repository layout it was written against. ``fake_docker_cli`` is the one Docker CLI
-boundary those suites fake.
+The git repository was split out of ``tests/test_workspace_executor.py`` when that
+module was divided by theme; it is now one world of the run, so every sibling suite
+keeps the tree, commit and configuration it was written against (the ``.git`` folder
+holds no template files). ``fake_docker_cli`` is the one Docker CLI boundary those
+suites fake.
 """
 
 from __future__ import annotations
@@ -11,6 +12,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
 def fake_docker_cli(monkeypatch, script, *, docker_popen=None, on_docker_stop=None) -> None:
@@ -65,11 +69,14 @@ def fake_docker_cli(monkeypatch, script, *, docker_popen=None, on_docker_stop=No
     monkeypatch.setattr(workspace_executor, "kill_process_tree", stop)
 
 
+def _lay_readme_repo(folder: Path) -> None:
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "test@example.invalid")
+    world_git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    world_git(repo, "add", "README.md")
+    world_git(repo, "commit", "-m", "init")
+
+
 def _init_repo(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    (path / "README.md").write_text("x\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    clone_repository(world("workspace-executor-readme", _lay_readme_repo) / "repo", path)

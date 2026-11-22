@@ -15,23 +15,19 @@ from devtools.benchmarks.cybergym.cybergym_server import (
     CyberGymServerError,
     _RootlessIsolatedServer,
 )
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 
-def _git(repo: pathlib.Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+def _lay_seed(folder: pathlib.Path) -> None:
+    repo = git_repository(folder / "seed", unborn=True)
+    (repo / "VERSION").write_text("test-version\n", encoding="utf-8")
+    world_git(repo, "add", "VERSION")
+    world_git(repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed")
 
 
 def _seed_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
-    repo = tmp_path / "seed"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    (repo / "VERSION").write_text("test-version\n", encoding="utf-8")
-    _git(repo, "add", "VERSION")
-    subprocess.run(
-        ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "seed"],
-        cwd=repo,
-        check=True,
-    )
+    repo = clone_repository(world("cybergym-server-seed", _lay_seed) / "seed", tmp_path / "seed")
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     return repo, commit
 
