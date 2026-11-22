@@ -373,9 +373,10 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
         return None
     from ouroboros.budget_pause import STATE_RESUME_GRANTED
     from ouroboros.cancel_intents import _validated_single_cancel_target, claim_still_owned
-    from ouroboros.headless import _child_drive_from_task, prepare_terminal_task_files, terminal_task_files_ready
+    from ouroboros.headless import (
+        _child_drive_from_task, prepare_terminal_task_files, terminal_source_present, terminal_task_files_ready,
+    )
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import SETTLED_STATUSES
     from supervisor.cancel_publication import (
         CANCEL_ALREADY_SETTLED,
         CANCEL_FAILED,
@@ -407,11 +408,17 @@ def prepare_closure(q: Any, task_id: str, task: Dict[str, Any], intent: Optional
     try:
         stored = load_task_result(root, task_id, strict=True) or {}
         child = _child_drive_from_task(task)
+        # Another attempt's settled replica is no end of this live one (``headless.terminal_source_present``).
         if (child is not None and not terminal_task_files_ready(root, task, stored)
-                and str((load_task_result(child, task_id, strict=True) or {}).get("status") or "") in SETTLED_STATUSES):
+                and terminal_source_present(stored, load_task_result(child, task_id, strict=True))):
             if prepare_terminal_task_files(root, task).get("terminal_source_present") is not True:
                 raise RuntimeError("terminal file publication is unresolved")
             stored = load_task_result(root, task_id, strict=True) or {}
+            if not terminal_task_files_ready(root, task, stored):
+                # Its own settled end is confirmed; a publication still held by another publisher (a temporary
+                # ``CustodyBusy``) is no ending to replace with this cancel. The row and the intent go back to
+                # the watchdog, whose next pass completes the same publication.
+                raise RuntimeError("terminal file publication is still pending")
         if terminal_task_files_ready(root, task, stored):  # it finished by itself: that result and its event stand
             _settle_intent(q, task_id, outcome=SETTLED_ALREADY, detail=str(stored["status"]), intent=intent)
             q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields, status=str(stored["status"]))

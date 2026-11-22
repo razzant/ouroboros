@@ -8,6 +8,7 @@ import {
     buildModelIndex, compareNewerFirst, describeRoute, normalizeChoice, routeKey, routeSource, sameRoute, searchModels,
     shortName, sourceUnlisted, typedRoute, windowWords,
 } from '../modules/chat_model_routes.js';
+import { mergeModelCatalog } from '../modules/settings_catalog.js';
 
 const ASTRA = 'claudexor::codex=gpt-6-astra';
 const SOL = 'claudexor::codex=gpt-6.1-sol';
@@ -148,31 +149,111 @@ test('models read newer first by the version their names state; a name that stat
     assert.deepEqual(order(['b-2', 'a-1']), ['a-1', 'b-2'], 'families follow each other by name');
 });
 
-test('a row keeps the catalog\'s own price and the tiers its accounts list; a source keeps the tiers its transport advertises', () => {
-    const PRICED = api('openrouter', 'anthropic/claude-opus-5.5', { price: { input: 4, output: 20 } });
-    const index = buildModelIndex({ catalog: {
+test('a typed model keeps only its named API connection’s transport, even without model rows', () => {
+    const source = 'openai-compatible@lab';
+    const other = 'openai-compatible@other';
+    const legacy = api('openai-compatible@legacy', 'same-id', { processing_transport: ['standard', 'fast'] });
+    const catalog = { items: [legacy], api_sources: [{ id: source, label: 'Sandbox', processing_transport: ['standard'] },
+        { id: other, label: 'Other', processing_transport: ['standard', 'fast'] },
+        { id: 'openai-compatible@unknown', label: 'Unknown' }] };
+    const index = buildModelIndex({ catalog });
+    const typed = typedRoute(index, 'same-id', source);
+    assert.deepEqual(typed, { model: `${source}::same-id`, use_local: false });
+    assert.equal(index.row(typed), null);
+    assert.equal(index.source(source).count, 0);
+    assert.equal(describeRoute(index, typed).sourceLabel, 'Sandbox');
+    assert.deepEqual(index.tiers(typed), { lane: 'api', ceiling: ['standard'], complete: false, accounts: [] });
+    assert.deepEqual(index.tiers(typedRoute(index, 'same-id', other)).ceiling, ['standard', 'fast']);
+    assert.equal(index.tiers({ model: 'openai-compatible@unknown::same-id' }).ceiling, null);
+    assert.equal(index.tiers({ model: 'openai-compatible@missing::same-id' }).ceiling, null);
+
+    const old = buildModelIndex({ catalog: { items: [legacy] } });
+    assert.deepEqual(old.tiers({ model: legacy.value }).ceiling, ['standard', 'fast']);
+    assert.equal(old.tiers({ model: 'openai-compatible@legacy::unlisted' }).ceiling, null);
+});
+
+test('a row keeps the catalog\'s own price; the index says of a route\'s tiers only what this read itself said', () => {
+    const PRICED = api('openrouter', 'anthropic/claude-opus-5.5', { price: { input: 4, output: 20 }, processing_transport: ['standard', 'fast', 7] });
+    const model = (id, modes, extra = {}) => ({ id, ...(modes ? { processing: { modes, eligible: null, source: 'account', observedAt: null } } : {}), ...extra });
+    const account = (id, models, extra = {}) => ({ credentialProfileId: id, availability: 'available', problem: null,
+        catalog: models && { source: 'codex', credentialProfileId: id, accountFingerprint: `fp-${id}`, provenance: 'live', models, ...extra } });
+    const catalog = {
+        store_id: 'store-a',
         model_sources: [{ id: 'codex', label: 'Codex', credentialHarness: 'codex', processingPreferences: ['standard', 'fast', 7] },
             { id: 'claude', label: 'Claude', credentialHarness: 'claude' }],
-        items: [codex('gpt-6-astra', 'work', { processing: { modes: ['standard'] } }), codex('gpt-6-astra', 'home', { processing: { modes: ['fast', null] } }),
-            codex('gpt-6.1-sol', 'home', { processing: { modes: [] } }), codex('gpt-5-old', 'home'), PRICED, api('openrouter', 'z-ai/glm-5.3')],
-    } });
-    assert.deepEqual([...index.row({ model: ASTRA }).modes].sort(), ['fast', 'standard'], 'every account\'s list, once');
-    assert.deepEqual([...index.row({ model: SOL }).modes], [], 'an account that lists none makes the list known, and empty');
-    assert.equal(index.row({ model: 'claudexor::codex=gpt-5-old' }).modes, null, 'no account says: unknown');
-    assert.deepEqual(index.source('subscription:codex').transport, ['standard', 'fast']);
-    assert.equal(index.source('subscription:claude').transport, null, 'a source that does not say');
-    assert.equal(index.source('openrouter').transport, null);
+        account_catalogs: [{ source: 'codex', partial: false, accounts: [
+            account('work', [model('gpt-6-astra', ['standard']), model('gpt-6.1-sol', [])]),
+            account('home', [model('gpt-6-astra', ['fast', null]), model('gpt-5-old')]),
+            account('spent', null),                                                  // not read: a pause, an error
+            account('empty', []),                                                    // read, and listed nothing
+            account('shipped', [model('gpt-6-astra', ['standard', 'fast'])], { provenance: 'bundled' }),
+            account('hinted', [model('gpt-6-astra', ['fast'], { origin: 'hint' }), model('gpt-6.1-sol', ['fast'], { processing: { modes: ['fast'], source: 'bundled_hint' } })]),
+        ] }],
+        // The rows of the list are the display's; with envelopes in the answer they add no account evidence.
+        items: [codex('gpt-6-astra', 'work', { processing: { modes: ['standard', 'fast', 'ultrafast'] } }), codex('gpt-6-astra', 'home'),
+            codex('gpt-6.1-sol', 'work'), codex('gpt-5-old', 'home'), PRICED, api('openrouter', 'z-ai/glm-5.3')],
+    };
+    const index = buildModelIndex({ catalog });
+    const accounts = (said) => said.accounts.map((entry) => [entry.id, entry.modes && [...entry.modes].sort(), entry.absent]);
+    const astra = index.tiers({ model: ASTRA });
+    assert.deepEqual([astra.lane, astra.ceiling, astra.complete, index.storeId], ['subscription', ['standard', 'fast'], true, 'store-a']);
+    assert.deepEqual(accounts(astra), [['work', ['standard'], false], ['home', ['fast'], false], ['spent', null, false],
+        ['empty', null, false], ['shipped', null, false], ['hinted', null, false]],
+    'each account\'s own list; one not read, empty or shipped says nothing, and no row\'s list is taken for an account\'s');
+    assert.deepEqual(accounts(index.tiers({ model: SOL })).slice(0, 2), [['work', null, false], ['home', null, true]],
+        'an empty list is no word; an account whose read list lacks the model does not serve it');
+    assert.deepEqual(accounts(index.tiers({ model: SOL })).at(-1), ['hinted', null, false], 'a tier list a program ships is no account\'s word');
+    assert.deepEqual(index.tiers({ model: 'claudexor::claude=opus' }), { lane: 'subscription', ceiling: null, complete: false, accounts: [] },
+        'a source that says nothing');
+    assert.deepEqual(index.tiers({ model: PRICED.value }), { lane: 'api', ceiling: ['standard', 'fast'], complete: false, accounts: [] },
+        'a key\'s row keeps its transport\'s ceiling');
+    assert.equal(index.tiers({ model: 'z-ai/glm-5.3' }).ceiling, null);
+    assert.equal(index.tiers(null), null);
     assert.deepEqual(index.row({ model: PRICED.value }).price, { input: 4, output: 20 }, 'Standard\'s price, kept as the figures');
     assert.equal(index.row({ model: 'z-ai/glm-5.3' }).price, null);
     assert.equal(index.priced, true);
     assert.equal(buildModelIndex({ catalog: { items: [api('openrouter', 'z-ai/glm-5.3')] } }).priced, false);
+    // A partial envelope is not every account; an answer without envelopes (an older engine) names only its rows' accounts.
+    assert.equal(buildModelIndex({ catalog: { ...catalog, account_catalogs: [{ ...catalog.account_catalogs[0], partial: true }] } })
+        .tiers({ model: ASTRA }).complete, false);
+    const legacy = buildModelIndex({ catalog: { model_sources: catalog.model_sources, items: catalog.items } }).tiers({ model: ASTRA });
+    assert.deepEqual([legacy.complete, accounts(legacy)], [false, [['work', ['fast', 'standard', 'ultrafast'], false], ['home', null, false]]]);
+});
+
+test('rows a gap kept from an earlier read, another store\'s included, stay in the list and are no evidence of a tier', () => {
+    const envelope = (accounts, partial = false) => ({ source: 'codex', partial, accounts });
+    const read = (id, modes, fingerprint = `fp-${id}`) => ({ credentialProfileId: id, availability: 'available', problem: null,
+        catalog: { source: 'codex', credentialProfileId: id, accountFingerprint: fingerprint, provenance: 'live',
+            models: [{ id: 'gpt-6-astra', processing: { modes } }] } });
+    const sources = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex', processingPreferences: ['standard', 'fast'] }];
+    const rows = [codex('gpt-6-astra', 'work', { account_fingerprint: 'fp-work', processing: { modes: ['standard', 'fast'] } }),
+        codex('gpt-6-astra', 'home', { account_fingerprint: 'fp-home', processing: { modes: ['standard', 'fast'] } })];
+    const yesterday = mergeModelCatalog({}, { store_id: 'store-a', model_sources: sources, items: rows,
+        account_catalogs: [envelope([read('work', ['standard', 'fast']), read('home', ['standard', 'fast'])])] });
+    const modes = (catalog) => buildModelIndex({ catalog }).tiers({ model: ASTRA }).accounts.map((entry) => [entry.id, entry.modes && [...entry.modes]]);
+    assert.deepEqual(modes(yesterday), [['work', ['standard', 'fast']], ['home', ['standard', 'fast']]]);
+    // A partial read from another store: `work` was not read, `home` is another account now and lists less.
+    const today = mergeModelCatalog(yesterday, { store_id: 'store-b', model_sources: sources, partial: true,
+        items: [codex('gpt-6-astra', 'home', { account_fingerprint: 'fp-other', processing: { modes: ['standard'] } })],
+        account_catalogs: [envelope([{ credentialProfileId: 'work', availability: 'unknown', problem: { message: 'not read' }, catalog: null },
+            read('home', ['standard'], 'fp-other')], true)], errors: [{ source_id: 'codex', credential_profile_id: 'work', error: 'not read' }] });
+    assert.deepEqual(today.items.map((item) => [item.credential_profile_id, item.account_fingerprint]), [['work', 'fp-work'], ['home', 'fp-other']],
+        'the unread account\'s row stays for the list');
+    const index = buildModelIndex({ catalog: today });
+    assert.ok(index.row({ model: ASTRA }), 'and the model is still offered');
+    assert.deepEqual([modes(today), index.tiers({ model: ASTRA }).complete, index.storeId], [[['work', null], ['home', ['standard']]], false, 'store-b'],
+        'yesterday\'s membership is not today\'s evidence');
+    // A read that listed nothing (offline) proves nothing at all, the transport\'s ceiling included.
+    const offline = buildModelIndex({ catalog: mergeModelCatalog(yesterday, { read_state: 'transport', errors: [{ error: 'offline' }] }) });
+    assert.ok(offline.row({ model: ASTRA }));
+    assert.deepEqual(offline.tiers({ model: ASTRA }), { lane: 'subscription', ceiling: null, complete: false, accounts: [] });
 });
 
 test('a route names the catalog\'s price only where its context pays it: Flex, Fast and Ultrafast are priced by their own endpoint', () => {
     const index = buildModelIndex({ catalog: { items: [api('openrouter', 'anthropic/claude-opus-5.5', { price: { input: 4, output: 20 } })] } });
     const said = (...options) => describeRoute(index, { model: 'anthropic/claude-opus-5.5' }, ...options);
     assert.deepEqual([said().price, said().facts], ['$4 in / $20 out', 'OpenRouter · $4 in / $20 out'], 'no tier said: the catalog\'s');
-    assert.deepEqual([said({ tier: 'standard' }).price, said({ tier: '' }).price], ['$4 in / $20 out', '$4 in / $20 out']);
+    assert.deepEqual([said({ tier: 'standard' }).price, said({ tier: '' }).price], ['$4 in / $20 out', 'Catalog rate · $4 in / $20 out']);
     for (const tier of ['fast', 'economy', 'ultrafast']) {
         assert.deepEqual([said({ tier }).price, said({ tier }).facts], ['', 'OpenRouter · paid by key'], tier);
     }

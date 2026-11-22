@@ -63,49 +63,111 @@ def _owner_message_receipt(client_message_id: Any) -> str:
     return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
 
 
-def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
+def _receipt_room(evt: dict) -> int:
+    from ouroboros.chat_annotations import receipt_source_room
+    from ouroboros.project_dialogue import owner_message_ref_is_valid
+    ref = evt.get("source_ref")
+    if evt.get("owner_source") and owner_message_ref_is_valid(ref) and ref["client_message_id"] == str(evt.get("client_message_id") or ""):
+        return int(ref["chat_id"])
+    try:
+        return int(receipt_source_room(ref, _owner_message_receipt(evt.get("client_message_id")), evt.get("chat_id")) or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _routing_notice_reply(ctx: Any, evt: Dict[str, Any], chat_id=None, *, address=None) -> Dict[str, Any]:
     """The owner message a routing notice answers, as its exact host Reply reference.
 
     The retained owner row the act quotes for this receipt, else the owner source it
     carries by value, else the accepted row its receipt id names. ``{}`` when none
     resolves (a synthetic act, an unreadable store): an explicit "no owner row", which
     keeps a task-keyed System row from borrowing its target task's own origin.
+    ``address`` receives where the notice answers that row when it is an owner-bot Reply
+    whose room the host decided (``chat_references.decided_reply_address``).
     """
-    from ouroboros.chat_references import reference_from_row
-    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+    from ouroboros.chat_chain import _row_chat_id, resolve_row
+    from ouroboros.chat_references import decided_reply_address, reference_from_row, visible_source_reply
+    from ouroboros.owner_relay import owner_source_row
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, unique_inbound_message
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
+    receipt_room = _receipt_room(evt)
+    destination = receipt_room if chat_id is None else chat_id
     try:
-        row = next((quote["owner_row"] for quote in evt.get("quotes") or []
-                    if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
-                    and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
         source = evt.get("source_ref")
-        if row is None and owner_message_ref_is_valid(source) and (
-                not client_message_id or source["client_message_id"] == client_message_id):
-            row = resolve_owner_message_source(ctx.DRIVE_ROOT, source)
-        if row is None and _owner_message_receipt(client_message_id):
-            from supervisor.message_ingress import accepted_chat_message
-
-            row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
-        return reference_from_row(row) if row else {}
+        quote = next((quote for quote in evt.get("quotes") or []
+                      if client_message_id and isinstance(quote, dict) and isinstance(quote.get("owner_row"), dict)
+                      and _row_chat_id(quote["owner_row"]) == receipt_room
+                      and str((quote.get("source") or {}).get("client_message_id") or "") == client_message_id), None)
+        row = quote["owner_row"] if quote is not None else None
+        if not row or evt.get("owner_source"):
+            if owner_message_ref_is_valid(source) and (not client_message_id or (
+                    source["client_message_id"] == client_message_id and source["chat_id"] == receipt_room)):
+                snapshot = evt.get("origin_message_snapshot") or {}
+                reply = snapshot.get("reply") if snapshot.get("projectable") is True else None
+                return visible_source_reply(ctx.DRIVE_ROOT, source, destination, reply=reply)
+            if evt.get("owner_source") or evt.get("origin_suppressed") is True or (isinstance(source, dict) and source):
+                return {}  # a source the host named but cannot show, or suppressed, is never guessed from the client id
+        if row:
+            root = row.get("_owner_source_root") or ctx.DRIVE_ROOT
+            row = owner_source_row(row)
+            source_address = quote["source"].get("address")
+            if source_address and source_address != reference_from_row(row, root)["address"]:
+                row, _ = resolve_row(root, source_address)
+                if not row or _row_chat_id(row) != receipt_room:
+                    return {}
+            if address is not None:
+                address.update(decided_reply_address(row))
+            return visible_source_reply(root, None, destination, row=row)
+        if _owner_message_receipt(client_message_id):
+            row = unique_inbound_message(ctx.DRIVE_ROOT, {receipt_room}, client_message_id)
+        if row and address is not None:
+            address.update(decided_reply_address(row))
+        return visible_source_reply(ctx.DRIVE_ROOT, None, destination, row=row) if row else {}
     except Exception:
         log.debug("Routing notice origin unavailable for %s", client_message_id, exc_info=True)
         return {}
 
 
-def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
+def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any], *,
+                               notice_transport: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """What an ACK sent from these receipt fields says of the act's owner notice: ``{}`` for a quiet ACK; else the
     carrier the receipt selects. That is the ACK itself, with the owner message it answers, when its id names one.
     An ACK whose id names none annotates no chat row, so it is never the carrier: it names ``system``, the System
     row its act's path writes where the host owns the notice (a host-issued act, a steer of my human's words) and
     every client shows; a tool act tied to no owner message writes none, and the model narrates its tool result.
-    Neither field is a row field, and neither proves that a transport delivered anything."""
+    An ACK answering an owner-bot Reply whose room the host decided also names that Reply's own ``transport``.
+    No field is a row field, and none proves that a transport delivered anything."""
     if not _routing_notice_carried(fields["status"], str(fields.get("cause") or ""), fields.get("options"),
                                    fields.get("attachment_manifest")):
         return {}
-    if not _owner_message_receipt(evt.get("client_message_id")):
+    message = _owner_message_receipt(evt.get("client_message_id"))
+    unplaced = _receipt_unplaced(fields)
+    if not message or ((unplaced or message.startswith("quiz_answer:")) and fields.get("cause")
+                       and _system_row_follows(evt, fields)):
+        # No chat bubble wears an unplaced receipt or an answered quiz's hidden answer row: where the act's own path
+        # writes the System row its receipt selects, that row carries the notice, never a second standalone one.
         return {"routing_notice_carrier": "system"}
-    return {"routing_notice_carrier": "routing_ack", "reply_to": _routing_notice_reply(ctx, evt)}
+    address: Dict[str, Any] = dict(notice_transport or {})
+    reply = {} if unplaced else _routing_notice_reply(ctx, evt, address=None if address else address)
+    return {"routing_notice_carrier": "routing_ack", "reply_to": reply, **({"transport": address} if address else {})}
+
+
+def _receipt_unplaced(fields: Dict[str, Any]) -> bool:
+    """A receipt whose host stated that no row wears it (`chat_annotations.explicit_source_fields`)."""
+    return "source_row_address" in fields and not fields["source_row_address"]
+
+
+def _system_row_follows(evt: Dict[str, Any], fields: Dict[str, Any]) -> bool:
+    """Whether the act's own path publishes the System row its receipt selects as the notice's carrier: an owner's
+    steer (`steering._refusal_row` when `_notice_row_owed`) and a host-issued promote (`_notify_host_initiated_refusal`).
+    Only a refusal with a cause reaches either writer, so an attachment-only ACK of a started act keeps its notice, and
+    so does a task-issued act (it reads its typed refusal in its tool result)."""
+    status = fields.get("status")
+    if fields.get("action") == "steer_task":
+        issuer = evt.get("issuer")
+        return status in {"rejected", "needs_manual_target"} and not (isinstance(issuer, dict) and issuer.get("kind") == "task")
+    return bool(evt.get("host_initiated")) and status in {"needs_manual_target", "unconfirmed"}
 
 
 # Acts that pass the owner's words on to a running work: their receipt names that work and its room.
@@ -147,6 +209,10 @@ def _routing_receipt_fields(
         target_label = routing_target_label(ctx.DRIVE_ROOT, action, target, task=evt, project_id=str(evt.get("project_id") or ""),
                                             fallback=unnamed_label)
     fields: Dict[str, Any] = {**supplied, "action": action, "target": target, "target_label": target_label, "status": status}
+    from ouroboros.chat_annotations import routing_source_address
+    if "source_row_address" not in fields and (address := routing_source_address(
+            evt.get("source_ref"), _receipt_room(evt), evt.get("client_message_id"))):
+        fields["source_row_address"] = address
     optional = {
         "routing_token": str(evt.get("routing_token") or "").strip(),
         # Q3=A: the owner-facing sentence for a REFUSED act ("" for a landed row or the picker).
@@ -205,13 +271,23 @@ def _emit_routing_receipt(
     attachment_manifest: Optional[list] = None,
     publish: bool = True,
     reasoning_effort: str = "",
+    source_row_address: str = "",
 ) -> Dict[str, Any]:
     """Persist and publish one token-bound routing annotation receipt."""
     fields = _routing_receipt_fields(
         ctx, evt, action=action, target=target, target_label=target_label, status=status, reason=reason,
         options=options, attachment_manifest=attachment_manifest, reasoning_effort=reasoning_effort,
+        **({"source_row_address": source_row_address} if source_row_address else {}),
     )
     client_message_id = str(evt.get("client_message_id") or "").strip()
+    # An act that named a source (a reference of any shape, a selected owner source, the door's suppression) states
+    # where it landed ONCE: the exact address, or `source_row_address: ""` for what the host cannot verify. Its row
+    # and its live frame carry that one fact, so no reload and no mounted bubble places it by client id.
+    from ouroboros.chat_annotations import explicit_source_fields
+    fields.update(explicit_source_fields(
+        ctx.DRIVE_ROOT, evt.get("source_ref"), _receipt_room(evt), _owner_message_receipt(client_message_id), fields,
+        suppressed=evt.get("origin_suppressed") is True, selected=bool(evt.get("owner_source")), picker=bool(options)))
+    unplaced = _receipt_unplaced(fields)
     annotation_status = "not_applicable"
     if client_message_id:
         try:
@@ -222,8 +298,10 @@ def _emit_routing_receipt(
                 if append_chat_annotation(
                     ctx.DRIVE_ROOT,
                     client_message_id,
+                    source_chat_id=_receipt_room(evt),
                     reason=reason,
                     detail=detail,
+                    **({"source_unplaced": True} if unplaced else {}),
                     **{key: value for key, value in fields.items() if key in ROUTING_RECEIPT_FIELDS},
                 )
                 else "failed"
@@ -281,18 +359,22 @@ def _publish_routing_ack(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) 
     took the ACK without raising ("" for a quiet ACK or none sent).
     """
     try:
-        try:
-            chat_id = int(evt.get("chat_id") or 0)
-        except (TypeError, ValueError):
-            chat_id = 0
+        chat_id = _receipt_room(evt)
         ack = getattr(getattr(ctx, "bridge", None), "send_routing_ack", None)
         if callable(ack):
-            notice = _routing_notice_ack_fields(ctx, evt, fields)
+            notice = _routing_notice_ack_fields(ctx, evt, fields, notice_transport=_promotion_notice_transport(ctx, evt))
             ack(chat_id, client_message_id=str(evt.get("client_message_id") or "").strip(), **fields, **notice)
             return str(notice.get("routing_notice_carrier") or "")
     except Exception:
         log.debug("Routing typed ack failed", exc_info=True)
     return ""
+
+
+def _promotion_notice_transport(ctx: Any, evt: Dict[str, Any]) -> dict:
+    """Use the supervisor event's admitted turn address even when its quote cannot be read."""
+    from ouroboros.chat_references import TURN_ADDRESS, reply_transport_from_metadata
+
+    return reply_transport_from_metadata(ctx.DRIVE_ROOT, evt, anchor=False) if TURN_ADDRESS in evt else {}
 
 
 def _handle_project_digest(evt: Dict[str, Any], ctx: Any) -> None:
@@ -564,7 +646,9 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
         from ouroboros.presence_owner_contact import private_start_refusal
 
         private_refusal = private_start_refusal(ctx.DRIVE_ROOT, evt)
-        if not private_refusal and str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
+        from supervisor.worker_promotion import _promotion_origin_error
+        origin_error = _promotion_origin_error(evt)
+        if not (origin_error or private_refusal) and str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
             threading.Thread(
                 target=_prepare_promote_source_off_loop,
                 args=(dict(evt), ctx),
@@ -573,12 +657,12 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
             ).start()
             return {"status": "preparing", "task_id": task_id}
         source_error = str(evt.get("_source_error") or "")
-        if private_refusal or source_error:
+        if private_refusal or source_error or origin_error:
             outcome = {
                 "status": "needs_manual_target",
-                "reason": private_refusal or "project_source_error",
+                "reason": private_refusal or ("project_binding_failed" if origin_error else "project_source_error"),
                 "never_admitted": True,
-                "detail": source_error,
+                "detail": origin_error or source_error,
                 "task_id": task_id,
                 "reservation_owned": True,
             }
@@ -598,6 +682,7 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
         outcome = outcome if isinstance(outcome, dict) else {"status": "scheduled"}
         admitted_task_contract = outcome.pop("_admitted_task_contract", None)
         admitted_metadata = outcome.pop("_admitted_metadata", None) or {}
+        admitted_record = outcome.pop("_admitted_record", None) or {}
         if str(outcome.get("status") or "") == "scheduled":
             suggested_name = str(outcome.pop("_admitted_suggested_name", "") or "")
             receipt = _emit_routing_receipt(
@@ -626,6 +711,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
                 root_task_id=str(outcome.get("task_id") or task_id),
                 delegation_role="root",
                 task_contract=admitted_task_contract,
+                **({} if carrier else admitted_record),  # room, folder, drive and title as admitted; Presence keeps its own
+                **({"origin_message_ref": evt["source_ref"],
+                    "origin_message_text": "" if (evt.get("origin_message_snapshot") or {}).get("placeholder_text")
+                    else evt.get("source_text")} if evt.get("source_ref") else {}),
                 **{k: v for k, v in outcome.items() if k == "_project_admission"},
                 project_id=str(outcome.get("project_id") or evt.get("project_id") or ""),
                 description=str(evt.get("objective") or ""),
@@ -802,12 +891,16 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
         title = str(evt.get("title") or evt.get("suggested_name") or "").strip() or first_line or "Task"
         action = "route_to_project" if bool(evt.get("routed_from_main")) else "promote_chat_to_task"
         reason = str(outcome.get("reason") or ("admission_rejected" if status == "needs_manual_target" else ""))
+        address = _promotion_notice_transport(ctx, evt)
+        progress_meta = {"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
+                         "reply_to": _routing_notice_reply(ctx, evt, chat)}
+        if address:
+            progress_meta["transport"] = address
         ctx.send_with_budget(
             chat, f"{title} · {routing_refusal_cause(action, status, reason, None)}", role="system",
             system_type="task_start_unconfirmed" if status == "unconfirmed" else "task_not_started",
             task_id=str(outcome.get("task_id") or evt.get("task_id") or ""),
-            progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": _routing_notice_reply(ctx, evt)},
+            progress_meta=progress_meta,
         )
     except Exception:
         log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)

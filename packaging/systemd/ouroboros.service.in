@@ -15,6 +15,14 @@ KillSignal=SIGTERM
 # remaining cgroup processes before escalating to SIGKILL.
 TimeoutStopSec=120
 
+# A kernel OOM kill of one command must not stop the service. OOMPolicy works
+# from systemd 243; below that systemd does not react to a child OOM at all.
+OOMPolicy=continue
+# The launcher/server/workers live in the runtime subgroup; each command gets
+# its own memory leaf beside it (ouroboros/command_memory.py). Needs systemd 254.
+Delegate=memory
+DelegateSubgroup=runtime
+
 # Deliberately no systemd restart policy: the launcher owns its crash fuse and
 # treats a panic exit as a complete stop until the owner starts Ouroboros again.
 

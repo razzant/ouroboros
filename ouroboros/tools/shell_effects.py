@@ -256,3 +256,13 @@ def _get_diff_stat(repo_dir: pathlib.Path) -> str:
     except Exception:
         pass
     return ""
+
+
+def _pre_spawn_refusal(ctx, text: str, *, tool: str = "run_command") -> str:
+    """This producer refused before submission; arbitrary errors carry no such fact. Both shell handlers and the
+    process leaf refuse through this one owner, so no leaf imports the handler module back."""
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter, _publish_tool_result, _replace_tool_result
+
+    result = LegacyTextResultAdapter.from_text(tool, text)
+    return _publish_tool_result(ctx, _replace_tool_result(
+        result, meta_updates={"operation_outcome": "completed_no_effect"}))

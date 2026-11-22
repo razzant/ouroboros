@@ -313,12 +313,19 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
     """
     task_id = str(task.get("id") or "unknown")
     try:
+        from ouroboros.project_completion_facts import recorded_attempt
         from ouroboros.project_dialogue import append_canonical_task_summary, completion_status_label, outcome_phase
         from ouroboros.task_finalization import artifact_store_roots, rescued_files_fact
+        from ouroboros.terminal_time import source_task_attempt
 
         canonical_root = pathlib.Path(task.get("budget_drive_root") or drive_logs.parent)
         result_root = pathlib.Path(getattr(env, "drive_root", canonical_root))
+        # These counters belong to the supplied loop snapshot, not to the result
+        # that happens to be current when the post-task worker reaches this write.
+        attempt = source_task_attempt(task, recovered=bool(llm_trace.get("recovered_post_task_synthesis")))
         stored_result = _atp().load_task_result(result_root, task_id) or {}
+        if recorded_attempt(stored_result) != attempt:
+            stored_result = {"status": normalize_outcome_axes(usage)["lifecycle"].get("status") or "completed"}
         review_projection = _compact_review_projection(llm_trace, task, canonical_root)
         # TZ-2 C2: how many files the task rescued into its store(s) — positive, zero or
         # unknown — by stat alone; the fact discloses that no hash was computed. A split
@@ -330,6 +337,7 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
         append_canonical_task_summary(canonical_root, retained=True, row={
             "ts": utc_now_iso(), "direction": "system", "type": "task_summary",
             "summary_kind": "host_task_facts", "summary_id": f"task-facts:{task_id}",
+            **({"task_attempt": attempt} if attempt is not None else {}),
             "task_id": task_id, "parent_task_id": str(task.get("parent_task_id") or ""), "root_task_id": str(task.get("root_task_id") or task_id),
             "project_id": str(task.get("project_id") or ""), "chat_id": int(task.get("chat_id") or 0), "delegation_role": str(task.get("delegation_role") or ""), "role": str(task.get("role") or ""),
             "status": str(stored_result.get("status") or "completed"), "outcome": completion_status_label(stored_result, usage), "outcome_phase": outcome_phase(stored_result, usage),

@@ -137,8 +137,11 @@ test('a newer target keeps the old text with its own range and offers Check and 
             checked_key: { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) } }),
     }, '');
     assert.equal(view.state, 'ready');
-    assert.equal(view.label, "What's new");
-    assert.equal(view.note, `This description covers an earlier update (${'a'.repeat(8)} → ${'b'.repeat(8)}).`);
+    // The heading answers which text this is before it is read: not the account of the update on offer, for which
+    // nothing is being written (no request is held).
+    assert.equal(view.label, 'Earlier update');
+    assert.equal(view.note, `This description covers an earlier update (${'a'.repeat(8)} → ${'b'.repeat(8)}). `
+        + 'No request to describe the available update is open.');
     assert.equal(view.covers, `${'a'.repeat(8)} → ${'b'.repeat(8)}`);
     assert.match(view.markdown, /explain itself/);
     assert.deepEqual(view.action, DESCRIBE);
@@ -161,37 +164,51 @@ test('a same-range post-merge change never makes the description stale', () => {
 test('a description whose HEAD moved elsewhere is marked, and an unnamed relation lands there too', () => {
     const moved = updateLetterView({ ...CURRENT, letter: letter({ relation: 'other', description_current: false }) }, '');
     assert.equal(moved.relation, 'other');
-    assert.equal(moved.label, "What's new");
+    assert.equal(moved.label, 'Earlier update', 'the heading says what the note says');
     assert.equal(moved.note, 'This description was written for an earlier update.');
     // A relation this client does not know is treated as the honest "other".
     const unnamed = updateLetterView({ ...CURRENT, letter: letter({ relation: 'sideways', description_current: false }) }, '');
     assert.equal(unnamed.relation, 'other');
+    assert.equal(unnamed.label, 'Earlier update');
     assert.equal(unnamed.note, 'This description was written for an earlier update.');
 });
 
 
-test('a running request turns the action into a check that writes nothing and says which task is writing', () => {
+test('a held request turns the action into a check that writes nothing and says what its task really does', () => {
     const CHECK = { id: 'check', label: 'Check', disabled: false };
-    for (const status of ['scheduled', 'running', 'interrupted']) {
-        const request = { task_id: 'd3adb33f', mode: 'rewrite', key: REQUEST_KEY, status, saved: false };
+    // Only a running task with no Stop being carried out writes: one waiting to run may be queued, paused or held (its
+    // door shows which), an interrupted one says only that, and a Stop is the host's pending cancel beside the honest
+    // status (or a legacy cancel_requested record).
+    const states = [['requested', {}, 'is waiting to run'], ['scheduled', {}, 'is waiting to run'], ['running', {}, ''],
+        ['interrupted', {}, 'was interrupted'], ['cancel_requested', {}, 'has been asked to stop'],
+        ['running', { cancel_state: 'pending' }, 'has been asked to stop'],
+        ['scheduled', { cancel_state: 'pending' }, 'has been asked to stop']];
+    for (const [status, stop, state] of states) {
+        const request = { task_id: 'd3adb33f', mode: 'rewrite', key: REQUEST_KEY, status, saved: false, ...stop };
         const view = updateLetterView({ ...AVAILABLE, letter: letter({ request }) }, '');
         assert.deepEqual(view.action, CHECK, status);
         assert.equal(view.rewrite, null, 'nothing else is asked while its task can still save');
-        assert.equal(view.note, 'Ouroboros is writing the description (task d3adb33f). The current text stays until the new one is saved.');
+        const line = state ? `The description is not saved yet; its task ${state} (task d3adb33f).`
+            : 'Ouroboros is writing the description (task d3adb33f).';
+        assert.equal(view.note, `${line} The displayed text stays until its replacement is saved.`, status);
+        if (state) assert.doesNotMatch(view.note, /writing|retries|Resume/, `${status} is neither writing nor promised back`);
         assert.match(view.markdown, /explain itself/);
         const empty = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: REQUEST_KEY, request } }, '');
         assert.equal(empty.state, 'empty');
-        assert.equal(empty.note, 'Ouroboros is writing the description (task d3adb33f).');
-        // Its own save landed while the task finishes: the shown text is the new one, not one awaiting replacement.
+        assert.equal(empty.note, line);
+        // Its own save landed while the task finishes: the shown text is the new one, and nothing more is prepared.
         const saved = updateLetterView({ ...AVAILABLE, letter: letter({ request: { ...request, saved: true } }) }, '');
-        assert.equal(saved.note, 'Ouroboros saved the description; its task (d3adb33f) is still running.');
+        assert.equal(saved.note, `Ouroboros saved the description; its task (d3adb33f) ${state || 'is still running'}.`);
+        assert.doesNotMatch(saved.note, /is writing|not saved yet|until its replacement/);
         assert.deepEqual(saved.action, CHECK, status);
+        // A press finishes the package it found: a writer busy with another range names it, and the update on offer waits.
         for (const [base, target] of [['a', 'c'], ['c', 'b']]) {
             const key = { base_sha: base.repeat(40), target_sha: target.repeat(40) };
             const changed = updateLetterView({ ...AVAILABLE, running_sha: key.base_sha, latest_sha: key.target_sha,
                 letter: { state: 'none', text: '', checked_key: key, request } });
-            assert.equal(changed.note, 'Ouroboros is writing the description (task d3adb33f). The check found a '
-                + `different update range (${base.repeat(8)} → ${target.repeat(8)}); describe it after this task ends.`);
+            assert.equal(changed.note, `${state ? `The description of aaaaaaaa → bbbbbbbb is not saved yet; its task ${state}`
+                : 'Ouroboros is writing the description of aaaaaaaa → bbbbbbbb'} (task d3adb33f). The available update `
+                + `(${base.repeat(8)} → ${target.repeat(8)}) can be described once that task ends.`);
             assert.deepEqual(changed.action, CHECK);
         }
         // When the headline's own action already checks, the section adds no second check.
@@ -211,9 +228,68 @@ test('a writer of an earlier range stays visible beside an independently saved c
     assert.equal(view.markdown, 'Already saved for the new update.');
     assert.equal(view.action.id, 'check');
     assert.equal(view.request.taskId, 'successor');
-    assert.match(view.note, /covers the checked update/);
-    assert.match(view.note, /successor.*aaaaaaaa → bbbbbbbb/);
-    assert.doesNotMatch(view.note, /after this task ends|until the new one is saved/);
+    assert.equal(view.label, "What's new");
+    assert.equal(view.note, 'This description covers the available update. Ouroboros is writing the description of '
+        + 'aaaaaaaa → bbbbbbbb (task successor).');
+    assert.doesNotMatch(view.note, /once that task ends|until its replacement is saved/);
+});
+
+
+test('which text is shown and who writes stay two facts for exact ranges, a writer never hiding either', () => {
+    const newer = { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) };
+    const offer = { ...AVAILABLE, latest_sha: newer.target_sha, checked_target_sha: newer.target_sha };
+    const earlier = `This description covers an earlier update (${'a'.repeat(8)} → ${'b'.repeat(8)}).`;
+    // The owner presses Check and describe over the old text; the request names the update on offer.
+    for (const [status, writer] of [['scheduled', 'The description is not saved yet; its task is waiting to run (task w1).'],
+        ['running', 'Ouroboros is writing the description (task w1).'],
+        ['cancel_requested', 'The description is not saved yet; its task has been asked to stop (task w1).']]) {
+        const request = { task_id: 'w1', mode: 'write', key: newer, status, saved: false };
+        const view = updateLetterView({ ...offer, letter: letter({ relation: 'superseded', description_current: false,
+            checked_key: newer, request }) });
+        assert.equal(view.label, 'Earlier update', status);
+        assert.equal(view.note, `${earlier} ${writer}`, status);
+        assert.match(view.markdown, /explain itself/, 'the old text stays readable until the new one is saved');
+    }
+    // The same release version is no proof of the same range: the SHAs decide.
+    const sameVersion = updateLetterView({ ...offer, latest_version: letter().target_version,
+        letter: letter({ relation: 'superseded', description_current: false, checked_key: newer }) });
+    assert.deepEqual([sameVersion.label, sameVersion.note],
+        ['Earlier update', `${earlier} No request to describe the available update is open.`]);
+    // Busy with the earlier package: its line names that range, never calls the earlier text current, and the update
+    // on offer is asked for after it.
+    const busy = updateLetterView({ ...offer, letter: letter({ relation: 'superseded', description_current: false,
+        checked_key: newer, request: { task_id: 'w0', mode: 'rewrite', key: REQUEST_KEY, status: 'running' } }) });
+    assert.equal(busy.label, 'Earlier update');
+    assert.equal(busy.note, `${earlier} Ouroboros is writing the description of ${'a'.repeat(8)} → ${'b'.repeat(8)} `
+        + `(task w0). The displayed text stays until its replacement is saved. The available update (${'a'.repeat(8)} → `
+        + `${'c'.repeat(8)}) can be described once that task ends.`);
+    assert.doesNotMatch(busy.note, /current/i);
+    // The same target from another starting version keeps its own heading beside a live writer.
+    const moved = { base_sha: 'd'.repeat(40), target_sha: 'b'.repeat(40) };
+    const otherBase = updateLetterView({ ...AVAILABLE, running_sha: moved.base_sha, checked_target_sha: moved.target_sha,
+        letter: letter({ relation: 'other', description_current: false, checked_key: moved,
+            request: { task_id: 'w2', mode: 'write', key: moved, status: 'requested' } }) });
+    assert.equal(otherBase.label, 'Different range');
+    assert.equal(otherBase.note, `This description covers the same target from another starting version (${'a'.repeat(8)} `
+        + `→ ${'b'.repeat(8)}). The description is not saved yet; its task is waiting to run (task w2).`);
+    // A failed refresh and an unknown writer: each axis says its own failure.
+    const failed = updateLetterView({ ...AVAILABLE, letter: letter({ state: 'failed', description_current: false,
+        has_last_good: true, request: { task_id: 'w3', mode: 'write', key: REQUEST_KEY, status: 'unknown' } }) });
+    assert.equal(failed.note, 'Refresh failed. Previous description kept. The description task’s status is unknown '
+        + '(task w3); no new author will be requested until its status can be read.');
+    // An ended request of another range says nothing about this update's empty section.
+    const endedElsewhere = updateLetterView({ ...offer, letter: { state: 'none', text: '', checked_key: newer,
+        request: { task_id: 'w4', mode: 'write', key: REQUEST_KEY, status: 'failed', saved: false } } });
+    assert.equal(endedElsewhere.note, 'No description of this update yet.');
+    // Author A finished and saved; nothing writes the update found since, and the panel says so in words.
+    const finishedA = updateLetterView({ ...offer, letter: letter({ relation: 'superseded', description_current: false,
+        checked_key: newer, request: { task_id: 'w5', mode: 'write', key: REQUEST_KEY, status: 'completed', saved: true } }) });
+    assert.deepEqual([finishedA.label, finishedA.note],
+        ['Earlier update', `${earlier} No request to describe the available update is open.`]);
+    // A saved account of exactly the update on offer is current: no such line, and no writer claims it.
+    const current = updateLetterView({ ...offer, letter: letter({ key: newer, checked_key: newer,
+        request: { task_id: 'w6', mode: 'write', key: newer, status: 'running', saved: true } }) });
+    assert.deepEqual([current.label, current.note], ["What's new", 'Ouroboros saved the description; its task (w6) is still running.']);
 });
 
 
@@ -228,7 +304,7 @@ test('a running request says when the owner asked, a fixed time, and names its c
     assert.equal(view.request.taskId, 'c0ffee42', 'a Continue or host retry is the task the card follows');
     assert.equal(view.request.requestedAt, requested_at);
     assert.equal(view.note, `Ouroboros is writing the description you asked for on ${asked} (task c0ffee42). `
-        + 'The current text stays until the new one is saved.');
+        + 'The displayed text stays until its replacement is saved.');
     const empty = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: REQUEST_KEY, request } }, '');
     assert.equal(empty.note, `Ouroboros is writing the description you asked for on ${asked} (task c0ffee42).`);
     // An unreadable time says nothing about when rather than something false.
@@ -262,10 +338,10 @@ test('an unknown writer keeps its task and prose without claiming it is running 
 test('an ended request that saved nothing says so once; a saved one says nothing; nothing repeats', () => {
     const ended = (status, saved = false) => updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '',
         checked_key: REQUEST_KEY, request: { task_id: 'd3adb33f', mode: 'write', key: REQUEST_KEY, status, saved } } }, '');
-    assert.equal(ended('completed').note, 'The last writing task finished without saving a description.');
-    assert.equal(ended('failed').note, 'The last writing task failed without saving a description.');
-    assert.equal(ended('cancelled').note, 'The last writing task was stopped without saving a description.');
-    assert.equal(ended('missing').note, 'The last writing task left no readable result; nothing was saved.');
+    assert.equal(ended('completed').note, 'The last description task finished without saving a description.');
+    assert.equal(ended('failed').note, 'The last description task failed without saving a description.');
+    assert.equal(ended('cancelled').note, 'The last description task was stopped without saving a description.');
+    assert.equal(ended('missing').note, 'The last description task left no readable result; nothing was saved.');
     for (const status of ['completed', 'failed', 'cancelled']) {
         assert.deepEqual(ended(status).action, DESCRIBE, 'the owner may ask again; the panel never does');
     }
@@ -274,7 +350,7 @@ test('an ended request that saved nothing says so once; a saved one says nothing
     assert.equal(saved.note, '');
     const stoppedRewrite = updateLetterView({ ...AVAILABLE, letter: letter({ request: {
         task_id: 'd3adb33f', mode: 'rewrite', key: REQUEST_KEY, status: 'failed', saved: false } }) }, '');
-    assert.equal(stoppedRewrite.note, 'The last writing task failed without saving a description.');
+    assert.equal(stoppedRewrite.note, 'The last description task failed without saving a description.');
     assert.match(stoppedRewrite.markdown, /explain itself/);
 });
 
@@ -360,7 +436,9 @@ test('an old failed letter with a last good text shows the text plus the failure
     assert.equal(view.state, 'failed');
     assert.match(view.markdown, /explain itself/, 'the last good letter survives the failed rewrite');
     assert.deepEqual(view.failure, { kind: 'provider_unavailable', text: 'openrouter 503', failedAt: '', key: null });
-    assert.equal(view.note, 'Refresh failed. Previous description kept.');
+    // Each axis says its own fact: the kept text after the failed refresh, and that nothing writes the update on offer.
+    assert.equal(view.note, 'Refresh failed. Previous description kept. No request to describe the available update is open.');
+    assert.equal(view.label, 'Earlier update');
 });
 
 
@@ -411,8 +489,9 @@ test('an unchecked channel keeps historical text and the known writer without cl
             assert.equal(headlineAction(updateVerdict(data), data.letter).id, 'check');
             assert.equal(view.rewrite, null, 'no implicit restart or duplicate writer');
             assert.equal(view.over, '');
-            assert.match(view.note, /The writing task covers aaaaaaaa → bbbbbbbb/);
-            assert.doesNotMatch(view.note, /different update range/);
+            assert.match(view.note, /^Ouroboros is writing the description of aaaaaaaa → bbbbbbbb \(task writer-a\)/,
+                'with no known offer the writer names the range it writes');
+            assert.doesNotMatch(view.note, /available update|once that task ends/);
         }
         const history = updateLetterView({ managed: true, check_ok: null, available: false, ...unknown,
             letter: letter({ description_current: false }) });
@@ -439,6 +518,36 @@ test('stale check facts cannot remove Check and describe or label another range 
     assert.equal(unavailable.state, 'empty');
     assert.equal(unavailable.writeKey, null, 'an explicitly unknown runtime is never checkout HEAD');
     assert.deepEqual(unavailable.action, DESCRIBE, 'the server checks the range on this press');
+});
+
+
+test('an available update whose recorded check facts are stale still compares the text with the checked pair', () => {
+    // The status names a..c; the record's checked_key is another range, so nothing is on offer for actions (the server
+    // checks on the press), yet a text applied to this version is not that update's account.
+    const status = { ...AVAILABLE, latest_sha: 'c'.repeat(40), checked_target_sha: 'c'.repeat(40) };
+    const stale = { base_sha: 'd'.repeat(40), target_sha: 'c'.repeat(40) };
+    const applied = updateLetterView({ ...status, letter: letter({ key: { base_sha: 'e'.repeat(40), target_sha: 'a'.repeat(40) },
+        relation: 'applied', description_current: false, checked_key: stale }) });
+    assert.deepEqual([applied.label, applied.note], ['Earlier update', 'This description covers an earlier update (eeeeeeee → aaaaaaaa).']);
+    assert.deepEqual([applied.action, applied.writeKey.target_sha], [DESCRIBE, 'a'.repeat(40)], 'actions keep their offer rule');
+    // A text of exactly that checked pair stays its account, never "written for an earlier update".
+    const own = updateLetterView({ ...status, letter: letter({ key: { base_sha: 'a'.repeat(40), target_sha: 'c'.repeat(40) },
+        description_current: false, checked_key: stale }) });
+    assert.deepEqual([own.label, own.note], ["What's new", '']);
+});
+
+
+test('the host\'s description_current settles which text this is; without it the retained cell keeps its reading', () => {
+    // Its meaning: the text's range is exactly the running base to the checked target. Retained material of another
+    // base does not make such a text an earlier one; the same text the host does not confirm reads as another range.
+    const merge = 'd'.repeat(40);
+    const retained = { ...CURRENT, current_sha: merge, running_sha: merge, checked_target_sha: 'c'.repeat(40),
+        letter: letter({ key: { base_sha: merge, target_sha: 'c'.repeat(40) }, relation: 'pending', description_current: true,
+            material: { key: { base_sha: 'b'.repeat(40), target_sha: 'c'.repeat(40) } } }) };
+    assert.deepEqual([updateLetterView(retained).label, updateLetterView(retained).note], ["What's new", '']);
+    const unconfirmed = updateLetterView({ ...retained, letter: { ...retained.letter, description_current: false } });
+    assert.deepEqual([unconfirmed.label, unconfirmed.note], ['Different range',
+        'This description covers the same target from another starting version (dddddddd → cccccccc).']);
 });
 
 
@@ -548,6 +657,8 @@ test('the description section keeps one compact action and a quiet Rewrite outsi
     assert.match(card, /<button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all<\/button>/);
     // The note's words are the live region; the door to the running task's card sits beside it, outside it.
     assert.match(card, /<div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"><\/span> <span id="updates-letter-task"><\/span><\/div>/);
+    // Which text this is and who writes are read before the text itself: the note line precedes the body.
+    assert.ok(card.indexOf('id="updates-letter-note-line"') < card.indexOf('id="updates-letter-body"'));
     // Which notes draw it and where a press lands: tests/test_update_description_browser.py, through app.js.
     assert.doesNotMatch(SOURCE, /ouro:open-task/, 'the one door module raises it');
     // Check and describe is ONE request whose server checks first; the check while a task writes never authors;

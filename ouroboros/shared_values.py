@@ -21,7 +21,7 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
 
 #: The key of a reference: a dict with exactly this key and a 64-hex sha256 value stands for a shared value.
 SHARED_KEY = "$shared"
@@ -160,6 +160,38 @@ def segments(skeleton: bytes, parts: Parts, *, context: str = "document") -> Ite
 def splice(skeleton: bytes, parts: Parts, *, context: str = "document") -> bytes:
     """The exact whole bytes: every token replaced by its part's bytes."""
     return b"".join(segments(skeleton, parts, context=context))
+
+
+#: A token's longest spelling (``": "`` between key and digest): a token cut by a chunk's end is shorter than this.
+_TOKEN_LONGEST = len(b'{"$shared": ""}') + 64
+
+
+def splice_chunks(chunks: Iterable[bytes], parts: Parts, *, limit: Optional[int] = None,
+                  context: str = "document") -> bytes:
+    """``splice`` of a skeleton read a chunk at a time, refused (``ValueError``) at the first literal run or part that
+    would carry its whole past ``limit``: no part behind it is resolved.
+
+    A token is longer than a small element it names, so a skeleton can be longer than its whole: the bound holds what
+    the skeleton spells, and the skeleton itself is never held whole."""
+    resolve, whole, held = _resolver(parts, context), bytearray(), b""
+
+    def add(piece: bytes) -> None:  # the allowance is read before a piece joins the whole
+        if limit is not None and len(whole) + len(piece) > limit:
+            raise ValueError("blob exceeds byte limit")
+        whole.extend(piece)
+
+    for chunk in chunks:
+        held += chunk
+        position = 0
+        for match in TOKEN_PATTERN.finditer(held):
+            add(held[position:match.start()])
+            add(resolve(match.group(1).decode("ascii")))
+            position = match.end()
+        keep = max(position, len(held) - _TOKEN_LONGEST + 1)  # a token the chunk's end cut waits for the next one
+        add(held[position:keep])
+        held = held[keep:]
+    add(held)  # no whole token is left: any was found above
+    return bytes(whole)
 
 
 def token_digests(skeleton: bytes) -> List[str]:

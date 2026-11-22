@@ -150,6 +150,7 @@ export class ElementStub {
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
+    replaceWith(next) { this.parentNode?.replaceChild(next, this); }
     replaceChildren(...nodes) { this.children = []; nodes.forEach((node) => this.appendChild(node)); }
     contains(node) {
         if (node === this) return true;

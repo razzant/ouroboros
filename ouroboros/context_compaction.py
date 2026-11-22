@@ -461,10 +461,19 @@ def owner_protected_unit_ids(messages: Sequence[Mapping[str, Any]], units: Seque
 
 # Counted by ``_source_atoms`` for a part it cannot encode; never a sha256 digest and never evidence.
 UNENCODABLE_SOURCE_ATOM = "unencodable-source-atom"
+WIRE_TEXT_TYPES = frozenset({"text", "input_text", "output_text"})
+
+
+def physical_message_rows(payload: Any) -> list | None:
+    """The accepted candidate's own rows, in Chat/native or Responses layout, never a union."""
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("messages", payload.get("input"))
+    return rows if isinstance(rows, list) else None
 
 
 def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
-    """Content identities across function/custom and native tool-result syntax.
+    """Content identities across function/custom, native and Responses tool-result syntax.
 
     The transport may change JSON syntax and coalesce text blocks, but a call's
     name/arguments and its whole result still have to be present. IDs alone are
@@ -490,7 +499,7 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
         return value
 
     def content(value: Any) -> Any:
-        if isinstance(value, list) and all(isinstance(p, Mapping) and p.get("type") == "text" for p in value):
+        if isinstance(value, list) and all(isinstance(p, Mapping) and p.get("type") in WIRE_TEXT_TYPES for p in value):
             return "".join(str(p.get("text") or "") for p in value)
         return value
 
@@ -505,6 +514,16 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
 
     for message in messages:
         role, body = message.get("role"), message.get("content")
+        if not role and message.get("type") == "function_call":
+            if call_id := message.get("call_id"):
+                call = (str(message.get("name") or ""), arguments(message.get("arguments")))
+                calls_by_id[str(call_id)] = call
+                add("call", *call)
+            continue
+        if not role and message.get("type") == "function_call_output":
+            if call := calls_by_id.get(str(message.get("call_id") or "")):
+                add("result", *call, result_content(message.get("output")))
+            continue
         if role in {"tool", "function"}:
             call = calls_by_id.get(str(message.get("tool_call_id") or "")) or calls_by_name.get(str(message.get("name") or "")) or last_call
             add("result", *call, result_content(body))
@@ -516,7 +535,7 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
         for block in blocks:
             if not isinstance(block, Mapping):
                 continue
-            if role == "user" and block.get("type") == "text" and block.get("text"):
+            if role == "user" and block.get("type") in WIRE_TEXT_TYPES and block.get("text"):
                 add("host_text", str(block["text"]))
             if block.get("type") == "tool_use":
                 last_call = (str(block.get("name") or ""), arguments(block.get("input")))

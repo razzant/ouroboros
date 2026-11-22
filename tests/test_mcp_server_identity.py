@@ -158,6 +158,7 @@ def test_an_old_raw_name_and_its_new_explicit_slug_are_both_refused(world):
     assert world.manager.server_ids() == ["unique"]
     rows = {row["id"]: row for row in world.manager.status_payload()["servers"]}
     assert rows["my_company_b762e68c1ef1"]["code"] == "MCP_ID_AMBIGUOUS"
+    assert rows["my_company_b762e68c1ef1"]["configured_count"] == 2
     refresh = world.manager.refresh_server("my_company_b762e68c1ef1")
     assert refresh["ok"] is False and refresh["code"] == "MCP_ID_AMBIGUOUS"
     fact = world.manager.resolve_tool_name("mcp_my_company_b762e68c1ef1__list_files")

@@ -391,6 +391,47 @@ class TestShowRecord:
         assert _send_file(ctx, file_path=str(other)).endswith(
             "Reviews on record naming these bytes: none in this task's recent records.")
 
+    @pytest.mark.parametrize("name, label", [("report-雪.txt", "report-雪.txt"),
+                                              ("report-\udcff.txt", r'"report-\udcff.txt"')], ids=["utf8", "byte-name"])
+    def test_local_document_acceptance_retains_bytes_and_renders_name(self, tmp_path, monkeypatch, name, label):
+        import errno
+        import hashlib
+        import os
+
+        from ouroboros.gateway.files import resolve_task_file_reference
+        from ouroboros.tools.core_artifacts import _send_file
+
+        if "\udcff" in name and os.name != "posix":
+            pytest.skip("POSIX byte filename")
+        ctx = self._ctx(tmp_path, monkeypatch)
+        doc, data = tmp_path / name, b"A readable document.\n"
+        try:
+            doc.write_bytes(data)
+        except OSError as exc:
+            if "\udcff" in name and exc.errno in {errno.EILSEQ, errno.EINVAL}:
+                pytest.skip("fixture filesystem does not create non-UTF-8 names")
+            raise
+        caption = r"Exact caption: \udcff."
+        text = _send_file(ctx, file_path=str(doc), caption=caption)
+        text.encode("utf-8")
+        receipt, show = text.split("\n")
+        assert receipt == f"OK: file '{label}' accepted for delivery to owner chat."
+        assert show.startswith(f"Host fact: accepted for delivery: {label}, sha256 {hashlib.sha256(data).hexdigest()[:12]}")
+        [event] = ctx.event_queue.items  # fake sink, no real recipient
+        assert ctx._owner_message_sent and not ctx.pending_events
+        assert event["filename"] == name and event["caption"] == caption
+        assert resolve_task_file_reference(ctx.drive_root, ctx.task_id, event["file_ref"]).read_bytes() == data
+
+    def test_material_fact_distinguishes_byte_and_literal_labels_without_filesystem_assumptions(self, tmp_path, monkeypatch):
+        from ouroboros.tools.owner_delivery import show_record, shown_material
+
+        ctx = self._ctx(tmp_path, monkeypatch)
+        pieces = [shown_material("report-\udcff.txt", b"A"), shown_material(r"report-\udcff.txt", b"B")]
+        receipt = show_record(ctx, "live", pieces)
+        receipt.encode("utf-8")
+        assert r'"report-\udcff.txt", sha256 ' in receipt and r'; report-\udcff.txt, sha256 ' in receipt
+        assert pieces[0]["name"] == "report-\udcff.txt"
+
     def test_a_negative_names_its_scope_and_a_bounded_read_that_came_back_full_is_unknown(self, tmp_path, monkeypatch):
         """Both directions: a helper's review that names the bytes is named on the helper's own send, while its root's
         send says none in its own recent records, never a bare none; a bounded read that came back full claims nothing

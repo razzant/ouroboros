@@ -109,6 +109,7 @@ def session_execution(root, custody, summary, identity, observed):
 
 
 def review_execution(request, slot, actor, ctx, *, fallback_root=None):
+    from ouroboros.review_execution_projection import api_review_dispatch_evidence
     from ouroboros.review_ledger import ledger_root
 
     outcome, usage = actor.outcome or {}, actor.usage or {}
@@ -128,12 +129,15 @@ def review_execution(request, slot, actor, ctx, *, fallback_root=None):
                 **({"access": slot.session_access or "workspace_write"} if session else {})}
     received = outcome.get("transport") == "success" or bool(actor.raw_text)
     pending, unsent = outcome.get("status") == "pending", outcome.get("status") == "not_dispatched"
+    dispatched = api_review_dispatch_evidence(usage) if not session else None
+    if dispatched is not True:
+        legacy_attempts = dispatched is None and outcome.get("usage_ref", {}).get("ledger_attempt_ids")
+        dispatched = False if unsent else (True if received or usage.get("delegated_run_id") or legacy_attempts else None)
     publish(root, {"row_id": slot.subagent_id or slot.slot_id, "row_identity": identity,
         "purpose": "plan" if request.surface == "plan_review" else "review",
         "producer_id": "review:" + outcome["outcome_id"], "task_id": request.task_id,
         "ts": usage.get("finished_at") or usage.get("ts"), "terminal": not pending, "pending": pending,
-        "dispatched": False if unsent else True if received or outcome.get("usage_ref", {}).get("ledger_attempt_ids")
-            or usage.get("delegated_run_id") else None,
+        "dispatched": dispatched,
         "answer_received": received if not pending else None,
         "usable_verdict": outcome.get("parse") == "valid" and outcome.get("status") == "responded",
         "interrupted": outcome.get("status") == "interrupted",

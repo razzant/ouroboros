@@ -15,6 +15,7 @@ from ouroboros.platform_layer import (
 )
 from ouroboros.utils import (
     iter_jsonl_objects,
+    json_dumps_utf8,
     jsonl_append_lock_path,
     write_text_atomic,
 )
@@ -233,7 +234,7 @@ def publish_verification_receipt_union(
             canonical_receipts,
         )
         content = "".join(
-            json.dumps(row, ensure_ascii=False) + "\n" for row in merged
+            json_dumps_utf8(row, ensure_ascii=False) + "\n" for row in merged
         )
         from ouroboros.task_custody import fence_publication
 

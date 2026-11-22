@@ -10,9 +10,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { EXTENSIONS_PAGES } from '../modules/extensions.js';
 import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
-import { registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
+import { extensionsPageOf, registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from '../modules/settings_rows.js';
 import { Stub, settle, world } from './helpers/settings_dom.js';
 
@@ -42,6 +43,12 @@ test('an empty Settings page band passes over its scroller; a named level retain
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */
 function deadPath(path, { registered = (target) => Boolean(settingsPageFor(target)) } = {}) {
     if (path === '') return '';
+    if (path.startsWith('skills:')) {
+        const target = path.slice('skills:'.length);
+        // A search door can open a section view or a registered editor belonging to Extensions.
+        const served = EXTENSIONS_PAGES.some((page) => page.id === target) || (extensionsPageOf(target) && registered(target));
+        return served ? '' : `no Extensions page serves "${target}"`;
+    }
     if (isDoorId(path)) return DOORS.has(path) ? '' : `no door "${path}"`;
     const first = path.split('/')[0];
     return registered(path) || HOME_PAGES.includes(first) ? '' : `no page serves "${path}"`;
@@ -75,11 +82,14 @@ function sources(dir, keep) {
 }
 
 test('the guard fires on a dead tab name and is quiet on a living path', () => {
-    for (const dead of ['providers', 'secrets', 'behavior', 'advanced', 'about', 'dashboard:nowhere', 'skillz/x']) {
+    for (const dead of ['providers', 'secrets', 'behavior', 'advanced', 'about', 'dashboard:nowhere', 'skillz/x',
+        'skills:nowhere', 'skills:models', 'skills:installed/missing']) {
         assert.notEqual(deadPath(dead), '', dead);
     }
     for (const alive of ['', 'agents', 'models/local', 'accounts/codex', 'computer/about', 'skill/telegram', 'skill-sources',
-        'dashboard:costs', 'page:skills', 'main:context']) assert.equal(deadPath(alive), '', alive);
+        'dashboard:costs', 'page:skills', 'main:context', 'skills:skill', 'skills:skill/telegram', 'skills:tools/new',
+        'skills:skill-sources', 'skills:installed', 'skills:browse', 'skills:sources']) assert.equal(deadPath(alive), '', alive);
+    assert.notEqual(deadPath('skills:skill', { registered: () => false }), '', 'an unregistered editor is still a dead door');
     assert.deepEqual(addresses("ctx.openSettings?.('behavior', { back })"), [{ kind: 'path', value: 'behavior' }]);
     assert.deepEqual(addresses("host.openSettings('permissions', { row: 'SOME_ROW' })"),
         [{ kind: 'path', value: 'permissions' }, { kind: 'row', value: 'SOME_ROW' }]);
@@ -500,7 +510,7 @@ test('Settings pressed again in the sidebar: two panes keep a first-level page a
 
 // The sidebar's press (app.js `pressNavPage`): Settings pressed while shown goes to `pressedAgain`, never to an opening
 // anew, and the open drawer it was pressed in closes as it does for every other place; another page is shown.
-test('app.js: Settings pressed again goes to pressedAgain and closes the open drawer it was pressed in', () => {
+test('app.js: Settings and Extensions pressed again go to pressedAgain and close the open drawer', () => {
     const source = readFileSync(join(ROOT, 'web/app.js'), 'utf8').replace(/\r\n?/g, '\n');
     const from = source.search(/\nfunction pressNavPage\(/);
     const until = source.indexOf('\n}\n', from + 1);
@@ -509,6 +519,7 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
     const context = vm.createContext({
         state: { activePage: 'settings' }, navState: { mobileDrawerOpen: true },
         settingsControls: { pressedAgain: () => calls.push('again'), open: (path) => calls.push(`open:${path}`) },
+        skillsControls: { pressedAgain: () => calls.push('extensions-again') },
         setMobileDrawerOpen: (open) => { calls.push(`drawer:${open}`); context.navState.mobileDrawerOpen = open; },
         dashboardControls: { pressedAgain: () => calls.push('dashboard-again') },
         showPage: (name, options) => {
@@ -521,7 +532,7 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
     vm.runInContext(source.slice(from + 1, until + 2), context);
     // Execute the actual registration too: an unused correct helper is no protection against an old callback.
     const binding = source.match(/document.querySelectorAll\('\[data-nav-page\]'\)\.forEach\(btn => \{[\s\S]*?\n\}\);/)[0];
-    const buttons = ['settings', 'dashboard'].map((name) => ({ dataset: { navPage: name },
+    const buttons = ['settings', 'dashboard', 'skills'].map((name) => ({ dataset: { navPage: name },
         addEventListener(type, callback) { assert.equal(type, 'click'); this.click = callback; } }));
     context.document = { querySelectorAll: () => buttons };
     vm.runInContext(binding, context);
@@ -537,6 +548,10 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
     buttons[0].click();
     buttons[1].click();
     assert.deepEqual(calls, ['show:settings', 'show:dashboard', 'dashboard-again']);
+    calls.length = 0;
+    context.state.activePage = 'skills';
+    buttons[2].click();
+    assert.deepEqual(calls, ['show:skills', 'extensions-again']);
 });
 
 // The first-level page two panes land on is the one last opened on this device (docs/DESIGN.md "Settings"), kept across
@@ -546,7 +561,7 @@ test('passive landing keeps a restored home row focused; an explicitly opened pa
     registerSettingsPage('test-focus', { title: 'Focus', mount() {} });
     const controls = initSettings({ state, layers, ws: { on() {} }, showPage });
     layout(t, controls, content, { on: true });
-    const row = content.querySelector('[data-settings-open="tools"]');
+    const row = content.querySelector('[data-settings-open="voice"]');
     row.focus();
     state.activePage = 'settings';
     env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
@@ -621,15 +636,15 @@ test('two panes land on the first-level page last opened on this device, or on M
         assert.deepEqual(mounted, ['agents', 'agents/reviewer'], 'the remembered child keeps its named list page underneath');
         assert.equal(store.get('ouroboros.settings.last-page'), 'agents/reviewer');
     });
-    await t.test('installed skill and then uninstalled skill', async (sub) => {
-        store.set('ouroboros.settings.last-page', 'skill/one');
-        const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
-            { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
-        ] } });
-        assert.equal(installed.state.settingsPath, 'skill/one');
-        const removed = await land(sub, { skills: [], live: { settings_sections: [] } });
-        assert.equal(removed.state.settingsPath, 'models');
-        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
+    await t.test('a remembered page that moved to Extensions (a skill\'s form, Tools) is not landed on here', async (sub) => {
+        for (const moved of ['skill/one', 'tools', 'skill-sources']) {
+            store.set('ouroboros.settings.last-page', moved);
+            const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
+                { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
+            ] } });
+            assert.equal(installed.state.settingsPath, 'models', moved);
+            assert.equal(store.get('ouroboros.settings.last-page'), moved, 'landing never overwrites the device\'s choice');
+        }
     });
     await t.test('unreadable skill registry keeps the stored choice', async (sub) => {
         store.set('ouroboros.settings.last-page', 'skill/one');

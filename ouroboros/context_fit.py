@@ -349,6 +349,8 @@ class ContextCore:
     # This task's own direct requirement of the whole handbook (``development_required``), beside
     # ``docs_need_development``, which then holds what the subject alone says for Max.
     development_required: bool = False
+    # Repo-relative path, raw digest, normalized character count and digest.
+    base_prompt_source: Optional[Tuple[str, str, int, str]] = None
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
@@ -552,7 +554,7 @@ def estimate_context_prompt_tokens(
         context_custody_proxy,
         custody_private_key,
     )
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
 
     def project(value: Any) -> Any:
         if isinstance(value, dict):
@@ -584,7 +586,7 @@ def estimate_context_prompt_tokens(
     # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
     # block count included: every send copy pops it, so the density witness never counted it).
     # Do not strip same-named keys inside native payloads or user/tool arguments.
-    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
+    hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
               TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY, DISPLAY_KEY}
     messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
     messages = [{**message, "content": [
@@ -1445,7 +1447,7 @@ def build_context_fit_plan(
     )
 
 
-def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
+def _physical_context_for_fit(disposition: Any, plan: Any = None) -> PhysicalAttemptContext:
     from ouroboros.usage_accounting import PhysicalAttemptContext
 
     measurement = disposition.measurement
@@ -1466,4 +1468,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         window_observation_fp=measurement.window_observation_fp,
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
         mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
+        base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
     )

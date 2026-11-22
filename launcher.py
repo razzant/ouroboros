@@ -82,7 +82,7 @@ from ouroboros.launcher_onboarding import (
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
                                            request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
 from ouroboros.launcher_server_reaper import QuitEngineStop, reap_same_install_strays as _reap_same_install_strays_impl
-from ouroboros.launcher_context_menu import attach_every_window
+from ouroboros.launcher_context_menu import attach_every_window, enable_quote_menu
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
 from ouroboros.launcher_window_chrome import paint_room, transfer_when_windowed
 from ouroboros.standalone_page import themed_page
@@ -1564,8 +1564,7 @@ def main(argv=()):
     url = f"http://127.0.0.1:{actual_port}"
 
     if _headless:
-        # Never returns: keep-alive loop + teardown + sys.exit inside.
-        _run_headless_main(url, actual_port, lifecycle_thread)
+        return _run_headless_main(url, actual_port, lifecycle_thread)
 
     window = webview.create_window(
         f"Ouroboros v{APP_VERSION}",
@@ -1577,6 +1576,7 @@ def main(argv=()):
         background_color="#0f0f11",
         text_select=True, hidden=background.start_hidden(options.launch_intent),
     )
+    enable_quote_menu(window, url)
     _webview_window = attach_media_permissions(background.attach(window), url)  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
     webview.start(func=background.run, debug=False, private_mode=False,
                   menu=setup_recovery_menu(window, lambda: _generation_port))

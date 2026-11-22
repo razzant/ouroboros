@@ -92,6 +92,11 @@ def is_launch_marker(name: str) -> bool:
     return is_scope_name(name) and str(name).startswith(LAUNCH_SCOPE_PREFIX)
 
 
+def launch_id(marker: str) -> str:
+    """The launch owner's nonce as its id: never a name, pid or time-derived substitute."""
+    return f"launch-{marker[len(LAUNCH_SCOPE_PREFIX):]}" if is_launch_marker(marker) else ""
+
+
 def scope_entries(env: Mapping[str, str], *, prefix: str = "") -> Dict[str, str]:
     """The grammar-shaped ``NAME=1`` entries of ``env`` (optionally one role's)."""
     return {key: SCOPE_VALUE for key, value in env.items()
@@ -446,7 +451,8 @@ __all__ = [
     "IDENTITY_ABSENT", "IDENTITY_ALIVE", "IDENTITY_UNREADABLE", "IDENTITY_ZOMBIE", "INSTALL_SCOPE_PREFIX",
     "LAUNCH_SCOPE_PREFIX", "RUN_SCOPE_PREFIX", "SCOPE_NAME_RE", "SCOPE_VALUE", "TASK_SCOPE_PREFIX", "birth_epoch",
     "birth_text",
-    "canonical_birth", "census", "installation_scope_entries", "is_launch_marker", "is_scope_name", "leader_facts",
+    "canonical_birth", "census", "installation_scope_entries", "is_launch_marker", "is_scope_name",
+    "launch_id", "leader_facts",
     "lstart_text",
     "measure_birth", "mint_marker", "parse_proc_stat", "read_identities", "scope_entries", "shed_scopes",
 ]

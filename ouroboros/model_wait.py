@@ -79,18 +79,15 @@ def propagate_model_control(error: Exception, *, role: str = "") -> None:
                                    cause=error) from error
 
 
-def model_wait_reason(error: Exception) -> str:
-    """Only confirmed resource causes authorize this live waiting contract.
+def model_wait_reason(error: Exception, *, caller_reason: bool = True) -> str:
+    """Wait admission: ``caller_reason=False`` reads transport codes only.
 
-    The engine's typed mixed pool means auth plus quota, excluding unknown
-    readiness, disabled accounts and model incompatibility. A dated generic pool
-    refusal is ``unavailable`` for this request; its reset forecast proves neither
-    quota exhaustion nor unavailability until that instant. An undated pool failure
-    proves none of those facts and keeps its ordinary error path.
+    A typed mixed pool means auth plus quota, excluding unknown readiness, disabled accounts and incompatibility.
+    A generic pool needs a reported date to wait as unavailable; that date proves neither quota nor how long access is blocked.
     """
     authored = getattr(error, "task_resource_wait_reason", "")
-    if authored in {"auth", "quota"}:
-        return authored  # confirmed by the registered caller's refusal classifier
+    if caller_reason and authored in {"auth", "quota"}:
+        return authored  # a caller can also explicitly wait on unclassified access
     code = getattr(error, "code", "")
     if code in {"auth_required", "subscription_window_exhausted"}:
         return "auth" if code == "auth_required" else "quota"
@@ -103,6 +100,13 @@ def model_wait_reason(error: Exception) -> str:
     if code == "credential_pool_exhausted" and str(getattr(error, "reset_at", "") or "").strip():
         return "unavailable"
     return ""
+
+
+def _confirmed_resource_refusal(error: Exception) -> bool:
+    from ouroboros.llm_claudexor import ClaudexorModelError
+
+    capture = getattr(error, "physical_attempt_capture", None)
+    return isinstance(error, ClaudexorModelError) and getattr(capture, "state", None) in {"released", "settled"}
 
 
 @dataclass
@@ -954,7 +958,11 @@ class TaskModelWait:
         scope = current_usage_scope()
         slot_id = str(getattr(scope, "review_slot_id", "") or "")
         reason = model_wait_reason(error)
-        quota_wait = reason in {"quota", "auth_quota"}  # unavailable does not prove a quota window
+        # For an observable route, admission alone cannot prove quota; direct routes keep their legacy clock.
+        access_reason = model_wait_reason(error, caller_reason=False) if (
+            observes_access and (_confirmed_resource_refusal(error) or reason == "connection_unavailable")) else ""
+        quota_wait = reason in {"quota", "auth_quota"} and (
+            not observes_access or access_reason in {"quota", "auth_quota"})
         row = {"wait_id": wait_id, "task_attempt": self.attempt, "role": role,
                "_slot_id": slot_id,
                "model": kwargs["model"], "source": source,
@@ -963,7 +971,7 @@ class TaskModelWait:
                "credential_profile_id":"" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
                "credential_harness": "", "reason": reason, "reset_at": str(getattr(error, "reset_at", "") or ""),
                "auto_continue": self.auto_continue.get(role, True) if observes_access else False, "state": "waiting",
-               **({"availability_observation": "unavailable"} if not observes_access else {}),
+               **({"access_reason": access_reason} if observes_access else {"availability_observation": "unavailable"}),
                "worker_slot_held": self.worker_slot_held, "started_at": utc_now_iso()}
         if self.owner_id:
             row["model_wait_owner_id"] = self.owner_id
@@ -1359,17 +1367,13 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
 
     def can_wait(context, receiver, error, values):
         """Wait here, or raise; a deferring round first retains a quota refusal for its later routes."""
-        from ouroboros.llm_claudexor import ClaudexorModelError
-
-        capture = getattr(error, "physical_attempt_capture", None)
         binding = (_REPREPARE.get() or {}).get(values.get("model_role"))
         classified = binding[1](error) if binding and binding[1] is not None else ""
         if classified:
             error.task_resource_wait_reason = classified
         reason = model_wait_reason(error)
         if not (context and not context.closed and values.get("model_role") and reason
-                and (classified or reason == "connection_unavailable" or (isinstance(error, ClaudexorModelError)
-                                    and getattr(capture, "state", None) in {"released", "settled"}))):
+                and (classified or reason == "connection_unavailable" or _confirmed_resource_refusal(error))):
             return False
         deferral = _deferral(values["model_role"])
         # Account rotation, then every configured route, then the owner: sign-in too, so a

@@ -139,6 +139,102 @@ def test_a_follow_up_of_a_run_without_owner_words_claims_none(tmp_path):
     assert "task_owner_words" not in project_main_task_authority(schedules._task_from_schedule(record))
 
 
+_SEEDS, _BEDS = "c" * 64, "a" * 64
+
+
+def _drafted(corpus, *, text="Check the seed totals.", ref=None):
+    """A drafted start's task as its first request projects it: the origin ref and its recorded words at the top
+    level, the drafter's carried corpus under ``metadata``. ``ref``: the origin the door stamped (the selected
+    message by default, with its row key)."""
+    ref = {"chat_id": 1, "client_message_id": "owner-seeds", "ts": "2026-11-20T10:02:00+00:00",
+           "text_sha256": "e" * 64, "row_sha256": _SEEDS} if ref is None else ref
+    return {"id": "totals", "text": "Check the totals", "origin_message_ref": ref,
+            **({"origin_message_text": text} if text else {}),
+            "metadata": {"objective_author": {"kind": "task", "task_id": "root-1"}, "owner_corpus": corpus}}
+
+
+def _shown(task):
+    from ouroboros.main_context_authority import project_main_task_authority
+
+    return project_main_task_authority(task).get("task_owner_words", {}).get("rows", [])
+
+
+def test_the_first_request_folds_the_opening_by_identity_and_keeps_every_neighbour():
+    """The selected message (seed totals, with its file) opens the work; the garden-beds message, a later one that
+    says the same sentence again, and one that carried only a photo ride beside it. The projection shows the
+    opening once, as ``task_authority_origin``; the three neighbours stay whole in ``task_owner_words``, each under
+    its own source, time and identity, their files named and not given. The stored corpus is not rewritten."""
+    from ouroboros.main_context_authority import project_main_task_authority
+    from ouroboros.owner_relay import NOT_GIVEN
+
+    seeds = {"source": "origin_message", "content": "Check the seed totals.", "chat_id": "1", "ts": "2026-11-20T10:02:00+00:00",
+             "client_message_id": "owner-seeds", "row_sha256": _SEEDS, "attachments": [{"name": "seed-counts.csv", "size": 41}]}
+    beds = {"source": "origin_message", "content": "Plan the garden beds.", "chat_id": "1", "ts": "2026-11-20T10:01:00+00:00",
+            "client_message_id": "owner-beds", "row_sha256": _BEDS, "attachments": [{"name": "garden-beds.txt", "size": 12}]}
+    again = {"source": "owner_mailbox", "content": "Check the seed totals.", "chat_id": "1", "carried": True,
+             "ts": "2026-11-20T10:07:00+00:00", "client_message_id": "owner-again", "row_sha256": "b" * 64}
+    photo = {"source": "owner_mailbox", "content": "", "chat_id": "1", "ts": "2026-11-20T10:09:00+00:00", "carried": True,
+             "client_message_id": "owner-photo", "row_sha256": "d" * 64, "attachments": [{"name": "plot.jpg", "size": 7}]}
+    task = _drafted([seeds, beds, again, photo])
+    projection = project_main_task_authority(task)
+    assert projection["task_authority_origin"]["text"] == "Check the seed totals.", "the opening's words, once"
+    rows = projection["task_owner_words"]["rows"]
+    assert [(row["client_message_id"], row["source"], row["ts"], row["content"]) for row in rows] == [
+        ("owner-beds", "origin_message", "2026-11-20T10:01:00+00:00", "Plan the garden beds."),
+        ("owner-again", "owner_mailbox", "2026-11-20T10:07:00+00:00", "Check the seed totals."),
+        ("owner-photo", "owner_mailbox", "2026-11-20T10:09:00+00:00", "")], "equal words are not one message"
+    assert all(ref["staged"].startswith(NOT_GIVEN) for row in rows for ref in row.get("attachments") or [])
+    assert [ref["name"] for ref in rows[0]["attachments"]] == ["garden-beds.txt"]
+    assert [ref["name"] for ref in rows[2]["attachments"]] == ["plot.jpg"], "a row of files alone keeps them named"
+    assert all("staged" not in ref for row in task["metadata"]["owner_corpus"] for ref in row.get("attachments") or [])
+    # The same opening carried twice is one row: its repeat folds with it, and nothing else does.
+    assert [row["client_message_id"] for row in _shown(_drafted([seeds, dict(seeds), beds]))] == ["owner-beds"]
+
+
+def test_an_opening_that_carried_only_a_file_folds_and_one_whose_words_are_not_shown_stays():
+    """A file-only opening has no words to show beside its ref, and its file is the work's own: it folds. An opening
+    the task records no words for is not shown by ``task_authority_origin``, so its carried row keeps them."""
+    only_file = {"source": "origin_message", "content": "", "chat_id": "1", "client_message_id": "owner-seeds",
+                 "row_sha256": _SEEDS, "attachments": [{"name": "seed-counts.csv", "size": 41}]}
+    assert _shown(_drafted([only_file], text="[file: seed-counts.csv]")) == []
+    worded = {**only_file, "content": "Check the seed totals."}
+    assert [row["content"] for row in _shown(_drafted([worded], text=""))] == ["Check the seed totals."]
+    assert all("staged" not in ref for row in _shown(_drafted([worded], text="")) for ref in row["attachments"]), (
+        "the opening's own file is this work's: never marked as not given")
+
+
+def test_an_older_record_keeps_its_known_opening_folded_and_an_untold_relation_whole():
+    """Records written before row keys: the opening named by its room and client id folds as before, and so does
+    the first row a record kept with no identity at all. A carried row with no identity that only says the same
+    words has no relation the record can tell: it stays, under its own source."""
+    old_ref = {"chat_id": 1, "client_message_id": "owner-seeds", "ts": "2026-10-01T09:00:00+00:00", "text_sha256": "e" * 64}
+    by_client = {"source": "origin_message", "content": "Check the seed totals.", "chat_id": "1", "client_message_id": "owner-seeds"}
+    follow = {"source": "owner_mailbox", "content": "And keep the finance export.", "msg_id": "mail-1"}
+    assert [row["content"] for row in _shown(_drafted([by_client, follow], ref=old_ref))] == ["And keep the finance export."]
+    for first in ({"source": "origin_message", "content": "Check the seed totals."},
+                  {"source": "initial_user", "content": "Check the seed totals."}):
+        assert [row["content"] for row in _shown(_drafted([first, follow], ref=old_ref))] == ["And keep the finance export."]
+    untold = {"source": "initial_user", "content": "Check the seed totals.", "carried": True}
+    assert [(row["source"], row["content"]) for row in _shown(_drafted([by_client, untold], ref=old_ref))] == [
+        ("initial_user", "Check the seed totals.")]
+    # The older stamp names a time too: the same sentence sent again under the same client id is another message.
+    later = {**by_client, "ts": "2026-10-01T09:05:00+00:00"}
+    assert [row["ts"] for row in _shown(_drafted([by_client, later], ref=old_ref))] == ["2026-10-01T09:05:00+00:00"]
+
+
+def test_a_row_key_only_one_side_names_tells_no_opening():
+    """The fold needs the identity the record holds, never one it could guess: when the origin names its physical row
+    and a carried row names only the room and client id, or the row names a key the older stamp lacks, the record
+    does not tell they are one row. The row stays whole beside the origin, with its own source and words."""
+    by_client = {"source": "owner_mailbox", "content": "Check the seed totals.", "chat_id": "1", "client_message_id": "owner-seeds"}
+    assert [(row["source"], row["content"]) for row in _shown(_drafted([by_client]))] == [
+        ("owner_mailbox", "Check the seed totals.")]
+    old_ref = {"chat_id": 1, "client_message_id": "owner-seeds", "ts": "2026-10-01T09:00:00+00:00", "text_sha256": "e" * 64}
+    keyed = {**by_client, "row_sha256": _SEEDS}
+    assert [row["row_sha256"] for row in _shown(_drafted([keyed], ref=old_ref))] == [_SEEDS]
+    assert _shown(_drafted([keyed])) == [], "the same key on both sides is the opening, shown once"
+
+
 def test_one_list_names_my_humans_corpus_labels_for_every_reader(tmp_path):
     from ouroboros.owner_continue import CORPUS_INITIAL_SOURCES, CORPUS_OWNER_SOURCES
     from ouroboros.tools.control_routing import _attach_drafted_objective

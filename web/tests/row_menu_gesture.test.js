@@ -70,6 +70,73 @@ test('a contextmenu fired for a hold before the long press is that press: one op
     } finally { f.close(); }
 });
 
+test('a tap 250 ms after a long press acts at once, its mouse events as usual; the lift\'s own stay swallowed', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    const pressed = [];
+    f.elsewhere.addEventListener('click', () => pressed.push('elsewhere'));
+    const tap = (node, id) => {
+        f.touch(node, 'pointerdown', { pointerId: id });
+        f.touch(node, 'pointerup', { pointerId: id });
+        return { down: node.emit('mousedown', { detail: 1 }), click: node.emit('click', { detail: 1 }) };
+    };
+    try {
+        f.touch(f.label, 'pointerdown', { clientX: 30, clientY: 60 });
+        t.mock.timers.tick(LONG_PRESS_MS);
+        assert.equal(f.opened.length, 1);
+        f.touch(f.elsewhere, 'pointerup');  // the hold ends; this host sends no mouse events for it
+        t.mock.timers.tick(250);
+        const next = tap(f.elsewhere, 2);
+        assert.equal(next.down.defaultPrevented, undefined, 'the new finger\'s mousedown moves the focus as usual');
+        assert.equal(next.click.defaultPrevented, undefined);
+        assert.deepEqual(pressed, ['elsewhere'], 'and it acts once');
+        // A host that does send the hold's mouse events: those press nothing, the next finger's act.
+        f.closeMenu();
+        f.touch(f.label, 'pointerdown', { pointerId: 3 });
+        t.mock.timers.tick(LONG_PRESS_MS);
+        f.touch(f.elsewhere, 'pointerup', { pointerId: 3 });
+        assert.equal(f.elsewhere.emit('mousedown', { detail: 1 }).defaultPrevented, true);
+        assert.equal(f.elsewhere.emit('click', { detail: 1 }).defaultPrevented, true);
+        t.mock.timers.tick(250);
+        assert.equal(tap(f.elsewhere, 4).click.defaultPrevented, undefined);
+        assert.deepEqual(pressed, ['elsewhere', 'elsewhere']);
+    } finally { f.close(); }
+});
+
+test('after a cancel, a mouse or a key acts at once; the same hold\'s late contextmenu opens nothing, a right-click does', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const f = fixture();
+    const hold = (id) => { f.touch(f.label, 'pointerdown', { pointerId: id }); t.mock.timers.tick(LONG_PRESS_MS); };
+    try {
+        hold(1);
+        f.touch(f.label, 'pointercancel', { pointerId: 1 });
+        f.closeMenu();
+        f.touch(f.elsewhere, 'pointerdown', { pointerId: 2 });
+        assert.equal(f.elsewhere.emit('click', { detail: 1 }).defaultPrevented, undefined, 'pointercancel, then a new finger');
+        hold(3);
+        f.touch(f.elsewhere, 'pointerup', { pointerId: 3 });
+        f.closeMenu();
+        f.elsewhere.emit('pointerdown', { pointerType: 'mouse', isPrimary: true, pointerId: 4 });
+        assert.equal(f.elsewhere.emit('mousedown', { detail: 1 }).defaultPrevented, undefined, 'a mouse moves the focus');
+        assert.equal(f.elsewhere.emit('click', { detail: 1 }).defaultPrevented, undefined);
+        hold(5);
+        f.touch(f.elsewhere, 'pointerup', { pointerId: 5 });
+        f.closeMenu();
+        const button = f.row.children[0];
+        button.focus();
+        button.emit('keydown', { key: 'Enter' });
+        assert.equal(button.emit('click', { detail: 0 }).defaultPrevented, undefined, 'Enter on the focused row');
+        hold(7);
+        f.touch(f.elsewhere, 'pointerup', { pointerId: 7 });
+        f.closeMenu();
+        assert.equal(f.label.emit('contextmenu', { clientX: 30, clientY: 60 }).defaultPrevented, true);
+        assert.equal(f.opened.length, 4, 'the hold\'s own late contextmenu is no second opening');
+        f.label.emit('pointerdown', { button: 2, pointerType: 'mouse', isPrimary: true, pointerId: 8 });
+        assert.equal(f.label.emit('contextmenu', { clientX: 40, clientY: 50 }).defaultPrevented, true);
+        assert.equal(f.opened.length, 5, 'a right-click right after it opens the menu');
+    } finally { f.close(); }
+});
+
 test('movement past the tolerance, a scroll of the root or around it, a cancel, a mouse or a lift is no long press', (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
     const f = fixture();

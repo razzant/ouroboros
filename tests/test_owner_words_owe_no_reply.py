@@ -45,23 +45,88 @@ def test_my_humans_own_mail_still_owes_a_reply():
     assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx)
 
 
-def test_one_message_by_mail_and_by_relay_is_one_row_that_owes_its_reply():
-    mailed = _ctx(initiator="consciousness")
-    _initialize_owner_directives(mailed, [{"role": "user", "content": "[Wake-up]"}])
-    _record_owner_directive(mailed, source="owner_mailbox", content=OWNER_ROW["text"], msg_id="mail-55",
-                            origin={"client_message_id": "owner-55"})
-    _relay(mailed)
-    assert [row.get("carried") for row in mailed._owner_directives[1:]] == [None]
-    assert owner_input_revision(mailed) == 1
-    relayed_first = _ctx(initiator="consciousness")
-    _initialize_owner_directives(relayed_first, [{"role": "user", "content": "[Wake-up]"}])
-    _relay(relayed_first)
-    assert owner_input_revision(relayed_first) == 0
-    _record_owner_directive(relayed_first, source="owner_mailbox", content=OWNER_ROW["text"], msg_id="mail-55",
-                            origin={"client_message_id": "owner-55"})
-    rows = relayed_first._owner_directives[1:]
-    assert len(rows) == 1 and "carried" not in rows[0], "the direct delivery of the same words owes the reply"
-    assert owner_input_revision(relayed_first) == 1
+def _drain(tmp_path, task_id, ctx):
+    import queue
+
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+
+    _drain_incoming_messages([], queue.Queue(), tmp_path, task_id, None, set(), owner_ctx=ctx)
+
+
+def test_one_message_by_mail_and_by_relay_is_one_row_that_owes_its_reply(tmp_path):
+    # The ordinary producers stamp the same proven identity (the held chat row's
+    # row_sha256) on both paths — the mail drain via _stamp_owner_delivery/_arrival(held=True),
+    # the relay via inject_relay — so one owner message drained by mail and relayed is one
+    # corpus row in either order, and the direct delivery makes that row owe the reply.
+    # The previous fixture built a short legacy origin by hand and expected a merge without
+    # that fact; that legacy outcome is preserved by design (last test below), not claimed
+    # green here.
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_relay import quote_rows, write_relay
+    from tests.test_owner_relay import context, source
+
+    row, handle = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [handle])
+    assert not error
+    for task_id, relay_first in (("mail-first", False), ("relay-first", True)):
+        if relay_first:
+            write_relay(tmp_path, task_id, relay_id="r1", note="note", quotes=quotes, chat_id=1,
+                        teller_task_id="teller")
+            write_owner_message(tmp_path, row["text"], task_id, msg_id="steer-1",
+                                client_message_id=row["client_message_id"])
+        else:
+            write_owner_message(tmp_path, row["text"], task_id, msg_id="steer-1",
+                                client_message_id=row["client_message_id"])
+            write_relay(tmp_path, task_id, relay_id="r1", note="note", quotes=quotes, chat_id=1,
+                        teller_task_id="teller")
+        ctx = context(tmp_path)
+        ctx.task_id = task_id
+        _drain(tmp_path, task_id, ctx)
+        rows = [item for item in ctx._owner_directives if item["source"] == "owner_mailbox"]
+        assert len(rows) == 1 and "carried" not in rows[0], (task_id, rows)
+        assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx), task_id
+
+
+def test_two_separate_messages_with_the_same_visible_words_stay_two_owed_rows(tmp_path):
+    from ouroboros import dialogue_store
+    from ouroboros.owner_mailbox import write_owner_message
+    from tests.test_owner_relay import context
+
+    for client_id, ts in (("owner-a", "2026-10-01T00:00:01Z"), ("owner-b", "2026-10-01T00:00:02Z")):
+        dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": ts,
+                                                  "text": "Same visible words.", "client_message_id": client_id})
+        write_owner_message(tmp_path, "Same visible words.", "receiver", msg_id=f"steer-{client_id}",
+                            client_message_id=client_id)
+    ctx = context(tmp_path)
+    ctx.task_id = "receiver"
+    _drain(tmp_path, "receiver", ctx)
+    rows = [item for item in ctx._owner_directives if item["source"] == "owner_mailbox"]
+    assert len(rows) == 2 and all("carried" not in row for row in rows), rows
+    assert owner_input_revision(ctx) == 2 and owner_reply_owed(ctx)
+
+
+def test_a_delivery_without_proven_row_identity_is_preserved_not_merged(tmp_path):
+    # Legacy outcome, by design: a mail entry whose chat row the host cannot resolve carries
+    # no row_sha256, so it never merges with a relayed quote of the same words by text or a
+    # partial client field; its own row survives and still owes the reply.
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.owner_relay import quote_rows, write_relay
+    from tests.test_owner_relay import context, source
+
+    row, handle = source(tmp_path)
+    quotes, error = quote_rows(context(tmp_path, row), [handle])
+    assert not error
+    write_relay(tmp_path, "receiver", relay_id="r1", note="note", quotes=quotes, chat_id=1,
+                teller_task_id="teller")
+    write_owner_message(tmp_path, row["text"], "receiver", msg_id="steer-legacy",
+                        client_message_id="not-held-anywhere", origin_suppressed=True)
+    ctx = context(tmp_path)
+    ctx.task_id = "receiver"
+    _drain(tmp_path, "receiver", ctx)
+    owed = [item for item in ctx._owner_directives if item["source"] == "owner_mailbox" and "carried" not in item]
+    carried = [item for item in ctx._owner_directives if item.get("carried")]
+    assert len(owed) == 1 and len(carried) == 1, ctx._owner_directives
+    assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx)
 
 
 def test_a_drafted_objective_and_a_place_event_carry_words_without_a_debt():
