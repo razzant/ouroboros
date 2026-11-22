@@ -84,7 +84,18 @@ class Player:
 
     def facts(self, room: str, named: str = ''):
         place = (self.reader.place.get(room) or {}).get('id')
-        return self.page.evaluate(FACTS, [self.feed(room), place, named]) if room else None
+        reply = self.stand.newest_reply(room) if room else ''
+        return self.page.evaluate(FACTS, [self.feed(room), place, named, reply]) if room else None
+
+    def read(self, room: str, after: dict | None) -> bool:
+        """Whether the room's read receipt reached its revision: waited for when its newest reply shows (the client
+        acknowledges after the paint), observed for a moment when it does not (an early receipt would show by then)."""
+        revision = self.stand.revision(room)
+        for _ in range(30 if after and after.get('replyShown') else 5):
+            if self.stand.seen.get(room, 0) >= revision:
+                return True
+            self.page.wait_for_timeout(100)
+        return False
 
     def rest(self, room: str, held: bool = False):
         self.page.evaluate(REST, [self.feed(room), held])
@@ -92,9 +103,17 @@ class Player:
     def play(self):
         for event in self.session['events']:
             before = self.facts(self.reader.room)
+            seen = dict(self.stand.seen)
             problems = len(self.reader.problems)
-            extra = getattr(self, f'_{next(iter(event))}')(event)
-            after = self.facts(self.reader.room, (extra or {}).get('named', ''))
+            kind = next(iter(event))
+            extra = getattr(self, f'_{kind}')(event)
+            room = self.reader.room
+            after = self.facts(room, (extra or {}).get('named', ''))
+            # A room with something unread is read once its reader is shown its newest reply, and not before: checked
+            # where that can change (an opening, a reply here, ↓, a held read let go). A read room stays read.
+            if (kind in ('open', 'latest', 'release') or event.get('arrive') == room) \
+                    and seen.get(room, 0) < self.stand.revision(room):
+                extra = {**(extra or {}), 'read': self.read(room, after)}
             self.reader.check(event, before, after, extra)
             self.trace.append({'event': event, 'extra': extra, 'before': _brief(before), 'after': _brief(after),
                                'problems': self.reader.problems[problems:]})
@@ -129,7 +148,8 @@ class Player:
             self.page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
         self.reader.room = room
         self.rest(room)
-        return {'named': self.stand.newest_arrival(room)}
+        # An unread room's opening lands on its newest arrival (DESIGN "Unread").
+        return {'named': self.stand.newest_reply(room)} if self.session['rooms'][room].get('unread') else None
 
     def _arrive(self, event):
         room = event['arrive']

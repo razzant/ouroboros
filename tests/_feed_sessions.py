@@ -2,7 +2,12 @@
 
 A session (``tests/fixtures/feed_sessions/*.json``) is what reaches a room's feed over time: the rooms' saved rows,
 then its events in order: openings, replies arriving, history reads held and released, photos loading, the window's
-width and height, the phone keyboard, wheel, keys and touch. Its rows are synthetic, never live data.
+width and height, the phone keyboard, wheel, keys and touch. Its rows are synthetic, never live data. ``rooms`` maps
+``main`` or a Project's key to its ``rows`` (``Stand.rows``) and ``unread``; each event names one action and its
+value: ``open``, ``arrive`` (``words``, ``role``), ``wheel`` / ``swipe`` (px, + toward the end), ``key``, ``image``,
+``viewport`` ([w, h]), ``drag`` (a handle, px), ``keyboard`` (visible height, null: down), ``older``, ``quote``,
+``hold`` (``latest`` | ``older`` | ``after``), ``release``, ``latest`` (↓), ``pause`` (ms); ``expect`` (``following`` |
+``reading``) names what the reader is doing after it when the rules alone do not say.
 
 The stand serves the production page (``web/index.html``, no runtime) and answers each ``/api/chat/history`` read with
 the real endpoint over a dialogue store built from the session, so cursors, coverage and the newest arrival are the
@@ -10,10 +15,11 @@ server's own; the shell's other reads get quiet answers, the socket is a stand-i
 photo's bytes wait for the session's ``image`` event. Time is real: no fake clock, no replaced animation frames.
 
 After every event the player reads the feed (``FACTS``) and ``Reader`` checks the rules of docs/DESIGN.md the event
-touches: a room first opens at its newest message, an unread one on its newest arrival; a return finds it as left;
-the live edge follows replies while a passage being read stays put through replies, older pages, photos, width,
-height and the keyboard; a gesture scrolls the feed; ↓ reaches the retained end at once. The checks hold for every
-engine, the WebKit without scroll anchoring that the macOS window runs too (``overflow-anchor: none``).
+touches: a room first opens at its newest message, an unread one on its newest arrival, and is read once its newest
+reply is shown, never before; a return finds it as left; a quote lands on its row; the live edge follows replies while
+a passage being read stays put through replies, older pages, photos, width, height and the keyboard; a gesture moves
+the text by its own way; ↓ reaches the retained end at once. The checks hold for every engine, the WebKit without
+scroll anchoring that the macOS window runs too (``overflow-anchor: none``).
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ START = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
 WORDS = ('the', 'reply', 'reads', 'history', 'passage', 'owner', 'room', 'feed', 'width', 'keeps', 'place', 'newest',
          'message', 'older', 'page', 'lands', 'while', 'reading', 'scrolls', 'wheel', 'photo', 'below', 'above', 'line')
 TOLERANCE = 2  # px: a passage that stays may move by subpixel rounding, never by a line
+LIVE_EDGE = 48  # px: a gesture toward the end that stops this close to it follows (chat_reading_position.js nearBottom)
 
 
 def sessions() -> list[str]:
@@ -132,8 +139,8 @@ class Stand:
             self.quotes[spec['reply']] = {'text': text, 'target': target['text']}
             return [{'direction': 'out', 'text': text, 'reply_to': reference_from_row(target)}]
         low, high = spec.get('words', [24, 80])
-        owner = spec.get('role') == 'owner'
-        return [{'direction': 'in' if owner else 'out', 'text': words(self.minute + index, low + (index * 37) % (high - low + 1))}
+        direction = 'in' if spec.get('role') == 'owner' else 'out'
+        return [{'direction': direction, 'text': words(self.minute + index, low + (index * 37) % (high - low + 1))}
                 for index in range(spec.get('count', 1))]
 
     def append(self, key: str, row: dict) -> dict:
@@ -146,12 +153,18 @@ class Stand:
         self.stored.setdefault(key, []).append(stored)
         return stored
 
-    def newest_arrival(self, key: str) -> str:
-        """An unread room's newest arrival, where its opening must land (DESIGN "Unread"): its newest reply."""
-        if not self.session['rooms'][key].get('unread'):
-            return ''
+    def newest_reply(self, key: str) -> str:
+        """The room's newest arrival that is not the owner's: what reading the room means (DESIGN "Unread")."""
         return next((row['text'] for row in reversed(self.stored.get(key, []))
                      if row['direction'] == 'out' and row.get('type') != 'photo'), '')
+
+    def revision(self, key: str) -> int:
+        """The room's visible revision now: what its read receipt (``seen``, written by the page) has to reach."""
+        if key == 'main':
+            return self.main_revision
+        from ouroboros.projects_registry import get_project
+
+        return int(get_project(self.data, self.rooms[key]['project_id'])['visible_revision'])
 
     def revise(self, key: str) -> int:
         """The room's visible revision after its rows changed: what the shell's state read reports."""
@@ -323,16 +336,18 @@ INIT = """(() => {
             setTimeout(() => { this.readyState = 1; this._fire(new Event('open')); this._beat(); }, 20);
             this._timer = setInterval(() => this._beat(), 10000);
         }
-        _fire(event) { const handler = this['on' + event.type]; if (handler) handler.call(this, event); this.dispatchEvent(event); }
-        _beat() { if (this.readyState === 1) this._fire(new MessageEvent('message', {data: JSON.stringify({type: 'heartbeat'})})); }
+        _fire(event) {
+            this['on' + event.type]?.call(this, event);
+            this.dispatchEvent(event);
+        }
+        _beat() { if (this.readyState === 1) this._deliver({type: 'heartbeat'}); }
+        _deliver(frame) { this._fire(new MessageEvent('message', {data: JSON.stringify(frame)})); }
         send() {}
         close() { this.readyState = 3; clearInterval(this._timer); this._fire(new Event('close')); }
     }
     Object.assign(FeedSocket, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3});
     window.WebSocket = FeedSocket;
-    window.__feedPush = frame => {
-        for (const socket of sockets) if (socket.readyState === 1) socket._fire(new MessageEvent('message', {data: JSON.stringify(frame)}));
-    };
+    window.__feedPush = frame => { for (const socket of sockets) if (socket.readyState === 1) socket._deliver(frame); };
     window.__feedOpen = () => sockets.some(socket => socket.readyState === 1);
     window.__feedReads = {inflight: 0, done: 0};
     const nativeFetch = window.fetch.bind(window);
@@ -358,13 +373,14 @@ NO_ANCHOR = """(() => {
 
 # The room's feed as the reader sees it, in the page's coordinates: the read band between the bar's reach and the
 # composer (project_read_state.js readBand), the row at its top, the row read before (``place``, by its identity), a
-# message named by its words (``named``: an unread room's newest arrival, a quote's target), the live edge, the newest
-# row, ↓ and the rows shown twice (a defect).
-FACTS = """([sel, place, words]) => {
+# message named by its words (``named``: an unread room's newest arrival, a quote's target), whether the newest reply
+# starts in the band, the live edge, the newest row, ↓ and the rows shown twice (a defect).
+FACTS = """([sel, place, words, reply]) => {
     const feed = document.querySelector(sel);
     if (!feed || !feed.getClientRects().length) return null;
     const page = feed.parentElement, rect = feed.getBoundingClientRect();
-    const header = page.querySelector('.chat-page-header') || page.closest('.project-panel')?.querySelector('.project-panel-bar');
+    const header = page.querySelector('.chat-page-header')
+        || page.closest('.project-panel')?.querySelector('.project-panel-bar');
     const composer = page.querySelector('.chat-input-area');
     let top = rect.top, bottom = rect.bottom;
     if (header?.getClientRects().length) {
@@ -382,8 +398,11 @@ FACTS = """([sel, place, words]) => {
     };
     const first = rows.find(node => node.getBoundingClientRect().bottom > top + 1);
     const held = place && rows.find(node => id(node) === place);
-    const named = words && [...feed.querySelectorAll('.chat-bubble')]
-        .find(node => node.querySelector('.message')?.textContent.includes(words));
+    const bubble = text => text && [...feed.querySelectorAll('.chat-bubble')]
+        .find(node => node.querySelector('.message')?.textContent.includes(text));
+    const named = bubble(words), newestReply = bubble(reply);
+    const shown = node => Boolean(node) && node.getBoundingClientRect().top >= top - 1
+        && node.getBoundingClientRect().top < bottom;
     const newest = rows.at(-1), button = page.querySelector('.chat-scroll-bottom-btn');
     const count = (keys, map = new Map()) => { for (const key of keys) map.set(key, (map.get(key) || 0) + 1); return map; };
     // A reply drawn twice shows its words twice (a photo's menu repeats by design: media bubbles are not compared).
@@ -393,6 +412,7 @@ FACTS = """([sel, place, words]) => {
     return {scrollTop: feed.scrollTop, scrollHeight: feed.scrollHeight, clientHeight: feed.clientHeight,
         gap: feed.scrollHeight - feed.scrollTop - feed.clientHeight, band: {top, bottom, height: bottom - top},
         first: first ? at(first) : null, place: held ? at(held) : null, named: named ? at(named) : null,
+        replyShown: shown(newestReply),
         newest: newest ? {...at(newest), shown: newest.getBoundingClientRect().bottom <= bottom + 1} : null,
         rows: rows.length, resizing: feed.hasAttribute('data-resizing'), twice,
         latest: {shown: Boolean(button?.classList.contains('visible')), busy: button?.getAttribute('aria-busy') === 'true'},
@@ -407,7 +427,8 @@ REST = """([sel, held]) => new Promise((done, fail) => {
     const tick = () => {
         const feed = document.querySelector(sel);
         const reads = window.__feedReads?.inflight || 0;
-        const now = feed ? [feed.scrollTop, feed.scrollHeight, feed.clientHeight, feed.hasAttribute('data-resizing'), held ? 0 : reads].join('|') : 'none';
+        const now = !feed ? 'none' : [feed.scrollTop, feed.scrollHeight, feed.clientHeight,
+            feed.hasAttribute('data-resizing'), held ? 0 : reads].join('|');
         still = now === last ? still + 1 : 0;
         last = now;
         if (feed && still >= 8 && !feed.hasAttribute('data-resizing') && (held || !reads)) return done(still);
@@ -455,9 +476,10 @@ class Reader:
         named = after.get('named')
         return bool(named) and -TOLERANCE <= named['top'] < after['band']['height']
 
-    def settle(self, room: str, after: dict):
-        """What the reader is doing once an event has settled: following when the feed rests at its live edge."""
-        self.mode[room] = 'following' if after['gap'] <= TOLERANCE else 'reading'
+    def settle(self, room: str, after: dict, edge: float = TOLERANCE):
+        """What the reader is doing once an event has settled: following when the feed rests at its live edge (a
+        gesture toward the end that stops within the app's live edge, 48 px, follows: wheel, swipe or key)."""
+        self.mode[room] = 'following' if after['gap'] <= edge else 'reading'
         self.place[room] = dict(after['first']) if after.get('first') else None
 
     def check(self, event: dict, before: dict | None, after: dict | None, extra: dict | None = None):
@@ -467,6 +489,17 @@ class Reader:
             self.problems.append(f'{kind}: the room {room!r} shows no feed')
             return
         self.note('a row shows once', not after['twice'], after, f'rows shown twice: {after["twice"]}')
+        if 'read' in (extra or {}):
+            # Read only once its newest reply shows in the band, clear of the bar and the composer; never before.
+            self.note('the room is read once its newest reply is shown, and only then',
+                      extra['read'] == after['replyShown'], after,
+                      f'read receipt {extra["read"]}, newest reply shown {after["replyShown"]}')
+        toward_end = (kind in ('wheel', 'swipe') and event[kind] > 0
+                      or kind == 'key' and event['key'] in ('PageDown', 'End'))
+        edge = LIVE_EDGE if toward_end else TOLERANCE
+        if 'expect' in event:
+            self.note(f'{kind}: the reader is then {event["expect"]}',
+                      ('following' if after['gap'] <= edge else 'reading') == event['expect'], after)
         if kind == 'open':
             target = event['open']
             if target in self.mode:  # a return within the page session finds the room as left
@@ -520,7 +553,7 @@ class Reader:
             if not (extra or {}).get('held'):
                 self.note('latest: ↓ then follows the present', self.following(after), after)
         if kind != 'hold':
-            self.settle(room, after)
+            self.settle(room, after, edge)
         if kind == 'latest' and (extra or {}).get('held'):
             self.mode[room] = 'following'
 
