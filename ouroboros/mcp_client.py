@@ -806,8 +806,8 @@ async def _call_tool_async(
         try:
             return await asyncio.wait_for(pending, timeout=timeout_sec)
         except WorkDomainUnsettled as exc:
-            if returned is None:
-                raise  # no result was received; the operation may have happened
+            if returned is None:  # no result was kept; the operation may have happened, an answer stays one
+                raise mcp_catalog.with_answer(used, exc)
             return _replace_tool_result(returned, code="MCP_ERROR",
                 text=returned.text + "\n⚠️ The response above was received, but server cleanup is unconfirmed. "
                 "Do not repeat the completed call. " + str(exc), meta_updates={"backend_settled": False})

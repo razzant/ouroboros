@@ -1029,6 +1029,35 @@ def test_an_http_404_at_the_end_of_a_same_origin_redirect_is_no_answer_either(lo
     assert lost.code == "MCP_ERROR" and "Session terminated" in lost.text and call_now()["ok"] is False
 
 
+@pytest.mark.parametrize("mode, answered", [("protocol", True), ("invalid_result", True), ("good", True),
+                                            ("disconnect", False)])
+def test_a_reply_survives_a_managed_servers_unconfirmed_teardown(tmp_path, monkeypatch, mode, answered):
+    from ouroboros import execution_domain
+
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [raw_server(tmp_path)]})
+    assert manager.refresh_server("demo")["tool_count"] == 2
+    unconfirmed = []
+
+    class Unconfirmed:  # a managed domain's launch whose executor cannot confirm the server's process group ended
+        def __init__(self, argv, cwd, env):
+            self.argv, self.env = list(argv), {}
+
+        def require_cli(self):
+            pass
+
+        def adopt(self):
+            pass
+
+        def settle(self):
+            unconfirmed.append(self.argv)
+            return False
+    monkeypatch.setattr(execution_domain, "attached_launch", lambda argv, cwd, env: Unconfirmed(argv, cwd, env))
+    result = manager._call_tool_result("mcp_demo__ping", {"mode": mode, "code": -32000})
+    assert unconfirmed and result.code == "MCP_ERROR"  # the caller keeps its error and the teardown stays unconfirmed
+    assert call_now()["ok"] is answered
+
+
 def test_an_answer_received_before_its_session_failed_to_close_is_an_answer(loopback, monkeypatch, tmp_path):  # noqa: F811
     import asyncio
 
