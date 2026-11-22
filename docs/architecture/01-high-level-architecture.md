@@ -403,7 +403,7 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility, Nano's standing set (others: tool_capabilities.py)
-  capability_breakage.py — dated breaks told to works (§6 MCP)
+  capability_breakage.py — dated breaks: notice once, tail row on change
   tool_effects.py, place_guard.py — connector-declared effects (read · message · gesture · write), the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes and circle words beside a send
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
   browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
