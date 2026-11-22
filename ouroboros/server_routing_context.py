@@ -426,8 +426,8 @@ def _root_results_exist(ctx: Any) -> bool:
     """Whether the store holds any root's record, live or ended: one row of the root index
     (``newest_root_ids``), read without waiting on contention, since owner-message intake runs on
     the supervisor loop. A new install's store holds none. A busy or unreadable store is unknown
-    and answers yes, like an unreadable Projects list: the decision lane's manifest then says
-    what it could not read, never "no ended work"."""
+    and answers yes, like an unreadable Projects list: the turn is admitted for the manifest's
+    own read, which then says what it could not read, or finds the store empty."""
     from ouroboros.store import StoreBusy, acquisition_budget
     from ouroboros.task_store import newest_root_ids
 

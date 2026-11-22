@@ -821,7 +821,7 @@ def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_i
     digging. Any root's record now opens the decision lane through the owner ingress and keeps the manifest, a wake
     gets the same, and an unreadable store is unknown, never "no ended work"; a new install's store holds no root, so
     its message stays exactly as it was, and an install beside Projects never reads the root index for its gate."""
-    from ouroboros import server_owner_routing, task_store
+    from ouroboros import server_owner_routing, store, task_store
     from ouroboros.projects_registry import create_project
     from ouroboros.server_routing_context import STOP_REASON_LABEL, main_lane_routing_metadata
     from ouroboros.store import StoreBusy
@@ -869,6 +869,11 @@ def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_i
     before = len(gate_reads)
     beside = route("m-racer")["main_routing_manifest"]
     assert [row["project_id"] for row in beside["projects"]] == ["racer"] and len(gate_reads) == before == 3
+
+    # The probe never waits on the store: owner-message intake runs on the supervisor loop.
+    waits = []
+    monkeypatch.setattr(task_store, "newest_root_ids", lambda *_a, **_k: waits.append(store.bounded_wait(10.0)) or [])
+    assert real_gate(ctx) is False and waits == [0.0]
 
 
 def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path, monkeypatch):
