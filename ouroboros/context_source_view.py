@@ -72,8 +72,9 @@ def _obsolete_host_rows(messages: Sequence[Mapping[str, Any]]) -> set[int]:
 
 def superseded_host_fact(messages: Sequence[Mapping[str, Any]]) -> str:
     """The count, for the facts row being written now, of superseded host rows in view: the latest facts
-    row is one of them once this one follows it. They leave where the conversation is next rebuilt; rows that stand
-    through a fold (``compact_context.standing_rows``) are not counted."""
+    row is one of them once this one follows it. They leave at a rebuild that starts before them (a departure, or a
+    fold whose note precedes them); rows that stand through a fold (``compact_context.standing_rows``) are not
+    counted."""
     from ouroboros.loop_messages import CONTEXT_FACTS_NAME
     from ouroboros.tools.compact_context import standing_rows
     from ouroboros.utils import estimate_tokens
@@ -83,7 +84,8 @@ def superseded_host_fact(messages: Sequence[Mapping[str, Any]]) -> str:
     positions = _obsolete_host_rows(messages) | ({latest} if latest is not None else set())
     positions -= set(standing_rows(messages)) if positions else set()
     tokens = sum(estimate_tokens(str(messages[i].get("content") or "")) for i in positions)
-    return f"superseded host rows {len(positions)} ~{tokens:,} (leave at the next rebuild)" if positions else ""
+    return (f"superseded host rows {len(positions)} ~{tokens:,} (leave at a rebuild that starts before them)"
+            if positions else "")
 
 
 def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, drive_root: Any,
@@ -91,10 +93,10 @@ def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, dri
     """Superseded host state leaves where this request already departs from the last send.
 
     From the departure on (``transcript_prefix.departure``: a tool load re-reads from the start, a
-    rewrite at least from its first change; on Codex, whose cache keeps only whole leading system
-    items, from the end of those items) every row is read again anyway, so retiring
+    rewrite at least from its first change; on Codex from the nearest earlier end of the leading system
+    group or of a whole earlier answered request) every row is read again anyway, so retiring
     the superseded host rows there costs no extra re-read and retires no reasoning the departure
-    itself does not. Rows between the leading items and the departure stay even where a route
+    itself does not. Rows between that end and the departure stay even where a route
     reads them again (a disclosed residual, C2 S6). Their exact rows are retained first; one host record names what left and
     where it is. Nothing before the departure moves, and a round that only appends keeps its
     cached prefix: this never starts a rewrite, it only rides one. Without a recorded send nothing
