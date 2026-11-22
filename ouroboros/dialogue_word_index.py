@@ -44,7 +44,10 @@ log = logging.getLogger(__name__)
 
 FORMAT = 1  # the token rule and encoding; a different one is bypassed and rebuilt
 TOKEN_CHARS = 64
-CHUNK_ROWS = 256  # rows one posting commit carries: a lock-hold bound measured in the report, not a policy
+# Rows one posting commit carries: a bound on how long one commit holds the write lock, never a policy. On a loaded
+# Mac one 256-row chunk held it 1.5 s and 3.0 s; at 128 the worst observed hold beside a writer was 28 ms. The first
+# live catch-up's ``hold_ms`` chunk records are the measurement to read.
+CHUNK_ROWS = 128
 _DDL = (
     "CREATE TABLE IF NOT EXISTS dw_meta (id INTEGER PRIMARY KEY CHECK (id=1), format INTEGER NOT NULL, "
     "generation TEXT NOT NULL, seen_rev INTEGER NOT NULL, usable INTEGER NOT NULL CHECK (usable IN (0,1)), "
