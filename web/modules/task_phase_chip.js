@@ -153,12 +153,16 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     }
     let current;
     const modelPhase = modelActivityPresentation(modelActivity);
-    if (phase === 'unknown') {
+    // A recorded queue hold speaks where the server's view of the card cannot be confirmed: its label is the chip's
+    // word, parent and child alike, as in 7.11 (an unconfirmed work gave no view there, and children read no member
+    // state). The card's own parked unknown still outranks it, as it did then.
+    const holdSpeaks = Boolean(hold) && workView?.phase === 'unknown';
+    if (phase === 'unknown' && !holdSpeaks) {
         current = phaseView('unknown', CHIP.unconfirmed(), 'warn', { mark: CENSUS_MARKS.unknown });
         if (workView?.phase === 'unknown' && workView.secondary) current.secondary = workView.secondary;
     }
     // The card of a work's current episode says the work's word and its line (work_status.cardWorkView).
-    else if (workView) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
+    else if (workView && !holdSpeaks) current = { ...phaseView(workView.phase, workView.text, workView.classes, { mark: work?.mark,
         tone: workView.tone, waiting: workView.waiting }), ...(workView.secondary ? { secondary: workView.secondary } : {}),
         // The exact call still explains the work's word in the card's details where both say the same word; a held
         // work's latest refused Resume (`note`, already dated and attributed) explains it there too.

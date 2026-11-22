@@ -115,7 +115,8 @@ LIGHT = {
     "chosen answer": {
         "color": "rgb(23, 107, 73)",
         "backgroundColor": "rgba(34, 197, 94, 0.14)",
-        "boxShadow": "none",
+        # Flat on white, yet one transparent shadow layer a quote's ring can join (ui.css, #3971): never elevated.
+        "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px",
         "opacity": "1"},
     "chosen detail": {"color": "rgb(85, 93, 105)"},
     "chosen recommendation": {"color": "rgb(23, 107, 73)"},
