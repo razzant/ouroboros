@@ -245,9 +245,8 @@ def test_unpreparable_selection_refuses_typed_with_every_entry_before_any_send(t
     assert [row["status"] for row in result["input_files"]] == [
         "checked", "missing", "not_a_file", "denied", "denied"]
     assert not any(row["status"] == "prepared" for row in result["input_files"])
-    # The refusal carries the receipt's lines: each failing entry first, then the one the refusal held back.
-    assert result["receipt"].startswith("receipt:\nnot prepared: task_drive:absent.txt (missing"), result["receipt"]
-    assert result["receipt"].endswith("not delivered, the selection being refused: task_drive:ok.txt [requested]")
+    # A refusal is its own answer: the per-entry rows and reasons, never a receipt beside them.
+    assert "receipt" not in result and "receipt:" not in json.dumps(result), result
     assert engine.requests == [] and not (drive / "delegated_readonly_inputs").exists()
     assert not _retained_home(ctx).exists()
     assert not custody.pending_invocations(ctx.drive_root)
@@ -451,7 +450,7 @@ def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(t
     ctx, selected, drive = _scheduler(tmp_path, monkeypatch, kind=kind)
     missing = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                      input_files=[{"root": "task_drive", "path": "absent.md"}])
-    assert "input_files_unavailable" in missing and 'not prepared: task_drive:absent.md (missing' in missing
+    assert "input_files_unavailable" in missing and '"status": "missing"' in missing and "receipt:" not in missing
     writer = control._schedule_task(ctx, subagent_id=selected, objective="Edit", expected_output="Patch",
                                     write_surface="self_worktree", input_files=[{"path": "brief.md"}])
     assert "input_files_readonly_only" in writer
@@ -459,7 +458,7 @@ def test_schedule_refuses_unpreparable_and_writing_selections_without_queueing(t
         "id": "brief", "role": "black_box_reference", "paths": [str(drive / "brief.md")]}]}}
     protected = control._schedule_task(ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                        input_files=[{"root": "task_drive", "path": "brief.md"}])
-    assert "input_files_unavailable" in protected and 'not prepared: task_drive:brief.md (denied' in protected, protected
+    assert "input_files_unavailable" in protected and '"status": "denied"' in protected, protected
     assert not [row for row in ctx.pending_events if row["type"] == "schedule_subagent"]
     assert not _retained_home(ctx).exists()
     assert not list((ctx.drive_root / "state" / "headless_tasks").glob("*")), "no child state was left behind"
@@ -654,7 +653,7 @@ def test_an_unsupported_root_refuses_at_both_consumers_before_anything(tmp_path,
     sched_ctx, selected, _drive_dir = _scheduler(tmp_path / "schedule", monkeypatch)
     queued = control._schedule_task(sched_ctx, subagent_id=selected, objective="Read", expected_output="Summary",
                                     input_files=[{"root": root, "path": "x.txt"}])
-    assert "input_files_unavailable" in queued and '(unsupported_root' in queued
+    assert "input_files_unavailable" in queued and '"status": "unsupported_root"' in queued
     assert not [row for row in sched_ctx.pending_events if row["type"] == "schedule_subagent"]
 
 
@@ -911,7 +910,7 @@ def test_selected_file_uses_the_actual_read_file_dispatch_root(tmp_path, monkeyp
         observed = registry.execute("read_file", selection[0])
         assert "ordinary sample" in observed and "PRESENCE_RESOURCE_BLOCKED" not in observed
         denied = control._schedule_task(ctx, **options)
-        assert "PRESENCE_RESOURCE_BLOCKED" in denied and '(denied' in denied and not ctx.pending_events
+        assert "PRESENCE_RESOURCE_BLOCKED" in denied and '"status": "denied"' in denied and not ctx.pending_events
     assert not _retained_home(ctx).exists()
 
     # A real direct start also needs read authority for its entire bound scope.
@@ -1740,9 +1739,7 @@ def test_ordinary_input_respects_presence_in_the_receiving_workspace(tmp_path, m
 
     _presence(ctx, *grants, ("active_workspace", "one.md"))
     refused = control._schedule_task(ctx, **options, input_files=[nested_file, inherited_file])
-    # The failing entry is named with its cause; the one that passed its own check is named as held back, not failed.
-    assert "not delivered, the selection being refused: active_workspace:nested/one.md" in refused, refused
-    assert "not prepared: active_workspace:other.md (denied" in refused and "nested/one.md (checked)" not in refused
+    assert '"status": "checked"' in refused and "PRESENCE_RESOURCE_BLOCKED" in refused, refused
     assert not ctx.pending_events and not _retained_home(ctx).exists()
 
     _presence(ctx, ("active_workspace", "."))  # ordinary inherited reads remain available
@@ -1816,7 +1813,7 @@ def test_unreadable_copy_address_refuses_before_publication_for_native_child(tmp
     _presence(ctx, ("runtime_data", "."), read_bindings=tuple(bindings))
     reply = control._schedule_task(ctx, subagent_id=selected, objective="Read input", expected_output="Summary",
                                    input_files=[{"root": "runtime_data", "path": source}])
-    assert reason in reply and '(denied' in reply, reply
+    assert reason in reply and '"status": "denied"' in reply, reply
     assert not ctx.pending_events and not any(path.is_file() for path in _retained_home(ctx).rglob("*"))
 
 

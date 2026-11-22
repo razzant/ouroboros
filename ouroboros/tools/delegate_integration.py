@@ -290,10 +290,12 @@ def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, reques
     from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
 
     scope = (request.get("scope") if isinstance(request, dict) else None) or {}
-    facts = {**(start_facts(request, NO_RECORD) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
-                                                                                     "lineage": NO_RECORD}),
+    rows = (held.request_event or {}).get("input_files")
+    lineage = None if isinstance(rows, list) and rows else NO_RECORD  # a nonempty selection replaces lineage copies
+    facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
+                                                                                  "lineage": lineage}),
              "access": [("access", held.access, None)]}
-    if isinstance((rows := (held.request_event or {}).get("input_files")), list):  # this invocation's recorded copies
+    if isinstance(rows, list):  # this invocation's recorded copies
         facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
             1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
     note = f"{note}\n{render(build(facts))}"

@@ -693,7 +693,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage or (NO_RECORD if recovering else None)))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, inputs.lineage or (NO_RECORD if recovering and not inputs.selected else None)))
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,

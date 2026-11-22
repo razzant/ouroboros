@@ -12,6 +12,7 @@ predicted authority, and any host-minted shared cooperative tree.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -332,8 +333,8 @@ def _schedule_receipt_facts(emission: Dict[str, Any], route_kind: str, selected_
 
         row_access = str((emission.get("configured_subagent") or {}).get("access") or "workspace_write")
         shape = delegated_run_shape(bool(write_surface), row_access, emission.get("delegated_mode"))
-        leaf = shape.access + (f", mode {shape.mode}" if shape.mode != "agent" else "") + (
-            ", evidence-only private copy" if shape.investigation else "")
+        # The requested shape only: an Observe or Presence ceiling may still lower it at the start.
+        leaf = shape.access + (f", mode {shape.mode}" if shape.mode != "agent" else "")
         facts["access"] = [("supervisor access", profile + " (supervisor read roots are not a leaf-access guarantee, "
                             "native/nanny tools are not automatically leaf session tools)", False),
                            ("session access", leaf, None)]
@@ -1125,10 +1126,8 @@ def _prepare_child_input_files(ctx: ToolContext, fields: Dict[str, Any], child_t
             resource_intent=resource_intent) if fields["input_files"] else []
         return ""
     except InputSelectionError as exc:
-        from ouroboros.helper_receipt import build, render
-
-        receipt = render(build({"refused": exc.results}))  # "" when the refusal's own cause is the whole story
-        text, reason = f"⚠️ {exc.code}: {exc.detail} The child was not queued." + (f"\n{receipt}" if receipt else ""), exc.code
+        text, reason = (f"⚠️ {exc.code}: {exc.detail} The child was not queued. "
+                        f"input_files: {json.dumps(exc.results, ensure_ascii=False)}"), exc.code
     except (OSError, ValueError) as exc:
         text, reason = f"⚠️ input_files_unavailable: {type(exc).__name__}: {exc} The child was not queued.", "input_files_unavailable"
     code = refusal_host_code(reason)

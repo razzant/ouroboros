@@ -412,7 +412,7 @@ def test_inherited_presence_input_matches_the_receiving_childs_scope(chain, monk
         parent.pending_events.clear()
         denied = _schedule_task(parent, subagent_id=sid, objective="Read", expected_output="Summary",
                                 memory_mode="empty", input_files=selection)
-        assert '(denied' in denied and "PRESENCE_RESOURCE_BLOCKED" in denied, denied
+        assert '"status": "denied"' in denied and "PRESENCE_RESOURCE_BLOCKED" in denied, denied
         assert not parent.pending_events
         return
 

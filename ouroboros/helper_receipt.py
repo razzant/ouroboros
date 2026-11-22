@@ -45,10 +45,11 @@ def _range_changes(rows: List[Mapping[str, Any]], spec: Mapping[str, Any]) -> st
     import hashlib
 
     for row in rows:
-        if row.get("git_range") == spec and row.get("path") == "range.json" and (row.get("retained") or row.get("local")):
+        copy = row.get("retained") or row.get("local")
+        if row.get("git_range") == spec and row.get("path") == "range.json" and copy:
             digest, size, count = hashlib.sha256(), 0, 0
             try:
-                with open(row.get("retained") or row["local"], "rb") as manifest:
+                with open(copy, "rb") as manifest:
                     for item in manifest:
                         digest.update(item)
                         size += len(item)
@@ -74,22 +75,6 @@ def inputs_text(rows: List[Mapping[str, Any]]) -> str:
     return ", ".join(parts) or "none selected ([])"
 
 
-def _refused(rows: List[Mapping[str, Any]]) -> List[str]:
-    """Every selected entry that failed, by name, status and detail, then the rest the refused selection held back
-    (checked, deferred, not attempted, or copied but not delivered): a refusal sends nothing."""
-    from ouroboros.delegate_readonly_inputs import selection_label
-
-    def name(row: Mapping[str, Any]) -> str:
-        spec = row.get("git_range") if isinstance(row.get("git_range"), Mapping) else None
-        return (selection_label(row) if {"root", "path", "source"} <= set(row) or (not spec and {"root", "path"} <= set(row))
-                else f"change range {spec.get('base')}..{spec.get('head')}" if spec else str(row.get("path") or row))
-
-    held = [name(row) for row in rows if row.get("status") in {"checked", "deferred", "not_attempted", "prepared"}]
-    out = [f"not prepared: {name(row)} ({row.get('status')}{': ' + str(row['detail']) if row.get('detail') else ''}) "
-           f"[{REQUESTED}]" for row in rows if row.get("status") not in {"checked", "deferred", "not_attempted", "prepared"}]
-    return out + ([f"not delivered, the selection being refused: {', '.join(held)} [{REQUESTED}]"] if held else [])
-
-
 def memory_view_differences(view: Any, role: str, *, session_leaf: bool) -> List[str]:
     """A ``memory_view`` the view does not know, named with the role default that is used instead
     (``memory_view.view_spec_for_task``); a session leaf never receives one: its start composes its own selection
@@ -102,7 +87,8 @@ def memory_view_differences(view: Any, role: str, *, session_leaf: bool) -> List
     if problem := _explicit_problem(view):
         out.append(f"memory_view {view!r} not used ({problem}): the {role} default stands [{REQUESTED}]")
     if session_leaf and view:
-        out.append(f"memory_view shapes only the nanny's own view; the session leaf's start composes its own [{REQUESTED}]")
+        out.append("memory_view shapes only the nanny's own view; the session leaf's start composes its own "
+                   f"[{REQUESTED}]")
     return out
 
 
@@ -130,48 +116,51 @@ def owner_words_text(task: Mapping[str, Any], *, session: bool) -> str:
 
 
 def build(facts: Mapping[str, Any]) -> Receipt:
-    """The one receipt builder, from facts the caller already holds (each optional): ``refused`` (the rows of
-    a refused selection), ``access_ignored`` (``(requested, row)``: an API child's ignored ``access``),
-    ``access_lowering`` (``(asked, row)``: a session row's access a call could not widen), ``inputs_map``,
-    ``session`` (whose work order carries the words),
+    """The one receipt builder, from facts the caller already holds (each optional): ``access_ignored``
+    (``(requested, row)``: an API child's ignored ``access``), ``access_lowering`` (``(asked, row)``: a session
+    row's access a call could not widen), ``inputs_map``, ``session`` (whose work order carries the words),
     ``folder``, ``write_root``, ``access`` (``(subject, text, applied)`` grants; ``applied`` None is not known
     yet, False says nothing about it), ``inputs`` (prepared rows; None: nothing selected), ``inputs_outside``
     (how many of them lie outside a session's folder), ``inputs_when``, ``inputs_note``, ``lineage`` (automatic
     copies: ``(count, bytes)``), ``memory_view`` (``view``, ``role``, ``session_leaf``), ``owner_words`` (the
     record's fields, or a measured line) and ``assignment`` (``(text, stage)``: what was measured)."""
-    differences: List[str] = list(_refused(facts.get("refused") or []))
+    differences: List[str] = []
     if ignored := facts.get("access_ignored"):
         differences.append(f"access={ignored[0]!r} ignored for subagent_id={ignored[1]!r} (api_model); "
                            f"write_surface controls read/write authority [{REQUESTED}]")
     if lowering := facts.get("access_lowering"):
-        differences.append(f"access={lowering[0]!r} asked; the row's {lowering[1]} stands (access only lowers) [{REQUESTED}]")
+        differences.append(f"access={lowering[0]!r} asked; the row's {lowering[1]} stands (access only lowers) "
+                           f"[{REQUESTED}]")
     rows = facts.get("inputs")
     if rows and facts.get("inputs_outside"):
         differences.append(_outside(int(facts["inputs_outside"])))
     view = facts.get("memory_view") or {}
     if view:
-        differences += memory_view_differences(view.get("view"), view["role"], session_leaf=bool(view.get("session_leaf")))
+        differences += memory_view_differences(view.get("view"), view["role"],
+                                               session_leaf=bool(view.get("session_leaf")))
     summary = [(REQUESTED, "folder: " + facts["folder"])] if facts.get("folder") else []
     if facts.get("write_root"):
         summary.append((REQUESTED, "write root: " + facts["write_root"]))
     for subject, text, applied in facts.get("access") or ():
-        summary.append((REQUESTED, f"{subject}: {text}" + ("" if applied is False else f" (applied: {applied or PENDING})")))
+        shown = "" if applied is False else f" (applied: {applied or PENDING})"
+        summary.append((REQUESTED, f"{subject}: {text}{shown}"))
     if rows == [] and isinstance(facts.get("lineage"), tuple):
         differences.append(f"input_files [] selected nothing; automatic lineage was copied instead [{PREPARED}]")
     if rows is not None:
-        summary.append((PREPARED, f"inputs: {inputs_text(rows)}, {facts.get('inputs_when', 'retained before queueing')} "
-                                  "(prepared is not read)" + (f", map {facts['inputs_map']}" if facts.get("inputs_map") else "")))
+        where = f", map {facts['inputs_map']}" if facts.get("inputs_map") else ""
+        when = facts.get("inputs_when", "retained before queueing")
+        summary.append((PREPARED, f"inputs: {inputs_text(rows)}, {when} (prepared is not read){where}"))
     if facts.get("inputs_note"):
         summary.append((REQUESTED, "inputs: " + ("" if rows is not None else "none selected. ") + facts["inputs_note"]))
     if lineage := facts.get("lineage"):
-        summary.append((PREPARED, "inputs: automatic lineage, " + (NO_RECORD if isinstance(lineage, str) else
-                                                                  f"{_plural(lineage[0], 'file')}, {lineage[1]} bytes")))
+        counted = NO_RECORD if isinstance(lineage, str) else f"{_plural(lineage[0], 'file')}, {lineage[1]} bytes"
+        summary.append((PREPARED, "inputs: automatic lineage, " + counted))
     if view:
         summary.append((REQUESTED, "memory view: " + _memory_text(view.get("view"), view["role"])))
     if "owner_words" in facts:
         words = facts["owner_words"]
-        summary.append((PREPARED, "my human's words: " + (words if isinstance(words, str) else
-                                                          owner_words_text(words or {}, session=bool(facts.get("session"))))))
+        told = words if isinstance(words, str) else owner_words_text(words or {}, session=bool(facts.get("session")))
+        summary.append((PREPARED, "my human's words: " + told))
     if assignment := facts.get("assignment"):
         summary.append((assignment[1], f"{assignment[2] if len(assignment) > 2 else 'assignment'}: {assignment[0]}"))
     return Receipt(differences, summary)
@@ -179,7 +168,7 @@ def build(facts: Mapping[str, Any]) -> Receipt:
 
 def render(receipt: Receipt) -> str:
     """The differences first, when any is known (no line claims there is none), then one line per standing of
-    fact; "" for a receipt with nothing to say (a refusal whose cause is its own answer)."""
+    fact; "" for a receipt with nothing to say. A refusal carries none: its cause and rows are its answer."""
     if not (receipt.differences or receipt.summary):
         return ""
     head = ["receipt:", *receipt.differences]
@@ -211,10 +200,13 @@ def result_line(differences: List[str]) -> str:
 def task_result_line(data: Mapping[str, Any]) -> str:
     """The repeat for a child task's result, from its saved fields only (never a live read): its scheduling-time
     facts as such (an API child's ignored ``access``, ``memory_view``, copies placed outside the session's folder;
-    a later start may replace that selection) and the applied access its delegated runs disclosed."""
+    a later start may replace that selection). Nothing about its runs' applied access: one task's runs may each
+    request differently (a plan turn, then its implementation), and the task record cannot attribute them; each
+    run's own ``delegate_wait`` line compares its request with what it got (``run_result_line``)."""
     configured = data.get("configured_subagent") if isinstance(data.get("configured_subagent"), Mapping) else {}
     session = str((configured.get("route") or {}).get("kind") or "") == "agent_session"
-    differences = memory_view_differences(data.get("memory_view"), "nanny" if session else "child", session_leaf=session)
+    differences = memory_view_differences(data.get("memory_view"), "nanny" if session else "child",
+                                          session_leaf=session)
     asked = data.get("requested_access")
     if not session and configured and asked is not None:
         differences.append(f"access={asked!r} ignored (api_model); write_surface controls read/write authority "
@@ -226,36 +218,27 @@ def task_result_line(data: Mapping[str, Any]) -> str:
     intent = data.get("resource_intent") if isinstance(data.get("resource_intent"), Mapping) else {}
     if session and rows and intent.get("kind") != "explicit_none":
         differences.append(_outside(len(rows), past=True, when=" at scheduling"))
-    envelope = data.get("subagent_envelope") if isinstance(data.get("subagent_envelope"), Mapping) else {}
-    evidence = envelope.get("execution_evidence") if isinstance(envelope.get("execution_evidence"), Mapping) else {}
-    applied = evidence.get("applied_access_profiles")
-    # The leaf's run shape (``subagents.delegated_run_shape``): ask and plan run read-only whatever the row allows.
-    requested = "readonly" if data.get("delegated_mode") in ("ask", "plan") else row_access
-    settled = int(evidence.get("delegated_runs_settled") or 0)
-    if session and requested and isinstance(applied, list) and settled:
-        if not applied:
-            differences.append(f"applied access of its runs: not disclosed (requested {requested}) [{OBSERVED}]")
-        elif set(applied) != {requested}:
-            differences.append(f"applied access of its runs: {', '.join(sorted(map(str, applied)))}, requested "
-                               f"{requested} [{OBSERVED}]")
-        elif settled > 1:  # the record keeps one set of profiles, not one per run
-            differences.append(f"whether each of its {settled} runs disclosed its applied access is not recorded "
-                               f"[{OBSERVED}]")
     return result_line(differences)
 
 
-def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str, Any]]) -> str:
+def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str, Any]], *,
+                    looked_up: bool = True) -> str:
     """The repeat on a finished run's terminal ``delegate_wait`` payload, from that run's custody rows: the applied
-    access when it differs, copies outside its folder, and my human's later words whose last outcome is not
-    ``delivered`` (``accepted`` is taken by the engine, not read)."""
+    access against what THIS run's own recorded request asked, copies outside its folder, and my human's later
+    words whose last outcome is not ``delivered`` (``accepted`` is taken by the engine, not read). ``looked_up``
+    False: the custody lookup itself failed, which proves nothing about the record."""
     if entry is None:
-        return f"no custody record of this run [{OBSERVED}]"
+        return f"no custody record of this run [{OBSERVED}]" if looked_up else (
+            f"this run's custody record was unavailable at this read [{OBSERVED}]")
     differences: List[str] = []
     evidence = access_evidence or {}
     effective = str(evidence.get("effective") or "")
-    requested = str(evidence.get("requested") or getattr(entry, "access", "") or "")
+    request = (getattr(entry, "request_event", None) or {}).get("request")
+    requested = str((request.get("access") if isinstance(request, Mapping) else "") or evidence.get("requested")
+                    or getattr(entry, "access", "") or "")
     if not effective:
-        differences.append(f"access applied: not disclosed by the engine (requested {requested or 'unknown'}) [{OBSERVED}]")
+        differences.append(f"access applied: not disclosed by the engine (requested {requested or 'unknown'}) "
+                           f"[{OBSERVED}]")
     elif requested and effective != requested:
         differences.append(f"access applied {effective}, requested {requested} [{OBSERVED}]")
     rows = (getattr(entry, "request_event", None) or {}).get("input_files") or []
@@ -272,6 +255,7 @@ def run_result_line(ctx: Any, entry: Any, access_evidence: Optional[Mapping[str,
     unusual = sorted(outcome for outcome in last.values() if outcome != ORDINARY_DELIVERY)
     if unusual:
         differences.append("my human's later words: " + ", ".join(
-            f"{unusual.count(outcome)} {outcome}" + (" (taken by the engine, not read)" if outcome == "accepted" else "")
+            f"{unusual.count(outcome)} {outcome}"
+            + (" (taken by the engine, not read)" if outcome == "accepted" else "")
             for outcome in sorted(set(unusual))) + f" [{OBSERVED}]")
     return result_line(differences)

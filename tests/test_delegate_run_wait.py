@@ -894,3 +894,56 @@ def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, 
         assert "receipt" not in wake, "nothing observed to differ: no line, no assurance"
     spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})
     assert _armed(spilled).get("receipt") == wake.get("receipt"), "the shortened envelope keeps the line, or none"
+
+
+@pytest.mark.parametrize("lookup", ["raised", "answered_empty"])
+def test_a_failed_custody_lookup_is_no_proof_the_record_is_absent(tmp_path, monkeypatch, lookup):
+    """The wake's own read of the run's custody (``delegate_supervision._held_run``): a lookup that raised says the
+    record was unavailable at this read; only a lookup that answered and found no row says there is none. The
+    wait's admission keeps its ordinary lookup: only the read inside that seam is made to fail."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": "readonly", "verified": True}}))
+
+    def failing(*_a, **_k):
+        if lookup == "raised":
+            raise OSError("store busy")
+        return custody.UNKNOWN, None
+
+    real_seam, real_lookup = ds._held_run, custody.lookup
+
+    def seam(ctx_, run_id):
+        custody.lookup = failing
+        try:
+            return real_seam(ctx_, run_id)
+        finally:
+            custody.lookup = real_lookup
+
+    monkeypatch.setattr(ds, "_held_run", seam)
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    if lookup == "raised":
+        assert wake["receipt"] == "this run's custody record was unavailable at this read [observed]"
+    else:
+        assert wake["receipt"] == "no custody record of this run [observed]"
+
+
+def test_a_runs_applied_access_is_compared_with_its_own_recorded_request(monkeypatch):
+    """A run is judged against what IT asked (its START_REQUESTED body): an implementation run asking
+    workspace_write after a read-only plan turn is no difference; the same profile against another ask is one."""
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_message_store
+    from ouroboros.helper_receipt import run_result_line
+
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, _run: [])
+    run = SimpleNamespace(run_id="run-2", access="readonly", request_event={"request": {"access": "workspace_write"}})
+    ctx = SimpleNamespace(drive_root="/nonexistent", task_id="nanny")
+    assert run_result_line(ctx, run, {"requested": "readonly", "effective": "workspace_write"}) == ""
+    run.request_event = {"request": {"access": "readonly"}}
+    assert run_result_line(ctx, run, {"effective": "workspace_write"}) == (
+        "access applied workspace_write, requested readonly [observed]")

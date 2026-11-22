@@ -476,12 +476,9 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
     from ouroboros.delegate_shared import _fail
 
     def refuse(code: str, detail: str, **facts):
-        from ouroboros.helper_receipt import build, render
-
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), code)
-        receipt = render(build({"refused": facts.get("input_files") or []}))  # "" when the cause is the whole answer
-        return NO_INPUTS, _fail("delegate_start", code, detail, definitely_unrun=True, engine_discovery_completed=True,
-                                **({"receipt": receipt} if receipt else {}), **facts)
+        return NO_INPUTS, _fail("delegate_start", code, detail, definitely_unrun=True,
+                                engine_discovery_completed=True, **facts)
 
     try:
         entries = selection_entries(input_files)
