@@ -35,7 +35,7 @@ from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-exp
     session_design_navigation,
     session_host_references,
 )
-from ouroboros.subagent_work_order import in_place_scratch, session_service_directories
+from ouroboros.subagent_work_order import in_place_scratch, knowledge_notes_parameter, session_service_directories
 from ouroboros.delegate_source_coverage import (
     add_terminal_source_verification,  # noqa: F401  (leaf reads it through _delegate() at call time)
     prepare_work_order_start_binding,
@@ -425,7 +425,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _coordination_context: str = "", _initial_bootstrap: bool = False, mode: Optional[str] = None,
                     override_plan_readiness: Optional[bool] = None, _plan_answers: Any = None,
                     attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False,
-                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None) -> ToolResult:
+                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None,
+                    knowledge_notes: Optional[list] = None, _named_note_feedback: Optional[list] = None) -> ToolResult:
     from ouroboros.execution_domain import start_engine
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -450,7 +451,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     drive = custody.custody_root(ctx)
     owned_project_id, project_persistent, readonly_root = "", False, ""
     invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
-    binding_fingerprint, held = "", None  # held: the heads a fresh start sends, recorded by address and revision
+    binding_fingerprint, held, named = "", None, None  # heads and named notes a start sends, by address and revision
     processing_info: Dict[str, Any] = {}
     resource_ref, directory_options, continuation, documents, inputs = {}, {}, NO_CONTINUATION, NO_DOCUMENTS, NO_INPUTS
     if recovering:  # the owned recorded request is validated before any fingerprint (#1614)
@@ -470,6 +471,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
          authority_source, resource_ref, processing_info, binding_fingerprint,
          seconds_basis, continuation, ttl_info, retained_inputs, row_processing) = binding
         invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
+        named = (custody.invocation_record(drive, retry_token) or {}).get("named_notes")  # its envelope holds the text
     else:
         route, row_processing = actor["route"], actor.get("row_processing")  # the row's own tier: custody, never the request
         if selector_root := ("skill_payload" if prior else selector_root):
@@ -599,8 +601,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 gateway.ensure_full_access(scope_root)
             seconds = bound.seconds
             documents = attach_selected_documents(ctx, gateway, route.route_id, attachment_paths, _document_intent, _document_first_start)
-            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service, start_body=None if continuation_token else f"{text}\n{instructions}")  # the start tail: a start that continues no run
-            held = getattr(ctx, "_session_held_heads", None)  # set by its memory delivery (``session_memory_references``)
+            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service, start_body=None if continuation_token else f"{text}\n{instructions}", knowledge_notes=knowledge_notes)  # the start tail: a start that continues no run
+            held, named = getattr(ctx, "_session_held_heads", None), getattr(ctx, "_session_named_notes", None)
             request_body = _start_request(ctx, route, authority, scope_root, continuation.prompt or text,
                                           seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral, service_roots=service.roots,
                                           **({"directory_options": directory_options} if directory_options else {}))
@@ -631,7 +633,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
             processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
-            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody, **({"held_heads": held} if held else {}),
+            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody,
+            **{key: value for key, value in (("held_heads", held), ("named_notes", named)) if value},
         )
         if not requested or claim_refusal:
             reason, detail, facts = _unclaimed_start_facts(claim_refusal, recovering)
@@ -713,7 +716,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering)))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt={**start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering), named),
+                                     "argument_notes": _named_note_feedback})
 
 
 def _start_lineage(request: Any, invocation_id: str, authority: "DelegatedRunShape", inputs: Any, recovering: bool) -> Any:
@@ -758,7 +762,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     if input_files is not None:
         facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
             1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
-    rendered = render_receipt(build_receipt(facts))
+    rendered = render_receipt(build_receipt(facts)) + "".join(f"\n{line}" for line in facts.get("argument_notes") or ())
     note += rendered
     payload = {
         "status": "started" if durable else "started_uncustodied",
@@ -1268,7 +1272,7 @@ def get_tools() -> List[ToolEntry]:
                     "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
                     "the session starts with my human's words for the work, the marks, the knowledge outline and, unless "
                     "my input is declared, the heads of the notes that claim this work's room and of the notes their "
-                    "heads link, none of my other memory; "
+                    "heads link and the notes knowledge_notes names, none of my other memory; "
                     "the host appends those words verbatim. The run starts in my write root; "
                     "a path named here does not move it: for another repository, schedule a child whose workspace is that repository. "
                     "Direct retry_of: omit or pass '' to replay the recorded request; other text must equal "
@@ -1335,6 +1339,7 @@ def get_tools() -> List[ToolEntry]:
                     "session with retained evidence when the old session has gone astray. Omit for plan threads."},
                 **attachment_parameters("Until a scheduled child's first run starts, omitted attachment_paths keep its parent's selection. A continuation or replacement inherits none: pass them again. Omit both with retry_of."),
                 **input_files_parameter("continue_from retains its own new selection; nothing is inherited. Omit with retry_of: its result returns the original receipt."),
+                **knowledge_notes_parameter("checked before sending; this start carries each whole at its current revision. Omit with retry_of."),
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
                     "Looks up the accepted run. A Resume risk decision makes it lookup-only. Otherwise it may replay "

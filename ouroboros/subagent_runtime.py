@@ -1264,8 +1264,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         if str(options.get("retry_of") or "").strip() and (
             selected_id or selected_snapshot is not None or access is not None
             or options.get("mode") is not None or options.get("override_plan_readiness") is not None
-            or options.get("workspace") is not None or options.get("attachment_paths") is not None
-            or options.get("attachment_import") is not None or options.get("input_files") is not None
+            or any(options.get(key) is not None for key in (
+                "workspace", "attachment_paths", "attachment_import", "input_files", "knowledge_notes"))
         ):
             raise SubagentSelectionError(
                 "retry_selector_conflict",
@@ -1330,6 +1330,13 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 resolve_selection(ctx, entries)
         except InputSelectionError as exc:
             raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results}) from exc
+        from ouroboros.subagent_work_order import NamedNoteError, resolve_named_notes
+
+        try:  # the named notes resolve as the caller's knowledge_read resolves them, before the daemon
+            options["knowledge_notes"], options["_named_note_feedback"] = resolve_named_notes(
+                ctx, options.get("knowledge_notes"))
+        except NamedNoteError as exc:
+            raise SubagentSelectionError(exc.code, exc.detail, {"knowledge_notes": "unresolved"}) from exc
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
@@ -1337,7 +1344,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         from ouroboros.delegate_evidence import record_start_blocked
 
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), exc.code)
-        facts = {**exc.facts, **({"definitely_unrun": True} if "input_files" in exc.facts else {})}
+        facts = {**exc.facts, **({"definitely_unrun": True} if {"input_files", "knowledge_notes"} & set(exc.facts)
+                                 else {})}
         return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail, **facts),
                                     meta_updates={"operation_outcome": "completed_no_effect"})
 
@@ -1361,7 +1369,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             **{key: options.pop(key) for key in (
                 "directory_strategy", "scope_paths", "continue_from", "continue_carrier", "mode",
                 "override_plan_readiness", "_plan_answers", "workspace", "attachment_paths", "_document_intent",
-                "_document_first_start", "input_files", "_prepared_inputs") if key in options},
+                "_document_first_start", "input_files", "_prepared_inputs", "knowledge_notes", "_named_note_feedback")
+                if key in options},
         )
         # Every configured-session start lands here — the host's pre-start
         # (charter, owner 2026-08-28/29) and any model-issued retry/replacement
