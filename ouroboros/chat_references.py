@@ -509,15 +509,20 @@ def with_turn_address(metadata, row: dict) -> dict:
     return {**meta, TURN_ADDRESS: exact} if exact else meta
 
 
-def _turn_task(root, task_id: str) -> dict:
-    """The running task or stored result, including its host-owned lineage."""
+def _turn_task(root, task_id: str, *, live_only: bool = False) -> dict:
+    """The live task, or for durable delivery its stored result, including its host-owned lineage."""
     from ouroboros.task_status import load_effective_task_result
     from supervisor import queue
 
     with queue._queue_lock:
         running = queue.RUNNING.get(task_id)
-    return ((running or {}).get("task") if running is not None else load_effective_task_result(
-        root, task_id, materialize_artifacts=False)) or {}
+    if running is not None:
+        return running.get("task") or {}
+    if live_only:
+        from supervisor.workers import direct_chat_turn
+
+        return direct_chat_turn(task_id) or {}
+    return load_effective_task_result(root, task_id, materialize_artifacts=False) or {}
 
 
 def _turn_metadata(task: dict) -> dict:
@@ -525,23 +530,25 @@ def _turn_metadata(task: dict) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
-def turn_reply_transport(root, task_id: str, *, anchor: bool = True, strict: bool = False) -> dict:
+def turn_reply_transport(root, task_id: str, *, anchor: bool = True, strict: bool = False, live_only: bool = False) -> dict:
     """Where everything ``task_id``'s turn sends goes (its answer, questions, media, cards, typing; progress and its
     end's notice without the anchor, ``anchor`` False), when the owner's Telegram chat began it: an accepted exact
     Reply's address with its strict anchor, as the host accepted it and the turn carries it from its start
     (``TURN_ADDRESS``), so no read of the source row is needed; his late answer to a question there, the bot and
     chat that answer came from (``late_answer_surface``). A helper inherits its root's surface without the root's
     anchor. ``{}`` for every other turn: the room's binding, as before.
+    Ordinary host progress relies on live lineage only, not a full saved result (``live_only``).
     A record that cannot be read answers ``{}`` too, or raises for ``strict``."""
     if not root or not task_id:
         return {}
     try:
-        task = _turn_task(root, task_id)
+        task = _turn_task(root, task_id, live_only=live_only)
         address = reply_transport_from_metadata(root, _turn_metadata(task), anchor=anchor)
         if not address and task.get("delegation_role") == "subagent":
             root_id = str(task.get("root_task_id") or task.get("parent_task_id") or "")
             if root_id and root_id != task_id:
-                address = reply_transport_from_metadata(root, _turn_metadata(_turn_task(root, root_id)), anchor=False)
+                parent = _turn_task(root, root_id, live_only=live_only)
+                address = reply_transport_from_metadata(root, _turn_metadata(parent), anchor=False)
         return address
     except (OSError, ValueError, TypeError, StoreError):
         if strict:
@@ -619,7 +626,9 @@ def live_transport(root, meta: dict, room_binding: Callable[[], dict], task_id: 
     if address:
         bound = room_binding()
         return {**bound, "telegram_root": address} if bound else address
-    return turn_reply_transport(root, task_id, anchor=False) if is_progress and task_id else {}
+    # An ordinary host status has a room even without a live turn. Unlike a helper card or
+    # a turn's own speech, it need not reload completed work to reconstruct a Telegram route.
+    return turn_reply_transport(root, task_id, anchor=False, live_only=role == "system") if is_progress and task_id else {}
 
 
 def helper_card_address(root, meta: dict, *, role: str, system_type: str, is_progress: bool) -> dict:
