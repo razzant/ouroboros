@@ -3026,7 +3026,8 @@ the Check button sits under the field. The QR is drawn on the device by
 the vendored encoder, dark on a white square in both themes, and holds the link alone, never the token. A failed check
 says only its own cause («Could not reach Telegram from here», «Telegram did not accept this token») and blocks neither
 Continue nor Finish; a refused token is not saved, an unchecked one is. The code is made once per card and kept until
-Finish, which carries the token, the code and the options; Summary shows the card's row when a token will be saved. The
+Finish, which saves the token; the code and the options go to the skill once it runs, never into Settings. Summary
+shows the card's row when a token will be saved. The
 card's words, steps, link and options are the skill's declaration: nothing in the step is a service's own.
 
 The first-run wizard is compact; the step rail alone says which step this is. It names each step by one short word

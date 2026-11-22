@@ -952,37 +952,44 @@ enter it; a transport must not offer a reply as an answer to it.
 A skill that ships with the app (a built-in) may let the setup wizard connect it before Start: its Skills step then
 shows the skill as a card, first, with the skill's own steps to get a token, a token field, a check that names the
 account, a QR of a link with a one-time code, and options. Hub skills cannot: the host never runs a hub skill's code
-before its review. The card is one top-level manifest key beside `secret_fields`:
+before its review. The card is one top-level manifest key beside `secret_fields`, which holds only the token:
 
 ```yaml
-secret_fields: {botToken: TELEGRAM_BOT_TOKEN, pairingCode: TELEGRAM_PAIRING_CODE}
+env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields: {botToken: TELEGRAM_BOT_TOKEN}
 connection_card:
   title: "Phone via Telegram"          # the card's words; without them the catalog's title and pitch
   pitch: "Chat with Ouroboros anywhere"
   steps:                               # numbered; the token field stands under the last one
     - {text: "Open @BotFather in Telegram", link: "https://t.me/BotFather", action: "Open @BotFather"}
     - {text: "BotFather replies with a token: paste it here and press Check"}
-  token: botToken                      # the secret field holding the token
+  token: botToken                      # the secret field holding the token, saved to Settings at Finish
   pairing:
-    code: pairingCode                  # the secret field the one-time code is saved under
+    code: {key: TELEGRAM_PAIRING_CODE, store: skill_settings, route: settings/save}   # the skill's own settings
     link: "https://t.me/{username}?start={code}"   # https, with both places; drawn as the QR
     identity: "lib/telegram_pairing.py:bot_identity"   # stdlib-only function(token, timeout=) inside the skill
     hint: "Scan it with your phone’s camera, then press Start in Telegram."
     note: "You can finish setup now; the bot answers once Ouroboros starts."
-  options:                             # kept in the skill's own settings, posted once after Start
+  options:                             # the skill's own settings too
     - {key: TELEGRAM_NOTIFY_TASKS, label: "Send results and errors of work here", "on": "on", "off": "off",
        new_connection: true, store: skill_settings, route: settings/save}
 ```
 
 `identity` answers `{"ok": True, "username": …}`, `{"ok": False, "cause": "refused"}` (the service rejected the
 token) or `{"ok": False, "cause": "unreachable"}`; the host calls it from the app's own copy of the skill, waits a
-little longer than `timeout`, and never passes on its errors' text. The page makes the code (16 random bytes,
-base64url). Finish saves the token and the code under the declared keys in its one settings write (never from the
-Telegram Mini App, since a code names the account's owner) and notes the owner's consent in
-`state/skill_starter.json` (`connections`). Once the skill is installed the host grants the two keys through the
-lifecycle, enabling the skill, and then posts the options once to `/api/extensions/<skill>/<route>` on loopback,
-waiting a little for the route to answer; each outcome is recorded there and none blocks Start. A card missing any
-part the host needs is not shown, and the skill stays an ordinary row.
+little longer than `timeout`, and never passes on its errors' text. The page mints the code (24 random bytes,
+base64url, the form a skill's own minting gives). Finish saves the token alone in its one settings write, never the
+code; the completion route refuses a card's values from the Telegram Mini App, since a code names the account's owner.
+Once that write is saved, the owner's consent (the code and the options) is noted in `state/skill_starter.json`
+(`connections`), never in Settings or a log. When the skill is installed, the host grants the token key where reviewed
+skills are not granted automatically, then makes one post of every `store: skill_settings` value of the card that
+shares a route (here the code and the option) to `/api/extensions/<skill>/<route>` from the server itself over
+loopback, so the route's own guard (owner changes only from the owner's local session) reads it as local; no request
+can choose what it posts. It posts on events that already happen, never on a timer: the starter install's end, a
+saved completion for a skill already installed, the skill's extension finishing its load, and the next start; a route
+that does not serve yet (409) waits for the next of them. The code leaves the record once posted or refused; each
+outcome is recorded there and none blocks Start. A card missing any part the host needs is not shown, and the skill
+stays an ordinary row.
 
 ## Grants for protected keys and host permissions
 
