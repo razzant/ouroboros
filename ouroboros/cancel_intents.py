@@ -207,22 +207,24 @@ def settled_status(drive_root: Any, task_id: str) -> str:
         return ""
 
 
-def _validated_single_cancel_target(drive_root: Any, task_id: str) -> str:
-    """Resolve a historical root id to its durable physical retry leaf.
+def _validated_single_cancel_target(drive_root: Any, task_id: str, *, txn=None) -> str:
+    """Follow reciprocal stored retry links within the caller's control decision. Same-id retries stay exact."""
+    from ouroboros.task_results import _admit_stored, load_task_result, resolve_task_lineage
 
-    Only reciprocal host-written result lineage is authority.  Same-id retries
-    (subagent/evolution) stay exact.  This helper is called while the cancel
-    projection lock is held, which makes retry publication and intent minting
-    one ordered decision with the reaper's admission boundary.
-    """
-    from ouroboros.task_results import load_task_result, resolve_task_lineage
+    def read(tid):
+        if txn is None:
+            return load_task_result(drive_root, tid, strict=True)
+        row = txn.load(tid)
+        if row is not None:
+            _admit_stored(row, tid, strict=True, noun="task result authority")
+        return row
 
     current_id = _valid_task_id(task_id)
     seen = {current_id}
     logical_root = current_id
     for _hop in range(_RETRY_LINEAGE_MAX_HOPS + 1):
         try:
-            current = load_task_result(drive_root, current_id, strict=True) or {}
+            current = read(current_id) or {}
         except Exception as exc:
             raise CancelIntentLineageIndeterminate(
                 f"task-result authority is unreadable for {current_id}"
@@ -231,9 +233,7 @@ def _validated_single_cancel_target(drive_root: Any, task_id: str) -> str:
             logical_root = str(current.get("root_task_id") or current_id)
         superseded_by = str(current.get("superseded_by") or "").strip()
         retry_task_id = str(current.get("retry_task_id") or "").strip()
-        if not superseded_by and retry_task_id == current_id:
-            return current_id
-        if not superseded_by and not retry_task_id:
+        if not superseded_by and retry_task_id in ("", current_id):
             return current_id
         if not superseded_by or superseded_by != retry_task_id:
             raise CancelIntentLineageIndeterminate(
@@ -249,7 +249,7 @@ def _validated_single_cancel_target(drive_root: Any, task_id: str) -> str:
                 f"timeout retry lineage from {task_id} exceeds the integrity bound"
             )
         try:
-            successor = load_task_result(drive_root, successor_id, strict=True)
+            successor = read(successor_id)
         except Exception as exc:
             raise CancelIntentLineageIndeterminate(
                 f"task-result authority is unreadable for {successor_id}"

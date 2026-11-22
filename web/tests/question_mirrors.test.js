@@ -825,3 +825,22 @@ test('an optional canonical ask inherits no resumed fact from another quiz wait'
         assert.ok(options(card).every(button => !button.disabled));
     } finally { fx.decision.destroy(); fx.restore(); }
 });
+
+test('a Main copy never carries the answer row\'s address, even when a row names it', () => withTimers(async () => {
+    const fx = mainFixture();
+    try {
+        const ask = { ...WAITING, ts: '2024-04-09T10:05:00+00:00', project_name: 'Seed table',
+            question: 'Which colors should the table legend use?', options: ['Blue and gold', 'Gray and green'],
+            option_details: ['Warm accents', 'Muted colors'], stake: 'Table readability' };
+        fx.add(ask);
+        const [card] = fx.cards();
+        // A history row of the same question, answered, naming its answer row (DESIGN "Replies").
+        fx.decision.buildQuizCard({ msg_type: 'quiz', role: 'assistant', task_id: 't-1', text: ask.question, ts: ask.ts,
+            quiz: { quiz_id: 'qz-1', question: ask.question, options: ask.options, stake: ask.stake, assumption: '',
+                state: 'answered', answered_index: 1, comment: 'Use clear labels', answer_row_address: 'row:23@2024-04-09T10:14:00+00:00#0123456789ab' } });
+        assert.equal(card.dataset.state, 'answered');
+        assert.ok(options(card)[1].classList.contains('chosen') && options(card).every((button) => button.disabled),
+            'the copy keeps its recorded choice disabled: no Reply lands here');
+        assert.ok([...options(card), card.querySelector('.chat-quiz-answer')].every((node) => !node?.dataset.rowAddress));
+    } finally { fx.decision.destroy(); fx.restore(); }
+}));

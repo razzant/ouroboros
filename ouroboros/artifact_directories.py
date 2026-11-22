@@ -4,6 +4,8 @@ The process-output owner validates every source and archive name. This packer
 streams those members into the ordinary task artifact ledger and ZIP, whose
 names derive from the members' digests; ``current_directory_capture`` proves a
 retained pair still holds them, so an unchanged declaration needs no new pair.
+Unlike a browser download, the pair cannot omit an admitted member just because
+its native pathname is not representable in the ZIP.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import shutil
 import tempfile
 import zipfile
 from hashlib import sha256
-from typing import Any, Dict, Iterable, List, Union
+from typing import Any, Callable, Dict, Iterable, List, Union
 
 from ouroboros.artifact_storage import temporary_sibling
 from ouroboros.utils import atomic_write_json
@@ -175,8 +177,7 @@ def _work_directory_entries(source: pathlib.Path, member_paths: Iterable[pathlib
         if not rel or parts.is_absolute() or ".." in parts.parts or rel in seen:
             raise OSError(f"invalid or duplicate directory member name: {rel}")
         seen.add(rel)
-    excluded = [{"path": rel, "reason": "SQLite WAL index"} for rel, p in entries if work_domain.is_wal_index(p)]
-    return sorted((rel, p) for rel, p in entries if not work_domain.is_wal_index(p)), excluded
+    return _zip_entries(entries, work_domain.is_wal_index)
 
 
 def _received_members(source: pathlib.Path, entries: list, staged: pathlib.Path, *, policy_checked: bool) -> list:
@@ -230,8 +231,24 @@ def _directory_entries(source: pathlib.Path, member_paths: Iterable[pathlib.Path
         seen.add(rel)
     from ouroboros.store import is_wal_index  # shared memory no raw reader opens; a copy rebuilds its own
 
-    excluded = [{"path": rel, "reason": "SQLite WAL index"} for rel, p in entries if is_wal_index(p)]
-    return sorted((rel, p) for rel, p in entries if not is_wal_index(p)), excluded
+    return _zip_entries(entries, is_wal_index)
+
+
+def _zip_entries(
+    entries: list[tuple[str, pathlib.Path]], is_wal_index: Callable[[pathlib.Path], bool],
+) -> tuple[list[tuple[str, pathlib.Path]], list[dict[str, str]]]:
+    """Refuse an unencodable admitted name before staging, never certify a partial pair."""
+    members, excluded = [], []
+    for rel, path in entries:
+        if is_wal_index(path):
+            excluded.append({"path": rel, "reason": "SQLite WAL index"})
+            continue
+        try:
+            rel.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise OSError(f"directory member name cannot be stored in a ZIP: {rel!r}") from exc
+        members.append((rel, path))
+    return sorted(members), excluded
 
 
 def _available_member(path: pathlib.Path, policy_checked: bool) -> pathlib.Path:

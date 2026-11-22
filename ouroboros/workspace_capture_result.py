@@ -36,9 +36,11 @@ def _has_manifest(result):
 
 
 def read_replica(root, task_id, canonical, candidate, load):
-    """Read the selected result once. Only a host-admitted store can supply its first current capture."""
+    """Read the selected result once. Only a host-admitted store can supply its first current capture, and only
+    a replica of the canonical row's own attempt (``replica_attempt_matches``, where attempt 0 is never 1) may
+    become current; another attempt's replica is read for history, never as the row's current capture."""
     from ouroboros.headless import task_requires_workspace_capture
-    from ouroboros.post_task_checkpoint import post_task_attempt_matches
+    from ouroboros.post_task_checkpoint import replica_attempt_matches
     from ouroboros.task_custody import own_child_drives
 
     admitted = None
@@ -54,11 +56,8 @@ def read_replica(root, task_id, canonical, candidate, load):
             and replica.get("artifact_status") in ARTIFACT_READY_STATUSES and not replica.get("native_capture_pending")
             and not replica.get("artifact_error") and _has_manifest(replica)
             and task_requires_workspace_capture({**replica, **canonical})):
-        try:
-            if post_task_attempt_matches(replica, canonical):
-                return replica, admitted
-        except (TypeError, ValueError, OverflowError):
-            pass  # a malformed attempt cannot identify the producer
+        if replica_attempt_matches(canonical, replica):  # an unreadable or foreign attempt confirms nothing
+            return replica, admitted
     return replica, None
 
 

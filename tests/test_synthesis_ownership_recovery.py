@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import json
 import threading
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import pytest
 
 from ouroboros import agent_task_pipeline as pipeline, post_task_checkpoint as phase
 from ouroboros import usage_accounting as money
+from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_delegate_body_collection import _until
@@ -71,7 +73,12 @@ def test_child_pending_cannot_regress_canonical_phase_during_actual_copyback(wor
     copied = copy_child_task_result(work.root, {**work.task, "drive_root": str(child)})
     for row in (viewed, copied):
         assert row["root_phase_checkpoint"]["post_task_synthesis"] == canonical
-    assert copied["result"] == "Child answer enriched"
+        assert row["root_phase_checkpoint"]["status"] == "pass"  # the child's checkpoint was applied, its phase not
+    # Same attempt, contrary failed words: the settled ending stays whole and the child's row stays retrievable (#3929).
+    assert copied["result"] == viewed["result"] == "Preserved solve answer"
+    [kept] = copied["late_attempt_results"]
+    rejected = json.loads(read_actor_source_bytes(work.root, work.task["id"], kept["source_ref"]))
+    assert rejected["result"] == "Child answer enriched"
     assert checkpoint(work)["post_task_pause"] == saved["post_task_pause"]
 
 

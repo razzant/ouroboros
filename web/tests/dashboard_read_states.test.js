@@ -1215,6 +1215,55 @@ test('Activity keeps a queue row\'s own wait beside its known outcome and shows 
         'restart-root': '1', 'pending-root': undefined });
 });
 
+test('A retried row says only what the read of its current attempt says, and keeps its control', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const run = (id, attempt, extra = {}) => ({ id, type: 'task', attempt, runtime_sec: 9,
+        task: { id, root_task_id: id, title: `Work ${id}`, ...extra } });
+    const stop = (id) => ({ controls: [{ action: 'stop', target: id }] });
+    const thinking = (id, extra = {}) => projectedWork(id, 'working', { call: 'thinking', ...stop(id), ...extra });
+    const counted = (id, attempt, phase = 'working') => ({ activity_id: id, kind: 'managed_task', phase, task_attempt: attempt });
+    routes.set(queueUrl, response({ queue: { pending: [], running: [
+        run('old-thinking', 2), run('old-ending', 2), run('old-paused', 2), run('agreed', 1), run('kept-ending', 1),
+        run('ahead', 1), run('helper', 2, { root_task_id: 'agreed', parent_task_id: 'agreed', title: 'Helper of agreed' }),
+    ] } }));
+    routes.set(backgroundUrl, response({ bg_consciousness_enabled: false, active_chat_activities_complete: true,
+        works: [thinking('old-thinking'), projectedWork('old-ending', 'working', stop('old-ending')),
+            projectedWork('old-paused', 'paused'), projectedWork('kept-ending', 'working', stop('kept-ending')),
+            thinking('ahead'), thinking('agreed', { members: { states: {
+                helper: { activity: 'working', call: 'thinking', confirmed: true, mark: 'moving' } } } })],
+        active_chat_activities: [counted('old-thinking', 1), counted('old-paused', 1, 'budget_paused'),
+            counted('agreed', 1), counted('ahead', 2), ...['old-ending', 'kept-ending'].map((id) =>
+                outcomeRow(id, 'completed', 'ok', 'finalizing', 'running', { task_attempt: 1 }))] }));
+    await initActivity({ mount, ws }).refresh();
+    const sub = (id) => rowOf(mount, id).querySelector('.activity-sub').textContent;
+    const control = (id) => {
+        const button = section(mount, 'queue').querySelector(`[data-id="${id}"]`);
+        return [button.dataset.root, button.dataset.budgetPaused, button.dataset.resume, button.textContent];
+    };
+    // The census still describes attempt 1 of rows the queue already runs as attempt 2: neither that Thinking, that
+    // Done · Finalizing… nor that Paused is the running attempt's state. Each row says it is unconfirmed beside the
+    // running attempt's own time and ranks by the queue, so no Paused group forms.
+    for (const id of ['old-thinking', 'old-ending', 'old-paused']) {
+        assert.equal(sub(id), 'Activity unconfirmed · task · 9s', id);
+        assert.equal(chip(rowOf(mount, id)), null, id);
+    }
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]'), null);
+    // Both reads name one attempt: the census's word or outcome and the queue's time stand together.
+    assert.equal(sub('agreed'), 'Thinking · task · 9s');
+    const kept = chip(rowOf(mount, 'kept-ending'));
+    assert.deepEqual([kept.text, kept.secondary], ['Done', 'Finalizing…']);
+    assert.match(sub('kept-ending'), / · task · 9s/);
+    // The census already speaks for attempt 2 while the queue still times attempt 1: the word stays, the time goes.
+    assert.equal(sub('ahead'), 'Thinking · task');
+    // A legacy member has no attempt witness: keep its own phase without joining a clock or borrowing the root's attempt.
+    assert.equal(sub('helper'), 'Thinking · task');
+    assert.deepEqual(control('helper'), [undefined, undefined, undefined, 'Stop…']);
+    // Every control keeps its target and rights: each running root's Stop, the paused row's Resume.
+    for (const id of ['old-thinking', 'old-ending', 'kept-ending', 'ahead']) assert.deepEqual(control(id), control('agreed'), id);
+    assert.deepEqual(control('old-paused').slice(0, 3), ['1', '1', '1']);
+});
+
 // ---------------------------------------------------------------------------
 // Dashboard -> Storage: the real controller over the fixture's fetch, window and document.
 // ---------------------------------------------------------------------------

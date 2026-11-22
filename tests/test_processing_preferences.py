@@ -50,6 +50,34 @@ def test_unconfigured_cross_model_fallback_keeps_the_acting_role_intent(monkeypa
     assert task_processing_preference(task, model_role="light") == "fast"
 
 
+@pytest.mark.parametrize("wake,row_tier,own,expected", [
+    (True, "", "", "standard"), (True, "economy", "", "economy"),
+    (True, "economy", "fast", "fast"), (False, "", "", "ultrafast"),
+])
+def test_fallback_and_new_helper_keep_the_works_own_primary_role(monkeypatch, wake, row_tier, own, expected):
+    from types import SimpleNamespace
+
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.lead_fact import processing_fields
+    from ouroboros.subagent_runtime import run_processing
+    from ouroboros.supervisor_route import work_tier
+
+    roles = json.dumps({"main": "ultrafast", "consciousness": "standard", "fallback": [row_tier]})
+    settings = {**actor_settings(), ROLES: roles, GLOBAL: "economy"}
+    monkeypatch.setenv(ROLES, roles)
+    monkeypatch.setenv(GLOBAL, "economy")
+    metadata = wake_task_metadata("observe", "clock") if wake else {"lead": {"source": "main"}}
+    if own:
+        metadata["processing"] = {"source": "owner", "tier": own}
+    fallback = "fallback:0"
+    for task in ({"task_metadata": metadata}, {"metadata": metadata, "model_role": fallback}):
+        assert task_processing_preference(task, model_role=fallback) == expected
+    assert processing_fields({"metadata": metadata}, {"basis": "fallback", "role": fallback})["processing"]["resolved"] == expected
+    ctx = SimpleNamespace(task_metadata=metadata, context_fit_plan=SimpleNamespace(model_role=fallback))
+    snapshot, _ = select_subagent_snapshot(settings, subagent_id="critic", work_tier=work_tier(ctx, settings))
+    assert run_processing(snapshot) == expected
+
+
 @pytest.mark.parametrize("value", [1, {}, "auto"])
 def test_only_product_vocabulary_is_authored(value):
     with pytest.raises(ValueError):

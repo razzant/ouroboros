@@ -13,13 +13,14 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_completion_observations import _trace
 
 
-def source_reader(tmp_path, monkeypatch, mode):
+def source_reader(tmp_path, monkeypatch, mode, *, trace=None):
     canonical, execution, repo = [tmp_path / name for name in ('canonical', 'execution', 'repo')]
     for path in (canonical, execution, repo):
         path.mkdir()
     monkeypatch.setattr('ouroboros.skill_readiness.acceptance_skill_lifecycle', lambda *_a, **_k: [])
-    trace = _trace()
-    trace['tool_calls'][1]['result'] = 'Полный исходный ответ 🙂'
+    if trace is None:
+        trace = _trace()
+        trace['tool_calls'][1]['result'] = 'Полный исходный ответ 🙂'
     source = build_completion_observations(execution,
         {'id': 'source-task', 'budget_drive_root': str(canonical)}, trace)
     row = {'completion_observations': source}
@@ -45,6 +46,7 @@ def test_native_selector_retains_source_task_and_canonical_drive(tmp_path, monke
                         'arguments': {'task_id': 'source-task', 'include_completion_source': True}}
     raw = path.read_bytes()
     text = raw.decode('utf-8')
+    assert raw == json.dumps(json.loads(text), ensure_ascii=False, sort_keys=True).encode('utf-8')
     assert len(raw) > len(text)  # offsets count characters, not UTF-8 bytes
     metadata = json.loads(reg.execute(selector['tool'], selector['arguments']))['completion_source']
     assert metadata['reason'] == 'source_range_required' and 'text' not in metadata
@@ -67,6 +69,34 @@ def test_native_selector_retains_source_task_and_canonical_drive(tmp_path, monke
         }))['completion_source']
         assert result['text'] == text
     assert path.read_bytes() == raw
+
+
+def test_completion_source_keeps_byte_names_and_exact_displaced_ranges(tmp_path, monkeypatch):
+    raw_name = b'notes-\xff.txt'
+    name = raw_name.decode('utf-8', 'surrogateescape')
+    answers = [f'Résumé: {name}', r'Résumé: notes-\udcff.txt']
+    delivery = {'tool': 'send_file', 'status': 'error', 'code': 'LEGACY_TOOL_ERROR',
+                'result': f'Not delivered: {name}', 'is_error': True}
+    reg, ref, path, _, _, row = source_reader(tmp_path, monkeypatch, 'split_readonly',
+        trace={'tool_calls': [delivery], 'displaced_answer': answers})
+    raw = path.read_bytes()
+    text = raw.decode('utf-8')
+    snapshot = json.loads(text)
+    assert snapshot['delivery_results'] == [delivery] and snapshot['displaced_answer'] == answers
+    assert snapshot['delivery_results'][0]['result'].removeprefix('Not delivered: ').encode(
+        'utf-8', 'surrogateescape') == raw_name
+    observations = row['completion_observations']
+    assert observations['delivery_counts']['send_file'] == {'calls': 1, 'reported_ok': 0, 'status_unknown': 0}
+    assert observations['displaced_answer']['count'] == 2
+    for selected, answer in zip(observations['displaced_answer']['answers'], answers):
+        start, end = selected['source_range']
+        assert selected['chars'] == len(answer)
+        result = json.loads(reg.execute('get_task_result', {**ref['reader']['arguments'],
+            'source_start_char': start, 'source_end_char': end}))['completion_source']
+        part = result['text']
+        assert part == text[start:end] and json.loads(part) == answer
+        assert result['complete_sha256'] == ref['sha256'] == hashlib.sha256(raw).hexdigest()
+        assert result['text_sha256'] == hashlib.sha256(part.encode('utf-8')).hexdigest()
 
 
 @pytest.mark.parametrize('start,end', [(None, 1), (0, None), (0, False), (-1, 2)])

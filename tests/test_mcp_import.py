@@ -412,7 +412,7 @@ def test_preview_contract_twin_and_the_producer_agree():
                             contracts.MCPImportPreviewRequest) == []
 
 
-# The real Settings › Tools page (mcp_settings.js, mounted the way the shell mounts it) over the repo's DOM double,
+# The real MCP servers page of Extensions (mcp_settings.js, mounted the way the shell mounts it) over the repo's DOM double,
 # which parses nothing: this mounts the page's own markup, so a renamed control fails here. It stops short of an
 # engine, layout and CSS; tests/test_settings_tools_models_browser.py is the rendered lane.
 IMPORT_JOURNEY = r'''
@@ -487,7 +487,7 @@ const settle = async (ready) => {
     }
 };
 
-settingsPageFor('tools').mount(page, { path: 'tools', row: '', ctx: { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: 'tools' } } });
+settingsPageFor('tools').mount(page, { path: 'tools', row: '', ctx: { readSettings, openSettings: () => true, onScreen: (path) => path === 'tools', state: { activePage: 'skills' } } });
 await settle(() => page.querySelector('[data-tools-list]').children.length > 0);
 page.querySelector('[data-tools-action="tools:import"]').click();
 const dialog = doc.body.querySelector('.mcp-import-dialog');
@@ -528,7 +528,7 @@ process.stdout.write(JSON.stringify(facts), () => process.exit(0));
 
 
 def import_journey(document, tmp_path, settings_client, monkeypatch):  # noqa: F811
-    """Paste, Preview, Apply and the two switches on the real Settings › Tools page, against the real routes on a real port."""
+    """Paste, Preview, Apply and the two switches on the real MCP servers page, against the real routes on a real port."""
     from ouroboros import config
     from ouroboros.gateway import mcp as mcp_api
 

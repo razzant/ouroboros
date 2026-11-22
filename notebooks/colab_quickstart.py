@@ -236,6 +236,8 @@ if "OUROBOROS_RUNTIME_MODE" in os.environ:
     _launch["runtime_mode"] = os.environ["OUROBOROS_RUNTIME_MODE"]
 if "OUROBOROS_MAX_WORKERS" in os.environ:
     _launch["max_workers"] = int(os.environ["OUROBOROS_MAX_WORKERS"])
+if "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT" in os.environ:
+    _launch["max_active_subagents_per_root"] = os.environ["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"]  # read by the document rule
 settings = build_colab_settings(
     secrets,
     **_launch,

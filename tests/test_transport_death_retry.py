@@ -358,6 +358,17 @@ def test_unknown_outcomes_that_are_not_typed_transport_deaths_are_never_resent(t
     assert no_sleep == []
 
 
+def test_conflicting_tier_refusal_stops_round_recovery(tmp_path, no_sleep):
+    error = _status_failure(503)
+    error.processing_refusal_conflict = True
+    error.__cause__ = httpx.ReadError("connection lost")
+    llm, usage = _ScriptedLLM(lambda: error), {}
+    message, _ = _primary_call(llm, tmp_path, usage)
+    assert message is None and llm.calls == 1 and no_sleep == []
+    assert usage["_pending_transport_outcome"]["processing_refusal_conflict"] is True
+    assert not loop_transport.new_generation_after_unknown(SimpleNamespace(task_id="t-death"), usage)
+
+
 def test_requests_lane_death_repeats_on_the_same_rail(tmp_path, no_sleep):
     """The Anthropic-native requests/urllib3 shape rides the same bounded rail."""
     import http.client

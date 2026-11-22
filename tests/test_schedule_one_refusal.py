@@ -90,7 +90,20 @@ def test_independent_folder_field_problems_join_the_shape_refusal(tmp_path, monk
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place.")
     assert control._schedule_task(ctx, **base, directory_strategy="copy") == (
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder.")
+    # workspace='in_place' names what is in the way and the one change that removes the conflict, choosing no form.
+    lead = ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface and no "
+            "directory options; in the way: ")
+    tail = ". Omitting workspace removes this conflict."
+    assert control._schedule_task(ctx, **base, workspace="in_place", write_surface="external_workspace",
+                                  scope_paths=["src"]) == lead + "scope_paths" + tail
+    assert control._schedule_task(ctx, **base, workspace="in_place") == lead + "no write_surface" + tail
     assert not ctx.pending_events
+    # The other direction: the documented defaults are not in the way, and dropping workspace schedules.
+    acting = control._schedule_task(ctx, **base, workspace="in_place", write_surface="self_worktree",
+                                    directory_strategy="direct", scope_paths=[])
+    assert "in the way" not in acting
+    control._schedule_task(ctx, **base)
+    assert [event["type"] for event in ctx.pending_events][-1:] == ["schedule_subagent"]
 
 
 def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path, monkeypatch):

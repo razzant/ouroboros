@@ -22,6 +22,7 @@ import test from 'node:test';
 import { accountRows } from '../modules/harness_accounts.js';
 import { accountName, nextUpAccount } from '../modules/claudexor_status_store.js';
 import { indexProfilesByHarness } from '../modules/route_editor_primitives.js';
+import { terminalChildFrame } from '../modules/settled_card.js';
 
 // Source pins below delimit across line breaks; normalize CRLF so a Windows
 // checkout (core.autocrlf) reads the same bytes the delimiters were written for.
@@ -150,27 +151,43 @@ test('the live progress path forwards every progress field the endpoint emits an
                 `a chat.js live whitelist drops ${key}: the chip only tells the truth after a reload`);
         }
     }
-    // The SECOND whitelist of the same class: routeSubagentTerminalToCard
-    // synthesizes a terminal from the log-channel task_done through an
-    // enumerated updateSubagentCardFromEvent({...}) literal. Forgetting the
-    // delegation keys there keeps a log-channel-only card at "no run yet"
+    // The SECOND whitelist of the same class: routeSubagentTerminalToCard synthesizes a
+    // terminal from the log-channel task_done as a frame built by terminalChildFrame
+    // (settled_card.js) and hands it WHOLE to updateSubagentCardFromEvent. Forgetting the
+    // delegation keys in that frame keeps a log-channel-only card at "no run yet"
     // forever — the exact defect family this file was written for.
-    const terminalWhitelists = chat.split('updateSubagentCardFromEvent({').slice(1)
+    assert.match(chat, /updateSubagentCardFromEvent\(terminalChildFrame\(childId, info, evt, phase\)/,
+        'routeSubagentTerminalToCard must pass the whole synthesized frame to updateSubagentCardFromEvent');
+    const settled = moduleFile('settled_card.js');
+    const frameBuilders = settled.split('export function terminalChildFrame').slice(1)
         .map((chunk) => {
-            // The literal closes with `}, ts)` — cut at its closing brace line so
-            // the scanned chunk is exactly the enumerated field list.
-            const end = chunk.search(/^\s*\},/m);
+            // The frame literal closes with `};` — cut at the function's closing brace
+            // line so the scanned chunk is exactly the enumerated field list.
+            const end = chunk.search(/^\}/m);
             return end === -1 ? chunk : chunk.slice(0, end);
         });
-    assert.ok(terminalWhitelists.length > 0,
-        'no enumerated updateSubagentCardFromEvent call site found — update this test');
-    for (const chunk of terminalWhitelists) {
+    assert.ok(frameBuilders.length > 0,
+        'no terminalChildFrame frame builder found — update this test');
+    for (const chunk of frameBuilders) {
         const forwarded = forwardedFields(chunk);
+        assert.match(chunk, /reason_code: evt\.reason_code \|\| ''/);
         for (const key of DELEGATION_KEYS) {
             assert.ok(forwarded.has(key),
                 `the synthesized subagent terminal drops ${key}: a log-channel-only terminal cannot upgrade the chip`);
         }
     }
+    // Behaviour, not just source: a real terminalChildFrame call forwards every
+    // delegation key and the reason code into the frame updateSubagentCardFromEvent receives.
+    const delegationSample = {
+        executor_route: 'route-wire', execution_evidence: 'ev-wire',
+        actual_substrate: 'sub-wire', executor_observation: 'obs-wire',
+    };
+    const frame = terminalChildFrame('child-wire', { parentId: 'root-wire', role: 'scout' }, {
+        status: 'failed', reason_code: 'delegated_custody_unreconciled', ...delegationSample,
+    });
+    assert.equal(frame.reason_code, 'delegated_custody_unreconciled');
+    assert.equal(frame.subagent_event, 'failed');
+    for (const key of DELEGATION_KEYS) assert.equal(frame[key], delegationSample[key], key);
 });
 
 test('both consumers of the credential-profiles wire read the SAME shape', () => {
@@ -301,7 +318,19 @@ test('live structured delivery frames keep additive grouping and size fields', (
 });
 
 test('history typedef declares task outcome terminality fields', () => {
-    const types = moduleFile('api_types.js');
-    assert.match(types, /@property \{"working"\|"done"\|"warn"\|"error"\|"cancelled"=\} outcome_phase/);
-    assert.match(types, /@property \{boolean=\} outcome_final/);
+    // The additive outcome fields now live in the replaceable-client mirror.
+    // Pin TaskOutcomeHistoryFields' own block: the same mirror carries a second,
+    // looser {string=} outcome_phase with its own {boolean=} outcome_final further
+    // down, so a file-wide match could pass even if this history typedef dropped
+    // either field. The enum values are the Python producer's own set
+    // (project_dialogue.outcome_phase: working/done/warn/error/cancelled), now
+    // spelled with single quotes.
+    const types = moduleFile('client_contract_types.js');
+    const start = types.indexOf('@typedef {Object} TaskOutcomeHistoryFields');
+    assert.notEqual(start, -1, 'TaskOutcomeHistoryFields typedef not found — the contract moved, update this test');
+    const end = types.indexOf('*/', start);
+    assert.notEqual(end, -1, 'TaskOutcomeHistoryFields typedef closer not found — update this test');
+    const block = types.slice(start, end);
+    assert.match(block, /@property \{'working'\|'done'\|'warn'\|'error'\|'cancelled'=\} outcome_phase/);
+    assert.match(block, /@property \{boolean=\} outcome_final/);
 });

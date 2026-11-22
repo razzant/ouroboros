@@ -442,11 +442,24 @@ def _transfer(ctx: Any, row: Dict[str, Any], owner: str, *, via: str) -> Dict[st
             "record. Its work stays with that owner; continue or stop that task first.")
     live = live_lineage_processes(_results_root(ctx), previous)
     if live:
+        # Positive entries are the pids RECORDS are addressed by, not a verified live process;
+        # a -1 is a gap (state unreadable), never a pid. Say each as what it is.
+        pids = sorted({pid for pid in live if pid > 0})
+        parts = []
+        if pids:
+            parts.append("the ownership set still holds records addressed by pid "
+                         + ", ".join(str(pid) for pid in pids)
+                         + " (a record address, not proof of a live process)")
+        if any(pid <= 0 for pid in live):
+            parts.append("at least one holding entry's state could not be read (or the ownership set is unreadable)")
         raise CandidateRefused(
             "CANDIDATE_OWNER_PROCESSES_LIVE",
-            f"candidate {row.get('candidate_id')} belongs to task {previous}, whose processes "
-            f"{live} are still alive (or the ownership set is unreadable). Its work stays with that owner "
-            "until they end.")
+            f"candidate {row.get('candidate_id')} belongs to task {previous}, whose custody has not settled: "
+            + "; ".join(parts)
+            + ". A leader that ended does not close its group's record on its own. Its work stays with that "
+            "owner: while this hold stands, do not clean or write into the candidate's folder — either apply "
+            "the saved patch in a separate candidate if the author decides, or return after the group's "
+            "completion is confirmed.")
 
     def change(entry: Dict[str, Any]) -> None:
         if str(entry.get("task_id") or "") != previous:

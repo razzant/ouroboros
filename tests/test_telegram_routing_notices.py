@@ -497,6 +497,22 @@ def test_a_picker_gets_no_invented_reason_and_one_message_with_its_files(phone):
               "Reply with a number, or tap an option in the web chat.")
     [sent] = phone.sent()
     assert sent["text"] == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
+    # A native Reply "2" to that very message quotes the list it shows (its stored row), so the router reads it.
+    from ouroboros.chat_references import resolve_reply
+    from supervisor import message_bus
+
+    state = sys.modules[phone.plugin.__package__ + ".lib.telegram_state"]
+    picker_id = 100 + len(phone.calls)
+    listed = state._message_ref(phone.api, "", 42, picker_id)["row_address"]
+    assert resolve_reply(phone.data, listed)["snippet"].startswith("I couldn't pick a destination for the last message.")
+    answer = {"message_id": 51, "chat": {"id": 42, "type": "private"}, "from": {"id": 42}, "text": "2",
+              "reply_to_message": {"message_id": picker_id, "from": {"id": 7, "is_bot": True}}}
+    fields = state._owner_ingress_fields(phone.api, "", 42, answer, 51, state._reply_target(phone.api, "", 42, answer))
+    row, _ = message_bus.accept_local_message(
+        SimpleNamespace(enqueue_local_message=lambda *_a, **_k: None), phone.data, "2", chat_id=42, user_id=42,
+        source="skill:telegram", client_message_id=fields["client_message_id"],
+        task_metadata={"reply_to": fields["reply_to"]})
+    assert row["reply_to"]["address"] == listed and "telegram_room_chat_id" not in row["reply_to"]
     asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "cause": "Not started: the attachments could not be staged",
                                                        "target_label": "Export"}))
     assert phone.sent()[-1]["text"] == (f"Export · Not started: the attachments could not be staged\n{picker}"

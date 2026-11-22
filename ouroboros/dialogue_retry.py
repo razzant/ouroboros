@@ -15,6 +15,7 @@ import threading
 from collections import OrderedDict
 
 from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+from ouroboros.utils import json_dumps_utf8
 
 log = logging.getLogger(__name__)
 MAX_ROWS = 2048
@@ -53,7 +54,7 @@ def retain(root, stream, row, *, feed=False, **shown) -> None:
     global _bytes, _eviction_burst
     address = row_address(row)
     key = (str(pathlib.Path(root).resolve()), stream, address["chat_id"], address["ts"], address["row_sha256"])
-    payload = json.dumps([key[0], stream, row, bool(feed), shown], ensure_ascii=False).encode("utf-8")
+    payload = json_dumps_utf8([key[0], stream, row, bool(feed), shown], ensure_ascii=False).encode("utf-8")
     announce = False
     with _lock:
         if key in _rows:

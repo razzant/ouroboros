@@ -27,10 +27,10 @@ from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatche
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
-    _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
+    _plain, _provider_exception_facts, failure_settlement_price, physical_failure_evidence, refusal_failure_payload, provider_cost_value, refusal_conflicts,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
-from ouroboros.transport_custody import release_pre_dispatch_attempt, report_attempt_end
+from ouroboros.transport_custody import ProcessingNotStarted, release_pre_dispatch_attempt, report_attempt_end
 from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     QUARANTINE_REL, BillingAuthorityUnavailable, ControlAuthorityUnavailable, UsageAccountingError,
     UsageLedgerCorrupt, UsageLockUnavailable, _drive_root, _named_lock, _number, _TERMINAL,
@@ -278,13 +278,22 @@ class AttemptRequest:
     # None when the candidate carries none. An identity, never a row field.
     candidate_clock_free_sha256: Optional[str] = None
     effort: Optional[Dict[str, Any]] = None
-    allow_live_fetch: bool = True  # False only for a price display: cached tariffs, never a fetch
+    allow_live_fetch: bool = True
     provider_receipt_binding: Optional[Dict[str, str]] = None
     # The local serving tokenizer's observation of this candidate, never a density forecast.
     prompt_tokens_exact: Optional[int] = None
     context_window_tokens_exact: Optional[int] = None
     working_reserve_tokens: Optional[int] = None
     cost_evidence: Optional[Dict[str, Any]] = None
+    provider_reported_cost_only: bool = False
+    estimate_ordinary_pool: bool = False
+    # Whether the candidate's own OpenRouter routing may admit endpoints outside its tier pool; None: no candidate.
+    provider_routing_pinned: Optional[bool] = None
+    unpriced_add_on: bool = False  # Token rates alone cannot price this sealed request.
+    opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
+
+    def settlement_policy(self) -> dict:
+        return {key: True for key in ("provider_reported_cost_only", "unpriced_add_on") if getattr(self, key)}
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -296,6 +305,9 @@ class AttemptReservation:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     scope: Optional[UsageScope] = None
+    provider_reported_cost_only: bool = False
+    unpriced_add_on: bool = False
+    opencode_go: bool = False
 PhysicalAttemptState = Literal["reserved", "released", "dispatched", "settled", "unresolved"]
 PHYSICAL_ATTEMPT_STATES = frozenset(get_args(PhysicalAttemptState))
 POSITIVE_PHYSICAL_ATTEMPT_STATES = frozenset({"settled", "dispatched", "unresolved"})
@@ -324,6 +336,7 @@ class PhysicalAttemptCapture:
     effort: Optional[Dict[str, Any]] = None
     # The submitted fit-estimator count of these bytes (measurement only): 0 unknown, or an exact local count outranks it.
     prompt_tokens_bounded_estimate: int = 0
+    provider_reported_cost_only: bool = False
 
 
 @contextlib.contextmanager
@@ -479,7 +492,7 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
         request = replace(request, task_id=scope.task_id, root_task_id=scope.root_task_id)
     return request, scope
 from ouroboros._usage_cache_splits import (  # noqa: F401,E402  (re-exported seam)
-    invalidate_task_cache_splits, last_task_cache_split,
+    invalidate_task_cache_splits, last_task_cache_split, reservation_cache_ttl,
     reset_task_cache_splits as _reset_task_cache_splits, stash_task_cache_split)
 
 
@@ -560,11 +573,11 @@ def read_usage_records(drive_root: pathlib.Path | str | None = None, *, final_on
     return usage_store.read_usage_records(_drive_root(drive_root))
 
 
-def _reservation_cost(request: AttemptRequest) -> Optional[float]:
+def _reservation_cost(request: AttemptRequest, *, allow_ordinary_lookup: bool = False) -> Optional[float]:
     explicit = request.max_budget_usd if request.max_budget_usd is not None else request.reservation_usd
     if explicit is not None:
         return _number(explicit)
-    if request.force_unknown_reservation:
+    if request.force_unknown_reservation or request.provider_reported_cost_only:
         return None
     if str(request.provider or "").lower() == "local":
         return 0.0
@@ -581,9 +594,7 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         and normalized_model.startswith("openai/")
     ):
         prompt_tokens = (prompt_tokens * 11 + 9) // 10
-    cache_write_tokens = (
-        prompt_tokens if str(request.model or "").lstrip("~").startswith(("anthropic/", "anthropic::")) else 0
-    )
+    cache_write_tokens = prompt_tokens if normalized_model.startswith("anthropic/") else 0
     cached_tokens = 0
     if cache_write_tokens:
         # Price the task's OWN last observed split, not a full write every round;
@@ -592,32 +603,18 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
             request.task_id, request.model, provider=request.provider,
             processing_mode=request.submitted_processing_mode) or 0)
         cache_write_tokens = prompt_tokens - cached_tokens
-    prompt_cache_ttl: Optional[str] = None
-    if cache_write_tokens:
-        # Price the applied candidate TTL; unknown construction sites use the owner SSOT.
-        from ouroboros.config import PROMPT_CACHE_TTL_SCALE, resolve_prompt_cache_ttl
-
-        prompt_cache_ttl = str(request.prompt_cache_ttl or "").strip().lower()
-        if prompt_cache_ttl not in PROMPT_CACHE_TTL_SCALE:
-            # An inspectable marker-free candidate writes no cache at all. Keep the
-            # historical conservative base-tier reservation without misreporting a TTL on
-            # the physical settlement; opaque sites still fall back to the owner setting.
-            prompt_cache_ttl = (
-                "default"
-                if request.candidate_measurement_kind == "canonical_json_v1"
-                else resolve_prompt_cache_ttl()
-            )
+    pricing_mode = "ordinary" if request.estimate_ordinary_pool else request.submitted_processing_mode
     return estimate_cost_optional(
         request.model,
         prompt_tokens,
         max(0, int(request.max_completion_tokens or 0)),
         cache_usage={"cache_write_tokens": cache_write_tokens,
                      "cached_tokens": cached_tokens,
-                     "prompt_cache_ttl": prompt_cache_ttl},
-        allow_live_fetch=request.allow_live_fetch,
+                     "prompt_cache_ttl": reservation_cache_ttl(request) if cache_write_tokens else None},
+        allow_live_fetch=request.allow_live_fetch and (not request.estimate_ordinary_pool or allow_ordinary_lookup),
         provider=request.provider,
-        **({"processing_mode": request.submitted_processing_mode}
-           if request.submitted_processing_mode else {}),
+        **({"processing_mode": pricing_mode} if pricing_mode else {}),
+        **({"routing_pinned": request.provider_routing_pinned} if request.provider_routing_pinned is not None else {}),
     )
 
 
@@ -771,6 +768,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                         **({"provider_receipt_binding": copy.deepcopy(request.provider_receipt_binding)}
                            if request.provider_receipt_binding else {}),
                         **({"cost_evidence": copy.deepcopy(request.cost_evidence)} if request.cost_evidence is not None else {}),
+                        **request.settlement_policy(),
                         **({"effort": copy.deepcopy(request.effort)} if request.effort is not None else {}),
                         **({"processing_preference": request.processing_preference,
                             "submitted_processing_mode": request.submitted_processing_mode,
@@ -800,7 +798,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         bucket.append(attempt_id)
     return AttemptReservation(attempt_id, root, request.model, request.provider, bound,
                               request.processing_preference, request.submitted_processing_mode,
-                              copy.deepcopy(request.processing_basis), scope=scope)
+                              copy.deepcopy(request.processing_basis), scope=scope, opencode_go=request.opencode_go, **request.settlement_policy())
 
 
 def record_unmetered_external_dispatch(
@@ -1175,12 +1173,13 @@ def settle_attempt(
 ) -> None:
     fields = _settlement_fields(reservation, usage, cost_usd, cost_final)
     _transition(reservation, "settled", _expected_revision=expected_revision, **fields)
-    stash_task_cache_split(
-        (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model,
-        int(fields.get("cached_tokens") or 0), provider=reservation.provider,
-        ttl_seconds=3600.0 if fields["prompt_cache_ttl"] == "1h" else 300.0,
-        processing_mode=observed_processing_mode(reservation.provider, fields),
-    )
+    if not reservation.provider_reported_cost_only:
+        stash_task_cache_split(
+            (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model,
+            int(fields.get("cached_tokens") or 0), provider=reservation.provider,
+            ttl_seconds=3600.0 if fields["prompt_cache_ttl"] == "1h" else 300.0,
+            processing_mode=observed_processing_mode(reservation.provider, fields),
+        )
 
 
 def apply_provider_price_receipt(drive_root, attempt_id: str, receipt: dict, *, expected_revision=None) -> dict:
@@ -1240,7 +1239,7 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
     With ``exc`` only once the answer path ended: ``ended_unbound_model_request`` reads that."""
     payload = None
     try:
-        payload = provider_failure_payload(exc) if exc is not None else _plain(response)
+        payload = refusal_failure_payload(exc) if exc is not None else _plain(response)
         stream_receipt = (getattr(exc, "stream_receipt", None) if exc is not None else
                           payload.get("_stream_receipt") if isinstance(payload, dict) else None)
         stream_receipt = stream_receipt if isinstance(stream_receipt, dict) else {}
@@ -1281,10 +1280,11 @@ def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, c
     """
     request, scope = _merge_scope(request)
     root = _drive_root(scope.drive_root)
-    reservation = AttemptReservation(uuid.uuid4().hex, root, request.model, request.provider, None, scope=scope)
+    policy = request.settlement_policy()
+    reservation = AttemptReservation(uuid.uuid4().hex, root, request.model, request.provider, None, scope=scope, **policy)
     fields = _settlement_fields(reservation, usage, cost_usd, False)
     row = {key: value for key, value in asdict(scope).items() if key != "drive_root"}
-    row.update(kind="attempt", attempt_id=reservation.attempt_id, model=request.model, provider=request.provider,
+    row.update(**policy, kind="attempt", attempt_id=reservation.attempt_id, model=request.model, provider=request.provider,
                reservation_upper_bound_usd=None, pricing_known=False, reservation_basis="receipt_already_received",
                candidate_measurement_kind="opaque", cost_evidence=copy.deepcopy(request.cost_evidence or {}),
                physical_context=asdict(request.physical_context) if request.physical_context else None)
@@ -1347,39 +1347,39 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     """Route a raised provider send to its honest terminal ledger state."""
     if getattr(exc, "receiver_abandoned", False):  # owner Pause: the sender settles it late; still dispatched
         return "dispatched"
+    if isinstance(exc, ProcessingNotStarted) and refusal_conflicts(exc):
+        exc.processing_refusal_conflict = True
     payload = _retain_physical_failure(reservation, exc=exc)
+    tier_conflict = getattr(exc, "processing_refusal_conflict", False)
     if release_pre_dispatch_attempt(reservation, exc):
         _return_physical_claim(reservation.attempt_id)
         return "released"
     provider = str(reservation.provider or "").strip().lower()
     stream_usage = getattr(exc, "stream_usage", None)
-    for evidence in ({"usage": stream_usage}, payload):
-        if isinstance(evidence, dict):
-            evidence = {key: value for key, value in evidence.items() if key != "error"}
-        usage, cost, final = usage_from_response(evidence)
-        if final and cost is not None:
-            settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
-            return "settled"
-    if provider == "openrouter":
+    priced = failure_settlement_price(exc, payload, provider, opencode_go=reservation.opencode_go)
+    if isinstance(exc, ProcessingNotStarted) and not tier_conflict and not (reservation.opencode_go and priced):
+        _transition(reservation, "settled", cost_usd=priced[1] if priced else None,
+                    cost_final=priced is not None, settle_reason="processing_not_started")
+        return "settled"
+    if priced:
+        usage, cost, final = priced
+        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
+        return "settled"
+    if provider == "openrouter" and not reservation.provider_reported_cost_only and not tier_conflict:
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
-            if predicate(exc):
+            if predicate(exc) and not refusal_conflicts(exc, retained_payload=payload):
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
-    if isinstance(stream_usage, dict) and stream_usage:
-        # The usage frame was read before the body was judged unusable: money is
-        # known, so settle through the success path's extractor and cost derivation
-        # from that frame alone (no assembled-body facts such as service_tier, no
-        # cache-TTL injection or token-density observation); only the answer is missing.
-        usage, cost, final = usage_from_response({"usage": stream_usage})
-        settle_attempt(reservation, dict(usage or {}), cost_usd=cost, cost_final=final)
-        return "settled"
-    else:
-        from ouroboros.transport_custody import attempt_custody_event_fields
-        cause = attempt_custody_event_fields(exc).get("transport_cause_type")
-        suffix = f" [cause: {cause}]" if cause else ""
-        # Suffix leads: a verbose provider body must not truncate it away (mark_unresolved keeps 500 chars).
-        mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
-        return "unresolved"
+    if not tier_conflict and isinstance(stream_usage, dict) and stream_usage:
+        usage, _, billed = usage_from_response({"usage": stream_usage}, provider=provider, opencode_go=reservation.opencode_go)
+        if not billed:  # A price rejected by priced_failure_usage cannot be recovered from a subset of that evidence.
+            settle_attempt(reservation, usage)
+            return "settled"
+    from ouroboros.transport_custody import attempt_custody_event_fields
+    cause = attempt_custody_event_fields(exc).get("transport_cause_type")
+    suffix = f" [cause: {cause}]" if cause else ""
+    mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
+    return "unresolved"
 
 
 def _record_attempt_capture(
@@ -1409,6 +1409,7 @@ def _record_attempt_capture(
         provider_error_type=error_type,
         provider_error=error,
         route_is_loopback=bool(request.route_is_loopback),
+        provider_reported_cost_only=request.provider_reported_cost_only,
         processing_preference=request.processing_preference,
         submitted_processing_mode=request.submitted_processing_mode,
         processing_basis=copy.deepcopy(request.processing_basis),
@@ -1507,7 +1508,10 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
     payload = _retain_physical_failure(reservation, response=response)
     terminal_state = "settled"
     try:
-        usage, cost, final = extractor(response, payload=payload) if extractor is usage_from_response else extractor(response)
+        usage, cost, final = (extractor(response, payload=payload, provider=request.provider,
+                                        opencode_go=reservation.opencode_go,
+                                        provider_reported_cost_only=request.provider_reported_cost_only or request.unpriced_add_on)
+                              if extractor is usage_from_response else extractor(response))
         usage = dict(usage or {})
         if request.prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = request.prompt_cache_ttl
