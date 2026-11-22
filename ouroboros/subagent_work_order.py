@@ -580,7 +580,153 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
     return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
 
 
-def session_memory_references(ctx: Any) -> str:
+NAMED_NOTES = "knowledge_notes"  # the notes the delegating mind names for a helper, by knowledge_read's address
+
+
+def knowledge_notes_parameter(text: str) -> dict[str, Any]:
+    """The ``knowledge_notes`` schema schedule_subagent and delegate_start share. The item is typed like
+    ``input_files``' (a compact custom-tool projection keeps this structure, not the description)."""
+    item = {"type": "object", "required": ["topic"], "additionalProperties": False,
+            "properties": {"topic": {"type": "string"}, "scope": {"type": "string"}}}
+    return {NAMED_NOTES: {"type": "array", "items": item, "description": "Knowledge notes by knowledge_read's address, " + text}}
+
+
+class NamedNoteError(ValueError):
+    """Named notes the caller cannot hand on, each problem with the call that works; nothing was queued or sent."""
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.code, self.detail = "knowledge_note_unresolved", "; ".join(problems)
+
+
+def note_label(entry: Mapping[str, Any]) -> str:
+    return f"{entry.get('topic')} ({entry.get('scope')})"
+
+
+def _note_floor(ctx: Any, topic: str, scope: str) -> str:
+    """The refusal a Presence-bound caller's own ``knowledge_read`` of this address would meet (the guards
+    ``held_notes._reader_restriction`` consults), "" where it may read it or has no Presence ceiling: handing a note
+    on never widens what its caller reads."""
+    from ouroboros.presence_authority import presence_ceiling_from_context
+    from ouroboros.tools.registry_core import _presence_bound_args
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
+
+    if presence_ceiling_from_context(ctx) is None:
+        return ""
+    args = {"topic": topic, **({"scope": scope} if scope else {})}
+    bound, refusal = _presence_bound_args(ctx, "knowledge_read", args)
+    if refusal:
+        return refusal
+    if denied := _capability_resource_guard_result(ctx, "knowledge_read", bound):
+        return denied.text
+    if {key: bound.get(key, "") for key in ("topic", "scope")} != {"topic": topic, "scope": scope}:
+        return "Presence argument bindings do not request this note at this address."
+    return ""
+
+
+def resolve_named_notes(ctx: Any, value: Any) -> tuple[list[dict] | None, list[str]]:
+    """``(the canonical addresses, the result's notes on spellings that mean the same)`` for ``knowledge_notes``, or
+    ``NamedNoteError`` naming every address that does not resolve, cannot be read or that the caller's own
+    ``knowledge_read`` would be refused. Addresses resolve as ``knowledge_read`` resolves them (omitted scope: this
+    task's project shelf, else global) and are stored with their scope, so a later start reads the shelf meant."""
+    from ouroboros import knowledge as store
+    from ouroboros.tools.arg_feedback import ignored_argument_note
+    from ouroboros.tools.knowledge import _address
+
+    if value is None:
+        return None, []
+    if value == []:
+        return None, [ignored_argument_note(NAMED_NOTES, value, "names no note; the start carries none")]
+    if not isinstance(value, list):
+        raise NamedNoteError([f"{NAMED_NOTES}={value!r}: use an array of {{topic, scope?}} objects, as knowledge_read "
+                              "takes them"])
+    found, problems, notes = {}, [], []
+    for index, item in enumerate(value, 1):
+        name = f"{NAMED_NOTES} {index}"
+        if isinstance(item, str):
+            notes.append(f"{name}={item!r} read as {{'topic': {item!r}}}")
+            item = {"topic": item}
+        if (not isinstance(item, dict) or set(item) - {"topic", "scope"} or not isinstance(item.get("topic"), str)
+                or not item["topic"].strip() or not isinstance(item.get("scope") or "", str)):
+            problems.append(f"{name}={item!r}: an object {{topic, scope?}} with a nonempty topic, as knowledge_read "
+                            "takes it")
+            continue
+        topic, scope = item["topic"], item.get("scope") or ""
+        if "scope" in item and not item["scope"]:
+            notes.append(ignored_argument_note(f"{name}.scope", item["scope"], "this task's project shelf, else global"))
+        try:
+            if refusal := _note_floor(ctx, topic, scope):
+                problems.append(f"{name} {topic!r}: {refusal}")
+                continue
+            address = store.shelf_spelling(_address(ctx, topic, scope))
+            note = store.read_knowledge_note(address)
+        except FileNotFoundError:
+            elsewhere = ""
+            if address.scope != "global" and store.resolve_knowledge_address(
+                    address.canonical_root, address.topic, "global").path.is_file():
+                elsewhere = f"; a global note exists: {{'topic': {address.topic!r}, 'scope': 'global'}}"
+            problems.append(f"{name}: no note {address.topic!r} on the {address.scope} shelf; "
+                            f"knowledge_list(scope={address.scope!r}) lists that shelf{elsewhere}")
+            continue
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append(f"{name} {topic!r}: the note could not be read ({type(exc).__name__})")
+            continue
+        except ValueError as exc:
+            problems.append(f"{name} {item!r}: {exc}")
+            continue
+        entry = {"topic": address.topic, "scope": address.scope}
+        if (address.scope, address.topic) in found:
+            notes.append(f"{name} names {note_label(entry)} again; it is carried once")
+            continue
+        found[address.scope, address.topic] = entry
+        if note.parse_error or note.state != "active":
+            notes.append(f"{name} {note_label(entry)} is carried whole with "
+                         + ("metadata unavailable" if note.parse_error else f"its state, {note.state}"))
+    if problems:
+        raise NamedNoteError(problems)
+    return list(found.values()), notes
+
+
+def named_notes_section(ctx: Any, entries: Any) -> tuple[str, dict | None]:
+    """``(the start's text, its custody facts)`` for the named notes: each note's current revision whole under its
+    address, or a named gap where it cannot be read now (never a withheld start); ``("", None)`` without any. Each is
+    read on its own, so one unreadable note or store loses only itself."""
+    from ouroboros import knowledge as store
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    if not entries:
+        return "", None
+    parts = ["## Named knowledge notes\nThe notes named for this work (knowledge_notes), each whole as it stood when "
+             "this start was prepared."]
+    sent, gaps = [], []
+    for entry in entries:
+        topic, scope = entry["topic"], entry["scope"]
+        try:
+            note = store.read_knowledge_note(store.resolve_knowledge_address(canonical_data_root(ctx), topic, scope))
+        except Exception as exc:  # noqa: BLE001 — a named gap, never a withheld start
+            gaps.append({"topic": topic, "scope": scope, "reason": type(exc).__name__})
+            parts.append(f"### {note_label(entry)}\n[Host: this named note could not be read at this start "
+                         f"({type(exc).__name__}); its text is not here.]")
+            continue
+        state = "metadata unavailable" if note.parse_error else f"state {note.state}"
+        parts.append(f"### {note.title}\nNote: knowledge_read(topic={topic!r}, scope={scope!r})\n"
+                     f"Revision: {note.revision} ({state}, {len(note.text)} chars)\n\n{note.text}")
+        sent.append({"topic": topic, "scope": scope, "revision": note.revision, "chars": len(note.text)})
+    return "\n\n".join(parts), {key: value for key, value in (("sent", sent), ("gaps", gaps)) if value}
+
+
+def named_notes_block(entries: Any, *, session: bool) -> str:
+    """A scheduled child's own reference to the notes its parent named, frozen into its first input: addresses only,
+    as ``knowledge_read`` calls; "" without any, so a child scheduled without them keeps its first input."""
+    if not entries:
+        return ""
+    calls = "\n".join(f"- knowledge_read(topic={entry['topic']!r}, scope={entry['scope']!r})" for entry in entries)
+    where = ("Each session start of this work carries their whole text at their revision then." if session else
+             "Their text is not in this input.")
+    return f"[NAMED KNOWLEDGE NOTES]\nThe parent named these knowledge notes for this work (knowledge_notes). {where}\n{calls}"
+
+
+def session_memory_references(ctx: Any, knowledge_notes: Any = None) -> str:
     """The marks in force for the session task's room (this room's and the global ones), the knowledge outline
     (the global shelf's and its room's: every note by address and title, people's summaries kept) and the heads of
     the notes that claim the situation names a helper of this work carries and of the notes their heads link
@@ -592,8 +738,10 @@ def session_memory_references(ctx: Any) -> str:
     The stores are read once as they stand, through the memory
     view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
     helper's outline (``context_sections.helper_navigation_sections``) and the heads resolved now, never the
-    launcher's own capture. ``ctx._session_held_heads`` keeps the heads sent, by address and revision, for the start's
-    custody; nothing else is written or activated here. A retry replays the recorded bytes."""
+    launcher's own capture. The notes named for this work (the task's ``knowledge_notes``, then this call's) follow whole,
+    declared or not (``named_notes_section``). ``ctx._session_held_heads`` and ``ctx._session_named_notes`` keep the
+    heads and named notes sent, by address and revision, for the start's custody; nothing else is written or activated
+    here. A retry replays the recorded bytes."""
     import dataclasses
     from types import SimpleNamespace
 
@@ -615,6 +763,9 @@ def session_memory_references(ctx: Any) -> str:
     task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
     task["task_contract"] = getattr(ctx, "task_contract", None) or task.get("task_contract")
     ctx._session_held_heads = held = None
+    helper = False  # the working-notes line closes held heads and named notes alike
+    named, ctx._session_named_notes = named_notes_section(ctx, list({note_label(entry): entry for entry in (
+        *(task.get(NAMED_NOTES) or ()), *(knowledge_notes or ())) if isinstance(entry, Mapping)}.values()))
     try:
         root = canonical_data_root(ctx)
         navigation = {"bodies": {}, "names": helper_names(ctx, root)}
@@ -635,24 +786,28 @@ def session_memory_references(ctx: Any) -> str:
                         "heads link, are not in this start, because its input is declared: " + ", ".join(topics) + ".]")
         elif entries := held_notes.turn_sections(root, task, spec, navigation, ctx=SimpleNamespace(
                 held_reader_unavailable=held_notes.EXTERNAL_READER)):  # a fresh namespace, never the launcher's capture
-            held = "\n\n".join([*(part.full_text for part in entries), held_notes.HELPER_NOTE])
+            held, helper = "\n\n".join(part.full_text for part in entries), True
             ctx._session_held_heads = held_notes.sent_heads(entries) or None
     except Exception as exc:  # an unreadable store is a named gap in the start, never a withheld start
         log.warning("session references: my memory could not be read at this start", exc_info=True)
-        return head + f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline."
+        return head + "\n\n".join(part for part in (
+            f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline.",
+            named, named and held_notes.HELPER_NOTE) if part)
     return head + "\n\n".join(part for part in (
-        marks_text or "No marks are in force for this work's room or globally.", outline, held) if part)
+        marks_text or "No marks are in force for this work's room or globally.", outline, held, named,
+        (helper or named) and held_notes.HELPER_NOTE) if part)
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
                             private_copy: bool = False, payload_skill: str = "", service: Any = None,
-                            start_body: str | None = None) -> str:
+                            start_body: str | None = None, knowledge_notes: Any = None) -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
     Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
-    inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge outline and the held heads
-    as text (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
-    installed instruction-skill index for any workspace;
+    inputs included: they govern the work, as BIBLE does), the marks in force, the knowledge outline, the held heads and
+    the named notes (``knowledge_notes``: the task's and this call's) as text (``session_memory_references``: outside
+    the work order's fingerprint, at every start of the line), and the installed instruction-skill index for any
+    workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
@@ -667,7 +822,7 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
-            + owner_rules_section(session=True) + session_memory_references(ctx) + session_skill_index(ctx))
+            + owner_rules_section(session=True) + session_memory_references(ctx, knowledge_notes) + session_skill_index(ctx))
     tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
     tail = f"\n\n{tail}" if tail else ""
     if payload_skill:
