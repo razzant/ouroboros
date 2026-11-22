@@ -119,6 +119,9 @@ def _contexts(root: pathlib.Path) -> dict:
         "consciousness_observe": {**main, "task_metadata": _wake("observe")},
         "consciousness_full": {**main, "task_metadata": _wake("full")},
         "readonly_helper": readonly,
+        # A configured actor-first session before any leaf: its one receipt, verify_and_record, is shown narrowed.
+        "readonly_actor_bootstrap": {**readonly, "_actor_bootstrap": {"physical_started": False,
+                                                                       "zero_run_receipt_recorded": False}},
         "acting_helper": acting,
         "acting_helper_cyber_pro": {**acting, "_runtime_mode": "cyber_pro"},
         "presence": {"task_id": "presence-1", "task_contract": _presence_contract()},
@@ -240,9 +243,12 @@ def _catalog_patches(name: str, spec: dict, root: pathlib.Path):
         repo.mkdir(parents=True)
         drive.mkdir()
         (repo / "README.md").write_text("ok\n", encoding="utf-8")
+        bootstrap = spec.pop("_actor_bootstrap", None)
         registry = ToolRegistry(repo_dir=repo, drive_root=drive)
         if spec:
             registry.set_context(ToolContext(repo_dir=repo, drive_root=drive, **spec))
+        if bootstrap is not None:
+            registry._ctx._configured_actor_bootstrap = dict(bootstrap)
         yield registry
 
 
