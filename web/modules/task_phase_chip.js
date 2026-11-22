@@ -250,7 +250,9 @@ function recordPhase(record = {}, terminalPhase = 'done') {
         modelWaiting: Boolean(record.modelWaiting), modelOwnerAction: Boolean(record.modelWaiting && record.modelOwnerAction),
         // The census's explicit Resume (main_waiting's rule): the owner's own Pause is not the owner's move.
         resumeAction: record.canResume === true && record.pauseCause !== 'owner',
-        ownerMove: Boolean(record.ownerMove), hold: record.projectHold,
+        // The hold speaks for a card whose member state the server could not confirm, not for a card the client itself
+        // parked because it lost the connection (chat.js sets `parkedOffline` and a fresh connected queue read clears it).
+        ownerMove: Boolean(record.ownerMove), hold: record.parkedOffline && record.parkedPhase === 'unknown' ? '' : record.projectHold,
         pauseCause: record.pauseCause, pauseReason: record.pauseReason, stopPolicy: record.cancelPendingPolicy,
         finishingReviews: Boolean(record.finishingReviews),
         modelActivity: record.modelActivity, workView: view, work: finishingChild && !view ? null : record.workLook,
