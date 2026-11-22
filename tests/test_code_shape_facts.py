@@ -100,11 +100,14 @@ def test_a_reexport_is_a_name_a_marked_top_level_from_import_binds():
         def inner():
             from ouroboros.loop import hidden  # noqa: F401
     ''', path="ouroboros/tools/facade.py")
-    # Each name of a marked statement, its source resolved (the facade inventory's unit and reader).
-    assert shape == {("re-export", "ouroboros.loop", "run_loop", ""): 1,
-                     ("re-export", "ouroboros.loop", "step", "one_step"): 1, ("re-export", "ouroboros.tools", "git", ""): 1}
-    assert _shape("from ouroboros.tools import git  # noqa: F401\n", path="ouroboros/tools/facade.py") == {
-        ("re-export", "ouroboros.tools", "git", ""): 1}  # absolute and relative spellings are one name
+    # Each name of a marked statement, by its resolved source and the name it binds (the facade
+    # inventory's unit and reader).
+    assert shape == {("re-export", "ouroboros.loop", "run_loop", "run_loop"): 1,
+                     ("re-export", "ouroboros.loop", "step", "one_step"): 1,
+                     ("re-export", "ouroboros.tools", "git", "git"): 1}
+    for spelling in ("git", "git as git"):  # absolute and relative spellings, a redundant alias: one name
+        assert _shape(f"from ouroboros.tools import {spelling}  # noqa: F401\n", path="ouroboros/tools/facade.py") == {
+            ("re-export", "ouroboros.tools", "git", "git"): 1}
 
 
 def test_a_test_source_counts_patched_product_names_and_git_init_call_sites():

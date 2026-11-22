@@ -1390,8 +1390,8 @@ def diff_pulse(
     omitted, every changed path is. A shown test source adds the suite's facts (declared
     items, new test modules, ``serial`` marks, recorded test-seconds, its lines); a shown
     Python source adds the code-shape line (``code_shape_facts``: module handles and the
-    calls through them, re-exports, a test's patched product-module names and ``git init``
-    runs). A fact for the mind, never a gate: one shape and one question for any size, and
+    calls through them, re-exported names, a test's patched product-module names and ``git init``
+    call sites). A fact for the mind, never a gate: one shape and one question for any size, and
     the list bounds are presentation only, counting the rest.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base

@@ -13,7 +13,8 @@ binds that module). Counted per file and side:
   (``tests/test_module_handle_extraction.py``); and each ``handle().name`` read through one (the
   extraction table's unit: a local holding the module, ``q = handle()``, is not followed);
 - a re-exported name: each name a top-level ``from ... import`` binds under the ``noqa: F401``
-  marker (``code_intelligence_architecture.reexported_names``, the facade inventory's unit);
+  marker (``code_intelligence_architecture.reexported_names``, the facade inventory's unit), by
+  its source and the name it binds (``x as x`` is ``x``);
 - in a test source (under a ``tests`` directory): each patch of a name in a product module's
   namespace (``monkeypatch.setattr``/``delattr`` or ``mock.patch`` with a dotted string, or with
   an object that resolves to such a name, a module or a class, and ``patch.object``), and each
@@ -225,7 +226,7 @@ def _product_items(tree: ast.Module, path: str, lines: list[str], modules: froze
     for node, seen in _scoped(tree, path, mark):
         if isinstance(node, ast.Attribute) and (handle := _through(node.value, seen)):
             yield "call", handle, node.attr
-    yield from (("re-export", base, alias.name, alias.asname or "")
+    yield from (("re-export", base, alias.name, alias.asname or alias.name)
                 for base, alias in reexported_names(tree, lines, path))
 
 
