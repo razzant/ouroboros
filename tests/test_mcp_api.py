@@ -429,7 +429,7 @@ def test_settings_post_rehydrates_masked_auth_token(tmp_path, monkeypatch, setti
         patch.object(srv, "load_settings", side_effect=fake_load_settings),
         patch.object(srv, "save_settings", side_effect=fake_save_settings),
         patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings),
-        patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda: (fake_load_settings(), {})),
+        patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())),
         patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]
@@ -524,7 +524,7 @@ def test_settings_post_canonicalizes_mcp_server_ids(tmp_path, monkeypatch, setti
         patch.object(srv, "load_settings", side_effect=fake_load_settings),
         patch.object(srv, "save_settings", side_effect=fake_save_settings),
         patch.object(srv._gateway_settings, "_owner_read_settings_raw", side_effect=fake_load_settings),
-        patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda: (fake_load_settings(), {})),
+        patch.object(srv._gateway_settings, "settings_read_view", side_effect=lambda **_: (fake_load_settings(), fake_load_settings())),
         patch.object(srv._gateway_settings, "_owner_write_settings", side_effect=fake_save_settings),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]

@@ -623,3 +623,128 @@ def test_main_keeps_earlier_notes_under_empty_keep_and_merges_only_named_ones(ma
     assert replaced["checkpoint_ref"] == seen["address"]["checkpoint_ref"]
     restored = [text for text in accounts(f.inputs[7]["messages"]) if text.startswith("[Historical source")]
     assert len(restored) == 1 and goal in restored[0]
+
+
+def _plain(rows):
+    """A request's rows as a provider's cache compares them: the host's cache marks and text-block wrapping aside."""
+    def row(message):
+        out = {key: value for key, value in message.items() if key != "cache_control"}
+        content = out.get("content")
+        if isinstance(content, list) and content and all(isinstance(b, dict) and set(b) - {"cache_control"} == {"type", "text"}
+                                                         for b in content):
+            out["content"] = "".join(block["text"] for block in content)
+        return out
+    return [row(message) for message in rows]
+
+
+def test_two_full_folds_leave_the_start_and_the_first_folds_request_in_place(main_loop):
+    """Test 1 of the cheap-folds order: a full fold leaves the request's start rows byte-identical and writes its note
+    after them; its own call keeps the arguments the model sent, the note's exact text included; the next full fold
+    leaves every row of the request sent after the first fold, up to its last row before the model's answer, as
+    that request carried it, and writes its note after them."""
+    from ouroboros.context_compaction import _capsule_metadata
+
+    f = main_loop
+    first_note, second_note = "The first read holds the conclusion.", "The second read agrees with the first."
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"),
+           call("compact_context", {"working_note": first_note, "keep_unit_ids": []}, "fold-1"),
+           call("read_file", {"path": "evidence.txt"}, "read-2"),
+           call("compact_context", {"working_note": second_note, "keep_unit_ids": []}, "fold-2"),
+           {"content": "done"}])
+    start, after_first, after_second = (_plain(f.inputs[i]["messages"]) for i in (0, 2, 4))
+    assert [row.get(HOST_CONTEXT_KIND_KEY) for row in start[2:]] == ["ouroboros_roster_snapshot", "ouroboros_context_facts"]
+    notes = [(i, meta) for i, row in enumerate(after_first) if (meta := _capsule_metadata(row)[1])]
+    (at, meta), = notes
+    assert at == len(start) and after_first[:at] == start  # the start's host rows stand, the note follows them
+    own = after_first[at + 1]
+    assert own["tool_calls"][0]["id"] == "fold-1"
+    assert json.loads(own["tool_calls"][0]["function"]["arguments"]) == {"working_note": first_note, "keep_unit_ids": []}
+    assert after_first[at]["content"][0]["text"].endswith("\n" + first_note)
+    assert after_second[:len(after_first)] == after_first  # that whole request stands, superseded facts included
+    second = after_second[len(after_first)]
+    assert _capsule_metadata(second)[1] and second["content"][0]["text"].endswith("\n" + second_note)
+
+
+def _roster_after_a_change(monkeypatch):
+    """A roster of twelve independent roots whose titles carry a version; ``bump`` changes it as a reply is produced."""
+    from ouroboros import peer_roster
+
+    state = {"v": 0}
+    monkeypatch.setattr(peer_roster, "independent_roots", lambda _root: {"roots": [
+        {"task_id": f"peer-{n}", "title": f"Peer work {n} at version {state['v']} " + "x" * 80, "project_id": "",
+         "chat_id": 1, "status": "running"} for n in range(12)], "incomplete": False})
+
+    def bump(reply):
+        def produce(_kwargs):
+            state["v"] += 1
+            return reply
+        return produce
+    return bump
+
+
+def _rosters(rows):
+    return [i for i, row in enumerate(rows) if str(row.get(HOST_CONTEXT_KIND_KEY) or "").startswith("ouroboros_roster")]
+
+
+def test_a_round_that_applies_a_fold_holds_a_changed_roster_back_one_round(main_loop, monkeypatch):
+    """Three directions at the loop's seam: with the roster changed, the round that applies a fold appends no roster
+    row and the next round appends it; a round without a fold appends it at once; when a fold is applied in two
+    consecutive rounds, the first round appends no roster row and the second does."""
+    from ouroboros.context_compaction import _capsule_metadata
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    read = lambda n: call("read_file", {"path": "evidence.txt"}, f"read-{n}")  # noqa: E731
+    f.run([read(1), bump(call("compact_context", {"working_note": "N1 holds read one.", "keep_unit_ids": []}, "fold-1")),
+           read(2), bump(read(3)),
+           bump(call("compact_context", {"working_note": "N2 holds read three.", "fold_last_n": 1}, "fold-2")),
+           bump(call("compact_context", {"working_note": "N3 holds the rest.", "keep_unit_ids": []}, "fold-3")),
+           {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+
+    def after_last_note(rows):
+        return [i for i in _rosters(rows) if i > max(i for i, row in enumerate(rows) if _capsule_metadata(row)[1])]
+
+    def calls_before(rows, ident):
+        return next(i for i, row in enumerate(rows) if ident in {c["id"] for c in row.get("tool_calls") or ()})
+
+    assert not after_last_note(requests[2]) and after_last_note(requests[3])  # held by fold-1, then appended
+    assert max(_rosters(requests[4])) > calls_before(requests[4], "read-3")  # no fold: at once
+    assert not after_last_note(requests[5])  # held by fold-2
+    assert after_last_note(requests[6])  # fold-3 the next round: appended anyway (that fold then stands nothing)
+
+
+def test_four_full_folds_with_a_changing_roster_keep_at_most_two_snapshots_and_each_request(main_loop, monkeypatch):
+    """Over four full folds with a roster that changes before each, the view never holds more than two roster rows,
+    and the request sent after each fold is a prefix of the request sent after the next."""
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    script = []
+    for n in range(1, 5):
+        script += [bump(call("read_file", {"path": "evidence.txt"}, f"read-{n}")),
+                   call("compact_context", {"working_note": f"N{n} holds read {n}.", "keep_unit_ids": []}, f"fold-{n}")]
+    f.run([*script, {"content": "done"}])
+    requests = [_plain(f.inputs[i]["messages"]) for i in range(len(f.inputs))]
+    assert max(len(_rosters(rows)) for rows in requests) <= 2, [len(_rosters(rows)) for rows in requests]
+    folded = requests[2::2]
+    assert len(folded) == 4 and all(later[:len(earlier)] == earlier for earlier, later in zip(folded, folded[1:]))
+
+
+def test_six_consecutive_full_folds_with_a_changing_roster_deliver_it_and_never_pin_it(main_loop, monkeypatch):
+    """Six full folds in six consecutive rounds, the roster changing before each: the changed roster reaches the view
+    within one round every time, no roster row ever stands as a fold's own row (a fold whose round holds one leaves
+    nothing standing), and after each fold the view holds at most two roster rows."""
+    from ouroboros.tools.compact_context import standing_rows
+
+    f, bump = main_loop, _roster_after_a_change(monkeypatch)
+    f.run([call("read_file", {"path": "evidence.txt"}, "read-1"), *(bump(call(
+        "compact_context", {"working_note": f"N{n} holds what came before.", "keep_unit_ids": []}, f"fold-{n}"))
+        for n in range(1, 7)), {"content": "done"}])
+    requests = [f.inputs[i]["messages"] for i in range(len(f.inputs))]
+    def versions(rows):
+        return {v for i in _rosters(rows) for v in range(8) if f"at version {v} " in str(rows[i].get("content"))}
+
+    for r in range(2, len(requests) - 1):  # request r is built after reply r - 1 set version r - 1: it or the next
+        assert max(versions(requests[r]) | versions(requests[r + 1])) >= r - 1, (r, versions(requests[r]))
+    for rows in requests:
+        standing = standing_rows(rows)
+        assert not [i for i in _rosters(rows) if standing.get(i) is not None]
+        assert len(_rosters(rows)) <= 2, [len(_rosters(r)) for r in requests]

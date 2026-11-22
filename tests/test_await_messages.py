@@ -96,7 +96,6 @@ def test_an_empty_mailbox_waits_the_whole_requested_window(tmp_path, monkeypatch
     assert (out["requested_sec"], out["window_sec"], out["window_bound"]) == (5000, 5000, "requested")
     assert out["elapsed_sec"] == 5000.0 and out["slot"] == "held"
     assert max(clock.sleeps) <= _AWAIT_MESSAGES_POLL_SEC and sum(clock.sleeps) == 5000.0
-    assert "cache_horizon" not in out  # no applied horizon recorded on this ctx
 
 
 def test_a_message_arriving_mid_wait_ends_it_early(tmp_path, monkeypatch):
@@ -240,7 +239,7 @@ def test_under_an_execution_budget_the_real_executor_gets_the_typed_result_not_a
     assert 1 <= out["window_sec"] <= outer - 1 and took < outer
 
 
-def test_the_applied_cache_horizon_is_reported_from_the_recorded_fact(tmp_path, monkeypatch):
+def test_an_in_slot_wait_longer_than_the_ttl_reports_wait_time_without_a_forecast(tmp_path, monkeypatch):
     clock = _FakeClock()
     _install_clock(monkeypatch, clock)
     ctx = _ctx(tmp_path)
@@ -248,8 +247,8 @@ def test_the_applied_cache_horizon_is_reported_from_the_recorded_fact(tmp_path, 
 
     out = json.loads(_await_messages(ctx, 1800))
 
-    assert out["reason"] == "timeout"
-    assert "5m" in out["cache_horizon"] and "300s" in out["cache_horizon"]
+    assert out["reason"] == "timeout" and out["elapsed_sec"] == 1800.0
+    assert "cache_horizon" not in out
 
 
 def test_a_non_integer_window_is_an_argument_error(tmp_path):

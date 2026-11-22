@@ -171,6 +171,8 @@ class PublicationReleases:
                         raise ValueError("release position unreadable")
                     self.pending[row["path"]] = {**row, "staging": op.get("staging")}
             elif op.get("state") == "accounted":
+                if any(not isinstance(op.get(key) or [], list) for key in ("files", "not_moved", "staging_held")):
+                    raise ValueError("release operation has no addressed files")
                 unknown = {row.get("path") for row in [*(op.get("not_moved") or ()), *(op.get("staging_held") or ())]
                            if isinstance(row, dict) and row.get("reason") != "not_moved"}
                 self.uncertain.update({row["path"]: row for row in op.get("files") or ()

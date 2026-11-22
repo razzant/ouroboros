@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_
 from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
-    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
+    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_failure, usage_from_response,
     _plain, _provider_exception_facts, failure_settlement_price, physical_failure_evidence, refusal_failure_payload, provider_cost_value, refusal_conflicts,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
@@ -68,24 +68,16 @@ __all__ = (
     "usage_writer_snapshot", "read_usage_records",
     "review_wave_admission",
 )
-_CURRENT_SCOPE: contextvars.ContextVar[Optional["UsageScope"]] = contextvars.ContextVar(
-    "ouroboros_usage_scope", default=None
-)
-_ATTEMPT_COLLECTOR: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar(
-    "ouroboros_usage_attempt_collector", default=None
-)
-_PHYSICAL_LIMIT: contextvars.ContextVar[Optional["_AttemptLimit"]] = contextvars.ContextVar(
-    "ouroboros_physical_attempt_limit", default=None
-)
-_PHYSICAL_CONTEXT: contextvars.ContextVar[Optional["PhysicalAttemptContext"]] = contextvars.ContextVar(
-    "ouroboros_physical_attempt_context", default=None
-)
-_PHYSICAL_PREDICATE: contextvars.ContextVar[Optional[Callable[["AttemptRequest"], Any]]] = contextvars.ContextVar(
-    "ouroboros_physical_attempt_predicate", default=None
-)
-_LAST_PHYSICAL_ATTEMPT: contextvars.ContextVar[Optional["PhysicalAttemptCapture"]] = contextvars.ContextVar(
-    "ouroboros_last_physical_attempt", default=None
-)
+def _context_var(name: str) -> contextvars.ContextVar:
+    """One named context variable with a None default, as this module's bindings declare."""
+    return contextvars.ContextVar(name, default=None)
+
+_CURRENT_SCOPE: contextvars.ContextVar[Optional["UsageScope"]] = _context_var("ouroboros_usage_scope")
+_ATTEMPT_COLLECTOR: contextvars.ContextVar[Optional[list[str]]] = _context_var("ouroboros_usage_attempt_collector")
+_PHYSICAL_LIMIT: contextvars.ContextVar[Optional["_AttemptLimit"]] = _context_var("ouroboros_physical_attempt_limit")
+_PHYSICAL_CONTEXT: contextvars.ContextVar[Optional["PhysicalAttemptContext"]] = _context_var("ouroboros_physical_attempt_context")
+_PHYSICAL_PREDICATE: contextvars.ContextVar[Optional[Callable[["AttemptRequest"], Any]]] = _context_var("ouroboros_physical_attempt_predicate")
+_LAST_PHYSICAL_ATTEMPT: contextvars.ContextVar[Optional["PhysicalAttemptCapture"]] = _context_var("ouroboros_last_physical_attempt")
 _PHYSICAL_DRIVE_ROOT: contextvars.ContextVar[Optional[Tuple[str, pathlib.Path]]] = contextvars.ContextVar("ouroboros_physical_drive_root", default=None)
 _ROOT_ACCOUNTING_TELEMETRY: Dict[str, Dict[str, Any]] = {}
 _ROOT_ACCOUNTING_TELEMETRY_LOCK = threading.Lock()
@@ -579,7 +571,8 @@ def _reservation_cost(request: AttemptRequest, *, allow_ordinary_lookup: bool = 
         return _number(explicit)
     if request.force_unknown_reservation or request.provider_reported_cost_only:
         return None
-    if str(request.provider or "").lower() == "local":
+    provider = str(request.provider or "").strip().lower()
+    if provider == "local":
         return 0.0
     # Deliberately the RAW estimate (base64-inclusive), NOT the bounded proxy:
     # for money reservation an over-count on image rounds is the safe
@@ -589,10 +582,7 @@ def _reservation_cost(request: AttemptRequest, *, allow_ordinary_lookup: bool = 
     # OpenAI-family chars/4 estimates keep the measured 1.10 reservation envelope.
     from ouroboros.provider_models import normalize_model_identity
     normalized_model = normalize_model_identity(str(request.model or "").lstrip("~"))
-    if (
-        str(request.provider or "").strip().lower() in {"openai", "openrouter"}
-        and normalized_model.startswith("openai/")
-    ):
+    if provider in {"openai", "openrouter"} and normalized_model.startswith("openai/"):
         prompt_tokens = (prompt_tokens * 11 + 9) // 10
     cache_write_tokens = prompt_tokens if normalized_model.startswith("anthropic/") else 0
     cached_tokens = 0
@@ -1170,8 +1160,9 @@ def settle_attempt(
     cost_usd: Optional[float] = None,
     cost_final: bool = False,
     expected_revision: Optional[int] = None,
+    estimate_cache_ttl: Optional[str] = None,
 ) -> None:
-    fields = _settlement_fields(reservation, usage, cost_usd, cost_final)
+    fields = _settlement_fields(reservation, usage, cost_usd, cost_final, estimate_cache_ttl=estimate_cache_ttl)
     _transition(reservation, "settled", _expected_revision=expected_revision, **fields)
     if not reservation.provider_reported_cost_only:
         stash_task_cache_split(
@@ -1265,11 +1256,11 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
     return payload
 
 
-def _settlement_fields(reservation, usage, cost_usd, cost_final) -> Dict[str, Any]:
+def _settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cache_ttl=None) -> Dict[str, Any]:
     from ouroboros._usage_settlement import settlement_fields
 
     return settlement_fields(reservation, usage, cost_usd, cost_final,
-                             estimate_cost_optional=estimate_cost_optional)
+                             estimate_cost_optional=estimate_cost_optional, estimate_cache_ttl=estimate_cache_ttl)
 
 
 def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, cost_usd=None, pending=False) -> AttemptReservation:
@@ -1307,30 +1298,27 @@ def _observe_token_density(request: AttemptRequest, usage: Optional[Dict[str, An
     observe_token_density(request, usage, drive_root_resolver=_drive_root)
 
 
-def _is_pre_routing_rejection(exc: BaseException) -> bool:
-    """True for the exact free OpenRouter router-side 404 signature."""
+def _provider_rejection(exc: BaseException, phrase: str, code: int) -> bool:
+    """Match one existing OpenRouter rejection signature."""
     text = str(exc or "").lower()
-    if "no endpoints found" not in text:
+    if phrase not in text:
         return False
     status = getattr(exc, "status_code", None)
     try:
         status = int(status) if status is not None else None
     except (TypeError, ValueError):
         status = None
-    return status == 404 or "error code: 404" in text or '"code": 404' in text or "'code': 404" in text
+    return status == code or f"error code: {code}" in text or f'"code": {code}' in text or f"'code': {code}" in text
+
+
+def _is_pre_routing_rejection(exc: BaseException) -> bool:
+    """True for the exact free OpenRouter router-side 404 signature."""
+    return _provider_rejection(exc, "no endpoints found", 404)
 
 
 def _is_tos_rejection(exc: BaseException) -> bool:
     """True for the exact free OpenRouter ToS-policy 403 signature."""
-    text = str(exc or "").lower()
-    if "prohibited due to a violation of provider terms of service" not in text:
-        return False
-    status = getattr(exc, "status_code", None)
-    try:
-        status = int(status) if status is not None else None
-    except (TypeError, ValueError):
-        status = None
-    return status == 403 or "error code: 403" in text or '"code": 403' in text or "'code': 403" in text
+    return _provider_rejection(exc, "prohibited due to a violation of provider terms of service", 403)
 
 
 def _return_physical_claim(attempt_id: str) -> None:
@@ -1343,7 +1331,8 @@ def _return_physical_claim(attempt_id: str) -> None:
                 state.used -= 1
 
 
-def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> str:
+def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException,
+                                request: Optional[AttemptRequest] = None) -> str:
     """Route a raised provider send to its honest terminal ledger state."""
     if getattr(exc, "receiver_abandoned", False):  # owner Pause: the sender settles it late; still dispatched
         return "dispatched"
@@ -1354,14 +1343,20 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     if release_pre_dispatch_attempt(reservation, exc):
         _return_physical_claim(reservation.attempt_id)
         return "released"
+    receipt = getattr(exc, "stream_receipt", None)
+    if isinstance(receipt, dict) and receipt.get("attempt_id") not in (None, "", reservation.attempt_id):
+        mark_unresolved(reservation, "Received stream evidence names another physical attempt")
+        return "unresolved"
     provider = str(reservation.provider or "").strip().lower()
     stream_usage = getattr(exc, "stream_usage", None)
+    usage, _, _ = usage_from_failure(payload, stream_usage, opencode_go=reservation.opencode_go)  # Counters and invalid facts, not authority to settle a price.
     priced = failure_settlement_price(exc, payload, provider, opencode_go=reservation.opencode_go)
     if isinstance(exc, ProcessingNotStarted) and not tier_conflict and not (reservation.opencode_go and priced):
         _transition(reservation, "settled", cost_usd=priced[1] if priced else None,
                     cost_final=priced is not None, settle_reason="processing_not_started")
         return "settled"
     if priced:
+        # A reconciled provider bill settles, a reported zero included, even with work evidence.
         usage, cost, final = priced
         settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
         return "settled"
@@ -1371,13 +1366,18 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if not tier_conflict and isinstance(stream_usage, dict) and stream_usage:
-        usage, _, billed = usage_from_response({"usage": stream_usage}, provider=provider, opencode_go=reservation.opencode_go)
+        _, _, billed = usage_from_response({"usage": stream_usage}, provider=provider, opencode_go=reservation.opencode_go)
         if not billed:  # A price rejected by priced_failure_usage cannot be recovered from a subset of that evidence.
-            settle_attempt(reservation, usage)
+            # An estimate uses the frame's own facts and its bound send's TTL; an empty TTL means unbound.
+            from ouroboros._usage_settlement import frame_estimate_ttl
+
+            settle_attempt(reservation, usage, cost_usd=None, cost_final=False,
+                           estimate_cache_ttl=frame_estimate_ttl(reservation, request, exc))
             return "settled"
     from ouroboros.transport_custody import attempt_custody_event_fields
     cause = attempt_custody_event_fields(exc).get("transport_cause_type")
     suffix = f" [cause: {cause}]" if cause else ""
+    # Suffix leads: a verbose provider body must not truncate it away (mark_unresolved keeps 500 chars).
     mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
     return "unresolved"
 
@@ -1493,7 +1493,7 @@ def execute_physical_attempt(
     except BaseException as exc:
         terminal_state = "dispatched"
         try:
-            terminal_state = _terminalize_failed_attempt(reservation, exc)
+            terminal_state = _terminalize_failed_attempt(reservation, exc, request)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
         _record_attempt_capture(
@@ -1568,7 +1568,7 @@ async def execute_physical_attempt_async(
         except BaseException as exc:
             terminal_state = "dispatched"
             try:
-                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc)
+                terminal_state = await presend_off_loop(_terminalize_failed_attempt, reservation, exc, request)
             except Exception:
                 log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
             _record_attempt_capture(

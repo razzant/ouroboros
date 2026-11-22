@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import pathlib
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple
@@ -39,6 +40,8 @@ try:  # Python 3.11+
     from typing import TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import TypedDict  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
 
 OWNER_KEEP = "owner_keep"
 SCOPE_TASK = "task"
@@ -198,8 +201,9 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                                       root / "task_results" / "artifacts" / task_id / WIRE_JOURNAL) if os.path.lexists(path)]
     unknown: List[str] = []
     pins: Dict[str, str] = {}
+    from ouroboros.saved_state_retirement import worked_copies_in, worked_copy
+
     try:  # the folders whose saved states for exact return ``saved_state_retirement.prune_worked_copies`` would retire
-        from ouroboros.saved_state_retirement import worked_copies_in
         places += sorted({SAVED_STATES_PLACE + str(path.parent)
                           for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
@@ -216,7 +220,11 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
         if canonical is not None:
             if canonical.resolve(strict=False) != canonical:
                 raise OSError("canonical artifact store reached through a link")
-            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()]
+            handles = canonical / "source_handles"  # a saved state is named by its folder, never per file
+            for path in iter_artifact_tree(canonical):
+                if path.is_file() and not path.is_symlink():  # one that arrived after the first walk names its folder
+                    saved = path.parent.parent == handles and worked_copy(path.parent.name, path.name)
+                    places.append(SAVED_STATES_PLACE + str(path.parent) if saved else str(path))
     except OSError:
         unknown.append("canonical_payloads")
     read = read_records(root)
@@ -358,7 +366,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
     managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
     from ouroboros.delegate_documents import managed_keep_places
-    from ouroboros.payload_release_state import keep_places
+    from ouroboros.payload_release_state import keep_places, store_of
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -396,7 +404,19 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             unknown.append("managed_imports")
         places = sorted(set(places) | set(documents))
         releases.update(documents)
-        payloads = keep_places(base, task_id, row, places)  # fresh canonical facts under the same custody lock
+        try:  # fresh canonical facts under the same custody lock as the owner's keep
+            payloads = keep_places(base, task_id, row, places)
+        except Exception as exc:  # noqa: BLE001 - the rule: an explicit keep is saved whatever this reader does
+            # A protective action must not depend on the evidence it protects: an unreadable store or a malformed
+            # release record answers ``canonical_payloads`` unknown and the owner's keep is still saved. A release
+            # (keep=False) still raises.
+            if not keep:
+                raise
+            log.warning("owner keep of %s: canonical release facts unavailable: %s", task_id, type(exc).__name__)
+            store = store_of(base, task_id)  # the listed store files: nothing is claimed about them, the keep is saved
+            payloads = {place: ("unknown", None) for place in places if pathlib.Path(place).is_relative_to(store)}
+            if "canonical_payloads" not in unknown:
+                unknown.append("canonical_payloads")
         places = sorted(set(places) | set(payloads))
         releases.update({place: state for place, (state, _present_now) in payloads.items()})
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]

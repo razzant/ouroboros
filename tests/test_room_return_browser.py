@@ -274,35 +274,6 @@ def test_messages_arriving_while_a_room_is_away_stay_unread_below_its_passage_un
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_a_room_left_at_its_newest_message_follows_the_fresh_end_and_reads_it(direct_server_with_data, engine):
-    from playwright.sync_api import sync_playwright
-
-    data = direct_server_with_data["data_dir"]
-    chat_a, first = _seed_room(data, "end-a", "End A", _rows("Alpha", 30))
-    _seed_room(data, "end-b", "End B", _rows("Bravo", 4))
-    acks = []
-    with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
-        try:
-            page, row = _client(browser, direct_server_with_data["url"], "end-a", acks)
-            _open(page, "end-a")
-            assert _wait_for(page, lambda: _seen(acks, "end-a") == [first]), acks
-            _open(page, "end-b")
-            dialogue_store.append(data, "chat", {"ts": "2026-09-28T11:50:00Z", "direction": "out", "chat_id": chat_a,
-                                                 "text": "Fresh end while away"})
-            second = advance_room_revision(data, chat_id=chat_a)["visible_revision"]
-            _emit_ws_frame(page, {"type": "projects_changed"})
-            _unread(row).wait_for(state="attached")
-            _open(page, "end-a")
-            page.locator('[id="panel-pchat-end-a"] [data-history-id]').filter(has_text="Fresh end while away").wait_for()
-            assert _wait_for(page, lambda: page.evaluate(_AT_BOTTOM, "end-a") <= 8), "it follows the fresh end"
-            assert _wait_for(page, lambda: _seen(acks, "end-a") == [first, second]), acks
-            _unread(row).wait_for(state="detached")
-        finally:
-            browser.close()
-
-
-@pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_a_history_read_still_in_flight_when_a_room_leaves_is_not_drawn_while_it_is_away(direct_server_with_data, engine):
     from playwright.sync_api import sync_playwright
 

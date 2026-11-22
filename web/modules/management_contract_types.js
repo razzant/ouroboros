@@ -693,7 +693,7 @@
  */
 
 /**
- * From `min_prompt_tokens` input tokens on, a request is charged these USD per 1M tokens.
+ * Effective USD per 1M tokens above `min_prompt_tokens` until the next threshold is exceeded.
  * @typedef {Object} ModelPriceTier
  * @property {number} min_prompt_tokens
  * @property {number} input
@@ -831,6 +831,7 @@
  * @property {string=} issuer
  * @property {boolean=} pending
  * @property {string=} required_scope
+ * @property {?string=} required_scope_since
  */
 
 /**

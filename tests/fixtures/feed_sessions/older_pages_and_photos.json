@@ -1,0 +1,38 @@
+{
+  "about": "Reading back to the edge of what is loaded: an older page lands above the passage, photos above it finish loading later and grow up out of view; the passage stays through both. ↓ then reaches the end at once and the next reply follows. A quote then lands on a photo still loading: the reader is on the picture, which grows down and stays where it is read. In another room a quote lands on a loading photo and a 31 px wheel moves it to start just above the band: it grows up out of view, its bottom and the text after it stay.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Older pages", "rows": [
+      {"count": 140, "words": [18, 60]},
+      {"photo": "p1", "height": 420},
+      {"count": 4, "words": [20, 50]},
+      {"photo": "p2", "height": 300},
+      {"count": 120, "words": [18, 60]},
+      {"photo": "p3", "height": 380},
+      {"count": 30, "words": [18, 60]},
+      {"reply": "on-photo", "to": 267, "words": [30, 30]}
+    ]},
+    "b": {"name": "A photo at the band's top", "rows": [
+      {"count": 40, "words": [18, 60]},
+      {"photo": "p4", "height": 380},
+      {"count": 30, "words": [18, 60]},
+      {"reply": "on-p4", "to": 41, "words": [30, 30]}
+    ]}
+  },
+  "events": [
+    {"open": "a"},
+    {"older": true},
+    {"image": "p2"},
+    {"image": "p1"},
+    {"wheel": -600},
+    {"arrive": "a", "words": 50},
+    {"latest": true},
+    {"arrive": "a", "words": 30},
+    {"quote": "on-photo"},
+    {"image": "p3"},
+    {"open": "b"},
+    {"quote": "on-p4"},
+    {"wheel": 31},
+    {"image": "p4"}
+  ]
+}

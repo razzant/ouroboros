@@ -225,13 +225,9 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
             self.assertIn(key, RETIRED_SETTING_KEYS)
 
     def test_duplicate_plan_calls_use_existing_sequential_tool_lane(self):
-        from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
+        from ouroboros.tool_capabilities import call_segments
 
-        calls = [
-            {"function": {"name": "plan_task", "arguments": "{}"}},
-            {"function": {"name": "plan_task", "arguments": "{}"}},
-        ]
-        self.assertFalse(tool_calls_can_run_parallel(calls))
+        self.assertEqual(call_segments(["plan_task", "plan_task"]), [[0], [1]])
 
 
 class TestPlanBudgetFollowsQuorum(unittest.TestCase):

@@ -106,7 +106,8 @@ from ouroboros.delegate_directory import (
     prepare_directory_execution, snapshot_checkout, started_receipt)
 from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
-from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
+from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, replayed_lineage, start_inputs
+from ouroboros.helper_receipt import build as build_receipt, render as render_receipt, start_facts
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -666,7 +667,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         if definite and requested:
             definite = close_unsent_start(drive, str(ctx.task_id), invocation_id, code)
         if (start_attempted and isinstance(exc, ClaudexorUnavailable)
-                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body)) is not None):
+                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body, inputs.selected,
+                                                   _start_lineage(request_body, invocation_id, authority, inputs, recovering))) is not None):
             return accepted
         try:
             cleanup = _retire_orphaned_registration(
@@ -713,7 +715,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering)))
+
+
+def _start_lineage(request: Any, invocation_id: str, authority: "DelegatedRunShape", inputs: Any, recovering: bool) -> Any:
+    """The automatic lineage fact this start may state: its copies' count, else, for a replay, ``NO_RECORD`` only
+    where its own recorded request was prepared for copies (``replayed_lineage``)."""
+    return inputs.lineage or (replayed_lineage(request, invocation_id, authority.investigation, inputs.selected)
+                              if recovering else None)
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
@@ -721,36 +730,38 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
                      baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None,
                      prompt_cache_ttl=None, continuation=None, max_seconds: int = 0, max_seconds_basis: str = "",
-                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None) -> ToolResult:
+                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None,
+                     receipt=None) -> ToolResult:
     """The one author of delegate_start's started result (note + payload).
 
-    The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
-    start, so both are said. An undurable custody row is the louder one and goes first:
-    a nanny that walks away from an uncustodied MUTATING run leaves a live shell in its
-    own worktree that nothing outside this process can name.
+    An undurable custody row is the loudest fact and goes first: a nanny that walks away from an
+    uncustodied MUTATING run leaves a live shell in its own worktree that nothing outside this process
+    can name. The rest of the note is the receipt of what reached the run (``helper_receipt``), from the
+    same facts the payload keys carry plus ``receipt`` (what this start measured: the text sent, the
+    automatic lineage copies, my human's rows the host carried). Applied access is not known until
+    ``delegate_wait`` reads the run's own artifacts.
     """
     note = "" if durable else (
         "CUSTODY IS NOT DURABLE: the run started, but its custody row could not be written, "
         "so nothing outside this worker can wait on, cancel or settle it. Do not walk away "
-        "from it — finish it or delegate_cancel it in this session. ")
-    note += (
-        "You are the nanny and the host. Poll with delegate_wait; the run's own "
-        "claims are evidence to check, not a verified result."
-        + (
-            (" This run is an evidence-only investigation in a PRIVATE COPY: its changes are kept as evidence, "
-             "never applied (integrate_delegated_patch refuses); never let it commit." if authority.investigation else
-             " This run edits a PRIVATE SNAPSHOT of your write root, not the shared "
-             "tree: at terminal its diff is captured for you, and NOTHING lands in "
-             "the shared tree until you explicitly integrate_delegated_patch(run_id="
-             "...) to apply or reject it — read the captured diff before you claim "
-             "it, and never let the run commit.") + " The requested native access profile "
-            f"is {authority.access}; scoped HOME selects native state and credentials, "
-            "not filesystem confinement. Actual access is read from the run's own "
-            "artifacts by delegate_wait."
-            if authority.isolation == "live" else
-            " This run cannot write anything: it reads and answers."
-        )
-    )
+        "from it — finish it or delegate_cancel it in this session.\n")
+    facts = dict(receipt or {})
+    facts["access"] = [("access", authority.access + (
+        " (scoped HOME selects native state and credentials, not filesystem confinement)"
+        if authority.isolation == "live" else ""), None)]
+    if snapshot_id and authority.investigation:  # nothing from its copy can land: no write root, this fact instead
+        facts["access"].append(("investigation", "evidence-only investigation in a private copy (execution_root) of "
+                                "authority_target_root: its captured changes are kept as evidence and never applied "
+                                "(integrate_delegated_patch refuses), and the host's instructions forbid commits", False))
+    elif snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
+        facts["write_root"] = ("private snapshot (execution_root) of authority_target_root: only a diff captured at "
+                               "terminal can land there, through integrate_delegated_patch, and the host's instructions "
+                               "forbid commits")
+    if input_files is not None:
+        facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
+            1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
+    rendered = render_receipt(build_receipt(facts))
+    note += rendered
     payload = {
         "status": "started" if durable else "started_uncustodied",
         "run_id": run_id,
@@ -800,7 +811,8 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
             payload["baseline_manifest_read"] = {"root": "artifact_store", "path": f"delegated_runs/{snapshot_id}/baseline_manifest.json"}
     if isinstance(resource_ref, dict) and (resource_ref.get("workspace_kind") == "directory"
                                            or is_in_place_run({"resource_ref": resource_ref})):
-        started_receipt(payload, resource_ref, target_root, durable=durable, investigation=authority.investigation)
+        started_receipt(payload, resource_ref, target_root, durable=durable, investigation=authority.investigation,
+                        receipt=rendered)
     return delegate_result(payload)
 
 

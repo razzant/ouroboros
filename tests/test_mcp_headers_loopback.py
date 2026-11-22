@@ -9,9 +9,6 @@ MCPManager, and the real SDK transports initialize, list and call a tool.
 from __future__ import annotations
 
 import json
-import socket
-import threading
-import time
 from typing import Annotated
 
 import pytest
@@ -26,68 +23,7 @@ BASIC = "Basic c3ludGhldGljOmxvb3BiYWNr"
 CUSTOM = "synthetic-loopback-key-0002"
 
 
-class _Synthetic:
-    """One FastMCP app behind a guard that records and checks request headers."""
-
-    def __init__(self, transport, required):
-        from mcp.server.fastmcp import FastMCP
-
-        server = FastMCP("synthetic", host="127.0.0.1", log_level="WARNING")
-
-        @server.tool()
-        def echo(text: str) -> str:
-            return f"echo:{text}"
-
-        self.app = server.streamable_http_app() if transport == "http" else server.sse_app()
-        self.required, self.seen = required, []
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = {key.decode().lower(): value.decode() for key, value in scope["headers"]}
-            self.seen.append(headers)
-            if any(headers.get(name.lower()) != value for name, value in self.required.items()):
-                await send({"type": "http.response.start", "status": 401, "headers": []})
-                await send({"type": "http.response.body", "body": b"missing synthetic header"})
-                return
-        await self.app(scope, receive, send)
-
-
-def start_asgi(app, running, name="mcp-loopback"):
-    """Serve one ASGI app on a free loopback port; ``running`` collects it for shutdown."""
-    import uvicorn
-
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, name=name, daemon=True)
-    thread.start()
-    running.append((server, thread))
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline, "synthetic MCP server did not start"
-        time.sleep(0.02)
-    return port
-
-
-@pytest.fixture
-def loopback():
-    running = []
-
-    def serve(transport, required, wrap=None):
-        app = _Synthetic(transport, required)
-        port = start_asgi(wrap(app) if wrap else app, running, f"mcp-loopback-{transport}")
-        path = "/mcp" if transport == "http" else "/sse"
-        return app, f"http://127.0.0.1:{port}{path}"
-
-    mcp_client.reset_manager_for_tests()
-    try:
-        yield serve
-    finally:
-        mcp_client.reset_manager_for_tests()
-        for server, thread in running:
-            server.should_exit = True
-            thread.join(10)
+from tests._mcp_loopback import _Synthetic, loopback, start_asgi  # noqa: F401 -- shared (tests/_mcp_loopback.py)
 
 
 def test_saved_headers_initialize_list_and_call_over_http_and_sse(loopback, settings_client, monkeypatch):  # noqa: F811
@@ -124,7 +60,7 @@ def test_saved_headers_initialize_list_and_call_over_http_and_sse(loopback, sett
     assert {headers["authorization"] for headers in sse_app.seen} == {BASIC}
 
 
-def test_a_rejected_header_reports_the_failure_without_its_value(loopback):
+def test_a_rejected_header_reports_the_failure_without_its_value(loopback):  # noqa: F811
     _app, url = loopback("http", {"X-Api-Key": CUSTOM})
     wrong = "synthetic-wrong-key-0003"
     manager = mcp_client.get_manager()
@@ -161,7 +97,7 @@ class _Ordinary(_Synthetic):
 
 
 @pytest.mark.parametrize("transport", ["http", "sse"])
-def test_header_values_are_forwarded_configuration_not_filters_over_server_content(loopback, transport):
+def test_header_values_are_forwarded_configuration_not_filters_over_server_content(loopback, transport):  # noqa: F811
     """Short and long ordinary header values leave results, descriptions, nested schemas and addresses intact.
 
     Settings masks every value and the origin guard limits where values go; text the
@@ -236,7 +172,7 @@ class _Echoing:
     (True, "http", "Error parsing JSON response"),
     (False, "sse", "Error parsing server message"),
 ])
-def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_saved_token(loopback, monkeypatch, transport, sdk_line,
+def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_saved_token(loopback, monkeypatch, transport, sdk_line,  # noqa: F811
                                                                         redacted):
     """The SDK logs the raw invalid body with its traceback before Ouroboros sees an error.
 
@@ -292,7 +228,7 @@ class _NotifyingSSE(_Echoing):
 
 
 @pytest.mark.parametrize("redacted", [True, False])
-def test_sdk_session_warnings_on_the_root_logger_never_carry_a_saved_token(loopback, monkeypatch, redacted):
+def test_sdk_session_warnings_on_the_root_logger_never_carry_a_saved_token(loopback, monkeypatch, redacted):  # noqa: F811
     """The SDK session logs an invalid notification on the root logger with its raw parameters.
 
     The echo is the legacy token. Only records made inside this connection are
@@ -341,7 +277,7 @@ class _Recording:
         await self.app(scope, receive, send)
 
 
-def test_effective_wire_precedence_of_protocol_headers_is_transport_specific(loopback):
+def test_effective_wire_precedence_of_protocol_headers_is_transport_specific(loopback):  # noqa: F811
     """Literal means sent as written unless the transport sets that name itself.
 
     Streamable HTTP sets Accept and Content-Type on every request, and
@@ -392,7 +328,7 @@ def test_effective_wire_precedence_of_protocol_headers_is_transport_specific(loo
     assert {request["content-type"] for request in values(typed_rec, "POST")} == {"text/plain"}
 
 
-def test_cyber_url_userinfo_replaces_a_configured_authorization_header(loopback, monkeypatch):
+def test_cyber_url_userinfo_replaces_a_configured_authorization_header(loopback, monkeypatch):  # noqa: F811
     """With userinfo in the URL (Cyber only), the HTTP client sends Basic auth in Authorization."""
     import base64
 
