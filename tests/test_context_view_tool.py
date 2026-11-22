@@ -803,3 +803,34 @@ def test_a_host_source_view_ends_the_standing_rows_and_the_next_full_fold_takes_
     full = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("three")], "fold-2", keep_unit_ids=[])
     assert full[:len(request) + 1] == [*request, older] and restored not in full
     assert not any(row.get("tool_call_id") in ("tail", "three") for row in full)
+
+
+from tests.test_review_view_integration import harness  # noqa: E402,F401 -- the recorded plan-review fixture
+
+
+def test_no_fold_changes_a_review_index_before_its_note_and_a_stale_one_after_it_leaves(harness, tmp_path, monkeypatch):
+    """At the fold's seam, the review-index refresh obeys the positional rule in both directions: a stale start index,
+    a full fold, a newer index appended by a later review, a second full fold and a tail fold (fold_last_n=1) leave
+    every row before each fold's note byte-identical; a stale index copy after the tail fold's note leaves."""
+    from ouroboros import review_history_view as rv
+    from tests.test_review_view_integration import _capture, _three
+
+    ctx, _ = _three(harness)
+    ctx.active_context_mode = "low"
+    now = next(row for row in _capture(ctx) if rv.REVIEW_CONTEXT_INDEX_KEY in row)
+    old = rv._index_message({"decision_rows": []}, "plan", task_id=ctx.task_id)
+    assert old != now
+    view = [*_source()[:2], old, _facts("round 1"), *_read("r0")]
+    first = _fold(tmp_path, monkeypatch, ctx, view, "fold-1", keep_unit_ids=[])
+    at = _notes(first)[0]
+    assert first[:at] == view[:at] and old in first
+    view = [*first, _facts("round 3"), *_read("r1"), now, *_read("r2")]
+    second = _fold(tmp_path, monkeypatch, ctx, view, "fold-2", keep_unit_ids=[])
+    at = _notes(second)[-1]
+    assert second[:at] == view[:at] and old in second
+    late = {**copy.deepcopy(old), "content": old["content"]}
+    view = [*second, _facts("round 5"), *_read("r3"), *_read("r4"), late]
+    tail = _fold(tmp_path, monkeypatch, ctx, view, "tail", fold_last_n=1)
+    at = _notes(tail)[-1]
+    assert tail[:at] == view[:at] and at == len(view) - 3
+    assert sum(row == old for row in tail) == 1 and tail[2] == old  # the copy after the note left, the start's stays

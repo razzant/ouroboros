@@ -141,13 +141,21 @@ def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, dri
                      "kinds": dict(kinds), "checkpoint_ref": address}
 
 
+def fold_note_position(messages: list, receipt: dict) -> Optional[int]:
+    """Where an applied authored fold's note stands in ``messages`` (None without one): no host writer changes a
+    row before it (``retire_host_rows_after_fold``, ``review_history_view.refresh_compacted_review_context``)."""
+    if receipt.get("status") != "applied" or not receipt.get("selection_fingerprint"):
+        return None
+    note = "view:" + receipt["selection_fingerprint"]
+    return next((i for i, row in enumerate(messages) if (compaction._capsule_metadata(row)[1] or {}).get("unit_id") == note), None)
+
+
 def retire_host_rows_after_fold(messages: list, receipt: dict, *, observed_messages=(), keep_unit_ids=()) -> list:
     """Retire unselected superseded host rows inside an applied, checkpointed authored fold, none located before the
-    note it wrote: a fold changes nothing before its first replaced unit."""
+    note it wrote (``fold_note_position``): a fold changes nothing before its first replaced unit."""
     if receipt.get("status") != "applied" or not receipt.get("selection_fingerprint") or not receipt.get("checkpoint_ref"):
         return messages
-    note = "view:" + receipt["selection_fingerprint"]
-    first = next((i for i, row in enumerate(messages) if (compaction._capsule_metadata(row)[1] or {}).get("unit_id") == note), 0)
+    first = fold_note_position(messages, receipt) or 0
     def identity(row):
         return compaction.context_reclaim_transcript_sha256(compaction._view_source_messages([row]))
     units = compaction.context_units(observed_messages, scope="dialogue")

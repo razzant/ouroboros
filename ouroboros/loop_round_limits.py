@@ -638,7 +638,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             exposed_units=observed.get("exposed_units"), written_at=proposal.get("written_at"),
         )
         receipt = asdict(result)
-        from ouroboros.context_source_view import retire_host_rows_after_fold
+        from ouroboros.context_source_view import fold_note_position, retire_host_rows_after_fold
         candidate = retire_host_rows_after_fold(candidate, receipt, observed_messages=observed["messages"],
                                                 keep_unit_ids=request.keep_unit_ids)
         if receipt["status"] == "no_op" and (proposal.get("review_transfers") or proposal.get("review_notes")):
@@ -654,8 +654,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             try:
                 review_pointer, review_capsule, review_transfers, expected_selection = prepare_review_view(
                     tool_ctx, candidate, receipt, proposal.get("review_transfers") or [], proposal.get("review_notes") or [])
-                candidate = (refresh_compacted_review_context(tool_ctx, candidate, selection=review_pointer)
-                             if review_pointer else refresh_compacted_review_context(tool_ctx, candidate))
+                candidate = refresh_compacted_review_context(tool_ctx, candidate, floor=fold_note_position(
+                    candidate, receipt), **({"selection": review_pointer} if review_pointer else {}))
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 receipt.update(status="selection_failed", review_selection_error=f"{type(exc).__name__}: {exc}")
                 candidate = messages
