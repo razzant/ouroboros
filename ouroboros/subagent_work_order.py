@@ -588,7 +588,8 @@ def knowledge_notes_parameter(text: str) -> dict[str, Any]:
     ``input_files``' (a compact custom-tool projection keeps this structure, not the description)."""
     item = {"type": "object", "required": ["topic"], "additionalProperties": False,
             "properties": {"topic": {"type": "string"}, "scope": {"type": "string"}}}
-    return {NAMED_NOTES: {"type": "array", "items": item, "description": "Knowledge notes by knowledge_read's address, " + text}}
+    return {NAMED_NOTES: {"type": "array", "items": item,
+                          "description": "Knowledge notes by knowledge_read's address, " + text}}
 
 
 class NamedNoteError(ValueError):
@@ -653,7 +654,8 @@ def resolve_named_notes(ctx: Any, value: Any) -> tuple[list[dict] | None, list[s
             continue
         topic, scope = item["topic"], item.get("scope") or ""
         if "scope" in item and not item["scope"]:
-            notes.append(ignored_argument_note(f"{name}.scope", item["scope"], "this task's project shelf, else global"))
+            notes.append(ignored_argument_note(f"{name}.scope", item["scope"],
+                                               "this task's project shelf, else global"))
         try:
             if refusal := _note_floor(ctx, topic, scope):
                 problems.append(f"{name} {topic!r}: {refusal}")
@@ -723,7 +725,8 @@ def named_notes_block(entries: Any, *, session: bool) -> str:
     calls = "\n".join(f"- knowledge_read(topic={entry['topic']!r}, scope={entry['scope']!r})" for entry in entries)
     where = ("Each session start of this work carries their whole text at their revision then." if session else
              "Their text is not in this input.")
-    return f"[NAMED KNOWLEDGE NOTES]\nThe parent named these knowledge notes for this work (knowledge_notes). {where}\n{calls}"
+    return ("[NAMED KNOWLEDGE NOTES]\nThe parent named these knowledge notes for this work (knowledge_notes). "
+            f"{where}\n{calls}")
 
 
 def session_memory_references(ctx: Any, knowledge_notes: Any = None) -> str:
@@ -738,9 +741,9 @@ def session_memory_references(ctx: Any, knowledge_notes: Any = None) -> str:
     The stores are read once as they stand, through the memory
     view's own capture and render (``memory_view._capture_marks``, ``render_room`` over a marks-only snapshot), the
     helper's outline (``context_sections.helper_navigation_sections``) and the heads resolved now, never the
-    launcher's own capture. The notes named for this work (the task's ``knowledge_notes``, then this call's) follow whole,
-    declared or not (``named_notes_section``). ``ctx._session_held_heads`` and ``ctx._session_named_notes`` keep the
-    heads and named notes sent, by address and revision, for the start's custody; nothing else is written or activated
+    launcher's own capture. The notes named for this work (the task's ``knowledge_notes``, then this call's) follow
+    whole, declared or not (``named_notes_section``). ``ctx._session_held_heads`` and ``ctx._session_named_notes`` keep
+    the heads and named notes sent, by address and revision, for the start's custody; nothing else is written or activated
     here. A retry replays the recorded bytes."""
     import dataclasses
     from types import SimpleNamespace
@@ -822,7 +825,8 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
-            + owner_rules_section(session=True) + session_memory_references(ctx, knowledge_notes) + session_skill_index(ctx))
+            + owner_rules_section(session=True) + session_memory_references(ctx, knowledge_notes)
+            + session_skill_index(ctx))
     tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
     tail = f"\n\n{tail}" if tail else ""
     if payload_skill:
