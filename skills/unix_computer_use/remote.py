@@ -350,11 +350,11 @@ class RemoteBackends:
                 if stop:
                     return self._stopped(ctx, shared, before, backend, stop, later=later)
                 # The wrapper prints `__FRONT_BEFORE__` first and `__FRONT_AFTER__` after the input: the latter, or exit 0
-                # after the former (ssh returns it only once the session ended normally), is completion, `rc` the input's.
-                # A reply cut short leaves the outcome unknown, never "not sent"; exit 0 with no marker at all means sh
-                # ran no script (ssh gave it no stdin, as `StdinNull yes` does): nothing was sent.
-                started = bool(re.search(r"^__FRONT_BEFORE__", stdout, re.M))
-                completed = (rc == 0 and started or bool(re.search(r"^__FRONT_AFTER__", stdout, re.M))) if input_effect else True
+                # after the former, is completion and `rc` the input's; a cut reply leaves the outcome unknown. Exit 0 with
+                # no marker on either stream (a forced command may send them to stderr) means sh ran no script: nothing sent.
+                marked = f"{stdout}\n{stderr}"
+                started = bool(re.search(r"^__FRONT_BEFORE__", marked, re.M))
+                completed = (rc == 0 and started or bool(re.search(r"^__FRONT_AFTER__", marked, re.M))) if input_effect else True
                 payload = {"ok": rc == 0 and completed, "backend": backend, "returncode": rc, "output": strip_markers(stdout),
                            "dispatched": True if completed else None,
                            **(mac_input.answer_fields(strip_markers(stdout), stderr) if completed else {})}

@@ -973,18 +973,23 @@ def test_an_ssh_sequence_names_no_recipient_when_its_first_step_could_not_read_t
         assert out["reason"] == "target_lost" and out["front"]["app"] == "Safari", out
 
 
-@pytest.mark.parametrize("markers", [True, False])
-def test_an_ssh_input_whose_script_never_ran_is_not_a_success(tmp_path, monkeypatch, markers):
-    """ssh exits 0 in both cases. With the wrapper's lines the click ran; with none of them the remote sh read no
-    script (a StdinNull yes for this host gives it no stdin), so nothing was sent and the receipt says why."""
+@pytest.mark.parametrize("where", ["stdout", "stderr", "nowhere"])
+def test_an_ssh_input_whose_script_never_ran_is_not_a_success(tmp_path, monkeypatch, where):
+    """ssh exits 0 in all three cases. With the wrapper's lines on either stream the click ran (a forced command can
+    send the remote stdout to stderr); with none of them the remote sh read no script (a StdinNull yes for this host
+    gives it no stdin), so nothing was sent and the receipt says why."""
+    lines = f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n"
+
     def script(command):
         if is_input(command):
-            return (0, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__FRONT_AFTER__{info_line(SAFARI)}\n") if markers else (0, "")
+            return {"stdout": (0, lines), "stderr": (0, "", lines), "nowhere": (0, "")}[where]
         return 0, ""
     module, api, calls = ssh(tmp_path, monkeypatch, script)
     out = receipt(api.tools["click"](x=10, y=20, raw=True))
-    if markers:
+    if where == "stdout":
         assert out["ok"] is True and out["dispatched"] is True and out["observed_effect"] is True, out
+    elif where == "stderr":
+        assert out["ok"] is True and out["dispatched"] is True and out.get("reason") != "remote_script_not_run", out
     else:
         assert out["ok"] is False and out["dispatched"] is False and out["reason"] == "remote_script_not_run", out
         assert "StdinNull" in out["error"] and "transport_failed" not in out and not out.get("observed_effect"), out
