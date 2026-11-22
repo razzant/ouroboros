@@ -179,8 +179,9 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
     """Everything a gated retirer could remove for this exact task, as ``(places, unknown, pins)``, ``pins``
     naming the copy path whose record each ``pins:`` place stands on, and the ownership record each session
     scratch stands on. One listing per current folder (copy records, the copies' root, review seats and
-    checkouts), the task's canonical artifact tree and one keyed custody read per stopped seat's operation; a listing, marker or
-    start that cannot be read names its class in ``unknown``."""
+    checkouts) and one keyed custody read per stopped seat's operation. Canonical payload choices
+    are read separately under custody, not enumerated as individual history files here. A listing,
+    marker or start that cannot be read names its class in ``unknown``."""
     from ouroboros.copy_environments import ENV_SUFFIX, scratch_owner
     from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
     from ouroboros.private_copy_read import _copy_owner, read_records
@@ -204,21 +205,6 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
                           for path, _kind, _info in worked_copies_in(root / "task_results" / "artifacts" / task_id)})
     except OSError:
         unknown.append("saved_states")
-    from ouroboros.artifacts import iter_artifact_tree
-    from ouroboros.payload_release_state import store_of
-
-    canonical = store_of(root, task_id)
-    try:
-        try:
-            canonical.lstat()
-        except FileNotFoundError:
-            canonical = None
-        if canonical is not None:
-            if canonical.resolve(strict=False) != canonical:
-                raise OSError("canonical artifact store reached through a link")
-            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()]
-    except OSError:
-        unknown.append("canonical_payloads")
     read = read_records(root)
     if read.unlistable or read.unreadable or read.import_pending:
         unknown.append("private_copies")
@@ -358,7 +344,7 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
     managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
     from ouroboros.delegate_documents import managed_keep_places
-    from ouroboros.payload_release_state import keep_places
+    from ouroboros.payload_release_state import keep_places, unlisted_payload_place
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -396,7 +382,14 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             unknown.append("managed_imports")
         places = sorted(set(places) | set(documents))
         releases.update(documents)
-        payloads = keep_places(base, task_id, row, places)  # fresh canonical facts under the same custody lock
+        try:  # canonical facts under the same custody lock as the owner's keep
+            payloads = keep_places(base, task_id, row, places)
+        except OSError:
+            if not keep:
+                raise
+            payloads = {}
+            if "canonical_payloads" not in unknown:
+                unknown.append("canonical_payloads")
         places = sorted(set(places) | set(payloads))
         releases.update({place: state for place, (state, _present_now) in payloads.items()})
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]
@@ -412,7 +405,14 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
             if kind not in unknown:
                 unknown.append(kind)
         if keep and retired and not retained and not unknown and not releasing:  # a bound release is no proof of gone
-            return answer("already_retired", stands, retired=retired, releases=releases)
+            try:
+                place = unlisted_payload_place(base, task_id, row)
+            except (OSError, RuntimeError):
+                unknown.append("canonical_payloads")
+            else:
+                if place is None:
+                    return answer("already_retired", stands, retired=retired, releases=releases)
+                retained.append(place)  # the folder, never its unselected names
         if keep and not stands:
             fact = {"at": utc_now_iso(), "scope": SCOPE_TASK, "source": source,
                     **({"note": note[:_NOTE_MAX]} if note else {})}

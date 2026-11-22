@@ -189,7 +189,8 @@ def _open_member(parents: _Parents, route: Route) -> Tuple[Any, os.stat_result]:
 def directory_archives(stores: List[pathlib.Path], rows: Any, *, anchor: Any = None) -> Dict[str, Dict[str, Any]]:
     """Per top-level result directory, what ``?archive=<dir>`` would stream now: ``files``/``size``
     of its members from one confined no-follow stat each (no hashing), the recorded rows it leaves
-    out (``excluded``) and ``available`` iff it has a member (never where the platform cannot confine)."""
+    out (``excluded``), an optional positive count the owner ``released``, and ``available`` iff it
+    has a member (never where the platform cannot confine)."""
     spellings = root_spellings(anchor) if anchor is not None else ()
     anchor = spellings[0] if spellings else None
     view: Dict[str, Dict[str, Any]] = {}
@@ -206,9 +207,9 @@ def directory_archives(stores: List[pathlib.Path], rows: Any, *, anchor: Any = N
             if not sep or (location is None and not plain_segments(relpath)):
                 continue
             entry = view.setdefault(directory, {"name": directory + ARCHIVE_SUFFIX, "files": 0, "size": 0,
-                                                "excluded": 0, "released": 0, "available": False})
+                                                "excluded": 0, "available": False})
             if row.get("released"):  # the owner released it in Storage: said apart, never a silent gap
-                entry["released"] += 1
+                entry["released"] = entry.get("released", 0) + 1
                 continue
             observed = (_member_stat(parents, _zip_route(anchor, stores[location[0]], relpath))
                         if location and _eligible(row) else None)

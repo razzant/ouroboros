@@ -391,8 +391,9 @@ def _where(root: Any, record: Dict[str, Any], path: str, receipt: Dict[str, Any]
 
 def keep_places(root: Any, task_id: str, document: Any, listed: List[str]) -> Dict[str, Tuple[str, Optional[bool]]]:
     """Keep's fresh canonical inventory under custody: path -> (release state, still keepable).
-    LISTED was enumerated before the lock; current offers/operations/rows add arrivals. Only accounted
-    receipts can say ``deleted``. An unaccounted move says ``queued``, ``moved`` or ``unknown`` from its
+    LISTED names ordinary places observed before the lock. Offers, agreed retained refs, operations
+    and recorded outputs add exact paths. Only accounted receipts can say ``deleted``.
+    An unaccounted move says ``queued``, ``moved`` or ``unknown`` from its
     actual source/slot; Keep saves what remains, never promises to undo the owner's accepted move."""
     from ouroboros.task_custody import store_relpath
 
@@ -403,6 +404,8 @@ def keep_places(root: Any, task_id: str, document: Any, listed: List[str]) -> Di
     for offer in record["offers"].values():
         if isinstance(offer, dict):
             paths.update(item["path"] for item in offer.get("files") or () if isinstance(item, dict) and plain_path(item.get("path")))
+            paths.update(ref["path"] for ref in offer.get("retained") or () if isinstance(ref, dict)
+                         and ref.get("path") != "task_result" and plain_path(ref.get("path")))
     decisions = task_release_state(document, store)
     paths.update(decisions.positions)
     paths.update(item["path"] for op in record["operations"].values() if isinstance(op, dict)
@@ -434,6 +437,30 @@ def keep_places(root: Any, task_id: str, document: Any, listed: List[str]) -> Di
                     state, present = "unknown", None
         found[str(store / original)] = (state, present)
     return found
+
+
+def unlisted_payload_place(root: Any, task_id: str, document: Any) -> Optional[str]:
+    """The last keepable area after other material went: stop at one ordinary unselected file.
+
+    Only the already-retired decision needs this read. Never list unselected names in the receipt;
+    an uncertain observation saves Keep as unknown, and this probe grants no release authority.
+    """
+    from ouroboros.artifacts import iter_artifact_tree
+    from ouroboros.payload_release import protected
+
+    canonical = store_of(root, task_id)
+    try:
+        canonical.lstat()
+    except FileNotFoundError:
+        return None
+    if canonical.resolve(strict=False) != canonical:
+        raise OSError("canonical artifact store unavailable")
+    decisions = task_release_state(document, canonical)
+    for path in iter_artifact_tree(canonical):
+        rel = path.relative_to(canonical).as_posix()
+        if rel not in decisions.positions and not protected(rel) and not path.is_symlink() and path.is_file():
+            return str(canonical)
+    return None
 
 
 def operation_outcome(root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:

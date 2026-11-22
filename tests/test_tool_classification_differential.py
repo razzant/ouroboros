@@ -366,6 +366,7 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    "ACCESS_BLOCKED": (True, "blocked"),  # control_storage._read_refusal: the requested task was not read
     # workpad_write: a blind overwrite of a version this task did not write landed; its receipt rides LEGACY_WARNING (ok,
     # not OK), so a finishing turn reads it (memory_texts.write_text).
     "BLIND_OVERWRITE": (False, "ok"),

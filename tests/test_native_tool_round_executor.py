@@ -1075,7 +1075,6 @@ _LAST_READ_VIEW_WRITERS = {  # exact (file, enclosing def, kind); the site COUNT
     (_CORE, "_read_file", "assign"),
     (_EPISODE, "_execute_inspection_call", "assign"),
 }
-_RESET = "    ctx.last_read_view = None\n"  # the reader's entry reset inside _read_file
 
 
 def _assert_three_writers(sites):
@@ -1112,12 +1111,14 @@ def test_last_read_view_has_exactly_three_writers():
     live = {rel: sources[rel] for rel in (_CORE, _EPISODE)}  # the three sites all live in these two files
     base = _last_read_view_sites(live)
     _assert_three_writers(base)
-    core = live[_CORE]
-    assert core.count(_RESET) == 1
-    injected_at = core[:core.index(_RESET)].count("\n") + 2  # 1-based line of the injected reset
-    live[_CORE] = core.replace(_RESET, _RESET + _RESET.rstrip("\n") + "  # injected\n")
+    reset_at, = (line for f, d, line, k in base if (f, d, k) == (_CORE, "_read_file", "assign"))
+    core = live[_CORE].splitlines(keepends=True)
+    reset = core[reset_at - 1]
+    assert reset.partition("#")[0].strip() == "ctx.last_read_view = None"
+    core.insert(reset_at, reset)
+    live[_CORE] = "".join(core)
     fourth = _last_read_view_sites(live)
-    assert fourth == base | {(_CORE, "_read_file", injected_at, "assign")}
+    assert len(fourth) == len(base) + 1 and (_CORE, "_read_file", reset_at + 1, "assign") in fourth
     with pytest.raises(AssertionError):
         _assert_three_writers(fourth)
 
