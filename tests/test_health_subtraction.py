@@ -135,30 +135,20 @@ def test_the_self_lines_state_each_file_s_last_update_record_and_never_its_mtime
     assert said() == ["WORLD.md: last update_world record unreadable"]
 
 
-def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):
+def test_a_published_owner_status_warning_is_not_a_model_health_diagnosis(tmp_path, monkeypatch):
     from ouroboros import usage_accounting
 
-    def no_usage_read(*_a, **_k):
-        raise AssertionError("a context build must not open the usage store for the drift line")
-
-    monkeypatch.setattr(usage_accounting, "usage_breakdown", no_usage_read)
+    reads = []
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", lambda *_a, **_k: reads.append(True))
     env = _make_health_env(tmp_path)
-    assert "BUDGET DRIFT" not in context_health.build_health_invariants(env)  # no alert: no line, no read
-    # The percentage compares the two changes since the check's baseline; the line says those, not lifetime totals.
     (tmp_path / "state" / "state.json").write_text(json.dumps({
         "budget_drift_alert": True, "budget_drift_pct": 76.1, "openrouter_total_usd": 30176.79,
         "session_total_snapshot": 30150.0, "openrouter_checked_ledger_settled_usd": 29331.41,
-        "session_openrouter_settled_snapshot": 29325.0}), encoding="utf-8")
-    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
-    assert "76.1%" in line and "$6.41" in line and "$26.79" in line
-    assert "29331" not in line and "30176" not in line
-    # A state written before the checked field keeps its older ledger field (/status reads the same).
-    (tmp_path / "state" / "state.json").write_text(json.dumps({
-        "budget_drift_alert": True, "budget_drift_pct": 76.1, "openrouter_total_usd": 30176.79,
-        "session_total_snapshot": 30150.0, "openrouter_ledger_settled_usd": 29331.41,
-        "session_openrouter_settled_snapshot": 29325.0}), encoding="utf-8")
-    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
-    assert "$6.41" in line and "$26.79" in line
+        "session_openrouter_settled_snapshot": 29325.0,
+        "openrouter_last_check_at": "2026-11-17T14:00:00+00:00"}), encoding="utf-8")
+    health = context_health.build_health_invariants(env)
+    assert "BUDGET DRIFT" not in health and "76.1%" not in health and "$26.79" not in health
+    assert reads == []
 
 
 def test_counts_and_obligations_with_an_action_stay(tmp_path):

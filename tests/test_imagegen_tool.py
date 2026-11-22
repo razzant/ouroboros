@@ -585,12 +585,21 @@ def test_registered_and_parallel_control_reaches_loop_owner(monkeypatch, ctx, pa
     def handler(_ctx):
         raise error
     registry.override_handler(name, handler)
-    monkeypatch.setattr(execution, "_PARALLEL_SAFE_TOOLS", frozenset({name}))
     calls = [{"id": f"control-{i}", "function": {"name": name, "arguments": "{}"}} for i in range(2 if parallel else 1)]
+    if parallel:  # the pool rail: the response runs as the legacy pool, with the real registry and wrapper
+        monkeypatch.setattr(execution, "legacy_pool_response", lambda names: True)
+    pools, real_pool = [], execution.ThreadPoolExecutor
+
+    def recorded_pool(max_workers):
+        if max_workers > 1:  # a call's own one-worker pool is not the batch's
+            pools.append(max_workers)
+        return real_pool(max_workers=max_workers)
+    monkeypatch.setattr(execution, "ThreadPoolExecutor", recorded_pool)
     with pytest.raises(type(error)) as caught:
         execution.handle_tool_calls(calls, registry, ctx.drive_root / "logs", ctx.task_id,
                                     object(), [], {"tool_calls": []}, lambda _: None)
     assert caught.value is error
+    assert pools == ([2] if parallel else []), "the parallel case entered the batch's pool; one call never does"
 
 
 @pytest.mark.parametrize("tool", ["generate_image", "list_image_models", "recover_image"])

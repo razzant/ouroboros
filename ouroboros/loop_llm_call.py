@@ -1132,12 +1132,11 @@ def _record_round_cache_facts(
     """Cache facts of this round only (no dollar counterfactuals).
 
     Returns ``(prompt_cache_ttl, cache_hit_rate, gap_since_prev_round_sec, duration_ms)``: the
-    provider's cached share and the gap since the previous successful round, which separates a
-    TTL expiry (long wait) from a prefix rewrite. Also records the APPLIED TTL of this task's
-    latest send — the recorded fact the wait-tool cache-horizon disclosure reads (one place, never
-    re-derived). ``duration_ms`` spans the logical round from its first started frame (retries,
-    fallbacks and waits included) and settles it: a later call on the same round id (a wrap-up)
-    measures only itself. No verdict ("cold restart") is derived from these counters: on a
+    provider's cached share and the gap since the previous successful round, neither a cache
+    prognosis nor proof of expiry. The round facts and supervision wakes read the accepted
+    response's finish time and the TTL stamped on its request. ``duration_ms`` spans the round
+    from its first frame (retries, fallbacks and waits included) and settles it: a later call on
+    the same round id (a wrap-up) measures only itself. No verdict is derived: on a
     Codex route the provider reports no cache writes, so one would never fire there.
     """
     reported = event_token_counts(usage)  # #1578: REPORTED counters; an unreported one makes these null

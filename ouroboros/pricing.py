@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 
 class PricingSchedule(tuple):
-    """A tuple-compatible base price with provider prompt-length tiers."""
+    """A tuple-compatible base price with effective rows above strict prompt-length thresholds."""
 
     def __new__(
         cls,
@@ -355,13 +355,16 @@ def route_processing(value: str, read_settings: Any) -> Dict[str, Any]:
     return {"value": value, "processing": endpoint_processing(_read_endpoint_catalog(value), only)}
 
 
-def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: int, *,
+def estimate_cost_optional(model: str, prompt_tokens: Optional[int], completion_tokens: Optional[int], *,
                            cache_usage: Optional[Dict[str, Any]] = None,
                            allow_live_fetch: bool = True,
                            provider: Optional[str] = None,
                            processing_mode: str = "",
                            routing_pinned: Optional[bool] = None) -> Optional[float]:
     """Estimate cost from exact provider/model data, preserving unknown as None.
+
+    A received reply passes a text count it did not report as None (``_usage_response.text_token_counts``):
+    it adds nothing, and both base text rates stay required; only a reported zero frees its class's rate.
 
     ``cache_usage`` and everything after it are KEYWORD-ONLY: the 4th slot used
     to be a positional ``cached_tokens: int``, and a stale positional caller
@@ -379,9 +382,8 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
       (``usage.cache_creation`` → ``{"5m": n, "1h": n}``), harvested when the
       provider reports it: on a ``1h`` request whose payload also produced 5m
       writes (e.g. a server-tool block cached at the default tier beside the 1h
-      prefix) only the genuine 1h share bills the extended-tier price. Absent the
-      split, every write bills the reported tier — the pre-split behavior, never
-      a loosened ratio.
+      prefix) only the genuine 1h share bills the extended-tier price. An incomplete
+      split cannot price the whole call. Absent a split, the estimate uses the requested tier.
 
     A named ``processing_mode`` (a host tier or its native word) uses an OpenRouter endpoint-pool upper estimate
     with literal tier prices (``processing_pool``); it is not an exact endpoint quote, and a missing tariff or a
@@ -400,9 +402,11 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     if processing_mode:
         from ouroboros.llm_pricing import openrouter_endpoint_slug
 
+        catalog_model = parse_model_route(raw_model)
         mode = _POOL_MODES.get(processing_mode)
-        if route != "openrouter" or not openrouter_endpoint_slug(raw_model) or (
-                mode is None and processing_mode != "ordinary"):
+        if (route != "openrouter" or catalog_model.kind != "openrouter" or not catalog_model.valid
+                or not openrouter_endpoint_slug(catalog_model.model)
+                or (mode is None and processing_mode != "ordinary")):
             return None  # no public slug: nothing to price it by, and no scan of the whole catalogue
         endpoints = get_pricing(provider=route, model=raw_model, allow_live_fetch=allow_live_fetch)
         if mode is None:
@@ -419,63 +423,58 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     return _cost_from_pricing(pricing, prompt_tokens, completion_tokens, cache_usage)
 
 
-def _cost_addends(pricing: tuple, prompt_tokens: int, completion_tokens: int, cache_usage: Optional[Dict[str, Any]],
-                  *, exact_cache_tiers: bool = False) -> Optional[Tuple[float, ...]]:
+def pricing_at_prompt(pricing: tuple, prompt_tokens: int) -> tuple:
+    """Select a catalog's effective row; OpenRouter's min_prompt_tokens is exclusive."""
+    prompt = max(0, int(prompt_tokens or 0))
+    for minimum, tier in getattr(pricing, "tiers", ()):
+        if prompt > int(minimum):
+            pricing = tier
+    return pricing
+
+
+def _has_endpoint_price_source(row: tuple) -> bool:
+    """A published endpoint or tier tariff, not the model-level reference price."""
+    source = getattr(row, "source", {})
+    native = source.get("service_tier")
+    return bool(source.get("endpoint_tag") or source.get("processing") or
+                (isinstance(native, str) and native in _POOL_MODES))
+
+
+def _cost_addends(pricing: tuple, prompt_tokens: Optional[int], completion_tokens: Optional[int], cached_tokens: int,
+                  write_tokens_by_ttl: Tuple[int, int], *, exact_cache_tiers: bool = False) -> Optional[Tuple[float, ...]]:
     """One complete tariff's five addends in dollars for one call: uncached input, cache reads, default-tier
-    cache writes, extended-tier cache writes, output; None when a price it needs is unknown."""
-    cache_row = cache_usage if isinstance(cache_usage, dict) else {}
-    cached_tokens = int(cache_row.get("cached_tokens") or 0)
-    cache_write_tokens = int(cache_row.get("cache_write_tokens") or 0)
-    prompt_cache_ttl = cache_row.get("prompt_cache_ttl")
-    cache_write_tokens_by_ttl = cache_row.get("cache_write_tokens_by_ttl")
-    tiers = getattr(pricing, "tiers", ())
-    for min_prompt_tokens, tier_pricing in tiers:
-        if max(0, int(prompt_tokens or 0)) >= int(min_prompt_tokens):
-            pricing = tier_pricing
-    if len(pricing) != 4 or pricing[0] is None or pricing[3] is None:
+    cache writes, extended-tier cache writes, output; None when a price a class of its tokens needs is unknown.
+    With both text counts reported, a class reported as zero needs no price. An unreported text count (None) adds
+    nothing and keeps the strict check of both base text rates. An endpoint bound can use an hourly
+    price only from an endpoint or tier tariff, not from a model-level reference."""
+    pricing = pricing_at_prompt(pricing, prompt_tokens)
+    if len(pricing) != 4 or (None in (prompt_tokens, completion_tokens) and None in (pricing[0], pricing[3])):
         return None
-    input_price = float(pricing[0])
-    cached_price = float(pricing[1]) if pricing[1] is not None else None
-    write_price = float(pricing[2]) if pricing[2] is not None else None
-    output_price = float(pricing[3])
-    extended_write_tokens = 0
-    if (write_price is not None or exact_cache_tiers) and str(prompt_cache_ttl or "") == "1h":
-        # Split writes before pricing them. Endpoint schedules use the exact
-        # 1h tariff; the legacy model-only path keeps its existing 2/1.25 ratio.
-        extended_write_tokens = max(0, int(cache_write_tokens or 0))
-        if isinstance(cache_write_tokens_by_ttl, dict):
-            try:
-                reported_1h = int(cache_write_tokens_by_ttl.get("1h") or 0)
-            except (TypeError, ValueError):
-                reported_1h = extended_write_tokens
-            # Clamp into the reported total: a malformed split never bills MORE
-            # extended-tier tokens than were written at all.
-            extended_write_tokens = max(0, min(reported_1h, extended_write_tokens))
-    if cached_tokens and cached_price is None:
+    default_write_tokens, extended_write_tokens = write_tokens_by_ttl
+    regular_input = max(0, (prompt_tokens or 0) - cached_tokens - default_write_tokens - extended_write_tokens)
+    hourly_price = getattr(pricing, "cache_write_1h", None)
+    if exact_cache_tiers and not _has_endpoint_price_source(pricing):
+        hourly_price = None
+    classes = ((regular_input, pricing[0]), (cached_tokens, pricing[1]), (default_write_tokens, pricing[2]),
+               (extended_write_tokens, hourly_price), (completion_tokens or 0, pricing[3]))
+    if any(tokens and price is None for tokens, price in classes):
         return None
-    regular_input = max(0, prompt_tokens - cached_tokens - cache_write_tokens)
-    default_write_tokens = max(0, int(cache_write_tokens or 0) - extended_write_tokens)
-    extended_write_price = (getattr(pricing, "cache_write_1h", None) if exact_cache_tiers
-                            else float(write_price or 0.0) * (2.0 / 1.25))
-    if default_write_tokens and write_price is None or extended_write_tokens and extended_write_price is None:
-        return None
-    return (
-        regular_input * input_price / 1_000_000,
-        cached_tokens * float(cached_price or 0.0) / 1_000_000,
-        default_write_tokens * float(write_price or 0.0) / 1_000_000,
-        extended_write_tokens * float(extended_write_price or 0.0) / 1_000_000,
-        completion_tokens * output_price / 1_000_000,
-    )
+    return tuple(tokens * float(price or 0.0) / 1_000_000 for tokens, price in classes)
 
 
-def _cost_from_pricing(pricing: tuple, prompt_tokens: int, completion_tokens: int,
+def _cost_from_pricing(pricing: tuple, prompt_tokens: Optional[int], completion_tokens: Optional[int],
                        cache_usage: Optional[Dict[str, Any]], *, exact_cache_tiers: bool = False) -> Optional[float]:
     """Price one complete tariff; endpoint bounds compare whole costs, not rate maxima."""
-    addends = _cost_addends(pricing, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=exact_cache_tiers)
+    cache_row = cache_usage if isinstance(cache_usage, dict) else {}
+    read = int(cache_row.get("cached_tokens") or 0)
+    lifetimes = write_lifetimes(cache_row, assume_short=True)
+    if lifetimes is None:
+        return None
+    addends = _cost_addends(pricing, prompt_tokens, completion_tokens, read, lifetimes,
+                            exact_cache_tiers=exact_cache_tiers)
     if addends is None:
         return None
-    cost = addends[0] + addends[1] + addends[2] + addends[3] + addends[4]  # the order the one expression added them in
-    return cost if exact_cache_tiers else round(cost, 6)
+    return addends[0] + addends[1] + addends[2] + addends[3] + addends[4]
 
 
 COST_CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
@@ -501,39 +500,45 @@ def cost_class_weights(pricing: Optional[tuple], usage: Dict[str, Any]) -> Optio
     ``usage`` carries the usage-row fields (``prompt_tokens``, ``completion_tokens``, ``cached_tokens``,
     ``cache_write_tokens``, ``prompt_cache_ttl``, the reported ``cache_write_tokens_by_ttl``). These are the
     addends ``_cost_from_pricing`` sums; only their ratios are meant, the recorded cost stays the amount."""
-    counts = [usage.get(name) for name in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")]
+    counts = [usage.get(name) for name in ("prompt_tokens", "completion_tokens", "cached_tokens")]
     if not pricing or any(count is None for count in counts):
         return None  # a count the row does not have is unknown, never zero
-    prompt, completion, read, writes = (max(0, int(count)) for count in counts)
-    lifetimes = write_lifetimes(usage, writes)
+    prompt, completion, read = (max(0, int(count)) for count in counts)
+    lifetimes = write_lifetimes(usage)
     if lifetimes is None:
         return None  # written at a lifetime the row does not name: never assumed to be the cheaper one
-    addends = _cost_addends(pricing, prompt, completion, {"cached_tokens": read, "cache_write_tokens": writes})
+    addends = _cost_addends(pricing, prompt, completion, read, lifetimes)
     if addends is None:
         return None
-    rates = pricing
-    for min_prompt_tokens, tier_pricing in getattr(pricing, "tiers", ()):
-        if prompt >= int(min_prompt_tokens):
-            rates = tier_pricing
-    write_price = float(rates[2] or 0.0)
-    extended = getattr(rates, "cache_write_1h", None)  # a long-prompt tier's own 1-hour price, as the bill takes it
-    extended = float(extended) if extended is not None else write_price * (2.0 / 1.25)  # the estimator's own ratio
-    uncached, cache_read, _written, _extended, output = addends
-    write = (lifetimes[0] * write_price + lifetimes[1] * extended) / 1_000_000
-    return {"cache_write": write, "cache_read": cache_read, "output": output, "uncached_input": uncached}
+    uncached, cache_read, short_write, hourly_write, output = addends
+    return {"cache_write": short_write + hourly_write, "cache_read": cache_read, "output": output, "uncached_input": uncached}
 
 
-def write_lifetimes(usage: Dict[str, Any], writes: int) -> Optional[Tuple[int, int]]:
-    """``(5-minute, 1-hour)`` written tokens: the provider's own split when it accounts for every write, else the
-    one lifetime the row names; None when neither says (``default`` or an absent lifetime, a partial split)."""
+def write_lifetimes(usage: Dict[str, Any], writes: Optional[int] = None, *,
+                    assume_short: bool = False) -> Optional[Tuple[int, int]]:
+    """A reported split must account for every write. Only an absent split permits a request-tier estimate."""
+    from ouroboros._usage_response import cache_write_split, cache_write_total
+
+    split = cache_write_split(usage)
+    if usage.get("cache_write_tokens_invalid"):
+        return None
+    if writes is None:
+        writes, invalid = cache_write_total(usage, split)
+        if invalid:
+            return None
+    if split:
+        if None in split.values() or sum(split.values()) != writes:
+            return None
+        return split.get("5m", 0), split.get("1h", 0)
+    if writes is None:
+        return (0, 0) if assume_short else None
     if writes == 0:
         return 0, 0
-    split = usage.get("cache_write_tokens_by_ttl")
-    if (isinstance(split, dict) and split and set(split) <= {"5m", "1h"}
-            and all(type(count) is int and count >= 0 for count in split.values()) and sum(split.values()) == writes):
-        return split.get("5m", 0), split.get("1h", 0)
-    named = str(usage.get("prompt_cache_ttl") or "")
-    return (writes, 0) if named == "5m" else (0, writes) if named == "1h" else None
+    if usage.get("prompt_cache_ttl") == "1h":
+        return 0, writes
+    if usage.get("prompt_cache_ttl") == "5m" or assume_short:
+        return writes, 0
+    return None
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
@@ -624,7 +629,10 @@ def normalize_usage_cost(usage: Dict[str, Any], *, model: str, use_local: bool,
     Callers pass normalized usage, including the host's ``cost_invalid`` marker.
     Local execution is the explicit free exception; subscription absence is unknown.
     """
-    from ouroboros._usage_response import observed_processing_mode, provider_cost_value
+    from ouroboros._usage_response import (
+        malformed_token_counts, observed_processing_mode, provider_cost_value, text_token_counts,
+    )
+    from ouroboros._usage_settlement import has_nontext_usage
 
     raw_cost = usage.get("cost")
     cost = provider_cost_value(raw_cost)
@@ -639,17 +647,18 @@ def normalize_usage_cost(usage: Dict[str, Any], *, model: str, use_local: bool,
         log.warning("Provider reported an invalid cost (type=%s) for %s; keeping unknown, skipping estimation",
                     type(raw_cost).__name__, display_model)
         usage["cost_invalid"] = True
-    elif cost is None and provider != "claudexor" and not usage.get("provider_reported_cost_only"):
+    elif (cost is None and provider != "claudexor" and not usage.get("provider_reported_cost_only")
+          and any(counts := text_token_counts(usage))
+          and not has_nontext_usage(usage) and not malformed_token_counts(usage)
+          and usage.get("cost_coverage") != "partial"):
+        # The ledger's rules (``_usage_settlement.settlement_fields``): without reported text counts a paid call
+        # stays unknown, never an estimated $0; reported audio or image usage is never priced as text; a malformed
+        # count is no observed zero — an adapter's partial row, the same fact settlement
+        # refuses, prices nothing here either.
         processing_mode = observed_processing_mode(provider, usage)
         cost = estimate_cost_optional(
-            display_model, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0),
-            cache_usage={
-                "cached_tokens": int(usage.get("cached_tokens") or 0),
-                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-                "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
-                "cache_write_tokens_by_ttl": usage.get("cache_write_tokens_by_ttl")
-                    if isinstance(usage.get("cache_write_tokens_by_ttl"), dict) else None,
-            },
+            display_model, *counts,
+            cache_usage=usage,
             provider=provider, **({"processing_mode": processing_mode} if processing_mode else {}),
         )
         estimated = cost is not None

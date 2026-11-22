@@ -6,14 +6,17 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { STATUS_READ_LIFETIME_MS } from '../modules/claudexor_status_store.js';
 import { normalizeConsciousness } from '../modules/consciousness_api.js';
 import { AUTONOMY_LEVELS } from '../modules/consciousness_autonomy.js';
 import { cardWords, initConsciousnessDashboard, waitWords } from '../modules/consciousness_dashboard.js';
-import { initCosts, subscriptionDoors } from '../modules/costs.js';
+import { allowancePresentation, costDashboardPresentation, initCosts, subscriptionDoors } from '../modules/costs.js';
 import { focusSettingRow, initDashboard, mountTabSettings } from '../modules/dashboard.js';
 import { SAFETY_LEVELS } from '../modules/consciousness_words.js';
 import { initEvolution, whenMode, whenName, whenWords } from '../modules/evolution.js';
-import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow } from '../modules/settings_controls.js';
+import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsReadMessage, settingsRow,
+    settingsSnapshot } from '../modules/settings_controls.js';
+import { spendGapsWords } from '../modules/route_editor_primitives.js';
 import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
 import { initUpdates } from '../modules/updates.js';
@@ -860,6 +863,1046 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
     shown(window, 'costs');
     await settle();
     assert.equal(document.activeElement, elsewhere, 'a refresh does not take focus from elsewhere');
+});
+
+test('Costs › Subscriptions whose status body never comes ends at the status reads\' lifetime as a read that failed; Refresh reads anew', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });  // before the fixture, so the timers it keeps are these
+    const { mount, routes, window } = setup(t);
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20 }));
+    routes.set('/api/consciousness', response({ enabled: true, spent_24h_usd: 1, daily_usd: 20 }));
+    // The engine answered the request and its body never comes, abort or not: a stalled read, not a host that is offline.
+    let bodies = 0;
+    routes.set('/api/claudexor/status?view=quota', async () => ({ ok: true, status: 200,
+        json: () => { bodies += 1; return new Promise(() => {}); } }));
+    initCosts({ mount, state: { activePage: 'dashboard' }, openSettings() {}, openDashboardTab() {} });
+    const block = mount.querySelector('.costs-subscriptions');
+    const doors = () => block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount,
+        door.querySelector('.ui-row-meta').textContent]);
+    shown(window, 'costs');
+    await settle();
+    t.mock.timers.tick(STATUS_READ_LIFETIME_MS - 1);
+    await settle();
+    assert.deepEqual([bodies, doors()], [1, []], 'within its lifetime the read is still out');
+    assert.match(block.querySelector('[data-costs-subscriptions]').textContent, /Reading/);
+    t.mock.timers.tick(1);
+    await settle();
+    assert.deepEqual(doors(), [['accounts', 'The accounts could not be read now.']],
+        'at its lifetime it is a read that failed, said as such: no engine is called stopped');
+    routes.set('/api/claudexor/status?view=quota', response(passive()));
+    mount.querySelector('#btn-refresh-costs').fire('click');
+    await settle();
+    assert.deepEqual(doors().map(([path]) => path), ['accounts/codex', 'accounts/claude', 'accounts'], 'Refresh reads anew');
+});
+
+test('Costs › Subscriptions cancels its old quota body on Refresh and on either exit without painting it', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const state = { activePage: 'dashboard' };
+    routes.set('/api/settings', response({}));
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({}));
+    const pending = [];
+    routes.set('/api/claudexor/status?view=quota', (_url, { signal }) => {
+        const body = deferred();
+        pending.push({ signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    initCosts({ mount, state });
+    const doors = () => mount.querySelectorAll('[data-costs-account]').map((door) => door.dataset.costsAccount);
+    const noAccounts = passive({ profiles: { profiles: [] }, quota: [] });
+    shown(window, 'costs');
+    await settle();
+    const [old] = pending;
+    assert.equal(old.signal.aborted, false);
+    await mount.querySelector('#btn-refresh-costs').fire('click');
+    assert.equal(old.signal.aborted, true, 'Refresh released the old transport while its body was pending');
+    assert.equal(pending.length, 2);
+    pending[1].resolve(passive());
+    old.resolve(noAccounts);  // a body reader that ignores abort
+    await settle();
+    const expected = ['accounts/codex', 'accounts/claude', 'accounts'];
+    assert.deepEqual(doors(), expected);
+
+    for (const leave of [() => shown(window, 'logs'), () => {
+        state.activePage = 'chat';
+        window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    }]) {
+        shown(window, 'costs');
+        await settle();
+        const latest = pending.at(-1);
+        assert.equal(latest.signal.aborted, false);
+        leave();
+        assert.equal(latest.signal.aborted, true, 'leaving Costs frees the transport');
+        latest.resolve(noAccounts);
+        await settle();
+        assert.deepEqual(doors(), expected, 'the hidden panel keeps its last completed read');
+    }
+});
+
+test('Costs › Subscriptions resumes an unfinished read when Dashboard is shown again', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'costs' };
+    routes.set('/api/settings', response({}));
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({}));
+    const pending = [];
+    routes.set('/api/claudexor/status?view=quota', (_url, { signal }) => {
+        const body = deferred();
+        pending.push({ signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    initCosts({ mount, state });
+    const host = mount.querySelector('[data-costs-subscriptions]');
+    const doors = () => mount.querySelectorAll('[data-costs-account]').map((door) => door.dataset.costsAccount);
+    shown(window, 'costs');
+    await settle();
+    assert.equal(pending.length, 1);
+    assert.match(host.textContent, /Reading…/);
+
+    state.activePage = 'chat';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    assert.equal(pending[0].signal.aborted, true, 'leaving Dashboard still releases the transport');
+    assert.match(host.textContent, /Reading…/, 'the cancelled first read has not replaced its placeholder');
+
+    state.activePage = 'dashboard';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } }));
+    assert.equal(pending.length, 2, 'the page return starts one fresh read without a subtab event');
+    pending[1].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    await settle();
+    assert.deepEqual(doors(), ['accounts']);
+    assert.doesNotMatch(host.textContent, /Reading…/);
+
+    pending[0].resolve(passive());
+    await settle();
+    assert.deepEqual(doors(), ['accounts'], 'the abandoned answer cannot repaint the resumed read');
+});
+
+// The Dashboard and Costs together, as app.js mounts them. The sheets draw one column's list over a hidden pane and a page
+// opened as a level in it (ui.css @container sectionplace), which `getClientRects` stands for here as the existing tests do;
+// the Costs page inside the pane has a box exactly while the pane has.
+function costsInDashboard(t, { twoPanes = false, ws = undefined } = {}) {
+    const { mount, routes, window, calls } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    window.CSS = { supports: () => twoPanes };
+    routes.set('/api/settings', response({}));
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({}));
+    const pending = [];
+    routes.set('/api/claudexor/status?view=quota', (_url, { signal }) => {
+        const body = deferred();
+        pending.push({ signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const layers = new Map();
+    const dashboard = initDashboard({ state, ws, layers: { push: (layer) => layers.set(layer.id, layer), remove: (id) => layers.delete(id) } });
+    const panes = dashboard.page.querySelector('.dashboard-panels');
+    panes.getClientRects = () => (twoPanes || dashboard.page.dataset.sectionView === 'page' ? [{ width: 390 }] : []);
+    const costs = initCosts({ mount: dashboard.page.querySelector('#dashboard-panel-costs'), state, ws, openSettings() {}, openDashboardTab() {} });
+    dashboard.page.querySelector('#page-costs').getClientRects = () => (state.dashboardActiveSubtab === 'costs' ? panes.getClientRects() : []);
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    const open = () => list.fire('click', { target: list.querySelector('[data-dashboard-tab="costs"]') });
+    const doors = () => mount.querySelectorAll('[data-costs-account]').map((door) => door.dataset.costsAccount);
+    return { dashboard, layers, pending, window, state, open, doors, calls, routes, costs };
+}
+
+test('Costs › Subscriptions ends its pending read when one column’s Back or a second press of Dashboard leaves Costs, and reads anew when it is opened', async (t) => {
+    const { dashboard, layers, pending, open, doors } = costsInDashboard(t);
+    for (const [leave, how] of [[() => layers.get('dashboard-level').onClose(), 'Back'], [() => dashboard.pressedAgain(), 'Dashboard pressed again']]) {
+        const before = pending.length;
+        await open();
+        await settle();
+        assert.equal(pending.length, before + 1, `${how}: opening Costs reads`);
+        assert.equal(layers.has('dashboard-level'), true, 'Costs is a level of the one column');
+        const read = pending.at(-1);
+        assert.equal(read.signal.aborted, false);
+        leave();
+        assert.equal(dashboard.page.dataset.sectionView, 'auto', `${how}: the list is back`);
+        assert.equal(read.signal.aborted, true, `${how}: Costs is hidden, so its read is released as it is when another tab is chosen`);
+    }
+    await open();
+    await settle();
+    const [first, second, third] = pending;
+    assert.equal(pending.length, 3, 'each opening starts its own read; none inherits the one left behind');
+    third.resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    first.resolve(passive());
+    second.resolve(passive());  // bodies that ignore their abort
+    await settle();
+    assert.deepEqual(doors(), ['accounts'], 'only the read of this showing paints');
+    dashboard.destroy();
+});
+
+test('Costs › Subscriptions reads nothing when Dashboard returns as one column’s list, and reads anew when Costs is opened', async (t) => {
+    const { dashboard, layers, pending, window, state, open, doors } = costsInDashboard(t);
+    const show = (page) => {
+        state.activePage = page;
+        window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page } }));
+    };
+    await open();
+    await settle();
+    assert.equal(pending.length, 1, 'opening Costs reads');
+    show('chat');
+    assert.equal(pending[0].signal.aborted, true, 'Chat in front releases the read');
+    show('dashboard');
+    await settle();
+    assert.equal(dashboard.page.dataset.sectionView, 'auto', 'one column: the list comes back, not Costs');
+    assert.equal(pending.length, 1, 'no read starts for a page that is not on screen');
+    await open();
+    await settle();
+    assert.equal(pending.length, 2, 'opening Costs reads anew, as a new showing');
+    layers.get('dashboard-level').onClose();
+    assert.equal(pending[1].signal.aborted, true, 'one column’s Back releases the read');
+    show('chat');
+    show('dashboard');
+    await settle();
+    assert.equal(pending.length, 2, 'a list that returns after Back reads nothing either');
+    await open();
+    await settle();
+    assert.equal(pending.length, 3, 'each opening starts its own read');
+    pending[2].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    pending[0].resolve(passive());
+    pending[1].resolve(passive());  // bodies that ignore their abort
+    await settle();
+    assert.deepEqual(doors(), ['accounts'], 'only the read of this showing paints');
+    dashboard.destroy();
+});
+
+test('Costs › Subscriptions reads nothing while the arrow keys only select Costs in one column’s list, and reads when a press opens it', async (t) => {
+    const { dashboard, pending, state, open } = costsInDashboard(t);
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    // One ArrowDown from Logs, Activity and Consciousness reaches Costs, which the list selects without opening its page.
+    for (const row of list.querySelectorAll('[data-dashboard-tab]').slice(0, 3)) await list.fire('keydown', { target: row, key: 'ArrowDown', preventDefault() {} });
+    await settle();
+    assert.deepEqual([state.dashboardActiveSubtab, dashboard.page.dataset.sectionView], ['costs', 'auto'], 'the keys chose Costs on the list, not its page');
+    assert.equal(pending.length, 0, 'a page that is not drawn reads nothing');
+    await open();
+    await settle();
+    assert.equal(pending.length, 1, 'the press that opens the page reads');
+    dashboard.destroy();
+});
+
+test('Costs › Subscriptions resumes at once when Dashboard returns with Costs beside its list, with no subtab event', async (t) => {
+    const { dashboard, pending, window, state, doors } = costsInDashboard(t, { twoPanes: true });
+    const announced = [];
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => announced.push(event.detail.tab));
+    dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual([pending.length, announced], [1, ['costs']]);
+    state.activePage = 'chat';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    assert.equal(pending[0].signal.aborted, true, 'leaving the Dashboard releases the read');
+    state.activePage = 'dashboard';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } }));
+    assert.equal(pending.length, 2, 'the page keeps its box beside the list: the return reads at once');
+    assert.deepEqual(announced, ['costs'], 'and no tab was announced for it');
+    pending[1].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    pending[0].resolve(passive());
+    await settle();
+    assert.deepEqual(doors(), ['accounts'], 'only the read of this showing paints');
+    dashboard.destroy();
+});
+
+test('Costs › Subscriptions keeps its read while its page is on screen and ends it only when Costs’ own page is hidden', async (t) => {
+    const two = costsInDashboard(t, { twoPanes: true });
+    two.dashboard.activateTab('costs');
+    await settle();
+    two.dashboard.pressedAgain();
+    assert.equal(two.pending.length, 1);
+    assert.equal(two.pending[0].signal.aborted, false, 'beside its list the page keeps its box: nothing is hidden');
+    two.window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-hidden', { detail: { tab: 'logs' } }));
+    assert.equal(two.pending[0].signal.aborted, false, 'another tab’s page hidden is not Costs’ page');
+    two.window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-hidden', { detail: { tab: 'costs' } }));
+    assert.equal(two.pending[0].signal.aborted, true, 'Costs’ own page hidden ends the read');
+    two.dashboard.destroy();
+});
+
+test('a Dashboard page that loses its box while the Dashboard stays is announced hidden, once, and never when the Dashboard itself is left', async (t) => {
+    const { dashboard, window, state, pending } = costsInDashboard(t, { twoPanes: true });
+    const hidden = [];
+    window.addEventListener('ouro:dashboard-subtab-hidden', (event) => hidden.push(event.detail.tab));
+    const pane = dashboard.page.querySelector('.dashboard-panels');
+    let box = true;
+    pane.getClientRects = () => (box ? [{ width: 390 }] : []);
+    dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual(hidden, [], 'a page with its box is not hidden');
+    box = false;  // the window narrowed to one column: the open page loses the pane beside the list
+    dashboard.pressedAgain();
+    dashboard.pressedAgain();
+    assert.deepEqual(hidden, ['costs'], 'announced once, for the page that was open');
+    assert.equal(pending[0].signal.aborted, true);
+    box = true;
+    dashboard.pressedAgain();
+    state.activePage = 'chat';
+    box = false;
+    window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    assert.deepEqual(hidden, ['costs'], 'leaving the Dashboard is the page event’s to announce');
+    dashboard.destroy();
+});
+
+// ---- Costs: every read waits for a drawn page and ends with it -------------------------------------------------------
+// What Costs asks when it is shown, by address; the answers the tests give carry a transport signal and a body to resolve.
+const COSTS = { totals: '/api/cost-breakdown', period: '/api/cost-breakdown?period=24h', settings: '/api/settings',
+    allowance: '/api/consciousness', quota: '/api/claudexor/status?view=quota' };
+const asked = (calls) => Object.values(COSTS).map((url) => calls.filter((call) => call === url).length);
+// Whether each read's transport was ended: false while it is out, true once ended; a request sent with no way to end it, or
+// never sent, says so.
+const ended = (reads) => reads.map((read) => (!read ? 'not sent' : read.signal ? read.signal.aborted : 'no signal'));
+const totalsBody = (spent) => ({ accounting: { available: true, settled_usd: spent, confirmed_usd: spent, estimated_usd: 0, reserved_usd: 0,
+    unresolved_upper_bound_usd: 0, unknown_unmetered: 0, limit_usd: 100, cost_final: true }, total_calls: 1 });
+const periodBody = (model) => ({ period: { available: true, models: [{ model, calls: 1, cost: 1 }], cache_writes: [] } });
+const allowanceBody = (spent) => ({ enabled: true, spent_24h_usd: spent, daily_usd: 10 });
+function heldReads(routes, urls) {
+    const held = Object.fromEntries(urls.map((url) => [url, []]));
+    for (const url of urls) {
+        routes.set(url, (_url, { signal }) => {
+            const body = deferred();
+            held[url].push({ signal, ...body });
+            return { ok: true, status: 200, json: () => body.promise };
+        });
+    }
+    return held;
+}
+const arrowsToCosts = async (dashboard) => {
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    for (const row of list.querySelectorAll('[data-dashboard-tab]').slice(0, 3)) await list.fire('keydown', { target: row, key: 'ArrowDown', preventDefault() {} });
+};
+
+test('Costs starts none of its reads while the arrow keys only select it in one column’s list, and the press that opens it starts each once', async (t) => {
+    const { dashboard, calls, state, open } = costsInDashboard(t);
+    const base = calls.length;
+    await arrowsToCosts(dashboard);
+    await settle();
+    assert.deepEqual([state.dashboardActiveSubtab, dashboard.page.dataset.sectionView], ['costs', 'auto'], 'the keys chose Costs on the list, not its page');
+    assert.deepEqual(asked(calls.slice(base)), [0, 0, 0, 0, 0], 'a page that is not drawn asks for no totals, no 24 hours, no limits, no allowance and no subscriptions');
+    await open();
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [1, 1, 1, 1, 1], 'the press that opens the page asks for each once');
+    dashboard.destroy();
+});
+
+test('Costs ends every read it has out when one column’s Back hides it, so no late answer paints, and each opening reads anew', async (t) => {
+    const { dashboard, layers, pending, routes, open, doors } = costsInDashboard(t);
+    const held = heldReads(routes, [COSTS.totals, COSTS.period, COSTS.allowance]);
+    const reads = (at) => [held[COSTS.totals][at], held[COSTS.period][at], held[COSTS.allowance][at], pending[at]];
+    const painted = () => ['#cost-spent', '#costs-allowance-spent', '.costs-period-models'].map((selector) => dashboard.page.querySelector(selector).textContent).concat([doors()]);
+    const back = () => layers.get('dashboard-level').onClose();
+    // The first showing ends at Back: its four transports are released and its bodies come too late to paint.
+    await open();
+    await settle();
+    const first = reads(0);
+    assert.deepEqual(ended(first), [false, false, false, false], 'opened, the page has its four reads out, each with its own transport to end');
+    back();
+    assert.deepEqual(ended(first), [true, true, true, true], 'Back ends every one of them, not the subscriptions alone');
+    first[0].resolve(totalsBody(11)); first[1].resolve(periodBody('late/first')); first[2].resolve(allowanceBody(1)); first[3].resolve(passive());
+    await settle();
+    assert.deepEqual(painted(), ['Loading…', 'Reading…', '', []], 'a page that was left paints no answer that comes after');
+    // A second showing, ended by Back, and a third: whatever the earlier one answers, however late, the third's stands.
+    await open();
+    await settle();
+    const second = reads(1);
+    back();
+    await open();
+    await settle();
+    const third = reads(2);
+    assert.deepEqual([ended(second), ended(third)], [[true, true, true, true], [false, false, false, false]], 'each opening reads anew');
+    third[0].resolve(totalsBody(7)); third[1].resolve(periodBody('current/model')); third[2].resolve(allowanceBody(2));
+    third[3].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    await settle();
+    const current = painted();
+    assert.deepEqual(current, [costDashboardPresentation(totalsBody(7)).spent,
+        allowancePresentation(normalizeConsciousness(allowanceBody(2))).meter.spent, current[2], ['accounts']]);
+    assert.match(current[2], /current\/model/);
+    second[0].resolve(totalsBody(99)); second[1].resolve(periodBody('stale/model')); second[2].resolve(allowanceBody(9)); second[3].resolve(passive());
+    await settle();
+    assert.deepEqual(painted(), current, 'an earlier showing paints nothing over the one on screen');
+    dashboard.destroy();
+});
+
+test('Costs reads each of its reads at once when two columns show it, and its visible Refresh reads again at once', async (t) => {
+    const { dashboard, calls } = costsInDashboard(t, { twoPanes: true });
+    const base = calls.length;
+    dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [1, 1, 1, 1, 1], 'beside its list the page asks for all five as it is shown');
+    await dashboard.page.querySelector('#btn-refresh-costs').fire('click');
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [2, 2, 1, 2, 2], 'Refresh asks again for the totals, the 24 hours, the allowance and the subscriptions; the limits are not its');
+    dashboard.destroy();
+});
+
+test('Costs ends its reads when the window narrows to one column and reads anew at once when it widens again', async (t) => {
+    const observers = [];
+    const before = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = before; });
+    const { dashboard, pending, routes } = costsInDashboard(t, { twoPanes: true });
+    const held = heldReads(routes, [COSTS.totals, COSTS.period, COSTS.allowance]);
+    const pane = dashboard.page.querySelector('.dashboard-panels');
+    let box = true;
+    pane.getClientRects = () => (box ? [{ width: 390 }] : []);
+    const reflow = () => observers.forEach((fn) => fn([{ target: dashboard.page }]));
+    const reads = (at) => [held[COSTS.totals][at], held[COSTS.period][at], held[COSTS.allowance][at], pending[at]];
+    dashboard.activateTab('costs');
+    await settle();
+    const beside = reads(0);
+    assert.deepEqual(ended(beside), [false, false, false, false], 'beside its list the page has four reads out');
+    box = false;  // one column: the open page loses the pane beside the list
+    reflow();
+    assert.deepEqual(ended(beside), [true, true, true, true], 'the page without its box holds no read');
+    box = true;
+    reflow();
+    await settle();
+    const again = reads(1);
+    assert.deepEqual(ended(again), [false, false, false, false], 'widened, it reads anew at once');
+    dashboard.destroy();
+});
+
+test('Costs reads nothing for a setting saved while its page is not drawn, its own rows’ late saves included, and reads what each moves when it is', async (t) => {
+    const { dashboard, calls, window, open } = costsInDashboard(t);
+    const base = calls.length;
+    const saved = (detail = { source: 'settings' }) => window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail }));
+    const own = (row) => ({ source: 'settings-row', page: 'dashboard:costs', row });  // a save of Costs' own row that lands after Back
+    await arrowsToCosts(dashboard);
+    saved();
+    saved(own('TOTAL_BUDGET'));
+    saved(own('OUROBOROS_CONSCIOUSNESS_DAILY_USD'));
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [0, 0, 0, 0, 0], 'the list holds Costs undrawn: no save, elsewhere or its own, reads any of it');
+    await open();
+    await settle();
+    saved();
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [2, 1, 2, 2, 1], 'drawn, a save elsewhere reads the totals, the limits and the allowance again');
+    saved(own('TOTAL_BUDGET'));
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 2, 1], 'a saved total reads the totals only');
+    saved(own('OUROBOROS_CONSCIOUSNESS_DAILY_USD'));
+    await settle();
+    assert.deepEqual(asked(calls.slice(base)), [3, 1, 2, 3, 1], 'a saved allowance reads the allowance only');
+    dashboard.destroy();
+});
+
+test('Costs reads each of its reads once when Dashboard returns with Costs beside its list after a real exit, answered or cut short, and the old paint stays until the new answers come', async (t) => {
+    const show = (env, page) => {
+        env.state.activePage = page;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page } }));
+    };
+    const env = costsInDashboard(t, { twoPanes: true });
+    const held = heldReads(env.routes, [COSTS.totals, COSTS.period, COSTS.allowance]);
+    const painted = () => ['#cost-spent', '#costs-allowance-spent', '.costs-period-models'].map((selector) => env.dashboard.page.querySelector(selector).textContent).concat([env.doors()]);
+    const answer = (at, spent, model) => {
+        held[COSTS.totals][at].resolve(totalsBody(spent)); held[COSTS.period][at].resolve(periodBody(model));
+        held[COSTS.allowance][at].resolve(allowanceBody(spent)); env.pending[at].resolve(passive({ profiles: { profiles: [] }, quota: [] }));
+    };
+    env.dashboard.activateTab('costs');
+    await settle();
+    answer(0, 11, 'old/model');
+    await settle();
+    const old = painted();
+    assert.match(old[2], /old\/model/, 'the first showing is answered and painted');
+    const base = asked(env.calls);
+    // A real exit and a return, every read of the old visit answered: the return is a new visit and reads each once. The
+    // return is told twice in one transition (commitPage: its page, then the tab its `enter` restores): the tab's tells
+    // the visit nothing new.
+    show(env, 'chat');
+    show(env, 'dashboard');
+    shown(env.window, 'costs');
+    await settle();
+    const returned = base.map((count) => count + 1);
+    assert.deepEqual(asked(env.calls), returned, 'the return reads again though the last showing was answered, once, whatever tells it');
+    assert.deepEqual(painted(), old, 'and the old paint stays until the new answers come');
+    // A show after the transition is another: a visible page's show reads what is not out, as it always did.
+    shown(env.window, 'costs');
+    await settle();
+    assert.deepEqual(asked(env.calls), returned.map((count, at) => count + (at === 2 ? 1 : 0)),
+        'only what is not out (the answered limits) is read');
+    // Refresh is never held back by the visit: it reads again at once.
+    await env.dashboard.page.querySelector('#btn-refresh-costs').fire('click');
+    await settle();
+    assert.deepEqual(asked(env.calls), returned.map((count) => count + 1),
+        'Refresh reads the totals, the 24 hours, the allowance and the subscriptions again at once (the limits’ one more is the show before)');
+    answer(2, 22, 'new/model');
+    await settle();
+    const fresh = painted();
+    assert.match(fresh[2], /new\/model/, 'the new answers replace the old paint');
+    assert.deepEqual(fresh.slice(0, 2), [costDashboardPresentation(totalsBody(22)).spent, allowancePresentation(normalizeConsciousness(allowanceBody(22))).meter.spent]);
+    env.dashboard.destroy();
+    const cut = costsInDashboard(t, { twoPanes: true });  // its quota read never answers
+    cut.dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual(asked(cut.calls), [1, 1, 1, 1, 1]);
+    show(cut, 'chat');
+    assert.equal(cut.pending[0].signal.aborted, true);
+    show(cut, 'dashboard');
+    await settle();
+    assert.deepEqual(asked(cut.calls), [2, 2, 2, 2, 2], 'a read cut short is replaced with the others, once each, and no tab was announced');
+    cut.dashboard.destroy();
+});
+
+test('Costs coalesces only the tab announcement of the transition that entered the Dashboard: one that comes later is a show of its own', async (t) => {
+    const env = costsInDashboard(t, { twoPanes: true });
+    const show = (page) => {
+        env.state.activePage = page;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page } }));
+    };
+    env.dashboard.activateTab('costs');
+    await settle();
+    env.pending[0].resolve(passive());
+    await settle();
+    const base = asked(env.calls);
+    show('chat');
+    show('dashboard');  // an ordinary entry into a Dashboard that shows Costs: no tab announcement follows it
+    await settle();
+    const entered = base.map((count) => count + 1);
+    assert.deepEqual(asked(env.calls), entered, 'the entry reads each once');
+    shown(env.window, 'costs');  // an announcement of the tab, later: not the pair of that entry
+    await settle();
+    assert.deepEqual(asked(env.calls), entered.map((count, at) => count + (at === 4 ? 0 : 1)), 'it reads what is not out (the quota read of the entry still is)');
+    env.dashboard.destroy();
+});
+
+test('Costs gives back what it took when its owner destroys it: its socket, its page events, the reads it has out and its timer', async (t) => {
+    forgetSettingRows();
+    const ws = socket();
+    const env = costsInDashboard(t, { twoPanes: true, ws });
+    env.dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual(asked(env.calls), [1, 1, 1, 1, 1]);
+    env.costs.destroy();
+    assert.equal(env.pending[0].signal.aborted, true, 'the read it had out is ended');
+    const base = asked(env.calls);
+    ws.emit('open', { previouslyConnected: true });
+    shown(env.window, 'costs');
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'dashboard' } }));
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings' } }));
+    await settle();
+    assert.deepEqual(asked(env.calls), base, 'nothing that reached it before reaches it now');
+    env.dashboard.destroy();
+});
+
+test('the app that mounts Costs destroys it with its other pages when the window goes', () => {
+    const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    assert.ok(/const costs = initCosts\(\{ \.\.\.ctx, mount: document\.getElementById\('dashboard-panel-costs'\) \}\);/.test(app), 'the owner keeps what initCosts answers');
+    assert.ok(/costs\.destroy\(\);/.test(app.slice(app.indexOf("window.addEventListener('pagehide'"))), 'and gives it back where the other pages are');
+});
+
+test('Costs does not read the allowance again at the time it gave while its page is not drawn, and does while it is', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });  // before the fixture, so the timers it keeps are these
+    const { dashboard, calls, routes } = costsInDashboard(t, { twoPanes: true });
+    const pane = dashboard.page.querySelector('.dashboard-panels');
+    let box = true;
+    pane.getClientRects = () => (box ? [{ width: 390 }] : []);
+    routes.set(COSTS.allowance, () => response({ enabled: true, spent_24h_usd: 12, daily_usd: 10, allowance_status: 'exhausted',
+        allowance_room_after: new Date(Date.now() + 60_000).toISOString() }));
+    const allowance = () => calls.filter((call) => call === COSTS.allowance).length;
+    dashboard.activateTab('costs');
+    await settle();
+    assert.equal(allowance(), 1);
+    box = false;  // the page is not drawn when its time comes
+    t.mock.timers.tick(61_001);
+    await settle();
+    assert.equal(allowance(), 1, 'a page that is not drawn is not read at the time it named');
+    box = true;
+    dashboard.activateTab('costs');
+    await settle();
+    assert.equal(allowance(), 2, 'shown again, it reads');
+    t.mock.timers.tick(61_001);
+    await settle();
+    assert.equal(allowance(), 3, 'drawn at the time it named, it reads once more');
+    dashboard.destroy();
+});
+
+// ---- The settings read: its signal is opt-in, and a read it ended costs no other read its place ---------------------------
+// `/api/settings` answers as the test says: each read keeps its transport signal and a body to resolve (`answer.status`
+// set before the body fails it). `applied` lists the TOTAL_BUDGET of every document announced as applied.
+function heldSettings(t, { post = null } = {}) {
+    forgetSettingRows();
+    const env = setup(t);
+    const held = [];
+    const applied = [];
+    env.routes.set('/api/settings', (url, init = {}) => {
+        if (init.method === 'POST' && post) return post(url, init);
+        const body = deferred();
+        const answer = { status: 200, get ok() { return this.status < 400; }, json: () => body.promise };
+        held.push({ signal: init.signal, answer, ...body });
+        return answer;
+    });
+    document.addEventListener('settings-document:applied', (event) => applied.push(event.detail.TOTAL_BUDGET));
+    return { ...env, held, applied };
+}
+
+test('a settings read its own signal ended changes nothing when its answer comes: no document, no announcement, no mark of failure', async (t) => {
+    const { held, applied, routes } = heldSettings(t);
+    const first = readSettings();
+    held[0].resolve({ TOTAL_BUDGET: 100 });
+    await first;
+    assert.deepEqual([settingsSnapshot().TOTAL_BUDGET, applied], [100, [100]], 'an ordinary read lands as it always did');
+    const control = new AbortController();
+    const endedRead = readSettings({ signal: control.signal }).then(() => 'landed', (error) => error.name);
+    await settle();
+    assert.equal(held[1].signal?.aborted, false, 'a read that is given a signal carries it to the transport');
+    control.abort();
+    assert.equal(held[1].signal?.aborted, true, 'and the end reaches the transport');
+    held[1].resolve({ TOTAL_BUDGET: 999 });  // a transport that ignores the end answers anyway
+    assert.equal(await endedRead, 'AbortError');
+    assert.deepEqual([settingsSnapshot().TOTAL_BUDGET, applied], [100, [100]], 'the answer of an ended read puts no document back and announces none');
+    forgetSettingRows();  // nothing read yet: an ended read that fails is no failure of the page to read
+    const lost = new AbortController();
+    const failed = readSettings({ signal: lost.signal }).then(() => 'landed', (error) => error.message);
+    await settle();
+    lost.abort();
+    held[2].answer.status = 500;
+    held[2].resolve({ error: 'offline' });
+    assert.equal(await failed, 'offline');
+    assert.equal(settingsReadMessage(), 'Reading…', 'a read its own signal ended marks no failure and paints none');
+    const plain = readSettings().catch(() => 'failed');
+    await settle();
+    held[3].answer.status = 500;
+    held[3].resolve({ error: 'offline' });
+    await plain;
+    assert.equal(settingsReadMessage(), 'Could not be read', 'the same failure of an ordinary read still does');
+    // A transport that honours the end rejects at once with its own abort: that too is no failure to read.
+    forgetSettingRows();
+    routes.set('/api/settings', (_url, init = {}) => new Promise((_resolve, reject) => {
+        const refuse = () => reject(new DOMException('aborted', 'AbortError'));
+        if (init.signal.aborted) refuse(); else init.signal.addEventListener('abort', refuse);  // as fetch does
+    }));
+    const honoured = new AbortController();
+    const rejected = readSettings({ signal: honoured.signal }).catch((error) => error.name);
+    await settle();
+    honoured.abort();
+    assert.equal(await rejected, 'AbortError');
+    assert.equal(settingsReadMessage(), 'Reading…');
+    await assert.rejects(readSettings({ signal: honoured.signal }), { name: 'AbortError' }, 'a signal already ended starts no read');
+});
+
+test('a settings read its own signal ended confirms no write: a row unconfirmed stays so until a read that counts shows its value', async (t) => {
+    const { held, mount } = heldSettings(t, { post: () => response({ error: 'answer lost' }, 500) });
+    const row = rowById('TOTAL_BUDGET');
+    const host = new NodeStub();
+    mount.appendChild(host);
+    host.innerHTML = settingsRow(row);
+    const rows = bindSettingRows(host);
+    const first = readSettings();
+    held[0].resolve({ TOTAL_BUDGET: 100 });
+    await first;
+    const writing = commitSetting(row, 150);  // the answer is lost, and so is the read that would settle it
+    await settle();
+    held[1].answer.status = 500;
+    held[1].resolve({ error: 'offline' });
+    await writing;
+    assert.equal(result(host, 'TOTAL_BUDGET'), 'Not confirmed yet');
+    const control = new AbortController();
+    const endedRead = readSettings({ signal: control.signal }).catch((error) => error.name);
+    await settle();
+    control.abort();
+    held[2].resolve({ TOTAL_BUDGET: 150 });  // it shows the value that was sent
+    assert.equal(await endedRead, 'AbortError');
+    assert.equal(result(host, 'TOTAL_BUDGET'), 'Not confirmed yet', 'an ended read confirms nothing');
+    const counted = readSettings();
+    held[3].resolve({ TOTAL_BUDGET: 150 });
+    await counted;
+    assert.match(result(host, 'TOTAL_BUDGET'), /^Saved/, 'a read that counts does');
+    rows.dispose();
+});
+
+test('a read its own signal can end takes its place in the order only when it lands: ended it costs the reads before it nothing, first it stands over them, overtaken it lands nothing', async (t) => {
+    const { held, applied } = heldSettings(t, { post: () => response({ status: 'saved', changes: { TOTAL_BUDGET: { old: 6, new: 7, token: 'TOTAL_BUDGET@1' } } }) });
+    const answer = (index, spent) => held[index].resolve({ TOTAL_BUDGET: spent });
+    const start = (signal) => readSettings(signal ? { signal } : undefined).then((data) => data.TOTAL_BUDGET, (error) => error.name);
+    const base = start();
+    answer(0, 1);
+    await base;
+    // An ordinary read is out, Costs reads after it and is ended: the ordinary answer still lands over the snapshot.
+    const ordinary = start();
+    const visit = new AbortController();
+    const endedRead = start(visit.signal);
+    await settle();
+    visit.abort();
+    answer(1, 2);
+    await ordinary;
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 2, 'the ordinary read lands: an ended read took no place in the order');
+    answer(2, 99);
+    assert.equal(await endedRead, 'AbortError');
+    assert.deepEqual([settingsSnapshot().TOTAL_BUDGET, applied], [2, [1, 2]], 'the ended read changed and announced nothing');
+    // An ordinary read is out, Costs reads after it and lands first: its document stands, and the older answer does not undo it.
+    const older = start();
+    const first = start(new AbortController().signal);
+    await settle();
+    answer(4, 4);
+    assert.equal(await first, 4);
+    answer(3, 3);
+    await older;
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 4, 'the older ordinary answer, after the one that landed first, puts nothing over it');
+    // The ordinary answer first, then Costs': each lands in the order it answered, the newer stands.
+    const early = start();
+    const late = start(new AbortController().signal);
+    await settle();
+    answer(5, 5);
+    await early;
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 5);
+    answer(6, 6);
+    assert.equal(await late, 6);
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 6);
+    // Costs reads, an ordinary read begins after it: Costs' answer is overtaken and lands nothing.
+    const overtaken = start(new AbortController().signal);
+    const newer = start();
+    await settle();
+    answer(7, 7);
+    assert.equal(await overtaken, 'AbortError', 'a read a newer one overtook is no answer');
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 6);
+    answer(8, 8);
+    await newer;
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 8);
+    // Costs reads, a write lands after it: the write is the newer authority, Costs' answer lands nothing.
+    const beforeWrite = start(new AbortController().signal);
+    await settle();
+    await commitSetting(rowById('TOTAL_BUDGET'), 7);
+    answer(9, 9);
+    assert.equal(await beforeWrite, 'AbortError');
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 7, 'the write stands');
+});
+
+test('a read its own signal can end clears no standing failure: the pages left with "Could not be read" keep it until an answer, however the retry ends', async (t) => {
+    const { held } = heldSettings(t);
+    const plain = readSettings().catch(() => 'failed');
+    held[0].answer.status = 500;
+    held[0].resolve({ error: 'offline' });
+    await plain;
+    assert.equal(settingsReadMessage(), 'Could not be read', 'nothing was read and the newest read failed');
+    const control = new AbortController();
+    const retry = readSettings({ signal: control.signal }).catch((error) => error.name);
+    await settle();
+    assert.equal(settingsReadMessage(), 'Could not be read', 'a retry that may end clears the failure only by an answer');
+    control.abort();
+    held[1].resolve({ TOTAL_BUDGET: 5 });  // an answer that came after the end
+    assert.equal(await retry, 'AbortError');
+    assert.deepEqual([settingsReadMessage(), settingsSnapshot()], ['Could not be read', null], 'ended, it leaves the failure standing, and no page waits on a reader that is gone');
+    const answered = readSettings({ signal: new AbortController().signal });
+    held[2].resolve({ TOTAL_BUDGET: 6 });
+    await answered;
+    assert.deepEqual([settingsReadMessage(), settingsSnapshot().TOTAL_BUDGET], ['', 6], 'an answer clears it');
+});
+
+test('Costs’ retry after a failed read leaves that failure standing when one column’s Back ends it', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t);
+    const held = [];
+    let reads = 0;
+    env.routes.set(COSTS.settings, (_url, init = {}) => {
+        reads += 1;
+        if (reads === 1) return response({ error: 'offline' }, 500);  // a Settings page's read: it fails with nothing read
+        const body = deferred();
+        held.push({ signal: init.signal, ...body });
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    await readSettings().catch(() => {});
+    assert.equal(settingsReadMessage(), 'Could not be read');
+    await env.open();  // Costs reads again, a retry that its Back may end
+    await settle();
+    assert.equal(held.length, 1);
+    assert.equal(settingsReadMessage(), 'Could not be read', 'the retry clears the failure only by an answer');
+    env.layers.get('dashboard-level').onClose();
+    assert.equal(held[0].signal.aborted, true);
+    assert.equal(settingsReadMessage(), 'Could not be read', 'Back leaves the other pages their failure, not a "Reading…" with no reader');
+    env.dashboard.destroy();
+});
+
+// A settings document as GET /api/settings answers it, to the fields Costs' limits card reads: the budget, what its limits
+// cannot count (`known_spend_gaps`, `partly_counted_spend`) and the setup contract's note of how its limits count.
+const limitsDoc = (budget, { gaps = [], partly = [], note = '' } = {}) => ({ TOTAL_BUDGET: budget,
+    _meta: { known_spend_gaps: gaps, partly_counted_spend: partly, setup_contract: { budgetFields: note ? [{ note }] : [] } } });
+// What the limits card shows of such a document: its Total budget field and, under the rows, the line of what is not
+// counted and the note of how the limits count.
+const limitsCard = (page) => ({
+    total: () => page.querySelector('#setting-TOTAL_BUDGET').value,
+    gaps: () => page.querySelector('#costs-gaps').textContent,
+    help: () => page.querySelector('#costs-budget-help').textContent,
+});
+
+test('the limits’ notes are the accepted document’s, as the rows are: a read a newer read overtook paints neither, the newer document leads both', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t, { twoPanes: true });
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    const { total, gaps, help } = limitsCard(env.dashboard.page);
+    const base = readSettings();  // a snapshot exists: held[0]
+    held[0].resolve(limitsDoc(50, { note: 'Base note' }));
+    await base;
+    env.dashboard.activateTab('costs');  // Costs reads: held[1]
+    await settle();
+    const newer = readSettings();  // a Settings page reads after it: held[2]
+    await settle();
+    held[1].resolve(limitsDoc(111, { gaps: ['Stale tool'], note: 'Stale note' }));
+    await settle();
+    assert.deepEqual([gaps(), help(), total(), settingsSnapshot().TOTAL_BUDGET], ['', 'Base note', '50', 50],
+        'a read the newer one overtook paints no note and puts nothing back');
+    held[2].resolve(limitsDoc(60, { gaps: ['Current tool'], note: 'Current note' }));
+    await newer;
+    assert.deepEqual([total(), settingsSnapshot().TOTAL_BUDGET, gaps(), help()], ['60', 60, spendGapsWords(['Current tool']), 'Current note'],
+        'the newer read’s document stands in the rows and, as one, in the notes under them');
+    assert.equal(held.length, 3, 'no read was made for the notes: the three above are all');
+    env.dashboard.destroy();
+});
+
+test('concurrent settings reads, in either order, leave the rows and the notes on the one document that was accepted', async (t) => {
+    for (const order of ['the newer lands first', 'the older lands first']) {
+        forgetSettingRows();
+        const env = costsInDashboard(t, { twoPanes: true });
+        const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+        const { total, gaps, help } = limitsCard(env.dashboard.page);
+        env.dashboard.activateTab('costs');  // Costs reads first: held[0]
+        await settle();
+        const other = readSettings();  // a Settings page reads after it: held[1]
+        await settle();
+        const [older, newer] = [() => held[0].resolve(limitsDoc(111, { gaps: ['Older tool'], note: 'Older note' })),
+            () => held[1].resolve(limitsDoc(222, { gaps: ['Newer tool'], note: 'Newer note' }))];
+        for (const answer of order === 'the newer lands first' ? [newer, older] : [older, newer]) {
+            answer();
+            await settle();
+        }
+        await other;
+        assert.deepEqual([total(), settingsSnapshot().TOTAL_BUDGET, gaps(), help()], ['222', 222, spendGapsWords(['Newer tool']), 'Newer note'], order);
+        env.dashboard.destroy();
+    }
+});
+
+test('a limit saved while Costs reads stays saved: the older document that comes after puts nothing back, and a later opening reads the notes anew', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t, { twoPanes: true });
+    let server = limitsDoc(50, { gaps: ['Tool A'], note: 'Note A' });
+    const held = [];
+    env.routes.set(COSTS.settings, (_url, init = {}) => {
+        if (init.method === 'POST') {
+            const body = JSON.parse(init.body);
+            server = { ...server, ...body };
+            return response({ status: 'saved', changes: { TOTAL_BUDGET: { old: 50, new: body.TOTAL_BUDGET, token: 'TOTAL_BUDGET@1' } } });
+        }
+        const body = deferred();
+        held.push({ signal: init.signal, ...body, asked: structuredClone(server) });  // the document as it stood when asked
+        return { ok: true, status: 200, json: () => body.promise };
+    });
+    const { total, gaps, help } = limitsCard(env.dashboard.page);
+    const base = readSettings();
+    held[0].resolve(held[0].asked);
+    await base;
+    env.dashboard.activateTab('costs');  // Costs reads the document of 50: held[1]
+    await settle();
+    const saved = await commitSetting(rowById('TOTAL_BUDGET'), 120);
+    assert.equal(saved.state, 'saved');
+    held[1].resolve(held[1].asked);  // the older document comes after the write
+    await settle();
+    assert.deepEqual([total(), settingsSnapshot().TOTAL_BUDGET, gaps(), help()], ['120', 120, spendGapsWords(['Tool A']), 'Note A'],
+        'the saved value stands, and the notes are still those of the accepted document');
+    server = { ...server, _meta: { ...server._meta, known_spend_gaps: ['Tool B'] } };  // the server's own accounting moved on
+    env.dashboard.activateTab('logs');
+    env.dashboard.activateTab('costs');  // a later opening reads anew: held[2]
+    await settle();
+    held[2].resolve(held[2].asked);
+    await settle();
+    assert.deepEqual([total(), gaps()], ['120', spendGapsWords(['Tool B'])], 'the saved value is the server’s too, and the notes follow the new read');
+    env.dashboard.destroy();
+});
+
+test('Costs hidden reads nothing for its notes and keeps what it showed; opened again it reads once, and the notes follow that read', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t, { twoPanes: true });
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    const { gaps, help } = limitsCard(env.dashboard.page);
+    env.dashboard.activateTab('costs');
+    await settle();
+    held[0].resolve(limitsDoc(1, { gaps: ['First tool'], note: 'First note' }));
+    await settle();
+    assert.deepEqual([gaps(), help()], [spendGapsWords(['First tool']), 'First note']);
+    env.dashboard.activateTab('logs');  // Costs is hidden
+    await settle();
+    assert.deepEqual([held.length, gaps(), help()], [1, spendGapsWords(['First tool']), 'First note'], 'hiding asks for nothing and clears nothing');
+    const other = readSettings();  // a Settings page reads while Costs is hidden: held[1]
+    await settle();
+    held[1].resolve(limitsDoc(2, { gaps: ['Second tool'], note: 'Second note' }));
+    await other;
+    assert.deepEqual([held.length, gaps(), help()], [2, spendGapsWords(['Second tool']), 'Second note'], 'its rows and its notes alike follow the accepted document, with no read of its own');
+    env.dashboard.activateTab('costs');  // opened again: held[2]
+    await settle();
+    assert.equal(held.length, 3, 'one read for the opening');
+    held[2].resolve(limitsDoc(3, { gaps: ['Third tool'], note: 'Third note' }));
+    await settle();
+    assert.deepEqual([gaps(), help()], [spendGapsWords(['Third tool']), 'Third note']);
+    env.dashboard.destroy();
+});
+
+test('Costs’ settings read is its page’s: Back ends it, no body that comes after puts a document back or paints a row, and each opening reads anew', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t);
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    const applied = [];
+    document.addEventListener('settings-document:applied', (event) => applied.push(event.detail.TOTAL_BUDGET));
+    const total = () => env.dashboard.page.querySelector('#setting-TOTAL_BUDGET').value;
+    const back = () => env.layers.get('dashboard-level').onClose();
+    const unread = total();
+    await env.open();
+    await settle();
+    assert.deepEqual(ended([held[0]]), [false], 'opened, the page has its limits read out, with a transport to end');
+    back();
+    assert.deepEqual(ended([held[0]]), [true], 'Back ends it with the others');
+    held[0].resolve({ TOTAL_BUDGET: 111 });
+    await settle();
+    assert.deepEqual([settingsSnapshot(), applied, total()], [null, [], unread], 'its late answer puts no document back and paints no row');
+    // A second showing, ended by Back, and a third: the second's answer, however late, changes nothing over the third's.
+    await env.open();
+    await settle();
+    back();
+    await env.open();
+    await settle();
+    assert.deepEqual(ended([held[1], held[2]]), [true, false], 'each opening reads anew');
+    held[2].resolve({ TOTAL_BUDGET: 333 });
+    await settle();
+    assert.deepEqual([settingsSnapshot().TOTAL_BUDGET, applied, total()], [333, [333], '333']);
+    held[1].resolve({ TOTAL_BUDGET: 222 });
+    await settle();
+    assert.deepEqual([settingsSnapshot().TOTAL_BUDGET, applied, total()], [333, [333], '333'], 'an earlier showing’s answer changes nothing');
+    env.dashboard.destroy();
+});
+
+// One socket for the Dashboard and Costs both, as the app has: the fixture's keeps the last listener of a kind only.
+function socket() {
+    const listeners = new Map();
+    return {
+        on(type, fn) {
+            listeners.set(type, [...(listeners.get(type) || []), fn]);
+            return () => listeners.set(type, (listeners.get(type) || []).filter((each) => each !== fn));
+        },
+        emit(type, data = {}) { (listeners.get(type) || []).forEach((fn) => fn(data)); },
+    };
+}
+
+test('a reconnect starts no settings read for Costs while one column’s list holds it undrawn; drawn, Costs reads its limits once, as a read its Back ends', async (t) => {
+    forgetSettingRows();
+    const ws = socket();
+    const env = costsInDashboard(t, { ws });
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    await arrowsToCosts(env.dashboard);
+    await settle();
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(held.length, 0, 'a reconnect reads nothing for a page that the list holds undrawn');
+    ws.emit('open', { previouslyConnected: false });  // the first connect is no reconnect
+    await settle();
+    assert.equal(held.length, 0);
+    await env.open();
+    await settle();
+    assert.equal(held.length, 1, 'the press that opens the page reads its limits once');
+    held[0].resolve({ TOTAL_BUDGET: 1 });
+    await settle();
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(held.length, 2, 'drawn, a reconnect reads the limits once: Costs’ own read, and the Dashboard adds none beside it');
+    assert.deepEqual(ended([held[1]]), [false], 'a read of the page, with a transport its Back can end');
+    env.layers.get('dashboard-level').onClose();
+    assert.deepEqual(ended([held[1]]), [true]);
+    held[1].resolve({ TOTAL_BUDGET: 2 });
+    await settle();
+    assert.equal(settingsSnapshot().TOTAL_BUDGET, 1, 'and its late answer puts no document back');
+    env.dashboard.destroy();
+});
+
+test('a reconnect still reads once for a neighbouring tab the Dashboard shows, and once for Costs beside its list in two columns', async (t) => {
+    forgetSettingRows();
+    const ws = socket();
+    const env = costsInDashboard(t, { twoPanes: true, ws });
+    const reads = () => env.calls.filter((call) => call === COSTS.settings).length;
+    env.dashboard.activateTab('consciousness');
+    await settle();
+    const base = reads();
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(reads(), base + 1, 'Consciousness, drawn beside the list, is read for as the Dashboard always did');
+    env.dashboard.activateTab('costs');
+    await settle();
+    const costs = reads();
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(reads(), costs + 1, 'Costs, drawn beside the list, is read for once');
+    env.dashboard.destroy();
+});
+
+test('the notes are painted inside every settings read, so a document with malformed notes breaks neither that read nor the rows', async (t) => {
+    forgetSettingRows();
+    const env = costsInDashboard(t, { twoPanes: true });
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    const { total, gaps, help } = limitsCard(env.dashboard.page);
+    for (const [meta, shown] of [[{ known_spend_gaps: 'a string', partly_counted_spend: { not: 'a list' }, setup_contract: { budgetFields: 'bad' } }, 7],
+        [{ known_spend_gaps: [null, 3], partly_counted_spend: [null, 5], setup_contract: { budgetFields: [null, {}, { note: 42 }] } }, 8], [null, 9]]) {
+        const read = readSettings();  // an ordinary read, as any page makes it
+        await settle();
+        held.at(-1).resolve({ TOTAL_BUDGET: shown, _meta: meta });
+        assert.equal(await read.then(() => 'landed', (error) => `rejected: ${error.message}`), 'landed');
+        assert.deepEqual([total(), settingsSnapshot().TOTAL_BUDGET], [String(shown), shown], 'the rows hold the document');
+        assert.equal(typeof gaps(), 'string');
+        assert.ok(help().length > 0, 'the note of how the limits count is never left empty');
+    }
+    env.dashboard.destroy();
+});
+
+test('a visible reconnect replaces a limits read that is still out: the old answer lands nothing, the new one paints rows and notes, whichever answers first', async (t) => {
+    for (const order of ['the old answers first', 'the new answers first']) {
+        forgetSettingRows();
+        const ws = socket();
+        const env = costsInDashboard(t, { twoPanes: true, ws });
+        const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+        const { total, gaps, help } = limitsCard(env.dashboard.page);
+        env.dashboard.activateTab('costs');  // Costs reads: held[0], asked on the connection that is about to drop
+        await settle();
+        assert.deepEqual(ended(held), [false], `${order}: one read is out`);
+        ws.emit('open', { previouslyConnected: true });
+        await settle();
+        assert.equal(held.length, 2, `${order}: the reconnect asks again though the old read is still out`);
+        assert.deepEqual(ended(held), [true, false], `${order}: the new read replaces the old, whose transport is ended`);
+        const [old, now] = [() => held[0].resolve(limitsDoc(111, { gaps: ['Old tool'], note: 'Old note' })),
+            () => held[1].resolve(limitsDoc(222, { gaps: ['New tool'], note: 'New note' }))];
+        const answers = order === 'the old answers first' ? [old, now] : [now, old];
+        answers[0]();
+        await settle();
+        if (answers[0] === old) {
+            assert.deepEqual([settingsSnapshot(), gaps()], [null, ''], 'the ended read lands no document and paints no note');
+        } else {
+            assert.deepEqual([total(), gaps(), help()], ['222', spendGapsWords(['New tool']), 'New note'], 'the new answer paints rows and notes');
+        }
+        answers[1]();
+        await settle();
+        assert.deepEqual([total(), settingsSnapshot().TOTAL_BUDGET, gaps(), help()], ['222', 222, spendGapsWords(['New tool']), 'New note'],
+            `${order}: what stands is the new read's document, in the rows and under them`);
+        assert.equal(held.length, 2, 'and no other read was made');
+        env.dashboard.destroy();
+    }
+});
+
+test('a reconnect asks nothing for a Costs the Dashboard does not draw, and nothing once Costs is destroyed', async (t) => {
+    forgetSettingRows();
+    const ws = socket();
+    const env = costsInDashboard(t, { twoPanes: true, ws });
+    const held = heldReads(env.routes, [COSTS.settings])[COSTS.settings];
+    env.dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual(ended(held), [false]);
+    env.dashboard.activateTab('logs');  // Costs is hidden: the read it had out is ended with it
+    await settle();
+    assert.deepEqual(ended(held), [true]);
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(held.length, 1, 'a hidden Costs reads nothing on a reconnect');
+    env.dashboard.activateTab('costs');
+    await settle();
+    assert.deepEqual([held.length, ended(held)], [2, [true, false]], 'opened, it reads once');
+    ws.emit('open', { previouslyConnected: true });  // a read of the opening is out: the reconnect replaces it
+    await settle();
+    assert.deepEqual([held.length, ended(held)], [3, [true, true, false]]);
+    env.costs.destroy();
+    assert.deepEqual(ended(held), [true, true, true], 'destroyed, it ends what it has out');
+    ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(held.length, 3, 'and a reconnect reaches it no more');
+    env.dashboard.destroy();
 });
 
 test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {

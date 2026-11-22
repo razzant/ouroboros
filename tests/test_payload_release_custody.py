@@ -328,6 +328,43 @@ def test_keep_endpoint_keeps_last_canonical_material_after_drive_retirement(real
     assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
 
 
+@pytest.mark.parametrize("failure", ["unreadable", "malformed", "accounted_shape"])
+def test_keep_saves_fact_when_payload_read_fails(real_finished, monkeypatch, failure):
+    """From f6bfcc318, in this branch's per-file format: a canonical store that cannot be read (OSError) or a release
+    record that is malformed (ValueError from ``release_record``) still saves an explicit Keep; the listed store files
+    are answered ``unknown`` (``canonical_payloads``), never retained without a state. A release (keep=False) on the
+    same failure raises and leaves the saved fact in place."""
+    root, canonical = _retire_empty_drive(real_finished)
+    assert _propose(root)["ok"]
+    if failure == "unreadable":
+        def unreadable_store(*_args):
+            raise PermissionError(errno.EACCES, "synthetic canonical inventory unavailable")
+
+        monkeypatch.setattr(release_state, "keep_places", unreadable_store)
+        expected = PermissionError
+    elif failure == "malformed":
+        patch_document(root, TASK, lambda row: {**row, "payload_release": {"released": []}})
+        expected = ValueError
+    else:  # an accounted operation whose files are no list: the reader answers its own ValueError
+        patch_document(root, TASK, lambda row: {**row, "payload_release": {
+            "operations": {"old": {"state": "accounted", "files": 1}}}})
+        expected = ValueError
+    with _client(root) as client:
+        answer = _keep(client)
+    assert answer["keep"] and answer["status"] == "partly_retired", answer
+    assert "canonical_payloads" in answer["unknown"]
+    for rel in (SNAP, REPORT, SCRIPT, CARRIER):
+        path = str(canonical / rel)
+        assert answer["releases"].get(path) == "unknown", answer
+        assert path not in answer["retained"] and path not in answer["retired"], answer
+    fact = read_document(root, TASK)["owner_keep"]
+    assert fact["source"]["basis"] == "authenticated_gateway_request"
+    assert pr.holds(root, TASK, read_document(root, TASK), lambda _task: False) == "owner_keep"
+    with pytest.raises(expected):
+        owner_keep.set_owner_keep(root, TASK, keep=False, source={"basis": "test"})
+    assert read_document(root, TASK)["owner_keep"] == fact
+
+
 @pytest.mark.parametrize("order", ["keep_first", "free_first"])
 def test_real_keep_and_free_in_both_orders(real_finished, order):
     root, canonical = _retire_empty_drive(real_finished)
