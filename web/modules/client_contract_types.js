@@ -1,6 +1,5 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` — the replaceable-client envelopes
- *  `api_types.js` indexes: the served main interface, the setup bootstrap, the settings writers' refusal,
- *  completion readback, the auth gate's JSON login and the `GET /api/contract` document. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` and `history_contracts` that `api_types.js` indexes: the served
+ *  interface, setup bootstrap, settings writers' refusal, completion readback, JSON login, `GET /api/contract` and chat history rows. */
 /**
  * One completion attempt read back: saved is true while the settings document holds its write, false when
  * refused before writing, null when unconfirmed. Only `receipt` (its own success envelope) completes.
@@ -480,7 +479,7 @@
 
 /**
  * One `GET /api/chat/history` row (live frames call `text` `content`). A row may also carry the
- * task-progress, outcome and `notice` fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
+ * task-progress and outcome fields of a live `chat` frame (`ChatOutbound`). Replay-evidence rows
  * (`quiz_answer`, `quiz_closed`, `task_evidence`, or `summary_kind` + `historical_terminal`) are never shown.
  * @typedef {Object} ChatHistoryMessage
  * @property {PlaceHistoryFacts=} place_history
@@ -491,6 +490,7 @@
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
+ * @property {import('./api_types.js').HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
