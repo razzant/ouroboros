@@ -972,7 +972,7 @@ status sentence's or a composer chip's dot is its tone, §4).
 - **Amber is the owner's attention and nothing else:** (1) the owner's move — a
   question still unanswered (the ones Main's pill counts, whether its task stands on it, goes on under its
   assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
-  restart or crash, grant access, a skill review that must run first, local
+  restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,

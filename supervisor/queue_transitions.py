@@ -463,8 +463,6 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     from ouroboros.work_stop import SELECTION_KEY, clear_refusal, release_refusal, selection_record, unsafe_replay_response
     q = _queue_module()
     task_id = str(task_id or "").strip()
-    if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT)):
-        return refusal
     if not task_id:
         return {"ok": False, "error": "missing_task_id"}
     from supervisor.events_budget import (

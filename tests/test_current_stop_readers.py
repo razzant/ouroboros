@@ -843,8 +843,8 @@ def test_the_absorption_reminder_names_each_held_child_held_with_the_stop_its_pa
 
 
 def test_the_absorption_reminder_names_a_door_only_where_the_parent_may_ask_and_absorbs_as_before():
-    """Only a held member stop the mind may release offers its door; Panic's, a tree's and a stale queue's do
-    not. A stop that settles a still running child rides beside it there; a finished child is absorbed as before."""
+    """Only a held member stop the mind may release offers its door, a Panic hold's included; a stop nobody may
+    release, a tree's and a stale queue's do not. A stop that settles a still running child rides beside it there; a finished child is absorbed as before."""
     from ouroboros.task_status import format_subagent_absorption_message
 
     def child(task_id, status="scheduled", **stop):
@@ -853,14 +853,14 @@ def test_the_absorption_reminder_names_a_door_only_where_the_parent_may_ask_and_
                                      **stop}} if stop else {})}
 
     text = format_subagent_absorption_message([
-        child("door", cause="awaiting_selection"), child("panic", release="owner", cause="panic"),
+        child("door", cause="awaiting_selection"), child("panic", cause="panic"), child("none", release="none"),
         child("tree", scope="tree", cause="pause"), child("stale", queue_freshness="stale"),
         child("settling", status="running", state="pausing"), child("plain", status="running"),
         {**child("done", status="completed"), "result": "the finished work"},
     ], parent_task_id="P")
     held = {row.split(":", 1)[0][2:]: row for row in _section(text, _HELD_HEADER)}
     running = {row.split(":", 1)[0][2:]: row for row in _section(text, _RUNNING_HEADER)}
-    assert list(held) == ["door", "panic", "tree", "stale"] and list(running) == ["settling", "plain"]
-    assert [name for name, row in held.items() if '"door": "resume_child_task"' in row] == ["door"]
+    assert list(held) == ["door", "panic", "none", "tree", "stale"] and list(running) == ["settling", "plain"]
+    assert [name for name, row in held.items() if '"door": "resume_child_task"' in row] == ["door", "panic"]
     assert '"state": "pausing"' in running["settling"] and "current_stop" not in running["plain"]
     assert "## child done (" in text and "the finished work" in text

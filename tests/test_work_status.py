@@ -139,12 +139,13 @@ def test_pause_author_reads_the_declared_record_and_never_defaults_to_the_owner(
     ("restart", {"reason": "saved_work_hold"}, "saved_on_stop"),
     ("restart", {"reason": "owner_restart_hold"}, "after_restart"),
     ("budget", {}, "spending_limit"),
+    ("unknown", {"reason": "panic_hold"}, "after_panic"),  # the census names no pause cause for Panic
 ])
 def test_owner_required_resume_is_the_owners_turn_only_when_the_census_says_so(cause, hold, code):
     parked = row("t", "budget_paused", pause_cause=cause, can_resume=True)
     state = ws.classify_member(parked, {"hold": hold})
     assert state["activity"] == "paused" and state["reasons"][0]["code"] == code
-    assert state["turn"] == [{"kind": "action", "task_id": "t", "code": code}] and state["release"] == ("owner" if code == "after_panic" else "mind")
+    assert state["turn"] == [{"kind": "action", "task_id": "t", "code": code}] and state["release"] == "mind"
     quiet = ws.classify_member(dict(parked, can_resume=False), {"hold": hold})
     assert quiet["turn"] == []
 
