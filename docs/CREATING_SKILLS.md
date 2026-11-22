@@ -2134,7 +2134,8 @@ A failing result (`{"ok": false, ...}`) may name why with a string `reason` (a s
 `refusal` object: `capability_unavailable` (bool), `permission` (an id such as `accessibility`), `repair` (`owner`,
 `retry` or `self`) and `where` (a short hint). The host copies the valid fields into `meta.extension_reason`, ignores any
 other type and keeps the code `TOOL_REPORTED_FAILURE`. With `capability_unavailable` true and a `permission`, the
-skill's health record keeps that permission open and dated, and every work is told. Only a success that lists it in
+skill's health record, once it exists, keeps that permission open and dated, and every work that reaches extensions
+is told. Only a success that lists it in
 `permissions_available` (`{"ok": true, "permissions_available": ["accessibility"], ...}`) closes it: a skill that
 reports refusals but never what is available keeps the line open.
 
