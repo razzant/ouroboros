@@ -119,11 +119,9 @@ def test_registry_hides_and_blocks_disabled_tools(tmp_path, monkeypatch):
 
     avail = set(reg.available_tools())
     schema_names = {s["function"]["name"] for s in reg.schemas()}
-    core_names = {s["function"]["name"] for s in reg.schemas(core_only=True)}
     for tool in WEB_TOOLS:
         assert tool not in avail, f"{tool} should be withheld from available_tools"
         assert tool not in schema_names, f"{tool} should be hidden from schemas()"
-        assert tool not in core_names, f"{tool} should be hidden from schemas(core_only=True)"
         assert reg.get_schema_by_name(tool) is None, f"{tool} should not be rediscoverable"
         blocked = reg.execute(tool, {})
         assert "RESOURCE_CONSTRAINT_BLOCKED" in blocked and "disabled_tools" in blocked

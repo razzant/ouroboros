@@ -58,11 +58,14 @@ def _repo(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     (root / "ouroboros").mkdir()
+    # A module at the cap carries its band reason, which a change that touches it owes.
     (root / "ouroboros/size_ratchet_manifest.py").write_text(
         'BASELINE_SOURCE_SHA = "' + "0" * 40 + '"\n'
         'GIANT_PATHS = ()\nFUNCTION_DEBT = ()\nBAND_BASELINE_PATHS = ()\n'
-        'BAND_PATHS = {}\nBYTE_BASELINE_DEBT = {}\nBYTE_DEBT = {}\n', encoding="utf-8")
-    (root / "sample.py").write_text("def sample():\n    return 1\n", encoding="utf-8")
+        'BAND_PATHS = {"sample.py": "one module at the cap"}\nBYTE_BASELINE_DEBT = {}\nBYTE_DEBT = {}\n',
+        encoding="utf-8")
+    (root / "sample.py").write_text("def sample():\n    return 1\n" + "#\n" * (review.MAX_MODULE_LINES - 3),
+                                    encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",

@@ -954,7 +954,12 @@ def test_projection_names_every_honest_status(describe):
     assert describe(BASE, enabled=False)["status"] == "disabled"
     assert describe(BASE, enabled=False)["enabled"] is False  # the caller's flag, not the snapshot's
     sleeping = describe(BASE)
-    assert sleeping["status"] == "sleeping" and sleeping["detail"] == f"Sleeping until {server._clock_of(BASE['next_wake_at'])}."
+    # The time is the server's, and the sentence names that zone (a UTC server is not the reader's morning).
+    from datetime import datetime
+
+    zone = datetime.fromisoformat(BASE["next_wake_at"]).astimezone().strftime("%z")
+    assert sleeping["status"] == "sleeping" and sleeping["detail"] == (
+        f"Sleeping until {server._clock_of(BASE['next_wake_at'])} (UTC{zone[:3]}:{zone[3:]}).")
     assert sleeping["next_wake_at"] == BASE["next_wake_at"] and sleeping["enabled"] is True
     # #1603: no early wake exists, so even a stale snapshot key is never rendered as one.
     stale = describe({**BASE, "pending_reason": "task_finished:a:completed"})

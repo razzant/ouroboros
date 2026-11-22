@@ -23,6 +23,8 @@ import sys
 
 import pytest
 from tests._safety_fixtures import disable_safety, owner_registry as _registry
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 
 from ouroboros.runtime_mode_policy import protected_path_category
 from ouroboros.tools.registry import ToolRegistry
@@ -457,17 +459,18 @@ class _CommitCtx:
         return path
 
 
-def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+def _lay_git_repo(folder: pathlib.Path) -> None:
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "test@example.com")
+    world_git(repo, "config", "user.name", "Test")
     (repo / "README.md").write_text("ok\n", encoding="utf-8")
     (repo / "BIBLE.md").write_text("constitution\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
-    return repo
+    world_git(repo, "add", ".")
+    world_git(repo, "commit", "-m", "init")
+
+
+def _git_repo(tmp_path: pathlib.Path) -> pathlib.Path:
+    return clone_repository(world("runtime-mode-core-repo", _lay_git_repo) / "repo", tmp_path / "repo")
 
 
 # ----- Light mode blanket block -----

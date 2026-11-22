@@ -24,10 +24,14 @@ What is left of that allowance is the launched tree's producer ceiling
 spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
 ledger fence stays at the owner's per-task cap, so a wake never dies before its first call on a
 nearly spent day. The next
-wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup`` persists
+wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup(seconds)`` persists
 ``consciousness_next_interval_sec``) or ``WAKE_DEFAULT_SEC``, clamped into the owner's
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
-wake succeeds. The persisted own actor id and cause fence completion; a carrier handoff
+wake succeeds. A time the mind named (``set_next_wakeup(at)``, ``consciousness_clock``) makes it
+sooner while it lies strictly ahead, never below min nor above max after that finish (and turning
+consciousness on comes first at one still ahead); the settlement of a wake appointed after it was
+stored consumes it once that wake ends at or after it, deciding on the state its own write holds
+(``_next_delay``). The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
 A wake a pending Restart refuses before its start stays a refusal, like every closed door:
 no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
@@ -69,6 +73,7 @@ from ouroboros.config import (
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
+from ouroboros.consciousness_clock import OWNER_ZONE_STATE_KEY, WAKE_TARGET_STATE_KEY, consumed_by, target_ts
 from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_continuity, wake_continuity_after, wake_task_metadata
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.deadline_utils import parse_deadline_ts
@@ -345,13 +350,26 @@ class BackgroundConsciousness:
         except Exception:
             log.debug("consciousness: %s not persisted", key, exc_info=True)
 
-    def _interval(self) -> int:
-        """The model's chosen interval (``set_next_wakeup``) or the default, clamped."""
+    def _interval(self, state: Optional[Dict[str, Any]] = None, bounds: Optional[Tuple[int, int]] = None) -> int:
+        """The model's chosen interval (``set_next_wakeup(seconds)``) or the default, clamped into ``bounds`` (MIN,
+        MAX; read from the settings when not given)."""
+        floor, ceiling = bounds or (self.floor, self.ceiling)
         try:
-            chosen = int(self._read_state().get(INTERVAL_STATE_KEY) or WAKE_DEFAULT_SEC)
+            chosen = int((self._read_state() if state is None else state).get(INTERVAL_STATE_KEY) or WAKE_DEFAULT_SEC)
         except (TypeError, ValueError):
             chosen = WAKE_DEFAULT_SEC
-        return max(self.floor, min(self.ceiling, chosen))
+        return max(floor, min(ceiling, chosen))
+
+    def _next_delay(self, now: float, state: Dict[str, Any], bounds: Optional[Tuple[int, int]] = None) -> float:
+        """The one next-delay rule of a settlement and a refused admission: the rhythm (the chosen interval times
+        the failure backoff, up to MAX), or sooner while a named time (``set_next_wakeup(at)``) lies strictly
+        ahead of ``now``, never below MIN nor above MAX after it. A passed named time changes nothing here."""
+        floor, ceiling = bounds or (self.floor, self.ceiling)
+        delay = min(ceiling, self._interval(state, (floor, ceiling)) * self._backoff)
+        target = target_ts(state.get(WAKE_TARGET_STATE_KEY))
+        if target is not None and target > now:
+            delay = min(delay, max(floor, min(ceiling, target - now)))
+        return delay
 
     def _archive_legacy_inbox(self) -> None:
         """One-time move of the retired observation inbox into the archive (never read)."""
@@ -534,6 +552,10 @@ class BackgroundConsciousness:
             "window": allowance_fact(window),
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
+            # The "Own clock" section's facts (``consciousness_standing._clock_section``), in the state's shape.
+            "clock": {**{key: persisted[key] for key in (WAKE_TARGET_STATE_KEY, OWNER_ZONE_STATE_KEY)
+                         if key in persisted},
+                      APPOINTMENT_STATE_KEY: self._appointment_at, "floor": self.floor, "ceiling": self.ceiling},
         }
         bound_over, stopped_before_binding = None, False
 
@@ -573,7 +595,7 @@ class BackgroundConsciousness:
             if why == "admission_failed":
                 self._backoff = min(self._backoff * 2, 1024)
             transient = why == "repo_writer_gate_closed"
-            self._set_next_wake(now + (self.floor if transient else min(self.ceiling, self._interval() * self._backoff)))
+            self._set_next_wake(now + (self.floor if transient else self._next_delay(now, self._read_state())))
             self._record("consciousness_wake_rejected", reason=why, wake_reason=reason)
             return f"rejected:{why}"
         if stopped_before_binding:
@@ -663,14 +685,26 @@ class BackgroundConsciousness:
             else:
                 self._backoff, self._last_wake_outcome = min(self._backoff * 2, 1024), "failed"
                 self._last_error = f"wake-up {task_id} failed in its runner (see the chat and events.jsonl)"
-            self._next_wake_at = self._appointment_at = now + min(self.ceiling, self._interval() * self._backoff)
+            # Only a wake appointed after the named time was stored consumes it: judged by this wake's appointment.
+            prior, bounds = self._appointment_at, (self.floor, self.ceiling)
+            # Held when the settlement cannot be written; a written one decides on the state it holds.
+            self._next_wake_at = self._appointment_at = now + self._next_delay(now, self._read_state(), bounds)
+            settled = {OWN_WAKE_STATE_KEY: self._own_wake, LAST_WAKE_STATE_KEY: now,
+                       OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
+                       CONTINUITY_STATE_KEY: dict(self._continuity)}
+
+            def settle(st: Dict[str, Any]) -> None:
+                # Under the state lock: a named time stored since the read above is the one judged and the one
+                # that sets the next appointment.
+                if consumed_by(st.get(WAKE_TARGET_STATE_KEY), appointment_at=prior, now=now):
+                    st.pop(WAKE_TARGET_STATE_KEY, None)
+                self._next_wake_at = self._appointment_at = now + self._next_delay(now, st, bounds)
+                st.update(settled, **{NEXT_WAKE_STATE_KEY: self._next_wake_at,
+                                      APPOINTMENT_STATE_KEY: self._appointment_at})
+
             from supervisor import state
             try:  # the notes past it (``None``: an unreadable row) persist with the settlement itself
-                state.update_state(lambda st: st.update({OWN_WAKE_STATE_KEY: self._own_wake,
-                    LAST_WAKE_STATE_KEY: now, NEXT_WAKE_STATE_KEY: self._next_wake_at,
-                    APPOINTMENT_STATE_KEY: self._appointment_at,
-                    OBSERVATION_BOOTSTRAP_STATE_KEY: self._observation_bootstrap_since,
-                    CONTINUITY_STATE_KEY: dict(self._continuity)}))
+                state.update_state(settle)
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
         if (row or {}).get("wake_summary") and not row.get("title"):
@@ -693,8 +727,17 @@ class BackgroundConsciousness:
             if self._enabled:
                 return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
-            # The clock did not advance while disabled: never announce a wake in the past.
-            self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
+            # The clock did not advance while disabled: never announce a wake in the past. A named time still ahead
+            # (one stored while off, ``set_next_wakeup(at)``) comes first when it is earlier than the next attempt Off
+            # left, no sooner than MIN after the last wake, boot or skip (the tool's contract).
+            now, stored = time.time(), self._read_state()
+            due, named = max(self._next_wake_at, now), target_ts(stored.get(WAKE_TARGET_STATE_KEY))
+            if named is not None and named > now:
+                skip = stored.get(LAST_SKIP_STATE_KEY)
+                skipped = parse_deadline_ts(skip.get("at")) if isinstance(skip, dict) else None
+                last = max(self._last_wake_at, self._booted_at, skipped.timestamp() if skipped is not None else 0.0)
+                due = min(due, max(named, last + self.floor))
+            self._set_next_wake(due, appointment=True)
             at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
         from ouroboros.consciousness_view import on_sentence
         try:  # where it may speak now: one read that never holds the start (the words 15.11, 5A)

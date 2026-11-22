@@ -37,7 +37,7 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, consciousness_clock, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -356,10 +356,12 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         from ouroboros.server_control import external_owner_binding
 
         ext_known, owner_ext_id, bound_pair = external_owner_binding(st)
-        if panic and external_identity_present and ext_known and owner_ext_id is not None and (
-                bound_pair == (user_id, chat_id)):
+        bound_owner = external_identity_present and ext_known and owner_ext_id is not None and bound_pair == (user_id, chat_id)
+        if panic and bound_owner:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
+        # A task's owner binding and the owner's zone match the bridge's positive identities, not the display defaults above.
+        bound_external_owner = is_external_transport and bound_owner and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
 
         # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
@@ -381,6 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso, accepted=msg.get("accepted_source_row"))
 
         try:
             ctx.update_state(_stamp_owner_activity)
@@ -487,10 +490,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
-                    # Match the bridge's positive identities, not the display defaults above.
-                    "bound_external_owner": (is_external_transport and ext_known and owner_ext_id is not None
-                                             and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
-                                             and bound_pair == (sender_id, conversation_id)),
+                    "bound_external_owner": bound_external_owner,
                 },
             )
     return offset
@@ -1373,12 +1373,11 @@ def _restart_cleanup_kwargs() -> dict:
 def _emergency_process_cleanup() -> dict:
     """Kill child processes, workers and companions; the kill census. The main and
     Host Service listeners close with this process: no port is swept."""
-    from ouroboros.maintenance import child as maintenance_child
-    from ouroboros.storage import count as storage_count
-    from ouroboros.storage_free import free as storage_free
-    maintenance_child.stop()
-    storage_count.stop()
-    storage_free.stop()
+    from ouroboros.startup_historical_audit import live_background_children, stop_background_children
+    background = stop_background_children()  # the maintenance child, the Storage count and Free
+    with suppress(Exception):  # a teardown cut short may not have stopped the local model: ask the loaded one, if any
+        if (model := sys.modules["ouroboros.local_model"].get_manager(create=False)) is not None:  # no import: it waits
+            model.panic_stop(request_only=True)  # its server, an install and a stop still waiting: no lock, no wait
     begin_owned_stop(DATA_DIR, cause=server_stop_cause())  # the grace starts here; cause and pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:
@@ -1416,8 +1415,7 @@ def _emergency_process_cleanup() -> dict:
             pass
     if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
         body_adoption.arm(DATA_DIR, worker_exits=worker_exits,
-                          live_children=multiprocessing.active_children() + maintenance_child.live_children()
-                          + storage_count.live_children() + storage_free.live_children(),
+                          live_children=multiprocessing.active_children() + live_background_children(background),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())
     try:
         from ouroboros.extension_companion import panic_kill_all
@@ -1425,8 +1423,7 @@ def _emergency_process_cleanup() -> dict:
     except Exception:
         pass
     return {"worker_exits": worker_exits, "owned_stop": owned_stop,
-            "live_children": multiprocessing.active_children() + maintenance_child.live_children()
-            + storage_count.live_children() + storage_free.live_children()}
+            "live_children": multiprocessing.active_children() + live_background_children(background)}
 
 def main() -> int:
     from ouroboros.delegate_recovery import observe_restart_parent

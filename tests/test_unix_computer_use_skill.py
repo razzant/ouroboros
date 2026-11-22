@@ -125,10 +125,10 @@ def test_unix_computer_use_window_list_uses_linux_backend(tmp_path, monkeypatch)
 
 # --- NW-5: macOS-branch coverage (previously only the linux path was tested) ---
 
-def _macos_impl(tmp_path, monkeypatch, captured):
+def _macos_impl(tmp_path, monkeypatch, captured, tools=("osascript",)):
     module = _load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
-    monkeypatch.setattr(module, "_which", lambda name: "/usr/bin/cliclick" if name == "cliclick" else "")
+    monkeypatch.setattr(module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
@@ -137,47 +137,51 @@ def _macos_impl(tmp_path, monkeypatch, captured):
     return module._ComputerUse(_API(tmp_path))
 
 
-def test_macos_scroll_is_honest_unsupported_not_fake_wait(tmp_path, monkeypatch):
+def _ops(captured):
+    """The operations of the last macOS input program call (its JSON spec is the last word)."""
+    argv = _inputs(captured)[-1]
+    assert argv[:3] == ["osascript", "-l", "JavaScript"] and argv[3].endswith("input_events.js"), argv
+    return json.loads(argv[-1])["ops"]
+
+
+def test_macos_scroll_posts_wheel_lines_at_the_pointer(tmp_path, monkeypatch):
+    """The wheel is CoreGraphics scroll events (#63), one line per step in either axis; positive dy is up."""
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    result = json.loads(impl.scroll(clicks=3, direction="down"))
-    assert result["ok"] is False
-    assert "unsupported on macOS" in result["error"]
-    # Must NOT have issued a cliclick `w:` (wait) masquerading as a scroll.
-    assert not any(any(str(part).startswith("w:") for part in cmd) for cmd in captured)
+    for direction, delta in (("down", {"dy": -3}), ("up", {"dy": 3}), ("left", {"dx": 3}), ("right", {"dx": -3})):
+        result = json.loads(impl.scroll(clicks=3, direction=direction))
+        assert result["ok"] is True and result["method"] == "cg_events" and _ops(captured) == [{"op": "scroll", **delta}], result
+    count = len(captured)
+    assert json.loads(impl.scroll(direction="sideways"))["ok"] is False and len(captured) == count, "a bad direction sends nothing"
 
 
-def test_macos_right_click_uses_rc(tmp_path, monkeypatch):
+def test_macos_right_and_middle_click(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    json.loads(impl.click(x=10, y=20, button="right", raw=True))
-    assert captured and captured[-1] == ["cliclick", "rc:10,20"]
-
-
-def test_macos_middle_click_honest_unsupported(tmp_path, monkeypatch):
-    captured: list = []
-    impl = _macos_impl(tmp_path, monkeypatch, captured)
-    result = json.loads(impl.click(x=10, y=20, button="middle", raw=True))
-    assert result["ok"] is False and "middle" in result["error"]
+    for button in ("right", "middle"):
+        assert json.loads(impl.click(x=10, y=20, button=button, raw=True))["ok"] is True
+        assert _ops(captured) == [{"op": "click", "x": 10, "y": 20, "button": button, "count": 1}]
 
 
 def test_negative_coordinates_are_absolute_points_on_macos(tmp_path, monkeypatch):
-    """A display left of or above the main one has negative logical coordinates: cliclick takes them with the `=`
-    prefix (a bare `-` would be a move relative to the pointer), so they are valid input here, not an error."""
+    """A display left of or above the main one has negative logical coordinates: they go as numbers in the global
+    space CoreGraphics events use, so they are valid input here, not an error."""
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     assert json.loads(impl.click(x=-5, y=20, raw=True))["ok"] is True
+    assert _ops(captured) == [{"op": "click", "x": -5, "y": 20, "button": "left", "count": 1}]
     assert json.loads(impl.move(x=10, y=-1, raw=True))["ok"] is True
-    assert _inputs(captured) == [["cliclick", "c:=-5,20"], ["cliclick", "m:10,=-1"]]
+    assert _ops(captured) == [{"op": "move", "x": 10, "y": -1}]
 
 
 def test_macos_key_combo_uses_modifier_down_up(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     json.loads(impl.key(keys="command+shift+s"))
-    # kd:cmd,shift t:s ku:cmd,shift (modifiers held, key tapped, modifiers released).
-    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd,shift", "t:s", "ku:cmd,shift"]
+    # Modifiers held, the key tapped, modifiers released: the program does it from the one operation.
+    assert _ops(captured) == [{"op": "keys", "mods": ["cmd", "shift"], "char": "s"}]
     # Command and one character is the Command chord program's (osascript), checked before anything is sent.
+    impl = _macos_impl(tmp_path, monkeypatch, captured, tools=())
     captured.clear()
     refused = json.loads(impl.key(keys="command+s"))
     assert refused["dispatched"] is False and "osascript is not installed" in refused["error"] and captured == []
@@ -218,37 +222,40 @@ def test_observation_transform_remaps_click_coordinates(tmp_path, monkeypatch):
     })
     result = json.loads(impl.click(x=100, y=50, observation_id="shot-1"))
     assert result["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "c:200,100"]
+    assert _ops(captured) == [{"op": "click", "x": 200, "y": 100, "button": "left", "count": 1}]
     assert result["coordinate_space"] == "screenshot"
 
     result_raw = json.loads(impl.click(x=100, y=50, raw=True))
     assert result_raw["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "c:100,50"]
+    assert _ops(captured) == [{"op": "click", "x": 100, "y": 50, "button": "left", "count": 1}]
     assert result_raw["coordinate_space"] == "raw"
 
 
-def test_macos_drag_uses_dd_dm_du(tmp_path, monkeypatch):
+def test_macos_drag_is_one_operation(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     result = json.loads(impl.left_click_drag(start_x=10, start_y=20, end_x=30, end_y=40, raw=True))
     assert result["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "dd:10,20", "dm:30,40", "du:30,40"]
+    assert _ops(captured) == [{"op": "drag", "from": [10, 20], "to": [30, 40], "button": "left"}]
 
 
-def test_macos_triple_click_uses_tc(tmp_path, monkeypatch):
+def test_macos_double_and_triple_click_carry_their_count(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    json.loads(impl.click(x=10, y=20, triple=True, raw=True))
-    assert _inputs(captured)[-1] == ["cliclick", "tc:10,20"]
+    for kwargs, count in (({"double": True}, 2), ({"triple": True}, 3)):
+        json.loads(impl.click(x=10, y=20, raw=True, **kwargs))
+        assert _ops(captured) == [{"op": "click", "x": 10, "y": 20, "button": "left", "count": count}]
 
 
-def test_macos_mouse_down_left_only(tmp_path, monkeypatch):
+def test_macos_mouse_down_and_up_take_any_button(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
     assert json.loads(impl.mouse_down(x=5, y=6, raw=True))["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "dd:5,6"]
-    result = json.loads(impl.mouse_down(x=5, y=6, button="right", raw=True))
-    assert result["ok"] is False and "left button" in result["error"]
+    assert _ops(captured) == [{"op": "button", "down": True, "button": "left", "x": 5, "y": 6}]
+    assert json.loads(impl.mouse_down(x=5, y=6, button="right", raw=True))["ok"] is True
+    assert _ops(captured) == [{"op": "button", "down": True, "button": "right", "x": 5, "y": 6}]
+    assert json.loads(impl.mouse_up(button="middle"))["ok"] is True
+    assert _ops(captured) == [{"op": "button", "down": False, "button": "middle"}], "no coordinates: at the pointer"
 
 
 def test_wayland_click_routes_through_ydotool(tmp_path, monkeypatch):
@@ -446,26 +453,22 @@ def test_wait_bounded(tmp_path, monkeypatch):
     assert slept and max(slept) <= 10.0
 
 
-def test_macos_hold_key_modifier_combo_and_honest_unsupported(tmp_path, monkeypatch):
-    """B-fix: pure-modifier combos hold via kd/w/ku; non-modifier keys are
-    honestly unsupported (cliclick kp is press-and-release, cannot hold)."""
+def test_macos_hold_key_holds_any_key_and_refuses_an_unknown_one(tmp_path, monkeypatch):
+    """Modifier combos and any other key hold now (#63): the program presses, waits and lets up in its finally, under
+    its own deadline below the helper timeout. An unknown key sends nothing."""
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-
-    result = json.loads(impl.hold_key(keys="cmd", duration_ms=500))
-    assert result["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd", "w:500", "ku:cmd"]
-
-    result = json.loads(impl.hold_key(keys="cmd+shift", duration_ms=200))
-    assert result["ok"] is True
-    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd,shift", "w:200", "ku:cmd,shift"]
-
+    for keys, duration, op in (("cmd", 500, {"op": "hold", "mods": ["cmd"], "ms": 500}),
+                               ("cmd+shift", 200, {"op": "hold", "mods": ["cmd", "shift"], "ms": 200}),
+                               ("a", 300, {"op": "hold", "mods": [], "ms": 300, "char": "a"}),
+                               ("cmd+space", 300, {"op": "hold", "mods": ["cmd"], "ms": 300, "code": 49})):
+        assert json.loads(impl.hold_key(keys=keys, duration_ms=duration))["ok"] is True
+        assert _ops(captured) == [op]
+        budget = json.loads(_inputs(captured)[-1][-1])["budget_ms"]
+        assert duration < budget < max(12, duration // 1000 + 8) * 1000, "its own deadline is below the helper's"
     before = list(captured)
-    result = json.loads(impl.hold_key(keys="a"))
-    assert result["ok"] is False and "non-modifier" in result["error"]
-    result = json.loads(impl.hold_key(keys="cmd+space"))
-    assert result["ok"] is False and "non-modifier" in result["error"]
-    assert captured == before  # nothing issued for unsupported holds
+    result = json.loads(impl.hold_key(keys="hyper"))
+    assert result["ok"] is False and "hyper" in result["error"] and captured == before  # nothing issued
 
 
 def test_wayland_key_is_honest_unsupported(tmp_path, monkeypatch):
@@ -595,6 +598,7 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     assert result["app"] == {"pid": 77, "app_id": "com.apple.Safari", "app": "Safari"}
     assert result["window"] == "Start Page" and result["truncated_by"] == ["max_nodes"]
     assert len(result["marks"]) == 2 and len(result["nodes"]) == 3
+    assert result["permissions_available"] == ["accessibility"], "a tree read proves the Accessibility grant"
     first = result["marks"][0]
     assert first["id"] == 1 and first["role"] == "Button" and first["title"] == "Reload"
     assert first["center_x"] == 115 and first["center_y"] == 60
@@ -608,6 +612,9 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", failing)
     degraded = json.loads(impl.ax_tree())
     assert degraded["ok"] is False and degraded["reason"] == "accessibility_untrusted" and "marks" not in degraded
+    assert "permissions_available" not in degraded
+    assert degraded["refusal"] == {"capability_unavailable": True, "permission": "accessibility", "repair": "owner",
+                                   "where": "System Settings > Privacy & Security > Accessibility"}
 
 
 def test_coerce_point_normalizes_the_shapes_models_actually_emit():

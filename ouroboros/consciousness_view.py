@@ -43,6 +43,15 @@ def _clock_of(iso_value: Any) -> str:
     return date + at.strftime("%H:%M")
 
 
+def _zone_of(iso_value: Any) -> str:
+    """`` (UTC+03:00)``: the zone ``_clock_of`` prints that instant in (the server's), so a UTC server's time is not
+    read as the reader's own; "" when there is no instant."""
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_offset_text
+
+    parsed = parse_deadline_ts(str(iso_value or ""))
+    return f" ({utc_offset_text(parsed.astimezone(_DISPLAY_ZONE))})" if parsed is not None else ""
+
+
 def _when(iso_value: Any) -> str:
     """«at HH:MM» for a coming instant, «due since HH:MM» for a passed one: no line names a past time as next."""
     from ouroboros.deadline_utils import parse_deadline_ts
@@ -111,7 +120,8 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         since = f" since {_clock_of(snapshot['appointment_at'])}" if snapshot.get("appointment_at") else ""
         status, detail = "due", f"Due{since}; the wake-up has not started yet."
     else:
-        status, detail = "sleeping", f"Sleeping until {_clock_of(snapshot.get('next_wake_at'))}."
+        wake_at = snapshot.get("next_wake_at")
+        status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
     return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
             "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
             "position": position_words(requested_enabled, snapshot.get("places_brief")), "gloss": SWITCH_GLOSS}
