@@ -702,7 +702,7 @@ def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_an
     _pages, read = _proposal_with(tmp_path, plan, target_id=g, replaces=[long])
     assert [re.search(rf"- {name}: starts ([^;]+);", read)[1] for name in ("now", "with this selection")] == [
         "Low, temporarily, for the window", "Max"]
-    assert "- now: starts Low, temporarily, for the window; Max room crowded: window " in read
+    assert "- now: starts Low, temporarily, for the window; Max room lost, cause memory: window " in read
     assert plan.initial_mode == "low"  # the production start of the captured view is the "now" arm: chapter maps
     assert "This task started in Low, temporarily, for the window (its start projection, a separate fact" in read
     files, views, capture = tree(tmp_path), [], mv.capture_memory_view

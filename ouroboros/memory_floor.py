@@ -370,12 +370,14 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
     """The host's measure of one start in the provable parts; the mind judges what they mean: the gate's need
     (``gate_need``: whole books, my memory at the gate's level, the work's room, the reply reserve) against the window,
     the ordinary need (my memory with no shortened form) under that name and the need with no memory; with ``parts``
-    the measure by whose part it is (``WHOSE``). ``pages`` (``unfolded_pages`` of the same snapshot) names how many
-    unfolded pages there are and where they pile up."""
+    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too. ``pages``
+    (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
     window, gate = fact["window"], gate_need(fact)
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
     text = (f"window {window:,}; the gate's need {gate:,}, {'headroom' if gate <= window else 'short by'} "
             f"{abs(window - gate):,}; the ordinary need {fact['need']:,}; with no memory {fact['zero_need']:,}")
+    if not parts:  # the parts name the schemas whose; here they and the need without them stand alone
+        text += f"; tool schemas {fact['schemas']:,}; without them {fact['floor_need']:,}"
     if parts:
         named, grouped = dict(fact["parts"]), {name for _whose, names in WHOSE for name in names}
         listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}"],
@@ -1165,6 +1167,7 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
     frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
              "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
              "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode,  # the start's own mode
+             "unmeasured": tuple(plan.start) == ("max", "unmeasured"),  # a Max start whose route named no window
              # an owner's Max the window took to Low, temporarily, carries its cause (``start_cause``), whatever is chosen now
              "maps": (plan.start[0] or plan.initial_mode) == "low" and bool(
                  plan.start[1] if plan.start[0] else start_cause(plan.projection(plan.initial_mode).memory_facts))}
@@ -1194,7 +1197,8 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
     if not fit.get("measured"):
         return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
     f = fit["frame"]
-    started = TEMPORARY_LOW if f.get("maps") else f["started"]
+    started = (TEMPORARY_LOW if f.get("maps") else "Max, window not measured at the start" if f.get("unmeasured")
+               else f["started"])
     lines = ["", head, (
         f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
         f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
@@ -1214,7 +1218,8 @@ def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
         maps = arm["mode"] == "low" and f["preferred"] == "max"  # Low, temporarily, for the window: my human's Max
         lines.append(f"- {name}: starts {TEMPORARY_LOW if maps else arm['mode'].capitalize()}"
                      + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
-                     + (f"; Max room {room['cause']}: {measure_text(room)}" if room else "; no Max room measured")
+                     + (f"; Max room {'held' if room['cause'] == 'held' else 'lost, cause ' + lowered_cause(room)}: "
+                        f"{measure_text(room)}" if room else "; no Max room measured")
                      + f"; floor steps {steps}"
                      + (f"; host sections by address, if their capture succeeds: {host}" if host else ""))
     return lines

@@ -418,11 +418,19 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
                               task_id='scale-fit')
     assert {**retained, 'predicted': True} == predicted_section(sections[retained['section_id']])
     text = '\n'.join(mf.counterfactual_lines(fit))
-    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
+    # Review round 1 (Astra 11): a lost room names its cause by its own numbers, and the arm keeps the tool schemas and
+    # the need without them beside the need with no memory.
+    room = shown['max_room']
+    said = 'held' if room['cause'] == 'held' else f"lost, cause {mf.lowered_cause(room)}"
+    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {said}: window " in text and 'crowded' not in text
+    assert (f"; with no memory {room['zero_need']:,}; tool schemas {room['schemas']:,}; without them "
+            f"{room['floor_need']:,}; my story ") in text
     assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
     # The start is named by its own cause, never by the mode chosen now: a Low start resumed under the owner's Max stays
-    # Low; a Max start the window took to Low (a cause recorded) is Low, temporarily, for the window (21.11).
-    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Low, temporarily, for the window')):
+    # Low; a Max start the window took to Low (a cause recorded) is Low, temporarily, for the window (21.11); a Max start
+    # whose route named no window says so, a held one does not (Astra 6).
+    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Low, temporarily, for the window'),
+                        (('max', 'unmeasured'), 'Max, window not measured at the start'), (('max', ''), 'max')):
         frame = mf.counterfactual_starts(dataclasses.replace(plan, start=start, preferred_mode='max'), {'as captured': captured})
         assert f"This task started in {said} (its start projection" in '\n'.join(mf.counterfactual_lines(frame))
     # Without the inputs the frame needs, the fit is named as not measured, never guessed.
