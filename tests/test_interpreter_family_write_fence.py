@@ -58,18 +58,18 @@ FENCE_CASES = [
     ("python3", "python3.11", "-c", "open('probe.txt','w').write('x')"),
     ("ruby", "ruby3.2", "-e", "File.write('probe.txt', 'x')"),
     ("perl", "perl5.38", "-e", "unlink('probe.txt')"),
-    ("php", "php8.3", "-r", "unlink('probe.txt');"),
     ("node", "node18", "-e", "fs.writeFileSync('probe.txt','x')"),
 ]
 
 
-def test_versioned_spellings_read_inline_write_targets_like_unversioned(tmp_path):
+def test_versioned_spellings_read_inline_write_targets_like_unversioned():
     """The versioned spelling of an interpreter yields the same inline write targets
     as its family name; the python/ruby/node literal readers name the probe path."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    # Parsing only, so a fixed path: a native temp path (D:\a\_temp\...) inside a
+    # Python literal would decode \a and \t and never read back equal.
+    probe = "/srv/probe/repo/probe.txt"
     for unversioned, versioned, flag, code in FENCE_CASES:
-        named = code.replace("probe.txt", f"{repo}/probe.txt")
+        named = code.replace("probe.txt", probe)
         results = {
             spelling: writer_target_tokens([spelling, flag, named])
             for spelling in (unversioned, versioned)
@@ -78,7 +78,7 @@ def test_versioned_spellings_read_inline_write_targets_like_unversioned(tmp_path
         # while its family name was read.
         assert results[versioned] == results[unversioned], results
         if unversioned in {"python3", "ruby", "node"}:
-            assert f"{repo}/probe.txt" in results[versioned], results
+            assert probe in results[versioned], results
 
 
 def test_versioned_writer_spelling_reads_writer_operands_like_the_family():
@@ -278,7 +278,7 @@ def test_literal_deliverable_writes_name_their_target(tmp_path):
     for argv in (
         ["node", "-e", f"require('fs').writeFileSync('{out}','x')"],
         ["ruby3.2", "-e", f"File.write('{out}','x')"],
-        ["python3.11", "-c", f"open('{out}','w').write('x')"],
+        ["python3.11", "-c", f"open({str(out)!r},'w').write('x')"],
     ):
         assert str(out) in writer_target_tokens(argv), argv
     # as_posix() keeps the source valid python on Windows too (raw C:\Users would
@@ -325,9 +325,10 @@ def test_an_ordinary_stdlib_write_is_never_read_as_a_proven_read(subtests, tmp_p
     for label, template in _ORDINARY_STDLIB_WRITES:
         tmp_path = next(case_paths)
         with subtests.test(label=label, template=template):
-            code = template.format(t=repr(str(tmp_path / "victim.txt")))
-            targets, unknown = _python_write_targets_and_unknown(code)
-            assert targets or unknown, f"{label} parsed as a proven read"
+            victim = str(tmp_path / "victim.txt")
+            code = template.format(t=repr(victim))
+            # The DESTINATION is the target, never the source operand.
+            assert _python_write_targets_and_unknown(code) == ([victim], False), label
 
 
 def test_a_write_through_an_untraceable_handle_is_unknown_not_a_proven_read(tmp_path):

@@ -236,8 +236,8 @@ def _python_path_open_target(node: ast.AST, names: dict[str, str]) -> tuple[str 
 # "no write targets" conclusion worthless: the payload is computed at runtime
 # (exec/eval/compile/__import__) or handed to another process (os.system, popen,
 # subprocess, exec*/spawn*). This is a LANGUAGE-level list — what defeats the
-# parser — not another file-API vocabulary. Seeing any of these means UNKNOWN,
-# which the callers treat as write-capable.
+# parser — not another file-API vocabulary. Seeing any of these means UNKNOWN;
+# the after-command output audit drops that flag and keeps only resolved targets.
 _PYTHON_OPAQUE_EXEC_NAMES = frozenset({"exec", "eval", "compile", "__import__"})
 _PYTHON_OPAQUE_EXEC_ATTRS = frozenset({
     "system", "popen", "Popen", "check_call", "check_output", "getoutput", "getstatusoutput",
@@ -789,7 +789,7 @@ def directory_destination_pairs(argv: List[str]) -> List[tuple[str, str, str]]:
 
 
 def _writer_target_tokens_single(
-    argv: List[str], *, include_inline: bool = True,
+    argv: List[str], *,
     direct_only: bool = False, parse_redirects: bool = True, certain_only: bool = False,
 ) -> List[str]:
     if not argv:
@@ -928,7 +928,7 @@ def _writer_target_tokens_single(
     # Inline code, through the ONE per-family flag table: `-c` alone found python
     # bodies and left `node -e` / `ruby -e` / `php -r` / `perl -e` unparsed, so
     # their literal write targets were invisible here (XG-7B3.1).
-    for inline_code in interpreter_inline_code(argv) if include_inline and not direct_only else ():
+    for inline_code in interpreter_inline_code(argv) if not direct_only else ():
         if interpreter_family(cmd) == "python":
             # ONE python body scanner: `_python_write_targets_and_unknown` already
             # models shutil/os/pathlib writers and reports an UNPROVABLE body. The

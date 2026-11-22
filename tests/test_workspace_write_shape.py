@@ -74,6 +74,17 @@ def test_ruby_file_open_is_mode_aware():
     assert "/tmp/o" not in writer_target_tokens(["ruby", "-e", "File.new('/tmp/o','r')"])
 
 
+def test_python_keyword_mode_and_library_saves_name_their_target():
+    """A statically-known keyword mode decides read vs write, a library save names
+    its file, and a write through an untraceable handle is UNKNOWN, not a target."""
+    from ouroboros.tools.shell_guards import _python_write_targets_and_unknown, writer_target_tokens
+
+    assert writer_target_tokens(["python3", "-c", "open('out', mode='w')"]) == ["out"]
+    assert writer_target_tokens(["python3", "-c", "open('out', mode='rb')"]) == []
+    assert writer_target_tokens(["python3", "-c", "df.to_csv('out.csv')"]) == ["out.csv"]
+    assert _python_write_targets_and_unknown("fh.writelines(rows)") == ([], True)
+
+
 def test_python_collection_constructor_remove_is_not_a_path_write():
     """A list/tuple/set/dict constructor produces a collection receiver; an item
     named like a protected file is not a filesystem target."""

@@ -134,6 +134,7 @@ def test_sqlite_plain_connect_is_still_a_write():
     "git config --get remote.origin.url",
     "git stash list",
     "git name-rev HEAD",
+    "git worktree list",
 ])
 def test_git_readonly_modes_are_classified_readonly(cmd):
     from ouroboros.git_shell_policy import _git_invocation_block_reason
@@ -144,6 +145,7 @@ def test_git_readonly_modes_are_classified_readonly(cmd):
 @pytest.mark.parametrize("cmd", [
     "git config --unset user.name",
     "git config set user.name x",
+    "git config user.name x",
     "git notes add -m x",
     "git bisect reset",
     "git log --output=/tmp/x",

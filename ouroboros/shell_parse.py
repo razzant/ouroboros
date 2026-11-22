@@ -358,7 +358,7 @@ _REDIRECT_OPERATOR_RE = re.compile(
 )
 
 
-def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None = None) -> tuple[List[str], List[str]]:
+def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
     """Split redirections off a command segment.
 
     Returns ``(argv_without_redirections, output_targets)``. Input redirections
@@ -367,15 +367,13 @@ def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None =
     the clean operand. Without this split the writer-target lane counted the
     redirect OPERAND as the command's own operand — `cp x y >> log.txt` reported
     `log.txt` and LOST the destination `y`, and a glued `2>/dev/null;` was forged
-    into the path `/dev/null;`. ``redirect_tokens`` optionally receives the
-    exact removed tokens, including input redirects, for local-effect views.
+    into the path `/dev/null;`.
     """
     items = [str(token) for token in (tokens or [])]
     argv: List[str] = []
     targets: List[str] = []
     index = 0
     while index < len(items):
-        start = index
         token = items[index]
         match = _REDIRECT_OPERATOR_RE.match(token)
         if match is None and token.isdigit() and index + 1 < len(items):
@@ -394,8 +392,6 @@ def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None =
             index += 1
             operand = items[index]
         index += 1
-        if redirect_tokens is not None:
-            redirect_tokens.extend(items[start:index])
         if operator.startswith("<"):
             continue
         if operator == ">&" and (operand == "-" or operand.isdigit()):

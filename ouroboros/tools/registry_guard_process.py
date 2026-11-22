@@ -195,7 +195,7 @@ def _run_shell_post_checks(
     and its snapshot recorded an OSError while reading as "file absent", so the
     restore could UNLINK the live settings.json after a transient read error. The
     light-lane guard below refuses auto-rollback for exactly this reason. Pre-exec
-    guards keep skill owner state (SKILL_STATE_WRITE_BLOCKED); the settings.json mention-gates are lexical, so an obfuscated argument-level
+    checks see only explicit write targets, so an obfuscated argument-level
     writer (``S=settings; cat > data/$S.json``) can pass them — the tripwire below
     makes that LOUD (a typed ``tripwire`` fact plus an appended note) without
     re-introducing the unsound rollback. Disclosed residual: the write itself is
