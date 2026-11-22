@@ -59,12 +59,14 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
 
 def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypatch):
     """The split by whose part reads the host's sections by id (``memory_floor.max_room_fact``): knowledge, the source
-    registry, scratchpad and held note heads are mine; runtime facts, skills and subagents what the request itself
-    carries; the books my human's; core and the assignment alone. With the tool schemas and memory they are the start's
+    registry, scratchpad and held note heads are mine; runtime facts, skills (their lines and always-in-context bodies,
+    review round 1, Astra 2) and subagents what the request itself carries; the books my human's; core and the
+    assignment alone. With the tool schemas and memory they are the start's
     whole need at density 1, and a calibrated density is named beside them: the needs apply it, the parts do not."""
     from ouroboros.section_floor import HostSection
 
-    stable = (HostSection("stable_0", "Identity " * 50), HostSection("subagents", "s" * 800))
+    stable = (HostSection("stable_0", "Identity " * 50), HostSection("subagents", "s" * 800),
+              HostSection("always_on_skills", "a" * 700))
     head = (HostSection("knowledge_index", "k" * 1_200),)
     dynamic = (HostSection("runtime", "f" * 1_000), HostSection("registry", "r" * 600), HostSection("scratchpad", "p" * 400),
                HostSection("installed_skills", "i" * 300), HostSection("held_note:plans", "h" * 500))
@@ -76,9 +78,10 @@ def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypat
     parts = dict(fact["parts"])
     assert (parts["knowledge"], parts["source registry"], parts["scratchpad"], parts["held note heads"]) == (
         tok("k" * 1_200), tok("r" * 600), tok("p" * 400), tok("h" * 500))
-    assert parts["skills and subagents"] == tok("s" * 800) + tok("i" * 300)
+    assert parts["skills and subagents"] == tok("s" * 800) + tok("i" * 300) + tok("a" * 700)
     assert parts["runtime facts"] == tok(core.dynamic_text) - tok("r" * 600) - tok("p" * 400) - tok("i" * 300) - tok("h" * 500)
-    assert parts["core"] == tok(core.base_prompt) + tok(core.bible_md) + tok(core.semi_stable_text) - tok("s" * 800)
+    assert parts["core"] == (tok(core.base_prompt) + tok(core.bible_md) + tok(core.semi_stable_text) - tok("s" * 800)
+                             - tok("a" * 700))
     assert sum(parts.values()) + fact["schemas"] + fact["story"] + fact["room"] + fact["reserve"] + fact["work"] == fact["need"]
     line = memory_facts(plan, "max")
     assert (f"mine: my memory at the gate's level {fact['story'] + fact['room']:,}, knowledge {parts['knowledge']:,}, source "

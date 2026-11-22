@@ -200,12 +200,13 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
 
     ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact).
     ``floor_need`` is the books, core, my knowledge (its index, shared understanding, a project's journal), source
-    registry, scratchpad and held note heads, runtime facts (Health, recent activity, drive state too), the skills and
-    subagents lines, the connections map Max shows, assignment, reply reserve and work room; ``zero_need`` adds the tool
-    schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut): ``story`` (``unfolded``: its
-    pages no part or account holds yet) and ``room``. ``parts`` read the host's sections by id as the request carries
-    them (``addressed``: those sent in a shorter form), each part by whose it is (``WHOSE``), in measured tokens before
-    ``density``. Measures only: the start alone chooses the mode, and the mind judges what to fold.
+    registry, scratchpad and held note heads, runtime facts (Health, recent activity, drive state too), the skills (their
+    lines and always-in-context bodies) and subagents, the connections map Max shows, assignment, reply reserve and work
+    room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing
+    cut): ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. ``parts`` read the host's
+    sections by id as the request carries them (``addressed``: those sent in a shorter form), each part by whose it is
+    (``WHOSE``), in measured tokens before ``density``. Measures only: the start alone chooses the mode, and the mind
+    judges what to fold.
     """
     if allowance is None:
         return None
@@ -215,14 +216,15 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
         return sum(view_tokens(addressed.get(part.section_id, part.full_text)) for part in sections if part.section_id in ids
                    or ("held_note:" in ids and part.section_id.startswith("held_note:")))
     base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
-    subagents, skills = sent(core.semi_stable_sections, "subagents"), sent(core.dynamic_sections, "installed_skills")
+    stable = sent(core.semi_stable_sections, "subagents", "always_on_skills")  # the stable block's skills and subagents
+    skills = sent(core.dynamic_sections, "installed_skills")
     mine = {"knowledge": view_tokens(core.dynamic_head_text), "source registry": sent(core.dynamic_sections, "registry"),
             "scratchpad": sent(core.dynamic_sections, "scratchpad"), "held note heads": sent(core.dynamic_sections, "held_note:")}
     parts = {"books": max(0, sum(map(view_tokens, books)) - base),
-             "core": max(0, base + view_tokens(core.semi_stable_text) - subagents),
+             "core": max(0, base + view_tokens(core.semi_stable_text) - stable),
              "runtime facts": max(0, view_tokens(core.dynamic_text) - skills - sum(  # the changing block's other sections
                  mine[name] for name in ("source registry", "scratchpad", "held note heads"))),
-             **{name: tokens for name, tokens in {**mine, "skills and subagents": subagents + skills}.items() if tokens},
+             **{name: tokens for name, tokens in {**mine, "skills and subagents": stable + skills}.items() if tokens},
              **({"connections": view_tokens(core.connections[0])} if core.connections[0] else {})}  # Max's map (``_system_blocks``)
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
     ordinary = ordinary_level(snapshot) if snapshot else mv.FULL_VIEW
