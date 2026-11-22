@@ -243,6 +243,13 @@ def _enable_evolution_controls(live: Dict[str, Any]) -> None:
     live.pop("evolution_stop_source", None)
 
 
+def _start_unsaved(exc: Any) -> Dict[str, Any]:
+    """Either authorized start whose activation the runtime state could not save: its phrase, with the state lock's
+    reason as the notice's detail (DESIGN principle 7), never "ON" and the raw reason."""
+    return {"text": "Evolution did not turn on: the runtime state could not be saved.",
+            **fields("evolution_start_unsaved", details=exc.reason)}
+
+
 def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin: Any = None) -> Dict[str, Any]:
     """The owner's authorized start: clears the owner stop (GR4-6: BEFORE the campaign
     is minted), starts the campaign (which alone clears a recorded stop intent), then
@@ -284,8 +291,7 @@ def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin:
         update_state(_enable_evolution_controls, confirm=EVOLUTION_CONTROL_KEYS)
     except StateUnavailable as exc:
         owner_evolution_stop_controls("owner Start could not persist activation")
-        return {"text": "Evolution did not turn on: the runtime state could not be saved.",
-                **fields("evolution_start_unsaved", details=exc.reason)}
+        return _start_unsaved(exc)
     return {}
 
 
@@ -351,7 +357,9 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         try:
             update_state(_enable_evolution_controls, confirm=EVOLUTION_CONTROL_KEYS)
         except StateUnavailable as exc:
-            persisted = f" — not persisted: runtime state unavailable ({exc.reason})"
+            refusal = _start_unsaved(exc)
+            _notify(refusal["text"], {"notice": refusal["notice"]})
+            return
     elif not enabled and owner_sourced:
         persisted = owner_evolution_stop_controls("disabled via owner toggle")
     elif not enabled:
