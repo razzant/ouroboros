@@ -647,3 +647,22 @@ def test_a_named_match_found_in_an_incomplete_walk_says_what_was_not_read(regist
     partial = _listed(registry, name="shared")
     assert partial["found"] is True and len(partial["skills"]) == 1
     assert partial["unreadable_sources"] == [f"{hidden} (PermissionError)"]
+
+
+def test_a_short_note_is_whole_in_the_index_without_an_omission_and_whole_by_name(registry):
+    """A mixed package with one declared script file absent: a short real note through the registered tool
+    (RV3 R3-8)."""
+    drive = registry._ctx.drive_root
+    folder = _seed(registry, "mini", type="script", runtime="python3", scripts=[{"name": "gone.py"}],
+                   mcp_servers=[{"id": "tools", "runtime": "agent_python", "entry": "server.py"}])
+    (folder / "server.py").write_text("print('serve')\n", encoding="utf-8")
+    from ouroboros.skill_loader import find_skill
+
+    (drive / "state" / "skills" / "mini").mkdir(parents=True, exist_ok=True)
+    (drive / "state" / "skills" / "mini" / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": find_skill(drive, "mini").content_hash}), encoding="utf-8")
+    save_enabled(drive, "mini", True, actor="owner_ui")
+    note = "skill_exec unavailable: no declared script file exists (scripts/gone.py); its MCP tools are separate"
+    [row] = _listed(registry)["skills"]
+    assert row["notes"] == note and "notes" not in row.get("omitted", {})
+    assert _listed(registry, name="mini")["skills"][0]["notes"] == [note]

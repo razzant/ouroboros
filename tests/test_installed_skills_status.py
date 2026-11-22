@@ -610,3 +610,11 @@ def test_a_long_failure_cause_is_cut_with_a_mark(tmp_path, monkeypatch):
     assert line.startswith("The skill list could not be read (PermissionError: [Errno 13] Permission denied: ")
     assert "OMISSION NOTE: truncated at 300 chars; original length " in line and path not in line
 
+
+def test_a_discovery_that_answers_none_still_builds_the_request_and_says_the_failure(tmp_path, monkeypatch):
+    """The other branch of the build's guard (RV3 R3-7): an injected discovery answering None neither breaks the
+    always-in-context block nor lets the catalog read again."""
+    monkeypatch.setattr("ouroboros.skill_catalogue.discover_context_skills", lambda *_args: None)
+    _env, text = _build(tmp_path)
+    assert "The skill list could not be read (OSError: skill discovery failed); list_skills() reads it." in text
+    assert "No skills are installed." not in text
