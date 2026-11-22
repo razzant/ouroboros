@@ -7,12 +7,7 @@ from tests.test_restart_retention import _pool_events, _restart_door
 
 
 
-def _running(root, workers, task_id="root"):
-    from ouroboros.task_results import write_task_result
-    write_task_result(root, task_id, "running", root_task_id=task_id, chat_id=0)
-    task = {"id": task_id, "root_task_id": task_id, "type": "task", "chat_id": 0, "_attempt": 1}
-    workers.RUNNING[task_id] = {"task": task, "attempt": 1, "worker_id": 0}
-    return task
+from tests._invocation_harness import _running  # noqa: F401 -- shared (tests/_invocation_harness.py)
 
 
 def _next_boot_after_owner_restart(root, monkeypatch, queue, *, refusal="selection_owner_held"):

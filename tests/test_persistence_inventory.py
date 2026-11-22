@@ -1024,7 +1024,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 481 -> 485: a saved task file the owner releases is moved to a numbered slot under ``released/`` in the task's
 # custody staging folder and then in its custody trash folder (``payload_release_state._slot``, #3981); both folders
 # already have their row (``state/custody_staging/<id>-<token>/``, ``state/custody_trash/<id>-<token>/``).
-EXPECTED_SCAN_PATHS = 485
+# 485 -> 487: the MCP call record ``state/mcp/calls/server-*.json`` and its directory (``ouroboros/mcp_catalog.py``,
+# ``record_call`` and the configuration-event remover ``prune_catalogs``); its own row beside the catalogs row.
+EXPECTED_SCAN_PATHS = 487
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
