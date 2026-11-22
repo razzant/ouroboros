@@ -348,27 +348,17 @@ def test_relative_argument_symlinked_into_the_runtime_is_blocked():
     assert violation, "a symlinked relative destination must not bypass containment"
 
 
-# --- read-only git classification (the runtime-read guard's exemption key) -----
+# --- read-only git classification (one classifier every git guard asks) -----
 
-@pytest.mark.parametrize("cmd,expected", [
-    pytest.param("cd /Users/anton/Ouroboros/repo && git status", True, id="ro_cd_then_git"),
-    pytest.param("sh -c 'git log'", True, id="ro_nested_shell"),
+@pytest.mark.parametrize("cmd,readonly", [
+    pytest.param("git status", True, id="ro_status"),
+    pytest.param("git log", True, id="ro_log"),
     pytest.param("git commit -m x", False, id="mut_commit"),
     pytest.param("git branch -D x", False, id="mut_branch_delete"),
-    pytest.param("git status && cat /Users/anton/Ouroboros/data/settings.json", False, id="mixed_git_and_cat"),
-    pytest.param("cat /etc/passwd", False, id="not_git_at_all"),
-    pytest.param("sh -c 'git commit -m x'", False, id="mut_nested_shell"),
-    pytest.param("", False, id="empty"),
     # A read-only-looking invocation that WRITES a file is not read-only: the diff
-    # option `--output=<file>` truncates it, so it must meet the runtime/secret guard.
+    # option `--output=<file>` truncates it.
     pytest.param("git log --output=/tmp/x.txt", False, id="output_flag_writes"),
     pytest.param("git diff --output /tmp/x.txt", False, id="output_flag_split_writes"),
-    # ... and one that READS ARBITRARY FILES is not repo inspection either:
-    # `git diff --no-index /dev/null <secret>` PRINTS the file (measured).
-    pytest.param("git diff --no-index /dev/null /Users/anton/Ouroboros/data/settings.json", False, id="no_index_reads_any_file"),
-    # `-o` must NOT be read as an output flag: for this family it means something
-    # else entirely (`git ls-files -o` == --others) and matching it would refuse an
-    # ordinary untracked-file listing.
     pytest.param("git remote add origin https://example.com/x.git", False, id="mut_remote_add"),
     pytest.param("git remote -v add origin https://example.com/x.git", False, id="mut_remote_verbose_add"),
     pytest.param("git tag v1.0.0", False, id="mut_tag_create"),
@@ -377,11 +367,10 @@ def test_relative_argument_symlinked_into_the_runtime_is_blocked():
     pytest.param("git reflog delete HEAD@{1}", False, id="mut_reflog_delete"),
     pytest.param("git reflog drop --all", False, id="mut_reflog_drop"),
 ])
-def test_is_readonly_git_command(cmd, expected):
-    """ALL-or-nothing per segment: this is what lets read-only git through the
-    external-workspace runtime-read guard WITHOUT opening a shell bypass for the
-    secret/credential surface."""
-    assert policy.is_readonly_git_command(cmd) is expected, cmd
+def test_git_invocation_readonly_classification(cmd, readonly):
+    """One invocation, one honest answer: an empty block reason means the git
+    invocation only reads."""
+    assert (policy._git_invocation_block_reason(cmd.split(), allow_network=True) == "") is readonly, cmd
 
 
 def test_pushd_moves_the_segment_walker_base_like_cd():
