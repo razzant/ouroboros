@@ -642,8 +642,8 @@ class LocalModelManager:
 
         self._panic_requested = True
         self._install_cancelled.set()
-        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc, *self._stopping)
-                    if proc is not None]
+        requests = [request_process_tree_kill(proc) for proc in (self._proc, self._install_proc, *self._stopping.copy())
+                    if proc is not None]  # copy(): a snapshot in one C call; a stop's discard cannot cut into it
         if not request_only:
             self.stop_server()
         return requests
