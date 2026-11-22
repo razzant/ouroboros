@@ -1,0 +1,83 @@
+# Verification branch only. This file is not part of the product PR.
+name: QA 3939 disposable measurement scratch
+
+on:
+  push:
+    branches: [qa/storage-3939-joined-33752212]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_SHA: '33752212999df0fe2bda8eeed602a34d561e53c4'
+  PRODUCT_TREE: '0ab69732632478772ec512ace09c35aa31e24c21'
+  MSYS_NO_PATHCONV: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  storage:
+    name: Storage and Continue (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Identify and check out the exact product parent
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-storage-3939-joined-33752212.yml
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'Product %s, tree %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: shipped
+      - name: Verify disposable snapshots, Continue and closed service logs
+        run: |
+          set -euo pipefail
+          inventory=tests/test_persistence_inventory.py
+          custody=tests/test_child_scratch_custody.py
+          maintenance=tests/test_maintenance_child.py
+          storage=tests/test_storage_free.py
+          python -m pytest -o addopts='' -q --junitxml=qa-storage-3939.xml \
+            "$inventory::test_scan_is_populated_and_pinned" \
+            "$inventory::test_every_scanned_path_has_an_inventory_row" \
+            tests/test_work_control_races.py::test_continue_button_and_tool_capture_then_claim_once \
+            "$custody::test_the_claim_takes_predecessor_custody_alone" \
+            "$custody::test_a_root_continue_taken_first_holds_the_childs_scratch" \
+            "$custody::test_a_root_continue_cannot_claim_inside_the_release_window" \
+            "$custody::test_a_later_exact_deferral_keeps_a_cancelled_childs_scratch_while_parent_lives" \
+            "$custody::test_child_release_requires_a_durable_acceptance_before_removal" \
+            "$custody::test_keep_wins_between_parent_proof_and_release_acceptance" \
+            "$maintenance::test_an_unchanged_hold_is_retried_only_on_the_reconcile_cadence_then_removed" \
+            "$maintenance::test_a_lost_retirement_wake_stays_owed_beside_an_unchanged_hold_and_is_scheduled_once" \
+            "$maintenance::test_stop_mid_listing_records_removals_but_keeps_the_recorded_holds" \
+            "$storage::test_a_stuck_entry_removed_just_before_storebusy_still_gets_its_retirement_scheduled" \
+            "$storage::test_a_childs_work_folder_is_freed_while_the_trash_keeps_the_scratch_its_parent_waits_on" \
+            tests/test_child_drive_settlement.py::test_a_leftover_service_log_leaves_with_its_drive_only_as_the_canonical_private_copy \
+            tests/test_child_drive_settlement.py::test_uncertain_child_service_log_inventory_retains_the_original \
+            "$custody::test_measurement_recipe_survives_scratch_release"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = list(ET.parse('qa-storage-3939.xml').iter('testcase'))
+          identities = {(case.get('classname'), case.get('name')) for case in cases}
+          incomplete = [case.get('name') for case in cases if list(case)]
+          if len(cases) != 24 or len(identities) != len(cases) or incomplete:
+              raise SystemExit(f'Expected 24 unique passing cases: {len(cases)=}, {len(identities)=}, {incomplete=}')
+          print('STORAGE_3939_EXACT_JOIN: 24 passed, none skipped')
+          PY
