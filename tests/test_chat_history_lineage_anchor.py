@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.gateway.history import make_chat_history_endpoint
+from ouroboros.store_import import ensure_current_store
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS
 from tests._store_shared import seed_result
 
@@ -245,6 +246,116 @@ def test_receipt_lands_on_final_when_progress_rows_unread(tmp_path):
     assert final["parent_task_id"] == "root"
     assert final["execution_evidence"] == {"delegated_runs_succeeded": 1}
     assert final["actual_substrate"] == "harness_used"
+    assert final["task_terminal_status"] == "completed"  # the answer also carries the stored ending (selected attempt)
+
+
+def _receipt_result(**extra):
+    return {"task_id": "child", "status": "completed", "subagent_envelope": {
+        "execution_evidence": {"delegated_runs_succeeded": 1}, "actual_substrate": "harness_used"}, **extra}
+
+
+@pytest.mark.parametrize("row_attempt, lands", [(2, True), (1, False)])
+def test_the_receipt_belongs_to_the_selected_attempt(tmp_path, row_attempt, lands):
+    """The stored result is attempt 2's. Another attempt's final keeps its lineage and words but takes
+    neither that receipt nor that ending: an older ending never changes the meaning of the newer one."""
+    final = json.loads(_child_final("2026-06-05T00:00:10Z", "child"))
+    _write(
+        tmp_path,
+        chat_lines=[json.dumps({**final, "task_attempt": row_attempt})],
+        progress_lines=_root_flood(),
+        results={"root": {"task_id": "root", "status": "running"}, "child": _receipt_result(task_attempt=2)},
+    )
+    row = next(m for m in _run(tmp_path) if m.get("task_id") == "child")
+    assert row["parent_task_id"] == "root" and row["text"] == "child answer"
+    assert ("execution_evidence" in row) is lands and ("actual_substrate" in row) is lands
+    assert ("task_terminal_status" in row) is lands
+
+
+def _words(ts, text, attempt, kind=""):
+    """One chat row of the child with its own words and attempt (`kind` "task_summary" makes it a summary)."""
+    return json.dumps({**json.loads(_child_final(ts, "child", kind=kind)), "text": text, "task_attempt": attempt})
+
+
+@pytest.mark.parametrize("tools", [False, True], ids=["no_tool_evidence", "evidence_carrier"])
+def test_the_receipt_rides_the_current_final_not_the_words_before_it(tmp_path, tools):
+    """One child, its progress rows outside the read tail, the stored result attempt 2's; three rows: an older
+    attempt's answer, the same attempt's ordinary words, its current final. The executor's receipt (what ran, not how
+    a message was delivered) belongs to the current final alone, with or without the host's tool-evidence carrier;
+    every row keeps its lineage and words."""
+    rows = (("2026-06-05T00:00:10Z", "older attempt answer", 1),
+            ("2026-06-05T00:00:11Z", "ordinary words", 2),
+            ("2026-06-05T00:00:12Z", "current final", 2))
+    _write(
+        tmp_path,
+        chat_lines=[_words(*row) for row in rows],
+        progress_lines=_root_flood(),
+        results={"root": {"task_id": "root", "status": "running"}, "child": _receipt_result(task_attempt=2)},
+    )
+    if tools:  # a tool call of the child: the host adds an evidence carrier row, which takes the ending's status
+        (tmp_path / "logs" / "tools.jsonl").write_text(json.dumps({
+            "task_id": "child", "ts": "2026-06-05T00:00:05Z", "type": "tool_call", "tool": "read_file",
+            "invocation_id": "child-call", "is_error": False}) + "\n", encoding="utf-8")
+        ensure_current_store(tmp_path)
+    shown = [m for m in _run(tmp_path) if m.get("task_id") == "child" and m.get("system_type") != "task_evidence"]
+    assert [m["text"] for m in shown] == [text for _, text, _ in rows]
+    assert all(m["parent_task_id"] == "root" for m in shown)
+    assert [("execution_evidence" in m, "actual_substrate" in m) for m in shown] == [
+        (False, False), (False, False), (True, True)]
+    assert shown[-1]["execution_evidence"] == {"delegated_runs_succeeded": 1}
+    assert shown[-1]["actual_substrate"] == "harness_used"
+    if not tools:  # beside a carrier the host puts the ending's status on the carrier instead
+        assert [m.get("task_terminal_status") for m in shown] == [None, None, "completed"]
+
+
+def test_the_receipt_rides_the_selected_summary_not_the_plain_words_beside_it(tmp_path):
+    """No progress row of the child in the window, a working root, its attempt 2 done; two rows: its ordinary mid-run
+    words, then its durable summary. The summary is the one selected ending row, so it alone carries the executor's
+    receipt and the stored ending; the fallback plain words of the same attempt carry neither."""
+    _write(
+        tmp_path,
+        chat_lines=[_words("2026-06-05T00:00:10Z", "ordinary mid-run words", 2),
+                    _words("2026-06-05T00:00:11Z", "durable final summary", 2, "task_summary")],
+        progress_lines=_root_flood(),
+        results={"root": {"task_id": "root", "status": "running"}, "child": _receipt_result(task_attempt=2)},
+    )
+    shown = [m for m in _run(tmp_path) if m.get("task_id") == "child"]
+    assert [(m.get("system_type") or "", m["text"], m.get("actual_substrate"), m.get("task_terminal_status"))
+            for m in shown] == [("", "ordinary mid-run words", None, None),
+                                ("task_summary", "durable final summary", "harness_used", "completed")]
+    assert "execution_evidence" not in shown[0] and shown[1]["execution_evidence"] == {"delegated_runs_succeeded": 1}
+
+
+def test_an_older_attempts_summary_does_not_take_the_receipt_from_the_current_final(tmp_path):
+    """The selected summary is the receipt's row only when it is the stored attempt's own: an attempt-1 summary beside
+    the attempt-2 final carries nothing, and the final (the selected suitable plain words) keeps the receipt."""
+    _write(
+        tmp_path,
+        chat_lines=[_words("2026-06-05T00:00:10Z", "older attempt summary", 1, "task_summary"),
+                    _words("2026-06-05T00:00:11Z", "current final", 2)],
+        progress_lines=_root_flood(),
+        results={"root": {"task_id": "root", "status": "running"}, "child": _receipt_result(task_attempt=2)},
+    )
+    shown = [m for m in _run(tmp_path) if m.get("task_id") == "child"]
+    assert [m["text"] for m in shown] == ["older attempt summary", "current final"]
+    assert [("execution_evidence" in m, "actual_substrate" in m) for m in shown] == [(False, False), (True, True)]
+
+
+def test_a_receipt_never_revives_an_unanchored_child(tmp_path):
+    """The receipt follows the lineage anchor: a child whose parent is absent and dead is de-roled, not decorated."""
+    progress = [
+        _lineage_row(f"2026-06-05T00:00:0{i}Z", "child", ev)
+        for i, ev in zip((1, 2, 3), ("scheduled", "running", "completed"))
+    ]
+    progress += _root_flood(task_id="other")
+    _write(
+        tmp_path,
+        chat_lines=[_child_final("2026-06-05T00:00:10Z", "child")],
+        progress_lines=progress,
+        results={"root": {"task_id": "root", "status": "completed"}, "child": _receipt_result()},
+    )
+    final = next(m for m in _run(tmp_path) if m.get("task_id") == "child")
+    assert not any(field in final for field in SUBAGENT_MESSAGE_FIELDS)
+    assert "execution_evidence" not in final and "actual_substrate" not in final
 
 
 def test_project_thread_keeps_children_of_a_working_root(tmp_path):

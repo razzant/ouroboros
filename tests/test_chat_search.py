@@ -185,8 +185,12 @@ def test_a_childs_words_are_its_cards_content_by_the_rule_history_shares(tmp_pat
 def test_a_search_reads_its_room_and_the_room_rules_lineage_never_a_task_result_or_journal(tmp_path, monkeypatch):
     """A speaker's lineage is the room rule's indexed facts, typed or an older body's metadata role: no task result
     is read (its effective projection reads the queue snapshot and the events journal for a task stored as running),
-    nor the routing annotations journal only history's rows carry."""
-    from ouroboros import project_dialogue, task_store
+    nor the routing annotations journal only history's rows carry. Each is watched where every reader of it passes (the
+    saved task documents every effective projection starts from; the journal's own file, whichever reader function asks
+    for it), so history's positive read below proves the watch is live."""
+    import pathlib
+
+    from ouroboros import chat_annotations, task_store
     from ouroboros.task_results import write_task_result
     from tests._store_shared import seed_result
 
@@ -196,11 +200,15 @@ def test_a_search_reads_its_room_and_the_room_rules_lineage_never_a_task_result_
     _say(tmp_path, 1, "kingfisher from the owner", client_message_id="msg-1")
     _say(tmp_path, 2, "kingfisher from a running root", direction="out", task_id="root-1")
     _say(tmp_path, 3, "kingfisher from a metadata-role child", direction="out", task_id="kid-meta")
-    reads, documents, annotations = [], task_store.display_documents, project_dialogue.latest_chat_annotations
+    reads, documents, journal = [], task_store.display_documents, chat_annotations.iter_jsonl_objects
+
+    def watched(path, *args, **kwargs):
+        if pathlib.Path(path).name == chat_annotations._ANNOTATIONS_NAME:
+            reads.append("annotations")
+        return journal(path, *args, **kwargs)
     monkeypatch.setattr(task_store, "display_documents", lambda *args, **kwargs: (
         reads.append("task result"), documents(*args, **kwargs))[1])
-    monkeypatch.setattr(project_dialogue, "latest_chat_annotations", lambda *args, **kwargs: (
-        reads.append("annotations"), annotations(*args, **kwargs))[1])
+    monkeypatch.setattr(chat_annotations, "iter_jsonl_objects", watched)
     assert _texts(_found(tmp_path, q="kingfisher")) == ["kingfisher from a running root", "kingfisher from the owner"]
     monkeypatch.setattr(chat_search, "_SCAN_ROWS", 1)
     pages = _all(tmp_path, q="kingfisher")  # each continued page as well, never once per search

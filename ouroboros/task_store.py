@@ -75,6 +75,16 @@ def receipt_anchor(root: Any, task_id: str) -> Optional[Tuple[str, bool]]:
     return root_id, bool(receipt is not None and receipt["kind"] not in (None, "null"))
 
 
+def result_text_at(root: Any, task_id: str, write_seq: int) -> Optional[str]:
+    """Fetch just the answer omitted from a display view, only while its source revision still matches."""
+    with open_store(root, write=False) as txn:
+        row = txn.conn.execute(
+            "SELECT json_extract(b.body, '$.result') FROM tasks t JOIN task_bodies b USING (task_id) "
+            "WHERE t.task_id=? AND t.write_seq=? AND json_type(b.body, '$.result')='text'",
+            (task_id, write_seq)).fetchone()
+    return row[0] if row else None
+
+
 def signature(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional[Tuple[int, str]]:
     """``(write_seq, updated_at)``: changes on every write; ``None`` for an absent task. The key
     the memos compare that used to compare a result file's stat."""
@@ -541,7 +551,7 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
     "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
-    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken",
+    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken", "payload_release",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
         "configured_subagent", "project_routing_manifest", "subagent_envelope", "owner_corpus",
@@ -549,7 +559,8 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
 DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
-    "artifact_bundle": ("status",), "task_contract": ("deadline_at",),
+    "artifact_bundle": ("status",), "task_contract": ("deadline_at", "capability_ceiling"),
+    "task_contract.capability_ceiling": ("schema_version",),  # history classifies legacy schedule reports by shape, not grants
     "loop_outcome": ("usage",), "loop_outcome.usage": ("total_rounds",),  # history's accepted solve responses
     # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
     "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),

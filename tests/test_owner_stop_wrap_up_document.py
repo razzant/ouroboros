@@ -222,13 +222,15 @@ def test_cancelled_child_salvage_reaches_the_owner_whole_without_its_private_pat
     assert "- Subtask kid (Stopped): a saved text with no recorded author" in text
     assert ("### Subtask kid\n\nIts saved task text; the author is not recorded:\n\n"
             "> Running task cancelled and worker terminated.\n>\n"
-            "> Last persisted intermediate model message (salvaged best-effort, unreviewed; full copy below):\n") in text
-    assert f"{osr._KEPT_COPY}\n\n> salvaged words" in text and text.count("SALVAGE-TAIL.") == 1
+            "> Last persisted intermediate model message for this task (salvaged best-effort, unreviewed; "
+            "may be from an earlier attempt; not a final answer; full copy below):\n") in text
+    assert ("Full saved intermediate text for this subtask (not a final answer; may be from an earlier attempt):"
+            "\n\n> salvaged words") in text and text.count("SALVAGE-TAIL.") == 1
     assert ("### Subtask api-kid\n\nIts last unreviewed message, kept by Ouroboros (not a final answer):"
             "\n\n> api words") in text and text.count("API-TAIL.") == 1
     pathlib.Path(path).unlink()
     text = _download(client)[1].text
-    assert "unreviewed; full copy not readable here):" in text and "SALVAGE-TAIL." not in text
+    assert "not a final answer; full copy not readable here):" in text and "SALVAGE-TAIL." not in text
     assert osr._KEPT_COPY not in text
 
 

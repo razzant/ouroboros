@@ -93,6 +93,24 @@ def test_task_bound_progress_keeps_identity_after_worker_moves_on(chat_id):
     assert events.empty()
 
 
+def test_a_task_bound_narration_policy_follows_its_source_not_the_next_task():
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    agent, events = _agent()
+    agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)
+    agent._bind_task_progress = partial(OuroborosAgent._bind_task_progress, agent)
+    agent._current_chat_id, agent._current_task_metadata = 5, {}
+    ordinary = OuroborosAgent._bind_task_progress_for_task(agent, {"id": "ordinary"})
+    task = {"id": "schedule", "metadata": run_metadata(), "task_contract": {"capability_ceiling": ceiling()}}
+    report = OuroborosAgent._bind_task_progress_for_task(agent, task)
+    agent._current_task_id, agent._current_task_metadata = "ordinary", {}
+    report("The report's own words.", narration=True)
+    assert events.empty()
+    agent._current_task_id, agent._current_task_metadata = "schedule", task["metadata"]
+    ordinary("Ordinary narration.", narration=True)
+    assert events.get_nowait()["task_id"] == "ordinary"
+
+
 def test_task_bound_progress_keeps_lineage_meta_after_worker_moves_to_child():
     agent, events = _agent()
     agent._emit_progress = partial(OuroborosAgent._emit_progress, agent)

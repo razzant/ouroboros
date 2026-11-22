@@ -201,8 +201,8 @@ def _count_census(monkeypatch) -> list:
 
 def _order_spy(monkeypatch, by_thread: dict | None = None) -> list:
     """Every signal sent (``kill``/``killpg``, signal 0 excluded), process-table scan (``ps -A``, ``ps -axo``,
-    ``pgrep``) and identity read (``ps -p``), in the order they happen; ``by_thread`` also files each under
-    its thread's name."""
+    ``pgrep``) and identity read (``ps -p`` or Linux's in-process ``/proc`` birth read), in the order they happen;
+    ``by_thread`` also files each under its thread's name."""
     events, run, kill, killpg = [], subprocess.run, os.kill, os.killpg
 
     def note(kind, value):
@@ -231,6 +231,16 @@ def _order_spy(monkeypatch, by_thread: dict | None = None) -> list:
     monkeypatch.setattr(subprocess, "run", spy_run)
     monkeypatch.setattr(os, "kill", spy_kill)
     monkeypatch.setattr(os, "killpg", spy_killpg)
+
+    from ouroboros import process_census
+
+    birth = process_census.birth_text
+
+    def spy_birth(pid, *args, **kwargs):
+        note("read", str(pid))
+        return birth(pid, *args, **kwargs)
+
+    monkeypatch.setattr(process_census, "birth_text", spy_birth)
     return events
 
 

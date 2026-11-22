@@ -236,6 +236,22 @@
   "recognition": "unsupported"
  },
  {
+  "file": "bodies/zai-1261.body.json",
+  "server": "Z.ai",
+  "version": "error code 1261",
+  "provenance": "live refusal on this install 2026-11-20 22:06 UTC (zai::glm-5.3, logs/events.jsonl llm_api_error llm_912c35cf3f7c474688b85055e0d4fb0c): HTTP 400, code 1261, message verbatim; docs.z.ai/guides/llm/glm-5.3 states a 1M-token context and no per-request token counts in the refusal",
+  "status": 400,
+  "expected_refusal": {
+   "window": 0,
+   "requested": 0,
+   "meaning": "unknown",
+   "units": "tokens",
+   "source": "text:zai/prompt-too-long"
+  },
+  "expected_class": "context_overflow",
+  "recognition": "typed_or_frozen"
+ },
+ {
   "file": "bodies/openai-code.body.json",
   "server": "OpenAI",
   "version": "fixture",

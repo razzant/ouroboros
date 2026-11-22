@@ -125,7 +125,8 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                             for name in SKILLS:
                                 _enable(page, name)
                             enabled = True
-                        # Each skill's form stands on that skill's own Settings page: one host, re-filled per skill.
+                        # Each skill's form stands on that skill's own page (Extensions, over Skills; its old Settings
+                        # address leads there): one host, re-filled per skill, one form page at a time.
                         page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=30_000)
 
                         def show(name):
@@ -164,8 +165,9 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                         expect(legacy.locator("[data-extension-settings-edit-anyway]")).to_be_enabled()
 
                         geometry = page.evaluate("""() => {
-                            const scroller = document.querySelector('#page-settings .settings-page:not([hidden])');
-                            const legacy = document.querySelector('[data-skill="legacy_reminders"]');
+                            const scroller = document.querySelector('.page.active .settings-page:not([hidden])');  // Extensions' page
+                            // The form, not the skill's card in the Skills list this page stands over.
+                            const legacy = document.querySelector('[data-extension-settings-form][data-skill="legacy_reminders"]');
                             const [save, anyway] = legacy.querySelectorAll('.settings-extension-actions .btn');
                             const a = save.getBoundingClientRect(), b = anyway.getBoundingClientRect();
                             return {overflow: scroller.scrollWidth - scroller.clientWidth,

@@ -453,7 +453,7 @@ def test_the_local_lane_answers_without_its_reasoning_and_calls_tools_the_new_wa
 
     client = LLMClient(api_key="unused")
     monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
-    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum: (0, maximum))
+    monkeypatch.setattr(llm_local, "local_context_limits", lambda maximum, evidence=None: (0, maximum))
     monkeypatch.setattr(client, "_get_local_client", lambda: SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=lambda **payload: Response(replies.pop(0))))))
     tools = [{"type": "function", "function": {"name": "read_file", "description": "Read a file.",

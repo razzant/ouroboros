@@ -37,6 +37,27 @@ test('server stamp rejects a project frame the client has not learned yet', () =
     assert.equal(mainThreadAccepts({ chat_id: 77777777 }, new Set()), true); // unstamped unknown id: unchanged behaviour
 });
 
+test('an accepted room echo reaches its primary room and explicit additional Projects', () => {
+    const echo = { type: 'chat', role: 'user', source: 'web', ingress_accepted: true,
+        kind: 'room_echo', chat_id: 7, also_rooms: [23] };
+    for (const projects of [new Set(), new Set([41])]) {
+        assert.equal(chatThreadAccepts(echo, true, 1, projects), false);
+        assert.equal(chatThreadAccepts(echo, false, 7, projects), true);
+        assert.equal(chatThreadAccepts(echo, false, 23, projects), true);
+        assert.equal(chatThreadAccepts(echo, false, 41, projects), false);
+        assert.equal(chatThreadAccepts({ ...echo, chat_id: 1 }, true, 1, projects), true);
+    }
+});
+
+test('only an accepted web user room echo narrows the implicit Main mirror', () => {
+    const echo = { type: 'chat', role: 'user', source: 'web', ingress_accepted: true, chat_id: 197422551 };
+    assert.equal(mainThreadAccepts(echo, known), true, 'older web receipts keep their meaning');
+    assert.equal(mainThreadAccepts({ ...echo, project_id: 'garden' }, known), true, 'a Project hint is not a stamp');
+    for (const other of [{ source: 'skill:telegram' }, { ingress_accepted: false }, { role: 'system' }, { type: 'log' }]) {
+        assert.equal(mainThreadAccepts({ ...echo, kind: 'room_echo', ...other }, known), true);
+    }
+});
+
 test('stamp is authoritative regardless of chat_id shape', () => {
     assert.equal(mainThreadAccepts({ chat_id: 1, project_thread: true }, known), false);
     assert.equal(mainThreadAccepts({ project_thread: true }, known), false);

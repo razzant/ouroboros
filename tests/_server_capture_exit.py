@@ -111,7 +111,7 @@ def main():
 
     def drive_maintenance():
         # Providerless boot has no supervisor; drive its existing child owner explicitly.
-        while not maintenance.child._stopped.is_set():
+        while not maintenance.child.ordinary._stopped.is_set():
             if maintenance.child.owed():
                 maintenance.child.tick(root, REPO)
             time.sleep(.02)

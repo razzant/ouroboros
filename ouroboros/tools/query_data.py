@@ -33,6 +33,7 @@ from ouroboros.knowledge_versions import is_claim_commit
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.utils import json_dumps_utf8
 
 _FILES = {"review_ledger": "state/review_ledger/{id}.json", "advisory_review": "state/advisory_review.json",
           "queue_snapshot": "state/queue_snapshot.json", "queue_dispatch": "state/queue_dispatch.json",
@@ -71,7 +72,9 @@ class SelectorError(ValueError):
 
 
 def _canonical(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """Sorted compact JSON as UTF-8 bytes. A stored value may name a file by POSIX bytes that are not UTF-8:
+    ``json_dumps_utf8`` escapes them inside the JSON value, where a plain dump would fail the whole encode."""
+    return json_dumps_utf8(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def selected_bytes(value) -> int:
