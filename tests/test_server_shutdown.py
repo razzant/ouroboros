@@ -1101,6 +1101,73 @@ def test_emergency_cleanup_reaches_a_model_child_the_graceful_stop_still_awaits(
             graceful.join(15)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
+@pytest.mark.parametrize("held", [False, True], ids=["native", "concurrent-waiter"])
+def test_an_install_that_exits_after_its_stop_leaves_the_model_manager(tmp_path, monkeypatch, held):
+    """A stop kills an install that ignores TERM after 5 s and polls it once; that poll can come before the exit, or
+    while another thread's wait holds the handle. The install's own thread reaps it and lets it go, so no later Stop
+    or Panic keeps or asks it; until something sees the exit it stays where Panic's request reaches it."""
+    import signal
+    import sys
+
+    from ouroboros import local_model
+
+    ready = tmp_path / "ready"
+    code = ("import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
+    monkeypatch.setattr(local_model, "_get_install_command", lambda: [sys.executable, "-c", code, str(ready)])
+    monkeypatch.setattr(local_model, "_get_install_env", lambda: dict(os.environ))
+    manager = local_model.LocalModelManager()
+    owner = threading.Thread(target=manager._run_install, daemon=True)  # the install's thread, as install_runtime's
+    owner.start()
+    deadline = time.monotonic() + 10
+    while not (ready.is_file() and manager._install_proc is not None) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    child = manager._install_proc
+    assert child is not None and ready.is_file(), "the install never started"
+    try:
+        if held:
+            with child._waitpid_lock:  # another thread's wait: no poll can see the exit yet
+                manager.stop_server()
+                assert child in manager._stopping, "an install whose exit nothing has seen left Panic's reach"
+                assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
+        else:
+            manager.stop_server()
+        owner.join(10)
+        assert not owner.is_alive() and child.returncode == -signal.SIGKILL
+        assert child not in manager._stopping, "the reaped install stayed in the model manager"
+        assert manager.panic_stop(request_only=True) == [], "Panic asked a reaped install to die"
+    finally:
+        _end(child)
+        owner.join(10)
+
+
+def test_a_model_child_that_exits_after_its_stop_goes_at_the_next_stop_or_panic():
+    """A server an earlier stop saw alive after its last wait may exit later: the next Stop's poll lets it go, and
+    Panic polls before it signals, so a reaped handle (the current server's or a stopped one's) is released and never
+    asked to die, while a child nothing has seen exit stays and is asked."""
+    import subprocess
+    import sys
+
+    from ouroboros import local_model
+
+    manager = local_model.LocalModelManager()
+    exited = [subprocess.Popen([sys.executable, "-c", "pass"]) for _ in range(2)]
+    for each in exited:
+        each.wait()
+    live = _model_child()
+    try:
+        manager._stopping.update((exited[0], live))
+        manager.stop_server()
+        assert manager._stopping == {live}, "the next Stop kept an exited child or dropped a live one"
+        manager._proc = exited[1]
+        manager._stopping.add(exited[0])
+        assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [live.pid]
+        assert manager._stopping == {live} and live.wait(timeout=10) is not None
+    finally:
+        _end(live)
+
+
 def test_emergency_cleanup_never_waits_on_a_first_import_of_the_local_model(monkeypatch):
     """Another thread may still be importing the optional model module (autostart, a status read): the cleanup asks
     only a module already loaded, so it reaches its worker stop at once; once that module is loaded it is asked."""

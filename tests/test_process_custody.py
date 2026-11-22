@@ -145,8 +145,9 @@ def test_spawn_sites_are_custodied_or_allowlisted():
 # that names no kind here, a kind no start names any more and a kind left without an entry at a door. It keys by
 # function: a second start inside a listed function, a new caller of a listed wrapper (ProcessContainer.spawn, as
 # process_lifeline.py's guardian is) and children a library starts (MCP stdio servers, the Playwright driver, the
-# forkserver) pass unseen. An entry is "<routine>: <name>", a stop the door's routine calls or hands to its dispatcher
-# (checked; that the stop works stays with its owner's tests), or "<fate>: <why>" where no door routine stops it:
+# forkserver) pass unseen. An entry is "<routine>: <name>", a stop the door's routine calls, hands to Panic's attempt
+# or, at worker exit, names in a (module, method) row whose module defines it (checked; that the stop works stays
+# with its owner's tests), or "<fate>: <why>" where no door routine stops it:
 # survives (a recorded decision keeps it), lifeline (it ends with its parent: a POSIX lifeline, the Windows Job),
 # waited (its starter's call or context waits for and ends it), exits (the process ends itself at this door), next
 # start (the next start's custody sweep reaps its row), outside (no server generation starts it).
@@ -306,17 +307,24 @@ _STOPPERS = {
     "data query": {  # a worker's task tool, in its own group; its env keeps no scope marker for the Panic census
         "quit": ("teardown: stop_owned_work", "teardown: kill_workers"),
         "restart": ("cleanup: stop_owned_work", "owner restart: stop_owned_work", "cleanup: kill_workers"),
-        "panic": ("panic: kill_worker_tree", "lifeline: that requests its worker; it ends once the worker is gone"),
+        "panic": ("panic: kill_worker_tree", "lifeline: on POSIX its parent lifeline ends it once the worker is gone",
+                  "exits: a direct Windows server gives it no lifeline; it ends at its query budget (10 s at most) "
+                  "or naturally",
+                  "lifeline: under a Windows launcher the generation's Job, retired at the server's exit, can end it",
+                  "next start: a query still running is a task row the next start reaps"),
         "fault": ("teardown: stop_owned_work", "cleanup: stop_owned_work"),
     },
-    "publish scanner": {  # a worker's task scan in the worker's group, or the owner's preflight on a server thread
+    "publish scanner": {  # a task scan in its own session (POSIX) or group, or the owner's preflight on a server thread
         "quit": ("waited: each scan waits for its child to a deadline and kills it there",
                  "teardown: stop_owned_work", "teardown: kill_workers",
                  "next start: a preflight scan the server leaves behind is a session row the next start reaps"),
         "restart": ("waited: as at Quit", "cleanup: stop_owned_work", "cleanup: kill_workers",
                     "next start: as at Quit"),
-        "panic": ("panic: kill_worker_tree", "launcher panic: kill_process_tree",
-                  "next start: a page Panic leaves a preflight scan to its deadline; the next start reaps its row"),
+        "panic": ("launcher panic: kill_process_tree",
+                  "exits: the worker request misses a scan's own session or group; detect ends at its own --timeout, "
+                  "a capture at its natural end",
+                  "lifeline: under a Windows launcher the generation's Job, retired at the server's exit, can end it",
+                  "next start: a scan still running, task or preflight, is a row the next start reaps"),
         "fault": ("waited: as at Quit", "teardown: stop_owned_work", "next start: as at Quit"),
     },
     "tracked command": {
@@ -374,10 +382,25 @@ def _process_starts(root: pathlib.Path) -> set:
     return starts - _LAUNCH_FUNCTIONS
 
 
+def _defines(root: pathlib.Path, module: str) -> set:
+    """The top-level names (functions, classes, assignments, imports) of a dotted ``module`` under ``root``."""
+    base = root / module.replace(".", "/")
+    try:
+        body = ast.parse((base.with_suffix(".py") if base.with_suffix(".py").is_file() else base / "__init__.py")
+                         .read_text(encoding="utf-8")).body
+    except OSError:
+        return set()
+    return ({stmt.name for stmt in body if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+            | {alias.asname or alias.name for stmt in body if isinstance(stmt, (ast.Import, ast.ImportFrom))
+               for alias in stmt.names}
+            | {target.id for stmt in body if isinstance(stmt, ast.Assign) for target in stmt.targets
+               if isinstance(target, ast.Name)})
+
+
 def _door_calls(root: pathlib.Path, ref: str):
     """What a door routine (``file::qualname``; ``:finally``, the finally around a lifespan's ``yield``) calls, the
-    callables it hands to Panic's ``attempt`` and the method strings of a (module, method, ...) tuple it dispatches
-    over; None when the routine, or that finally, is gone."""
+    callables it hands to Panic's ``attempt`` and, for the worker's dispatcher alone, the method of each literal
+    (module, method, ...) row whose module defines that method; None when the routine, or that finally, is gone."""
     file, _, qualname = ref.partition("::")
     qualname, _, part = qualname.partition(":")
     try:
@@ -391,15 +414,17 @@ def _door_calls(root: pathlib.Path, ref: str):
                                                 isinstance(sub, ast.Yield) for each in stmt.body
                                                 for sub in ast.walk(each))), None)) is None:
         return None
-    calls = set()
+    calls, rows = set(), ref == _DOOR_ROUTINES["worker exit"]
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
             calls.add(target := ast.unparse(sub.func))
             if target == "attempt" and len(sub.args) > 1:  # Panic's dispatcher calls what it is handed
                 calls.add(ast.unparse(sub.args[1]))
-        elif isinstance(sub, ast.For) and isinstance(sub.iter, ast.Tuple):  # the worker's (module, method, ...) rows
-            calls.update(row.elts[1].value for row in sub.iter.elts if isinstance(row, ast.Tuple) and len(row.elts) > 1
-                         and isinstance(row.elts[1], ast.Constant) and isinstance(row.elts[1].value, str))
+        elif rows and isinstance(sub, ast.For) and isinstance(sub.iter, ast.Tuple):  # it looks each pair up, calls it
+            for row in sub.iter.elts:
+                module, method, *_ = [getattr(item, "value", None) for item in getattr(row, "elts", ())] + [None, None]
+                if isinstance(module, str) and isinstance(method, str) and method in _defines(root, module):
+                    calls.add(method)
     return calls
 
 
@@ -433,9 +458,17 @@ def _stopper_problems(root: pathlib.Path, kinds: dict, stoppers: dict) -> list:
 def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
     """The real tree agrees with the table, and the gate reports each way a table and a tree part: a start with no
     kind, a start gone, a kind with no row, a row no start names, a door left out, an unknown fate, a routine at a
-    door it does not run in, a stop its routine only mentions or calls outside the teardown, a teardown gone."""
+    door it does not run in, a stop its routine only mentions, logs from a tuple or calls outside the teardown, a
+    worker row naming a module without that method, a teardown gone."""
     assert _stopper_problems(REPO_ROOT, _PROCESS_KINDS, _STOPPERS) == []
     (tmp_path / "ouroboros").mkdir()
+    (tmp_path / "supervisor").mkdir()
+    (tmp_path / "supervisor" / "worker_process.py").write_text(
+        "def request_worker_owned_stops():\n    for module_name, method, manager in (\n"
+        "            ('ouroboros.owner', 'stop_all', False), ('ouroboros.tool', 'stop_rest', False)):\n"
+        "        request(module_name, method)\n", encoding="utf-8")
+    (tmp_path / "ouroboros" / "owner.py").write_text("def stop_all():\n    pass\n\n\ndef stop_rest():\n    pass\n",
+                                                     encoding="utf-8")  # tool.py defines no stop_rest
     (tmp_path / "ouroboros" / "tool.py").write_text(
         "def start():\n    spawn_supervised(['x'])\n\n\ndef started_raw():\n    subprocess.Popen(['y'])\n\n\n"
         "def start_new():\n    asyncio.create_subprocess_exec('z')\n\n\ndef start_more():\n    tracked_start()\n",
@@ -444,12 +477,16 @@ def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
                                                     encoding="utf-8")  # a file that spells no other start name
     (tmp_path / "server.py").write_text(
         "async def lifespan(app):\n    thing.stop()\n    try:\n        yield\n    finally:\n        thing.halt()\n\n\n"
-        "def _emergency_process_cleanup():\n    log.debug('%s', thing.stop)\n", encoding="utf-8")
+        "def _emergency_process_cleanup():\n    log.debug('%s', thing.stop)\n"
+        "    for module, text in (('local', 'thing.stop'), ('ouroboros.owner', 'stop_all')):\n"
+        "        log.info(text)\n", encoding="utf-8")  # a real pair, outside the worker's dispatcher
     kinds = {"ouroboros/tool.py::start": "thing", "ouroboros/gone.py::run": "thing",
              "ouroboros/tool.py::start_new": "rowless", "ouroboros/tool.py::start_more": "half",
              "ouroboros/pool.py::start_pool": "half"}
-    stoppers = {"thing": {"quit": ("teardown: thing.halt",), "panic": ("teardown: thing.halt",),
-                          "restart": ("teardown: thing.stop", "cleanup: thing.stop"), "fault": ("magic: x",)},
+    stoppers = {"thing": {"quit": ("teardown: thing.halt",),
+                          "panic": ("teardown: thing.halt", "worker exit: stop_all", "worker exit: stop_rest"),
+                          "restart": ("teardown: thing.stop", "cleanup: thing.stop", "cleanup: stop_all"),
+                          "fault": ("magic: x",)},
                 "half": dict.fromkeys(("quit", "restart", "fault"), ("survives: x",)),
                 "spare": ("survives: no start",)}
     assert _stopper_problems(tmp_path, kinds, stoppers) == [
@@ -460,8 +497,10 @@ def test_every_process_kind_names_who_stops_it_at_each_door(tmp_path):
         "half at panic: '' is no stop of this door's routines and no fate",
         "thing at fault: 'magic: x' is no stop of this door's routines and no fate",
         "thing at panic: 'teardown: thing.halt' is no stop of this door's routines and no fate",
+        "thing at panic: supervisor/worker_process.py::request_worker_owned_stops does not call stop_rest",
         "thing at restart: server.py::lifespan:finally does not call thing.stop",
         "thing at restart: server.py::_emergency_process_cleanup does not call thing.stop",
+        "thing at restart: server.py::_emergency_process_cleanup does not call stop_all",
     ]
     (tmp_path / "server.py").write_text("async def lifespan(app):\n    thing.halt()\n    yield\n", encoding="utf-8")
     quit_only = {door: ("teardown: thing.halt",) if door == "quit" else ("survives: x",) for door in _DOORS}
