@@ -441,6 +441,42 @@ def test_selecting_a_works_tools_again_never_adds_a_second_typed_notice(monkeypa
     assert registry._ctx._capability_breakage_told is told  # what the work was told stays its own
 
 
+def test_a_changed_registry_omission_reaches_a_live_call_when_its_tools_are_selected_again_and_only_then(
+        monkeypatch, tmp_path):
+    import os
+
+    from ouroboros import loop as loop_mod
+    from ouroboros.live_conversation import ConversationHost
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools import github
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh"))
+    monkeypatch.setattr(github, "github_cli_configured", lambda: bool(os.environ.get("GITHUB_TOKEN")))
+    monkeypatch.setenv("GITHUB_TOKEN", "synthetic-test-fixture")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "test-call"
+    schemas = initial_tool_schemas(registry, context_mode="max")
+    rows = [{"role": "user", "content": "call"}]
+    loop_mod._setup_dynamic_tools(registry, schemas, rows)
+    starts = [dict(row) for row in rows if row.get("_host_context_kind") == breakage.START_KIND]
+    host = SimpleNamespace(tools=registry, ctx=registry._ctx, schemas=schemas, messages=rows, call_tools={},
+                           turn=SimpleNamespace(feature={}), _context_changed=lambda: None)
+
+    def changes():
+        return [row["content"] for row in rows if row.get("_host_context_kind") == breakage.CHANGE_KIND]
+
+    ConversationHost._reselect_tools(host, "low")
+    assert changes() == []  # the same omissions: nothing to tell
+    monkeypatch.delenv("GITHUB_TOKEN")  # the credential is revoked during the call
+    ConversationHost._reselect_tools(host, "low")
+    [changed] = changes()
+    assert "submit_skill_to_hub" in changed and "missing_credential" in changed
+    ConversationHost._reselect_tools(host, "max")
+    assert len(changes()) == 1  # told once
+    assert [row for row in rows if row.get("_host_context_kind") == breakage.START_KIND] == starts  # never rebuilt
+
+
 def test_the_round_appends_the_change_row_before_its_facts(monkeypatch, tmp_path):
     from ouroboros import loop as loop_mod
     from ouroboros import loop_messages

@@ -342,17 +342,28 @@ def _merged_rows(omissions: List[Dict[str, Any]], broken: Facts) -> List[Dict[st
 
 
 def write_start_notice(registry: Any, messages: list) -> None:
-    """The work's one capability notice: a typed host row written once, never again when its tools are
-    selected anew (a mode change, a call's room fit) and never resetting what the work was told."""
+    """The work's one capability notice: a typed host row written once and never rebuilt. When its tools are
+    selected anew (a mode change, a call's room fit), what the registry now withholds is compared with what the
+    work was told: changed lines reach it as one typed tail row (``CHANGE_KIND``), as the notice the base wrote
+    at every selection did; unchanged ones add nothing, and what the work was told of breaks is kept."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
     from ouroboros.tool_policy import format_capability_omissions
 
     tool_ctx = getattr(registry, "_ctx", None)
-    if getattr(tool_ctx, _TOLD, None) is not None or any(
-            isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == START_KIND for row in messages):
-        return
     omissions = registry.capability_omissions() if hasattr(registry, "capability_omissions") else []
+    lines = format_capability_omissions(omissions)
+    told = getattr(tool_ctx, _TOLD, None)
+    if isinstance(told, dict):
+        if told.get("registry", lines) != lines:
+            messages.append(bound_host_row(CHANGE_KIND, f"{CHANGE_HEADER} What this work's tools leave out changed "
+                                           "since it was told (the registry's current omissions):\n" + "\n".join(lines)))
+        told["registry"] = lines
+        return
+    if any(isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == START_KIND for row in messages):
+        return
     rows = start_notice_rows(tool_ctx, omissions)
+    if isinstance(getattr(tool_ctx, _TOLD, None), dict):
+        getattr(tool_ctx, _TOLD)["registry"] = lines
     if rows:
         messages.append(bound_host_row(START_KIND, "[SYSTEM NOTICE]\n" + "\n".join(format_capability_omissions(rows))))
 
