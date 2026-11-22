@@ -34,7 +34,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/`: macOS quiet AX/exposure/same-window `until_text`; `macos_capture.py`/`macos_stream.py`: capture-only ScreenCaptureKit exact-window snapshot/task MCP stream. `paste_chord.js`: local/SSH Command-plane V/shortcuts. Targets/grants/receipts: `SKILL.md`; owned native fixtures.
+`skills/unix_computer_use/`: macOS quiet AX/exposure/same-window `until_text`; `macos_capture.py`/`macos_stream.py`: capture-only ScreenCaptureKit exact-window snapshot/task MCP stream. `paste_chord.js`/`input_events.js`: local/SSH input. Targets/grants/receipts: `SKILL.md`; owned native fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 

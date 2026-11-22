@@ -1524,6 +1524,11 @@ def op_displays() -> dict[str, Any]:
     main = cg.CGMainDisplayID()
     rows = []
     secondary = 1
+    try:  # a capture without this grant shows only the wallpaper, so the display list says whether it holds
+        cg.CGPreflightScreenCaptureAccess.restype = c_ubyte
+        recording = "granted" if cg.CGPreflightScreenCaptureAccess() else "denied"
+    except Exception:  # noqa: BLE001
+        recording = "unknown"
     for i in range(count.value):
         did = ids[i]
         r = cg.CGDisplayBounds(did)
@@ -1537,7 +1542,7 @@ def op_displays() -> dict[str, Any]:
                      "width": int(r.size.w), "height": int(r.size.h),
                      "pixels_wide": int(cg.CGDisplayPixelsWide(did)), "pixels_high": int(cg.CGDisplayPixelsHigh(did)),
                      "index": capture_index})
-    return {"ok": True, "displays": rows}
+    return {"ok": True, "displays": rows, "screen_recording": recording}
 
 
 def _print(payload: dict[str, Any]) -> None:

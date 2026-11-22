@@ -106,7 +106,7 @@ ouroboros/ — agent core and shared runtime (§6)
   cli.py — source/headless CLI over gateway tasks, logs, settings, skills, local model and MCP (CLI / Headless Boundary below)
   packaged_cli.py, packaged_cli_install.py — packaged desktop CLI bridge and its command-shim installer
   agent.py — task orchestrator; a loop crash is projected from captured evidence or an explicit `loop_evidence_unavailable`, never invented counters (§6 Task lifecycle)
-  startup_historical_audit.py — explicit seal-audit child in its own process group (`python -m ouroboros.startup_historical_audit`; §2; docs/MODEL_SEND_OBSERVABILITY.md)
+  startup_historical_audit.py — explicit seal-audit child in its own process group (§2; docs/MODEL_SEND_OBSERVABILITY.md); background children's launch and stop list
   maintenance.py, maintenance_jobs.py, maintenance_retirement.py, plan_collection_job.py, record_compression.py, saved_state_retirement.py, temp_sweep.py — maintenance child jobs, `job:<name>` facts (§5)
   focus.py — authored focus with typed source ref; no dialogue or path escapes
   agent_startup_checks.py — agent-boot verification (warning-only health) and native-host adoption for self-restart (§2)
