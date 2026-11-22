@@ -1,0 +1,120 @@
+name: 'Model recovery: locate the remaining Pause and deadline failures'
+on:
+  push:
+    branches: ['qa/model-recovery-p01-r16-20261122']
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE: '907c144a53d1b2a76949b68a4012348d873f9ad0'
+      PREVIOUS: '1d6317ac1fedbf6ba62a3f6787f1a9764dc076e0'
+      PRODUCT: '1d5743015eef9c591dac16938dc4c575b68a7c95'
+      PRODUCT_TREE: 'e4e74ecd5ffbfd990bf60da7deebd16ebdccd0d4'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact synthetic subjects
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-list --parents -1 HEAD)" == "$GITHUB_SHA $PRODUCT" ]]
+          [[ "$(git rev-list --parents -1 "$PRODUCT")" == "$PRODUCT $PREVIOUS" ]]
+          [[ "$(git rev-list --parents -1 "$PREVIOUS")" == "$PREVIOUS $BASE" ]]
+          [[ "$(git rev-parse "$PRODUCT^{tree}")" == "$PRODUCT_TREE" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT" HEAD)" == $'A\t.github/workflows/qa-model-recovery-r16.yml' ]]
+          [[ "$(git diff --name-only "$PREVIOUS" "$PRODUCT")" == $'ouroboros/loop_routes.py\ntests/test_subscription_main_wait.py' ]]
+          git diff --exit-code "$BASE" "$PRODUCT" -- uv.lock pyproject.toml .github/actions/setup-python-env/action.yml
+          git checkout --detach "$PRODUCT"
+          git worktree add --detach "$RUNNER_TEMP/r16-base" "$BASE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test -z "$(git -C "$RUNNER_TEMP/r16-base" status --porcelain --untracked-files=all)"
+      - name: Install the shared locked test dependencies
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Observe only the selected synthetic assertions
+        run: |
+          set -euo pipefail
+          runner_py=$(python -c 'import sys; print(sys.executable)')
+          python - "$RUNNER_TEMP" "$runner_py" <<'PY'
+          import collections
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          tmp = Path(sys.argv[1])
+          runner = sys.argv[2]
+          pause = 'tests/test_pause_author_aux_receivers.py::'
+          paired = [pause + 'test_warm_resume_restarts_author_wait_while_the_original_review_still_runs']
+          paired += [pause + 'test_forced_final_model_wait_pauses_without_publishing_its_late_answer' + f'[{p}]'
+                     for p in ('round_limit', 'deadline')]
+          fallback = 'tests/test_subscription_main_wait.py::test_fallback_choice_and_first_request_from_its_saved_round'
+          retained = 'tests/test_native_fallback_binding_acceptance.py::test_ready_checkpoint_reads_a_retained_answer_offline'
+          own = [f'{fallback}[first_candidate-{p}]' for p in ('cross-family', 'same-family')]
+          own += [f'{retained}[{p}]' for p in ('answer', 'deadline', 'stop', 'refusal-at-deadline',
+                                               'deadline-with-marker', 'deadline-with-commentary', 'deadline-with-cut')]
+
+          def read_cases(path):
+              try:
+                  root = ET.parse(path)
+              except (OSError, ET.ParseError):
+                  return []
+              rows = []
+              for case in root.iter('testcase'):
+                  carrier = case.get('file') or case.get('classname', '').replace('.', '/') + '.py'
+                  status = next((s for s in ('error', 'failure', 'skipped') if case.find(s) is not None), 'passed')
+                  item = {'node': carrier + '::' + case.get('name', ''), 'status': status}
+                  if status != 'passed':
+                      detail = case.find(status)
+                      # All selected tests use ephemeral data and fake replies. Export only their bounded assertion
+                      # message and recognized source locations, not captured stdout, request bodies or raw JUnit.
+                      item['message'] = ' '.join(detail.get('message', '').split())[:700]
+                      locations = re.findall(r'(?:tests|ouroboros|supervisor)/[\w/]+\.py:\d+', detail.text or '')
+                      item['sites'] = list(dict.fromkeys(locations))[-10:]
+                  rows.append(item)
+              return rows
+
+          def run(label, cwd, nodes):
+              report = tmp / f'r16-{label}.xml'
+              argv = [runner, '-I', '-S', 'scripts/safe_test.py', '--timeout', '95',
+                      '--evidence-dir', str(tmp / f'r16-raw-{label}'), '--', runner, '-m', 'pytest',
+                      '-q', '--tb=short', '--show-capture=no', '-p', 'no:cacheprovider',
+                      '-o', 'addopts=', '-o', 'junit_family=xunit1', f'--junitxml={report}', *nodes]
+              try:
+                  code = subprocess.run(argv, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=153).returncode
+              except subprocess.TimeoutExpired:
+                  code = 124
+              rows = read_cases(report)
+              complete = collections.Counter(row['node'] for row in rows) == collections.Counter(nodes)
+              return {'exit': code, 'expected': nodes, 'complete': complete, 'cases': rows}
+
+          result = {k.lower(): os.environ[k] for k in ('BASE', 'PREVIOUS', 'PRODUCT', 'PRODUCT_TREE', 'GITHUB_SHA')}
+          result['baseline'] = run('base', tmp / 'r16-base', paired)
+          result['candidate'] = run('product', os.environ['GITHUB_WORKSPACE'], paired + own)
+          text = json.dumps(result, indent=2) + '\n'
+          (tmp / 'r16-case-diagnosis.json').write_text(text, encoding='utf-8')
+          print(text)
+          verdicts = (result['baseline'], result['candidate'])
+          sys.exit(0 if all(side['exit'] == 0 and side['complete'] and
+                            all(row['status'] == 'passed' for row in side['cases']) for side in verdicts) else 1)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: r16-case-diagnosis
+          path: ${{ runner.temp }}/r16-case-diagnosis.json
+          if-no-files-found: error
+          retention-days: 7
