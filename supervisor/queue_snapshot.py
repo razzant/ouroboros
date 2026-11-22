@@ -868,7 +868,15 @@ def restore_pending_from_snapshot(
     key = str(pathlib.Path(_queue().QUEUE_SNAPSHOT_PATH).absolute())
     _RESTORING[key] = threading.get_ident()
     try:
-        return _restore_pending(key, max_age_sec, terminalized)
+        restored = _restore_pending(key, max_age_sec, terminalized)
+        from ouroboros.delegate_resume import restore_recovered_writer_hints
+        try:
+            restore_recovered_writer_hints(_queue().DRIVE_ROOT)
+        except Exception:
+            from supervisor.owner_pause_control import defer_failed_recovery_discovery
+            defer_failed_recovery_discovery(_queue().DRIVE_ROOT)
+            log.warning("Recovered writer fences unavailable during queue restore", exc_info=True)
+        return restored
     finally:
         _RESTORING.pop(key, None)
 

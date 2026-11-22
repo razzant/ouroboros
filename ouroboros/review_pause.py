@@ -369,10 +369,10 @@ def review_operation_state(owner_id: str) -> str:
 def live_detached_operations(task_id: str) -> List[Dict[str, Any]]:
     """The open review operations of ``task_id`` its paused author detached from.
 
-    Their launched reviewers keep running in THIS process, so the author parks
-    warm here and the process stays until each operation closes (after its
-    settlement publication), never released on the settle event alone. Facts
-    only: owner id, surface, paid identity.
+    Their launched reviewers keep running in THIS process, which stays until each
+    operation closes (after its settlement publication), never released on the
+    settle event alone (``local_reviews_settled``). Facts only: owner id, surface,
+    paid identity.
     """
     task_id = str(task_id or "")
     with _LOCK:

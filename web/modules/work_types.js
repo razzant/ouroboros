@@ -191,6 +191,10 @@
  * @property {WorkFocus=} focus
  * @property {Array<Object>=} gaps
  * @property {string=} client_message_id
+ * @property {boolean=} place_turn  // a correspondent's Presence turn: Telegram's owner list leaves it out
+ * @property {boolean=} unbound_start  // an accepted delegate start no engine run answers yet: its Stop is a
+ *   request taken against the recorded request and the tree, never against a remote run handle; that start's
+ *   true fate stays unknown until a stop is confirmed (#3428; task_control_menu.js). Absent, never false, otherwise.
  * @property {WorkLead=} lead  // the model it runs on and whose choice that is
  * @property {WorkProcessing=} processing  // its own tier and the newest call's receipt
  */

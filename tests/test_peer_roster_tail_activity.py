@@ -42,7 +42,6 @@ def observer(monkeypatch):
 
     monkeypatch.setattr("ouroboros.task_results.load_task_result", lambda root, task_id: None)
     monkeypatch.setattr("ouroboros.gateway.work_projection.unconfirmed_stops", lambda *a, **k: scripted["stops"])
-    monkeypatch.setattr("ouroboros.external_runs.unbound_starts", lambda fence: ["inv-unbound"])
     monkeypatch.setattr("ouroboros.delegate_feed.current_activities", activities)
     monkeypatch.setattr("supervisor.continuation_admission.model_handoffs", lambda root, task_id: [])
     return scripted
@@ -53,7 +52,8 @@ def _tails(entries, running=(), members="census", root="."):
 
     if members == "census":  # every addressed run's task is a live member, as its queue row would make it
         members = {str(entry.task_id) for entry in entries if entry.task_id} | set(running)
-    tree = {"running": list(running), "runs": entries, "members": set(members or ())}
+    tree = {"running": list(running), "runs": entries, "members": set(members or ()),
+            "starts": [("inv-unbound", True)]}
     return peer_roster._tree_tails(root, tree, {}, "")
 
 

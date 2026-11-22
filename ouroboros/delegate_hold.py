@@ -87,7 +87,7 @@ def _configured_session(ctx: Any) -> bool:
 
 
 def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
-    """READ-ONLY liveness probe: one short engine poll of the run's own engine, no lease/settle/cancel.
+    """Probe the owned run once, recording a recovered start's first execution state.
 
     Requires a POSITIVE non-terminal engine state. A gateway failure, refusal,
     or state-less payload is not evidence of a live leaf (fail-closed)."""
@@ -96,13 +96,24 @@ def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
     try:
         from ouroboros import claudexor_daemon
         from ouroboros.delegate_progress import bounded_poll
+        from ouroboros.delegate_resume import ACTIVE, observe_bound_state, recovered_cancel_detail
         from ouroboros.execution_domain import run_gateway
 
-        entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1]
+        root = custody.custody_root(ctx)
+        ownership, entry = custody.lookup(root, str(getattr(ctx, "task_id", "") or ""), run_id)
+        if ownership != custody.OWNED:
+            return False
         with contextlib.closing(run_gateway(entry, lambda: claudexor_daemon.ensure_owned_gateway(
                 admission_wait_sec=0), timeout_sec=5.0)) as gateway:
             detail = bounded_poll(gateway, run_id, 5.0)
         state = str(custody.summary_of(detail).get("state") or "")
+        if entry.resume_start_state is not None:
+            # The recovered run's first state is kept only from its own proved answer
+            # (``recovered_cancel_detail``); an unrecognized answer keeps ``unknown`` and is
+            # no evidence of a live leaf.
+            if not recovered_cancel_detail(gateway, entry, detail) or observe_bound_state(root, entry, state) is False:
+                return False
+            return state in ACTIVE and entry.resume_start_state in ACTIVE and not entry.terminal_state
     except Exception:
         log.debug("Hold eligibility leaf probe failed", exc_info=True)
         return False

@@ -19,7 +19,7 @@ from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, load_task_r
 from ouroboros.work_stop import INTERRUPTED_SELECTION, continuation_refusal, interrupted_selection
 from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
-from tests.test_restart_retention import _pool_events, _queued
+from tests._worker_recovery_helpers import _crash, _pool_events, _queued
 from tests.worker_pool_support import affirm_ready
 
 
@@ -50,26 +50,6 @@ def _stop_and_boot(queue, workers, *, age_sec=0):
     workers.PENDING[:] = []
     workers.RUNNING.clear()
     return queue.restore_pending_from_snapshot()
-
-
-def _crash(queue, workers, monkeypatch, task_id):
-    """The worker running ``task_id`` dies before any terminal: the live same-id crash requeue
-    (``worker_health``) runs on the real queue. Doubled: the dead process, cost reconstruction and
-    the slot's respawn."""
-    from supervisor import worker_health
-    from tests.test_worker_crash_retry import _make_worker
-
-    meta = workers.RUNNING[task_id]
-    wid = int(meta["worker_id"])
-    dead = _make_worker(wid=wid, busy_task_id=task_id, exitcode=1)
-    dead.reaping = True
-    workers.WORKERS[wid] = dead
-    monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 2)  # the configurable limit, wide enough for two losses
-    monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *_a, **_k: {})
-    worker_health._recover_crashed_task_without_terminal(dict(
-        worker=dead, task_id=task_id, task=meta["task"], meta=meta, worker_id=wid, exitcode=1,
-        attempt=int(meta["attempt"]), drive_root=str(workers.DRIVE_ROOT)), queue)
-    workers.WORKERS.pop(wid, None)
 
 
 def _ack(root, transaction_id):

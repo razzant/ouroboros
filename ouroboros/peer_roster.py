@@ -280,8 +280,13 @@ def _queue_hold_facts(task: Dict[str, Any], stored: Dict[str, Any], waiting: Lis
 
 def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[List[str]] = None,
                 ) -> Dict[str, Dict[str, Any]]:
-    """Group queued helpers and open runs by root. A queue member can be matched with its executor observation;
-    it does not create a separate tree. Unreadable run custody marks the roster incomplete."""
+    """What each task tree holds beyond its root, by the tree's root id: the queue's helper rows, its live
+    ``members`` for executor-observation matching (without opening a separate tree), the open delegated runs
+    (``work_projection._open_runs``) and ``starts`` -- every open (invocation, lookup_only) pair this same read
+    saw, recorded on each tree the read knows. Listing and display are separate questions (#3428): a tree is
+    LISTED only while a helper row, an open run or an accepted lookup-only decision reaches it; a root's own row
+    answers its start set without opening any door. A read that could not decode every row flags each tree
+    ``starts_partial``: possibly short, never a complete list. Never raises; unreadable custody is named in ``gaps``."""
     from supervisor.owner_pause_control import warm_paused_member
 
     trees: Dict[str, Dict[str, Any]] = {}
@@ -305,13 +310,38 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
                     tree(root_id)["running"].append(task_id)
                 else:
                     tree(root_id)["pending"] += 1
+            elif root_id:
+                # The root's own row keeps no listing open -- its own row is the door -- but this read answers
+                # for that tree's start set too, so `_tree_tails` says what ONE snapshot saw (#3428).
+                tree(root_id)
     try:
+        from ouroboros.delegate_custody_current import open_work_custody
         from ouroboros.gateway.work_projection import _open_runs  # D01->D11 is lazy-only
 
-        for root_id, runs in _open_runs(root).items():
+        state, starts, unreadable = open_work_custody(root)
+        for root_id, runs in _open_runs(root, state).items():
             entry = tree(root_id)
             entry["runs"].extend(runs)
             entry["members"] = members.get(root_id, ())
+        # An accepted lookup-only start keeps its ended tree listed until the request binds or closes (#3428):
+        # Inclusion stays the accepted decision's: an unaccepted ordinary start opens no door and draws no row.
+        # What is DISPLAYED beside an entry this read made is every open (invocation, lookup_only) pair it saw
+        # -- a request that binds between the roster's reads keeps its unconfirmed form instead of falling out
+        # of both, and a tree the read answered needs no second read to say so.
+        for root_id, invocations in starts.items():
+            entry = (tree(root_id) if any(lookup_only for _invocation, lookup_only in invocations)
+                     else trees.get(root_id))
+            if entry is not None:
+                entry["starts"] = list(invocations)
+        for entry in trees.values():
+            entry.setdefault("starts", [])
+        if unreadable:
+            # A row this read could not decode belongs to an unknown tree: every start set it listed may be
+            # short. That is an incompleteness the tails name on their row, never an empty list read as absence.
+            for entry in trees.values():
+                entry["starts_partial"] = True
+            if gaps is not None:
+                gaps.append("delegated_custody_unavailable")
     except Exception:
         log.debug("Live trees: delegated custody unreadable", exc_info=True)
         if gaps is not None:
@@ -319,12 +349,16 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
     return trees
 
 
-def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task_id: str = "") -> List[Dict[str, Any]]:
-    """The card and roster share the typed run, its member's observation and the words for each tail; a worker's
-    roster, with no observer of its own, adds what the body's dated record last saw, in past words."""
-    from ouroboros.external_runs import unbound_starts
+def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task_id: str = "", *,
+                unavailable: Any = None) -> List[Dict[str, Any]]:
+    """The card and roster share the typed run, its member's observation (plus what the body's dated record last saw,
+    in past words, for a worker with no observer) and the words for each tail. Unbound starts come from the tree's
+    own ``_live_trees`` custody read whenever that read built the entry -- one coherent snapshot -- and fall back to
+    a fresh read with gap disclosure only when ``starts`` was not recorded."""
     from ouroboros.gateway import work_status as ws  # D01->D11 is lazy-only
-    from ouroboros.gateway.work_projection import observe_member_runs, unconfirmed_stops
+    from ouroboros.gateway.work_projection import (
+        _typed_unbound, observe_member_runs, unbound_run_tails, unconfirmed_stops,
+    )
     from ouroboros.task_results import load_task_result
 
     tree = tree or {"running": [], "runs": []}
@@ -338,20 +372,41 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
         except Exception:
             owner = None  # an unreadable owner proves no failure: the observation below still speaks
         stops = unconfirmed_stops(root, str(entry.task_id), owner) if entry.task_id else None
-        kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=stops is None or str(entry.run_id) in stops)
+        kind, state = ws.run_tail(getattr(entry, "source", ""), owner,
+                                  stop_unknown=stops is None or str(entry.run_id) in stops,
+                                  start_state=getattr(entry, "resume_start_state", None))
         run = {"run_id": str(entry.run_id), "kind": kind, "state": state}
         runs.append(run)
         if kind == "run" and str(entry.task_id or "") in tree.get("members", ()):
             observed[(str(entry.task_id), str(entry.run_id), str(getattr(entry, "invocation_id", "") or ""))] = run
     if observed:
         observe_member_runs(root, observed, recorded=True)
-    runs.extend({"run_id": start, "kind": "run", "state": "unknown"} for start in unbound_starts(fence))
     from supervisor.continuation_admission import model_handoffs
     root_task_id = root_task_id or str(fence.get("root_task_id") or "")
+    entries = tree.get("starts")
+    if fence and root_task_id:
+        if entries is None:
+            # No start set was recorded for this entry by the read that made it: only a fresh read knows.
+            starts, gap = unbound_run_tails(root, root_task_id)
+            runs.extend(starts)
+            if gap and unavailable is not None:
+                unavailable["unbound_starts"] = gap
+        else:
+            # Both forms come from ONE custody read (``_live_trees``): beside a paused tree every open form
+            # stands, exactly the card's pending set (``work_projection._project``), and a request that binds
+            # after the snapshot still names the run nobody can confirm rather than nothing (#3428).
+            runs.extend(_typed_unbound(invocation) for invocation, _lookup_only in entries)
+    elif entries:
+        # An ended tree's accepted lookup-only starts (#3428), named by the custody read: runs nobody can
+        # confirm until the request binds, exactly as the work projection says them.
+        runs.extend(_typed_unbound(invocation) for invocation, lookup_only in entries if lookup_only)
+    if entries is not None and tree.get("starts_partial") and unavailable is not None:
+        # The recorded set may be short: a row this read could not decode belongs to an unknown tree. That is
+        # said on the row, never read as an empty list -- including where the short set extended nothing.
+        unavailable["unbound_starts"] = "custody_rows_undecodable"
     tails = ws.work_tails([task for task in tree["running"] if task not in parked], runs,
                           reviewing=fence.get("state") == "paused" and bool(fence.get("finishing_reviews")))
     return tails + (ws.model_tails(model_handoffs(root, root_task_id)) if root_task_id else [])
-
 
 
 def _presence_task(task: Dict[str, Any]) -> bool:
@@ -442,11 +497,13 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str,
         row.update(stop=view["stop"], release=view["release"], refusal=view["refusal"])
     if waiting:
         row["waiting"] = waiting
-        # A root that waits also says what of its tree still runs: a review its Pause lets finish, a run nobody can
-        # confirm. A running root's own status already says it runs (its helpers' churn stays out of every roster).
-        tails = _tree_tails(canonical_root, (trees or {}).get(task_id), stored.get("owner_pause"), task_id)
+        # Only a waiting root lists its tails; a failed read leaves the other tails intact.
+        unavailable = row.get("unavailable", {})
+        tails = _tree_tails(canonical_root, (trees or {}).get(task_id), stored.get("owner_pause"), task_id, unavailable=unavailable)
         if tails:
             row["tails"] = tails
+        if unavailable:
+            row["unavailable"] = unavailable
     return row
 
 
@@ -547,6 +604,11 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
     for root_id, tree in sorted(_live_trees(root, snapshot).items()):
         if root_id in listed:
             continue
+        if not (tree["running"] or tree["pending"] or tree["runs"]
+                or any(lookup_only for _invocation, lookup_only in tree.get("starts") or ())):
+            # An entry this read made only to ANSWER the tree's start set (the root's own row, or a tree whose
+            # only starts are unaccepted) keeps no work of its own running: no phantom row (#3428).
+            continue
         unavailable = {}
         try:
             stored = load_task_result(root, root_id, strict=True) or {}
@@ -564,7 +626,7 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
                      **({"stop": view["stop"], "release": view["release"], "refusal": view["refusal"]}
                         if view["stop"] or view["refusal"] else {}),
                      "root_status": str(stored.get("status") or "unknown"), "helpers_running": len(tree["running"]),
-                     "helpers_waiting": tree["pending"], "tails": _tree_tails(root, tree, stored.get("owner_pause"), root_id),
+                     "helpers_waiting": tree["pending"], "tails": _tree_tails(root, tree, stored.get("owner_pause"), root_id, unavailable=unavailable),
                      **({"unavailable": unavailable} if unavailable else {})})
     return rows
 
@@ -650,6 +712,7 @@ _WAIT_DETAILS = ("quiz_id", "reason", "text", "by", "release", "role", "mode", "
                  "reset_at", "wake_at", "senders", "tasks", "runs", "services", "any_mail")
 # What a source this read could not open (``row["unavailable"]``) leaves unknown on its row, never absent.
 _UNAVAILABLE_MEANS = {"task_result": "its waits, open questions and settlement are unknown, not ended",
+                      "unbound_starts": "the list of unconfirmed delegate starts could not be read, whole or at all",
                       "project": "its project binding is unknown"}
 
 
@@ -877,14 +940,8 @@ def _latest_roster_note(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-def durable_descendant_of(
-    drive_root: pathlib.Path,
-    task_id: str,
-    task: Dict[str, Any],
-    ancestor_id: str,
-    *,
-    max_hops: int = 64,
-) -> bool:
+def durable_descendant_of(drive_root: pathlib.Path, task_id: str, task: Dict[str, Any], ancestor_id: str, *,
+                          max_hops: int = 64) -> bool:
     """Follow the durable parent chain; shared-root labels are not ancestry proof
     (the descendant half of ``forward_to_worker``'s addressability)."""
 
@@ -908,13 +965,8 @@ def durable_descendant_of(
         current_id = parent_id
     return False
 
-def peer_relation_to(
-    status_drive_root: pathlib.Path,
-    current_task_id: str,
-    metadata: Dict[str, Any],
-    tid: str,
-    data: Dict[str, Any],
-) -> str:
+def peer_relation_to(status_drive_root: pathlib.Path, current_task_id: str, metadata: Dict[str, Any], tid: str,
+                     data: Dict[str, Any]) -> str:
     """``parent`` / ``sibling`` / ``tree`` when ``tid`` is the caller's parent,
     shares its parent, or shares its durable tree root (the blackboard's own
     ``root_task_id`` scope: a cousin, an uncle, the root itself, a predecessor's
@@ -952,15 +1004,8 @@ def peer_relation_to(
     return "tree"
 
 
-def peer_contribution_admission(
-    status_drive_root: pathlib.Path,
-    current_task_id: str,
-    metadata: Dict[str, Any],
-    tid: str,
-    data: Dict[str, Any],
-    *,
-    relayed_from: str = "",
-) -> tuple:
+def peer_contribution_admission(status_drive_root: pathlib.Path, current_task_id: str, metadata: Dict[str, Any],
+                                tid: str, data: Dict[str, Any], *, relayed_from: str = "") -> tuple:
     """``(relation, refusal)`` for a ``forward_to_worker`` recipient that is not
     the caller's descendant (serial addressed turns, peer contributions).
 

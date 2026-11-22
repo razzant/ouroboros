@@ -155,7 +155,8 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
         context_model_role=str(state.get("context_model_role") or ""),
-        context_start=state.get("context_start")), RESUMED)
+        context_start=state.get("context_start")),
+        "candidate" if (state.get("resume_point") or {}).get("phase") == "candidate" else RESUMED)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -389,7 +390,10 @@ def save_terminal(limit_ctx: Any) -> None:
     if not getattr(ctx, "_pending_content_acks", None) or sys.exc_info()[0] is not None:
         return
     try:
-        save_ready(limit_ctx)
+        if not getattr(ctx, "_selected_answer_context", None):
+            save_ready(limit_ctx)
+        elif save_or_log(limit_ctx, "candidate"):  # a held answer keeps its own boundary; only this save ACKs
+            flush_content_acks(ctx)
     except Exception:
         log.warning("Final working state of %s unsaved; its drained mail stays unread",
                     getattr(ctx, "task_id", ""), exc_info=True)
@@ -733,17 +737,12 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
         episode_fields, observe_task_runs, set_budget_pause, task_owned_runs_open,
     )
     from ouroboros.model_wait import budget_paused_seconds
+    from ouroboros.owner_wait import working_resume_point
 
     _data, state = read_working(root, task_id, attempt)
     if not state or row.get("state") != STATE_PAUSING or row.get("source_ref"):
         return {}
-    working = state["working"]
-    pending = list(working.get("pending_tool_call_ids") or [])
-    point = {"round_idx": int(state.get("round_idx") or 0),
-             "phase": "partial_tool_batch_unknown" if pending else "boundary",
-             "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
-             "abandoned_model_attempts": [], "budget_tail": str(working.get("budget_tail") or "tool"),
-             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
+    point = working_resume_point(state)
     reason = str(row.get("reason") or "budget")
     policy = (STOP_POLICY_TASK_OWNED if reason == "owner" else STOP_POLICY_ALL if reason == "budget"
               else STOP_POLICY_OBSERVE)

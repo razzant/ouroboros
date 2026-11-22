@@ -749,15 +749,23 @@ def model_handoff_words(block: dict) -> str:
 
 
 def acceptable_unknown(blockers) -> list:
-    """The ids a caller may name to go on past (``control_actor.accepting_unknown``): every
-    blocker is a held call or merge request whose outcome is unknown, else none (``[]``)."""
+    """Offer a decision only when every blocker has an addressed, acceptable unknown outcome."""
     from ouroboros.local_custody_repair import ACCEPTABLE_UNKNOWN
 
-    rows = [b for b in blockers or () if isinstance(b, dict)]
-    ids = [str(b.get("operation_id") or b.get("attempt_id") or b.get("receipt_id") or "") for b in rows
-           if b.get("kind") in {"tool_handoff", "model_handoff", "merge_operation"}
-           and b.get("reason") in ACCEPTABLE_UNKNOWN]
-    return ids if rows and len(ids) == len(rows) and all(ids) else []
+    ids = []
+    for b in blockers or ():
+        if not isinstance(b, dict):
+            return []
+        if b.get("kind") == "delegated_run" and not b.get("run_id") and b.get("stop_outcome") == "pending_invocation_unbound":
+            key = b.get("choice_id")
+        elif b.get("kind") in {"tool_handoff", "model_handoff", "merge_operation"} and b.get("reason") in ACCEPTABLE_UNKNOWN:
+            key = b.get("operation_id") or b.get("attempt_id") or b.get("receipt_id")
+        else:
+            return []
+        if not key:
+            return []
+        ids.append(str(key))
+    return list(dict.fromkeys(ids))
 
 
 def unsafe_replay_response(observation: dict) -> dict:
@@ -795,7 +803,9 @@ def resume_outcome(outcome: dict) -> dict:
         if kind == "delegated_run":
             run = block.get("run_id") or block.get("invocation_id") or ""
             words.append(f"delegated run {run} is running" if block.get("state") == "running" else
-                         "a delegated start has an unknown outcome (no run was recorded)"
+                         f"delegated run {run} ended and awaits collection" if block.get("state") == "terminal" else
+                         f"start {run} of task {tid} has an unknown outcome and may still be working or spending money"
+                         if block.get("choice_id") else "a delegated start has an unknown outcome (no run was recorded)"
                          if block.get("stop_outcome") == "pending_invocation_unbound" else
                          f"delegated run {run}: its stop is requested, not confirmed"
                          if block.get("state") == "stop_requested" else
@@ -814,7 +824,7 @@ def resume_outcome(outcome: dict) -> dict:
                       "owned_process": f"a process of task {tid} is still alive",
                       "workspace_executor": f"a workspace process of task {tid} is not settled"}.get(
                           kind, str(kind or "unknown").replace("_", " ")))
-    accept = acceptable_unknown(outcome.get("blockers"))
+    accept = [] if outcome.get("selection_scope_mismatch") else acceptable_unknown(outcome.get("blockers"))
     return {**outcome, **({"acceptable_unknown": accept} if accept else {}), "message": "Resume refused: " + (
         "; ".join(dict.fromkeys(words)) if words else phrases.get(error, error.replace("_", " ")))}
 

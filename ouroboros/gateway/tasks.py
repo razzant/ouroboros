@@ -1047,9 +1047,9 @@ def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:
 
 
 def _cascade_waits_only_on_runs(task_id: str) -> bool:
-    """Whether a cascade that did not settle left only its tree's open delegated runs live.
+    """Whether the cascade awaits delegated work in its tree or a witnessed inline Presence runner.
 
-    Their cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
+    A lookup-only start awaits binding. A known run's cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
     critical until a verified terminal) or not sent (the engine is unreachable: pending until it answers).
     A witnessed live inline Presence root waits the same way: its runner observes the open intent at its
     next stop check and writes the terminal itself (#2012). The Stop stays pending and the cancel-intent
@@ -1058,12 +1058,12 @@ def _cascade_waits_only_on_runs(task_id: str) -> bool:
     stays; only a Presence root's own row reads that census.
     """
     try:
-        from ouroboros.delegate_custody_reconcile import tree_open_runs
+        from ouroboros.delegate_custody_current import cascade_work_open
         from ouroboros.presence_runner import presence_execution_witness
         from supervisor.cancel_publication import live_presence_row
         from supervisor.queue import DRIVE_ROOT, task_subtree_is_live
 
-        waits = tree_open_runs(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
+        waits = cascade_work_open(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
                                                          and presence_execution_witness(task_id, drive_root=DRIVE_ROOT) is True)
         return bool(waits) and not task_subtree_is_live(task_id, ignore_intents=True, count_runs=False)
     except Exception:
@@ -1399,6 +1399,10 @@ async def api_task_resume(request: Request) -> JSONResponse:
             or not all(isinstance(value, str) for value in named)):
         return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
                           reason_code="unexpected_fields")
+    if any(value.startswith("delegate_start:") for value in named) and not (
+            isinstance(body.get("reason"), str) and body["reason"].strip()):
+        return json_error("Give a reason for accepting the delegated start risk.", 400, task_id=task_id,
+                          reason_code="missing_resume_reason")
     def resume() -> Dict[str, Any]:
         from ouroboros.control_actor import accepting_unknown, owner_door
         from supervisor.queue import resume_budget_paused_task
@@ -1425,7 +1429,8 @@ async def api_task_resume(request: Request) -> JSONResponse:
     # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
     status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
-                             "action", "blockers", "message", "refusal_basis", "acceptable_unknown") if result.get(key)}},
+                             "action", "blockers", "message", "refusal_basis",
+                             "acceptable_unknown", "accepted_start_risks") if result.get(key)}},
                         status_code=status)
 
 

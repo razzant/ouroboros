@@ -56,6 +56,23 @@ UNBOUND = {"kind": "delegated_run", "run_id": "", "invocation_id": "inv-unbound"
            "stop_outcome": "pending_invocation_unbound", "source": "delegated_subagent"}
 RUNNING = {"kind": "delegated_run", "run_id": "run-leaf", "invocation_id": "", "state": "running",
            "stop_outcome": "", "source": "delegated_subagent"}
+# The unbound start's recorded address (ouroboros.delegate_resume.address): the tree and the member
+# it belongs to, the invocation it names, and the choice a saved task may be resumed from. A bound
+# run has no address: only a start whose outcome is unknown may be resumed without a new start.
+UNBOUND_START = {"root_task_id": PRED, "task_id": PRED, "invocation_id": "inv-unbound",
+                 "choice_id": f"delegate_start:{PRED}/{PRED}/inv-unbound"}
+
+
+def _legacy(facts):
+    """The census facts as they stood before the start address joined them: every field this
+    change did not touch is compared exactly, and the address is judged apart (below)."""
+    return sorted(({key: value for key, value in fact.items() if key != "ordinary_start"} for fact in facts),
+                  key=json.dumps)
+
+
+def _addresses(facts):
+    """The recorded start addresses the unbound starts carry, in a stable order."""
+    return sorted((fact["ordinary_start"] for fact in facts if "ordinary_start" in fact), key=json.dumps)
 
 
 @pytest.mark.parametrize("blocker,facts", [
@@ -72,16 +89,21 @@ def test_the_held_continue_and_its_resume_refusal_carry_the_observed_facts(tmp_p
     assert status == 200 and ack["ok"] and ack["held"] is True
     successor_id = ack["successor_task_id"]
     expected = sorted(({**fact, "task_id": PRED, "review_owned": False} for fact in facts), key=json.dumps)
-    assert sorted(ack["blockers"], key=json.dumps) == expected, "the Continue answer names what holds it"
+    expected_addresses = sorted(([UNBOUND_START] if UNBOUND in facts else []), key=json.dumps)
+    assert _legacy(ack["blockers"]) == expected, "the Continue answer names what holds it"
+    assert _addresses(ack["blockers"]) == expected_addresses, "an unbound start names its own address"
     status, replay = _http(api_task_continue, PRED, {"action_nonce": NONCE})
     assert status == 200 and replay["held"] and replay["successor_task_id"] == successor_id
-    assert sorted(replay["blockers"], key=json.dumps) == expected
+    assert _legacy(replay["blockers"]) == expected
+    assert _addresses(replay["blockers"]) == expected_addresses
     hold = budget_hold_fact(next(row for row in workers.PENDING if row["id"] == successor_id))
-    assert hold["reason"] == "continuation_writer_unsettled" and sorted(hold["blockers"], key=json.dumps) == expected
+    assert hold["reason"] == "continuation_writer_unsettled" and _legacy(hold["blockers"]) == expected
+    assert _addresses(hold["blockers"]) == expected_addresses
     status, refusal = _http(api_task_resume, successor_id)
     # An existing held successor is a conflict, never Not Found, and the body keeps the facts.
     assert status == 409 and refusal["error"] == "predecessor_writers_unsettled"
-    assert sorted(refusal["blockers"], key=json.dumps) == expected
+    assert _legacy(refusal["blockers"]) == expected
+    assert _addresses(refusal["blockers"]) == expected_addresses
     if blocker == "running_delegated_leaf":
         assert refusal["action"] == "wait_or_stop_the_previous_work"
     else:
@@ -195,7 +217,8 @@ def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_pat
         expected = sorted(({**fact, "task_id": PRED, "review_owned": False} for fact in facts[condition]),
                           key=json.dumps)
         assert status == 409 and result["error"] == "predecessor_writers_unsettled", result
-        assert sorted(result["blockers"], key=json.dumps) == expected
+        assert _legacy(result["blockers"]) == expected
+        assert _addresses(result["blockers"]) == sorted([UNBOUND_START], key=json.dumps)
         assert "action" not in result, "no wait/stop advice while any outcome is unknown"
 
 

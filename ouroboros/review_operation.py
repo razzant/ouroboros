@@ -334,6 +334,52 @@ def local_reviews_settled() -> bool:
         return not _LIVE and not _ACTIVE
 
 
+def drain_local_review_attempts(task_id: str, *, timeout_sec: float, spare_detached: bool = False) -> Dict[str, Any]:
+    """Bounded quiescence barrier over THIS task's in-flight review attempts.
+
+    Observation only: the fence already refuses new sends; this waits for the
+    requests that were ALREADY sent to settle through their own custody path
+    (``review_custody`` records each actor and its response reference before
+    signalling the attempt's event). An attempt still open at the bound is
+    recorded by operation id as ``unsettled`` — its durable identity is what the
+    late-result custody adopts when the provider answers after release; it is
+    never marked settled, PASS, failed or refunded here. ``spare_detached``: an
+    attempt of an operation ``review_pause.live_detached_operations`` names is listed
+    as ``spared``, never waited for; its operation and this process keep it.
+    """
+    settled: List[Dict[str, str]] = []
+    unsettled: List[Dict[str, str]] = []
+    spared: List[Dict[str, str]] = []
+    try:
+        from ouroboros import review_custody as rc
+
+        live: set = set()
+        if spare_detached:
+            with _LOCK:  # the live_detached_operations predicate, read before (never under) the attempt lock
+                live = {id(op) for op in _LIVE.values()
+                        if op.task_id == str(task_id) and not op.closed and op.author_detached}
+        with rc._ACTIVE_LOCK:
+            mine = [entry for entry in rc._ACTIVE.values()
+                    if str(task_id) in str(getattr(entry, "wave_key", "") or "").split("|")
+                    or f"|{task_id}|" in f"|{getattr(entry, 'key', '')}|"]
+    except Exception:
+        log.debug("Review attempt registry unavailable at budget pause", exc_info=True)
+        return {"drained": False, "registry": "unavailable", "settled": settled, "unsettled": unsettled}
+    deadline = time.monotonic() + max(0.0, float(timeout_sec or 0.0))
+    for entry in mine:
+        remaining = max(0.0, deadline - time.monotonic())
+        row = {"operation_id": str(getattr(entry, "operation_id", "") or ""),
+               "key": str(getattr(entry, "key", "") or "")[:120]}
+        if id(getattr(entry, "operation", None)) in live and not entry.event.is_set():
+            spared.append(row)
+        elif entry.event.wait(remaining):
+            settled.append(row)
+        else:
+            unsettled.append(row)
+    return {"drained": not unsettled, "registry": "ok", "timeout_sec": float(timeout_sec or 0.0),
+            "settled": settled, "unsettled": unsettled, "spared": spared}
+
+
 @dataclass
 class OperationBinding:
     """One caller's hold on an operation: the slots it may not send, with the reason."""

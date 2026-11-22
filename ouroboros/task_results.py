@@ -7,6 +7,7 @@ import json
 import logging
 import pathlib
 import re
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS, normalize_task_result_cost_planes
@@ -476,6 +477,7 @@ def write_task_result(
     _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
+    _publication: Any = None,
     _terminal_observed: bool = False,
     _cancel_observed: bool = False,
     _terminal_time_source: Optional[Dict[str, Any]] = None,
@@ -513,8 +515,9 @@ def write_task_result(
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
-                              last_word=_judged if _last_word else None)
+        write = partial(_publication, patch_document, wait=True) if _publication else patch_document
+        return write(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
+                     last_word=_judged if _last_word else None)
 
     def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         judged = _last_word(txn, current, document)

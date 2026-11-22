@@ -1094,12 +1094,13 @@ class OuroborosAgent:
 
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.delegate_resume import finish_selected_answer
         from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
-            emit_task_results(self.env, self.memory, self.llm, self._pending_events, task, text, usage, llm_trace,
-                              start_time, drive_logs, ctx=ctx, event_queue=self._event_queue)
-            return list(self._pending_events)
+            return finish_selected_answer(ctx, lambda *answer: emit_task_results(  # a forced replacement emits the same way
+                self.env, self.memory, self.llm, self._pending_events, task, *answer, start_time, drive_logs,
+                ctx=ctx, event_queue=self._event_queue), (text, usage, llm_trace), self._pending_events, _worker_immediate_stop)
 
         self._bind_turn(task)
         start_time = self._task_started_ts = _settle_start_origin(task)
@@ -1581,7 +1582,6 @@ from ouroboros.agent_dispatch import (  # noqa: E402, F401 -- intentional public
     _queued_budget_exhausted_message,
     _physical_calls_after_budget_rail,
     _initial_effort_for,
-    model_role_slot_override,
     resolve_dispatch_axes,
     _DELEGATE_VERBS,
     preflight_delegate_visibility,

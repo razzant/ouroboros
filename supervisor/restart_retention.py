@@ -172,8 +172,12 @@ def retain_owner_pause_park(root: pathlib.Path, task_id: str, attempt: int) -> D
         "runs": [], "custody_read": "failed", "error": "not_observed_at_warm_park"}
     old = budget_pause_row(root, task_id)
     pause_id = "owner-pause-" + uuid.uuid4().hex
+    # Older parks did not record the phase; having answer bytes alone does not prove selection.
+    point = (state.get("owner_pause") or {}).get("resume_point") or {
+        "round_idx": int(state.get("round_idx") or 0), "phase": "boundary", "unanswered_tool_call_ids": [],
+        "budget_tail": "tool", "abandoned_model_attempts": []}
     state = {**state, "pause_id": pause_id, "reason": REASON_OWNER, "rail": RAIL_OWNER_PAUSE, "scope": "root",
-             "external_runs": external}
+             "external_runs": external, "resume_point": point}
     source = store_actor_source_bytes(root, task_id, category="context_checkpoints",
         source_id="budget-pause-" + pause_id, data=json.dumps(state, ensure_ascii=False).encode(), extension="json")
     pause = {"pause_id": pause_id, "pause_generation": int(old.get("pause_generation") or 0) + 1,
@@ -182,12 +186,10 @@ def retain_owner_pause_park(root: pathlib.Path, task_id: str, attempt: int) -> D
              "retained_owner_wait_id": wait.get("wait_id"), "owner_fence_id": str(pause_meta.get("fence_id") or ""),
              "settlement": "external_writers_running" if task_owned_runs_open(external) else "settled",
              **episode_fields(pause_meta, external),  # the warm park's participants, partial if it kept no list
-             "external_runs": external, "resume_point": {"round_idx": int(state.get("round_idx") or 0),
-                                                         "phase": "boundary", "unanswered_tool_call_ids": [],
-                                                         "budget_tail": "tool", "abandoned_model_attempts": []},
+             "external_runs": external, "resume_point": point,
              "execution_drive_root": wait.get("execution_drive_root"), "started_at": wait.get("started_at"),
              # Keep the warm interval open through cold retention; Resume folds it once.
-             "paused_at": parked_at.timestamp() if parked_at else time.time(),
+             "paused_at": wait.get("sleep_started_at") or (parked_at.timestamp() if parked_at else time.time()),
              "paused_duration_sec": float(wait.get("budget_paused_sec") or 0),
              "model_wait_quota_clock": wait.get("model_wait_quota_clock") or {},
              "exact_continuation": True, "auto_resume": False, "replay_safe": False}

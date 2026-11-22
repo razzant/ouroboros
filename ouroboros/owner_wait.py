@@ -300,6 +300,35 @@ def store_continuation_source(ctx: Any, state: dict, source_id: str) -> dict:
 REASON_OWNER_PAUSE_WARM = "owner_pause"
 
 
+def _resume_point(round_idx: int, pending: list[str], *, selected: bool, budget_tail: str,
+                  abandoned: tuple[str, ...] | list[str] = ()) -> dict:
+    return {"round_idx": int(round_idx),
+            "phase": "partial_tool_batch_unknown" if pending else "candidate" if selected else "boundary",
+            "unanswered_tool_call_ids": list(pending), "unanswered_policy": "not_re_executed_execution_unknown",
+            "abandoned_model_attempts": list(abandoned), "budget_tail": budget_tail}
+
+
+def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = False) -> dict:
+    """Capture the phase once, whether the pause keeps its stack or releases it."""
+    from ouroboros.budget_pause import pending_tool_call_ids
+
+    return _resume_point(
+        int(limit_ctx.round_idx), pending_tool_call_ids(limit_ctx.messages),
+        selected=bool(delivery_candidate or getattr(limit_ctx, "resume_candidate", False)),
+        budget_tail=getattr(limit_ctx, "budget_tail", "tool"),
+        abandoned=list(getattr(ctx, "_abandoned_model_attempts", None) or []),
+    )
+
+
+def working_resume_point(state: dict) -> dict:
+    """Derive the same pause program counter from an expanded working-checkpoint state."""
+    working = state["working"]
+    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate",
+                            budget_tail=str(working.get("budget_tail") or "tool")),
+            "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
+
+
 def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
                           round_idx: int, tool_schemas: list, seen: set,
                           *, review_binding: str = "", pause: dict | None = None) -> dict:
@@ -650,7 +679,8 @@ def _owner_pause_wake(ctx: Any, checkpoint: dict) -> str:
     return f"control:{control}" if control else ""
 
 
-def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list) -> str:
+def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list,
+                         delivery_candidate: bool = False) -> str:
     """Park the SAME author stack warm under the owner's Pause (full variant, 2026-10-08).
 
     The member whose launched reviewers the Pause lets finish keeps its worker:
@@ -683,6 +713,7 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
         external = {"runs": [], "custody_read": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     pause = {"fence_id": str(fence.get("fence_id") or ""), "generation": int(fence.get("generation") or 0),
              "root_task_id": str(fence.get("root_task_id") or ""), "detached_reviews": list(detached),
+             "resume_point": pause_resume_point(limit_ctx, ctx, delivery_candidate=delivery_candidate),
              "external_runs": external, **episode_fields({}, external, starts=True), "parked_at": utc_now_iso()}
     from ouroboros import model_sleep
 

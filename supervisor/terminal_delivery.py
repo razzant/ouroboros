@@ -278,12 +278,11 @@ def _log_registry_corrupt(drive_root: Any, delivery_id: str, *, op: str) -> None
                                "delivery_id": str(delivery_id or "")})
 
 
-def register_pending_delivery(drive_root: Any, event: Dict[str, Any]) -> bool:
-    """Owe exact bytes before enqueue; retire only after confirmed send/receipt.
-
-    Newest _PENDING_CAP rows survive; eviction retains and discloses the payload.
-    Deferred handlers retain timestamps/sent facts. False is missing id or disclosed
-    failure (cancel stays open); True includes owed/delivered. Completion still tries live send."""
+def register_pending_delivery(drive_root: Any, event: Dict[str, Any], *, publication=None) -> bool:
+    """Owe exact bytes until confirmed delivery. Eviction retains and discloses the payload.
+    Deferred handlers retain timestamps and send facts.
+    False leaves cancellation open. True includes a previously owed or delivered answer."""
+    from ouroboros.delegate_resume import AnswerHeld
     did = str(event.get("delivery_id") or "").strip()
     if not did:
         return False
@@ -333,11 +332,13 @@ def register_pending_delivery(drive_root: Any, event: Dict[str, Any]) -> bool:
             if not main_delivery_current(drive_root, str(event.get("task_id") or ""), token):
                 return True  # an older send cannot replace the current publication's debt
         update_json_locked(_registry_path(drive_root), _mutate, strict_existing_dict=True,
-                           timeout_sec=bounded_wait(4.0))
+                           timeout_sec=bounded_wait(4.0), **({"publication": publication} if publication else {}))
     except ValueError:
         _log_registry_corrupt(drive_root, did, op="register_pending_delivery")
         _log_unregistered_delivery(drive_root, event, did)
         return False
+    except AnswerHeld:
+        raise
     except Exception:
         # Failed crash insurance is disclosed; the caller still tries the live send (GR3-4).
         log.error("terminal-delivery pending registration failed for %s", did, exc_info=True)

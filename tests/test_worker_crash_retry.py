@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._worker_recovery_helpers import _make_worker
+
 
 @pytest.fixture(autouse=True)
 def _isolate_worker_crash_state(tmp_path, monkeypatch):
@@ -67,23 +69,6 @@ def _make_task(task_id="abc123", attempt=1, chat_id=1):
         "text": "test",
         "_attempt": attempt,
     }
-
-
-def _make_worker(wid=0, alive=False, busy_task_id="abc123", exitcode=-11):
-    proc = MagicMock()
-    proc.is_alive.return_value = alive
-    proc.exitcode = exitcode
-    proc.pid = 12345
-    w = MagicMock()
-    w.wid = wid
-    w.proc = proc
-    w.busy_task_id = busy_task_id
-    # Real Worker defaults reaping=False; without this the MagicMock auto-attr is truthy
-    # and the new crash-detector reaping guard would skip the worker.
-    w.reaping = False
-    w.readiness_exhausted = False
-    w.active_capacity = True
-    return w
 
 
 def _run_health_and_reap():

@@ -128,19 +128,22 @@ function presenceWorkName(census, taskId) {
  * false: no door takes it yet). `work` is the confirmed work whose live episode this row is: a parked census phase
  * only guesses, so that work's word and line say it, the row's own outcome still leading, as on a queue row. A work's
  * episode is offered that work's controls only (the click handler, never the generic menu), and a parked row whose
- * work lists none (an unbound start no door reaches) shows no trigger at all. */
+ * work lists none (an unbound start no door reaches) shows no trigger at all. With no census row (`a === null`),
+ * the server's tail-only work supplies the ended episode, name, outcome and controls without a synthetic phase. */
 export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
+    const tailOnly = a === null;
+    a ??= {};
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
     const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
     const elapsed = spent ? ` · ${spent}` : '';
-    const truth = work && PARKED_PHASES.has(a.phase) ? workRowView(work) : null;
+    const truth = work && (tailOnly || PARKED_PHASES.has(a.phase)) ? workRowView(work) : null;
     const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work, truth && work) : null;
-    const own = !late && slot ? ownOutcomePhase(a) : null;
+    const own = !late && slot ? ownOutcomePhase(tailOnly ? { status: work.outcome } : a) : null;
     const outcome = own && truth ? { ...own, secondary: truth.word } : own;
     const presence = a.kind === 'presence';
-    // A Presence turn says its work's name; any other run the name its card shows (the producer's suggested_name).
-    const named = !late && (presence ? work?.name : String(a.suggested_name || '').trim());
+    // A Presence turn or tail-only row says its work's name; another census row uses its producer's suggested_name.
+    const named = !late && (presence || tailOnly ? work?.name : String(a.suggested_name || '').trim());
     const line = presence && work ? workLine(work) : truth?.secondary || '';
     const said = (text) => `<span data-i18n-skip>${esc(text)}</span>`;
     // The trigger says what a press will offer: its work's controls, else the card-state set the click opens.
@@ -149,14 +152,24 @@ export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume =
     const offers = !truth || actions.length > 0;
     const look = truth || ownCensusView(a).view;
     const mark = late || outcome ? '' : stateMark(look);
+    const target = tailOnly ? work.episode.task_id : a.activity_id;
+    const tail = tailOnly ? ` data-tail-work="${esc(work.work_id)}"` : '';
+    // A work the server marks with an accepted unbound start (#3428): its Stop confirmation says the request.
+    const unbound = work?.unbound_start ? ' data-unbound-start="1"' : '';
     const trigger = (presence && a.cancelable === false) || !offers ? ''
-        : `<div class="ui-row-actions activity-row-actions"><button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button></div>`;
+        : `<div class="ui-row-actions activity-row-actions"><button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${esc(target || '')}" data-root="1"${tail}${unbound}${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button></div>`;
     return `<div class="ui-row activity-row">
-                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[a.kind] || 'Live turn')}</span>
+                <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[tailOnly ? 'managed_task' : a.kind] || 'Live turn')}</span>
                 <span class="ui-row-meta activity-sub">${late ? late.sub : `${mark}${outcome ? `${slot(outcome)}${line ? ` · ${said(line)}` : ''}`
                     : said([truth ? truth.word : censusWords(a), line].filter(Boolean).join(' · '))}${elapsed}`}</span>
                 ${trigger}
             </div>`;
+}
+
+function delegatedTailWorks(census) {
+    const works = Array.isArray(census?.works) ? census.works : [];
+    return works.filter((work) => work?.confirmed !== false && work?.work_id && work.episode?.live === false
+        && work.episode.task_id && work.tails?.some((tail) => tail.kind === 'run'));
 }
 
 /** The shared status mark of a row's state, beside its word: the work's own shape, the owner's move in amber. */
@@ -541,7 +554,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${label}</span>
                 <span class="ui-row-meta activity-sub">${meta}${projectWait}</span>
                 <div class="ui-row-actions activity-row-actions">
-                    <button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>
+                    <button type="button" class="btn btn-sm btn-default" data-act="task-control" data-id="${id}"${budgetPaused ? ' data-budget-paused="1"' : ''}${resumable.has(ownId) ? ' data-resume="1"' : ''}${root ? ' data-root="1"' : ''}${work?.unbound_start ? ' data-unbound-start="1"' : ''} data-task-control-direct="1">${esc(taskControlTriggerLabel(actions))}</button>
                 </div>
                 ${rowDetailsHtml({ key: `order:${ownId}`, open: isOpen(`order:${ownId}`), text: order, title: named })}
             </div>`;
@@ -554,16 +567,23 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const queued = running.filter((q) => !q?.task?._presence_run);
         const known = new Set([...queued, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
+        const represented = new Set([...known, ...live.map((a) => String(a.activity_id || ''))]);
+        const tails = delegatedTailWorks(census).filter((work) => !represented.has(String(work.episode.task_id)));
         const items = [...queued.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
             ...live.map((a) => {
                 const work = workOfEpisode(census, a.activity_id);
                 return { html: liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')), work),
                     rank: a.phase === 'budget_paused' || work?.activity === 'paused' ? RANKS.paused : RANKS.working };
-            })];
+            }), ...tails.map((work) => ({ html: liveActivityRowHtml(null, Date.now(), phaseSlot, false, work),
+                rank: RANKS[work.activity] ?? RANKS.unknown }))];
         if (!items.length) {
-            return census?.active_chat_activities_complete === true
+            // An empty list needs BOTH completeness proofs: a complete census beside an incomplete work
+            // projection (an unreadable delegated custody) can hide an ended task's unconfirmed helper
+            // (#3428), so the unknown side says what is unknown — never "nothing".
+            const turns = census?.active_chat_activities_complete === true;
+            return turns && census?.works_complete !== false
                 ? '<div class="activity-empty">Nothing running or queued.</div>'
-                : '<div class="activity-empty">Queue empty; live turns unknown.</div>';
+                : `<div class="activity-empty">Queue empty; ${turns ? 'work status' : 'live turns'} unknown.</div>`;
         }
         const ordered = items.map((item, index) => ({ ...item, index })).sort((a, b) => a.rank - b.rank || a.index - b.index);
         const paused = ordered.filter((item) => item.rank === RANKS.paused).map((item) => item.html);
@@ -731,12 +751,15 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // running, Stop earlier attempt the earlier ones, each at the server's exact target. It offers
             // only those: a work that lists none opens nothing, never the generic menu below, whose Stop or
             // Resume a door that work does not list would refuse.
-            const work = btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
+            const tail = btn.dataset.tailWork;
+            const work = tail ? delegatedTailWorks(lastCensus).find((w) => w.work_id === tail && w.episode.task_id === id)
+                : btn.dataset.root === '1' ? workOfEpisode(lastCensus, id) : null;
             if (work) {
                 openWorkControls(btn, work, { cancelPending: taskCancelPending(stored), withResume: true,
                     afterAction: refresh });
                 return;
             }
+            if (tail) return; // A vanished tail never falls back to the generic live-task menu.
             openTaskControlMenu(btn, {
                 cancelPending: taskCancelPending(stored),
                 budgetPaused: btn.dataset.budgetPaused === '1',
