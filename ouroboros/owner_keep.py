@@ -221,8 +221,10 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
             if canonical.resolve(strict=False) != canonical:
                 raise OSError("canonical artifact store reached through a link")
             handles = canonical / "source_handles"  # a saved state is named by its folder, never per file
-            places += [str(path) for path in iter_artifact_tree(canonical) if path.is_file() and not path.is_symlink()
-                       and not (path.parent.parent == handles and worked_copy(path.parent.name, path.name))]
+            for path in iter_artifact_tree(canonical):
+                if path.is_file() and not path.is_symlink():  # one that arrived after the first walk names its folder
+                    saved = path.parent.parent == handles and worked_copy(path.parent.name, path.name)
+                    places.append(SAVED_STATES_PLACE + str(path.parent) if saved else str(path))
     except OSError:
         unknown.append("canonical_payloads")
     read = read_records(root)

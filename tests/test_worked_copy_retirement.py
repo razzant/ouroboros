@@ -284,6 +284,25 @@ def test_a_malformed_release_record_still_saves_keep_and_the_next_pass_leaves_th
     assert all(path.is_file() for path in copies)
 
 
+def test_a_first_saved_state_arriving_after_the_folder_walk_is_kept_by_its_folder(root, monkeypatch):
+    """The only material of a work is a saved state written after Keep's first folder walk: the canonical walk names
+    its folder, so Keep is saved (never already_retired) and the next pass leaves the file."""
+    from ouroboros import saved_state_retirement
+    from ouroboros.owner_keep import set_owner_keep
+    from ouroboros.task_store import read_document
+
+    handles = _task(root, "arrival")
+    write_task_result(root, "arrival", "completed", child_drive_root=str(root / "task_drives" / "arrival-settled"))
+    copy = _file(handles / "working" / "working_checkpoint-a1.json")
+    with monkeypatch.context() as patch:
+        patch.setattr(saved_state_retirement, "worked_copies_in", lambda _folder: [])  # the first walk saw nothing
+        answer = set_owner_keep(root, "arrival", keep=True, source={"basis": "test"})
+    assert answer["status"] != "already_retired" and f"saved_states:{copy.parent}" in answer["retained"], answer
+    assert str(copy) not in answer["retained"] and read_document(root, "arrival").get("owner_keep")
+    report = _prune(root)
+    assert report["held"] == {"owner_keep": 1} and copy.is_file(), report
+
+
 @pytest.mark.parametrize("walk", ["missed", "raised"])
 def test_keep_names_a_saved_state_by_what_it_is_even_when_the_folder_walk_misses_it(root, monkeypatch, walk):
     """Keep's per-file listing leaves a saved state out by its folder and its writer's name, not by the earlier walk:
