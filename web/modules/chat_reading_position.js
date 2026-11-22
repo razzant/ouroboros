@@ -12,10 +12,7 @@ const MOVE_FRAMES = 3, WIDTH_HELD_FRAMES = 12;
 export function createChatReadingPosition({ visible, alive, ready, feed, anchors, changed, afterWrite, activity, updateButton }) {
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
-    let viewportAnchor = null, width = feed.clientWidth, anchorTop = 0;
-    // Where the feed itself is laid out in the page (no transform): the bar entering the flow under a phone keyboard
-    // moves it, and a kept place moves the text back by as much, so the passage stays where it is on the screen.
-    const feedTop = () => { let y = 0; for (let node = feed; node; node = node.offsetParent) y += node.offsetTop; return y; };
+    let viewportAnchor = null, width = feed.clientWidth;
     // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
@@ -84,7 +81,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
         get approximate() { return approximate; },
         remember(force = false) {
             if (intent || !visible() || (!force && width !== feed.clientWidth)) return;
-            width = feed.clientWidth; viewportAnchor = anchors.capture(); anchorTop = feedTop();
+            width = feed.clientWidth; viewportAnchor = anchors.capture();
         },
         reflow() {
             noteWidth();
@@ -97,10 +94,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
             if (intent) { if (visible()) settledBox = feedBox(); state.position(); return; }
             if (!visible()) return;
             if (state.stick) feed.scrollTop = feed.scrollHeight;
-            else if (anchors.restore(viewportAnchor)) {
-                const moved = feedTop() - anchorTop;
-                if (Math.abs(moved) > 0.5) feed.scrollTop += moved;
-            }
+            else anchors.restore(viewportAnchor);
             settledBox = feedBox(); state.top = feed.scrollTop; state.remember(true); updateButton();
         },
         scroll() {
