@@ -639,7 +639,8 @@ def test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it
     assert medium["consciousness-model"]["titleLines"] == 1
     assert medium["consciousness-model"]["valueLines"] <= (1 if width >= 1000 else 2), medium["consciousness-model"]
 
-    route["value"] = "groq::meta-llama/llama-4-maverick-17b-128e-instruct"
+    # A known provider kind is stripped from the shown route; an unknown head is one OpenRouter id shown whole (#3943).
+    route["value"] = "openrouter::meta-llama/llama-4-maverick-17b-128e-instruct"
     with page.expect_response(_answers("/api/consciousness")) as refreshed:
         page.clock.fast_forward(21_000)
     _applied(page, refreshed)
