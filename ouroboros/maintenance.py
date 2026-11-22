@@ -39,9 +39,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros import (delegate_capture_job, delegate_pending, delegate_result_taken, historical_retirement,
-                       maintenance_jobs, maintenance_retirement, plan_collection_job, record_compression,
-                       room_appearances, room_messages, store, subagent_metrics)
+from ouroboros import (delegate_capture_job, delegate_pending, delegate_result_taken, dialogue_word_index,
+                       historical_retirement, maintenance_jobs, maintenance_retirement, plan_collection_job,
+                       record_compression, room_appearances, room_messages, store, subagent_metrics)
 from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -439,6 +439,7 @@ JOBS: Dict[str, tuple] = {
     "memory_tail": (_tail_due, _resumable("memory_tail", "ouroboros.memory_inventory", "fill_tail")),  # after the import
     "room_appearances": (room_appearances.due, _resumable("room_appearances", "ouroboros.room_appearances")),  # likewise
     "room_messages": (room_messages.due, _resumable("room_messages", "ouroboros.room_messages")),  # dates the history
+    "dialogue_words": (dialogue_word_index.due, _resumable("dialogue_words", "ouroboros.dialogue_word_index")),
     "hot_facts": (_hot_facts_due, _hot_facts_run),
     "ended_plan_asks": (plan_collection_job.due, plan_collection_job.run),
     "custody_trash": (_trash_due, _trash_run),  # before retirement: a removed drive's bytecode goes in the same pass

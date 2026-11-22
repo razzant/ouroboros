@@ -29,7 +29,7 @@ from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execu
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
 from ouroboros.server_auth import (
-    NetworkAuthGate,
+    NetworkAuthGate, recall_serving_app,
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
@@ -1485,7 +1485,7 @@ def main() -> int:
         log.info("Stop requested before the server started serving; exiting.")
         return 0
     server.config = uvicorn.Config(
-        app,
+        **recall_serving_app(app),  # proxy headers apply inside the recall door's raw-peer check (server_auth)
         host=args.host,
         port=actual_port,
         log_level="warning",

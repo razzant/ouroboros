@@ -111,7 +111,7 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   needs; finished history, its own included, grows that work only through what they read; a computation
   with no reader left on that path is removed from it. Unknown is never empty; no universal time limit,
   benchmark or approval gate.
-- **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
+- **Passive GET:** rendering/stored display adds no steady-state writes; the recall door's count row is the exception (PERSISTENCE). Already-performed
   external discovery may store typed provider facts through their existing evidence owner;
   this permits no new network or control-state writes. `usage_store.py::read` may initialize
   an empty store without pending import (`tests/test_usage_store.py`).

@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 from pathlib import Path
 from ouroboros.config import runtime_setting
+from ouroboros.dialogue_recall import WORDS_DESCRIPTION
 
 
 def _evolution_restart_block_reason(ctx: ToolContext) -> str:
@@ -330,12 +331,45 @@ def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "")
             "It will be queued and executed asynchronously.")
 
 
+# The schema beside its handler: _chat_history reads exactly these argument names, so one place owns them.
+CHAT_HISTORY_SCHEMA = {
+    "name": "chat_history",
+    "description": "Retrieve live and archived chat messages. Supports exact provenance/date filters, substring search or words, and pagination.",
+    "parameters": {"type": "object", "properties": {
+        "count": {"type": "integer", "default": 100, "description": "How many rows to return. With words, the first of the requested order; otherwise the latest."},
+        "offset": {"type": "integer", "default": 0, "description": "How many rows to skip in that order. Without words, skip that many from the latest."},
+        "search": {"type": "string", "default": "", "description": "Text filter"},
+        "provider": {"type": "string", "default": "", "description": "Exact transport provider"},
+        "account_id": {"type": "string", "default": "", "description": "Exact transport account ID"},
+        "conversation_id": {"type": "string", "default": "", "description": "Exact transport conversation ID"},
+        "thread_id": {"type": "string", "default": "", "description": "Exact transport thread ID"},
+        "actor_id": {"type": "string", "default": "", "description": "Exact platform actor ID"},
+        "date_from": {"type": "string", "default": "", "description": "Inclusive ISO-8601 lower timestamp bound"},
+        "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
+        "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
+        "words": {"type": "array", "items": {"type": "string"}, "description": WORDS_DESCRIPTION},
+        "room_id": {"type": "string", "description": "With words: one room's chat id (1 is Main)."},
+        "voice": {"type": "string", "enum": ["owner"], "description": "With words: only rows of my human's own words, a card they answered included."},
+        "order": {"type": "string", "enum": ["newest", "oldest"], "description": "With words: newest (default) or oldest first by recorded time; oldest puts an original before its later restatements."},
+    }, "required": [], "additionalProperties": False},
+}
+
+
 @completed_local_read
 def _chat_history(
     ctx: ToolContext, count: int = 100, offset: int = 0, search: str = "",
-    snapshot: str = "", **filters: str,
+    snapshot: str = "", words: list | None = None, room_id: str = "", voice: str = "", order: str = "",
+    **filters: str,
 ) -> str:
+    from ouroboros import dialogue_recall
     from ouroboros.memory import Memory
+    from ouroboros.tools.arg_feedback import argument_refusal
+
+    try:  # words, room_id, voice and order: the words reader (``dialogue_recall``); without them, the legacy one
+        query, room = dialogue_recall.check_arguments(words, search=search, room_id=room_id, voice=voice, order=order,
+                                                      filters=filters)
+    except ValueError as exc:
+        return argument_refusal(ctx, "TOOL_ARG_ERROR (chat_history)", [str(exc)], effect="Nothing was read.")
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(
         getattr(ctx, "task_metadata", {}), dict
     ) else {}
@@ -348,6 +382,9 @@ def _chat_history(
     # Full project awareness (v6.32.0): the one mind's active recall spans every
     # thread (main + projects). The project-task working FOCUS is applied to the
     # passive default context only, never to this deliberate recall tool.
+    if query is not None:
+        return dialogue_recall.words_history(mem, query, room=room, voice=voice, order=order, count=count,
+                                             offset=offset, snapshot=snapshot, filters=filters)
     return mem.chat_history(
         count=count, offset=offset, search=search, snapshot=snapshot, **filters,
     )
