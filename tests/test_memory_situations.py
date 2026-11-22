@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from ouroboros import dialogue_import, dialogue_store, places
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.memory_view import view_room_id
-from ouroboros.memory_view_events import CARRIED_NAMES, carried_room, helper_names, situation_names
+from ouroboros.memory_view_events import CARRIED_NAMES, WAKE, carried_room, helper_names, situation_names
 from ouroboros.places import connect_place, conversation_chat_id
 from ouroboros.presence_bindings import conversation_key
 from ouroboros.presence_context import focus_metadata
@@ -113,6 +113,65 @@ def test_a_helper_carries_its_place_turns_names_by_value_and_reads_their_room(tm
     assert situation_names({"metadata": inherited}, "1") == ("room:1", *names[1:]) and carried_room(inherited) is None
     assert view_room_id({"metadata": inherited}, None, tmp_path, project_chat_ids=()) == "1"
     assert helper_names(uncarried, tmp_path) == ()
+
+
+OWN_WAKE = {"initiator": "consciousness", "usage_category": "consciousness", "wake_cause": "own_clock",
+            "consciousness_cause": "own", "work_kind": "consciousness", "consciousness_autonomy": "act"}
+
+
+def test_only_an_own_clock_wake_has_the_wake_name_and_no_helper_carries_it(tmp_path):
+    """``wake`` is a host fact of the own clock's wake alone, read under ``metadata`` or flat as a ctx's: a Main turn,
+    a focus wake, a Presence turn, a root the wake starts and a helper have their own names only, and no helper is
+    handed it, whether the wake schedules it or a helper passes carried names on; Main's room is carried as before."""
+    assert situation_names({"id": "wake", "chat_id": 1, "metadata": OWN_WAKE}, "1") == ("room:1", WAKE)
+    assert situation_names(dict(OWN_WAKE), "1") == ("room:1", WAKE)
+    focus = {**OWN_WAKE, "wake_cause": "focus", "focus": {"place_id": "team", "room_chat_id": 789}}
+    started = consciousness_origin_metadata(OWN_WAKE, started_root=True)
+    child = {**consciousness_origin_metadata(OWN_WAKE), "delegation_role": "subagent"}
+    assert "wake_cause" not in started and "wake_cause" not in child
+    for metadata, room, names in (({}, "1", ("room:1",)), (focus, "789", ("room:789", "place:team")),
+                                  ({"presence": {"place_id": "team"}}, "789", ("room:789", "place:team")),
+                                  (started, "1", ("room:1",)), (child, "1", ("room:1",))):
+        assert situation_names({"type": "task", "metadata": metadata}, room) == names
+
+    wake = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="wake", current_chat_id=1,
+                       task_metadata=dict(OWN_WAKE))
+    assert helper_names(wake, tmp_path) == ("room:1",)
+    for carried in (["room:1", WAKE], ["room:1"]):  # a record carrying it (no build writes one) passes it on without it
+        passing = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child",
+                              task_metadata={**child, CARRIED_NAMES: carried})
+        assert helper_names(passing, tmp_path) == ("room:1",)
+
+
+def test_carried_names_keep_wake_only_for_an_own_clock_wake(tmp_path):
+    """Ordinary task admission keeps the names a task carries (``gateway.tasks``): ``wake`` among them stays only for
+    an own-clock wake, the rule ``helper_names`` applies to what a helper passes on, so no other focus holds the notes
+    claiming it or names it in its receipts; the other carried names stay."""
+    names = ["room:1", WAKE, "place:team"]
+    for task in ({"type": "task", "metadata": {CARRIED_NAMES: names}}, {CARRIED_NAMES: names}):
+        assert situation_names(task, "1") == ("room:1", "place:team")
+    assert situation_names({"metadata": {**OWN_WAKE, CARRIED_NAMES: names}}, "1") == tuple(names)
+    carrying = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="owner-task", current_chat_id=1,
+                           task_metadata={CARRIED_NAMES: ["room:1", WAKE]})
+    receipt = _knowledge_read(carrying, "unwritten", scope="global").splitlines()
+    assert "This situation's names: room:1 (Main)" in receipt
+
+
+def test_a_wakes_receipts_name_it_and_a_claim_of_it_is_a_present_situation(tmp_path):
+    """Inside a wake the receipts' names line adds ``wake`` in words; a Main turn's line is as it was. A note claiming
+    ``wake``, written from either, stands where a present situation holds it, and an unknown name still matches none."""
+    wake = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="wake", current_chat_id=1,
+                       task_metadata=dict(OWN_WAKE))
+    main = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="main", current_chat_id=1)
+    assert "This situation's names: room:1 (Main), wake (a wake my own clock started)" in _knowledge_read(
+        wake, "unwritten", scope="global").splitlines()
+    assert "This situation's names: room:1 (Main)" in _knowledge_read(main, "unwritten", scope="global").splitlines()
+    for ctx in (main, wake):
+        reply = _knowledge_write(ctx, f"own-time-{ctx.task_id}", mode="overwrite",
+                                 content="---\nclaims: ['wake', 'wake:other']\n---\nWhat I return to.")
+        assert reply.startswith("✅"), reply
+        assert _claim_diagnostic(reply, "Present situations holding this note: ") == WAKE
+        assert _claim_diagnostic(reply, "Claims with no matching situation found: ") == "'wake:other'"
 
 
 def test_legacy_conversation_keys_resolve_only_unambiguous_components():

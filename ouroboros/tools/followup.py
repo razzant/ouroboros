@@ -47,7 +47,7 @@ import uuid
 from typing import Any, Dict, List
 
 from ouroboros.consciousness_authority import consciousness_origin_metadata, work_kind
-from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.deadline_utils import naive_instant, parse_deadline_ts
 from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier, presence_root_relation
 from ouroboros.settings_scales import EFFORT_SCALE, requested_effort
 from ouroboros.tools.arg_feedback import ignored_argument_note
@@ -240,7 +240,7 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
                 f"ERROR: FOLLOWUP_EFFORT_INVALID: {exc}. Nothing changed.")))
         if effort:
             patch["reasoning_effort"] = effort
-    if patch.get("timezone") and _naive_instant(patch.get("run_at", "")):
+    if patch.get("timezone") and naive_instant(patch.get("run_at", "")):
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
             f"ERROR: FOLLOWUP_TIMEZONE_WITH_RUN_AT: run_at={patch['run_at']!r} carries no UTC offset and "
             "timezone applies only to recurring cron schedules. Put the offset into run_at "
@@ -473,16 +473,6 @@ def _pending_followups(records: List[Dict[str, Any]], task_id: str) -> List[Dict
     return out
 
 
-def _naive_instant(raw: str) -> bool:
-    """True when an ISO instant names no UTC offset (such a time is read as UTC)."""
-    from datetime import datetime
-
-    try:
-        return datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw).tzinfo is None
-    except ValueError:
-        return False
-
-
 def _destination_error(ctx: ToolContext, destination: Any, *, new_work: bool) -> str:
     """The refusal of a call's ``destination``, else ``""``; read before any schedule or audit write.
 
@@ -539,7 +529,7 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     if run_at_raw:
         instant = parse_deadline_ts(run_at_raw)
         if timezone and instant is not None:
-            if _naive_instant(run_at_raw):
+            if naive_instant(run_at_raw):
                 # A zone beside a run_at WITHOUT an offset asks for something: ignoring it would
                 # schedule the naive time as UTC, hours away from what was meant.
                 return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(

@@ -192,7 +192,8 @@ def test_the_clock_admits_with_its_facts_and_the_carrier_prepares_the_wake(monke
                               "repo_dir": str(tmp_path), "last_wake_at": 5.0, "last_wake_task_id": "w0",
                               "disabled_tools": [], "window": {"settled_usd": 1.0, "unknown_unmetered": 0,
                                                                "limit_usd": 5.0, "spend_by_cause": None},
-                              "counted_roots": [], "max_tasks": 2, "interval": 600, "appointment_at": 20.0}}
+                              "counted_roots": [], "max_tasks": 2, "interval": 600, "appointment_at": 20.0,
+                              "clock": {"consciousness_appointment_at": 20.0, "floor": 900, "ceiling": 14400}}}
     observed, rendered = [], []
     observation = SimpleNamespace(full_text=lambda: "EVENTS", overview_text=lambda s: "OVERVIEW",
                                   source_bytes=lambda: b"{}\n", captured_at="t", window={}, counts=lambda: {},
@@ -204,7 +205,8 @@ def test_the_clock_admits_with_its_facts_and_the_carrier_prepares_the_wake(monke
                         lambda root, task, obs, render: {"task_id": task["id"], "seq": 4})
     monkeypatch.setattr("ouroboros.consciousness_view.place_views", lambda root, window: None)
     consciousness_wake.prepare_wake(task, tmp_path)
-    assert observed == [{"boundary": {"seq": 3}, "since": 10.0, "now": 20.0, "reason": "heartbeat"}]
+    assert observed == [{"boundary": {"seq": 3}, "since": 10.0, "now": 20.0, "reason": "heartbeat",
+                         "clock": {"consciousness_appointment_at": 20.0, "floor": 900, "ceiling": 14400}}]
     assert task["text"] == "RENDERED:EVENTS" and "_wake_prepare" not in task
     assert task["metadata"]["wake_observation"]["accepted_boundary"] == {"task_id": "w1", "seq": 4}
     assert rendered[0]["previous_wake"] == "prev" and rendered[0]["running"] == 0
