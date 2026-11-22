@@ -348,6 +348,9 @@ def _account_changed(harness: str, profile_id: str, enabled=None, *, home: str |
             roster["accountPools"] = []
             roster.pop("routing_evidence", None)
             roster.pop("routing_evidence_read", None)
+    from ouroboros.subscription_census import account_changed
+
+    account_changed(enabled)  # a removal or disable marks the census pending; every change asks for a read
 
 
 def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False,
@@ -1061,6 +1064,8 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
                     # or transport failure still becomes the proxy's honest 503.
                     exc.login_profile_verdict = True
                     raise
+            else:  # a new account: the revision moves and the subscription census reads again
+                _account_changed(harness, profile_id, True)
 
         def _create() -> Dict[str, Any]:
             try:

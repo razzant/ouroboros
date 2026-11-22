@@ -318,10 +318,11 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
     scroll_to = lambda at: sidebar.evaluate("(el, at) => { el.scrollTop = at; return el.scrollTop; }", at)
     # Three zones (DESIGN "Shell", "Navigation"): a window this short cannot hold them, so the column itself is the
-    # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
-    # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
-    # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
-    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # ONE scroller and the Projects list shows every row in flow (no inner scroller). Where the card, one Project row
+    # and the sections still fit between the two bars, Main is pinned at the top and the sections on the bottom edge
+    # (400 px); a column shorter still lets both bars go with the list, the card one scroll up and the sections at its
+    # end, since two pinned bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489;
+    # the sections joined the card there in #3972, DESIGN "Navigation": "at its two ends"). Each step waits for
     # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it; a page
     # that draws no frame for 5 s fails there, by a timer.
     frames = lambda: page.evaluate("""() => new Promise((resolve, reject) => {
@@ -337,7 +338,13 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
         assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
         scroll_to(0)
         frames()
-        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        crowd = sidebar.evaluate("el => el.hasAttribute('data-bars-crowd')")
+        foot = sidebar.evaluate("el => getComputedStyle(el.querySelector('.sidebar-foot')).position")
+        assert crowd is (not pinned), ("two pinned bars fit only where a Project row fits between them", height)
+        if pinned:
+            assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        else:
+            assert foot == "static", ("the sections go with the list where the bars crowd", height, foot)
         top_before = main_top()
         scrolled = scroll_to(10 ** 6)
         frames()

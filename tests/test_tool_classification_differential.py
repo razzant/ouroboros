@@ -696,6 +696,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # presence_finish, refused before Safety/staging with native ACCESS_BLOCKED; bare `_ARGUMENT` is generic ok.
     "SCHEDULE_REPORT_FIXED_ARGUMENT": (False, "ok"),
     "native:ACCESS_BLOCKED:SCHEDULE_REPORT_FIXED_ARGUMENT": (True, "blocked"),
+    # #3981 control_storage._read_refusal: a task outside what the caller may read is refused before anything is read
+    # or proposed. The bare line is a policy denial like every ACCESS_BLOCKED publication; the retired pair never saw it.
+    "ACCESS_BLOCKED": (True, "blocked"),
 }
 
 

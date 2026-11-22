@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -16,19 +15,23 @@ import pytest
 from ouroboros.tools.core import _code_search, _edit_text, _is_search_skippable, _write_file
 from ouroboros.tools.core_file_tools import _read_file
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
+
+def _lay_repo(folder):
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.name", "Test")
+    world_git(repo, "config", "user.email", "test@example.com")
+    (repo / "README.md").write_text("hello workspace\n", encoding="utf-8")
+    world_git(repo, "add", "-A")
+    world_git(repo, "commit", "-m", "init")
 
 
 def _make_ctx(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    repo = clone_repository(world("filesystem-root-observability-repo", _lay_repo) / "repo", tmp_path / "repo")
     drive = tmp_path / "data"
     drive.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
-    (repo / "README.md").write_text("hello workspace\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
     return ToolContext(repo_dir=repo, drive_root=drive)
 
 

@@ -25,7 +25,7 @@ def progress(root):
     return json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("outcome", ["refused", "abandoned", "switched"])
+@pytest.mark.parametrize("outcome", ["refused", "abandoned", "switch_not_performed", "switched"])
 def test_next_boot_reports_failed_switch_once(switch_root, target_repo, owner_chat, outcome):
     root, (repo, old, _) = switch_root, target_repo
     intent(root, old)
@@ -56,11 +56,12 @@ def test_next_boot_reports_failed_switch_once(switch_root, target_repo, owner_ch
         assert owner_chat == []
         return
     [(chat, text, voice)] = owner_chat
+    notice = voice.pop("progress_meta")["notice"]
     assert chat == 7 and voice == {"role": "system", "system_type": "storage_switch_notice", "require_write": True}
-    assert "Rollback" in text and "v7.6.0" in text and "did not happen" in text
-    assert "current version" in text and "again" in text and "\n" not in text
-    reasons = {"refused": "could not confirm", "abandoned": "failed twice",
-               "switch_not_performed": "stopped", "switch_failed": "checkout could not be changed"}
+    assert "Rollback" in text and "did not happen" in text and "v7.6.0" in notice["details"]
+    assert "current version" in text and notice["step"] == "press_again" and "\n" not in text
+    # A cause the host knows is said in words (a checkout's own message would be the notice's detail).
+    reasons = {"refused": "could not confirm", "abandoned": "failed twice", "switch_not_performed": "stopped"}
     assert reasons[outcome] in text
     assert all(row["reported"] for row in progress(root)["outcomes"])
     state.init(root)  # a new boot reloads durable state, not a process-local sent flag
@@ -111,6 +112,7 @@ def test_previous_body_outcome_and_failed_send_remain_owed(switch_root, target_r
         store_switch.startup_notice(root)
     assert owner_chat == [] and progress(root) == legacy
     store_switch.startup_notice(root)
-    assert len(owner_chat) == 1 and "Automatic rollback to v7.6.0" in owner_chat[0][1]
+    assert len(owner_chat) == 1 and "Automatic rollback did not happen" in owner_chat[0][1]
+    assert "Automatic rollback to v7.6.0" in owner_chat[0][2]["progress_meta"]["notice"]["details"]
     store_switch.startup_notice(root)
     assert len(owner_chat) == 1 and progress(root)["outcomes"][0]["reported"]

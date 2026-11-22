@@ -205,6 +205,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/onboarding/bootstrap",
     "POST /api/onboarding/subagents/preview",
     "POST /api/onboarding/model-catalog",
+    "POST /api/onboarding/connection/identity",
     "POST /api/onboarding/complete",
     "GET /api/onboarding/complete",
     "GET /api/files/list",
@@ -270,6 +271,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/onboarding/model-catalog": Shape(
         "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
+    "POST /api/onboarding/connection/identity": Shape(
+        "200:ConnectionIdentityResponse 400,404,500,503:ConnectionIdentityResponse", "ConnectionIdentityRequest",
+        note="writes nothing; the declared function of a built-in skill's connection card names the token's account"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
         "OnboardingCompleteRequest", note="the one atomic setup writer; a 503 with can_skip offers completion without agent presets"),

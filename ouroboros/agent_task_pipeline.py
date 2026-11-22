@@ -1090,8 +1090,8 @@ def emit_task_results(
     if stored_result.get("status"):  # post-store carriers state the stored row's word
         outcome_axes = lifecycle_named(outcome_axes, str(stored_result["status"]))
     # A split root may dispatch on the parent drive before its actor result is copied back.
-    post_usage = ({
-        **(usage or {}), "rounds": loop_rounds, "outcome_axes": outcome_axes, "reason_code": reason_code,
+    post_usage = ({  # the terminal seam's host notice row stays with the answer, never with post-task work
+        **{k: v for k, v in (usage or {}).items() if k != "host_notice_row"}, "rounds": loop_rounds, "outcome_axes": outcome_axes, "reason_code": reason_code,
         **({"typed_routing_action": _typed_routing_action} if _typed_routing_action else {}),
     } if _root_outbox else {})
     if _root_outbox and task.get("_skip_post_task_synthesis"):

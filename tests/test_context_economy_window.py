@@ -974,9 +974,8 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     assert text == "Primary answered after return." and len(payloads) == 3
     rebound = [row for row in _drained(events) if row.get("checkpoint_kind") == "context_fit_route_rebound"]
     mode = {"roomy": "low", "tight": "nano"}[fallback]
-    named = {"roomy": "max", "tight": "nano"}[fallback]  # Max with chapter maps is named Max (4A)
     assert [(row["preferred_mode"], row["effective_mode"], row["books"], row["view_kept"]) for row in rebound] == [
-        ("max", named, "maps", fallback == "roomy"), ("max", named, "maps", True)]
+        ("max", mode, "maps", fallback == "roomy"), ("max", mode, "maps", True)]  # a Low for the window is Low (21.11)
     assert tools._ctx.active_context_mode == mode and tools._ctx.context_fit_plan.preferred_mode == "max"
     assert tools._ctx.messages[0] == tools._ctx.context_fit_plan.projection(mode).system_message()
     assert ("cannot hold Max with even the shortest view of my memory; this task runs in Nano."  # kept by the return
@@ -1128,8 +1127,8 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
     # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
-    assert [(row.get("effective_mode"), row.get("books")) for row in rows  # Max with chapter maps is named Max (4A)
-            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("max", "maps")]
+    assert [(row.get("effective_mode"), row.get("books")) for row in rows  # a Low for the window is Low (21.11)
+            if row.get("checkpoint_kind") == "context_memory_coarsened"] == [("low", "maps")]
     assert "context_fit_low_retry" not in kinds
 
     def shows(sent, whole):
@@ -1150,7 +1149,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from ouroboros.transcript_prefix import message_digest
     assert {message_digest(first[1]), message_digest(owner)} <= {message_digest(row) for row in low}
     note = low[2]["content"]
-    assert f"Max cuts for the window ({window} tokens)." in note  # the owner's Max with chapter maps (owner 15.11, 4A)
+    assert f"Low cuts for the window ({window} tokens)." in note  # Low, temporarily, for the window (owner 21.11)
     assert "does not hold all of my memory" not in note and "cannot hold" not in note
     # The task's trace keeps the fact of the Low view sent, not the whole Max view of its start: a writer reads
     # what the request actually showed only by address.
@@ -1208,7 +1207,8 @@ def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
     assert tools._ctx.active_context_mode == owner_mode
 
 
-@pytest.mark.parametrize("owner_mode,window", [("low", 300_000), ("nano", 300_000), ("max", 400_000)])
+# Max's whole body fits with room to spare: 400K left tens of tokens, which the facts row's measure by part spends.
+@pytest.mark.parametrize("owner_mode,window", [("low", 300_000), ("nano", 300_000), ("max", 410_000)])
 def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
         main_call, monkeypatch, tmp_path, owner_mode, window):
     import functools
@@ -1260,7 +1260,7 @@ def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
     active_window = windows[sent["account"]["profileId"]]
     # The delivery sizes a chosen body against the line this request is admitted at (the stated window less the reply
     # floor; Nano's reserve is that floor). On the 300K window the bounded view fills it, so the host rows added after
-    # it pass that line and the candidate recovers before the send, as it always did; on the 400K window the whole
+    # it pass that line and the candidate recovers before the send, as it always did; on the 410K window the whole
     # body and those rows fit under it: the delivery is complete (it leaves no receipt) and nothing is refused.
     assert bounded_prompt_tokens_for_payload(sent, 0) + 8_192 <= active_window
     assert bool(deliveries) is (window < 400_000)

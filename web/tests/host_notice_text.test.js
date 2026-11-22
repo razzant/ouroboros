@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
-import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, toolErrorDisplayText } from '../modules/host_notice_text.js';
+import { HOST_NOTICE_PREFIXES, RETIRED_HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText, noticeLine, toolErrorDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { cardRowSummary } from '../modules/chat_activity.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
@@ -186,6 +186,50 @@ test('a live startup row paints the same; authored, unknown and untyped System r
     } finally { f.close(); }
 });
 
+// A host notice (ouroboros/host_notice.py): the window draws it as its server assembled it — the phrase and its step
+// in the install's language, the line Telegram and Copy say — with its raw details behind Details (DESIGN principle 7).
+const NOTICE = { code: 'task_exception', details: 'ValueError: boom', line: 'This turn stopped on an unexpected error.' };
+
+test('a host notice says its one line wherever it is drawn; any other row keeps its own words', () => {
+    const row = { role: 'system', system_type: 'task_error', text: 'This turn stopped on an unexpected error.', notice: NOTICE };
+    assert.equal(noticeLine(row), NOTICE.line);
+    assert.equal(hostRowDisplayText({ ...row, notice: { ...NOTICE, line: 'Этот ход остановился на непредвиденной ошибке.' } }),
+        'Этот ход остановился на непредвиденной ошибке.', 'the line is the install-language words the server assembled');
+    for (const other of [{ ...row, role: 'assistant' }, { ...row, narration: true }, { ...row, notice: { code: 'x' } }, { ...row, notice: null }]) {
+        assert.equal(noticeLine(other), '', JSON.stringify(other));
+    }
+    assert.equal(hostRowDisplayText({ ...row, notice: undefined, text: '⚠️ Error: X: y' }), 'Error: X: y', 'an older row keeps the table');
+    const line = summarizeChatLiveEvent({ type: 'send_message', is_progress: true, task_id: 't1', role: 'system', narration: false,
+        system_type: 'worker_failure', text: 'No conversation carrier could start, so this turn continues inside the server process.',
+        notice: { code: 'conversation_degraded_executor', details: 'carrier_boot_failed', line: 'Нет носителя разговора.' } });
+    assert.equal(line.headline, 'Нет носителя разговора.', 'a card line says the notice line too');
+});
+
+test('a live notice row says its line, Copy keeps that line and its raw details open from Details', async () => {
+    const f = chatFixture();
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const step = { code: 'budget_exhausted', step: 'raise_total_budget',
+            line: 'The total budget is spent, so this turn did not start. Raise Total budget in Settings → Costs.' };
+        f.emit({ role: 'system', system_type: 'task_error', content: 'This turn stopped on an unexpected error.',
+            text: 'This turn stopped on an unexpected error.', notice: NOTICE });
+        f.emit({ role: 'system', system_type: 'task_not_started', ts: '2026-10-10T12:00:01Z',
+            content: 'The total budget is spent, so this turn did not start.', notice: step });
+        const [error, budget] = f.systemBubbles();
+        assert.match(error.innerHTML, /class="message">This turn stopped on an unexpected error\.</);
+        const details = error.children.find((child) => child.tagName === 'DETAILS');
+        assert.ok(details && details.className === 'ui-disclosure', 'the shared disclosure part holds the raw error');
+        assert.equal(details.children[0].textContent, 'Details');
+        assert.equal(details.children[1].className, 'ui-result-details');
+        assert.equal(details.children[1].textContent, 'ValueError: boom');
+        assert.doesNotMatch(error.querySelector('.message').innerHTML, /ValueError/, 'the raw error is not in the main line');
+        assert.equal(await copied(error), NOTICE.line);
+        assert.match(budget.innerHTML, /Raise Total budget in Settings → Costs\./, 'the step follows the phrase');
+        assert.equal(budget.children.find((child) => child.tagName === 'DETAILS'), undefined, 'no details, no disclosure');
+        assert.equal(await copied(budget), step.line);
+    } finally { f.close(); }
+});
+
 test('a typed host progress line shows words in the card; narration and the dedupe key keep their bytes', () => {
     const host = summarizeChatLiveEvent({ type: 'send_message', is_progress: true, task_id: 't1', role: 'system',
         system_type: 'host_progress', narration: false, text: '💬 🌐 Connection restored — continuing from saved work in a new attempt.' });
@@ -244,11 +288,12 @@ test('skill review paint changes only its generated opening, in legacy and lazy 
 
 // Probe independently selected real producer phrases, rather than enumerating the
 // display table (which cannot detect a missing producer entry).
-test('command, plan and paused-evolution producer variants are covered', () => {
+// The paused-evolution row is a host notice now (supervisor/evolution_lifecycle.py): the rows it wrote before keep
+// losing their mark through the retired table.
+test('command and plan producer variants are covered', () => {
     const cases = [
         ['ouroboros/consciousness_view.py', 'command_reply', '🧠 Consciousness: ', 'Only when you write to it — 2 places are heard, not answered.'],
         ['ouroboros/tools/plan_ask.py', 'host_progress', '📐 Plan: ', 'ask a1 on revision 1 — sending to 2 participants.'],
-        ['supervisor/evolution_lifecycle.py', 'evolution_notice', '🧬 Evolution paused: ', 'its next cycle was not admitted (consciousness_allowance_exhausted). /evolve start resumes it.'],
         // An OpenAI attempt and the stream's own search event stay two rows, each without its mark.
         ['ouroboros/tools/search.py', 'host_progress', '🔍 Trying ', 'OpenAI web search: q'],
         ['ouroboros/tools/search.py', 'host_progress', '🔍 Searching: ', 'q'],

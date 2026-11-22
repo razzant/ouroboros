@@ -120,7 +120,11 @@
  * @property {string} source_name
  * @property {string=} trust
  * @property {string} name
+ * @property {string=} title  // the catalog's human name; "" when it has none (show `name`)
  * @property {string=} description
+ * @property {string=} pitch  // the catalog's one line for people; "" when it has none
+ * @property {?string=} needs  // the prerequisite in words; "" none, null when the catalog says nothing
+ * @property {string=} mark  // `needs` in a few words for a row ("bot token"); "" when the catalog gives none
  * @property {string[]=} category
  * @property {string=} version
  * @property {string=} digest
@@ -238,9 +242,74 @@
  */
 
 /**
- * `GET /api/onboarding/starter-skills`.
+ * `POST /api/onboarding/connection/identity`: the built-in skill whose card is open and the token typed there.
+ * @typedef {Object} ConnectionIdentityRequest
+ * @property {string} skill
+ * @property {string} token
+ */
+
+/**
+ * Which account the token names (`ok` with `username`), or why not: `cause` `refused` or `unreachable`; `error` when
+ * the check itself did not run. Never the token.
+ * @typedef {Object} ConnectionIdentityResponse
+ * @property {boolean} ok
+ * @property {string=} username
+ * @property {string=} cause
+ * @property {string=} error
+ */
+
+/**
+ * One skill's entry in the completion's `connections`: its card's token by the token field's name (saved to
+ * Settings), the one-time code the page minted and its options by key, those two only once the page drew the QR that
+ * holds the code (the code and options go to the skill's own settings, never the core's).
+ * @typedef {Object} CompletionConnection
+ * @property {Object} fields
+ * @property {string=} code
+ * @property {Object=} options
+ */
+
+/**
+ * A built-in skill's declared connection card on its starter item (its manifest's `connection_card`): `token` names
+ * its token's secret field, `pairing.link` holds `{username}` and `{code}`; `title`, `pitch`, `steps`, `pairing.hint`,
+ * `pairing.note` and `options` are the skill's own words. `needs_allow`: this install grants reviewed skills nothing
+ * on its own, so the skill starts only once the owner allows it in Extensions.
+ * @typedef {Object} StarterConnection
+ * @property {string} skill
+ * @property {string} token
+ * @property {Object} pairing
+ * @property {string=} title
+ * @property {string=} pitch
+ * @property {Object[]=} steps
+ * @property {Object[]=} options
+ * @property {boolean=} needs_allow
+ */
+
+/**
+ * One skill the setup's Skills step offers; `title` and `pitch` are the catalog's optional words ("" when it has
+ * none: show `name` and `description`), `needs` its prerequisite in words and `mark` the same in a few words ("" none, null when the catalog says
+ * nothing); `recommended` means ticked by the starter list.
+ * @typedef {Object} StarterSkillItem
+ * @property {string} id
+ * @property {string} name
+ * @property {string=} title
+ * @property {string=} pitch
+ * @property {?string=} needs
+ * @property {string=} mark
+ * @property {string=} description
+ * @property {Object=} icon  // the catalog's icon spec, {} for none
+ * @property {boolean=} official
+ * @property {boolean=} builtin
+ * @property {boolean=} recommended
+ * @property {string[]=} needs_keys
+ * @property {StarterConnection=} connection
+ */
+
+/**
+ * `GET /api/onboarding/starter-skills`: groups are `{category, label, items: StarterSkillItem[]}`; `catalog_more`
+ * counts the read catalog's skills the step does not offer (null while no source is read; absent from older cores).
  * @typedef {Object} StarterSkillsResponse
  * @property {Object[]} groups
  * @property {Object[]} hub_rows
  * @property {SkillSourceRow[]} sources
+ * @property {(number|null)=} catalog_more
  */

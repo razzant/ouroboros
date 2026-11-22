@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 PAYLOADS = {
     "ui_design": ("SKILL.md", "references/craft.md", "references/browser.md", "references/measure.js",
                   "references/freeze.js", "references/brief.md", "references/live_stand.py",
-                  "assets/compare.html"),
+                  "references/place_plan.py", "assets/compare.html"),
 }
 
 @pytest.mark.parametrize("name", PAYLOADS)
@@ -64,9 +64,12 @@ def test_design_catalogue_rows_are_recommended_default_on_and_categorised(tmp_pa
     for name in PAYLOADS:
         shutil.copytree(REPO / "skills" / name, seeds / name)
     shutil.copyfile(REPO / "skills/builtin.json", seeds / "builtin.json")
-    rows = {row["name"]: row for row in json.loads((seeds / "builtin.json").read_text())["skills"]}
+    rows = {row["name"]: row for row in json.loads((seeds / "builtin.json").read_text(encoding="utf-8"))["skills"]}
     catalog = {row["name"]: row for row in builtin_snapshot(tmp_path)["entries"]}
+    marks = ("name", "category", "recommended", "default_on")
     for name in PAYLOADS:
-        assert rows[name] == {"name": name, "category": ["design"], "recommended": True, "default_on": True}
+        assert {key: rows[name].get(key) for key in marks} == {"name": name, "category": ["design"], "recommended": True,
+                                                              "default_on": True}
+        assert set(rows[name]) - set(marks) <= {"title", "pitch", "needs", "mark"}, "only the catalog's words for people beside"
         assert catalog[name]["category"] == ["design"] and catalog[name]["recommended"] is True
     assert set(default_on_names(seeds)) == set(PAYLOADS)

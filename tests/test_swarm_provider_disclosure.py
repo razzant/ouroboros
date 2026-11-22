@@ -92,8 +92,8 @@ def test_host_admitted_swarm_root_has_one_live_and_rebuilt_provider_disclosure(h
     rebuilt = build_completed_result_event(host.root, task, case.task_id, stored)
     assert rebuilt["text"] == sent["text"]
     incidents = []
-    separate = send_provider_death_notice(
-        SimpleNamespace(send_with_budget=lambda *a, **k: incidents.append(a[1])),
+    separate = send_provider_death_notice(  # the incident's phrase, its provider diagnostic behind Details
+        SimpleNamespace(send_with_budget=lambda *a, **k: incidents.append(f"{a[1]}\n{k['progress_meta']['notice']['details']}")),
         case.chat_id, case.task_id, stored,
     )
     assert separate is current

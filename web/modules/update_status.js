@@ -48,6 +48,20 @@ export function updatePillDetail(status = {}) {
     return current && latest ? `Update ${current} → ${latest}` : 'Update available';
 }
 
+/** What an available update brings, in owner words (DESIGN principle 7): its versions, else its count of new changes;
+ *  the commits they name are the record's (the Updates page's chips, the Apply dialog's Details). */
+export function updateTarget(status = {}) {
+    const current = status.current_version || 'unknown';
+    const latest = status.latest_version || 'unknown';
+    return latest !== current ? `${current} → ${latest}`
+        : status.behind ? `${status.behind} new ${status.behind === 1 ? 'change' : 'changes'}` : latest;
+}
+
+// The Apply dialog's title names the versions only when the status read names the very range preflight pinned and both
+// its versions are readable (never "unknown"); otherwise it is neutral, and the pinned commits lead its Details.
+export const applyTitle = (status = {}, plan = {}) => (plan.base_sha && (status.running_sha ?? status.current_sha) === plan.base_sha
+    && (status.checked_target_sha || status.latest_sha) === plan.target_sha && status.current_version && status.latest_version ? `Update: ${updateTarget(status)}` : 'Update');
+
 // Shared preflight verification for the ONE apply surface (consumed by
 // web/modules/updates.js): never lets an unverified plan reach updateApply.
 export function verifiedUpdatePlan(preflight) {
@@ -131,11 +145,13 @@ export function updateOverReview(facts) {
 export function preflightEvidenceRows(preflight) {
     const plan = preflight?.merge_plan || {};
     const facts = preflight?.qualification;
+    // The range's commits lead its Details, known checks or not: the dialog's title says the versions (updateTarget).
+    const range = { label: 'Commits', value: `${String(plan.base_sha || '').slice(0, 8)} → ${String(plan.target_sha || '').slice(0, 8)}` };
     if (!facts || facts.base_sha !== plan.base_sha || facts.target_sha !== plan.target_sha) {
-        return [{ label: 'Checks', value: 'Qualification for this range is unknown.' }];
+        return [range, { label: 'Checks', value: 'Qualification for this range is unknown.' }];
     }
-    const rows = updateOverReview(facts).landed.map((row) => ({ label: String(row.sha).slice(0, 8),
-        value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}${/[.!?]"?$/.test(row.outcome) ? '' : '.'}` }));
+    const rows = [range, ...updateOverReview(facts).landed.map((row) => ({ label: String(row.sha).slice(0, 8),
+        value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}${/[.!?]"?$/.test(row.outcome) ? '' : '.'}` }))];
     if (!Array.isArray(facts.landed_over_review)) {
         rows.push({ label: 'Made on this computer', value: NOT_READ });
     }

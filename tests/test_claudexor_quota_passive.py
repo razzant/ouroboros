@@ -741,3 +741,47 @@ def test_the_passive_reader_does_not_load_the_http_accounts_module(tmp_path):
                             text=True, cwd=Path(__file__).resolve().parents[1], timeout=120)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_a_confirmed_settings_change_marks_the_subscription_census_and_a_refused_one_does_not(
+    passive_engine, monkeypatch, tmp_path,
+):
+    """The Settings route over the engine's own transport: a refused disable leaves the census and the accounts
+    revision alone; a confirmed one moves the revision, marks the census pending and asks for its read, which then
+    reads the changed roster."""
+    from ouroboros import config
+    from ouroboros import subscription_census as census
+    from ouroboros.gateway import claudexor_accounts
+    from ouroboros.gateway.claudexor_accounts import api_claudexor_credential_profile
+
+    engine = passive_engine
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(census, "_PASS", {"confirmed_at": None, "failing_since": None, "dispatched": 0.0})
+    _full_status_engine(engine, monkeypatch)
+    named = deepcopy(_NAMED)
+    named["profile"]["credential_kind"] = "config_dir_login"
+    engine.state["responses"]["/v2/credential-profiles"] = {"profiles": [named], "harnessAccounts": [], "accountPools": []}
+    engine.state["responses"]["/v2/quota"] = {"snapshots": [{
+        "subject": {"harness": "claude", "credential_route": "vendor_native", "plan_label": None,
+                    "subject_id": "work-research"},
+        "source": "fixture", "freshness": "fresh", "observed_at": "2026-11-21T13:00:00Z",
+        "constraints": [{"id": "weekly", "used_ratio": 0.3, "window_seconds": 604800, "freshness": "fresh"}],
+        "availability": {"state": "available", "blocking_constraints": [], "resets_at": None,
+                         "model_scoped_exhaustions": []}}],
+        "absences": [], "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
+    engine.state["account_mutations"] = True
+    engine.provision()
+    assert census.refresh() == "written" and "claude 1 with room" in census.census_text(census.read_file())
+    path, mutation = "/api/claudexor/credential-profiles/claude/work-research", "/v2/credential-profiles/claude/work-research"
+    app = Starlette(routes=[Route("/api/claudexor/credential-profiles/{harness}/{profile_id}",
+                                  api_claudexor_credential_profile, methods=["PATCH", "DELETE"])])
+    with TestClient(app) as client:
+        engine.state["errors"][mutation] = (409, {"code": "credential_profile_conflict", "message": "refused"})
+        assert client.patch(path, json={"enabled": False}).status_code != 200
+        assert claudexor_accounts.account_read_revision() == 0
+        assert census.request_mtime() is None and not census.read_file().get("pending")
+        del engine.state["errors"][mutation]
+        assert client.patch(path, json={"enabled": False}).status_code == 200
+    assert claudexor_accounts.account_read_revision() == 1
+    assert census.read_file()["pending"] is True and census.request_mtime() is not None
+    assert census.refresh() == "none"  # the duty's read lands: no enabled subscription account now

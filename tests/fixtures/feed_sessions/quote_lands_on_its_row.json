@@ -1,0 +1,22 @@
+{
+  "about": "A reply's quote is explicit navigation: pressed, its room lands on the row it quotes, a row on screen or one older than every loaded page (read around it); a reply then stays below that place, and ↓ returns to the present.",
+  "viewport": [1280, 860],
+  "rooms": {
+    "a": {"name": "Quotes", "rows": [
+      {"count": 200, "words": [14, 50]},
+      {"reply": "far", "to": 12, "words": [40, 40]},
+      {"reply": "near", "to": 195, "words": [30, 30]},
+      {"count": 2, "words": [20, 30]}
+    ]}
+  },
+  "events": [
+    {"open": "a"},
+    {"quote": "near"},
+    {"arrive": "a", "words": 30},
+    {"latest": true},
+    {"quote": "far"},
+    {"arrive": "a", "words": 30},
+    {"latest": true},
+    {"arrive": "a", "words": 20}
+  ]
+}

@@ -139,8 +139,8 @@ class TestRequestToolEmitsEvent:
         ):
             result = _request_deep_self_review(ctx, "test reason")
         assert len(ctx.pending_events) == 0
-        assert result.startswith("❌ Deep self-review unavailable: no provider credentials for openai/x")
-        assert "Main model (the default)" in result and "Review lanes" not in result
+        assert result.startswith("Deep self-review is unavailable: no provider credentials for openai/x")
+        assert "or the Main model." in result and "Review lanes" not in result
 
 
 class TestSystemReviewRow:

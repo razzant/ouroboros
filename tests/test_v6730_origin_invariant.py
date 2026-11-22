@@ -303,7 +303,9 @@ def test_lens_over_cap_origins_emit_disclosed_omission_note(tmp_path):
     notes = [m for m in view if m.get("system_type") == "origin_omission"]
     assert len(notes) == 1
     assert "2 more" in notes[0]["text"]
-    assert "project_task_bindings.json" in notes[0]["text"]
+    # Where the copies are kept is the notice's detail, not a word of its line (DESIGN principle 7).
+    assert "project_task_bindings.json" not in notes[0]["text"]
+    assert "project_task_bindings.json" in notes[0]["notice"]["details"] and notes[0]["notice"]["line"] == notes[0]["text"]
 
 
 # ---------------------------------------------------------------- attachment-bearing origins

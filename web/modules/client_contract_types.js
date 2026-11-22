@@ -1,6 +1,5 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` — the replaceable-client envelopes
- *  `api_types.js` indexes: the served main interface, the setup bootstrap, the settings writers' refusal,
- *  completion readback, the auth gate's JSON login and the `GET /api/contract` document. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` and `history_contracts` that `api_types.js` indexes: the served
+ *  interface, setup bootstrap, settings writers' refusal, completion readback, JSON login, `GET /api/contract` and chat history rows. */
 /**
  * One completion attempt read back: saved is true while the settings document holds its write, false when
  * refused before writing, null when unconfirmed. Only `receipt` (its own success envelope) completes.
@@ -54,6 +53,7 @@
  * @typedef {Object} SetupStep
  * @property {string} id
  * @property {string} title
+ * @property {string} railTitle  // the step's short name in the rail; `title` heads the step itself
  * @property {string} railCopy
  * @property {string} copy
  * @property {string} footer
@@ -361,7 +361,7 @@
  * @property {string[]} interface_paths
  * @property {ContractHttpEntry[]} http
  * @property {ContractWs} ws
- * @property {CallSocketContract=} call_socket
+ * @property {import('./call_contract_types.js').CallSocketContract=} call_socket
  * @property {Object.<string,Object>} schemas
  */
 
@@ -491,6 +491,7 @@
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
+ * @property {import('./api_types.js').HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
@@ -716,10 +717,9 @@
 /**
  * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
  * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
- * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
- * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
- * reading.
- * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * how) or a host notice's line (`notice`), a photo, video or file's `caption` and a file's `filename`, a links row's
+ * `title` and `actions`, a question's `quiz` card, a Project lifecycle row's answer and ending; whether its words
+ * contain the query is the client's reading. `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
  * @typedef {Object} ChatSearchCandidate
  * @property {string} history_id
  * @property {string} row_address
@@ -746,6 +746,7 @@
  * @property {string=} task_name
  * @property {string=} completion_reason
  * @property {Object=} completion_notice
+ * @property {import('./api_types.js').HostNotice=} notice  // its line is the words the bubble draws; its details are not searched
  */
 
 /**
@@ -1352,146 +1353,6 @@
  * @property {string} card_id
  * @property {boolean} pinned
  * @property {string=} pinned_at
- */
-
-/**
- * @typedef {Object} CallOpenRequest
- * @property {number} chat_id
- * @property {string} client_message_id
- * @property {string=} feature
- */
-/**
- * @typedef {Object} CallOpenResponse
- * @property {string} call_id
- * @property {string} ws_path
- * @property {boolean} vision
- * @property {boolean=} joined
- */
-/**
- * @typedef {Object} CallRefusal
- * @property {false} ok
- * @property {string} code
- * @property {string} error
- */
-/**
- * @typedef {Object} ConversationFinishedOutbound
- * @property {"conversation_finished"} type
- * @property {number} chat_id
- * @property {string} call_id
- * @property {string} task_id
- * @property {string} reason
- */
-/**
- * Separate media socket; control schemas are in GET /api/contract.schemas.
- * @typedef {Object} CallSocketContract
- * @property {string} path
- * @property {string} host_open_path
- * @property {string} host_peer_path
- * @property {string} host_auth
- * @property {number} protocol
- * @property {string} audio_header
- * @property {number} audio_header_bytes
- * @property {number} max_audio_payload_bytes
- * @property {number} max_video_payload_bytes
- * @property {number} max_control_bytes
- * @property {Object.<string,string>} peer_messages
- * @property {Object.<string,string>} server_messages
- */
-/**
- * @typedef {Object} HostCallOpenRequest
- * @property {'meeting'} role
- * @property {string=} call_id
- * @property {string=} binding_id
- * @property {Object=} event
- * @property {string=} label
- * @property {boolean=} mic
- * @property {boolean=} speaker
- * @property {boolean=} video
- */
-/**
- * @typedef {Object} HostCallOpenResponse
- * @property {string} call_id
- * @property {string} peer_path
- */
-/**
- * @typedef {Object} CallHello
- * @property {'hello'} type
- * @property {1} protocol
- * @property {'owner'|'meeting'} role
- * @property {boolean} mic
- * @property {boolean} speaker
- * @property {boolean=} video
- * @property {number} rate
- * @property {string=} label
- */
-/**
- * @typedef {Object} CallMute
- * @property {'mute'} type
- * @property {boolean} muted
- */
-/**
- * @typedef {Object} CallPlayed
- * @property {'played'} type
- * @property {string} item_id
- * @property {number} played_ms
- */
-/**
- * @typedef {Object} CallContext
- * @property {'context'} type
- * @property {string} text
- * @property {string} source
- */
-/**
- * @typedef {Object} CallParticipant
- * @property {'participant'} type
- * @property {string} label
- * @property {boolean} speaking
- */
-/**
- * @typedef {Object} CallShare
- * @property {'share'} type
- * @property {boolean} sharing
- * @property {'screen'|'camera'} kind
- */
-/**
- * @typedef {Object} CallBye
- * @property {'bye'} type
- * @property {string=} reason
- */
-/**
- * @typedef {Object} CallState
- * @property {'state'} type
- * @property {'preparing'|'connecting'|'live'|'reconnecting'|'closing'|'closed'} state
- * @property {string} reason
- * @property {string=} engine
- * @property {string=} phase
- * @property {string=} detail
- * @property {'settings'|'retry'=} action
- */
-/**
- * @typedef {Object} CallActivity
- * @property {'activity'} type
- * @property {'working'|'idle'} activity
- * @property {string} label
- */
-/**
- * @typedef {Object} CallTurn
- * @property {'turn'} type
- * @property {'awaiting'|'answering'|'idle'} turn
- */
-/**
- * @typedef {Object} CallCaption
- * @property {'caption'} type
- * @property {'owner'|'ouroboros'} speaker
- * @property {string} text
- * @property {boolean} final
- * @property {string} item_id
- * @property {boolean=} replace
- */
-/**
- * @typedef {Object} CallFlush
- * @property {'flush'} type
- * @property {number} epoch
  */
 
 /**

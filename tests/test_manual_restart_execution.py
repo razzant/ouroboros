@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.host_notice import mind_text
+
 from ouroboros import cancel_intents, claudexor_daemon as owned, claudexor_runtime, config
 from ouroboros import delegate_custody as custody, server_restart
 from ouroboros.post_task_checkpoint import POST_TASK_SYNTHESIS_INFLIGHT, POST_TASK_SYNTHESIS_LOCK
@@ -88,7 +90,9 @@ def _ctx(calls, *, kill=None, checkout=None, running=None, messages=None):
     return SimpleNamespace(
         RUNNING=running or {}, consciousness=None,
         load_state=lambda: {}, save_state=lambda _state: None, update_state=lambda mutator: mutator({}),
-        send_with_budget=lambda _chat_id, text, **_kw: (messages if messages is not None else []).append(text),
+        # What a reader is told: the phrase, then a host notice's step and details (host_notice.mind_text).
+        send_with_budget=lambda _chat_id, text, **_kw: (messages if messages is not None else []).append(
+            text + mind_text(_kw.get("progress_meta") or {})),
         kill_workers=kill or default_kill,
         safe_restart=checkout or (lambda **kw: calls.append(("checkout", kw)) or (True, "OK: ouroboros")),
     )
@@ -184,8 +188,8 @@ def test_assisted_update_refusal_still_refuses_before_any_stop(owners, restart_r
                checkout=lambda **kw: pytest.fail("the gate refuses before the checkout"),
                kill=lambda **kw: pytest.fail("refused before any stop"))
     assert _restart(ctx, monkeypatch, gate=server_restart._safe_restart_serialized) == []
-    assert messages == ["♻️ Restarting.",
-                        "⚠️ Restart cancelled: Managed update merge is still being resolved; restart was deferred."]
+    assert messages == ["♻️ Restarting.", "The restart was cancelled.\n[Details: Managed update merge is still being "
+                                          "resolved; restart was deferred.]"]
     assert owners.calls == [] and not (restart_root / "state").exists()
 
 
@@ -195,7 +199,7 @@ def test_checkout_refusal_leaves_the_server_intact(owners, restart_root, monkeyp
                checkout=lambda **kw: owners.calls.append(("checkout", kw)) or (False, "Failed checkout: fixture"),
                kill=lambda **kw: pytest.fail("a refused checkout stops nothing"))
     assert _restart(ctx, monkeypatch) == []
-    assert messages == ["♻️ Restarting.", "⚠️ Restart cancelled: Failed checkout: fixture"]
+    assert messages == ["♻️ Restarting.", "The restart was cancelled.\n[Details: Failed checkout: fixture]"]
     assert [c[0] for c in owners.calls] == ["checkout"] and not (restart_root / "state").exists()
 
 

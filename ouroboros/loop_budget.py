@@ -87,10 +87,16 @@ def _check_budget_limits(
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
 
     if budget_remaining_usd is not None and budget_remaining_usd <= 0 and _next_round_pays(ctx):
-        finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
+        from ouroboros.host_notice import STEPS, fields
+
+        phrase = "The total budget is spent, so this task stopped before its next paid call."
+        finish_reason = f"{phrase} {STEPS['raise_total_budget']}"
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
         if ctx.round_idx <= 1 and not accumulated_usage.get("rounds"):
+            # Its row says the phrase with the step beside it whenever these words are what it publishes.
+            accumulated_usage["host_notice_row"] = {"text": phrase, "record": finish_reason, **fields(
+                "budget_exhausted", step="raise_total_budget", details="setting: TOTAL_BUDGET")}  # the key: a detail
             trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
             tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
             suffix = (
@@ -672,14 +678,17 @@ def _handle_authority_unavailable(
             "exact_pause_unavailable": str(usage.get("exact_pause_unavailable") or "")}
     usage.update(execution_status="infra_failed", reason_code=code, billing_authority=fact)
     ctx.llm_trace["billing_authority"] = fact
-    message = (
-        f"⚠️ No new paid call was admitted at this boundary: this task's billing lineage is missing or not its own "
-        f"({exc}). This is not a budget limit, and neither waiting nor a budget change repairs it. "
-        "Work already saved stays retained."
-        if exc.kind == "refused" else
-        f"⚠️ No new paid call was admitted at this boundary: this task's {subject} could not be read ({exc}), "
-        f"and its exact pause could not be saved ({fact['exact_pause_unavailable'] or 'no actor context'}). "
-        "This is not a budget limit. Work already saved stays retained; nothing unsaved is promised back.")
+    phrase = ("No new paid call was admitted because this task's billing lineage is missing or not its own; this "
+              "is not a budget limit, neither waiting nor a budget change repairs it, and saved work stays retained."
+              if exc.kind == "refused" else
+              f"No new paid call was admitted because this task's {subject} could not be read and its exact pause "
+              "could not be saved; this is not a budget limit, saved work stays retained, and nothing unsaved is "
+              "promised back.")
+    raw = str(exc) if exc.kind == "refused" else f"{exc}; pause: {fact['exact_pause_unavailable'] or 'no actor context'}"
+    message = f"{phrase} ({raw})"  # the record keeps the raw cause; the row says the phrase with it behind Details
+    from ouroboros.host_notice import fields
+
+    usage["host_notice_row"] = {"text": phrase, "record": message, **fields(code, details=raw)}
     if limit_ctx is None:
         _loop()._finalize_task_services(ctx)
         return message, usage, ctx.llm_trace

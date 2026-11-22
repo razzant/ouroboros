@@ -69,8 +69,9 @@ from ouroboros.delegate_hold import (
     latch_after_unknown as _delegate_hold_latch,
     round_top as _delegate_hold_round_top,
 )
+from ouroboros.model_concurrency import capacity_refusal
 from ouroboros.loop_transport import (
-    continue_unknown_transport as _continue_unknown_transport,
+    continue_unknown_transport as _continue_unknown_transport, engine_unanswered,
     TransportWaitEpisode,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
     end_episode_budget as _end_episode_budget,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
     PRIMARY_REFUSAL_KINDS,
@@ -187,23 +188,16 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="m
     """Bind the one discovery implementation to this loop's resident schema list.
 
     The tools a task starts without schemas for are named by the connections map in the
-    system view (``tool_connections``), not by a per-task notice.
+    system view (``tool_connections``), not by a per-task notice. The omissions and the dated breaks
+    of servers and skills form the work's one capability notice, written once (``capability_breakage``);
+    later changes reach the round tail, never this row.
     """
+    from ouroboros.capability_breakage import write_start_notice
     from ouroboros.tools.tool_discovery import bind_resident_schemas
 
     enabled_extra = bind_resident_schemas(tools_registry, tool_schemas, gateway=gateway)  # MCP via call_mcp_tool where resident
     tools_registry._ctx._actor_loaded_tool_names = enabled_extra  # a route's schema ceiling keeps these
-    omissions = (
-        tools_registry.capability_omissions()
-        if hasattr(tools_registry, "capability_omissions")
-        else []
-    )
-    if omissions:
-        _append_or_merge_user_message(
-            messages,
-            "[SYSTEM NOTICE]\n" + "\n".join(format_capability_omissions(omissions)),
-        )
-
+    write_start_notice(tools_registry, messages)
     return tool_schemas, enabled_extra
 
 
@@ -241,6 +235,9 @@ def _provider_unavailable_result(
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
+            local = "local_capacity" if capacity_refusal(usage) else "local_engine" if engine_unanswered(usage) else ""
+            if is_transport_wait and not unknown_outcome and local:  # the install's own limit, no provider: the incident's words
+                usage["terminal_provider_cause"] = local
             if (not salvaged and text == fallback != notice and usage.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE
                     and round_failure_words(usage, ctx.round_idx)):  # any other round keeps the words of its own failure
                 text = notice  # a refusal round's host words, composed before a forced call that itself failed: now its facts too
@@ -519,8 +516,9 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
 
 
 def _note_low_start(ctx: Any, plan: Any, mode: str, task_id: str, event_queue: Any) -> None:
-    """The owner's one Main line per Low episode (``context_view_facts.low_start_episode``), owed through the terminal
-    outbox under one id per task attempt; none while Low holds or when Max returns. Never raises."""
+    """The owner's one Main line per open Low period of each cause (``context_view_facts.low_start_episode``), owed
+    through the terminal outbox under one id per task attempt; none while that period is open or when Max returns.
+    Never raises."""
     from ouroboros.context_view_facts import low_start_episode
 
     try:

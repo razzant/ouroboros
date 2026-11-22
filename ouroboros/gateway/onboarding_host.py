@@ -78,14 +78,18 @@ def _consciousness_control(request: Request) -> "tuple[bool | None, bool]":
 
 def _live_setup(request: Request) -> tuple[dict, dict]:
     """The install's settings view and the web wizard bootstrap derived from it: the one
-    derivation the page and its JSON projection share, computed and never persisted."""
+    derivation the page and its JSON projection share, computed and never persisted. Its Skills
+    step is offered only where completion honors the starter ticks (``skill_starter.starter_choice_open``)."""
     from ouroboros.config import SETTINGS_PATH
+    from ouroboros.gateway._helpers import request_drive_root
+    from ouroboros.skill_starter import starter_choice_open
 
     settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
     enabled, first_state = _consciousness_control(request)
     return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
                                            consciousness_enabled=enabled, consciousness_first_state=first_state,
-                                           document=_owner_settings_document())
+                                           document=_owner_settings_document(),
+                                           starter_choice=starter_choice_open(request_drive_root(request), settings))
 
 
 async def onboarding_page(_request: Request) -> HTMLResponse:

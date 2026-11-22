@@ -642,7 +642,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
                     "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
-                    "sleep", "previous_model_response", "cache_horizon_note", "leaf_live_input")
+                    "sleep", "previous_model_response", "cache_horizon_note", "leaf_live_input",
+                    "receipt")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -689,7 +690,7 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
             "run_id": str(payload.get("run_id") or "")[:200],
             **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
                                              "continuation_note", "sleep", "previous_model_response",
-                                             "leaf_live_input") if key in payload},
+                                             "leaf_live_input", "receipt") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1163,6 +1164,15 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
     return None, states
 
 
+def _held_run(ctx: Any, run_id: str) -> tuple[Any, bool]:
+    """``(custody entry or None, whether the lookup answered)``: a lookup that raised is no proof the record is
+    absent, so the receipt line says the record was unavailable at this read (``helper_receipt.run_result_line``)."""
+    try:
+        return custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1], True
+    except Exception:
+        return None, False
+
+
 def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questions: Any = None) -> ToolResult:
     """Publish one wake of the runs a wait selected and render it: the ONE wake record (``pending_wake``:
     its loop-control, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
@@ -1180,10 +1190,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
     state = states[target]
     since = descriptor.get("since_seq")
     cursor = max(int(state.get("journal_cursor") or 0), int(since) if since is not None else 0)
-    try:
-        _ownership, held = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), target)
-    except Exception:
-        held = None
+    held, looked_up = _held_run(ctx, target)
     from ouroboros.tools.delegate import _read_run
     from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
 
@@ -1238,6 +1245,11 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
             payload["questions"] = questions
     if wakes:
         payload["wake_events"] = wakes
+    if payload.get("status") == "terminal":  # where the starter judges the result: what still differs, by run
+        from ouroboros.helper_receipt import run_result_line
+
+        if receipt := run_result_line(ctx, held, payload.get("access_evidence"), looked_up=looked_up):  # observed only
+            payload["receipt"] = receipt
     payload["coordination_context"] = coordination_live_context(ctx)
     _publish_wake_facts(ctx, descriptor, woke_by, payload, live_input)
     if descriptor.get("ignored_arguments"):

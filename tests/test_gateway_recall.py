@@ -313,19 +313,33 @@ def test_the_largest_room_id_the_store_holds_is_still_a_search(tmp_path):
     assert _search(tmp_path, "a", room_id=2**63 - 1)["total"] == 0
 
 
-def test_a_row_from_before_the_lineage_epoch_reopens_with_the_author_its_search_names(tmp_path):
+@pytest.mark.parametrize("indexed", [False, True], ids=["scan", "postings"])
+def test_a_row_from_before_the_lineage_epoch_reopens_with_the_author_its_search_names(tmp_path, indexed):
+    from ouroboros import dialogue_word_index as dwi
     from ouroboros.tools.chronicle import _memory_read
     from ouroboros.tools.registry import ToolContext
 
-    _say(tmp_path, "2026-10-01T00:00:01+00:00", "Review the patch.")
-    _say(tmp_path, "2026-10-01T00:00:02+00:00", "Child review: the patch is unsafe.", direction="out",
-         task_id="kid00001")
+    ts = "2026-10-01T00:00:02+00:00"
+    memo = "Archive the original memo."
+    _say(tmp_path, ts, memo, direction="out", task_id="kid00001")
+    _say(tmp_path, ts, "Archive the appendix.")
+    _say(tmp_path, ts, "Archive the index.")
     _memory_read(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1),
                  rows=True)  # activates: the lineage epoch stands after these rows
-    found = _search(tmp_path, "unsafe")["rows"][0]
-    reopened = _ok(tmp_path, *_run(found["reopen"]))["row"]
-    assert "outgoing, author not recorded" in found["speaker"]
-    assert reopened["speaker"] == found["speaker"] and reopened["fields"] == found["fields"]
+    _say(tmp_path, ts, memo, direction="out", task_id="kid00001")  # identical physical copy across the epoch
+    if indexed:
+        if not dwi.fts5_available():
+            pytest.skip("SQLite has no FTS5")
+        assert dwi.run(tmp_path, lambda: False)["state"] == "done"
+    for order, rest in (("newest", ["Archive the index.", "Archive the appendix."]),
+                        ("oldest", ["Archive the appendix.", "Archive the index."])):
+        result = _search(tmp_path, "archive", order=order)
+        assert result["total"] == 3
+        assert [row["fields"][0]["text"] for row in result["rows"]] == [memo, *rest]
+        found = result["rows"][0]
+        reopened = _ok(tmp_path, *_run(found["reopen"]))["row"]
+        assert found["speaker"] == "outgoing, author not recorded"
+        assert reopened["speaker"] == found["speaker"] and reopened["fields"] == found["fields"]
 
 
 def test_unreadable_owner_accounts_are_noted_on_search_and_reopen(tmp_path, monkeypatch):

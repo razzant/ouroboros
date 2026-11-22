@@ -506,12 +506,18 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         if handover:
             read["path"] += f": more posting candidates than the re-check bound of {RECHECK_BOUND}"
     coverage = read["coverage"]
-    seen, hits_all = set(), []
+    hit_sequences, first_copies, hits_all = {}, {}, []
     for seq, row in sorted(read["pairs"], key=lambda pair: time_key(pair[1], pair[0]), reverse=newest):
-        identity = (row_address(row)["chat_id"], str(row.get("ts") or ""), source_row_id(row))
-        if identity not in seen:  # one source row, whatever its fields or physical copies
-            seen.add(identity)
+        address = row_address(row)
+        identity = (address["chat_id"], address["ts"], address["row_sha256"])
+        hit_seq = hit_sequences.get(identity)
+        if hit_seq is None:  # one source row, whatever its fields or physical copies
+            hit_sequences[identity] = seq
             hits_all.append((seq, row))
+        elif seq < first_copies.get(hit_seq, hit_seq):
+            # An unhinted address reopens the first stored copy. Use its position for
+            # authorship, not for the hit's existing order among rows with the same time.
+            first_copies[hit_seq] = seq
     # The rooms of exactly the rows this read hands out (all hits for the door's admission, else the page).
     offset, count = max(0, int(offset)), max(1, int(count))
     showing = Showing(root, [row for _seq, row in (hits_all if visible_only else hits_all[offset:offset + count])])
@@ -538,7 +544,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         gaps.append(UNSTABLE_GAP)
     page = hits_all[offset:offset + count]
     rooms_of = {seq: showing.rooms(row) for seq, row in page}
-    authors, lineage_gap = _authors(root, page, lineage)
+    authors, lineage_gap = _authors(root, [(first_copies.get(seq, seq), row) for seq, row in page], lineage)
     if lineage_gap:
         notes.append(lineage_gap)
     wanted = [(chat, source_row_id(row)) for seq, row in page
@@ -550,7 +556,7 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
         written = row_address(row)["chat_id"]
         rooms = rooms_of[seq]
         reader_room = room if room is not None else (written if written in rooms else (rooms[0] if rooms else None))
-        author = authors[seq]
+        author = authors[first_copies.get(seq, seq)]
         reply = row.get("reply_to") if isinstance(row.get("reply_to"), Mapping) else {}
         surface = row.get("client_surface") if isinstance(row.get("client_surface"), Mapping) else {}
         fields = fields_of(row)

@@ -160,7 +160,7 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             _switch(page, url, True)  # a fresh install starts it Off, which this card says first
             _costs(page, url)
             allowance = page.locator(FIELD)
-            expect(allowance).to_have_value("20")
+            expect(allowance).to_have_value("15")
             expect(page.locator(f"label[for=setting-{KEY}]")).to_have_text("Consciousness per 24 hours")
             # The keyboard reaches it after the per-task cap, as the card reads.
             page.focus("#setting-OUROBOROS_PER_TASK_COST_USD")
@@ -171,9 +171,9 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
                 allowance.press("Tab")  # leaving the field saves it
             status = page.locator(f"#setting-{KEY}-result")
             expect(status).to_contain_text("Saved", timeout=30_000)
-            # LANE A: with the server's receipt the line also says when it applies and "was 20", with Undo.
+            # LANE A: with the server's receipt the line also says when it applies and "was 15", with Undo.
             said = status.inner_text()
-            assert said == "Saved" or (said.startswith("Saved · ") and "was 20" in said), said
+            assert said == "Saved" or (said.startswith("Saved · ") and "was 15" in said), said
             assert posts[-1] == {KEY: 0}, posts
             assert float(_settings(data_dir)[KEY]) == 0
             expect(page.locator("#costs-allowance-state")).to_contain_text(
@@ -327,6 +327,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
     server["stop_server"]()
     now = time.time()
     leaves = _seed_spend(data_dir, now)
+    settings = _settings(data_dir)  # this test's own limit: its numbers never follow the factory default
+    (data_dir / "settings.json").write_text(json.dumps({**settings, KEY: 20}), encoding="utf-8")
     server["start_server"]()
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()

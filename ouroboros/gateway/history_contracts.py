@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
-from ouroboros.gateway.reference_contracts import ChatReplyReference
+from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
 
 try:
     from typing import Literal, Required, TypedDict
@@ -144,7 +144,7 @@ class HistoricalTerminal(TypedDict, total=False):
     schedule_report_only: bool
 
 
-class ChatHistoryMessage(TypedDict, total=False):
+class ChatHistoryMessage(HostNoticeField, total=False):
     """One ``GET /api/chat/history`` row. Every row has the six required keys; a stored row also
     has ``history_id`` and ``history_position``. Live frames call ``text`` ``content``.
 
@@ -363,10 +363,10 @@ class ChatSearchQuestion(TypedDict, total=False):
     comment: str
 
 
-class ChatSearchCandidate(TypedDict, total=False):
+class ChatSearchCandidate(HostNoticeField, total=False):
     """One saved message of the room as the fields the room's renderer draws its words from: the text history
     gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
-    how), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    how) or a host notice's line (``notice``; its details are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
     question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
     ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
     reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose

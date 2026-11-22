@@ -604,7 +604,7 @@ def _rebind_context_fit_plan(
                 "route_fp": rebound.route_fp,
                 "core_sha256": rebound.core_sha256,
                 "preferred_mode": preferred,
-                **_shown(rebound, mode, preferred),
+                **_shown(rebound, mode),
                 "evidence_status": rebound.status,
                 "window_tokens": rebound.window_tokens,
                 "known_window": known_window,  # a floored window keeps its number, not its authority
@@ -648,7 +648,7 @@ def _emit_physical_mode(event_queue: Any, task_id: str, drive_logs: Any, plan: A
         "checkpoint_kind": "context_fit_physical_mode",
         "route_fp": str(getattr(plan, "route_fp", "") or ""),
         "preferred_mode": str(switch.get("from") or ""),
-        **_shown(plan, mode, str(switch.get("from") or "")),
+        **_shown(plan, mode),
         "cause": mode_cause(plan, mode),
         "window_tokens": int(getattr(plan, "window_tokens", 0) or 0),
         "owner_visible": True,
@@ -722,13 +722,12 @@ def _context_fit_round_id(ctx: _RoundModelCallContext) -> str:
     return f"{execution_id}:round:{ctx.round_idx}"
 
 
-def _shown(plan: Any, mode: str, preferred: Optional[str] = None) -> Dict[str, str]:
+def _shown(plan: Any, mode: str) -> Dict[str, str]:
     """A checkpoint's mode and books as every surface names them (``physical_attempt_context.shown_mode``)."""
     from ouroboros.physical_attempt_context import shown_mode
 
-    owner = str(getattr(plan, "preferred_mode", "") or "") if preferred is None else preferred
     compact = bool(getattr(getattr(plan, "core", None), "compact_reference_docs", False))
-    effective, books = shown_mode(str(mode), owner, compact=compact)
+    effective, books = shown_mode(str(mode), compact=compact)
     return {"effective_mode": effective, "books": books}
 
 
@@ -870,9 +869,11 @@ def _dispatch_round_model(
     from ouroboros.send_clock import main_clock_policy
     from ouroboros.subagent_bootstrap import is_configured_api_child
     from ouroboros.loop_messages import append_context_facts
+    from ouroboros.capability_breakage import append_change_row
 
     _loop()._retire_main_reasoning(ctx)
-    if append_context_facts(ctx):
+    changed = append_change_row(ctx)  # a capability that broke or recovered since this work was told: its own tail row
+    if append_context_facts(ctx) or changed:
         disposition = _loop()._measure_round_main_fit(
             ctx, automatic_pass_used=bool(getattr(disposition, "automatic_pass_used", False)))
     mailbox_peek = OwnerMailboxPeek()

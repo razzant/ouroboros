@@ -643,11 +643,13 @@ def test_a_failed_bootstrap_is_told_once_in_the_owner_chat_and_a_deliberate_defe
 
     assert ok is False and len(sent) == 1
     chat, text, kw = sent[0]
-    assert (chat, kw) == (owner_chat, {"role": "system", "system_type": "startup_notice"})
-    # One owner line: the step, Git's own first line and what is known of the tree. Git's whole
-    # output stays in the returned (and logged) message and the checkout_step_failed row.
     headline, full = message.split("\n")
-    assert text == f"Startup bootstrap failed: {headline}"  # no decorative glyph to strip at render
+    # One owner phrase; Git's own first line and what is known of the tree are the notice's details
+    # (DESIGN principle 7). Git's whole output stays in the returned (and logged) message and the
+    # checkout_step_failed row.
+    assert (chat, kw) == (owner_chat, {"role": "system", "system_type": "startup_notice",
+                                       "progress_meta": {"notice": {"code": "startup_bootstrap", "details": headline}}})
+    assert text == "Startup could not prepare this code."  # no decorative glyph to strip at render
     assert "index.lock" in headline and "no checkout step had changed the working tree" in headline
     assert full.startswith("Git: fatal: Unable to create")
     [row] = _rows(managed_boot.data, "checkout_step_failed")
@@ -671,7 +673,8 @@ def test_a_failed_bootstrap_is_told_once_in_the_owner_chat_and_a_deliberate_defe
     (managed_boot.repo / "owner-draft.txt").write_text("unsaved\n", encoding="utf-8")
     ok, message = managed_boot.server._bootstrap_supervisor_repo({}, git_ops)
     assert ok is False and message.startswith("Failed checkout ouroboros: Reset blocked (")
-    assert [text for _chat, text, _kw in sent] == [f"Startup kept the current files: {message.partition(': ')[2]}"]
+    assert [text for _chat, text, _kw in sent] == ["Startup kept the current files to protect local changes."]
+    assert sent[0][2]["progress_meta"]["notice"]["details"] == message.splitlines()[0], "the blocked reset, in its details"
     assert (managed_boot.repo / "owner-draft.txt").exists()
 
 
@@ -746,7 +749,7 @@ def test_deferred_replace_records_git_refusal_after_export_and_retirement(replac
     sent = []
     monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
     store_switch.report_outcomes(scene.data, 42)
-    assert len(sent) == 1 and "index.lock" in sent[0][1]
+    assert len(sent) == 1 and "index.lock" in sent[0][2]["progress_meta"]["notice"]["details"]
     assert sent[0][2]["system_type"] == "storage_switch_notice"
 
 
@@ -1017,7 +1020,8 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     sent = []
     monkeypatch.setattr(state, "load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr(message_bus, "send_with_budget",
-                        lambda _chat, text, **kw: sent.append((kw["system_type"], text)))
+                        lambda _chat, text, **kw: sent.append((kw["system_type"], text + (
+                            "\n" + kw["progress_meta"]["notice"].get("details", "") if kw.get("progress_meta") else ""))))
 
     (ok, message), result = _next_boot(scene, monkeypatch)
 
@@ -1033,10 +1037,11 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     assert update_merge.read_update_tx_strict()[0] == "absent"
     store_switch.report_outcomes(scene.data, 7)
     [switch_notice] = [text for kind, text in sent if kind == "storage_switch_notice"]
-    assert "did not happen" in switch_notice and "\n" not in switch_notice
-    assert seam != "switch_failed" or ("index.lock" in switch_notice and "Another git process" not in switch_notice)
+    words, _sep, details = switch_notice.partition("\n")  # the row's phrase, then its notice's details
+    assert "did not happen" in words and "\n" not in details
+    assert seam != "switch_failed" or ("index.lock" in details and "Another git process" not in switch_notice)
     startup = [text for kind, text in sent if kind == "startup_notice"]
-    assert startup == ([] if ok else [f"Startup bootstrap failed: {message.splitlines()[0]}"])
+    assert startup == ([] if ok else [f"Startup could not prepare this code.\n{message.splitlines()[0]}"])
     assert lock.exists() is (lock_at_next_boot == "still_held")
 
 
