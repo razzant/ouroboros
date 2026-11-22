@@ -1014,6 +1014,277 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
     assert "crash storm" not in call["result_reason"].lower()
 
 
+def _quiet_cleanup(monkeypatch):
+    """The cleanup with fresh background owners (a stop latches its owner for the process) and its other owners
+    replaced; the model module is the real one, loaded, with no manager yet."""
+    import server
+    from ouroboros import local_model, maintenance, storage, storage_free
+
+    for module, name, fresh in ((maintenance, "child", maintenance.MaintenanceChild()),
+                                (storage, "count", storage.StorageCounter()),
+                                (storage_free, "free", storage_free.FreeSpace())):
+        monkeypatch.setattr(module, name, fresh)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr(server, "_restart_requested", threading.Event())
+    monkeypatch.setattr(local_model, "_manager", None)
+    return server, local_model
+
+
+def _model_child(*code):
+    """A sleeping child in its own group, as the model's server and an install are; ``code`` runs first."""
+    import subprocess
+    import sys
+
+    from ouroboros.platform_layer import subprocess_new_group_kwargs
+
+    return subprocess.Popen([sys.executable, "-c", "; ".join(("import signal, time", *code, "time.sleep(60)"))],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs())
+
+
+def _end(*children):
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+
+
+def test_emergency_cleanup_requests_the_local_model_and_makes_no_manager(monkeypatch):
+    """A teardown cut short (the restart watcher's bound, a fault's census before exec) may not have reached the
+    local model's stop: the cleanup requests both captured handles, the server's and an install's, as Panic does.
+    With the manager's lock held (a stop would wait on it) it still returns at once, and on a server that never
+    made a model manager it makes none."""
+    server, local_model = _quiet_cleanup(monkeypatch)
+    server._emergency_process_cleanup()
+    assert local_model._manager is None, "the cleanup provisions no model manager"
+    manager = local_model.LocalModelManager()
+    manager._proc, manager._install_proc = _model_child(), _model_child()
+    monkeypatch.setattr(local_model, "_manager", manager)
+    try:
+        with manager._lock:  # a start or stop in progress holds it
+            cleanup = threading.Thread(target=server._emergency_process_cleanup, daemon=True)
+            cleanup.start()
+            cleanup.join(5)
+            assert not cleanup.is_alive(), "the cleanup waited on the model manager's lock"
+        assert manager._proc.wait(timeout=10) is not None and manager._install_proc.wait(timeout=10) is not None
+    finally:
+        _end(manager._proc, manager._install_proc)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
+def test_emergency_cleanup_reaches_a_model_child_the_graceful_stop_still_awaits(monkeypatch):
+    """The teardown's graceful stop takes the handles off the manager, sends TERM and waits up to 10 s: a child that
+    ignores TERM stays reachable, so the restart cleanup's request ends it during that wait; once it has exited the
+    stop forgets it, so no later request meets its pid."""
+    server, local_model = _quiet_cleanup(monkeypatch)
+    manager = local_model.LocalModelManager()
+    manager._proc = child = _model_child("signal.signal(signal.SIGTERM, signal.SIG_IGN)", "print('ready', flush=True)")
+    monkeypatch.setattr(local_model, "_manager", manager)
+    graceful = threading.Thread(target=manager.stop_server, daemon=True)
+    try:
+        assert child.stdout.readline() == b"ready\n"  # TERM is ignored from here on
+        graceful.start()
+        deadline = time.monotonic() + 5
+        while manager._proc is not None and time.monotonic() < deadline:  # the stop holds the handle now
+            time.sleep(0.01)
+        server._emergency_process_cleanup()
+        assert child.wait(timeout=5) is not None, "the request missed the child the graceful stop awaits"
+        graceful.join(10)
+        assert not graceful.is_alive() and manager._stopping == set()
+    finally:
+        _end(child)
+        if graceful.ident is not None:
+            graceful.join(15)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a child that ignores SIGTERM is a POSIX case")
+@pytest.mark.parametrize("held", [False, True], ids=["native", "concurrent-waiter"])
+def test_an_install_that_exits_after_its_stop_leaves_the_model_manager(tmp_path, monkeypatch, held):
+    """A stop kills an install that ignores TERM after 5 s and polls it once; that poll can come before the exit, or
+    while another thread's wait holds the handle. The install's own thread reaps it and lets it go, so no later Stop
+    or Panic keeps or asks it; until something sees the exit it stays where Panic's request reaches it."""
+    import signal
+    import sys
+
+    from ouroboros import local_model
+
+    ready = tmp_path / "ready"
+    code = ("import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
+    monkeypatch.setattr(local_model, "_get_install_command", lambda: [sys.executable, "-c", code, str(ready)])
+    monkeypatch.setattr(local_model, "_get_install_env", lambda: dict(os.environ))
+    manager = local_model.LocalModelManager()
+    owner = threading.Thread(target=manager._run_install, daemon=True)  # the install's thread, as install_runtime's
+    owner.start()
+    deadline = time.monotonic() + 10
+    while not (ready.is_file() and manager._install_proc is not None) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    child = manager._install_proc
+    assert child is not None and ready.is_file(), "the install never started"
+    try:
+        if held:
+            with child._waitpid_lock:  # another thread's wait: no poll can see the exit yet
+                manager.stop_server()
+                assert child in manager._stopping, "an install whose exit nothing has seen left Panic's reach"
+                assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
+        else:
+            manager.stop_server()
+        owner.join(10)
+        assert not owner.is_alive() and child.returncode == -signal.SIGKILL
+        assert child not in manager._stopping, "the reaped install stayed in the model manager"
+        assert manager.panic_stop(request_only=True) == [], "Panic asked a reaped install to die"
+    finally:
+        _end(child)
+        owner.join(10)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="TERM dispositions are a POSIX case")
+@pytest.mark.parametrize("disposition", ["SIG_IGN", "SIG_DFL"])
+def test_an_install_a_stop_overtook_during_its_launch_stays_reachable_until_its_thread_reaps_it(
+        tmp_path, monkeypatch, disposition):
+    """A stop that lands while the installer is still being launched finds no handle and only cancels; the install
+    thread then sends TERM to the child it got and waits for it. One that ignores TERM stays where Panic's request
+    reaches it; once the child has exited, by that TERM or by the request, the install thread reaps it and lets it go
+    with no further Stop or Panic, so no exited process or open pipe stays in the manager."""
+    import signal
+    import sys
+
+    from ouroboros import local_model
+
+    ready, children, termed = tmp_path / "ready", [], threading.Event()
+    code = (f"import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.{disposition}); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)")
+    monkeypatch.setattr(local_model, "_get_install_command", lambda: [sys.executable, "-c", code, str(ready)])
+    monkeypatch.setattr(local_model, "_get_install_env", lambda: dict(os.environ))
+    manager = local_model.LocalModelManager()
+    launch_kwargs, terminate = local_model._with_hidden_subprocess, local_model.terminate_process_tree
+
+    def stop_during_the_launch(kwargs):
+        manager.stop_server()  # past the install's first check, before it holds a handle
+        return launch_kwargs(kwargs)
+
+    def terminate_once_disposed(child):
+        children.append(child)
+        deadline = time.monotonic() + 10
+        while not ready.is_file() and time.monotonic() < deadline:  # the child's TERM disposition is set from here
+            time.sleep(0.01)
+        try:
+            return terminate(child)
+        finally:
+            termed.set()
+
+    monkeypatch.setattr(local_model, "_with_hidden_subprocess", stop_during_the_launch)
+    monkeypatch.setattr(local_model, "terminate_process_tree", terminate_once_disposed)
+    owner = threading.Thread(target=manager._run_install, daemon=True)
+    owner.start()
+    assert termed.wait(10) and len(children) == 1, "the install never sent its TERM"
+    child = children[0]
+    try:
+        if disposition == "SIG_IGN":
+            assert child.poll() is None and child in manager._stopping, "a live install escaped Panic's request"
+            assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [child.pid]
+        owner.join(10)
+        assert not owner.is_alive(), "the install thread never saw its child exit"
+        assert child.returncode == -(signal.SIGKILL if disposition == "SIG_IGN" else signal.SIGTERM)
+        assert child not in manager._stopping and manager._install_proc is None, "an exited install stayed behind"
+        assert manager.panic_stop(request_only=True) == []
+    finally:
+        _end(child)
+        owner.join(10)
+
+
+def test_panic_asks_each_model_child_once_however_many_places_hold_it():
+    """While an overtaken install's thread sends its TERM the child is in the install slot and among the stopping
+    children at once: Panic asks it once, and still asks every other child."""
+    from ouroboros import local_model
+
+    manager = local_model.LocalModelManager()
+    install, server = _model_child(), _model_child()
+    try:
+        manager._install_proc, manager._proc = install, server
+        manager._stopping.add(install)
+        receipts = manager.panic_stop(request_only=True)
+        assert sorted(receipt["pid"] for receipt in receipts) == sorted((install.pid, server.pid))
+    finally:
+        _end(install, server)
+
+
+def test_a_model_child_that_exits_after_its_stop_goes_at_the_next_stop_or_panic():
+    """A server an earlier stop saw alive after its last wait may exit later: the next Stop's poll lets it go, and
+    Panic polls before it signals, so a reaped handle (the current server's or a stopped one's) is released and never
+    asked to die, while a child nothing has seen exit stays and is asked."""
+    import subprocess
+    import sys
+
+    from ouroboros import local_model
+
+    manager = local_model.LocalModelManager()
+    exited = [subprocess.Popen([sys.executable, "-c", "pass"]) for _ in range(2)]
+    for each in exited:
+        each.wait()
+    live = _model_child()
+    try:
+        manager._stopping.update((exited[0], live))
+        manager.stop_server()
+        assert manager._stopping == {live}, "the next Stop kept an exited child or dropped a live one"
+        manager._proc = exited[1]
+        manager._stopping.add(exited[0])
+        assert [receipt["pid"] for receipt in manager.panic_stop(request_only=True)] == [live.pid]
+        assert manager._stopping == {live} and live.wait(timeout=10) is not None
+    finally:
+        _end(live)
+
+
+def test_emergency_cleanup_never_waits_on_a_first_import_of_the_local_model(monkeypatch):
+    """Another thread may still be importing the optional model module (autostart, a status read): the cleanup asks
+    only a module already loaded, so it reaches its worker stop at once; once that module is loaded it is asked."""
+    import importlib
+    import importlib.abc
+    import importlib.util
+    import sys
+
+    import ouroboros
+
+    server, _local_model = _quiet_cleanup(monkeypatch)
+    label, asked = "ouroboros.local_model", []
+    entered, release, past = threading.Event(), threading.Event(), threading.Event()
+
+    class HeldFirstImport(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, path, target=None):
+            return importlib.util.spec_from_loader(fullname, self) if fullname == label else None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            entered.set()
+            assert release.wait(10)
+            manager = SimpleNamespace(panic_stop=lambda *, request_only: asked.append(request_only))
+            module.get_manager = lambda *, create: manager
+
+    monkeypatch.delitem(sys.modules, label)  # the real module and attribute come back after the test
+    monkeypatch.delattr(ouroboros, "local_model")
+    monkeypatch.setattr(sys, "meta_path", [HeldFirstImport(), *sys.meta_path])
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: past.set())
+    first = threading.Thread(target=importlib.import_module, args=(label,), daemon=True)
+    first.start()
+    try:
+        assert entered.wait(5)
+        cleanup = threading.Thread(target=server._emergency_process_cleanup, daemon=True)
+        cleanup.start()
+        assert past.wait(5), "the cleanup waited on another thread's first import of the model module"
+        cleanup.join(5)
+    finally:
+        release.set()
+        first.join(5)
+    server._emergency_process_cleanup()  # loaded now: its manager is asked
+    assert asked == [True]
+
+
 def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_path):
     from ouroboros import server_control
 

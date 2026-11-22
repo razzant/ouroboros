@@ -95,8 +95,10 @@ def test_deleted_related_cron_stops_firing_and_waits_visibly_until_its_task_sett
     from supervisor.schedule_view import digest
     from datetime import datetime, timezone
     view = digest(schedules.load_schedule_store(root)["tasks"], datetime.now(timezone.utc))
-    assert [entry["id"] for entry in view["standing"]] == [sid]
-    assert view["standing"][0]["status"] == "delete_pending"
+    # No longer standing, it stays in view under attention while its admitted occurrence is in flight.
+    assert not view["standing"] and [entry["id"] for entry in view["attention"]] == [sid]
+    assert view["attention"][0]["status"] == "delete_pending"
+    assert view["attention"][0]["occurrence"]["task_id"] == task["id"]
     # Fresh firings stop at once, however often the tick runs.
     for _ in range(2):
         data = schedules.load_schedule_store(root)

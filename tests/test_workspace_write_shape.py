@@ -13,10 +13,7 @@ import pytest
 
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from ouroboros.tools.shell_guards import interpreter_write_shape, shell_has_write_indicator
 from tests._typed_guard_shared import _shell_guard_text
-
-
 
 
 @pytest.fixture(autouse=True)
@@ -64,72 +61,7 @@ READ_ONLY_HASH_SCRIPT = (
 # --- unit layer: the classifier itself -------------------------------------
 
 
-def test_read_only_open_is_not_interpreter_write_shape():
-    cmd = ["python3", "-c", "with open('f.bin', 'rb') as f:\n    print(len(f.read()))"]
-    assert interpreter_write_shape(cmd) is False
-    # The legacy coarse classifier keeps its pinned behavior for its other
-    # consumers (_protected_shell_block, ws5 carryover).
-    assert shell_has_write_indicator(cmd) is True
-
-
-def test_write_mode_open_and_pathlib_open_stay_write_shaped():
-    assert interpreter_write_shape(["python3", "-c", "open('/d/x', 'w').write('hi')"]) is True
-    assert (
-        interpreter_write_shape(
-            ["python3", "-c", "from pathlib import Path; Path('/d/x').open('w')"]
-        )
-        is True
-    )
-
-
-def test_opaque_subprocess_and_library_saves_stay_write_shaped():
-    assert (
-        interpreter_write_shape(
-            ["python3", "-c", "import subprocess; subprocess.run(['rm', '-rf', '/d/x'])"]
-        )
-        is True
-    )
-    assert interpreter_write_shape(["python3", "-c", "df.to_csv('out.csv')"]) is True
-    assert interpreter_write_shape(["python3", "-c", "fh.writelines(rows)"]) is True
-    assert (
-        interpreter_write_shape(
-            ["node", "-e", "const {writeFileSync} = require('fs'); writeFileSync('x', 'y')"]
-        )
-        is True
-    )
-
-
-def test_shell_level_signals_still_write_shaped_for_interpreters():
-    assert interpreter_write_shape(["sh", "-c", "python3 -c 'print(1)' && rm -rf /tmp/x"]) is True
-    assert interpreter_write_shape("python3 gen.py > out.txt") is True
-    assert interpreter_write_shape(["sh", "-c", "python3 gen.py && cp out.txt /tmp/y"]) is True
-
-
-def test_ruby_perl_pure_reads_are_not_write_shaped():
-    """LIGHT_SHELL_WRITER_COMMANDS membership (a coarse shell-writer role) must not
-    re-add the write shape the mode-aware classifier just re-judged."""
-    assert interpreter_write_shape(["ruby", "-e", "puts File.read('/tmp/f.txt')"]) is False
-    # perl 3-arg READ open: the filename's own letters (the 'x' in f.txt) must not
-    # classify the mode.
-    assert (
-        interpreter_write_shape(["perl", "-e", "open(my $fh, '<', '/tmp/f.txt'); print <$fh>"])
-        is False
-    )
-    assert interpreter_write_shape(["ruby", "-e", "File.write('/tmp/x', 'y')"]) is True
-
-
-def test_perl_ruby_native_write_idioms_stay_write_shaped():
-    """fable-5 review: dropping the membership floor demands the vocabulary
-    actually SEE perl/ruby write spellings — '>'-mode opens, File.delete,
-    FileUtils with a variable argument, IO.binwrite."""
-    assert interpreter_write_shape(["perl", "-e", "open(FH,'>','/outside/x'); print FH 'data'"]) is True
-    assert interpreter_write_shape(["perl", "-e", "open(FH, '>>', $log); print FH $line"]) is True
-    assert interpreter_write_shape(["ruby", "-e", "File.delete('/outside/x')"]) is True
-    assert interpreter_write_shape(["ruby", "-e", "f='/x'; FileUtils.rm_rf(f)"]) is True
-    assert interpreter_write_shape(["ruby", "-e", "IO.binwrite('a.bin', d)"]) is True
-
-
-def test_ruby_file_open_is_mode_aware(tmp_path):
+def test_ruby_file_open_is_mode_aware():
     """sol review: File.open must be a write target only with a write-mode 2nd arg —
     File.open('/x','r') is a READ and must not be reported as a write, while
     File.open('/x','w') and File.new('/x','w') stay writes."""
@@ -137,66 +69,34 @@ def test_ruby_file_open_is_mode_aware(tmp_path):
     read = ["ruby", "-e", "File.open('/tmp/r','r') { |f| puts f.read }"]
     # The literal path is NOT emitted as a write target for a read-mode open.
     assert "/tmp/r" not in writer_target_tokens(read)
-    assert interpreter_write_shape(read) is False
-    assert interpreter_write_shape(["ruby", "-e", "File.open('/tmp/o','w') { |f| f.puts 'x' }"]) is True
     assert "/tmp/o" in writer_target_tokens(["ruby", "-e", "File.open('/tmp/o','w') { |f| f.puts 'x' }"])
-    assert interpreter_write_shape(["ruby", "-e", "File.new('/tmp/o','w')"]) is True
-    assert interpreter_write_shape(["ruby", "-e", "File.new('/tmp/o','r')"]) is False
+    assert "/tmp/o" in writer_target_tokens(["ruby", "-e", "File.new('/tmp/o','w')"])
+    assert "/tmp/o" not in writer_target_tokens(["ruby", "-e", "File.new('/tmp/o','r')"])
+    # File.delete takes no mode: its literal path is a target as it stands.
+    assert "/tmp/d" in writer_target_tokens(["ruby", "-e", "File.delete('/tmp/d')"])
 
 
-def test_keyword_mode_open_is_write_shaped():
-    """sol review: open('/x', mode='w') with a statically-known keyword mode is a
-    real write (distinct from the disclosed variable-mode residual)."""
-    assert interpreter_write_shape(["python3", "-c", "open('/tmp/o', mode='w')"]) is True
-    assert interpreter_write_shape(["python3", "-c", "open('/tmp/o', mode='rb')"]) is False
+def test_python_keyword_mode_and_library_saves_name_their_target():
+    """A statically-known keyword mode decides read vs write, a library save names
+    its file, and a write through an untraceable handle is UNKNOWN, not a target."""
+    from ouroboros.tools.shell_guards import _python_write_targets_and_unknown, writer_target_tokens
 
-
-def test_unspaced_posix_redirect_is_write_shaped():
-    """fable-5 review: `python3 gen.py>out.txt` is ONE shlex token; the redirect
-    shape must be recognized mid-token, while located inline-code bodies keep
-    their '>' comparisons/filehandles as reads."""
-    assert interpreter_write_shape("python3 gen.py>out.txt") is True
-    assert interpreter_write_shape("python3 gen.py>>log.txt") is True
-    assert interpreter_write_shape(["python3", "-c", "print(1 if a > b else 2)"]) is False
-    assert interpreter_write_shape(["python3", "-c", "x = {'k': 'v => w'}; print(x)"]) is False
-
-
-def test_prose_words_are_not_write_shapes_for_interpreters():
-    """Natural-language words in code text ('scp done', 'count deleted rows') are
-    not write evidence; structural spellings (os.remove, rm in a compound) are."""
-    assert interpreter_write_shape(["python3", "-c", "print(open('/tmp/f').read()); print('scp done')"]) is False
-    assert interpreter_write_shape(["python3", "-c", "print('count deleted rows'); print(open('/tmp/f').read())"]) is False
-    assert interpreter_write_shape(["python3", "-c", "print('results truncated')"]) is False
-    assert interpreter_write_shape(["python3", "-c", "import os; os.remove('/tmp/x')"]) is True
-    assert interpreter_write_shape(["python3", "-c", "f.truncate(0)"]) is True
-
-
-def test_python_inline_strings_and_comments_do_not_create_write_shape():
-    """Writer vocabulary is structural: API names in output text/comments are
-    not filesystem channels, while an actual redirect outside the body remains
-    visible to the shell lane."""
-    assert interpreter_write_shape(
-        ["python3", "-c", "print('BIBLE.md write_text'); # os.remove('/tmp/x')"]
-    ) is False
-    assert interpreter_write_shape(
-        "sh -c \"python3 -c 'print(\\\"BIBLE.md write_text\\\")'\""
-    ) is False
-    assert interpreter_write_shape(
-        "python3 -c \"print('BIBLE.md write_text')\" > report.txt"
-    ) is True
+    assert writer_target_tokens(["python3", "-c", "open('out', mode='w')"]) == ["out"]
+    assert writer_target_tokens(["python3", "-c", "open('out', mode='rb')"]) == []
+    assert writer_target_tokens(["python3", "-c", "df.to_csv('out.csv')"]) == ["out.csv"]
+    assert _python_write_targets_and_unknown("fh.writelines(rows)") == ([], True)
 
 
 def test_python_collection_constructor_remove_is_not_a_path_write():
     """A list/tuple/set/dict constructor produces a collection receiver; an item
     named like a protected file is not a filesystem target."""
-    from ouroboros.tools.shell_guards import writer_target_rows
+    from ouroboros.tools.shell_guards import writer_target_tokens
 
     command = [
         "python3", "-c",
         "xs = list(('BIBLE.md',)); xs.remove('BIBLE.md'); print(xs)",
     ]
-    assert interpreter_write_shape(command) is False
-    assert writer_target_rows(command)[0][1] == []
+    assert writer_target_tokens(command) == []
 
 
 # --- guard layer: workspace lanes ------------------------------------------
@@ -303,36 +203,6 @@ def test_sol_r2_channel_grammar_writes_stay_write_shaped():
         assert writer_target_tokens(cmd) == [], cmd
 
 
-def test_sol_r2_compound_and_carve_holes_closed(tmp_path):
-    """sol-max round-2: a pure-filter HEAD speaks only for its own segment, and
-    uniq's '-' stdin operand cannot hide its output operand from the carve."""
-    from ouroboros.tools.registry import _is_pure_read_inspection
-    from ouroboros.tools.write_shape import non_interpreter_write_shape
-    assert (
-        non_interpreter_write_shape(
-            "sort /etc/hosts && find /d -name x -delete",
-            ["sort"], "sort", is_pure_read=_is_pure_read_inspection,
-        )
-        is True
-    )
-    assert _is_pure_read_inspection("printf x | uniq - data/settings.json") is False
-    assert _is_pure_read_inspection("uniq /var/log/a.txt") is True
-
-
-def test_inline_body_isolation_for_joined_and_wrapped_forms():
-    """sol-max round-2: a '>' comparison inside a located body is not a redirect
-    even when the body rides a joined flag or an sh -c wrap; real redirects
-    outside the body still classify."""
-    assert interpreter_write_shape(["python3", "-cprint(2 > 1)"]) is False
-    assert (
-        interpreter_write_shape(
-            ["sh", "-c", "python3 -c 'print(2 > 1); print(open(\"/etc/hosts\").read())'"]
-        )
-        is False
-    )
-    assert interpreter_write_shape(["sh", "-c", "python3 gen.py > out.txt"]) is True
-
-
 def test_pure_filter_write_channels_still_blocked(tmp_path):
     """The real channels stay writes: sort -o, sed -i, uniq's second operand,
     tar extract, gzip default all still take guard B."""
@@ -363,14 +233,7 @@ def test_pure_filter_write_channels_still_blocked(tmp_path):
     ),
     ids=("python-os-write-fd", "node-console-log"),
 )
-def test_unprovable_row_never_promotes_absolute_executable_to_write(tmp_path, cmd):
-    from ouroboros.tools.registry import _workspace_write_candidates
-
-    forced_uncertain_row = [(cmd, [], (cmd[-1],), True)]
-    assert not any(
-        token == cmd[0] and is_write
-        for token, is_write, _row in _workspace_write_candidates(forced_uncertain_row, [], cmd)
-    )
+def test_absolute_interpreter_executable_is_never_a_write_target(tmp_path, cmd):
     reg = _registry(tmp_path, mode="external")
     assert _shell_guard_text(reg,
         {"cmd": cmd, "cwd": str(tmp_path / "workspace")}, "advanced"
@@ -423,28 +286,18 @@ def test_split_redirections_grammar():
 def test_writer_targets_recover_the_destination_behind_a_redirect():
     """The writer-target lane reads the operator-aware view, so a redirect no
     longer displaces the command's own destination."""
-    from ouroboros.tools.shell_guards import writer_target_rows, writer_target_tokens
+    from ouroboros.tools.shell_guards import writer_target_tokens
 
     assert writer_target_tokens(["cp", "x", "y", ">>", "log.txt"]) == ["y", "log.txt"]
-    # A row is (segment_argv, targets, inline_code, unprovable); a `cd` operand
-    # takes the target policy because it is how a later relative write escapes.
-    assert writer_target_rows("cd . && cp src.txt /D/.env") == [
-        (["cd", "."], ["."], (), False),
-        (["cp", "src.txt", "/D/.env"], ["/D/.env"], (), False),
-    ]
 
 
-def test_workspace_rows_filter_bodies_without_weakening_the_light_fence():
-    from ouroboros.tools.shell_guards import writer_target_rows, writer_target_tokens
+def test_a_perl_body_stays_an_unfiltered_writer_operand():
+    from ouroboros.tools.shell_guards import writer_target_tokens
 
     body = "print '/outside/mentioned.txt'"
-    # The light fence keeps the historical unfiltered signal. The workspace
-    # lane removes the body from its path targets; its mode-aware classifier
-    # proves this body read-only, so it carries no row uncertainty.
+    # perl is a LIGHT_SHELL_WRITER_COMMANDS member: its operands, the body
+    # included, stay the historical unfiltered writer signal.
     assert writer_target_tokens(["perl", "-e", body]) == [body]
-    assert writer_target_rows(["perl", "-e", body]) == [
-        (["perl", "-e", body], [], (body,), False),
-    ]
 
 
 def test_cp_source_outside_root_is_a_read_and_destination_still_blocked(tmp_path):
@@ -620,21 +473,18 @@ def test_round3_old_block_coverage_stays_blocked(tmp_path):
     assert missing == []
 
 
-def test_round3_body_uncertainty_variants_are_row_scoped():
-    from ouroboros.tools.shell_guards import writer_target_rows
+def test_round3_body_uncertainty_variants_are_unknown():
+    from ouroboros.tools.write_shape import script_literal_write_targets_and_unknown
 
-    find_row = writer_target_rows(["find", "/tree", "-exec", "tee", "copy-{}", ";"])[0]
-    assert find_row[1] == []
-    assert find_row[3] is True
     for method in ("exec", "spawn", "execSync", "spawnSync"):
-        row = writer_target_rows(
-            ["node", "-e", f'child_process.{method}("rm /outside")']
-        )[0]
-        assert row[3] is True, method
-    ruby_row = writer_target_rows(
-        ["ruby", "-e", 'FileUtils.mv("/outside/source", destination)']
-    )[0]
-    assert ruby_row[3] is True
+        _targets, unknown = script_literal_write_targets_and_unknown(
+            "node", f'child_process.{method}("rm /outside")',
+        )
+        assert unknown is True, method
+    _targets, unknown = script_literal_write_targets_and_unknown(
+        "ruby", 'FileUtils.mv("/outside/source", destination)',
+    )
+    assert unknown is True
 
 
 def test_round3_ordinary_outside_reads_stay_allowed(tmp_path):

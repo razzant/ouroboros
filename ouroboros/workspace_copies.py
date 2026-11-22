@@ -117,7 +117,7 @@ def copy_apply_refusal(ctx: Any, target: Path, touched: list[str]) -> str:
     from ouroboros.presence_authority import presence_ceiling_from_context, presence_ceiling_allows_binding
     from ouroboros.tools.tool_resolution import system_repo_dir_for
     from ouroboros.tools.subagent_integration import _integration_runtime_mode, _capped_self_repo_refusal
-    from ouroboros.runtime_mode_policy import mode_allows_protected_write, protected_paths_in
+    from ouroboros.runtime_mode_policy import protected_paths_in
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     try:
@@ -133,9 +133,12 @@ def copy_apply_refusal(ctx: Any, target: Path, touched: list[str]) -> str:
             if mode == "light" or _capped_self_repo_refusal(ctx, "copy"):
                 return "LIGHT_MODE_BLOCKED: the parent's current mode forbids writing the Ouroboros body."
             constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-            grant = not constraint or constraint.mode != "acting_subagent" or constraint.protected_paths_grant
-            if protected_paths_in(touched) and not (mode_allows_protected_write(mode) and grant):
-                return "CORE_PROTECTION_BLOCKED: the parent's current authority excludes these protected body paths."
+            acting = bool(constraint and constraint.mode == "acting_subagent")
+            grant = bool(constraint and constraint.protected_paths_grant)
+            if (protected := protected_paths_in(touched)) and not protected_write_admitted(mode, acting=acting, grant=grant):
+                # The patch doors' own words: the mode that refuses, or the applying task's missing grant.
+                return protected_apply_refusal(path=protected[0].path, runtime_mode=mode, grant_ok=not acting or grant,
+                                               action="apply an isolated copy's result to").removeprefix("⚠️ ")
     except (OSError, ValueError, TypeError, RuntimeError) as exc:
         return f"INTEGRATE_TARGET_FORBIDDEN: {exc}"
     return ""
@@ -148,13 +151,33 @@ def target_write_refusal(target: Path, refusal: str) -> str:
             f"{target} does not admit this apply: {detail}")
 
 
+def protected_write_admitted(runtime_mode: str, *, acting: bool, grant: bool) -> bool:
+    """The one rule for a protected body path: the dispatcher's direct write and all three integration doors.
+
+    Pro and Cyber Pro admit protected paths; below Pro nothing does, a consciousness Act/Observe tree
+    included (``runtime_mode`` is the effective mode, its ``light`` cap applied). An acting child also
+    needs its own ``protected_paths_grant``, the grant of the task applying the change, never of its
+    author, except in Cyber Pro: there no internal grant vetoes Ouroboros (BIBLE P0), so the child may
+    apply a nested child's finished patch to a protected file as it may already write that file itself
+    (owner decision 6A, 21.11.2026). The doors' grant check came with the patch door (06.06,
+    5d4f75110), the delegated door (31.08, 782b5fe35) and the copy target (30.09, 9b79876de); the
+    dispatcher's Cyber Pro exception (11.09, 5b07a9a7b) never reached them, and 2adb54751 (10.11, an
+    Ouroboros commit, not an owner decision) only said whose grant it is. What the refusal protected,
+    and the cost the owner accepted: a nested child's changes reach protected files without the
+    delegator's own look at them.
+    """
+    from ouroboros.runtime_mode_policy import mode_allows_protected_write, mode_has_unrestricted_agency
+
+    return mode_allows_protected_write(runtime_mode) and (
+        not acting or grant or mode_has_unrestricted_agency(runtime_mode))
+
+
 def protected_apply_refusal(*, path: str, runtime_mode: str, action: str, grant_ok: bool) -> str:
     """The protected-path refusal of both integration doors, naming the cause that holds.
 
-    A door admits a protected body path when the mode allows protected writes AND an acting caller
-    holds its own ``protected_paths_grant``: the grant of the task applying the patch, never of its
-    author. A mode refusal keeps the policy's own words; a missing grant is named, since no mode
-    switch supplies it, and the captured result stays for the caller's parent to decide.
+    ``grant_ok`` is False for an acting caller without its own ``protected_paths_grant``. A mode refusal
+    keeps the policy's own words; a missing grant is named, since no switch to Pro supplies it, and the
+    captured result stays for the caller's parent to decide.
     """
     from ouroboros.runtime_mode_policy import (
         mode_allows_protected_write, normalize_repo_path, protected_path_category, protected_write_block_message,
@@ -163,12 +186,13 @@ def protected_apply_refusal(*, path: str, runtime_mode: str, action: str, grant_
     if grant_ok:
         return protected_write_block_message(path=path, runtime_mode=runtime_mode, action=action)
     norm = normalize_repo_path(path)
-    lead, effect = ((f"runtime_mode={runtime_mode!r} already allows protected writes, but this acting subagent lacks",
-                     "a mode switch would not help") if mode_allows_protected_write(runtime_mode) else
-                    (f"runtime_mode={runtime_mode!r} refuses protected writes, and this acting subagent also lacks",
-                     "'pro' alone would not admit it"))
+    grant = ("its own protected_paths_grant (the grant of the task applying a patch; its author's does not "
+             "carry over)")
+    cause = (f"runtime_mode={runtime_mode!r} admits an acting subagent's protected writes only with {grant}, "
+             "which this task lacks" if mode_allows_protected_write(runtime_mode) else
+             f"runtime_mode={runtime_mode!r} refuses protected writes, and this acting subagent also lacks {grant}, "
+             "so 'pro' alone would not admit it")
     return (f"⚠️ CORE_PROTECTION_BLOCKED: this task may not {action} protected "
-            f"{protected_path_category(norm) or 'core'} path: {norm}. {lead} its own protected_paths_grant (the "
-            f"grant of the task applying a patch; its author's does not carry over), so {effect}. The captured "
+            f"{protected_path_category(norm) or 'core'} path: {norm}. {cause}. The captured "
             "result is kept unapplied: report it to your parent, which decides with its own authority and may "
             "schedule the work with protected_paths_grant.")

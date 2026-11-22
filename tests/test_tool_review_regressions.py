@@ -32,8 +32,9 @@ def test_all_schema_readers_agree_on_network_gate(tmp_path, monkeypatch):
     for allowed in (False, True):
         reg._ctx.task_contract = {"allowed_resources": {"network": allowed}}
         name = "github_read"
-        for core_only in (False, True):
-            assert (name in {row["function"]["name"] for row in reg.schemas(core_only=core_only)}) is allowed
+        assert (name in {row["function"]["name"] for row in reg.schemas()}) is allowed
+        assert (name in reg.available_tools()) is allowed
+        assert (name in {row["name"] for row in reg.callable_rows()}) is allowed
         assert (reg.get_schema_by_name(name) is not None) is allowed
         assert (reg.policy_hidden_reason(name) is None) is allowed
         answer = enable_tools(reg, reg._ctx, name, [])

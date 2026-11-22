@@ -508,7 +508,11 @@ def test_review_temp_failure_uses_offline_show_and_preserves_suite_facts(tmp_pat
     (repo / path).write_text("def test_a():\n    pass\n\ndef test_b():\n    pass\n", encoding="utf-8")
     _git(repo, "add", path)
     rows = {path: (3, 0)}
-    expected = review._suite_facts(repo, base, True, rows, [])
+
+    def suite_facts():  # what the pulse reads, both sides of the index, then the facts of those texts
+        return review._suite_facts(rows, *review._change_texts(repo, base, True, [path], [path]), [])
+
+    expected = suite_facts()
     sources, shows = [], []
     real_run = subprocess.run
 
@@ -545,7 +549,7 @@ def test_review_temp_failure_uses_offline_show_and_preserves_suite_facts(tmp_pat
 
     monkeypatch.setattr(review.tempfile, "TemporaryFile", temporary)
     monkeypatch.setattr(review.subprocess, "run", run)
-    assert review._suite_facts(repo, base, True, rows, []) == expected
+    assert suite_facts() == expected
     assert "items +1/-0" in expected[0]
     assert review._blob_texts(repo, [":missing"]) == {":missing": None}
     assert shows == [f"{base}:{path}", f":{path}", ":missing"]

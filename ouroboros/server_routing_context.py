@@ -14,10 +14,11 @@ pointer and both windows, also says how its work ended (``_ended_work_facts``):
 an author stop's open Continue is a fact the next focus reads, not one it must
 dig for, and ``continue_task`` is among the valid actions it may choose. These
 facts ride where the decision lane is built (``server_owner_routing``: a Project
-room's turn; a Main turn when the install has Projects, a live root or an
-unreadable roots list) and in a wake's Main facts, and Main's manifest only beside
-Projects or live roots: a Main turn of a Project-less install with no live work
-reads a stopped card in its own room and the offer through ``get_task_result``.
+room's turn; a Main turn when the install has Projects, a live root or any root's
+record, or when one of them cannot be read) and in a wake's Main facts. Main's
+manifest is the same with Projects or without (owner decision, 21.11.2026): it
+stays while it names a Project, a live root or a root's result, or says the results
+could not be read; only an install with none of them, such as a new one, gets none.
 """
 
 from __future__ import annotations
@@ -421,6 +422,25 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
     }
 
 
+def _root_results_exist(ctx: Any) -> bool:
+    """Whether the store holds any root's record, live or ended: one row of the root index
+    (``newest_root_ids``), read without waiting on contention, since owner-message intake runs on
+    the supervisor loop. A new install's store holds none. A busy or unreadable store is unknown
+    and answers yes, like an unreadable Projects list: the turn is admitted for the manifest's
+    own read, which then says what it could not read, or finds the store empty."""
+    from ouroboros.store import StoreBusy, acquisition_budget
+    from ouroboros.task_store import newest_root_ids
+
+    try:
+        with acquisition_budget(0):
+            return bool(newest_root_ids(ctx.DRIVE_ROOT, 1))
+    except StoreBusy:  # contention: the manifest's own read may still wait, as beside Projects
+        return True
+    except Exception:
+        log.warning("Unable to inspect root results for owner routing", exc_info=True)
+        return True
+
+
 def _cancel_state_facts(ctx: Any, task_id: str) -> Dict[str, Any]:
     """The durable cancel intent standing over one LIVE root, or ``{}``: the typed
     public projection (``cancel_state``/``cancel_reason``/``stop_policy``), never a
@@ -620,9 +640,10 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     judgment among answer / tell_task / start_task / move_to_project / continue_task.
     ``roots``: the message's one ``addressable_roots`` snapshot, read here when not
     handed down. Built where the decision lane is (``server_owner_routing``: a Project
-    room; Main when the install has Projects, a live root or an unreadable roots
-    list) and for a wake (``main_lane_routing_metadata``); Main's manifest stays only
-    beside Projects or live roots."""
+    room; Main when the install has Projects, a live root or any root's record, or when
+    one of them cannot be read) and for a wake (``main_lane_routing_metadata``); Main's
+    manifest stays while it names a Project, a live root or a root's result, or an
+    unreadable result store, the same with Projects or without."""
     md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
     roots = roots if roots is not None else addressable_roots(ctx)
     addressable_here = roots.rows(chat_id)
@@ -638,6 +659,8 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         main_manifest = _main_routing_manifest(ctx, roots) if is_main_lane else {}
         if main_manifest and not (
             main_manifest.get("projects") or main_manifest.get("root_tasks")
+            or main_manifest.get("final_results")
+            or (main_manifest.get("omissions") or {}).get("final_results_error")
         ):
             main_manifest = {}
     except Exception:

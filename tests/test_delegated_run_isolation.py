@@ -448,23 +448,30 @@ class TestProtectedPathScope:
         assert (target / ".github" / "workflows" / "ci.yml").exists()
         custody._CUSTODY.clear()
 
-    @pytest.mark.parametrize(("mode", "grant"), [
-        ("advanced", False), ("advanced", True), ("pro", False), ("cyber_pro", False), ("pro", True),
+    @pytest.mark.parametrize(("mode", "grant", "capped"), [
+        ("advanced", False, False), ("advanced", True, False), ("pro", False, False), ("pro", True, False),
+        ("cyber_pro", False, False), ("cyber_pro", False, True),
     ])
-    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch, mode, grant):
+    def test_system_repo_target_still_refuses(self, tmp_path, monkeypatch, mode, grant, capped):
         import ouroboros.tools.subagent_integration as si
 
         target, ctx, _ = self._ready(tmp_path, monkeypatch, ".github/workflows/ci.yml")
         # The SAME patch, but the task's own surface says this tree is a checkout
-        # of the Ouroboros body: the protected-path policy applies again. Its
-        # refusal names the cause that holds (#2734): the mode, or this acting
-        # caller's own protected_paths_grant, which no mode switch supplies.
+        # of the Ouroboros body: the protected-path policy applies again, the
+        # dispatcher's own rule. Its refusal names the cause that holds (#2734):
+        # the mode, or this acting caller's own protected_paths_grant, which no
+        # switch to Pro supplies. In Cyber Pro the delegated run's patch applies
+        # without that grant, as the child may write the file itself (owner
+        # decision 6A, 21.11.2026); a consciousness tree capped to light refuses.
         ctx.task_constraint = {"mode": "acting_subagent", "surface": "self_worktree",
                                "write_root": str(target), "protected_paths_grant": grant}
+        if capped:
+            ctx.task_metadata = {**(ctx.task_metadata or {}), "initiator": "consciousness",
+                                 "consciousness_autonomy": "act", "runtime_mode_cap": "light"}
         monkeypatch.setattr(si, "get_runtime_mode", lambda: mode)
         out = si._integrate_delegated_patch(ctx, "run-1", "apply", "")
         written = (target / ".github" / "workflows" / "ci.yml").exists()
-        if mode == "pro" and grant:
+        if (mode == "pro" and grant) or (mode == "cyber_pro" and not capped):
             assert "✅ Integrated" in out and written, out
         else:
             assert "✅ Integrated" not in out and not written, out
