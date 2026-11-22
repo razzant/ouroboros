@@ -211,8 +211,9 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
             cost_final = False
             if cost is not None:
                 normalized["price_source"] = f"litellm@{evidence['tariff_quote']['fetched_at']}"
-    elif (cost is None and cost_usd is None and not normalized.get("cost_invalid") and has_usage
-          and normalized.get("cost_coverage") != "partial" and not has_nontext_usage(normalized)):
+    elif (cost is None and cost_usd is None and has_usage
+          and not normalized.get("cost_invalid") and normalized.get("cost_coverage") != "partial"
+          and not has_nontext_usage(normalized)):
         cost = estimate_cost_optional(
             reservation.model,
             int(prompt_tokens or 0),

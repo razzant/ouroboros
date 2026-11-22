@@ -18,7 +18,7 @@ from ouroboros import chat_uploads
 from ouroboros.config import DATA_DIR
 from ouroboros.gateway._helpers import run_sync_to_completion, settle_to_completion
 from ouroboros.gateway.completion_gist import short_gist_frame
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +187,7 @@ def _record_failure(data_dir: pathlib.Path, row: dict) -> None:
 
 
 def _encode(msg: dict) -> str:
-    return json.dumps(short_gist_frame(msg), ensure_ascii=False, default=str)
+    return json_dumps_utf8(short_gist_frame(msg), ensure_ascii=False, default=str)
 
 
 def _queue_frame(msg: dict) -> bool:

@@ -32,7 +32,7 @@ from ouroboros.tools.core import (
     validate_link_actions,
     validate_quiz_payload,
 )
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import path_for_prose, utc_now_iso
 from ouroboros.subagent_messages import is_task_card_message
 
 log = logging.getLogger(__name__)
@@ -813,7 +813,9 @@ class LocalChatBridge:
             "out",
             int(chat_id or 0),
             _owner_id(),
-            caption or f"📎 {safe_name}",
+            # The default text is UTF-8 prose: a POSIX byte name is spelled by path_for_prose, while the
+            # structured filename below and every wire frame keep the exact name as received.
+            caption or f"📎 {path_for_prose(safe_name)}",
             ts=ts,
             task_id=str(task_id or ""),
             record_type="document", feed=True,

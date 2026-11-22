@@ -967,7 +967,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
     from dataclasses import replace
 
     from ouroboros.deep_self_review import SystemReviewAsk, run_deep_self_review
-    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, new_review_wave_id, review_failure_facts
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, new_review_wave_id, reported_review_cost, review_failure_facts
     from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
     row = system_review_row(reviewer, effort)
@@ -990,7 +990,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
     usage = dict(usage or {})
     failed = str(usage.get("execution_status") or "") == "infra_failed"
     refused = failed and str(usage.get("reason_code") or "") == "deep_self_review_unavailable"
-    cost = usage.get("cost")
+    cost = reported_review_cost(usage)
     fact = body_fact(system, system_repo=system, data_dir=drive, treat_as_body=False)
     degraded = [f"system_review_failed: {usage.get('reason_code')}"] if failed and not refused else []
     after = _system_tree(system)
@@ -1007,7 +1007,7 @@ def run_system_review(ctx: ToolContext, *, reviewer: str = "", effort: str = "",
         "structured": {"started_ts": started, "rows": [system_seat_plan(row)]},
         "triad_raw": [] if refused else [{
             "slot_id": row.slot_id, "status": "error" if failed else "responded", "raw_text": "" if failed else report,
-            "model_id": str(usage.get("resolved_model") or ""), "cost_usd": cost if isinstance(cost, (int, float)) else None,
+            "model_id": str(usage.get("resolved_model") or ""), "cost_usd": cost,
             "capability_delta": list(usage.get("capability_delta") or []),
             # A failed /review keeps its reason on the row, before the report text can be pruned.
             **(review_failure_facts({"status": "error", "error": report,

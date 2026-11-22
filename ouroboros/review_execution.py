@@ -40,7 +40,7 @@ from ouroboros.review_slot_cancel import (  # noqa: F401 — re-exported seam su
 from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp
 from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, BillingAuthorityUnavailable
 from ouroboros.delegate_custody_usage import (
-    model_identity_delta, observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
+    ReviewAttemptCosts, model_identity_delta, observe_failed_review_send, observe_session_usage, run_names,
 )
 from ouroboros.delegate_start_instructions import READONLY_SOURCE_SCOPE
 from ouroboros.triad_review import (
@@ -335,11 +335,12 @@ class ReviewSlotExecutor:
     def __init__(self, assignment: ReviewAssignment, *, llm: Any = None):
         self.assignment = assignment
         self.llm = llm
+        self.attempt_costs = ReviewAttemptCosts()
         self.usage_observer: Optional[Callable[[Dict[str, Any]], None]] = None
         self.answer_observer: Optional[Callable[[], None]] = None
 
     def _observe_usage(self, usage: Optional[Dict[str, Any]]) -> None:
-        observe_review_usage(self.usage_observer, usage)
+        self.attempt_costs.observe(usage, self.usage_observer)
 
     def _output_contract(self) -> str:
         contract = str((self.assignment.request.policy or {}).get("output_contract") or "")
@@ -400,6 +401,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
             self._chat_kwargs = {
                 "messages": self.messages,
                 "model": slot.model,
+                "chat_conversation_id": self.assignment.call_id,
                 "model_role": f"reviewer:{slot.slot_id}",
                 "model_account_override": slot.session_profile,
                 "reasoning_effort": slot.effort,
@@ -450,7 +452,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
                 capture = getattr(exc, "physical_attempt_capture", None)
                 if str(getattr(capture, "state", "") or "") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
                     invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
-                observe_failed_review_send(self.usage_observer, exc)
+                self.attempt_costs.failed(observe_failed_review_send(self.usage_observer, exc))
                 raise
         # Null/non-object provider messages follow the caller's empty-response rail.
         raw_text = str(msg.get("content") or "") if isinstance(msg, dict) else ""

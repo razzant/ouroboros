@@ -27,6 +27,7 @@ from ouroboros.anthropic_native_custody import is_replayed_native_content
 from ouroboros._usage_response import provider_answer, typed_values
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, size_refusal
 from ouroboros.llm_helper_window import _helper_attempt_context, helper_context_for, priced_for
+from ouroboros.opencode_go import is_go_chat_route
 from ouroboros.request_wire_contract import physical_candidate_bytes as _canonical_candidate_bytes
 from ouroboros.request_wire_recovery import prepare_wire_payload_for_send
 from ouroboros.transport_custody import (  # noqa: F401 -- consumers import these two scopes through this module
@@ -630,6 +631,7 @@ def _attempt_request(
         processing_basis=copy.deepcopy(target.get("processing_basis")),
         effort=effort_request_facts(target, payload),
         provider_receipt_binding=binding_for_target(target),
+        opencode_go=is_go_chat_route(target.get("provider"), target.get("base_url")),
         candidate_clock_free_sha256=(
             hashlib.sha256(_canonical_candidate_bytes(clock_free)).hexdigest()
             if clock_note is not None else None

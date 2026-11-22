@@ -80,6 +80,26 @@ def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[flo
     return cost, cost is None and any(value is not None for value in candidates), BYOK_COST_BASIS if byok else ""
 
 
+def normalize_go_price(usage: Dict[str, Any]) -> Tuple[Optional[float], bool]:
+    """Only ``usage.cost`` is cash (or explicitly a BYOK estimate) on this exact route.
+
+    https://opencode.ai/docs/console/api/inference/#cost: list price, plan allowance
+    and billed-token split are different units, not substitute prices or the
+    OpenAI-compatible prompt's token count.
+    """
+    raw = usage.get("cost")
+    cost = provider_cost_value(raw)
+    opencode = usage.get("opencode")
+    estimated = cost is not None and isinstance(opencode, dict) and opencode.get("estimated") is True
+    for host_key in ("cost_basis", "cost_invalid", "price_source"):
+        usage.pop(host_key, None)
+    final = cost is not None and not estimated
+    usage.update(cost=cost, cost_final=final, cost_estimated=estimated)
+    if raw is not None and cost is None:
+        usage["cost_invalid"] = True
+    return cost, final
+
+
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``, Anthropic
 # ``max_tokens`` and Responses ``max_output_tokens``. The one vocabulary every finish-reason reader shares.
 OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
@@ -252,7 +272,8 @@ def _normalized_input_token_usage(raw: Any) -> Optional[Dict[str, Any]]:
     return normalized
 
 
-def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict[str, Any], Optional[float], bool]:
+def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD,
+                        opencode_go: bool = False) -> Tuple[Dict[str, Any], Optional[float], bool]:
     """Extract common usage/cost facts without retaining response text."""
     if payload is _UNREAD_PAYLOAD:
         payload = _plain(response)
@@ -335,6 +356,9 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         }
         if split:
             normalized["cache_write_tokens_by_ttl"] = split
+    if opencode_go:
+        cost, final = normalize_go_price(normalized)
+        return normalized, cost, final
     cost, invalid, basis = reported_price(
         usage, payload.get("total_cost_usd") if isinstance(payload, dict) else None,
         getattr(response, "total_cost_usd", None),

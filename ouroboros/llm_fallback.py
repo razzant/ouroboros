@@ -462,8 +462,10 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
+                if not candidate.get("stream"):
+                    return response
                 return consume_stream(response, expected_choices=candidate.get("n", 1),
-                                      responses=responses_route(target)) if candidate.get("stream") else response
+                                      responses=responses_route(target), opencode_go=request.opencode_go)
 
             try:
                 result = _execute_candidate(
@@ -643,8 +645,10 @@ class _RecoveryLadderMixin:
                     if refusal is error:
                         raise
                     raise refusal from error
+                if not candidate.get("stream"):
+                    return response
                 return await consume_stream_async(response, expected_choices=candidate.get("n", 1),
-                                                  responses=responses_route(target)) if candidate.get("stream") else response
+                                                  responses=responses_route(target), opencode_go=request.opencode_go)
 
             try:
                 result = await _execute_candidate_async(

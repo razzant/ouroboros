@@ -655,7 +655,7 @@ class _SSEFrames:
 
 class _StreamAssembly:
     def __init__(self, response: Any, native: bool, expected_choices: int, *, defer_binding: bool = False,
-                 responses: bool = False):
+                 responses: bool = False, opencode_go: bool = False):
         from ouroboros.usage_accounting import (
             AttemptReservation, current_physical_attempt_drive_root, last_physical_attempt_capture,
         )
@@ -663,6 +663,7 @@ class _StreamAssembly:
         capture, root = last_physical_attempt_capture(), current_physical_attempt_drive_root()
         self.reservation = (AttemptReservation(capture.attempt_id, root, capture.model, capture.provider, None)
                             if capture is not None and root is not None else None)
+        self.cost_keys = ("cost",) if opencode_go else ("cost", "total_cost")
         self.defer_binding = defer_binding
         self.pending_generations = []
         self.generation_id = ""
@@ -719,11 +720,11 @@ class _StreamAssembly:
         if not complete_usage:
             # message_start and unfinished Chat streams can carry partial counters.
             # An explicit price remains authoritative even on a partial message.
-            if not any(provider_cost_value(usage.get(key)) is not None for key in ("cost", "total_cost")):
+            if not any(provider_cost_value(usage.get(key)) is not None for key in self.cost_keys):
                 usage = {}
         received = getattr(error, "stream_usage", None)
         if isinstance(received, dict):
-            cost = next((value for source in (received, usage) for key in ("cost", "total_cost")
+            cost = next((value for source in (received, usage) for key in self.cost_keys
                          if (value := provider_cost_value(source.get(key))) is not None), None)
             _snapshot(usage, received)
             if cost is not None:
@@ -791,9 +792,9 @@ class _StreamAssembly:
 
 
 def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,
-                   responses: bool = False) -> AssembledResponse:
+                   responses: bool = False, opencode_go: bool = False) -> AssembledResponse:
     response = stream if native else getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, native, expected_choices, responses=responses)
+    assembly = _StreamAssembly(response, native, expected_choices, responses=responses, opencode_go=opencode_go)
     try:
         chunks = response.iter_content(chunk_size=8192) if native else response.iter_bytes()
         for chunk in chunks:
@@ -813,11 +814,13 @@ def consume_stream(stream: Any, *, native: bool = False, expected_choices: int =
     return AssembledResponse(body)
 
 
-async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False) -> AssembledResponse:
+async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False,
+                               opencode_go: bool = False) -> AssembledResponse:
     from ouroboros._usage_wait import presend_off_loop
 
     response = getattr(stream, "response", stream)
-    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True, responses=responses)
+    assembly = _StreamAssembly(response, False, expected_choices, defer_binding=True, responses=responses,
+                               opencode_go=opencode_go)
     try:
         if assembly.pending_generations:
             await presend_off_loop(assembly.bind_pending_generations)

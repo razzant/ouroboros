@@ -285,6 +285,7 @@ class AttemptRequest:
     context_window_tokens_exact: Optional[int] = None
     working_reserve_tokens: Optional[int] = None
     cost_evidence: Optional[Dict[str, Any]] = None
+    opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
 @dataclass(frozen=True)
 class AttemptReservation:
     attempt_id: str
@@ -296,6 +297,7 @@ class AttemptReservation:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     scope: Optional[UsageScope] = None
+    opencode_go: bool = False
 PhysicalAttemptState = Literal["reserved", "released", "dispatched", "settled", "unresolved"]
 PHYSICAL_ATTEMPT_STATES = frozenset(get_args(PhysicalAttemptState))
 POSITIVE_PHYSICAL_ATTEMPT_STATES = frozenset({"settled", "dispatched", "unresolved"})
@@ -800,7 +802,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         bucket.append(attempt_id)
     return AttemptReservation(attempt_id, root, request.model, request.provider, bound,
                               request.processing_preference, request.submitted_processing_mode,
-                              copy.deepcopy(request.processing_basis), scope=scope)
+                              copy.deepcopy(request.processing_basis), scope=scope, opencode_go=request.opencode_go)
 
 
 def record_unmetered_external_dispatch(
@@ -1356,9 +1358,9 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     for evidence in ({"usage": stream_usage}, payload):
         if isinstance(evidence, dict):
             evidence = {key: value for key, value in evidence.items() if key != "error"}
-        usage, cost, final = usage_from_response(evidence)
-        if final and cost is not None:
-            settle_attempt(reservation, usage, cost_usd=cost, cost_final=True)
+        usage, cost, final = usage_from_response(evidence, opencode_go=reservation.opencode_go)
+        if cost is not None and (final or reservation.opencode_go):
+            settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
             return "settled"
     if provider == "openrouter":
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
@@ -1366,11 +1368,8 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
                 _transition(reservation, "settled", cost_usd=0.0, cost_final=True, settle_reason=reason)
                 return "settled"
     if isinstance(stream_usage, dict) and stream_usage:
-        # The usage frame was read before the body was judged unusable: money is
-        # known, so settle through the success path's extractor and cost derivation
-        # from that frame alone (no assembled-body facts such as service_tier, no
-        # cache-TTL injection or token-density observation); only the answer is missing.
-        usage, cost, final = usage_from_response({"usage": stream_usage})
+        # Settle from the received usage frame, without inventing assembled-body facts or a price.
+        usage, cost, final = usage_from_response({"usage": stream_usage}, opencode_go=reservation.opencode_go)
         settle_attempt(reservation, dict(usage or {}), cost_usd=cost, cost_final=final)
         return "settled"
     else:
@@ -1507,7 +1506,8 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
     payload = _retain_physical_failure(reservation, response=response)
     terminal_state = "settled"
     try:
-        usage, cost, final = extractor(response, payload=payload) if extractor is usage_from_response else extractor(response)
+        usage, cost, final = (extractor(response, payload=payload, opencode_go=reservation.opencode_go)
+                              if extractor is usage_from_response else extractor(response))
         usage = dict(usage or {})
         if request.prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = request.prompt_cache_ttl
