@@ -231,30 +231,40 @@ itself: a Mini App or another computer is refused, `owner_ignored`), never in co
 granted and never served by a GET (`""` clears it; a value `new_code` did not mint is refused with
 400); the standard-library `lib/telegram_pairing.py` with `new_code` and `bot_identity` (one bare
 `getMe` to the cloud or the saved `TELEGRAM_API_BASE`, never redirected, `unreachable` while the
-skill's settings cannot be read; otherwise `refused` or `unreachable`, never naming the token or the
-URL); the link `https://t.me/{username}?start={code}`; the status route; the connection options.
+skill's settings cannot be read or that setting is not a server the bridge accepts; otherwise
+`refused` or `unreachable`, never naming the token or the URL); the link
+`https://t.me/{username}?start={code}`; the status route; the connection options. The card saves
+the code before the bot token, so the bridge never polls without it.
+
 While a code waits, only a private chat's `/start <code>` (typed, from the link, or as a photo's
-caption) binds. The bridge first asks the core to make that chat its emergency stop's owner: when
-the core's slot was empty or already holds that chat, one write of the skill's settings binds the
-chat, clears the code and keeps its SHA-256 digest (the link, and the same code saved again, never
-bind again), and one greeting follows, with the Mini App's Open button when it is ready. When
-another Telegram account holds the emergency stop nothing changes: the bridge keeps its owner, whose
-messages and `/panic` keep working, the code keeps waiting, the scanner is told that only an owner
-Reset moves the emergency stop, and `pairing/status` says `blocked`. When the core cannot answer, nothing changes
-and the scanner is asked to open the link again. Nothing else binds while a code waits; with no
-code, the first private chat binds as before, and the digest of its `/start` payload is kept the
-same way, so that code, saved by the card just after the bridge started, binds nothing a second
-time. `/start` never reaches the Main chat: its owner is greeted again, an owner's `/start` with a
-code that binds nothing is told the link is no longer valid, and while a code waits so is anyone
-else; with an owner bound and none waiting, someone else's `/start` gets no answer. These replies
-go out beside the update loop, so none delays an owner's `/panic`. `GET pairing/status` answers
+caption) binds. The bridge saves a claim, then asks the core to make that chat its emergency stop's
+owner. When the core takes it (its slot was empty or already holds that chat), one write of the
+skill's settings binds the chat, clears the code and the claim and keeps the code's SHA-256 digest
+(the link, and the same code saved again, never bind again), and one greeting follows, with the Mini
+App's Open button when it is ready; while the core is still starting, its door takes that owner a
+moment later. When another Telegram account holds the emergency stop nothing changes: the bridge
+keeps its owner, whose messages and `/panic` keep working, the code keeps waiting, the scanner is
+told that only an owner Reset moves the emergency stop, and `pairing/status` says `blocked`. When the
+core's answer does not come, or the bridge's write fails, the scanner is asked to open the link again
+and the claim settles at the bridge's next pass the same way, so the core and the bridge never name
+different owners. An owner the bridge already has is registered with the emergency stop as the bridge
+loads, also while a code waits: that owner never loses `/panic`, and another account's scan then
+gets the blocked answer. Nothing else binds while a code waits or a claim is open; with neither, the
+first private chat binds as before, but only while no owner chat at all is saved (a group or channel
+id used as a feed keeps the bot closed too), and the digest of its `/start` payload is kept, so that
+code, saved by the card afterwards, binds nothing a second time. `/start` never reaches the Main
+chat: its owner is greeted again (also when it opens the link that bound it), an owner's `/start`
+with another code is told the link is no longer valid, and while a code waits so is anyone else;
+with an owner bound and none waiting, someone else's `/start` gets no answer. These replies go out
+beside the update loop, so none delays an owner's `/panic`. `GET pairing/status` answers
 `{bot_username, owner_bound, pending, blocked}` (`bot_username` once the bridge validated the token
-in force with a `getMe` naming this bot; `blocked`: `"emergency_stop_owner"` or null; never the
-code or the token; 409 while the settings cannot be read). An option with `store: skill_settings`
-is this skill's own setting, saved through `POST settings/save`, for example
-`{"TELEGRAM_NOTIFY_TASKS": "on"}`. Not covered: the emergency stop's owner is written once, so
-moving the bridge to another Telegram account takes an owner Reset, also when the first owner was a
-first writer who reached a brand-new bot before the card saved its code.
+in force with a `getMe` naming this bot; `blocked`: `"emergency_stop_owner"` or null; never the code
+or the token; 409 while the settings cannot be read). An option with `store: skill_settings` is this
+skill's own setting, saved through `POST settings/save`, for example `{"TELEGRAM_NOTIFY_TASKS": "on"}`.
+Not covered: the core's external owner, written once, carries `/panic` and every external command
+(`/status`, `/restart`, `/review`, `/evolve`, `/bg`), so moving the bridge to another Telegram account
+takes an owner Reset, also when the first owner was a first writer who reached a brand-new bot before
+the card saved its code; `blocked` lasts for the bridge's current load.
 
 The bridge marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.

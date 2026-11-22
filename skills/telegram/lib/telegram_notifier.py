@@ -30,7 +30,7 @@ from .telegram_state import (
     _mirror_options,
     TelegramDestinationUnavailable,
 )
-from ..scripts.telegram_settings import owner_chat_id, telegram_api_base, telegram_files_dir, telegram_proxy
+from ..scripts.telegram_settings import load_settings, telegram_api_base, telegram_files_dir, telegram_proxy
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
 from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, routing_option_label
@@ -64,14 +64,20 @@ def _pinned_chat_id(settings: Dict[str, Any]) -> int:
 
 
 def _owner_moved(api, chat_id: int) -> bool:
-    """Whether the bridge's owner is now another chat than the one this cycle read (a pairing moved it), or cannot
-    be read: nothing addressed to the former owner goes out, and the next cycle sends to the owner then in force.
-    Read from the settings file at each send, apart from the cycle's own settings snapshot."""
+    """Whether the saved owner chat is no longer the one this cycle read (a pairing moved it, or the owner cleared
+    it), or cannot be read: nothing addressed to the former chat goes out, and the next cycle sends to the owner then
+    in force, if any. Read from the settings file at each send, apart from the cycle's own settings snapshot; a
+    file that never named an owner leaves the send as it is."""
     try:
-        current = owner_chat_id(Path(api.get_state_dir()))
+        settings = load_settings(Path(api.get_state_dir()))
     except Exception:  # noqa: BLE001 — unreadable now: the notification waits for the next cycle
         return True
-    return bool(current) and current != int(chat_id)
+    if "TELEGRAM_CHAT_ID" not in settings:
+        return False
+    try:
+        return int(str(settings.get("TELEGRAM_CHAT_ID") or "").strip()) != int(chat_id)
+    except ValueError:  # cleared, or not a chat any more
+        return True
 
 
 async def _push_notification(

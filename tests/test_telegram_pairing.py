@@ -170,10 +170,14 @@ def test_saved_api_base_reads_the_skills_own_settings_and_never_falls_back_to_th
     assert pairing.saved_api_base(tmp_path) == bot_api.origin
     bot_api.answers[ME] = (200, b'{"ok":true,"result":{"id":123456,"username":"pair_bot"}}', {}, 0)
     assert pairing.bot_identity(TOKEN, pairing.saved_api_base(tmp_path))["ok"] is True and bot_api.paths == [ME]
-    for broken in ("{broken", "[1, 2]"):
+    for broken in ("{broken", "[1, 2]", '{"TELEGRAM_API_BASE": 8081}', '{"TELEGRAM_API_BASE": "127.0.0.1:8081"}',
+                   '{"TELEGRAM_API_BASE": "http://127.0.0.1:8081/bot"}', '{"TELEGRAM_API_BASE": ["http://x"]}'):
         (tmp_path / "settings.json").write_text(broken, encoding="utf-8")
-        assert pairing.saved_api_base(tmp_path) == pairing.UNAVAILABLE
+        assert pairing.saved_api_base(tmp_path) == pairing.UNAVAILABLE, broken  # what the bridge refuses
         assert pairing.bot_identity(TOKEN, pairing.saved_api_base(tmp_path)) == {"ok": False, "cause": "unreachable"}
+    for empty in ('{"TELEGRAM_API_BASE": ""}', '{"TELEGRAM_API_BASE": null}', '{"TELEGRAM_API_BASE": "  "}'):
+        (tmp_path / "settings.json").write_text(empty, encoding="utf-8")
+        assert pairing.saved_api_base(tmp_path) is None, empty  # the bridge's own default: the cloud
     assert bot_api.paths == [ME]  # nothing was sent while the server could not be known
 
 
@@ -205,7 +209,8 @@ def test_a_code_waits_until_it_binds_once_and_its_one_write_keeps_only_its_diges
     # The pairing's write: the owner, the code cleared and its digest kept, so the same code never waits again.
     patch = pairing.paired(waiting, chat_id=42, digest=pairing.code_digest(code))
     after = {**waiting, **patch}
-    assert patch == {"TELEGRAM_CHAT_ID": "42", pairing.CONSUMED_KEY: pairing.code_digest(code), pairing.CODE_KEY: ""}
+    assert patch == {"TELEGRAM_CHAT_ID": "42", pairing.CONSUMED_KEY: pairing.code_digest(code), pairing.CODE_KEY: "",
+                     pairing.CLAIM_KEY: ""}
     assert code not in json.dumps(after) and pairing.pending_code({**after, pairing.CODE_KEY: code}) == ""
     # A new code saved meanwhile stays waiting: the write clears only the code it consumed.
     kept = pairing.paired({pairing.CODE_KEY: other}, chat_id=42, digest=pairing.code_digest(code))
@@ -216,8 +221,13 @@ def test_the_first_writer_binds_only_while_nothing_waits_and_its_start_payload_s
     code = pairing.new_code()
     assert not pairing.first_writer_may_bind(True) and pairing.first_writer_may_bind(False)
     assert pairing.first_written({}, chat_id=42) == {"TELEGRAM_CHAT_ID": "42"}
+    assert pairing.first_written({"TELEGRAM_CHAT_ID": " "}, chat_id=42) == {"TELEGRAM_CHAT_ID": "42"}
     assert pairing.first_written({pairing.CODE_KEY: code}, chat_id=42, payload=code) == {}  # a code waits
-    assert pairing.first_written({"TELEGRAM_CHAT_ID": "7"}, chat_id=42) == {}  # an owner is bound meanwhile
+    assert pairing.first_written({pairing.CLAIM_KEY: f"7:{pairing.code_digest(code)}"}, chat_id=42) == {}  # claimed
+    for saved in ("7", "-1001234567890", "0", "none"):  # any saved owner chat, a group or channel feed included
+        assert pairing.first_written({"TELEGRAM_CHAT_ID": saved}, chat_id=42) == {} and pairing.pinned(
+            {"TELEGRAM_CHAT_ID": saved})
+    assert not pairing.pinned({}) and not pairing.pinned({"TELEGRAM_CHAT_ID": ""}) and not pairing.pinned(None)
     bound = pairing.first_written({}, chat_id=42, payload=code)  # the backlog's /start <code>, before the code
     assert bound == {"TELEGRAM_CHAT_ID": "42", pairing.CONSUMED_KEY: pairing.code_digest(code)}
     assert pairing.pending_code({**bound, pairing.CODE_KEY: code}) == ""  # the code delivered after it: spent
@@ -225,6 +235,24 @@ def test_the_first_writer_binds_only_while_nothing_waits_and_its_start_payload_s
     assert pairing.first_written({}, chat_id=42, payload="not-a-code") == {"TELEGRAM_CHAT_ID": "42"}
     assert pairing.owner_chat({"TELEGRAM_CHAT_ID": " 42 "}) == 42
     assert pairing.owner_chat({"TELEGRAM_CHAT_ID": "x"}) == pairing.owner_chat(None) == 0
+
+
+def test_a_claim_records_the_pairing_the_core_is_asked_for_until_it_settles():
+    code, other = pairing.new_code(), pairing.new_code()
+    digest = pairing.code_digest(code)
+    claim = pairing.claimed({}, chat_id=42, digest=digest)
+    assert pairing.claim_of(claim) == (42, digest) and code not in json.dumps(claim)
+    for broken in ("", "42", "x:" + digest, "0:" + digest, "-1:" + digest, "42:short", None):
+        assert pairing.claim_of({pairing.CLAIM_KEY: broken}) is None
+    # The core refused: the claim goes only while it is still this one.
+    assert pairing.unclaimed(claim, chat_id=42, digest=digest) == {pairing.CLAIM_KEY: ""}
+    assert pairing.unclaimed(claim, chat_id=43, digest=digest) == {}
+    # The core took it: the owner write clears the claim with the code it consumed.
+    after = {**claim, pairing.CODE_KEY: code, **pairing.paired({**claim, pairing.CODE_KEY: code}, chat_id=42,
+                                                                 digest=digest)}
+    assert pairing.claim_of(after) is None and after["TELEGRAM_CHAT_ID"] == "42" and after[pairing.CODE_KEY] == ""
+    kept = pairing.paired({**claim, pairing.CODE_KEY: other}, chat_id=42, digest=digest)
+    assert pairing.CODE_KEY not in kept and kept[pairing.CLAIM_KEY] == ""  # a code saved meanwhile keeps waiting
 
 
 def _registered(tmp_path):

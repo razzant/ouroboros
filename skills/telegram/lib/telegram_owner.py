@@ -2,23 +2,26 @@
 
 ``owner_gate`` decides every polled update before anything else reads it. The pairing code is this skill's own
 write-only setting (lib/telegram_pairing.py). A private chat's ``/start <code>`` (as text or as a caption) matching
-the code that waits first asks the core whether its emergency stop can be this chat's (``POST /owner/external``).
-When it can (the slot was empty, or is this chat already), one write of the skill's settings binds the chat, clears
-the code and keeps its digest, and the chat is greeted. When another Telegram account holds the emergency stop
-nothing changes: the bridge keeps its owner, the code keeps waiting, the scanner is told why and ``pairing/status``
-says ``blocked``. When the core cannot answer, nothing changes and the scanner is asked to open the link again.
-While a code waits nothing else binds; with none, the first positive private chat binds, as before (owner rule of
-02.09). While the settings cannot be read nothing binds. ``/start`` never reaches the Main chat in any command mode:
-the owner is greeted again (or told that a stale link no longer binds), and while a code waits anyone else's
-``/start`` is told the link does not bind. Every reply of the gate is sent beside the poll loop with its own time
-limit, so no reply holds the next update, an owner's ``/panic`` among them.
+the code that waits first saves a claim, then asks the core whether its emergency stop can be this chat's
+(``POST /owner/external``). When the core took it (the slot was empty or is this chat already, its door holding the
+pair or about to), one write of the skill's settings binds the chat, clears the code and the claim and keeps the
+code's digest, and the chat is greeted. When another Telegram account holds the emergency stop nothing changes: the
+bridge keeps its owner, the code keeps waiting, the scanner is told why and ``pairing/status`` says ``blocked``. When
+the core's answer does not come, or the bridge's own write fails, the claim stays and the bridge's next pass settles
+it the same way, so the core's slot and the bridge's owner never name different chats. While a code waits or a claim
+is open nothing else binds; with neither and no owner chat saved at all, the first positive private chat binds, as
+before (owner rule of 02.09). While the settings cannot be read nothing binds. ``/start`` never reaches the Main
+chat in any command mode: the owner is greeted again (or told that a stale link no longer binds), and while a code
+waits anyone else's ``/start`` is told the link does not bind. Every reply of the gate is sent beside the poll loop
+with its own time limit, so no reply holds the next update, an owner's ``/panic`` among them.
 
 The emergency stop accepts an external ``/panic`` only from the core's external command owner
 (``owner_external_id``/``owner_external_chat_id``, ``ouroboros/server_control.PanicIngress``), a pair written once
 into an empty slot and kept until owner Reset. The bridge registers its owner there itself: at a pairing, before it
 binds; from its load on for an owner bound earlier or by a first writer (``keep_owner_registered``, asked again
-while the core cannot settle it); and when a ``/panic`` was refused before that registration settled
-(``dispatch_panic`` registers and sends it once more). A settled owner's ``/panic`` goes out at once, alone.
+while the core cannot settle it). The owner's ``/panic`` goes out at once; when the door refused that very
+``/panic``, the core is asked once more and, if its door holds the owner now, the ``/panic`` is sent once more
+(``dispatch_panic``). An owner the door knows is never asked anything first.
 """
 from __future__ import annotations
 
@@ -145,13 +148,14 @@ async def _start(api, client, chat_id: int, payload: str, owner: str, lang: str,
             return paired, True
         return owner or None, True
     waiting, bound_now = bool(pairing.pending_code(settings)), False
-    if not owner and not pairing.owner_chat(settings) and not waiting:
+    if not owner and not pairing.pinned(settings) and not waiting and not pairing.claim_of(settings):
         if not _first_writer(api, client, chat_id, payload):
             return None, True
         owner, bound_now = str(chat_id), True
     if owner:  # greeted; an owner's payload that bound nothing is told so, never "Connected"
         _owner_message_seen(api, client.bot_id, chat_id, int(message.get("message_id") or 0))
-        _reply(api, client, chat_id, "link_invalid" if payload and not bound_now else "greeting", lang)
+        spent = not waiting and pairing.same_digest(pairing.code_digest(payload), settings.get(pairing.CONSUMED_KEY))
+        _reply(api, client, chat_id, "link_invalid" if payload and not (bound_now or spent) else "greeting", lang)
         return owner, True
     if waiting:  # someone else, while a code waits: told once that this link does not bind
         _reply(api, client, chat_id, "link_invalid", lang)
@@ -172,30 +176,51 @@ def _first_writer(api, client, chat_id: int, payload: Optional[str]) -> bool:
 
 
 async def _pair(api, client, chat_id: int, digest: str, lang: str, post) -> Optional[str]:
-    """The waiting code's ``/start``: the core first, then one settings write. The new owner's chat, or None when
-    nothing changed (the scanner is told why)."""
-    _check(client)
-    outcome = await ensure_core_owner(api, chat_id, post, force=True)
-    if outcome == "other":
-        _load(api).blocked = digest
-        _reply(api, client, chat_id, "link_blocked", lang)
-        return None
-    if outcome not in ("bound", "same"):
-        _reply(api, client, chat_id, "link_retry", lang)
-        return None
+    """The waiting code's ``/start``: a claim, the core, then one settings write. The new owner's chat, or None when
+    nothing changed yet (the scanner is told why)."""
     _check(client)
     try:
-        merge_settings(pathlib.Path(api.get_state_dir()),
-                       functools.partial(pairing.paired, chat_id=chat_id, digest=digest))
-    except TelegramSettingsError as exc:
-        api.log("warning", f"Telegram could not save the owner its pairing link bound ({exc}); opening the link "
-                           "again finishes it.")
+        merge_settings(_dir(api), functools.partial(pairing.claimed, chat_id=chat_id, digest=digest))
+    except TelegramSettingsError:  # nothing was asked and nothing changed
         _reply(api, client, chat_id, "link_retry", lang)
         return None
-    _load(api).blocked = ""
-    api.log("info", "Telegram owner bound by the pairing link.")
-    _reply(api, client, chat_id, "greeting", lang)
-    return str(chat_id)
+    outcome, _cause = await _ask_core(api, chat_id, post)
+    settled = _settle_claim(api, chat_id, digest, outcome)  # once the core answered, settle it whatever came since
+    if settled == "paired":
+        _reply(api, client, chat_id, "greeting", lang)
+        return str(chat_id)
+    _reply(api, client, chat_id, "link_blocked" if settled == "blocked" else "link_retry", lang)
+    return None
+
+
+def _dir(api) -> pathlib.Path:
+    return pathlib.Path(api.get_state_dir())
+
+
+def _settle_claim(api, chat_id: int, digest: str, outcome: str) -> str:
+    """One claimed pairing after the core's answer: "paired" (the core took the chat: the one owner write),
+    "blocked" (another account holds the emergency stop: the claim goes), or "open" (no answer, or the write
+    failed: the claim stays for the next pass)."""
+    load = _load(api)
+    try:
+        if outcome == "other":
+            merge_settings(_dir(api), functools.partial(pairing.unclaimed, chat_id=chat_id, digest=digest))
+            if load.blocked != digest:
+                api.log("info", "A Telegram pairing link was refused: another Telegram account holds the emergency "
+                                "stop; the bridge keeps its owner.")
+            load.blocked = digest
+            return "blocked"
+        if outcome in ("bound", "same", "pending"):
+            merge_settings(_dir(api), functools.partial(pairing.paired, chat_id=chat_id, digest=digest))
+            load.blocked = ""
+            if outcome != "pending":
+                load.settled.add(chat_id)  # the live door holds it
+            api.log("info", "Telegram owner bound by the pairing link.")
+            return "paired"
+    except TelegramSettingsError as exc:
+        api.log("warning", f"Telegram could not save the pairing the core answered ({exc}); it is saved at the "
+                           "bridge's next pass.")
+    return "open"
 
 
 def _reply(api, client, chat_id: int, key: str, lang: str) -> None:
@@ -231,22 +256,27 @@ async def greet(api, client, chat_id: int, lang: str) -> None:
     await client.send_message(chat_id, text)
 
 
-async def ensure_core_owner(api, chat_id: int, post, *, force: bool = False) -> str:
-    """Ask the core to make ``chat_id`` its external command owner (``POST /owner/external``), once per load unless
-    ``force`` (a pairing asks each time). "bound", "same" or "other" (another pair holds the slot until owner Reset)
-    settle the chat for this load; "unknown" or "failed" while the core cannot answer, logged once until it can.
-    "settled" when this load had already settled it."""
-    load = _load(api)
-    if not force and chat_id in load.settled:
-        return "settled"
+async def _ask_core(api, chat_id: int, post) -> tuple:
+    """``POST /owner/external`` for ``chat_id``: ``(outcome, cause)``. The outcome is the core's ("bound", "same",
+    "pending": saved but its door does not hold it yet, "other", "unknown"), or "failed" without an answer."""
     try:
         status, body = await asyncio.wait_for(
             post(api, "/owner/external", {"user_id": chat_id, "chat_id": chat_id}), _HOST_WAIT_SEC)
-    except Exception as exc:  # noqa: BLE001 — one line per episode; the caller asks again
-        outcome, cause = "failed", type(exc).__name__
-    else:
-        outcome = str(body.get("owner") or "") if status < 400 else ""
-        cause = f"host answered {status} {outcome or 'nothing'}"
+    except Exception as exc:  # noqa: BLE001 — the cause by its type only
+        return "failed", type(exc).__name__
+    outcome = str(body.get("owner") or "") if status < 400 else ""
+    return outcome or "failed", f"host answered {status} {outcome or 'nothing'}"
+
+
+async def ensure_core_owner(api, chat_id: int, post, *, force: bool = False) -> str:
+    """Register the owner chat ``chat_id`` as the core's external command owner, once per load unless ``force``.
+    "bound", "same" or "other" (another pair holds the slot until owner Reset) settle the chat for this load;
+    "pending" (saved, the core's door not up yet), "unknown" or "failed" ask again at the next pass, logged once
+    until settled. "settled" when this load had already settled it."""
+    load = _load(api)
+    if not force and chat_id in load.settled:
+        return "settled"
+    outcome, cause = await _ask_core(api, chat_id, post)
     if outcome in _SETTLED:
         load.failing.discard(chat_id)
         if outcome == "bound":
@@ -255,38 +285,45 @@ async def ensure_core_owner(api, chat_id: int, post, *, force: bool = False) -> 
             api.log("warning", "The core's emergency stop is bound to another chat than this Telegram owner: /panic "
                                "from here is refused until Ouroboros is reset.")
         load.settled.add(chat_id)
-        return outcome
-    if chat_id not in load.failing:
+    elif chat_id not in load.failing:
         load.failing.add(chat_id)
-        api.log("warning", f"Telegram could not register its owner with the emergency stop yet ({cause}); it "
-                           "asks again.")
-    return outcome or "failed"
+        api.log("info" if outcome == "pending" else "warning",
+                "Telegram owner saved with the emergency stop; its door takes it once the core is up."
+                if outcome == "pending" else
+                f"Telegram could not register its owner with the emergency stop yet ({cause}); it asks again.")
+    return outcome
 
 
 async def keep_owner_registered(api, post) -> None:
-    """From the bridge's load on: an owner the core does not know yet (bound before 1.5.0, or by a first writer) is
-    registered, and asked again after a pause while the core cannot settle it, so the first /panic finds the
-    emergency stop ready. A settled owner costs one read of the skill's settings per pause. It ends with the load
-    (unload, Off or a revoked grant close the token binding), also when a cancellation was lost in ``wait_for``."""
+    """From the bridge's load on: a pairing claim still open is settled first (the core asked again, then the one
+    write); an owner the core does not know yet (bound before 1.5.0, or by a first writer) is registered and asked
+    again after a pause while the core cannot settle it, so the first /panic finds the emergency stop ready. A
+    settled owner costs one read of the skill's settings per pause. It ends with the load (unload, Off or a revoked
+    grant close the token binding), also when a cancellation was lost in ``wait_for``."""
     binding = binding_for(api)
     while binding.state != "closed":
-        chat = pairing.owner_chat(_settings(api))
-        if chat:
+        settings = _settings(api)
+        claim = pairing.claim_of(settings)
+        if claim:
+            outcome, _cause = await _ask_core(api, claim[0], post)
+            _settle_claim(api, claim[0], claim[1], outcome)
+        elif chat := pairing.owner_chat(settings):
             await ensure_core_owner(api, chat, post)
         await asyncio.sleep(_RETRY_SEC)
 
 
 async def dispatch_panic(api, chat_id: int, send, post) -> None:
-    """Send the owner's /panic at once (``send()``). When the emergency door refused it (HTTP 503) before this load
-    settled the owner's registration, the door had not seen the owner yet and nothing stopped: register the owner
-    and send it once more. An owner the core has settled is never asked again, so its /panic is one request."""
+    """Send the owner's /panic at once (``send()``). When the emergency door refused this very /panic (HTTP 503),
+    ask the core again for this owner: if its door holds the pair now (registered just now, or meanwhile by the
+    load's own registration), the refusal was the door not knowing the owner yet and nothing stopped, so the
+    /panic is sent once more. Another pair, a door not up yet or no answer leave the refusal as it was."""
     try:
         await send()
         return
     except HostRefused as exc:
-        if exc.status != 503 or chat_id in _load(api).settled:
+        if exc.status != 503:
             raise
-    if await ensure_core_owner(api, chat_id, post) not in ("bound", "same"):
+    if await ensure_core_owner(api, chat_id, post, force=True) not in ("bound", "same"):
         raise HostRefused(503)
     await send()
 

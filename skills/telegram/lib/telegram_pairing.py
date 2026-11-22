@@ -8,12 +8,14 @@ Pairing. A connection card (the setup wizard's phone card, or the skill's card l
 ``/start <code>``, and saves the code as ``TELEGRAM_PAIRING_CODE`` through the skill's own ``settings/save``
 route, from the computer running Ouroboros: a write-only setting of the skill, never in core Settings and never
 read back. A code is what ``new_code`` mints (``normalize_code``), so a typed short value is no code. It waits
-(``pending_code``) until it binds the owner; the binding's one settings write clears it and keeps its SHA-256
-digest as ``TELEGRAM_PAIRING_CONSUMED`` (``paired``), so the link never binds again, also when the same code is
-saved once more. While a code waits only a private chat's ``/start <code>`` binds the owner
-(``first_writer_may_bind``); with none, the first positive private chat binds, as before (``first_written``), and
-the digest of a code-shaped ``/start`` payload that bound it is kept the same way, so that code, delivered after
-that message, binds nothing a second time.
+(``pending_code``) until it binds the owner. Before the core is asked to give the scanning chat its emergency
+stop, the bridge saves a claim (``claimed``); the claim settles in one write, when the core took the chat
+(``paired``: the owner chat, the code cleared and its SHA-256 digest kept as ``TELEGRAM_PAIRING_CONSUMED``, so
+the link never binds again, also when the same code is saved once more) or refused it (``unclaimed``), at once
+or at the bridge's next pass. While a code waits or a claim is open, only a private chat's ``/start <code>``
+binds (``first_writer_may_bind``); with neither, and no owner chat saved at all (``pinned``), the first positive
+private chat binds, as before (``first_written``), and the digest of a code-shaped ``/start`` payload that bound
+it is kept the same way, so that code, delivered after that message, binds nothing a second time.
 
 Identity. ``bot_identity`` sends one bare ``getMe`` and says which bot a token names, or why it could not:
 Telegram refused the token, or Telegram could not be reached from here. Nothing it returns carries the token or
@@ -36,6 +38,7 @@ from typing import Any, Optional
 
 CODE_KEY = "TELEGRAM_PAIRING_CODE"
 CONSUMED_KEY = "TELEGRAM_PAIRING_CONSUMED"  # the digest of the code that bound the owner last
+CLAIM_KEY = "TELEGRAM_PAIRING_CLAIM"  # "<chat>:<digest>": a pairing the core was asked to make, until it settles
 CLOUD_API_BASE = "https://api.telegram.org"
 UNAVAILABLE = "unavailable"  # saved_api_base: the skill's settings cannot be read, so no server is known
 SETTINGS_FILE = "settings.json"  # the skill's own settings (scripts/telegram_settings.py)
@@ -99,14 +102,20 @@ def canonical_api_base(value: Any = None) -> str:
 
 
 def saved_api_base(state_dir: Any) -> Optional[str]:
-    """The ``TELEGRAM_API_BASE`` saved in the skill's own settings; None (the cloud) when none is saved;
-    ``UNAVAILABLE`` while those settings cannot be read, which ``bot_identity`` answers as unreachable (a
-    self-hosted install never sends its token to the cloud because its settings could not be read)."""
+    """The ``TELEGRAM_API_BASE`` saved in the skill's own settings, read as the running bridge reads it: None (the
+    cloud) when none is saved, the origin when it is one the bridge accepts, ``UNAVAILABLE`` when the settings
+    cannot be read or the saved value is not such an origin (a number, a path...). ``bot_identity`` answers
+    ``UNAVAILABLE`` as unreachable: a self-hosted install never sends its token to the cloud by a misreading."""
     status, settings = _read_json(Path(state_dir) / SETTINGS_FILE)
     if status == "unreadable":
         return UNAVAILABLE
-    value = settings.get("TELEGRAM_API_BASE")
-    return value.strip() if isinstance(value, str) and value.strip() else None
+    text = str(settings.get("TELEGRAM_API_BASE") or "").strip()  # as validate_telegram_api_base takes it
+    if not text:
+        return None
+    try:
+        return canonical_api_base(text)
+    except ValueError:
+        return UNAVAILABLE
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -181,8 +190,14 @@ def _read_json(path: Path) -> tuple[str, dict]:
     return ("ok", value) if isinstance(value, dict) else ("unreadable", {})
 
 
+def pinned(settings: Any) -> bool:
+    """Whether the settings hold an owner chat at all: any non-empty ``TELEGRAM_CHAT_ID``, a group or channel id
+    used as a feed included, closes first-writer binding, as the bridge always kept it."""
+    return bool(str((settings or {}).get("TELEGRAM_CHAT_ID") or "").strip()) if isinstance(settings, dict) else False
+
+
 def owner_chat(settings: Any) -> int:
-    """The owner chat the skill's settings name (``TELEGRAM_CHAT_ID``), or 0 when none is bound."""
+    """The private owner chat the skill's settings name (``TELEGRAM_CHAT_ID``), or 0 when none is."""
     try:
         value = int(str((settings or {}).get("TELEGRAM_CHAT_ID") or "").strip() or 0)
     except (AttributeError, ValueError):
@@ -206,10 +221,30 @@ def matching_digest(settings: Any, payload: Any) -> str:
     return digest if same_digest(code_digest(sent), digest) else ""
 
 
+def claim_of(settings: Any) -> Optional[tuple]:
+    """``(chat, digest)`` of the pairing the core was asked to make and that has not settled yet, or None."""
+    raw = settings.get(CLAIM_KEY) if isinstance(settings, dict) else None
+    chat, _, digest = str(raw or "").partition(":")
+    return (int(chat), digest) if chat.isdigit() and int(chat) > 0 and _DIGEST.fullmatch(digest) else None
+
+
+def claimed(_current: dict, *, chat_id: int, digest: str) -> dict:
+    """The write made before the core is asked: the claim, so a lost answer or a failed write afterwards still
+    settles the same way at the bridge's next pass (the core's slot and the bridge's owner never part)."""
+    return {CLAIM_KEY: f"{chat_id}:{digest}"}
+
+
+def unclaimed(current: dict, *, chat_id: int, digest: str) -> dict:
+    """The write of a claim the core refused (another account holds its emergency stop): the claim goes, if it is
+    still this one; nothing else changes."""
+    return {CLAIM_KEY: ""} if claim_of(current) == (chat_id, digest) else {}
+
+
 def paired(current: dict, *, chat_id: int, digest: str) -> dict:
-    """The one settings write of a pairing, decided under the write's lock: the owner chat and the consumed code's
-    digest, and the code cleared while it is still that code (one saved meanwhile keeps waiting)."""
-    patch = {"TELEGRAM_CHAT_ID": str(chat_id), CONSUMED_KEY: digest}
+    """The one settings write of a pairing the core took, decided under the write's lock: the owner chat, the
+    consumed code's digest, the claim gone, and the code cleared while it is still that code (one saved meanwhile
+    keeps waiting)."""
+    patch = {"TELEGRAM_CHAT_ID": str(chat_id), CONSUMED_KEY: digest, CLAIM_KEY: ""}
     saved = normalize_code(current.get(CODE_KEY))
     if saved and same_digest(code_digest(saved), digest):
         patch[CODE_KEY] = ""
@@ -217,10 +252,11 @@ def paired(current: dict, *, chat_id: int, digest: str) -> dict:
 
 
 def first_written(current: dict, *, chat_id: int, payload: Any = None) -> dict:
-    """The one settings write of a first writer's binding, decided under the write's lock: nothing once an owner is
-    bound or while a code waits (one saved meanwhile is seen here); else the owner chat, and the digest of a
-    code-shaped ``/start`` payload, so that code binds nothing when it arrives after this binding."""
-    if owner_chat(current) or not first_writer_may_bind(bool(pending_code(current))):
+    """The one settings write of a first writer's binding, decided under the write's lock: nothing once any owner
+    chat is saved, while a code waits (one saved meanwhile is seen here) or while a pairing is claimed; else the
+    owner chat, and the digest of a code-shaped ``/start`` payload, so that code binds nothing when it arrives
+    after this binding."""
+    if pinned(current) or claim_of(current) or not first_writer_may_bind(bool(pending_code(current))):
         return {}
     sent = normalize_code(payload)
     return {"TELEGRAM_CHAT_ID": str(chat_id), **({CONSUMED_KEY: code_digest(sent)} if sent else {})}
@@ -233,7 +269,8 @@ def first_writer_may_bind(code_pending: bool) -> bool:
 
 
 __all__ = [
-    "CLOUD_API_BASE", "CODE_KEY", "CONSUMED_KEY", "UNAVAILABLE", "bot_identity", "canonical_api_base",
-    "code_digest", "first_writer_may_bind", "first_written", "matching_digest", "new_code", "normalize_code",
-    "owner_chat", "paired", "pending_code", "same_digest", "saved_api_base", "start_command", "username_ok",
+    "CLAIM_KEY", "CLOUD_API_BASE", "CODE_KEY", "CONSUMED_KEY", "UNAVAILABLE", "bot_identity", "canonical_api_base",
+    "claim_of", "claimed", "code_digest", "first_writer_may_bind", "first_written", "matching_digest", "new_code",
+    "normalize_code", "owner_chat", "paired", "pending_code", "pinned", "same_digest", "saved_api_base",
+    "start_command", "unclaimed", "username_ok",
 ]
