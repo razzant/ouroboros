@@ -37,10 +37,10 @@ export function modelWaitRoleLabel(role = '') {
     return String(role || 'Model');
 }
 
-/** A wait's reason as its row names it; `observesAccess` false: the host cannot watch that route's access return.
- *  A work's card says a fallback's cause in the same words (card_model.js). */
+/** A wait's reason as its row names it; `''` proves no cause, and `observesAccess` false watches no access
+ *  return: both wait on provider access. A work's card says a fallback's cause in the same words (card_model.js). */
 export function modelWaitReasonLabel(reason, observesAccess = true) {
-    return reason === 'connection_unavailable' ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
+    return reason === 'connection_unavailable' ? 'Key unavailable' : !reason || !observesAccess ? 'Waiting for provider access'
         : reason === 'auth_quota' ? 'Waiting for access' : reason === 'unavailable' ? 'Waiting for an account'
             : reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
 }
@@ -172,14 +172,22 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         view.row = row;
         const node = view.node;
         const pending = view.sending || isPending(row);
-        const mixed = row.reason === 'auth_quota';
-        const pool = row.reason === 'unavailable';
-        const keyOff = row.reason === 'connection_unavailable';
-        const quota = row.reason === 'quota' || mixed;
         const observesAccess = row.availability_observation !== 'unavailable';
-        const timed = (quota || pool) && observesAccess;
+        const mixedWait = row.reason === 'auth_quota';
+        const poolWait = row.reason === 'unavailable';
+        // `reason` admits the wait; `access_reason` is the access its refusal proved. An old row from before
+        // the field keeps its original cause; an empty string promises no remedy. Automatic
+        // continuation follows the wait the host polls, independent of confirmed access.
+        const reason = row.access_reason ?? row.reason;
+        const mixed = reason === 'auth_quota';
+        const pool = reason === 'unavailable';
+        const keyOff = reason === 'connection_unavailable';
+        const quota = reason === 'quota';
+        // A wait whose refusal proved both causes carries its quota window too; the row's own evidence.
+        const quotaClock = quota || mixed;
+        const timed = (row.reason === 'quota' || mixedWait || poolWait) && observesAccess;
         node.querySelector('[data-wait-role]').textContent = modelWaitRoleLabel(row.role);
-        node.querySelector('[data-wait-reason]').textContent = modelWaitReasonLabel(row.reason, observesAccess);
+        node.querySelector('[data-wait-reason]').textContent = modelWaitReasonLabel(reason, observesAccess);
         // Amber only while the wait needs the owner (the host's revision-bound fact); a wait that goes on by itself is a
         // quiet tray with a neutral sentence (docs/DESIGN.md "Status marks").
         const owner = row.requires_owner_action === true;
@@ -201,20 +209,22 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             ? `Automatic access checks are unavailable. Retry after access is restored, ${managed ? '' : 'choose another model, '}or stop.` : (mixed
             ? 'Some accounts need sign-in; others are waiting for quota. ' : '') + (pool
             ? `No account can serve this model now. ${known ? `The engine reported a reset at ${reset.toLocaleString()}; availability is unconfirmed.` : 'The reset time is not known.'}`
-            : quota ? (known ? `Quota resets ${reset.toLocaleString()}.` : 'Quota reset time is not known.') : ''))
+            : quotaClock ? (known ? `Quota resets ${reset.toLocaleString()}.` : 'Quota reset time is not known.') : ''))
             + (managed ? ' Your organization sets this model; only its administrator changes it.' : '')).trim();
         node.querySelector('[data-wait-change]').hidden = managed;
         if (managed) node.querySelector('[data-wait-picker]').hidden = true;
         const automatic = node.querySelector('[data-wait-auto]');
         automatic.parentElement.hidden = !timed;
-        node.querySelector('[data-wait-auto-label]').textContent = mixed || pool
-            ? 'Continue automatically when access is restored' : 'Continue automatically when quota resets';
+        // Only a proved quota window is a quota reset; mixed, pool and unconfirmed waits name the access
+        // that has to be restored. For every row the old engine produced this says exactly what it said before.
+        node.querySelector('[data-wait-auto-label]').textContent = quota
+            ? 'Continue automatically when quota resets' : 'Continue automatically when access is restored';
         const requested = view.sending ? view.lastRequest : row.pending_action;
         automatic.checked = pending && requested?.action === 'auto_continue'
             ? requested.auto_continue : row.auto_continue !== false;
         const auth = node.querySelector('[data-wait-login]');
-        auth.hidden = row.reason !== 'auth' || !observesAccess;
-        node.querySelector('[data-wait-settings]').textContent = mixed || keyOff ? 'Accounts' : 'Settings';
+        auth.hidden = reason !== 'auth' || !observesAccess;
+        node.querySelector('[data-wait-settings]').textContent = mixedWait || keyOff ? 'Accounts' : 'Settings';
         const saved = view.persisted?.saved;
         node.querySelector('[data-wait-notice]').textContent = view.error
             || (view.sending ? 'Sending your choice…' : isPending(row)
