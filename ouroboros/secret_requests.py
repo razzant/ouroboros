@@ -190,6 +190,7 @@ def key_consumers(drive_root: Any, keys: List[str]) -> List[Dict[str, Any]]:
             row["unsupported"] = True  # an instruction skill receives no Settings key at all
         else:
             row["granted"] = [key for key in reads if key in set(status.get("granted_keys") or [])]
+            row["blocked"] = bool(status.get("blocked"))  # a key its decision never covered stops nothing
         rows.append(row)
     return sorted(rows, key=lambda item: item["name"])
 
@@ -400,7 +401,8 @@ def _consumer_line(outcome: Dict[str, Any]) -> str:
             missing = [key for key in row.get("reads") or [] if key not in set(row.get("granted") or [])]
             grant = f"needs the owner's grant for {', '.join(missing)} in Skills" if missing else "its grant covers it"
             if missing and row.get("enabled"):
-                grant += "; after saving, this enabled skill cannot run until the keys are granted"
+                grant += ("; after saving, this enabled skill cannot run until the keys are granted" if row.get("blocked")
+                          else "; after saving, this enabled skill keeps running without them until they are granted")
         parts.append(f"{row.get('name')} ({state}; {grant})")
     return "Skills that read them: " + "; ".join(parts) + "."
 

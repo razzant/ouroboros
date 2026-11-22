@@ -412,3 +412,13 @@ def test_the_end_of_work_fact_names_the_real_blocker_and_stays_silent_when_nothi
     assert "still work" not in message
     accept(root)
     assert _skill_finalization_message(root, trace, ctx) == "", "accepted in the same work: nothing is owed"
+
+
+def test_the_secret_card_says_whether_a_reader_keeps_running_without_the_key():
+    """S18: the readers sentence follows the host's ``blocked``: a key the decision never covered leaves the enabled
+    skill running without it; a missing key that stops it says so."""
+    from ouroboros.secret_requests import _consumer_line
+
+    row = {"name": "mailer", "enabled": True, "reads": ["MAILER_TOKEN"], "granted": []}
+    assert "keeps running without them until they are granted" in _consumer_line({"consumers": [{**row, "blocked": False}]})
+    assert "cannot run until the keys are granted" in _consumer_line({"consumers": [{**row, "blocked": True}]})
