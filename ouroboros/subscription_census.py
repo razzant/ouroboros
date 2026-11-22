@@ -5,11 +5,11 @@ The engine owns every verdict (``claudexor_observations.quota_availability``, th
 primary observation share); this module only counts them. ``build_census`` is the pure count over one passive read
 (``gateway/claudexor_passive``: the roster and one quota epoch, no handshake, no refresh) and ``census_text`` its
 facts-only words. The census duty (``dispatch``, ticked by ``server_maintenance``) runs ``refresh`` every ``DUTY_SEC``
-while someone works, or ``REQUEST_MIN_SEC`` after a refresh request newer than its last attempt (a run, seat or
-model call refused or settled on a limit code, a confirmed account change); any attempt answers the requests before
-it, so a failed read is retried on the cadence, never sooner. ``refresh`` rewrites
+while someone works, or ``REQUEST_MIN_SEC`` after a refresh request (a run, thread turn, seat or model call refused
+or settled on a limit code, a confirmed account change); each dispatch removes the request it answers, so a failed
+read is retried on the cadence, never sooner, and a restart never answers it again. ``refresh`` rewrites
 ``CENSUS_FILE`` when what the text states changed; its ``since`` moves only with the trigger (the counts, resets and
-model-scoped blocks; share ranges are not in it). ``quota_part`` is the round's reader: the file alone, never a
+model-scoped blocks; share ranges and a stale block's ``seen`` are not in it). ``quota_part`` is the round's reader: the file alone, never a
 connection, for the foci that may choose an executor, change-only against the latest part still in view. Nothing
 here selects, starts, refreshes, switches or advises.
 """
@@ -49,12 +49,14 @@ RETRACTION = f"({LABEL}, engine verdicts): no enabled subscription accounts now"
 UNCONFIRMED = f"({LABEL}): the previous summary is no longer confirmed"
 _SLOT = "quota "  # the facts row writes each part as ``quota <text>`` (``loop_messages.context_facts_line``)
 _FAILED_HEAD = f"({LABEL}, engine not read since "
-_SINCE = re.compile(r"(?:counts unchanged since|values from) ([^;]*)")  # the part's ``since`` in either head
+_SINCE = re.compile(r"counts unchanged since ([^;]*)")  # the part's ``since``, to the second, in either head
 _ROOM_DETAIL = re.compile(r" with room \([^()]*\)")  # shares and coverage: shown, never a trigger
+_SEEN = re.compile(r", seen [^)]*\)")  # a stale block's observation time: shown, never a trigger
 _RETRACTED, _UNCONFIRMED = "retracted", "unconfirmed"
 # A Presence task receives the part only when its ceiling grants one of these; an explicit denial withholds it.
 _EXECUTOR_TOOLS = ("schedule_subagent", "delegate_start", "start_task", "review_change", "commit_reviewed",
-                   "vcs_commit_reviewed", "preflight_review", "plan_task")
+                   "vcs_commit_reviewed", "preflight_review", "advisory_review", "plan_task")
+_DELEGATION_TOOLS = ("schedule_subagent", "delegate_start")  # the entries the delegation right opens
 # Counted classes in their text order; with room and at limit carry their own details.
 _CLASSES = (("with_room", "with room"), ("at_limit", "at limit"), ("verification_failed", "verification failed"),
             ("no_measured_window", "available (no measured general window)"),
@@ -192,14 +194,15 @@ def _family(tally: Dict[str, Any]) -> Dict[str, Any]:
 
 def census_text(census: Mapping[str, Any]) -> str:
     """The facts row's part without its slot word (the row writes ``quota <text>``): the engine's verdicts as counted,
-    with the read that first gave these counts and the read the shares come from; after a failed read, when the
-    engine was last read and why not."""
-    since, code = _clock(census.get("since")), census.get("code")
+    with the read that first gave these counts (to the second) and the read the shares come from; after a failed
+    read, also when the engine was last read and why not."""
+    code = census.get("code")
+    times = f"counts unchanged since {_clock(census.get('since'), seconds=True)}; shares read {_clock(census.get('read_at'))}"
     if census.get("read") == "failed":
         code = code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else "read_failed"
-        head = f"{_FAILED_HEAD}{_clock(census.get('confirmed_at'))} ({code}); values from {since})"
+        head = f"{_FAILED_HEAD}{_clock(census.get('confirmed_at'))} ({code}); {times})"
     else:
-        head = f"({LABEL}, engine verdicts; counts unchanged since {since}; shares read {_clock(census.get('read_at'))})"
+        head = f"({LABEL}, engine verdicts; {times})"
     return f"{head}: {body_text(_mapping(census.get('families')))}"
 
 
@@ -210,9 +213,9 @@ def body_text(families: Mapping[str, Any]) -> str:
 
 
 def _trigger(body: str) -> str:
-    """What makes the part due: the body without the with-room shares and coverage (counts, resets, model-scoped
-    blocks stay), read the same way from the file and from a part in view."""
-    return _ROOM_DETAIL.sub(" with room", body)
+    """What makes the part due: the body without the with-room shares and coverage and without a stale block's
+    ``seen`` (counts, resets and model-scoped blocks stay), read the same way from the file and from a part in view."""
+    return _SEEN.sub(")", _ROOM_DETAIL.sub(" with room", body))
 
 
 def _family_text(name: str, family: Mapping[str, Any]) -> str:
@@ -263,12 +266,14 @@ def _models(block: Mapping[str, Any]) -> str:
     return _clean(",".join(names)) or "models the engine did not name"
 
 
-def _clock(value: Any, *, nearest: bool = False) -> str:
-    """An instant to the minute; an engine reset to the NEAREST minute (vendor resets jitter around :00)."""
+def _clock(value: Any, *, nearest: bool = False, seconds: bool = False) -> str:
+    """An instant to the minute (``seconds``: to the second, the counts epoch the comparison reads); an engine reset to
+    the NEAREST minute (vendor resets jitter around :00)."""
     at = _instant(value)
     if at is None:
         return "an unreadable time"
-    return datetime.fromtimestamp(round(at / 60) * 60 if nearest else at, timezone.utc).strftime("%d.%m %H:%MZ")
+    shown = datetime.fromtimestamp(round(at / 60) * 60 if nearest else at, timezone.utc)
+    return shown.strftime("%d.%m %H:%M:%SZ" if seconds else "%d.%m %H:%MZ")
 
 
 def _instant(value: Any) -> Optional[float]:
@@ -278,7 +283,7 @@ def _instant(value: Any) -> Optional[float]:
 def census_signature(census: Mapping[str, Any]) -> str:
     """What makes the part due: the read status (ok or failed), the trigger and its ``since`` as the text states it;
     the shares, ``read_at``, ``confirmed_at`` and the code are shown, never compared."""
-    return _signature("failed" if census.get("read") == "failed" else "ok", _clock(census.get("since")),
+    return _signature("failed" if census.get("read") == "failed" else "ok", _clock(census.get("since"), seconds=True),
                       _trigger(body_text(_mapping(census.get("families")))))
 
 
@@ -400,22 +405,24 @@ def _publish(families: Dict[str, Any], now: float, revision: int, current_revisi
              stop: Callable[[], bool], root: Any) -> str:
     """Accept the read and write the census when what it states changed (or a pending or failed file awaits it);
     never over a confirmed account change that crossed this read (the accounts module's revision), which requested
-    its own pass. Only an accepted read confirms: ``confirmed_at`` and the end of a failed streak."""
+    its own pass. Only an accepted read that is stored (or already was) confirms: ``confirmed_at`` and the end of a
+    failed streak."""
     body = body_text(families)
     with _LOCK:
         if current_revision() != revision:
             return "roster_changed"
         if stop():
             return "stopped"
-        _PASS.update(confirmed_at=now, failing_since=None)
         existing = read_file(root)
         if (existing is not None and existing["read"] == "ok" and not existing.get("pending")
                 and body_text(existing["families"]) == body):
+            _PASS.update(confirmed_at=now, failing_since=None)
             return "unchanged"
         same = existing is not None and _trigger(body_text(existing["families"])) == _trigger(body)
         _write({"type": CENSUS_TYPE, "read": "ok", "code": None, "families": families,
                 "since": existing.get("since") if same and existing.get("since") else _iso(now), "read_at": _iso(now)},
                root)
+        _PASS.update(confirmed_at=now, failing_since=None)  # after the write: a failed replace confirms nothing
     if not same:
         return "written" if families else "none"
     return "recovered" if existing["read"] == "failed" else "confirmed" if existing.get("pending") else "refreshed"
@@ -477,14 +484,14 @@ def request_mtime(root: Any = None) -> Optional[float]:
 def duty_due(now: float, working: bool, root: Any = None) -> bool:
     """The census duty's due condition, never sooner than ``REQUEST_MIN_SEC`` after its last dispatch: ``DUTY_SEC``
     after it while someone works (a running task or a direct actor; a pending-only queue reads nothing), or a refresh
-    request newer than it. That attempt answered every older request, failed or not, so an engine that does not
-    answer is asked again on the cadence or a new request, never in a 15 s loop. Only an engine once provisioned, or
-    a census file to keep, has anything to read."""
+    request on disk. Each dispatch removes the request it answers (``dispatch``), failed read or not, so an engine
+    that does not answer is asked again on the cadence or a new request, never in a 15 s loop, and a restart never
+    answers an answered request again. Only an engine once provisioned, or a census file to keep, has anything to
+    read."""
     last = _PASS["dispatched"]
     if now - last < REQUEST_MIN_SEC:
         return False
-    requested = request_mtime(root)
-    due = (working and now - last >= DUTY_SEC) or (requested is not None and requested > last)
+    due = (working and now - last >= DUTY_SEC) or request_mtime(root) is not None
     if not due:
         return False
     from ouroboros.claudexor_daemon import owned_daemon_provisioned
@@ -494,12 +501,17 @@ def duty_due(now: float, working: bool, root: Any = None) -> bool:
 
 def dispatch(now: float, working: bool, latch: Any, root: Any, start: Callable[[], Any],
              busy: Callable[[Any, float], Any]) -> None:
-    """The census duty's tick (``server_maintenance``): when due and its latch is free, stamp and ``start`` one pass
-    (``duty_pass``); a due pass whose latch is still held reports the stall (``busy``)."""
+    """The census duty's tick (``server_maintenance``): when due and its latch is free, stamp, remove the request the
+    pass answers (one written during the read stays for the next) and ``start`` one pass (``duty_pass``); a due pass
+    whose latch is still held reports the stall (``busy``)."""
     if not duty_due(now, working, root):
         return
     if latch.acquire(blocking=False):
         _PASS["dispatched"] = now
+        try:
+            os.unlink(_data_dir(root) / REQUEST_FILE)
+        except OSError:
+            pass  # none on disk (a cadence pass), or not removable: the next dispatch tries again
         start()
     else:
         busy(latch, DUTY_SEC)
@@ -583,8 +595,9 @@ def _part_signature(text: str) -> str:
 def chooses_executors(ctx: Any) -> bool:
     """Whether this focus may choose an executor, so the census concerns it: every integrating focus (Main, project
     roots, consciousness); a Presence task when its ceiling grants an executor-starting or reviewer tool; a delegated
-    child or nanny that may call ``review_change`` (an acting profile) or holds the delegation right. A tool the
-    task's contract withholds (``disabled_tools``) grants nothing."""
+    child or nanny that may call ``review_change`` (an acting profile) or holds the delegation right with an entry
+    it opens left (the scheduler or a direct start). A tool the task's contract withholds (``disabled_tools``) grants
+    nothing."""
     from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
     from ouroboros.memory_view import view_role
 
@@ -608,7 +621,8 @@ def chooses_executors(ctx: Any) -> bool:
     from ouroboros.tool_access import active_tool_profile
 
     acting = active_tool_profile(tool_ctx) == "acting_subagent" and "review_change" not in denied
-    return acting or ("schedule_subagent" not in denied and holds_delegation_right(contract.get("delegation_budget")))
+    return acting or (any(name not in denied for name in _DELEGATION_TOOLS)
+                      and holds_delegation_right(contract.get("delegation_budget")))
 
 
 def holds_delegation_right(budget: Any) -> bool:

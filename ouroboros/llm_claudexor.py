@@ -628,6 +628,8 @@ class _ModelInvocation:
                     return result
                 outage_started = None
             except ClaudexorUnavailable as error:
+                if not self.operation_id:  # the create POST's own typed answer: a limit asks the census for a read
+                    _note_limit_failure(getattr(error, "problem", None))
                 if not self.operation_id and error.code == "model_request_invalid":
                     # This exact create refusal is minted by the engine only
                     # after its idempotency lookup proves no accepted command,

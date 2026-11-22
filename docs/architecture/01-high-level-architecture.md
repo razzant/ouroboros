@@ -269,7 +269,7 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_interactions.py, delegate_shared.py — nanny input into a live session: typed `waiting_on_user`, validated `_delegate_answer`, capability-gated `_delegate_message`; `_owned_run` keeps live control with the starter, confirmed successors can read and dispose of settled products (§6 Delegated subagents)
   route_spec.py — neutral route primitive: kind/target/pin normalization and effort validation
   configured_subagents.py, subagent_runtime.py — the canonical `OUROBOROS_SUBAGENTS` parser/serializer; immutable task-start snapshots and exact `subagent_id` selection (§6 Delegated subagents)
-  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py, subscription_census.py — manifest route health, shared passive evidence, exact configured-actor inspection, subscription census (§6 Route health)
+  subagent_route_health.py, claudexor_observations.py, subagent_inspection.py, subscription_census.py — manifest route health, shared passive evidence, exact configured-actor inspection (§6 Route health), census (PASSIVE_QUOTA_READ)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py, delegate_accepted.py, delegate_resume.py — exact-leaf recovery, `continue_from` after stops, keyed lookup/replay or lookup-only Resume (§6 Delegated subagents)
@@ -718,7 +718,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── scheduled_tasks.json   ← cron/one-shot schedules and `kind:"notify"` notes (§5)
 │   │   ├── claudexor_rotation_provisioning.json ← last rotation receipt
 │   │   ├── claudexor_route_health.json ← the engine's newest per-route failure shares, replaced on change
-│   │   ├── subscription_census.json ← subscription verdicts; `.request` asks a read
+│   │   ├── subscription_census.json ← counted verdicts; `.request` asks a read
 │   │   ├── subagent_last_delegation.json ← dated helper observations, not dispatch authority
 │   │   ├── update_letter.json     ← description, its range, check facts
 │   │   ├── update_material.json   ← checked range for its author

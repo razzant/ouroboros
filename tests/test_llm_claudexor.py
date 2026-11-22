@@ -558,6 +558,38 @@ def test_a_caller_owned_model_call_on_a_limit_asks_the_subscription_census_for_a
     assert (census.request_mtime() is not None) is asks
 
 
+@pytest.mark.parametrize("answer,asks", [
+    ((429, {"code": "credential_pool_exhausted", "message": "quota", "context": {"poolCause": "quota"}}), True),
+    ((409, {"code": "credential_pool_exhausted", "message": "no account serves it",
+            "context": {"poolCause": "structural"}}), False),
+    (None, False),  # a transport failure with no answer: nothing typed to read
+])
+def test_a_create_refused_on_a_limit_asks_the_subscription_census_for_a_read(setup, monkeypatch, answer, asks):
+    """The create POST itself can be refused before any operation exists: its typed answer, as the gateway's problem
+    classifier builds it, asks the census for a read; the admission and rejoin semantics stay as they are."""
+    from ouroboros import claudexor_daemon
+    from ouroboros import subscription_census as census
+
+    _root, gateway, client = setup
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    if answer is None:
+        gateway.lose_create = True  # the create's reply is lost once; the same create then succeeds
+        client.chat([{"role": "user", "content": "hi"}], MODEL)
+    else:
+        status, body = answer
+        response = httpx.Response(status, json=body,
+                                  request=httpx.Request("POST", "http://127.0.0.1:1/v2/model-operations"))
+        refusal = ClaudexorGateway._problem(ClaudexorGateway.__new__(ClaudexorGateway), response, "POST")
+
+        def refuse(*_args, **_kwargs):
+            raise refusal
+
+        monkeypatch.setattr(gateway, "create_model_operation", refuse)
+        with pytest.raises(transport.ClaudexorModelError):
+            client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert (census.request_mtime() is not None) is asks
+
+
 @pytest.mark.parametrize("code,label", [("provider_failed", "provider_error_type"), ("invalid_request", "provider_error_type"),
                                         ("rate_limited", "vendor_code")])
 def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_field(code, label):

@@ -28,7 +28,7 @@ CLAUDE_RESETS = (1795320000.368309, 1795330799.802446, 1795489199.919261, 179527
 CODEX_RESETS = (1795608236.0, 1795284968.0, 1795339282.0, 1795414748.0, 1795338217.0, 1795414820.0, 1795414981.0,
                 1795338697.0, 1795550368.0, 1795601827.0, 1795555210.0, 1795338223.0, 1795546274.0, 1795546565.0)
 LIVE_LINE = (
-    "(subscription accounts, engine verdicts; counts unchanged since 21.11 13:05Z; shares read 21.11 13:05Z): agy 1 "
+    "(subscription accounts, engine verdicts; counts unchanged since 21.11 13:05:21Z; shares read 21.11 13:05Z): agy 1 "
     "available (no measured general window), claude-opus-4-6-thinking,claude-sonnet-4-6,gpt-oss-120b-medium spent on "
     "1 (earliest reset 25.11 16:36Z); claude 1 with room (7d 88% used, 1 of 1 measured), 16 at limit (earliest reset "
     "21.11 14:30Z), 2 verification failed; codex 2 with room (7d 65–76% used, 2 of 2 measured), 14 at limit (earliest "
@@ -292,8 +292,8 @@ def test_the_live_shaped_read_renders_its_line():
     assert set(families) == {"agy", "claude", "codex", "cursor"}  # the paid key's family is no subscription
     assert _text(families) == LIVE_LINE
     failed = _text(families, read="failed", code="daemon_unreachable", confirmed_at="2026-11-21T14:09:30+00:00")
-    assert failed.startswith("(subscription accounts, engine not read since 21.11 14:09Z (daemon_unreachable); "
-                             "values from 21.11 13:05Z): agy 1 available")
+    assert failed.startswith("(subscription accounts, engine not read since 21.11 14:09Z (daemon_unreachable); counts "
+                             "unchanged since 21.11 13:05:21Z; shares read 21.11 13:05Z): agy 1 available")
     assert failed.split("): ", 1)[1] == LIVE_LINE.split("): ", 1)[1]
 
 
@@ -371,6 +371,72 @@ def test_shares_alone_refresh_the_file_and_keep_since_and_the_signature(engine):
     third = census.read_file()
     assert third["since"] == third["read_at"] != first["since"]
     assert census.census_signature(third) != census.census_signature(first)
+
+
+def test_a_failed_read_names_the_last_confirmed_read_the_counts_epoch_and_the_shares_read_time(engine):
+    """The counts began at 13:05:21 (88 %), the shares moved to 91 % at 13:15, an unchanged read confirmed them at 13:25:
+    after the failure the text names each of the three times for what it dates."""
+    assert census.refresh() == "written"
+    engine["now"] += 600
+    engine["payload"]["quota"][0]["constraints"][0]["used_ratio"] = 0.91
+    assert census.refresh() == "refreshed"
+    engine["now"] += 600
+    assert census.refresh() == "unchanged"
+    engine["payload"] = _failed_payload("daemon_unreachable")
+    engine["now"] += 600
+    assert census.refresh() == "failure_debounced"
+    engine["now"] += 600
+    assert census.refresh() == "failure_recorded"
+    head, _sep, body = census.census_text(census.read_file()).partition("): ")
+    assert head == ("(subscription accounts, engine not read since 21.11 13:25Z (daemon_unreachable); counts unchanged "
+                    "since 21.11 13:05:21Z; shares read 21.11 13:15Z")
+    assert "claude 1 with room (7d 91% used, 1 of 1 measured)" in body
+
+
+def test_a_stale_blocks_moving_seen_refreshes_the_file_and_is_no_change(engine):
+    """A stale observation time of an unchanged block (same profile, models and reset) is shown, never compared; a
+    reset that moves is a change."""
+    def stale_block(observed, reset="2026-12-02T00:00:00Z"):
+        return _payload([_profile("cursor", "c")], [_row("cursor", "c", freshness="stale", observed=observed, scoped=[
+            {"applies_to_models": ["gemini-4-carbon-high"], "resets_at": reset}])], [_absence("cursor", "c", "no_source")])
+
+    engine["payload"] = stale_block(NOW - 7200)
+    assert census.refresh() == "written"
+    first = census.read_file()
+    assert "seen 21.11 11:05Z" in census.census_text(first)
+    engine["now"] += 600
+    engine["payload"] = stale_block(NOW - 6600)
+    assert census.refresh() == "refreshed"
+    second = census.read_file()
+    assert "seen 21.11 11:15Z" in census.census_text(second) and second["since"] == first["since"]
+    assert census.census_signature(second) == census.census_signature(first)
+    engine["now"] += 600
+    engine["payload"] = stale_block(NOW - 6600, reset="2026-12-03T00:00:00Z")
+    assert census.refresh() == "written"
+    assert census.census_signature(census.read_file()) != census.census_signature(first)
+
+
+def test_a_failed_replace_confirms_nothing(engine, monkeypatch):
+    """A changed read whose file replace raised leaves the stored record and the last confirmation as they were: the
+    failure recorded later dates the engine by the read that was stored."""
+    assert census.refresh() == "written"
+    first = census.read_file()
+    engine["now"] += 600
+    _spend_the_room(engine["payload"])
+
+    def refuse(_record, _root):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(census, "_write", refuse)
+        assert census.refresh() == "error"
+    assert census.read_file() == first and census._PASS["confirmed_at"] == NOW
+    engine["payload"] = _failed_payload("daemon_unreachable")
+    engine["now"] += 600
+    assert census.refresh() == "failure_debounced"
+    engine["now"] += 600
+    assert census.refresh() == "failure_recorded"
+    assert census.read_file()["confirmed_at"] == first["read_at"]
 
 
 def test_a_count_change_moves_since_and_a_recovery_keeps_it(engine):
@@ -605,6 +671,30 @@ def test_a_refused_run_start_asks_for_a_read_and_a_classified_read_never_does(en
     assert json.loads(engine["request"].read_text(encoding="utf-8"))["reason"] == "credential_pool_exhausted"
 
 
+def test_a_review_thread_turn_refused_on_a_limit_asks_for_a_read(engine):
+    """A continuing review appends a thread turn instead of starting a run: its typed refusal asks, a structural or an
+    unrelated one does not (no run exists to settle)."""
+    import httpx
+
+    from ouroboros.gateways import claudexor as cx
+    from tests._delegated_transport_shared import _gateway
+
+    def answering(code, context, status):
+        return lambda _request: httpx.Response(status, json={"code": code, "message": f"{code} refusal",
+                                                             "retryable": False, "context": context})
+
+    turn = {"_thread_id": "thread-1", "mode": "agent"}
+    for refusal in (("credential_pool_exhausted", {"poolCause": "structural"}, 409), ("invalid_request", {}, 400)):
+        with _gateway(answering(*refusal)) as gateway:
+            with pytest.raises(cx.ClaudexorUnavailable):
+                gateway.start_run(turn, idempotency_key="turn-key")
+    assert census.request_mtime() is None
+    with _gateway(answering("subscription_window_exhausted", {"resetsAt": "2030-01-01T00:00:00Z"}, 429)) as gateway:
+        with pytest.raises(cx.ClaudexorSubscriptionWindowExhausted):
+            gateway.start_run(turn, idempotency_key="turn-key")
+    assert json.loads(engine["request"].read_text(encoding="utf-8"))["reason"] == "subscription_window_exhausted"
+
+
 def test_the_duty_is_due_on_its_cadence_while_someone_works_or_after_a_request(engine, monkeypatch):
     start = 1_800_000_000.0
     assert census.duty_due(start, working=True)
@@ -613,18 +703,45 @@ def test_the_duty_is_due_on_its_cadence_while_someone_works_or_after_a_request(e
     assert not census.duty_due(start + 599, working=True)
     assert census.duty_due(start + 600, working=True)
     census.request_refresh("test")
-    marked = start + 1000.0
-    os.utime(engine["request"], (marked, marked))
-    census._PASS["dispatched"] = marked - 1
-    assert not census.duty_due(marked + 5, working=False)  # at most one pass per REQUEST_MIN_SEC
-    assert census.duty_due(marked + 15, working=False)  # a request is answered once, even on an idle install
-    census._PASS["dispatched"] = marked + 15  # that attempt answered it, whatever its read's outcome
-    assert not census.duty_due(marked + 30, working=False)
-    assert not census.duty_due(marked + 30, working=True)  # no retry at work either: the cadence or a newer request
+    assert not census.duty_due(start + 5, working=False)  # at most one pass per REQUEST_MIN_SEC
+    assert census.duty_due(start + 15, working=False)  # a request on disk is answered, even on an idle install
     monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: False)
-    assert not census.duty_due(start + 5000, working=True)  # no engine and no file: nothing to read
+    assert not census.duty_due(start + 15, working=False)  # no engine and no file: nothing to read
     engine["path"].write_text("{}", encoding="utf-8")
-    assert census.duty_due(start + 5000, working=True)  # a census file to keep is read again
+    assert census.duty_due(start + 15, working=False)  # a census file to keep is read again
+
+
+def test_a_dispatched_pass_takes_its_request_so_a_restart_never_answers_it_again(engine, monkeypatch):
+    """The answered request leaves the disk with the dispatch, so a new process (its stamps at zero) reads nothing for
+    it; a request left before that start, or written during a read, is still answered."""
+    import threading
+
+    latch, tick = threading.Lock(), 1_800_000_000.0
+
+    def tick_at(seconds):
+        census.dispatch(tick + seconds, False, latch, None, lambda: census.duty_pass(lambda: False, latch),
+                        lambda *_args: pytest.fail("the duty's latch was held"))
+
+    census.request_refresh("test")
+    tick_at(0)
+    assert engine["reads"] == 1 and census.request_mtime() is None
+    monkeypatch.setattr(census, "_PASS", _fresh_pass())  # the next process
+    tick_at(1)
+    assert engine["reads"] == 1  # an answered request wakes nothing
+    census.request_refresh("left before this start")
+    monkeypatch.setattr(census, "_PASS", _fresh_pass())
+    tick_at(2)
+    assert engine["reads"] == 2
+
+    def read_and_request():
+        engine["reads"] += 1
+        census.request_refresh("written during the read")
+        return engine["payload"]
+
+    monkeypatch.setattr(claudexor_passive, "_quota_payload", read_and_request)
+    census.request_refresh("test")
+    tick_at(20)
+    assert engine["reads"] == 3 and census.request_mtime() is not None  # the newer request waits for its own pass
 
 
 def test_any_attempted_read_answers_the_requests_before_it_and_only_a_newer_one_asks_again(engine):
