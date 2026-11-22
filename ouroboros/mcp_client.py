@@ -1136,10 +1136,12 @@ class MCPManager:
                     and rt.catalog["latest_attempt"].get("ok") is True
                     and not rt.catalog["latest_attempt"].get("partial")]
 
-    def server_records(self) -> List[tuple]:
-        """``(config, adopted envelope)`` of every configured server, for readers of their dated records."""
+    def server_records(self) -> Dict[str, Any]:
+        """Whether MCP is on, every configured server's ``(config, adopted envelope)`` and the Settings rows that do
+        not parse (their typed ``code`` and words), for readers of their dated records."""
         with self._lock:
-            return [(rt.config, rt.catalog) for rt in self._servers.values()]
+            return {"enabled": self._enabled, "servers": [(rt.config, rt.catalog) for rt in self._servers.values()],
+                    "invalid": [dict(item) for item in self._configuration_errors]}
 
     def server_facts(self) -> Dict[str, Dict[str, Any]]:
         """Each enabled server's display name, pin, transport and ``task_session`` lifetime, and redacted

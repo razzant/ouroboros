@@ -1,41 +1,75 @@
 """One reader of the dated records that say a capability does not work now (C10 item 56, first delivery).
 
 The records' owners keep the facts and their starts: the MCP catalog (a failing listing's
-``listing_failing_since``) and its call record (``latest_call``), MCP sign-in (``mcp_oauth.status``) and the extension
-health record (the server's load and companion state, the worker qualifier, permissions the skill
-itself reported unavailable). This module only reads them.
+``listing_failing_since`` and its latest error) and its call record (``latest_call``), the MCP manager (a
+skill-bound server its skill cannot run, a Settings row that does not parse), MCP sign-in (``mcp_oauth.status``:
+a requirement, a scope a refused call needs) and the extension health record (server and worker observations,
+permissions the skill itself reported unavailable). This module only reads them.
 
-A work is told twice, never by rebuilding a row it was already sent: at its start, one line per broken
-server or skill joins the existing capability notice (on a server's own provenance row when it has
-one); then on each round the current facts are compared with what that work was last told, and only a
-change (a break, a different failure, a recovery) appends one typed host row in the round tail
-(``CHANGE_KIND``). Times are those of the facts, never an age; order is by key. What to tell the owner,
-and when, stays the mind's judgment: no threshold, timer or required reaction lives here.
+A work is told twice, never by rebuilding a row it was already sent: at its start one typed notice
+(``START_KIND``) carries one line per broken server or skill beside the registry's omissions, written once
+even when the work's tools are selected again; then at each round of the work the current facts are compared
+with what that work was last told, and only a change appends one typed host row (``CHANGE_KIND``). A source
+that cannot be read is unknown: its lines are carried over, never reported repaired; a line closes only with
+an observation (an answer, a listing, a live extension, a skill switched off or uninstalled, a server
+removed). Times are the facts' own, in UTC; order is by key. What to tell the owner, and when, stays the
+mind's judgment: no threshold, timer or required reaction lives here.
 """
 
 from __future__ import annotations
 
 import logging
 import pathlib
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 log = logging.getLogger(__name__)
 
 CHANGE_KIND = "capability_change"
+START_KIND = "capability_notice"
 CHANGE_HEADER = "[CAPABILITY CHANGES]"
 _TOLD = "_capability_breakage_told"  # on the work's ToolContext: the broken facts it was last told, and its reach
+_PAGE = "Extensions → MCP servers"
 # The health record's own codes for an extension that is not meant to run (extension_liveness): off, not an
 # extension, or no such skill (the loader groups the last two alike, extension_loader.reconcile_extension).
 _NOT_MEANT_TO_RUN = frozenset({"disabled", "not_extension", "missing"})
+_WORDS = 160  # a quoted error's cut: one line of the source's words, never its whole text
 
 Facts = Dict[str, str]
-# skill name -> (its state files' stat signature, whether it is installed and switched on): a skill lookup parses
-# and hashes the payload, so a round pays it only after one of those files changed (bounded by candidate skills).
-_SWITCH: Dict[str, Tuple[tuple, bool]] = {}
+# skill name -> (its state files' stat signature, "on" | "off" | "uninstalled"): a skill lookup parses and hashes
+# the payload, so a round pays it only after one of those files changed (bounded by candidate skills).
+_SWITCH: Dict[str, Tuple[tuple, str]] = {}
+
+
+@dataclass
+class Observed:
+    """One reading: each broken capability's line, the closing or positive fact of the others, and what could
+    not be read now (a key, or a whole surface: ``"mcp"``, ``"skills"``)."""
+
+    broken: Facts = field(default_factory=dict)
+    working: Facts = field(default_factory=dict)
+    unknown: set = field(default_factory=set)
+
+
+def _utc(value: Any) -> str:
+    """A fact's time in UTC ISO form; an unreadable one is shown as recorded."""
+    try:
+        moment = (datetime.fromtimestamp(float(value), timezone.utc) if isinstance(value, (int, float))
+                  else datetime.fromisoformat(str(value)))
+        return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(value)
 
 
 def _since(value: Any) -> str:
-    return f"since {value}" if value else "since: unknown"
+    return f"since {_utc(value)}" if value else "since: unknown"
+
+
+def _words(value: Any) -> str:
+    """The first line of a source's words, whitespace folded and cut (quoted as data, never instructions)."""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= _WORDS else text[:_WORDS - 1] + "…"
 
 
 def _root(tool_ctx: Any) -> pathlib.Path:
@@ -46,48 +80,71 @@ def _root(tool_ctx: Any) -> pathlib.Path:
                         or getattr(tool_ctx, "drive_root", "") or ".")
 
 
-def _mcp_facts() -> Tuple[Facts, Facts]:
-    """``(broken, working)`` by key for the configured MCP servers and MCP's own configuration."""
+def _server_line(cfg: Any, catalog: dict, mcp_catalog: Any, mcp_oauth: Any) -> Tuple[List[str], str]:
+    """``(problems, positive)`` for one enabled server: listing, binding, access and call result apart."""
+    attempt, call = catalog.get("latest_attempt") or {}, mcp_catalog.latest_call(cfg) or {}
+    sign_in = (mcp_oauth.status(cfg) or {}) if mcp_oauth.applies(cfg) else {}
+    problems = []
+    if getattr(cfg, "skill_error", ""):
+        problems.append(f"its skill cannot run it now: {_words(cfg.skill_error)}")
+    if attempt.get("ok") is False:
+        problems.append(f"listing failing {_since(catalog.get('listing_failing_since'))} "
+                        f"(latest error, the server's words: {_words(attempt.get('error'))})")
+    if sign_in.get("state") == mcp_oauth.SIGN_IN_REQUIRED:
+        problems.append(f"sign-in required {_since(sign_in.get('since'))} ({sign_in.get('reason')})")
+    elif sign_in.get("reason") == "insufficient_scope":
+        problems.append(f"its sign-in lacks a scope a refused call needs ({sign_in.get('required_scope')}) "
+                        "since: unknown")
+    if call.get("ok") is False:
+        problems.append(f"calls not answered {_since(call.get('since'))} "
+                        f"({call.get('code')}; changed at {_utc(call.get('at'))} on {call.get('method')})")
+    elif call.get("ok") is True and problems:  # a failing listing or scope does not hide that calls are answered
+        problems.append(f"calls answered (changed at {_utc(call.get('at'))} on {call.get('method')})")
+    positive = "; ".join(filter(None, (
+        f"a call answered at {_utc(call.get('at'))}" if call.get("ok") is True else "",
+        f"listed at {_utc(attempt.get('at'))}" if attempt.get("ok") is True else "",
+        f"signed in {_since(sign_in.get('since'))}" if sign_in else ""))) or "no current failure recorded"
+    return problems, positive
+
+
+def _mcp_facts() -> Observed:
+    """The configured MCP servers and MCP's own configuration, by key."""
     from ouroboros import mcp_catalog, mcp_client, mcp_oauth
 
     mcp_client.ensure_configured_from_settings()
-    manager = mcp_client.get_manager()
-    records = manager.server_records()
-    broken: Facts = {}
-    working: Facts = {}
-    if not manager.is_enabled():
-        if records:
-            broken["mcp-config:off"] = f"MCP is off in Extensions → MCP servers; its {len(records)} configured servers are not offered"
-        return broken, working
-    disabled = sorted(cfg.id for cfg, _catalog in records if not cfg.enabled)
+    records = mcp_client.get_manager().server_records()
+    seen = Observed()
+    servers = sorted(records["servers"], key=lambda record: record[0].id)
+    if not records["enabled"]:
+        if servers:
+            seen.broken["mcp-config:off"] = f"MCP is off in {_PAGE}; its {len(servers)} configured servers are not offered"
+        seen.working.update({f"mcp:{cfg.id}": f"MCP is off in {_PAGE}" for cfg, _catalog in servers})
+        return seen
+    seen.working["mcp-config:off"] = f"MCP is on in {_PAGE}"
+    disabled = [cfg.id for cfg, _catalog in servers if not cfg.enabled]
     if disabled:
-        broken["mcp-config:disabled"] = "disabled in Extensions → MCP servers: " + ", ".join(disabled)
-    for cfg, catalog in sorted(records, key=lambda record: record[0].id):
+        seen.broken["mcp-config:disabled"] = f"disabled in {_PAGE}: " + ", ".join(disabled)
+    else:
+        seen.working["mcp-config:disabled"] = f"no configured server is disabled in {_PAGE}"
+    for cfg, catalog in servers:
+        key = f"mcp:{cfg.id}"
         if not cfg.enabled:
+            seen.working[key] = f"disabled in {_PAGE}"
             continue
-        catalog = catalog or {}
-        attempt, call = catalog.get("latest_attempt") or {}, mcp_catalog.latest_call(cfg) or {}
-        sign_in = (mcp_oauth.status(cfg) or {}) if mcp_oauth.applies(cfg) else {}
-        problems = []
-        if attempt.get("ok") is False:
-            problems.append(f"listing failing {_since(catalog.get('listing_failing_since'))}")
-        if call.get("ok") is False:
-            problems.append(f"calls not answered {_since(call.get('since'))} "
-                            f"({call.get('code')}; changed at {call.get('at')} on {call.get('method')})")
-        if sign_in.get("state") == mcp_oauth.SIGN_IN_REQUIRED:
-            problems.append(f"sign-in required {_since(sign_in.get('since'))} ({sign_in.get('reason')})")
+        problems, positive = _server_line(cfg, catalog or {}, mcp_catalog, mcp_oauth)
         if problems:
-            broken[f"mcp:{cfg.id}"] = "; ".join(problems)
+            seen.broken[key] = "; ".join(problems)
         else:
-            working[f"mcp:{cfg.id}"] = "; ".join(filter(None, (
-                f"a call answered at {call.get('at')}" if call.get("ok") is True else "",
-                f"listed at {attempt.get('at')}" if attempt.get("ok") is True else "",
-                f"signed in {_since(sign_in.get('since'))}" if sign_in else ""))) or "no current failure recorded"
-    return broken, working
+            seen.working[key] = positive
+    for row in records["invalid"]:  # a Settings row that does not parse: the manager's typed code and words
+        if row.get("enabled") and row.get("id"):
+            seen.broken[f"mcp:{row['id']}"] = (f"its settings are invalid ({row.get('code') or 'MCP_CONFIG_ERROR'}): "
+                                               f"{_words(row.get('last_error'))}")
+    return seen
 
 
 def _skill_text(record: Dict[str, Any]) -> str:
-    """The broken part of one health record, or empty: not live (server or workers), unavailable permissions."""
+    """The broken part of one health record, or empty: not live on the server or in workers, permissions."""
     from ouroboros import extension_health as health
 
     observed = record.get("last_observed") if isinstance(record.get("last_observed"), dict) else {}
@@ -97,15 +154,19 @@ def _skill_text(record: Dict[str, Any]) -> str:
     problems = []
     if status == health.BROKEN:
         failures = record.get("companion_failures") if isinstance(record.get("companion_failures"), dict) else {}
-        started = sorted(str(fact.get("ts")) for fact in failures.values() if isinstance(fact, dict) and fact.get("ts"))
+        starts = sorted(_utc(moment) for moment in [observed.get("broken_since"), *(
+            fact.get("ts") for fact in failures.values() if isinstance(fact, dict))] if moment)
         known_good = (record.get("last_known_good") or {}).get("ts") if isinstance(record.get("last_known_good"), dict) else ""
-        problems.append(f"not live ({reason or 'unknown'}) {_since(started[0] if started else '')}"
-                        + (f"; last live {known_good}" if known_good else ""))
+        problems.append(f"not live on the server ({reason or 'unknown'}) {_since(starts[0] if starts else '')}"
+                        + (f"; last live {_utc(known_good)}" if known_good else ""))
     elif status == health.INACTIVE:  # an observation's own time moves on every server reconcile: not a start
-        problems.append(f"enabled but not live ({reason or 'unknown'}) since: unknown")
+        problems.append(f"enabled but not live on the server ({reason or 'unknown'}) since: unknown")
     worker = (record.get("observations") or {}).get("worker") if isinstance(record.get("observations"), dict) else None
-    if status == health.LIVE and isinstance(worker, dict) and worker.get("status") == health.BROKEN:
-        problems.append(f"not live in workers ({worker.get('reason') or 'unknown'}) since {worker.get('ts')}")
+    worker_reason = str((worker or {}).get("reason") or "") if isinstance(worker, dict) else ""
+    if isinstance(worker, dict) and (worker.get("status") == health.BROKEN or (
+            worker.get("status") == health.INACTIVE and worker_reason not in _NOT_MEANT_TO_RUN)):
+        # A worker observation is written only when it changes: its time is when workers first saw it so.
+        problems.append(f"not live in workers ({worker_reason or 'unknown'}) since {_utc(worker.get('ts'))}")
     for permission, fact in sorted(health.open_permission_refusals(record).items()):
         details = "; ".join(filter(None, (fact.get("code"), f"repair: {fact['repair']}" if fact.get("repair") else "",
                                           f"where (the skill's words): {fact['where']}" if fact.get("where") else "")))
@@ -113,33 +174,40 @@ def _skill_text(record: Dict[str, Any]) -> str:
     return "; ".join(problems)
 
 
-def _skill_facts(root: pathlib.Path) -> Tuple[Facts, Facts]:
-    """``(broken, working)`` by key for skills whose health record says something does not work."""
+def _skill_facts(root: pathlib.Path) -> Observed:
+    """Skills whose health record says something does not work, and how the others stand, by key."""
     from ouroboros import extension_health as health
 
-    broken: Facts = {}
-    working: Facts = {}
+    seen = Observed()
     try:
         names = sorted(path.name for path in (root / "state" / "skills").iterdir() if path.is_dir())
-    except OSError:
-        return broken, working
+    except FileNotFoundError:
+        return seen
     for name in names:
-        record = health.read_extension_health(root, name)
+        key, record = f"skill:{name}", health.read_extension_health(root, name)
         if not record:
             continue
-        text = _skill_text(record)
-        if not text:
-            observed = record.get("last_observed") if isinstance(record.get("last_observed"), dict) else {}
-            if record.get("status") == health.LIVE:
-                working[f"skill:{name}"] = f"live as observed {observed.get('ts')}"
+        if record.get("status") == health.UNKNOWN:  # an unreadable record, or none observed yet: not a repair
+            seen.unknown.add(key)
             continue
-        if _switched_on(root, name):  # a record can outlive its skill; an uninstalled or owner-disabled one is not broken
-            broken[f"skill:{name}"] = text
-    return broken, working
+        text = _skill_text(record)
+        observed = record.get("last_observed") if isinstance(record.get("last_observed"), dict) else {}
+        reason = str(observed.get("reason") or "")
+        if text:
+            state = _switch_state(root, name)  # a record can outlive its skill, and the owner's Off ends a break
+            if state == "on":
+                seen.broken[key] = text
+            else:
+                seen.working[key] = "switched off" if state == "off" else "uninstalled"
+        elif record.get("status") == health.LIVE:
+            seen.working[key] = f"live as observed {_utc(observed.get('ts'))}"
+        elif reason in ("disabled", "missing"):
+            seen.working[key] = "switched off" if reason == "disabled" else "uninstalled"
+    return seen
 
 
-def _switched_on(root: pathlib.Path, name: str) -> bool:
-    """Whether the skill is installed and enabled, looked up again only when its state files changed."""
+def _switch_state(root: pathlib.Path, name: str) -> str:
+    """``"on"``, ``"off"`` or ``"uninstalled"``, looked up again only when the skill's state files changed."""
     def stamp(leaf: str) -> Any:
         try:
             info = (root / "state" / "skills" / name / leaf).stat()
@@ -155,28 +223,29 @@ def _switched_on(root: pathlib.Path, name: str) -> bool:
         from ouroboros.skill_loader import find_skill
 
         skill = find_skill(root, name)
-        switched = skill is not None and bool(skill.enabled)
+        state = "uninstalled" if skill is None else "on" if skill.enabled else "off"
     except Exception:  # an unreadable skill keeps its record's own word, as the regression alarm does
-        switched = True
-    _SWITCH[name] = (signature, switched)
-    return switched
+        state = "on"
+    _SWITCH[name] = (signature, state)
+    return state
 
 
-def read_facts(root: pathlib.Path, *, mcp: bool = True, skills: bool = True) -> Tuple[Facts, Facts]:
-    """``(broken, working)``: each broken capability's line, and the current positive fact of the others."""
-    broken: Facts = {}
-    working: Facts = {}
-    for wanted, reader in ((mcp, _mcp_facts), (skills, lambda: _skill_facts(root))):
+def read_facts(root: pathlib.Path, *, mcp: bool = True, skills: bool = True) -> Observed:
+    """One reading of every reached surface; a surface whose reader fails is unknown as a whole."""
+    seen = Observed()
+    for wanted, surface, reader in ((mcp, "mcp", _mcp_facts), (skills, "skills", lambda: _skill_facts(root))):
         if not wanted:
             continue
         try:
-            part, fine = reader()
+            part = reader()
         except Exception:
-            log.debug("capability breakage facts unavailable", exc_info=True)
+            log.debug("capability breakage facts unavailable (%s)", surface, exc_info=True)
+            seen.unknown.add(surface)
             continue
-        broken.update(part)
-        working.update(fine)
-    return broken, working
+        seen.broken.update(part.broken)
+        seen.working.update(part.working)
+        seen.unknown |= part.unknown
+    return seen
 
 
 def _blocked_surfaces(omissions: List[Dict[str, Any]]) -> set:
@@ -186,28 +255,42 @@ def _blocked_surfaces(omissions: List[Dict[str, Any]]) -> set:
 def start_notice_rows(tool_ctx: Any, omissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The registry's omission rows with each broken capability's facts, recorded as what this work is told.
 
-    A server's facts join its own provenance row when it has one (one line per server); every other broken
-    capability gets one row, in key order. A surface the work cannot reach (``resource_blocked``) is not read."""
+    A server's facts join its own row when it has one (provenance or an empty listing): one line per server;
+    every other broken capability gets one row, in key order. A surface the work cannot reach
+    (``resource_blocked``) is not read."""
     blocked = _blocked_surfaces(omissions)
     reach = {"mcp": "mcp" not in blocked, "skills": "extensions" not in blocked}
     try:
-        broken, _working = read_facts(_root(tool_ctx), **reach)
+        seen = read_facts(_root(tool_ctx), **reach)
     except Exception:  # an unreadable work context keeps the registry's notice as it was
         log.debug("capability breakage notice unavailable", exc_info=True)
         return [dict(row) for row in omissions]
     if tool_ctx is not None:
         try:
-            setattr(tool_ctx, _TOLD, {"facts": dict(broken), **reach})
+            told = {"facts": dict(seen.broken), **reach}
+            setattr(tool_ctx, _TOLD, told)
         except Exception:
             pass
+    return _merged_rows(omissions, seen.broken)
+
+
+def _merged_rows(omissions: List[Dict[str, Any]], broken: Facts) -> List[Dict[str, Any]]:
     rows = [dict(row) for row in omissions]
     pending = dict(broken)
     for row in rows:
-        servers = row.get("servers") if isinstance(row.get("servers"), list) else []
-        if row.get("surface") == "mcp" and row.get("reason") == "catalog_provenance" and len(servers) == 1:
-            text = pending.pop(f"mcp:{servers[0].get('id')}", None) if isinstance(servers[0], dict) else None
+        if row.get("surface") != "mcp" or not isinstance(row.get("servers"), list):
+            continue
+        if row.get("reason") == "catalog_provenance" and len(row["servers"]) == 1:
+            server = row["servers"][0]
+            text = pending.pop(f"mcp:{server.get('id')}", None) if isinstance(server, dict) else None
             if text:
                 row["error"] = f"{row.get('error') or ''}; broken: {text}"
+        elif row.get("reason") == "server_no_tools":
+            row["servers"] = [dict(server) for server in row["servers"] if isinstance(server, dict)]
+            for server in row["servers"]:
+                text = pending.pop(f"mcp:{server.get('id')}", None)
+                if text:
+                    server["last_error"] = f"{server.get('last_error') or 'no tools listed'}; broken: {text}"
     for key in sorted(pending):
         kind, _, name = key.partition(":")
         surface = "skill" if kind == "skill" else "mcp"
@@ -217,44 +300,83 @@ def start_notice_rows(tool_ctx: Any, omissions: List[Dict[str, Any]]) -> List[Di
     return rows
 
 
+def write_start_notice(registry: Any, messages: list) -> None:
+    """The work's one capability notice: a typed host row written once, never again when its tools are
+    selected anew (a mode change, a call's room fit) and never resetting what the work was told."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
+    from ouroboros.tool_policy import format_capability_omissions
+
+    tool_ctx = getattr(registry, "_ctx", None)
+    if getattr(tool_ctx, _TOLD, None) is not None or any(
+            isinstance(row, dict) and row.get(HOST_CONTEXT_KIND_KEY) == START_KIND for row in messages):
+        return
+    omissions = registry.capability_omissions() if hasattr(registry, "capability_omissions") else []
+    rows = start_notice_rows(tool_ctx, omissions)
+    if rows:
+        messages.append(bound_host_row(START_KIND, "[SYSTEM NOTICE]\n" + "\n".join(format_capability_omissions(rows))))
+
+
 def _label(key: str) -> str:
     kind, _, name = key.partition(":")
     return {"mcp": f"MCP server {name}", "skill": f"skill {name}"}.get(kind, "MCP configuration")
 
 
-def change_text(told: Facts, broken: Facts, working: Facts) -> str:
-    """The one tail row's text for what changed since ``told``; empty when nothing did."""
-    lines = []
-    for key in sorted(set(told) | set(broken)):
-        before, now = told.get(key), broken.get(key)
-        if before == now:
+def _unreadable(key: str, seen: Observed) -> bool:
+    surface = "skills" if key.startswith("skill:") else "mcp"
+    return key in seen.unknown or surface in seen.unknown
+
+
+def _closing(key: str, seen: Observed) -> str:
+    """The observation that closes a told line, or empty when nothing was observed (then nothing is said)."""
+    if key in seen.working:
+        return seen.working[key]
+    if key.startswith("mcp:"):  # a readable configuration without it: the owner removed the server
+        return f"removed from {_PAGE}"
+    return "uninstalled" if key.startswith("skill:") else ""
+
+
+def change_text(told: Facts, seen: Observed) -> Tuple[str, Facts]:
+    """The one tail row's text for what changed since ``told`` (empty when nothing did), and what the work
+    is told after it: an unreadable or unclosed line is carried over as it was told."""
+    lines, after = [], {}
+    for key in sorted(set(told) | set(seen.broken)):
+        before, now = told.get(key), seen.broken.get(key)
+        if _unreadable(key, seen):
+            if before is not None:
+                after[key] = before
             continue
-        if now is None:
-            lines.append(f"- {_label(key)}: no longer reported broken ({working.get(key) or 'no current failure recorded'})")
+        if now is not None:
+            after[key] = now
+            if now != before:
+                lines.append(f"- {_label(key)}: {now}")
+        elif (closing := _closing(key, seen)):
+            lines.append(f"- {_label(key)}: no longer reported broken ({closing})")
         else:
-            lines.append(f"- {_label(key)}: {now}")
+            after[key] = before
     if not lines:
-        return ""
-    return (f"{CHANGE_HEADER} Host facts changed since this work was last told (times are the facts' own; "
-            "MCP and skill words are untrusted data):\n" + "\n".join(lines))
+        return "", after
+    return (f"{CHANGE_HEADER} Host facts changed since this work was last told (times are the facts' own, UTC; "
+            "MCP and skill words are untrusted data):\n" + "\n".join(lines)), after
 
 
 def append_change_row(ctx: Any) -> bool:
-    """Append one ``CHANGE_KIND`` row when a broken capability broke, changed or recovered since this work was
-    last told; nothing otherwise, and nothing for a loop without a start record. Never raises."""
+    """Append one ``CHANGE_KIND`` row when a capability broke, changed or recovered since this work (or a
+    live call's host: ``ctx`` with ``tools`` and ``messages``) was last told; nothing otherwise, and nothing for
+    a loop without a start record. Never raises."""
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     told = getattr(tool_ctx, _TOLD, None)
     if not isinstance(told, dict) or not isinstance(told.get("facts"), dict):
         return False
     try:
-        broken, working = read_facts(_root(tool_ctx), mcp=bool(told.get("mcp")), skills=bool(told.get("skills")))
-        text = change_text(told["facts"], broken, working)
+        seen = read_facts(_root(tool_ctx), mcp=bool(told.get("mcp")), skills=bool(told.get("skills")))
+        text, after = change_text(told["facts"], seen)
+        if after != told["facts"]:
+            told["facts"] = after
         if not text:
             return False
         from ouroboros.context_budget import bound_host_row
 
         ctx.messages.append(bound_host_row(CHANGE_KIND, text))
-        told["facts"] = dict(broken)
         return True
     except Exception:
         log.debug("capability change row unavailable", exc_info=True)

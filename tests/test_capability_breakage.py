@@ -102,7 +102,8 @@ def test_a_skill_not_live_or_missing_a_permission_is_dated_and_a_live_one_is_not
         "last_known_good": {"ts": "2026-11-20T08:00:00+00:00"}}), encoding="utf-8")
     [row] = breakage.start_notice_rows(_work(tmp_path), [])
     assert row == {"surface": "skill", "reason": "capability_broken", "error": (
-        "desk: not live (companion_restart_exhausted:svc) since 2026-11-21T09:00:00+00:00; last live 2026-11-20T08:00:00+00:00")}
+        "desk: not live on the server (companion_restart_exhausted:svc) since 2026-11-21T09:00:00+00:00; last live "
+        "2026-11-20T08:00:00+00:00")}
     told = breakage.start_notice_rows(_work(tmp_path), [])
     extension_health.record_extension_health(tmp_path, "desk", status=extension_health.LIVE)
     assert breakage.start_notice_rows(_work(tmp_path), []) == told  # a re-observation of the open failure is no change
@@ -177,4 +178,190 @@ def test_a_skill_not_meant_to_run_is_silent_without_a_lookup_and_an_enabled_bloc
     inactive("stale", "review_stale")
     monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=True))
     assert breakage.start_notice_rows(_work(tmp_path), []) == [{"surface": "skill", "reason": "capability_broken",
-                                                                 "error": "stale: enabled but not live (review_stale) since: unknown"}]
+                                                                 "error": "stale: enabled but not live on the server (review_stale) since: unknown"}]
+
+
+def _round(work):
+    """One round of a work whose start recorded what it was told: the change row's text, or None."""
+    ctx = SimpleNamespace(messages=[], tools=SimpleNamespace(_ctx=work))
+    breakage.append_change_row(ctx)
+    return ctx.messages[0]["content"] if ctx.messages else None
+
+
+def _relist(manager, error=None):
+    async def listing(cfg, timeout):
+        if error:
+            raise ConnectionError(error)
+        return [{"name": "ping", "input_schema": {"type": "object"}}]
+    manager._async_list_tools = listing
+    manager.refresh_server("demo")
+
+
+def test_a_failing_listing_does_not_hide_answered_calls_and_each_server_keeps_one_line(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, ("demo", True))
+    _call(manager, "demo", TimeoutError("slow"))
+    _relist(manager, "the listing timed out")
+    work = _work(tmp_path)
+    [row] = breakage.start_notice_rows(work, [])
+    assert "listing failing since" in row["error"] and "calls not answered since" in row["error"]
+    _call(manager, "demo", ToolResult(status="ok", code="OK", text="pong"))  # the kept catalog still serves a call
+    change = _round(work)
+    assert "listing failing since" in change and "calls answered (changed at" in change  # one line, both facts
+    assert _round(work) is None
+    omissions = [{"surface": "mcp", "reason": "server_no_tools",
+                  "servers": [{"id": "demo", "last_error": ""}, {"id": "calm", "last_error": ""}]}]
+    lines = format_capability_omissions(breakage.start_notice_rows(_work(tmp_path), omissions))
+    assert sum("demo" in line for line in lines) == 1 and "demo: no tools listed; broken: listing failing" in lines[1]
+
+
+def test_a_worker_that_cannot_run_a_skill_is_named_and_a_server_failure_keeps_its_start_in_utc(monkeypatch, tmp_path):
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: SimpleNamespace(enabled=True))
+    times = iter(["2026-11-22T09:00:00+00:00", "2026-11-22T09:30:00+00:00"])
+    monkeypatch.setattr(extension_health, "utc_now_iso", lambda: next(times))
+    for _seen in range(2):  # a load failure seen at 09:00 and again at 09:30 started at 09:00
+        extension_health.record_extension_health(tmp_path, "desk", status=extension_health.BROKEN, reason="load_error")
+    pad = extension_health.health_path(tmp_path, "pad")
+    live = {"status": "live", "reason": "ready", "ts": "2026-11-22T08:00:00+00:00", "process": "server"}
+    pad.write_text(json.dumps({"_schema_version": 1, "skill": "pad", "status": "live", "last_observed": live,
+        "observations": {"server": live, "worker": {"status": "inactive", "reason": "deps_missing",
+                                                    "ts": "2026-11-22T12:00:00+03:00", "process": "worker"}}}),
+                   encoding="utf-8")
+    assert [row["error"] for row in breakage.start_notice_rows(_work(tmp_path), [])] == [
+        "desk: not live on the server (load_error) since 2026-11-22T09:00:00+00:00",
+        "pad: not live in workers (deps_missing) since 2026-11-22T09:00:00+00:00"]  # a worker-only break, in UTC
+    pad.write_text(json.dumps({"_schema_version": 1, "skill": "pad", "status": "live", "last_observed": live,
+                               "observations": {"server": live}}), encoding="utf-8")
+    assert [row["error"].split(":")[0] for row in breakage.start_notice_rows(_work(tmp_path), [])] == ["desk"]
+
+
+def test_a_lost_skill_binding_and_an_invalid_settings_row_reach_a_running_work_and_so_does_their_repair(
+        monkeypatch, tmp_path):
+    import dataclasses
+
+    manager = _manager(monkeypatch, ("demo", True))
+    work = _work(tmp_path)
+    assert breakage.start_notice_rows(work, []) == []
+    monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_kw: None)  # keep the edited state
+    runtime = manager._servers["demo"]
+    healthy = runtime.config
+    runtime.config = dataclasses.replace(healthy, skill_error=(
+        "MCP_SKILL_UNAVAILABLE: server 'demo' runs from skill 'desk', which cannot run it now (not installed)"))
+    assert "- MCP server demo: its skill cannot run it now: MCP_SKILL_UNAVAILABLE" in _round(work)
+    runtime.config = healthy
+    assert "- MCP server demo: no longer reported broken (" in _round(work)
+    manager._configuration_errors = [{"id": "files", "enabled": True, "code": "MCP_CONFIG_ERROR",
+                                      "last_error": "secret ${MISSING_MCP_SECRET} is not set"}]
+    assert "- MCP server files: its settings are invalid (MCP_CONFIG_ERROR): secret ${MISSING_MCP_SECRET}" in _round(work)
+    manager._configuration_errors = []
+    assert "- MCP server files: no longer reported broken (" in _round(work)
+    assert _round(work) is None
+
+
+def test_an_unavailable_write_scope_stays_broken_through_an_answered_read_until_the_grant_widens(monkeypatch, tmp_path):
+    from ouroboros import mcp_oauth
+
+    manager = _manager(monkeypatch, ("demo", True))
+    cfg = manager.server_config("demo")
+    grant = {"tokens": {"access_token": "a", "scope": "files:read"},
+             "sign_in": {"state": "signed_in", "since": "2026-11-22T08:00:00+00:00"}}
+    mcp_oauth._save(cfg, grant)
+    work = _work(tmp_path)
+    assert breakage.start_notice_rows(work, []) == []
+    mcp_oauth._save(cfg, {**grant, "required_scope": "files:read files:write"})  # a write answered 403 insufficient_scope
+    assert "its sign-in lacks a scope a refused call needs (files:read files:write)" in _round(work)
+    _call(manager, "demo", ToolResult(status="ok", code="OK", text="read"))  # a read still answers...
+    read = _round(work)
+    assert "lacks a scope" in read and "calls answered" in read and "no longer reported broken" not in read  # ...not a repair
+    mcp_oauth._save(cfg, {**grant, "tokens": {"access_token": "b", "scope": "files:read files:write"}})  # widened
+    assert "- MCP server demo: no longer reported broken (a call answered at" in _round(work)
+    _call(manager, "demo", ToolResult(status="ok", code="OK", text="written"))
+    assert _round(work) is None
+
+
+def test_a_listing_failure_says_its_reason_and_only_a_changed_reason_reaches_a_running_work(monkeypatch, tmp_path):
+    manager = _manager(monkeypatch, ("demo", True))
+    work = _work(tmp_path)
+    assert breakage.start_notice_rows(work, []) == []
+    _relist(manager, "[Errno 8] nodename nor servname provided")
+    dns = _round(work)
+    assert "listing failing since" in dns and "nodename nor servname provided" in dns
+    _relist(manager, "401 Unauthorized: sign in again")
+    auth = _round(work)
+    assert "401 Unauthorized" in auth and "nodename" not in auth  # the reason changed: one row
+    _relist(manager, "401 Unauthorized: sign in again")
+    assert _round(work) is None  # the same outcome again: nothing
+    _relist(manager)
+    assert "- MCP server demo: no longer reported broken (listed at" in _round(work)
+
+
+def test_an_unreadable_source_is_unknown_not_repaired_and_a_switched_off_or_removed_skill_says_so(monkeypatch, tmp_path):
+    enabled = {"desk": True, "gone": True}
+    monkeypatch.setattr("ouroboros.skill_loader.find_skill", lambda _root, name: (
+        SimpleNamespace(enabled=enabled[name]) if enabled[name] is not None else None))
+    for name in enabled:
+        extension_health.record_extension_health(tmp_path, name, status=extension_health.BROKEN, reason="load_error")
+    work = _work(tmp_path)
+    assert len(breakage.start_notice_rows(work, [])) == 2
+    path = extension_health.health_path(tmp_path, "desk")
+    good = path.read_bytes()
+    path.write_text("{not json", encoding="utf-8")  # unreadable for a moment (a lock, a torn copy)
+    assert _round(work) is None  # unknown, never "repaired"
+    path.write_bytes(good)
+    assert _round(work) is None  # readable again: the same break, nothing new
+    enabled.update(desk=False, gone=None)  # the owner switched one off and uninstalled the other
+    (path.parent / "enabled.json").write_text(json.dumps({"enabled": False}), encoding="utf-8")
+    (extension_health.health_path(tmp_path, "gone").parent / "uninstalled.json").write_text("{}", encoding="utf-8")
+    change = _round(work)
+    assert "- skill desk: no longer reported broken (switched off)" in change
+    assert "- skill gone: no longer reported broken (uninstalled)" in change
+    manager = _manager(monkeypatch, ("demo", True))
+    _call(manager, "demo", TimeoutError("slow"))
+    mcp_work = _work(tmp_path)
+    breakage.start_notice_rows(mcp_work, [])
+    monkeypatch.setattr(breakage, "_mcp_facts", lambda: (_ for _ in ()).throw(RuntimeError("manager unreadable")))
+    assert _round(mcp_work) is None  # a surface whose reader failed is unknown as a whole
+
+
+def test_selecting_a_works_tools_again_never_adds_a_second_typed_notice(monkeypatch, tmp_path):
+    from ouroboros import loop as loop_mod
+    from ouroboros.context_budget import host_row_intact
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolRegistry
+
+    manager = _manager(monkeypatch, ("demo", True))
+    _call(manager, "demo", TimeoutError("slow"))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    messages = [{"role": "user", "content": "the task"}]
+    schemas = initial_tool_schemas(registry)
+    loop_mod._setup_dynamic_tools(registry, schemas, messages)
+    told = registry._ctx._capability_breakage_told
+    loop_mod._setup_dynamic_tools(registry, schemas, messages, context_mode="low")  # the mode is selected again
+    notices = [row for row in messages if row.get("_host_context_kind") == breakage.START_KIND]
+    assert len(notices) == 1 and host_row_intact(notices[0]) and messages[0] == {"role": "user", "content": "the task"}
+    assert notices[0]["content"].startswith("[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]")
+    assert registry._ctx._capability_breakage_told is told  # what the work was told stays its own
+
+
+def test_the_round_appends_the_change_row_before_its_facts(monkeypatch, tmp_path):
+    from ouroboros import loop as loop_mod
+    from ouroboros import loop_messages
+    from ouroboros.loop_model_call import _dispatch_round_model
+
+    manager = _manager(monkeypatch, ("demo", True))
+    work = _work(tmp_path)
+    breakage.start_notice_rows(work, [])
+    _call(manager, "demo", TimeoutError("slow"))
+
+    class Reached(Exception):
+        pass
+    kinds = []
+
+    def facts(ctx, **_kw):
+        kinds.append([row.get("_host_context_kind") for row in ctx.messages])
+        raise Reached
+    monkeypatch.setattr(loop_messages, "append_context_facts", facts)
+    monkeypatch.setattr(loop_mod, "_retire_main_reasoning", lambda _ctx: None)
+    ctx = SimpleNamespace(messages=[], tools=SimpleNamespace(_ctx=work))
+    with pytest.raises(Reached):
+        _dispatch_round_model(ctx, None, attempt_cap=None)
+    assert kinds == [[breakage.CHANGE_KIND]]  # the change row stands before the round's facts
