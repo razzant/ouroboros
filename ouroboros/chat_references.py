@@ -9,6 +9,7 @@ Selected passages require an authored source and remain sender-reported citation
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 
 from ouroboros.chat_chain import format_address, parse_address, resolve_row, row_address
 from ouroboros.chat_uploads import web_attachment_caption
@@ -607,15 +608,16 @@ def answer_reference(root, meta: dict, task_id: str, *, is_progress: bool) -> No
         meta["logical_room_chat_id"] = 1  # physical owner turn, independent of a coincident Project number
 
 
-def live_transport(root, meta: dict, bound: dict, task_id: str, *, role: str, system_type: str,
+def live_transport(root, meta: dict, room_binding: Callable[[], dict], task_id: str, *, role: str, system_type: str,
                    is_progress: bool) -> dict:
     """What a row's live frame carries, after its rows are written (never stored): a helper's card or notice, its
-    root's address (``helper_card_address``) where its room has no binding, else that binding with the root's address
+    root's address (``helper_card_address``), which alone needs the room's binding read. With a binding, add the address
     beside it (``telegram_root``, which only the bundled bridge reads), so another connector bound there keeps the row;
     an exact Reply's turn's progress, where its answer goes but without the anchor, so Silent mode replaces it as
     before; ``{}`` for any other row."""
     address = helper_card_address(root, meta, role=role, system_type=system_type, is_progress=is_progress)
     if address:
+        bound = room_binding()
         return {**bound, "telegram_root": address} if bound else address
     return turn_reply_transport(root, task_id, anchor=False) if is_progress and task_id else {}
 
