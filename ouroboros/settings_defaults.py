@@ -238,8 +238,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     "OUROBOROS_ONBOARDING_ATTEMPT_ID": "",
     "OUROBOROS_ONBOARDING_CONSCIOUSNESS": "",
-    # Auto-grant reviewed-skill requests by default; grants stay bound to the
-    # reviewed content hash and editing a skill still invalidates them.
+    # Auto-grant reviewed-skill requests by default; a key grant then follows local
+    # edits of the installed skill, permissions stay bound to the accepted bytes.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
     # Trust of the built-in source while no source list is saved (its derived row): true installs the bundled
     # skills with basis trusted (exact bytes only; any edit leaves the release), false reviews them like a

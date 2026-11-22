@@ -954,13 +954,24 @@ Some settings keys are protected: the provider, GitHub and network keys of `FORB
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
-until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
+until the owner grants it, while the skill keeps its other approvals. When the skill's last grant decision did not
+cover it (it was saved or declared later), it is not passed and stops nothing: the skill keeps running and readiness
+names it in its non-blocking `notes`; a key the decision covered and did not grant still stops it. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
 a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
-`notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
-consent. The desktop launcher's owner-grant bridge records these grants.
+`notify_owner` and chat event subscriptions also require explicit owner consent for the accepted version. The
+desktop launcher's owner-grant bridge records these grants.
+
+A key grant, core provider keys included, follows local edits of the installed skill that holds it
+(`ouroboros/skill_grant_follow.py`): while its install record is unchanged and no update is in flight or awaiting
+its check, and the manifest still declares the key, edits by Ouroboros or the owner keep it. An update, a built-in
+re-seed, a source install and the owner's grants bind exact bytes as before. Permissions never follow an edit: one
+the host checks at each use (`notify_owner`, `inject_chat`, `call_peer`, `presence`) keeps the extension running and
+refuses that use, saying it waits for the check of the edited version; `page_module`, `context_snapshot`,
+`live_conversation` and chat event subscriptions act through what the load publishes, so the extension waits for the
+check. A key granted later reaches a loaded extension by reloading it.
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
@@ -972,11 +983,12 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
 release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
+label alone; see the Skill Review Checklist. Editing the payload leaves its permission grants with the earlier version
+until an acceptance; readiness, the execution and toggle refusals and the skill card then also say
 that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
 values are untouched.
 
-Every review, grant and acceptance is bound to the skill's release digest: its
+Every review, permission grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
 same release has one identity on every install.
 
