@@ -429,12 +429,16 @@ def _room_fixture(root: pathlib.Path) -> int:
     return chat
 
 
-def _projected(rows, root) -> set:
+def _projected(rows, root, *, addressed=False) -> set:
     from ouroboros.dialogue_evidence import _row_projection
 
     out = set()
-    for row in rows:
-        view = row if "stream" in row else _row_projection(row, "chat", 0, root)
+    for entry in rows:
+        if addressed:
+            address, row, pos = entry
+            view = {**_row_projection(row, "chat", 0, root, pos=pos), "row_address": cc.format_address(address)}
+        else:
+            view = entry
         out.add(json.dumps({k: v for k, v in view.items() if k not in {"stream", "source_ordinal"}},
                            sort_keys=True, ensure_ascii=False))
     return out
@@ -447,16 +451,16 @@ def test_room_rows_are_the_room_evidence_rows_by_room_task_and_period(tmp_path):
     project_chat = _room_fixture(tmp_path)
     for room in (1, project_chat, 0, 777):
         evidence = [row for row in read_room_source(tmp_path, room)["rows"] if row["stream"] == "chat"]
-        ours = [row for _a, row, _p in cc.iter_room_rows(tmp_path, str(room))]
-        assert ours and _projected(ours, tmp_path) == _projected(evidence, tmp_path), room
-        tasks = [row for _a, row, _p in cc.iter_room_rows(tmp_path, str(room), task_ids=["t1", "bound"])]
-        assert _projected(tasks, tmp_path) == _projected(
+        ours = list(cc.iter_room_rows(tmp_path, str(room)))
+        assert ours and _projected(ours, tmp_path, addressed=True) == _projected(evidence, tmp_path), room
+        tasks = cc.iter_room_rows(tmp_path, str(room), task_ids=["t1", "bound"])
+        assert _projected(tasks, tmp_path, addressed=True) == _projected(
             [r for r in evidence if {"t1", "bound"} & {r.get(f) for f in ("task_id", "parent_task_id", "root_task_id")}],
             tmp_path), room
         period = {"from": "2026-09-01T00:00:30+00:00", "to": "2026-09-02T00:01:00+00:00"}
         lower, upper = parse_deadline_ts(period["from"]), parse_deadline_ts(period["to"])
-        dated = [row for _a, row, _p in cc.iter_room_rows(tmp_path, str(room), period=period)]
-        assert _projected(dated, tmp_path) == _projected(
+        dated = cc.iter_room_rows(tmp_path, str(room), period=period)
+        assert _projected(dated, tmp_path, addressed=True) == _projected(
             [r for r in evidence if r.get("ts") and lower <= parse_deadline_ts(r["ts"]) <= upper], tmp_path), room
     main = [row["text"] for _a, row, _p in cc.iter_room_rows(tmp_path, "1")]
     assert "Start the room" in main and "Bound work" not in main and "Agent traffic" not in main
@@ -512,8 +516,9 @@ def test_a_redelivered_message_stays_two_addressable_rows(tmp_path):
             _msg("2026-09-01T00:00:09+00:00", "same words", client_message_id="c"))
     ours = list(cc.iter_room_rows(tmp_path, "1"))
     assert [pos for _a, _r, pos in ours] == [0, 1] and ours[0][0]["row_sha256"] != ours[1][0]["row_sha256"]
-    # The evidence view folds a repeated client id into its first copy; the stream does not.
-    assert [row["text"] for row in read_room_source(tmp_path, 1)["rows"]] == ["same words"]
+    evidence = read_room_source(tmp_path, 1)["rows"]
+    assert [row["text"] for row in evidence] == ["same words", "same words"]
+    assert [row["row_address"] for row in evidence] == [cc.format_address(address) for address, _row, _pos in ours]
 
 
 def _paged_chain(tmp_path: pathlib.Path) -> pathlib.Path:

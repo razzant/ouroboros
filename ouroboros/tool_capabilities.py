@@ -24,8 +24,19 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "memory_read", "memory_mark",
 })
 
+# Where a route cannot carry every schema in one request (direct OpenAI takes 128;
+# ``tool_policy.fit_tool_schemas_to_limit``), the tools with which this mind reads and
+# revises its own memory and the work in front of it are always sent: this set, the
+# selectors and the MCP gateway. Owner administration of the installation, rescue and
+# one-off media wait in the tail (``ROUTE_TAIL_TOOL_NAMES``), and the route's notice
+# names every tool left out with its purpose. The provider's limit is the physical fact;
+# this rule only orders the default, and enable_tools still loads any permitted schema.
+# The set's size stays where it is (103), so one explicitly loaded skill (25 tools) fits beside it; a tool
+# outside the set that this task already called keeps its place ahead of a load and takes one of those 25.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
+    # Installation upkeep is neither this mind's memory nor the work in front of it: inspect_harness reads in
+    # ordinary order, maintain_harness and free_storage wait in the route tail. skill_exec runs the enabled skills.
+    "inspect_subagent", "skill_exec",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -66,10 +77,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
+    # The project's progress memory and working page, the hand-written source registry of memory
+    # (memory/registry.md), and the fold of this actor's own transcript.
+    "journal_read", "journal_write", "workpad_read", "workpad_write", "memory_map", "memory_update_registry",
+    "compact_context",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
-    "generate_image", "list_image_models", "recover_image",
+    "ocr_pdf", "extract_pdf_text",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
@@ -80,6 +94,18 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # load on demand (enable_tools) after a search found something worth it.
     "list_skills", "skill_review", "skill_preflight",
     "submit_skill_to_hub", "skill_search",
+})
+
+# What waits behind every other schema on such a route: the installation's saved
+# settings the owner administers (interface wording, the global tool timeout, the
+# consciousness and evolution switches), its upkeep (vendor program updates, the
+# Dashboard's Free storage), and one-off media helpers with the rescue of
+# an earlier image attempt. A name this task already called or the actor loaded keeps
+# its place ahead of the tail.
+ROUTE_TAIL_TOOL_NAMES: frozenset[str] = frozenset({
+    "pin_ui_translation", "set_tool_timeout", "toggle_consciousness", "toggle_evolution",
+    "maintain_harness", "free_storage",
+    "youtube_transcript", "extract_video_frames", "generate_image", "list_image_models", "recover_image",
 })
 
 # Meta-tools: always visible alongside core tools
@@ -512,7 +538,7 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness", "free_storage",
+    "maintain_harness", "free_storage", "propose_payload_release",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
@@ -562,9 +588,12 @@ COMPLETION_RECEIPT_TOOLS = frozenset({
 })
 
 
+SCHEMA_DISCOVERY_TOOLS = frozenset({"enable_tools", "list_available_tools"})
+
+
 def completion_observation_calls(calls: object) -> list:
     """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
     write that answered exactly ``OK`` (a warning or a partial write is read first)."""
     return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
-        call.get("tool") in {"enable_tools", "list_available_tools"}
+        call.get("tool") in SCHEMA_DISCOVERY_TOOLS
         or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

@@ -39,6 +39,8 @@ def test_custody_settles_an_intent_for_a_missing_task(qenv):
     """The incident's wedge: intent recorded, task neither queued nor running —
     custody's finalize-on-miss settles it as cancelled with the parent decision
     stamped at OUTCOME (never at intent time)."""
+    from ouroboros.terminal_time import terminal_time_fact
+
     ci.request_cancel(qenv.drive, "ghost1", reason="tree teardown",
                       requested_by="parent9")
     write_task_result(qenv.drive, "ghost1", STATUS_RUNNING, result="was running")
@@ -48,6 +50,7 @@ def test_custody_settles_an_intent_for_a_missing_task(qenv):
     assert outcome == qenv.tl.CANCEL_CANCELLED
     stored = load_task_result(qenv.drive, "ghost1")
     assert stored["status"] == STATUS_CANCELLED
+    assert terminal_time_fact(stored)["source"] == "unknown"
     assert stored["parent_decision"] == "cancelled"
     assert stored["parent_decision_reason"] == "tree teardown"
     # Honest accounting: reconstructed (confirmed zero here), never a missing block.

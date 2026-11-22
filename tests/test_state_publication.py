@@ -115,8 +115,8 @@ def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count
         registry.create_project(serving.root, f"project-{index:03d}", name=f"Project {index:03d}", origin="owner_ui")
     reads, real = [], registry.list_sidebar_projects
 
-    def spliced(drive_root):
-        rows = real(drive_root)
+    def spliced(drive_root, *, require_readable=False):
+        rows = real(drive_root, require_readable=require_readable)
         reads.append(len(rows))
         return rows if len(reads) == 1 else [*rows, {**rows[0], "id": "created-between-reads", "chat_id": 99_999}]
 
@@ -227,6 +227,42 @@ def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_tas
         _task(txn, "working-task", chat_id=1, status="running", focus="moved")
     third = _get(serving.app)
     assert len(productions) == 1 and third.headers[publication.GENERATION_HEADER] == "2"
+
+
+def test_a_cached_member_tail_expires_without_a_queue_or_custody_write(serving, monkeypatch):
+    from ouroboros import delegate_collection, delegate_custody, delegate_feed
+    from tests.test_owner_pause import _live_tree
+
+    _live_tree(serving.root, serving.workers)
+    for worker in serving.workers.RUNNING.values():
+        worker["owner_wait"] = {"state": "waiting", "reason": "sleep", "task_attempt": 1, "sleep": {"mode": "warm"}}
+    run = {"task_id": "child-run", "root_task_id": "root-1", "run_id": "r", "invocation_id": "inv"}
+    assert delegate_custody.emit(serving.root, delegate_custody.STARTED, run)
+    clock = [100.0]
+    fact = {**run, "answered": True, "run_state": "running", "at": clock[0]}
+    monkeypatch.setattr(delegate_feed, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(delegate_collection, "body_runtime", lambda _root: types.SimpleNamespace(observation=lambda _: fact))
+
+    def read():
+        response = _get(serving.app)
+        body = _payload(response)
+        [work] = body["works"]
+        [tail] = work["members"]["states"]["child-run"]["tails"]
+        assert work["tails"] == [tail]
+        assert work["live"] is (tail["state"] == "live")
+        room = body["rooms"]["0"]  # the synthetic tree's chat_id
+        assert room["mark"] == {"live": "moving", "unknown": "ring", "open": "still"}[tail["state"]]
+        return response.headers[publication.GENERATION_HEADER], tail["state"]
+
+    first, state = read()
+    assert state == "live"
+    fact["at"] = clock[0] = 101.0
+    assert read() == (first, "live")  # an identical heartbeat requires no census rebuild
+    clock[0] += delegate_feed._OBSERVATION_CURRENT_SEC + 1
+    expired, state = read()
+    assert expired != first and state == "unknown"
+    fact.update(at=clock[0], run_state="queued")
+    assert read()[1] == "open"
 
 
 def test_publication_reprobes_an_effective_child_root_after_it_changes(serving, monkeypatch):

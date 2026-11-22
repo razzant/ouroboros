@@ -672,7 +672,7 @@ _RUN_TEXT_SOURCES = {("output", "current"): "its saved output",
                      ("output", "other"): "another retained saved output",
                      ("report", "current"): "the engine's last report",
                      ("report", "other"): "another retained engine report"}
-_KEPT_COPY = "The full copy Ouroboros kept of its last unreviewed message (not a final answer):"
+_KEPT_COPY = "Full saved intermediate text for this subtask (not a final answer; may be from an earlier attempt):"
 # The host salvage note's own words (``observability.salvaged_output_note``) name its private copy.
 _SALVAGE_COPY_AT = re.compile(r"; full copy preserved at [^\n]+?\):\n")
 
@@ -1027,7 +1027,7 @@ def _child_texts(root: Any, child: Mapping[str, Any], cache: dict) -> Iterator[t
         path = preserved_salvage_path(pathlib.Path(root), tid)
         kept, unread = (pathlib.Path(path).read_text(encoding="utf-8") if path else ""), ""
     except (OSError, ValueError):
-        kept, unread = "", "The full copy Ouroboros kept of its last unreviewed message could not be read."
+        kept, unread = "", "The full saved intermediate text for this subtask could not be read."
     if text:
         changed = child.get("result_sha256") not in (None, hashlib.sha256(text.encode("utf-8")).hexdigest())
         yield (_CHILD_TEXT_LABELS[origin], text if origin == "answer" else _SALVAGE_COPY_AT.sub(

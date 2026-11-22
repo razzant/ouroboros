@@ -113,7 +113,7 @@ def _live_task(task_id: str) -> dict:
 
 
 def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
-    from ouroboros.gateway.owner_settings import CommitBoundary, record_settings_change
+    from ouroboros.gateway.owner_settings import BindingRefused, CommitBoundary, record_settings_change, settings_document_mutation
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, write_owner_message
     from supervisor.queue import _task_drive_for_task
 
@@ -122,6 +122,7 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
     action: dict = {}
     duplicate = False
     claimed = False
+    main_role = ""
     transformation_completed = False
     mailbox_attempted = False
     owner = None
@@ -212,7 +213,7 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
         attempt = int(task.get("_attempt") or 1)
 
         def claim(previous):
-            nonlocal duplicate
+            nonlocal duplicate, main_role
             if not previous:
                 raise WaitDecisionRefused("model_wait_not_found", status=404)
             if previous.get("task_attempt") != attempt:
@@ -239,20 +240,58 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
                 from ouroboros.gateway.owner_settings import _owner_read_settings_raw
                 from ouroboros.model_slots import apply_model_role_override
 
-                try:
-                    apply_model_role_override(
-                        _owner_read_settings_raw(), role=previous["role"], model=action["model"],
-                        credential_profile_id=action["credential_profile_id"], use_local=action["use_local"])
-                except ValueError as error:
-                    raise WaitDecisionRefused("invalid_role_update", previous, 400) from error
+                if previous["role"] in ("main", "reviewer:main"):
+                    main_role = previous["role"]
+                else:
+                    try:
+                        apply_model_role_override(_owner_read_settings_raw(), role=previous["role"], model=action["model"],
+                            credential_profile_id=action["credential_profile_id"], use_local=action["use_local"])
+                    except ValueError as error:
+                        raise WaitDecisionRefused("invalid_role_update", previous, 400) from error
             return {**previous, "pending_action": action}
 
-        row = mutate(wait_id, claim)
+        def first_claim(previous):
+            next_row = claim(previous)
+            return None if main_role else next_row  # direct reviewers consume a published action immediately
+
+        row = mutate(wait_id, first_claim)
+        if main_role:
+            from ouroboros.gateway.owner_settings import _owner_update_settings
+            from ouroboros.model_slots import apply_model_role_override, model_role_setting_keys
+
+            def change(settings):
+                try:
+                    return apply_model_role_override(settings, role=main_role, model=action["model"],
+                        credential_profile_id=action["credential_profile_id"], use_local=action["use_local"])
+                except ValueError as error:
+                    raise WaitDecisionRefused("invalid_role_update", row, 400) from error
+
+            def commit_wait(commit):
+                nonlocal row
+                live_task()
+                if not stop_clear():
+                    raise WaitDecisionRefused("task_not_live", row)
+                # Settings is already locked and validated. Only the actual file replacement happens
+                # in the wait's row transaction, before the reviewer can see the switch.
+                def publish(previous):
+                    if not previous or previous.get("role") != main_role:
+                        raise WaitDecisionRefused("stale_model_wait", previous)
+                    next_row = claim(previous)
+                    if next_row is None:
+                        return None
+                    commit()
+                    return {**next_row, "saved_request_id": action["request_id"]}
+                row = mutate(wait_id, publish)
+                return boundary.committed
+
+            with settings_document_mutation():
+                record_settings_change(request, _owner_update_settings(change, boundary=boundary, commit_if_current=commit_wait,
+                    authored_keys=model_role_setting_keys(main_role), allow_safety_lowering=True))
         claimed = True
         applied = row.get("applied_request_id") == action["request_id"]
         if not applied:
             if action.get("persist_role"):
-                from ouroboros.gateway.owner_settings import _owner_update_settings, settings_document_mutation
+                from ouroboros.gateway.owner_settings import _owner_update_settings
                 from ouroboros.model_slots import apply_model_role_override, model_role_setting_keys
 
                 if row.get("saved_request_id") != action["request_id"]:
@@ -318,6 +357,10 @@ def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
                              "state": row["state"], "wait": served_wait(row), "duplicate": duplicate, "applied": applied,
                              "saved": saved()},
                             status_code=200 if duplicate else 202)
+    except BindingRefused as error:
+        return json_error(f"{error} To switch only this task, uncheck ‘Also save this role in Settings’.",
+                          400, ok=False, reason_code="main_binding_invalid", wait=served_wait(row),
+                          applied=False, saved=saved())
     except WaitDecisionRefused as error:
         # Applied, saved and the refusal are separate facts; after a claim its row is read as it now is.
         applied = claim_as_it_is()

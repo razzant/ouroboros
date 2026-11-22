@@ -85,6 +85,21 @@ def test_an_unavailable_clone_falls_back_to_the_streamed_copy_with_the_same_iden
     assert list(destination.parent.iterdir()) == [destination]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="native POSIX filename bytes")
+@pytest.mark.parametrize("raw", [b"report-\xff.txt", b"r" * 239 + b"\xff.txt"], ids=["short", "long"])
+def test_atomic_temp_name_uses_the_original_basename_bytes(tmp_path, raw):
+    from ouroboros.temp_sweep import atomic_temp_path, is_atomic_temp
+
+    # Construct the name without depending on this volume accepting it for a real file.
+    sibling = atomic_temp_path(tmp_path / os.fsdecode(raw))
+    encoded = os.fsencode(sibling.name)
+    assert sibling.parent == tmp_path and is_atomic_temp(sibling.name) and len(encoded) <= 255
+    if len(raw) < 100:
+        assert encoded.startswith(b"." + raw + b".tmp.")
+    else:
+        assert b"~" + hashlib.sha256(raw).hexdigest()[:12].encode() + b".tmp." in encoded
+
+
 def test_a_cloned_temporary_of_an_old_source_is_in_flight_for_the_temp_sweep(tmp_path, monkeypatch):
     """Both directions. A clone copies the source's times, so the temporary of a copy of an old result
     looked older than the sweep's age guard while its verification read was still running, and the

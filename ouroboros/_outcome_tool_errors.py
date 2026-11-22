@@ -270,6 +270,39 @@ def _call_target_signature(args: Dict[str, Any]) -> tuple[str, set[str]]:
     return json.dumps(parts, sort_keys=True, default=str), paths
 
 
+def _held_call_identity(call: Dict[str, Any]) -> tuple[str, str] | None:
+    """A retrospective match needs a positive address and the whole recorded call; it grants no retry."""
+    from ouroboros.artifacts import SANITIZER_OMISSION_MARKERS
+    from ouroboros.tool_effects import bound_declaration, effect_of, retained_descriptor, target_values, touched_addresses
+
+    args = call.get("args")
+    if not isinstance(args, dict) or not args:
+        return None
+    recorded = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+    if any(marker in recorded for marker in (*SANITIZER_OMISSION_MARKERS, "***REDACTED", "*** REDACTED")):
+        return None
+    tool = str(call.get("tool") or "")
+    descriptor = retained_descriptor(call)
+    if descriptor is not None:
+        # Use only the declaration captured with this invocation, never the installed version at replay.
+        if bound_declaration(descriptor) is None:
+            return None
+        effect = effect_of(tool, ext_tool=descriptor, args=args)
+        touched, problem = touched_addresses(effect, args)
+        values = target_values(effect, args)
+        addressed = any(values.get(k) for k in (*effect.targets, effect.conversation)) or any(
+            address.effect == effect.effect for address in touched)
+        return (str(descriptor["extension_generation"]), recorded) if addressed and not (effect.problem or problem) else None
+    if tool.startswith(("ext_", "mcp_")) or tool in {"place_reply", "call_mcp_tool"}:
+        return None  # no historical declaration of the destination
+    # Enclosing root, cwd or repo alone never identifies an action. An integer GitHub target is an address too.
+    targets = (args.get(key) for key in ("path", "cmd", "script", "name", "outputs", "task_id", "target"))
+    if any(type(part) in (str, int) and str(part).strip() for target in targets
+           for part in (target if isinstance(target, list) else [target])):
+        return "", recorded
+    return None
+
+
 def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None) -> Dict[str, Any]:
     record = {
         "tool": str(item.get("tool") or "unknown"),
@@ -311,8 +344,8 @@ _DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "tim
 # live; a launch refused at hand-off): such a call never got past Safety and leaves a held call named. A status a
 # handler can return as well stays here, since naming a held call too long is the safe side.
 _BEFORE_SAFETY_STATUSES = _UNEXECUTED_STATUSES | frozenset({
-    "blocked", "cwd_blocked", "edit_ops_blocked", "edit_text_blocked", "error", "git_error", "git_via_shell_blocked",
-    "light_mode_blocked", "protected_blocked", "resource_constraint_blocked", "resource_policy_blocked",
+    "blocked", "cognitive_tool_required", "cwd_blocked", "edit_ops_blocked", "edit_text_blocked", "error", "git_error",
+    "git_via_shell_blocked", "light_mode_blocked", "protected_blocked", "resource_constraint_blocked", "resource_policy_blocked",
     "root_required_active_workspace", "root_required_user_files", "skill_payload_blocked", "unavailable",
     "user_files_path_blocked", "workspace_blocked", "write_file_blocked"})
 
@@ -405,12 +438,22 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_key, target_paths = _call_target_signature(args)
         recovered_by: int | None = None
-        held = status in SAFETY_HELD_STATUSES  # its identical call got past Safety, then succeeded or failed
+        held = status in SAFETY_HELD_STATUSES
+        held_identity = _held_call_identity(item) if held else None
         for later_idx, later in enumerate(calls[idx + 1:], start=idx + 2):
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
             if (later_status in SAFETY_HELD_STATUSES | _BEFORE_SAFETY_STATUSES if held
                     else later.get("is_error") or later_status not in _OK_TOOL_STATUSES):
+                continue
+            # The registry's cognitive redirect returns before the handler. Its trace bucket is now "ok"
+            # (a hint, not a failure); only the published code distinguishes it here.
+            if held and later.get("tool_result_code") == "COGNITIVE_TOOL_REQUIRED":
+                continue
+            # A caller's wait ending does not show that its worker entered the handler. Use this call's
+            # measured process facts instead: a process deadline or an exit code could not come from that wait.
+            if held and later_status == "timeout" and not (
+                    later.get("timed_out") is True or type(later.get("exit_code")) is int):
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
             later_key, later_paths = _call_target_signature(later_args)
@@ -424,7 +467,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             if status in ("artifact_output_error", "artifact_output_undeclared"):
                 recovered = artifact_registered and (same_path or not target_paths)
             elif held:
-                recovered = same_target
+                recovered = later_tool == tool and held_identity is not None and held_identity == _held_call_identity(later)
             else:
                 recovered = same_target or (artifact_registered and same_path)
             if recovered:

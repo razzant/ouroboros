@@ -98,7 +98,10 @@ def test_an_unverified_scratch_keeps_its_record_and_releases_its_proven_sibling(
     moved = entry / SESSION_SCRATCH_DIRNAME / "snap-1" / "scratch.json"
     assert moved.read_bytes() == record_bytes, "the ownership declaration moves byte for byte"
     layout = sorted(item.relative_to(entry).as_posix() for item in entry.rglob("*"))
-    assert layout == [SESSION_SCRATCH_DIRNAME, f"{SESSION_SCRATCH_DIRNAME}/snap-1", f"{SESSION_SCRATCH_DIRNAME}/snap-1/scratch.json"]
+    proof = moved.with_name(workspace_preflight.HANDOFF_RECORD)
+    assert layout == [SESSION_SCRATCH_DIRNAME, f"{SESSION_SCRATCH_DIRNAME}/snap-1",
+                      proof.relative_to(entry).as_posix(), moved.relative_to(entry).as_posix()]
+    assert json.loads(proof.read_text(encoding="utf-8")) == {"task_id": "task-1"}
     # The Storage remover fact carries the same typed hold.
     [fact] = [fact for fact in storage_removers.place_removers(data, engine=False)["session_scratch"]
               if fact["id"] == "custody_trash"]
@@ -281,7 +284,7 @@ def test_a_nested_drives_unverified_record_is_held_and_its_sibling_released(tmp_
     assert (report["removed"], report["stuck"], [h["class"] for h in report["holds"]]) == (1, {}, ["identity_unverified"])
     assert not rows["plain"][0].exists() and _tree(held) == before and not entry.exists()
     [handoff] = data.joinpath(*TRASH).iterdir()
-    assert handoff.name.startswith("task-1+scratch-")
+    assert handoff.name.startswith("child-1+scratch-")  # its own task, the one its parent hold is asked about
     assert (handoff / SESSION_SCRATCH_DIRNAME / "held" / "scratch.json").read_bytes() == held_bytes
     assert task_custody.remove_custody_trash(data)["holds"] == report["holds"]
     assert list(data.joinpath(*TRASH).iterdir()) == [handoff]

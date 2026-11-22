@@ -33,7 +33,6 @@ from tests._model_choice_browser import (
     _CARD,
     _SHEET,
     MAIN,
-    OFFERED,
     OTHER,
     PICKED,
     SOURCE,
@@ -498,8 +497,11 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             assert [(row["row"], row["id"], row["tag"], row["selected"]) for row in first] == [("main", "mock-main", "Main", True)], sheet
             assert sheet["headings"][0] == "Recent" and [row["id"] for row in sheet["groups"][1]["rows"]] == ["mock-picked"], \
                 ("a room's pick is a recent model everywhere", sheet)
-            assert sheet["offered"] == OFFERED and sheet["chosen"] == "" and not sheet["reset"], ("Main's strip offers no Ultrafast", sheet)
-            assert sheet["scope"] == "Default · Standard · for Main and its new subagents; no running work follows it now", sheet
+            catalog = desk.evaluate("async () => (await fetch('/api/model-catalog', { cache: 'no-store' })).json()")
+            assert next(row for row in catalog["items"] if row["value"] == MAIN)["processing_transport"] == ["standard"]
+            assert sheet["offered"] == [] and sheet["stop"] == [] and sheet["chosen"] == "" and not sheet["reset"], \
+                ("a known Standard-only connection with no saved choice has no tier controls", sheet)
+            assert sheet["scope"].startswith("Default · for Main and work that inherits its tier, even on a fallback model"), sheet
             close_capsule(desk)
 
             def search(page) -> None:
@@ -584,7 +586,8 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             assert said["title"] == "Model for this work · follows Main" and said["acts"] == [], said
             assert (main_row["row"], main_row["id"], main_row["facts"], main_row["selected"]) == ("main", "Main", "this work follows Main", True), said
             assert said["headings"][0] == "Recent" and said["chosen"] == "", said
-            assert said["scope"] == f"Default · Standard · {WORK_SCOPE}", ("its tier applies from its next call", said)
+            assert not said["offered"] and not said["stop"] and not said["reset"], said
+            assert said["scope"] == f"Default · {WORK_SCOPE}", ("its tier applies from its next call", said)
             close_popover(desk)
             _close_project(desk)
 
@@ -653,7 +656,7 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             moving = fact_of(desk, follower)
             seen["pending"] = moving
             assert moving["fact"].endswith("· mock-main") and moving["pending"] == "→ mock-other at the next step", moving
-            assert _work_of(_state(desk), follower)["lead"] == {"model": MAIN, "use_local": False, "basis": "main", "pending": {"model": OTHER, "use_local": False}}
+            assert _work_of(_state(desk), follower)["lead"] == {"model": MAIN, "use_local": False, "basis": "main", "pending": {"model": OTHER, "use_local": False, "basis": "main"}}
             assert _work_of(_state(desk), queued)["lead"] == {"model": OTHER, "use_local": False, "basis": "main"}, "a queued follower simply starts on the new Main"
 
             # --- One exit, on the real server: Keep makes the fallback the work's own choice; amber ends with the fact.

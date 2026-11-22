@@ -393,7 +393,9 @@ def _quiet_reconcile_steps(monkeypatch, sm, done: list, *, heal=None):
     monkeypatch.setattr(sm, "_tick_maintenance_child", step("maintenance"))
     from ouroboros import maintenance
 
-    monkeypatch.setattr(maintenance.child, "_owed", False)  # this process's first look already happened
+    # This fixture records the reconcile stages, not the independent foreground event tick.
+    monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChildren())
+    monkeypatch.setattr(maintenance.child, "owed", lambda: False)
 
 
 def test_a_slow_reconcile_block_never_holds_the_loop_tick(quiet_tick, monkeypatch):

@@ -124,7 +124,7 @@ def execute(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     executor: ExecutorRef | None = None,
-    stop: Any = None,
+    stop: Any = None, memory: bool = False,
 ) -> ExecutorResult:
     """Run in the configured backend. Host/interpreter ``env_overlay`` applies
     only locally: host paths/PATH must not leak into Docker. Explicit target_env
@@ -132,6 +132,7 @@ def execute(
     In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused).
     ``stop`` is an in-process turn's Stop-now reader (``shell_process.communicate_or_stop``): each backend ends
     through its own timeout kill, the container command through its owned pidfile, never the container."""
+    started = time.monotonic() if memory else None
     executor = executor or executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
@@ -144,8 +145,8 @@ def execute(
     if executor.kind == "local":
         return _execute_local(
             executor, cmd, cwd_path, timeout_sec,
-            drive_root=drive_root, local_env=candidate_env, stop=stop,
-            env_overlay=env_overlay, **({"target_env": target_env} if target_env else {}),
+            drive_root=drive_root, local_env=candidate_env, stop=stop, memory=memory,
+            env_overlay=env_overlay, started=started, **({"target_env": target_env} if target_env else {}),
         )
     return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root, stop=stop,
                            **({"target_env": overlay_env(candidate_env or {}, target_env), "replace_env": True}
@@ -181,8 +182,9 @@ def overlay_env(base: "dict[str, str]", env_overlay: "dict[str, str] | None") ->
     return env
 
 
-def _handed_off_popen(kind: str, cmd: list[str], **kwargs: Any) -> "tuple[subprocess.Popen, Any]":
-    """Start ``cmd`` under the Pause gate after its external duty is retained (``tool_custody``).
+def _handed_off_popen(kind: str, cmd: list[str], *, admit: Any = None, **kwargs: Any) -> "tuple[subprocess.Popen, Any]":
+    """Start ``cmd`` under the Pause gate after its external duty is retained (``tool_custody``); ``admit()``, when
+    given, is the caller's last word inside that gate, just before the Popen (a command's absolute deadline).
 
     Returns ``(proc, confirmed)``: only the caller's later receipt discharges the duty. A start
     that returned no process discharges it at once; an OS refusal is ``process_not_started``."""
@@ -193,6 +195,7 @@ def _handed_off_popen(kind: str, cmd: list[str], **kwargs: Any) -> "tuple[subpro
     proc = None
     try:
         with operation_start():
+            admit is not None and admit()
             try:
                 proc = subprocess.Popen(cmd, **kwargs)
             except (OSError, ValueError) as exc:
@@ -215,17 +218,17 @@ def _execute_local(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     local_env: "dict[str, str] | None" = None,
-    stop: Any = None,
+    stop: Any = None, memory: bool = False, started: float | None = None,
 ) -> ExecutorResult:
-    from ouroboros.tools.shell_process import communicate_or_stop
+    from ouroboros.tools.shell_process import communicate_or_stop, execute_local_gated
 
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
-    started = time.monotonic()
+    started = time.monotonic() if started is None else started
     from ouroboros.settings_integrity import runtime_environ
 
-    from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
+    from ouroboros.process_scope import scoped_child_env, task_launch_target
 
     base_env = local_env if local_env is not None else scrub_repo_from_pythonpath(runtime_environ(), _system_repo_dir())
     if local_env is None:
@@ -236,37 +239,20 @@ def _execute_local(
     target = task_launch_target(invocation_binding())
     if target is not None:  # after every overlay: the task marker is the last word on a task launch
         process_env = scoped_child_env(process_env, target)
+    deadline = None if timeout_sec is None or not memory else started + timeout_sec  # one absolute bound from entry
+    if memory and (gated := execute_local_gated(executor, cmd, cwd, deadline, env=process_env, target=target, drive_root=drive_root, stop=stop, started=started)) is not None:
+        return gated  # the memory leaf's gate (command_memory); None: no support here, the old start follows
+    from ouroboros.command_memory import check_deadline
+
     proc, confirmed = _handed_off_popen(
         "workspace_process",
-        [str(part) for part in cmd],
+        [str(part) for part in cmd], admit=(lambda: check_deadline(deadline)) if memory else None,
         cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        errors="replace",
-        env=process_env,
-        **subprocess_new_group_kwargs(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, errors="replace",
+        env=process_env, **subprocess_new_group_kwargs(),
     )
-    _FOREGROUND[proc] = (None, executor.kind)
-    if _panic_requested:
-        request_process_tree_kill(proc)
-    if target is not None:
-        record_task_group(*target, proc.pid)
-    record_path = _register_process(
-        drive_root,
-        {
-            "record_type": "foreground",
-            "executor_type": executor.kind,
-            "executor_id": executor.executor_id,
-            "host_pid": proc.pid,
-            "cwd": str(cwd),
-            "cmd": _redacted_cmd(cmd),
-        },
-    )
-    if record_path is not None:
-        confirmed()
-    _FOREGROUND[proc] = (record_path, executor.kind)
+    record_path = _hold_foreground(proc, executor, confirmed, drive_root, {"cwd": str(cwd), "cmd": _redacted_cmd(cmd)}, target)
+    timeout_sec = timeout_sec if deadline is None else max(0.0, deadline - time.monotonic())  # what registration left
     try:
         stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, lambda: kill_process_tree(proc))
         return ExecutorResult(
@@ -285,6 +271,24 @@ def _execute_local(
         _FOREGROUND.pop(proc, None)
         if proc.poll() is not None:
             _forget_process(record_path)  # Exceptions cannot discard a live child.
+
+
+def _hold_foreground(proc: subprocess.Popen, executor: ExecutorRef, confirmed: Any, drive_root: pathlib.Path | None,
+                     extra: dict[str, Any], target: Any = None) -> pathlib.Path | None:
+    """Name a just-started foreground child to Stop (Panic's request reaches it at once), then write its durable record."""
+    _FOREGROUND[proc] = (None, executor.kind)
+    if _panic_requested:
+        request_process_tree_kill(proc)
+    if target is not None:
+        from ouroboros.process_scope import record_task_group
+
+        record_task_group(*target, proc.pid)
+    record_path = _register_process(drive_root, {"record_type": "foreground", "executor_type": executor.kind,
+                                                 "executor_id": executor.executor_id, "host_pid": proc.pid, **extra})
+    if record_path is not None:
+        confirmed()
+    _FOREGROUND[proc] = (record_path, executor.kind)
+    return record_path
 
 
 def _execute_docker(
@@ -333,25 +337,8 @@ def _execute_docker(
         **({"env": {**os.environ, **{aliases[key]: value for key, value in target_env.items()}}} if target_env else {}),
         **subprocess_new_group_kwargs(),
     )
-    _FOREGROUND[proc] = (None, executor.kind)
-    if _panic_requested:
-        request_process_tree_kill(proc)
-    record_path = _register_process(
-        drive_root,
-        {
-            "record_type": "foreground",
-            "executor_type": executor.kind,
-            "executor_id": executor.executor_id,
-            "host_pid": proc.pid,
-            "container_name": executor.container_name,
-            "backend_pidfile": pidfile,
-            "backend_cwd": backend_cwd,
-            "cmd": _redacted_cmd(cmd),
-        },
-    )
-    if record_path is not None:
-        confirmed()
-    _FOREGROUND[proc] = (record_path, executor.kind)
+    record_path = _hold_foreground(proc, executor, confirmed, drive_root, {
+        "container_name": executor.container_name, "backend_pidfile": pidfile, "backend_cwd": backend_cwd, "cmd": _redacted_cmd(cmd)})
     cleanup_confirmed = False
 
     def stop_backend() -> bool:  # Stop now: the timeout's own pidfile stop, then the host CLI
@@ -505,16 +492,26 @@ def _services_snapshot() -> list[_ExecutorService]:
         return list(_SERVICES.values())
 
 
-def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) -> pathlib.Path | None:
+def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any], *, already_started: bool = True) -> pathlib.Path | None:
+    """Write a process's durable record and publish it to the ownership index; the path only once both exist.
+    ``already_started=False`` is a gated command whose argv is still held: a failure leaves no unindexed record,
+    latches no ``host_unconfirmed`` itself and returns None; the gate then latches the ordinary ``host_unconfirmed``
+    fact and releases the placed command (it may run), so ``rm`` and ``du`` still work on a full disk."""
     from ouroboros.tool_custody import retain_unconfirmed_host_operation
+
+    def failed(reason: str, path: pathlib.Path | None = None) -> pathlib.Path | None:
+        if already_started:
+            retain_unconfirmed_host_operation(reason)
+            return path
+        if path is not None:
+            _forget_process(path)
+        return None
 
     binding = invocation_binding()
     payload = {**{key: value for key, value in binding.items() if key != "drive_root"}, **payload}
     state_dir = _state_dir(drive_root)
     if state_dir is None:
-        if binding.get("task_id"):
-            retain_unconfirmed_host_operation("executor_custody_unavailable")
-        return None
+        return failed("executor_custody_unavailable") if binding.get("task_id") else None
     record_id = _safe_record_id(str(payload.get("record_type") or "process"))
     host_command_sha256 = ""
     try:
@@ -536,12 +533,11 @@ def _register_process(drive_root: pathlib.Path | None, payload: dict[str, Any]) 
     try:
         atomic_write_json(path, record, trailing_newline=True)
     except Exception:
-        retain_unconfirmed_host_operation("executor_custody_write_failed")
-        return None
+        return failed("executor_custody_write_failed")
     from ouroboros.owned_shutdown import record_executor_process
 
     if not record_executor_process(path, record):  # the exit reads the ownership set, never a walk
-        retain_unconfirmed_host_operation("executor_custody_write_failed")
+        return failed("executor_custody_write_failed", path)
     return path
 
 
@@ -567,7 +563,7 @@ def _register_service_process(drive_root: pathlib.Path | None, record: _Executor
             "skill_name": record.skill_name,
             "cmd": _redacted_cmd(record.cmd, record.secret_values),
             "keep_alive": bool(record.keep_alive),
-            **({"scope_marker": record.scope_marker} if record.scope_marker else {}),
+            **({"scope_marker": record.scope_marker} if record.scope_marker and record.executor.kind == "local" else {}),
             **({"host_birth": record.leader_birth} if record.scope_marker and record.leader_birth else {}),
         },
     )
@@ -610,6 +606,10 @@ def _host_pid_matches_record(record: dict[str, Any]) -> bool:
         return False
     if host_pid <= 0:
         return False
+    if _recorded_launch(record) and record.get("host_birth"):  # services too; a gated command exec'd past its hash
+        from ouroboros.process_custody import record_birth_matches
+
+        return record_birth_matches(record)
     expected = str(record.get("host_command_sha256") or "").strip()
     if not expected:
         # Windows has no POSIX command capture; macOS ps can also miss a spawn.
@@ -715,7 +715,7 @@ def _kill_host_pid(host_pid: Any) -> None:
 
 
 def _recorded_launch(record: dict[str, Any]) -> bool:
-    """A local service record that kept its launch marker (POSIX); ``host_birth`` only when it could be read."""
+    """A local service or memory-gated foreground record that kept its launch marker (POSIX); ``host_birth`` only when it could be read."""
     from ouroboros.process_census import is_launch_marker
 
     return (not IS_WINDOWS and record.get("executor_type") == "local"
@@ -726,8 +726,10 @@ def _launch_row(record: dict[str, Any]) -> dict[str, Any]:
     """The row of this record's launch as the record itself names it, for when the ledger no longer holds one; custody
     is the launch's (``process_custody.latest_launch_row``). No birth is no refutation: a command-only difference after
     an ``exec`` cannot prove the leader ended (``process_custody._launch_target``)."""
+    from ouroboros.process_custody import record_launch_purpose
+
     return {"pid": int(record.get("host_pid") or 0), "scope_marker": str(record.get("scope_marker") or ""),
-            "scope_birth": str(record.get("host_birth") or ""), "purpose": f"workspace_service:{record.get('name')}",
+            "scope_birth": str(record.get("host_birth") or ""), "purpose": record_launch_purpose(record),
             "scope": "session" if record.get("keep_alive") else "task", "owner_task": str(record.get("task_id") or "")}
 
 
@@ -783,8 +785,9 @@ def kill_all_foreground(drive_root: pathlib.Path | None = None, *, wait: bool = 
                 requested.append({"requested": False, "scope": "backend",
                                   "error": "container process requires executor settlement"})
         return requested
-    return [_settle_durable_record(path, record, wait=wait)
-            for path, record in _owned_process_records(drive_root, "foreground")]
+    from ouroboros.process_custody import settle_foreground_records
+
+    return settle_foreground_records(drive_root, wait=wait)
 
 
 def _assert_docker_network_none(container_name: str) -> None:
@@ -877,6 +880,7 @@ def start_service(
                 raise RuntimeError("another call still holds this service name")
     backend_cwd = map_host_path(executor, host_cwd)
     from ouroboros.body_candidate import executor_environment
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
     candidate_env = executor_environment(ctx, host_cwd, executor=executor, map_path=map_host_path)
     record = _ExecutorService(
         service_id=key,
@@ -898,15 +902,16 @@ def start_service(
         env=env,
         secret_values=secret_values,
         drive_root=drive_root,
+        scope_marker=mint_marker(LAUNCH_SCOPE_PREFIX),
     )
     if executor.kind == "local":
+        from ouroboros.launch_custody import open_local_service_log
         from ouroboros.maintenance_retirement import artifact_changed
         from ouroboros.process_custody import spawn_supervised
         # A service inside the bound body candidate runs isolated; a refusal precedes any log.
         base_env = candidate_env if candidate_env is not None else _executor_service_env()
-        log_path = drive_root / "services" / record.task_id / f"{name}.executor.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = log_path.open("ab")
+        log_path, log_fh = open_local_service_log(drive_root, record.task_id, name, record.scope_marker,
+                                                  keep_alive=record.keep_alive, executor=True)
         artifact_changed(drive_root)
 
         from ouroboros.owner_pause import _member_coordinates
@@ -918,10 +923,6 @@ def start_service(
         scope_root, _, scope_task = _member_coordinates(ctx)
         scope_target = None if record.keep_alive else task_launch_target(
             invocation_binding(), drive_root=scope_root, task_id=scope_task)
-        from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, birth_text, mint_marker
-
-        record.scope_marker = mint_marker(LAUNCH_SCOPE_PREFIX)  # this launch's own: its stop's reach, never a task's
-
         def publish_process(proc):
             record.local_proc = proc
             record.backend_pid = str(proc.pid)
@@ -1380,6 +1381,7 @@ def _docker_stop_group_shell() -> str:
 
 
 def _service_payload(record: _ExecutorService, *, state: str | None = None, note: str = "") -> dict[str, Any]:
+    from ouroboros.process_census import launch_id
     actual_state = state if state is not None else _safe_service_state(record)
     if actual_state == "running":
         _refresh_executor_service_readiness(record)
@@ -1387,8 +1389,6 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         # process can settle during the scan, so re-poll before serializing a
         # running+ready claim (for both local and Docker backends).
         actual_state = _safe_service_state(record)
-    else:
-        record.ready = False
     if actual_state != "running":
         record.ready = False
     payload = {
@@ -1407,6 +1407,8 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         "backend_pid": record.backend_pid,
         "backend_cwd": record.backend_cwd,
         "host_cwd": str(record.host_cwd),
+        "launch_id": launch_id(getattr(record, "scope_marker", "")),
+        "returncode": getattr(getattr(record, "local_proc", None), "returncode", None),
         "cwd_root": record.cwd_root,
         "cwd_base": record.cwd_base,
         "cwd_source": record.cwd_source,

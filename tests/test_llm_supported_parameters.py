@@ -463,6 +463,7 @@ class TestSupportedParametersFilter:
         from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 
         assert captured["client"]["default_headers"] == OPENROUTER_APP_HEADERS
+        assert captured["client"]["max_retries"] == 0
 
     def test_historical_model_global_rows_never_mutate_dispatch(self, monkeypatch, tmp_path):
         from ouroboros.llm import LLMClient

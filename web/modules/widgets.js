@@ -8,6 +8,7 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
+import { bindContextReport } from './context_report_host.js';
 import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
 import { SHELL_ICONS } from './page_icons.js';
 import {
@@ -65,6 +66,10 @@ function pageTemplate() {
                 <div id="widgets-list-error" class="skills-load-error" hidden><span data-widget-list-error></span> <button type="button" class="btn btn-default btn-sm" data-widget-list-retry>Retry</button></div>
                 <div id="widgets-list" class="widgets-list"></div>
                 <div class="widgets-arrange-status ui-status" data-tone="neutral" data-widget-arrange-status role="status" aria-live="polite"></div>
+                <div class="widgets-context-tools">
+                    <button type="button" class="btn btn-default" data-context-report aria-expanded="false" aria-controls="widgets-context-report">Beautiful Context</button>
+                    <section id="widgets-context-report" class="ui-card widgets-context-report" data-context-report-mount hidden></section>
+                </div>
             </div>
         </section>
     `;
@@ -110,7 +115,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
 // Full paint — only for a list that has no cards yet.
 function renderShell(host, tabs, contributionVisibility = null) {
     if (!tabs.length) {
-        host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension that registers a UI tab.</div>';
+        host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension skill that registers a UI tab.</div>';
         return;
     }
     host.innerHTML = tabs.map((tab) => renderCardHtml(tab, contributionVisibility)).join('');
@@ -882,6 +887,8 @@ export function initWidgets(ctx = {}) {
     const page = document.createElement('div');
     page.innerHTML = pageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
+    const closeReport = bindContextReport(document.querySelector('[data-context-report]'),
+        document.querySelector('[data-context-report-mount]'));
     const list = document.getElementById('widgets-list');
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
@@ -1361,6 +1368,7 @@ export function initWidgets(ctx = {}) {
         });
     });
     window.addEventListener('pagehide', (event) => {
+        closeReport();
         listRequests.abortAll();
         if (event.persisted) return;
         cardMenus.destroy();
@@ -1387,6 +1395,7 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
+            closeReport();
             // A card carried or an edge dragged when the owner left goes back: the release saves nothing.
             cardMenus.close();
             cancelWidgetCardCarry(list);

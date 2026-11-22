@@ -9,6 +9,7 @@ from ouroboros.projects_registry import create_project
 from ouroboros.startup_migrations import prepare_startup_state
 from ouroboros.store_import import run_legacy_reconcile
 from ouroboros.task_results import write_task_result
+from tests._queue_state import gateway, read_state  # noqa: F401
 
 
 def corrupt_body(root, task_id="task"):
@@ -410,6 +411,431 @@ def test_model_wait_without_current_owner_action_evidence_discloses_gap(tmp_path
     assert snapshot["main_attention_complete"] is False
     assert snapshot["main_attention_gaps"] == [{"reason": "model_wait_action_unknown",
                                                "task_id": "task", "wait_id": "wait"}]
+
+
+def test_main_actions_require_a_known_room_even_in_a_partial_census(tmp_path):
+    from ouroboros import projects_registry
+
+    project = project_task(tmp_path)
+    # One binding that cannot be read, and one to a Project the registry does not hold.
+    projects_registry._save_bindings(tmp_path, {"bindings": {"bad-parent": None, "moved-away": {
+        "task_id": "moved-away", "project_id": "no-such-project", "project_chat_id": 4242}}})
+    parked = {"phase": "budget_paused", "pause_cause": "budget", "can_resume": True}
+    rows = [dict(parked, activity_id=task, chat_id=chat) for task, chat in (
+        ("native", 1), ("hidden", 0), ("internal", -7), ("elsewhere", 9), ("missing", None))]
+    rows.extend([{**parked, "activity_id": "project", "project_id": project["id"], "chat_id": project["chat_id"]},
+                 # A Project ID no room has (a workspace lease lane) is no room and no proof of absence: the
+                 # address and the bindings place the row, and so does a registered room's own ID when this
+                 # Main work only leases that room's folder. A bound ancestor whose Project is gone, or whose
+                 # binding cannot be read, leaves the room unknown.
+                 {**parked, "activity_id": "leased", "chat_id": 1, "project_id": "proj_0f1e2d3c4b5a"},
+                 {**parked, "activity_id": "leases-a-room-folder", "chat_id": 1, "project_id": project["id"]},
+                 {**parked, "activity_id": "unresolved", "chat_id": 1, "parent_task_id": "moved-away"},
+                 {**parked, "activity_id": "descendant", "chat_id": 1, "parent_task_id": "bad-parent"}])
+    rows.extend({**parked, "activity_id": f"context-{chat}", "chat_id": chat, "project_id": project["id"]}
+                for chat in (0, -7, 9))
+    snapshot = main_decisions_snapshot(tmp_path, rows, {}, activities_complete=False)
+    assert {row["task_id"]: row.get("project_id") for row in snapshot["main_attention"]} == {
+        "native": None, "project": project["id"], "leased": "", "leases-a-room-folder": ""}
+    assert snapshot["main_attention_complete"] is False
+    assert snapshot["main_attention_gaps"] == [
+        {"reason": "action_room_unknown", "task_id": "unresolved"},
+        {"reason": "action_room_unknown", "task_id": "descendant"}]
+
+    unavailable = main_decisions_snapshot(tmp_path, rows, {}, bindings_complete=False)
+    assert [row["task_id"] for row in unavailable["main_attention"]] == ["project"]
+    assert not unavailable["main_attention_complete"]
+    assert unavailable["main_attention_gaps"] == [{"reason": "task_bindings_unavailable"}]
+
+
+# --- Which room shows an owner action of Main-addressed work ---------------------------------------
+# A census row carries its queue row's Project ID, and that ID is a scope: a room, a workspace lease
+# lane — the room's own ID when the leased folder belongs to a registered room — or a scope a helper
+# inherited (``worker_promotion._admit_promoted_workspace`` → ``project_scope_admission``). The row's
+# address and the strict room rule place its action; the ID alone neither shows it in Main nor proves
+# it left.
+
+def _parked(task_id, **fields):
+    """A parked census row that only Resume continues, addressed to Main unless ``fields`` say otherwise."""
+    return {"activity_id": task_id, "chat_id": 1, "phase": "budget_paused", "pause_cause": "budget",
+            "can_resume": True, "cancelable": True, **fields}
+
+
+def _lease_lane(root):
+    """The lane ID a bare workspace start gets for a folder no Project owns: no registry row, no binding."""
+    from ouroboros.projects_registry import project_scope_admission
+
+    folder = root / "outside-checkout"
+    folder.mkdir()
+    basis = project_scope_admission(root, workspace_root=str(folder))
+    assert basis["project"] is None and basis["project_id"].startswith("proj_")
+    return basis["project_id"]
+
+
+def _converted_branch(root, project):
+    """Main work whose helper the owner turned into a Project: ``root → middle (bound) → parent → helper``.
+    The census re-homes a row by its own, its parent's and its root's binding, so ``helper`` still says Main."""
+    from ouroboros.projects_registry import bind_task_to_project
+
+    chain = ["root", "middle", "parent", "helper"]
+    for index, task_id in enumerate(chain):
+        write_task_result(root, task_id, "running", chat_id=1, root_task_id="root",
+                          parent_task_id=chain[index - 1] if index else "",
+                          delegation_role="subagent" if index else "root")
+    bind_task_to_project(root, "middle", project["id"], origin={"absent": "system"})
+    return {"parent_task_id": "parent", "root_task_id": "root", "delegation_role": "subagent", "cancelable": False}
+
+
+def _registered_lease(root, project):
+    """The scope ID ``project_scope_admission`` derives for a folder a REGISTERED Project owns: that room's
+    own ID with no durable binding, which is what a Main start aimed at the room's folder gets."""
+    from ouroboros.projects_registry import project_scope_admission, update_project
+
+    folder = root / "room-checkout"
+    folder.mkdir()
+    update_project(root, project["id"], working_dir=str(folder))
+    basis = project_scope_admission(root, workspace_root=str(folder))
+    assert basis["project_id"] == project["id"] and (basis["project"] or {}).get("id") == project["id"]
+    return project["id"]
+
+
+@pytest.mark.parametrize("other_work_converted", [False, True])
+def test_a_workspace_lease_id_neither_hides_a_main_action_nor_names_a_project(tmp_path, other_work_converted):
+    """A Main start in a folder no Project owns keeps Main as its address and gets a lease lane ID no room has.
+    Read as a missing Project, that ID left a permanent ``action_room_unknown`` gap. The task's question was
+    always Main's own; its Resume now stands beside it, once, with no Project reference."""
+    from ouroboros.projects_registry import bind_task_to_project
+
+    project = project_task(tmp_path)
+    lane = _lease_lane(tmp_path)
+    write_task_result(tmp_path, "survey", "running", chat_id=1, root_task_id="survey", project_id=lane)
+    record_asked(tmp_path, "survey", quiz_id="scope", question="The whole folder?", options=["Yes", "No"], chat_id=1)
+    record_publication(tmp_path, "survey", "scope", 1)
+    if other_work_converted:  # bindings exist: the strict room rule reads this task's own lineage and finds none
+        bind_task_to_project(tmp_path, "task", project["id"], origin={"absent": "system"})
+    snapshot = main_decisions_snapshot(tmp_path, [_parked("survey", project_id=lane)], {})
+    assert snapshot["current_questions_complete"] is True and snapshot["current_questions_gaps"] == []
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+    [question] = snapshot["current_questions"]
+    assert (question["task_id"], question["quiz_id"], question["chat_id"], question["native"]) == (
+        "survey", "scope", 1, True)
+    [action] = snapshot["main_attention"]
+    assert (action["task_id"], action["chat_id"], action["project_id"], action["project_name"]) == ("survey", 1, "", "")
+    assert (action["can_resume"], action["attention_reason"], action["cancelable"]) == (True, "budget", True)
+
+
+@pytest.mark.parametrize("inherited_scope", [False, True])
+def test_a_held_helper_of_converted_work_is_offered_under_that_project(tmp_path, inherited_scope):
+    """The owner turned a helper of Main work into a Project; a helper two levels below it holds a Resume and its
+    census row still says Main. The strict room rule reaching that Project used to drop the row without a gap. It
+    is that Project's action: one row with the Project's reference, whatever scope ID the helper inherited."""
+    project = create_project(tmp_path, "atlas-room", name="Atlas room")
+    lineage = _converted_branch(tmp_path, project)
+    scope = {"project_id": _lease_lane(tmp_path)} if inherited_scope else {}
+    snapshot = main_decisions_snapshot(tmp_path, [_parked("helper", pause_cause="restart", **lineage, **scope)], {})
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+    [action] = snapshot["main_attention"]
+    assert (action["task_id"], action["project_id"], action["project_name"], action["chat_id"]) == (
+        "helper", project["id"], "Atlas room", project["chat_id"])
+    assert (action["can_resume"], action["attention_reason"], action["cancelable"]) == (True, "restart", False)
+    assert (action["parent_task_id"], action["root_task_id"]) == ("parent", "root")
+
+
+def test_placed_rows_stay_single_and_follow_every_existing_owner_action_rule(tmp_path):
+    """Placement decides only where a row is shown. The census's release rule still decides whether it is: the
+    owner's own Pause, a sleep that wakes itself, an authority pause that reconciles itself, a Pause still
+    settling and a wait that continues by itself stay quiet, without a gap, in Main and under a Project alike.
+    Nothing is offered twice, a Project ID a room really has keeps its reference, and the same ID a Main row
+    only leases through that room's folder stays Main's own until a durable binding says otherwise."""
+    project = project_task(tmp_path)
+    lane = _lease_lane(tmp_path)
+    lineage = _converted_branch(tmp_path, project)
+    automatic = {"wait_id": "quota", "state": "waiting", "task_attempt": 1, "revision": 2, "requires_owner_action": False}
+    rows = [
+        _parked("survey", project_id=lane),
+        _parked("helper", **lineage),
+        _parked("room-work", project_id=project["id"], chat_id=project["chat_id"]),
+        _parked("main-start-in-room-folder", project_id=project["id"]),  # only that room's folder is leased
+        _parked("main-lease-bound", project_id=project["id"], parent_task_id="middle"),  # the ID, bound
+        _parked("own-pause", project_id=lane, pause_cause="owner", can_resume=False),
+        _parked("sleeping", project_id=lane, pause_cause="sleep", can_resume=False),
+        _parked("reconciling", project_id=lane, pause_cause="authority"),
+        _parked("settling", project_id=lane, phase="budget_pausing", live=True),
+        _parked("helper-own-pause", **lineage, pause_cause="owner", can_resume=False),
+        _parked("helper-reconciling", **lineage, pause_cause="authority"),
+        {"activity_id": "continues-itself", "chat_id": 1, "project_id": lane, "phase": "working",
+         "task_attempt": 1, "model_waits": {"quota": automatic}},
+    ]
+    snapshot = main_decisions_snapshot(tmp_path, rows, {})
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+    assert [(row["task_id"], row["project_id"], row["project_name"]) for row in snapshot["main_attention"]] == [
+        ("survey", "", ""), ("helper", project["id"], "Current Project"),
+        ("room-work", project["id"], "Current Project"), ("main-start-in-room-folder", "", ""),
+        ("main-lease-bound", project["id"], "Current Project")]
+    assert all(row["can_resume"] is True and row["model_waits"] == {} for row in snapshot["main_attention"])
+
+
+def test_a_leased_rooms_scope_keeps_main_work_and_its_resume_in_main(tmp_path):
+    """Main work admitted with a registered room's folder carries that room's own ID as its scope, exactly as
+    an unregistered lease lane does. The ID names no room for this row: the task's question stays Main's own
+    native card and its Resume stays Main's own row, with no Project reference. Where a durable binding does
+    exist, the same ID goes to the bound room, even a different room than the one its own ID names."""
+    from ouroboros.projects_registry import bind_task_to_project
+
+    room = project_task(tmp_path)
+    lease = _registered_lease(tmp_path, room)
+    other = create_project(tmp_path, "atlas-room", name="Atlas room")
+    _converted_branch(tmp_path, room)  # root → middle (bound to the room) → parent → helper
+    bind_task_to_project(tmp_path, "leaf", other["id"], origin={"absent": "system"})
+    write_task_result(tmp_path, "survey", "running", chat_id=1, root_task_id="survey", project_id=lease)
+    record_asked(tmp_path, "survey", quiz_id="scope", question="The whole folder?", options=["Yes", "No"],
+                 chat_id=1)
+    record_publication(tmp_path, "survey", "scope", 1)
+    snapshot = main_decisions_snapshot(tmp_path, [
+        _parked("survey", project_id=lease),
+        _parked("bound-elsewhere", project_id=lease, parent_task_id="leaf"),
+        _parked("bound-here", project_id=other["id"], parent_task_id="middle")], {})
+    assert snapshot["current_questions_complete"] is True and snapshot["current_questions_gaps"] == []
+    [question] = snapshot["current_questions"]
+    assert (question["task_id"], question["quiz_id"], question["chat_id"], question["native"]) == (
+        "survey", "scope", 1, True)
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+    assert [(row["task_id"], row["chat_id"], row["project_id"], row["project_name"])
+            for row in snapshot["main_attention"]] == [
+        ("survey", 1, "", ""),
+        ("bound-elsewhere", other["chat_id"], other["id"], "Atlas room"),
+        ("bound-here", room["chat_id"], room["id"], "Current Project")]
+    assert all(row["can_resume"] is True and row["model_waits"] == {} for row in snapshot["main_attention"])
+
+
+def test_a_room_addressed_nested_row_lands_at_its_nearest_confirmed_project(tmp_path):
+    """A nested row's room address is provisional: the census re-homes it from the nearest LIVE owner row
+    (its root, once the ended intermediate ancestor left the census), skipping that ancestor's durable
+    binding. The strict room rule finds the NEAREST confirmed Project and the row lands there; a chain
+    without a nearer binding keeps the address its census row brought, without a gap."""
+    from ouroboros.projects_registry import bind_task_to_project
+
+    outer = project_task(tmp_path)
+    nearer = create_project(tmp_path, "nearer-room", name="Nearer room")
+    for chain, bound, room in ((["root", "middle", "helper"], "middle", nearer),
+                               (["root2", "helper2"], "root2", outer)):
+        for index, task_id in enumerate(chain):
+            write_task_result(tmp_path, task_id, "running", chat_id=1, root_task_id=chain[0],
+                              parent_task_id=chain[index - 1] if index else "",
+                              delegation_role="subagent" if index else "root")
+        bind_task_to_project(tmp_path, bound, room["id"], origin={"absent": "system"})
+    rows = [_parked("helper", project_id=outer["id"], chat_id=outer["chat_id"], parent_task_id="middle",
+                    root_task_id="root", delegation_role="subagent", cancelable=False),
+            _parked("helper2", project_id=outer["id"], chat_id=outer["chat_id"], parent_task_id="root2",
+                    root_task_id="root2", delegation_role="subagent", cancelable=False)]
+    snapshot = main_decisions_snapshot(tmp_path, rows, {})
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+    assert [(row["task_id"], row["project_id"], row["project_name"], row["chat_id"])
+            for row in snapshot["main_attention"]] == [
+        ("helper", nearer["id"], "Nearer room", nearer["chat_id"]),
+        ("helper2", outer["id"], "Current Project", outer["chat_id"])]
+    assert all(row["can_resume"] is True and row["cancelable"] is False for row in snapshot["main_attention"])
+
+
+def test_a_nested_rows_stale_room_is_never_offered_while_the_bindings_cannot_be_read(tmp_path):
+    """Without the bindings a nested row keeps the room its source record retained: an ended ancestor's later
+    conversion re-homes it only in the strict rule. That address is no proof, so no Resume is offered under it
+    and the partial census says why. A row addressed to its own Project has no ancestry the rule could consult;
+    Main work leasing a room's folder is no Project's. The restored read places each where the rule proves it."""
+    from ouroboros.projects_registry import bind_task_to_project
+
+    outer = project_task(tmp_path)
+    nearer = create_project(tmp_path, "nearer-room", name="Nearer room")
+    for task_id, parent in (("root", ""), ("middle", "root"), ("helper", "middle")):
+        write_task_result(tmp_path, task_id, "running", chat_id=1, root_task_id="root", parent_task_id=parent,
+                          delegation_role="subagent" if parent else "root")
+    bind_task_to_project(tmp_path, "middle", nearer["id"], origin={"absent": "system"})
+    rows = [_parked("helper", project_id=outer["id"], chat_id=outer["chat_id"], parent_task_id="middle",
+                    root_task_id="root", delegation_role="subagent", cancelable=False),
+            _parked("addressed", project_id=outer["id"], chat_id=outer["chat_id"]),
+            _parked("leased", project_id=_registered_lease(tmp_path, outer))]
+    unread = main_decisions_snapshot(tmp_path, rows, {}, bindings_complete=False)
+    assert [(row["task_id"], row["project_id"]) for row in unread["main_attention"]] == [("addressed", outer["id"])]
+    assert unread["main_attention_complete"] is False
+    assert unread["main_attention_gaps"] == [{"reason": "task_bindings_unavailable"}]
+    restored = main_decisions_snapshot(tmp_path, rows, {})
+    assert restored["main_attention_complete"] is True and restored["main_attention_gaps"] == []
+    assert [(row["task_id"], row["project_id"], row["chat_id"]) for row in restored["main_attention"]] == [
+        ("helper", nearer["id"], nearer["chat_id"]), ("addressed", outer["id"], outer["chat_id"]), ("leased", "", 1)]
+
+
+def test_unreadable_bindings_keep_a_row_at_its_own_registered_project_address(tmp_path):
+    """The branch's independent positive control, apart from any nested row: a row whose own census address IS
+    a registered Project's (its chat is that room's, with that Project's ID, no ancestry) is still that
+    Project's action in the partial census. The same ID addressed to another registered room, or to a chat no
+    room reserves, is offered nowhere. (A row with no chat ID at all, a shape the census never emits, keeps its
+    scope's room here exactly as in the complete census.)"""
+    outer = project_task(tmp_path)
+    other = create_project(tmp_path, "other-room", name="Other room")
+    rows = [_parked("own", project_id=outer["id"], chat_id=outer["chat_id"]),
+            _parked("elsewhere", project_id=outer["id"], chat_id=other["chat_id"]),
+            _parked("unreserved", project_id=outer["id"], chat_id=424242)]
+    unread = main_decisions_snapshot(tmp_path, rows, {}, bindings_complete=False)
+    assert [(row["task_id"], row["project_id"], row["chat_id"]) for row in unread["main_attention"]] == [
+        ("own", outer["id"], outer["chat_id"])]
+    assert unread["main_attention_complete"] is False
+    assert unread["main_attention_gaps"] == [{"reason": "task_bindings_unavailable"}]
+
+
+def test_hidden_and_unreadable_neighbours_never_borrow_a_placed_rows_room(tmp_path, monkeypatch):
+    """The same lane or the same converted branch at another address is another chat's work and stays out,
+    without a gap. A row whose bindings or ancestry cannot be read is a gap of its own beside the rows that
+    could be placed; it is never shown in Main for want of proof and never hides its neighbours."""
+    from ouroboros import projects_registry
+
+    project = project_task(tmp_path)
+    lane = _lease_lane(tmp_path)
+    lineage = _converted_branch(tmp_path, project)
+    rows = [_parked("survey", project_id=lane), _parked("helper", **lineage)]
+    rows.extend(_parked(f"lane-at-{chat}", project_id=lane, chat_id=chat) for chat in (0, -7, 9, None))
+    rows.extend(_parked(f"helper-at-{chat}", **lineage, chat_id=chat) for chat in (0, -7, 9, None))
+    snapshot = main_decisions_snapshot(tmp_path, rows, {})
+    assert [row["task_id"] for row in snapshot["main_attention"]] == ["survey", "helper"]
+    assert snapshot["main_attention_complete"] is True and snapshot["main_attention_gaps"] == []
+
+    # The store stops answering lineage: neither row's room can be proven, so neither is shown.
+    monkeypatch.setattr(projects_registry, "_TASK_LINEAGE", {})
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(projects_registry, "_read_lineage", lambda *_a, **_kw: None)
+        blind = main_decisions_snapshot(tmp_path, rows, {})
+    assert blind["main_attention"] == [] and blind["main_attention_complete"] is False
+    assert blind["main_attention_gaps"] == [{"reason": "action_room_unknown", "task_id": "survey"},
+                                            {"reason": "action_room_unknown", "task_id": "helper"}]
+    # One helper's ancestor binding is unreadable: that helper is the gap, its neighbours keep their rooms.
+    bindings = dict(projects_registry._load_bindings(tmp_path, fresh=True)["bindings"])
+    projects_registry._save_bindings(tmp_path, {"bindings": {**bindings, "torn": None}})
+    torn = main_decisions_snapshot(tmp_path, [*rows, _parked("orphan", project_id=lane, parent_task_id="torn")], {})
+    assert [row["task_id"] for row in torn["main_attention"]] == ["survey", "helper"]
+    assert torn["main_attention_complete"] is False
+    assert torn["main_attention_gaps"] == [{"reason": "action_room_unknown", "task_id": "orphan"}]
+
+
+def _budget_parked(root, task_id, **fields):
+    """A queue root parked before dispatch at the spending limit, with the result its admission wrote."""
+    write_task_result(root, task_id, "running", root_task_id=task_id, **fields)
+    return {"id": task_id, "root_task_id": task_id, "budget_drive_root": str(root), "_attempt": 3, **fields,
+            "_budget_pause": {"status": "paused_before_dispatch", "reason": "budget", "replay_safe": True,
+                              "auto_resume": False}}
+
+
+def test_the_census_row_of_a_leased_main_start_reaches_main_with_its_resume(gateway):  # noqa: F811
+    """Producer to census to placement: the queue row of a Main start in a folder no Project owns carries the
+    lane ID ``project_scope_admission`` derives and the address Main. The census keeps both; Main offers the
+    task's existing Resume as its own row, and reading it resumes nothing."""
+    lane = _lease_lane(gateway.root)
+    parked = _budget_parked(gateway.root, "survey", chat_id=1, project_id=lane)
+    gateway.pending.append(parked)
+    payload = read_state(gateway)
+    [census] = payload["active_chat_activities"]
+    assert (census["activity_id"], census["chat_id"], census["project_id"]) == ("survey", 1, lane)
+    assert (census["phase"], census["pause_cause"], census["can_resume"]) == ("budget_paused", "budget", True)
+    assert payload["main_attention_complete"] is True and payload["main_attention_gaps"] == []
+    [action] = payload["main_attention"]
+    assert (action["task_id"], action["chat_id"], action["project_id"], action["project_name"]) == ("survey", 1, "", "")
+    assert (action["can_resume"], action["attention_reason"], action["cancelable"]) == (True, "budget", True)
+    assert gateway.pending == [parked]
+
+
+def test_the_census_row_of_a_main_start_in_a_registered_rooms_folder_reaches_main(gateway):  # noqa: F811
+    """Producer to census to placement: a Main start admitted with a registered room's folder carries that
+    room's OWN ID in its queue row. Reading the ID as the room made Main's pill offer that Project instead of
+    Main's own System row, beside a question that is Main's own card. The census keeps the scope ID; placement
+    keeps both of this task's decisions in Main, with no Project reference, and reading it resumes nothing."""
+    room = project_task(gateway.root)
+    lease = _registered_lease(gateway.root, room)
+    parked = _budget_parked(gateway.root, "survey", chat_id=1, project_id=lease)
+    record_asked(gateway.root, "survey", quiz_id="scope", question="The whole folder?", options=["Yes", "No"],
+                 chat_id=1)
+    record_publication(gateway.root, "survey", "scope", 1)
+    gateway.pending.append(parked)
+    payload = read_state(gateway)
+    [census] = payload["active_chat_activities"]
+    assert (census["activity_id"], census["chat_id"], census["project_id"]) == ("survey", 1, lease)
+    assert payload["current_questions_complete"] is True and payload["current_questions_gaps"] == []
+    [question] = payload["current_questions"]
+    assert (question["task_id"], question["quiz_id"], question["chat_id"], question["native"]) == (
+        "survey", "scope", 1, True)
+    assert payload["main_attention_complete"] is True and payload["main_attention_gaps"] == []
+    [action] = payload["main_attention"]
+    assert (action["task_id"], action["chat_id"], action["project_id"], action["project_name"]) == ("survey", 1, "", "")
+    assert (action["can_resume"], action["attention_reason"], action["cancelable"]) == (True, "budget", True)
+    assert gateway.pending == [parked]
+
+
+def test_the_census_row_of_a_converted_works_held_helper_reaches_main_under_its_project(gateway):  # noqa: F811
+    """Producer to census to placement: the census leaves a helper two levels below a converted helper in Main
+    (it reads the row's own, its parent's and its root's binding). The strict room rule finds the Project, and
+    Main offers the helper's own Resume under that Project, once, while its root keeps running untouched."""
+    project = create_project(gateway.root, "atlas-room", name="Atlas room")
+    lineage = _converted_branch(gateway.root, project)
+    root = {"id": "root", "root_task_id": "root", "chat_id": 1, "budget_drive_root": str(gateway.root), "_attempt": 3}
+    helper = {"id": "helper", "chat_id": 1, "budget_drive_root": str(gateway.root),
+              **{key: lineage[key] for key in ("parent_task_id", "root_task_id", "delegation_role")},
+              "_budget_pause_hold": {"reason": "owner_restart_hold", "selected": False, "dispatchable": False}}
+    gateway.running["root"] = {"task": root, "attempt": 3, "started_at": 1.0}
+    gateway.pending.append(helper)
+    payload = read_state(gateway)
+    assert payload["active_chat_activities_complete"] is True
+    assert {row["activity_id"] for row in payload["active_chat_activities"]} == {"root"}
+    assert payload["main_attention_complete"] is True and payload["main_attention_gaps"] == []
+    [action] = payload["main_attention"]
+    assert (action["task_id"], action["project_id"], action["project_name"], action["chat_id"]) == (
+        "helper", project["id"], "Atlas room", project["chat_id"])
+    assert (action["phase"], action["can_resume"], action["cancelable"]) == ("budget_paused", True, False)
+    assert (action["parent_task_id"], action["root_task_id"]) == ("parent", "root")
+    assert gateway.pending == [helper] and set(gateway.running) == {"root"}
+
+
+@pytest.mark.parametrize("readable", [False, True])
+def test_the_census_row_of_a_nested_helper_follows_its_nearest_confirmed_project(gateway, monkeypatch, readable):  # noqa: F811
+    """Producer to census to placement: the live root leases the OUTER room and the census re-homes its
+    nested held helper from that root's row (the ended bound middle is no census row of its own). Main
+    offers the helper's Resume under the middle's NEARER Project, and reading the census resumes nothing.
+    While the census cannot read the bindings that room is the census's alone: nothing is offered under it."""
+    from ouroboros import projects_registry
+    from ouroboros.projects_registry import bind_task_to_project
+
+    outer = project_task(gateway.root)
+    nearer = create_project(gateway.root, "nearer-room", name="Nearer room")
+    lineage = _converted_branch(gateway.root, nearer)  # root → middle (bound to nearer) → parent → helper
+    bind_task_to_project(gateway.root, "root", outer["id"], origin={"absent": "system"})
+    root = {"id": "root", "root_task_id": "root", "chat_id": outer["chat_id"], "project_id": outer["id"],
+            "budget_drive_root": str(gateway.root), "_attempt": 3}
+    helper = {"id": "helper", "chat_id": 1, "budget_drive_root": str(gateway.root),
+              **{key: lineage[key] for key in ("parent_task_id", "root_task_id", "delegation_role")},
+              "_budget_pause_hold": {"reason": "owner_restart_hold", "selected": False, "dispatchable": False}}
+    gateway.running["root"] = {"task": root, "attempt": 3, "started_at": 1.0}
+    gateway.pending.append(helper)
+    if not readable:  # the census's own strict read of the durable bindings fails; the rest of the registry reads
+        census_read = projects_registry.all_task_project_bindings
+
+        def unreadable(*args, strict=False, **kwargs):
+            if strict:
+                raise ValueError("Project bindings are unavailable")
+            return census_read(*args, **kwargs)
+        monkeypatch.setattr(projects_registry, "all_task_project_bindings", unreadable)
+    payload = read_state(gateway)
+    census = {row["activity_id"]: row for row in payload["active_chat_activities"]}
+    assert set(census) == {"root"}, "the helper is no census row of its own"
+    assert (census["root"]["chat_id"], census["root"]["project_id"]) == (outer["chat_id"], outer["id"])
+    if not readable:
+        assert payload["active_chat_activities_complete"] is False and payload["main_attention_complete"] is False
+        assert payload["main_attention"] == [], "the census's room for the helper is no proof: no Resume under it"
+        assert payload["main_attention_gaps"] == [{"reason": "task_bindings_unavailable"}]
+        assert gateway.pending == [helper] and set(gateway.running) == {"root"}
+        return
+    assert payload["active_chat_activities_complete"] is True
+    assert payload["main_attention_complete"] is True and payload["main_attention_gaps"] == []
+    [action] = payload["main_attention"]
+    assert (action["task_id"], action["project_id"], action["project_name"], action["chat_id"]) == (
+        "helper", nearer["id"], "Nearer room", nearer["chat_id"])
+    assert (action["phase"], action["can_resume"], action["cancelable"]) == ("budget_paused", True, False)
+    assert gateway.pending == [helper] and set(gateway.running) == {"root"}
 
 
 @pytest.mark.parametrize("cause,can_resume,reason", [

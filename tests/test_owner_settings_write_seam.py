@@ -1302,6 +1302,50 @@ def test_owner_only_generic_write_names_its_endpoint_only_outside_cyber(row_clie
     assert json.loads(path.read_text(encoding="utf-8"))[key] == "light"
 
 
+def test_main_ultrafast_checks_the_connection_the_generic_save_would_install(row_client):
+    from ouroboros.gateway.owner_effort import MAIN_BINDING_KEYS
+    from ouroboros.model_slots import MODEL_PROCESSING_PREFERENCES_KEY as roles
+
+    client, path, _ = row_client
+    url = "/api/settings"
+
+    def confirmation(view):
+        meta = view["_meta"]
+        revision = next(row["revision"] for row in meta["connections"] if row["id"] == "openrouter")
+        return {**{key: meta["tokens"][key] for key in MAIN_BINDING_KEYS}, "connection": revision,
+                "ultrafast": json.dumps([view["OUROBOROS_MODEL"], False, "", "", ""])}
+
+    view = client.get(url).json()
+    enable = {roles: {"main": "ultrafast"}, "if_unchanged": confirmation(view)}
+    rotation = {"OPENROUTER_API_KEY": "replacement-fixture-key"}
+    before = path.read_bytes()
+    mixed = client.post(url, json={**enable, **rotation, "TOTAL_BUDGET": 321})
+    assert mixed.status_code == 400 and mixed.json()["code"] == "main_binding_invalid", mixed.text
+    assert mixed.json()["saved"] is False and path.read_bytes() == before
+    assert "replacement-fixture-key" not in mixed.text
+
+    # Resending the displayed mask leaves the selected key intact. A different key can change in the same save.
+    enabled = client.post(url, json={**enable, "OPENROUTER_API_KEY": view["OPENROUTER_API_KEY"],
+                                     "ANTHROPIC_API_KEY": "other-fixture-key"})
+    assert enabled.status_code == 200, enabled.text
+    before = path.read_bytes()
+    for edit in (rotation, {"OUROBOROS_OR_PROVIDER": '{"only":["fixture-provider"]}'}):
+        refused = client.post(url, json=edit)
+        assert refused.status_code == 400 and refused.json()["saved"] is False, refused.text
+        assert path.read_bytes() == before
+
+    rotated = client.post(url, json={**rotation, roles: {"main": "standard"}})
+    assert rotated.status_code == 200, rotated.text
+    renewed = confirmation(client.get(url).json())
+    assert renewed["connection"] != enable["if_unchanged"]["connection"]
+    confirmed = client.post(url, json={**enable, "if_unchanged": renewed})
+    assert confirmed.status_code == 200, confirmed.text
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(saved[roles]) == {"main": "ultrafast"}
+    assert saved["OPENROUTER_API_KEY"] == rotation["OPENROUTER_API_KEY"]
+    assert saved["ANTHROPIC_API_KEY"] == "other-fixture-key" and saved["TOTAL_BUDGET"] == 200
+
+
 def test_unrelated_change_does_not_block_a_key_condition_and_stale_undo_does(row_client):
     client, path, _ = row_client
     key = "TOTAL_BUDGET"

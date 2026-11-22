@@ -106,7 +106,7 @@ DECLARED_EXCEPTIONS = (
         row="supports_message_cache_control: families whose message cache markers OpenRouter accepts",
     ),
     DeclaredException(
-        symbol="ouroboros/llm_openai_compatible.py::_OpenAICompatibleLaneMixin._build_remote_kwargs",
+        symbol="ouroboros/llm_routing.py::openrouter_chat_routing",
         route="openrouter",
         name_prefixes=("anthropic/",),
         payload_path="/send/extra_body/provider",

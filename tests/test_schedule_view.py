@@ -146,7 +146,7 @@ def test_tool_and_activity_share_facts_and_bound_after_decoration():
         assert activity[key] == tool[key]
     assert tool["objective_preview"] == "Remember"
     assert tool["waiting_detail"] == {"reason": "wait", "detail": "Detail", "followup_wait": "origin_unavailable"}
-    large = row(destination={}, last_task_id="last", last_outcome={"task_id": "last", "state": "completed", "line": "x" * 1800})
+    large = row(destination={}, last_task_id="last", last_outcome={"task_id": "last", "state": "completed", "report_only": False, "line": "x" * 1800})
     page = schedule_tool_projection({"tasks": [large, large]}, result_limit=5000)
     assert len(page["tasks"]) == 1 and page["next_offset"] == 1
     assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= 4000
