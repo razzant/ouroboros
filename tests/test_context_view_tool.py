@@ -738,22 +738,25 @@ def test_the_own_calls_pointer_leaves_native_replay_and_keeps_a_complete_unit(tm
     assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue"))
 
 
-def test_an_untyped_start_row_takes_the_first_anchor_but_not_the_typed_start(tmp_path, monkeypatch):
-    """A host notice written untyped at the start (as the capability omission notice is) is ordinary prose: the first
-    full fold writes its note in its place, before the typed start rows, so that fold's own call does not follow the
-    note and leaves no anchor (a disclosed gap). Both directions: the typed start rows still stand through the next
-    full fold (a note is no answer that would end the start), and that fold's call points at its note and stands."""
+def test_an_untyped_start_row_stands_and_the_first_full_fold_leaves_an_anchor(tmp_path, monkeypatch):
+    """Every row between the assignment and the first answer stands, typed or not: a host notice written untyped (as
+    the capability omission notice is) stays, the first full fold writes its note after it and that fold's own call
+    points at its note, so the first fold leaves an anchor and the next full fold keeps the whole request sent after
+    it. The other direction: an explicit keep_unit_ids list that omits the untyped row takes it."""
+    from ouroboros.context_compaction import _capsule_metadata
     from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
 
     ctx = SimpleNamespace(active_context_mode="low")
     notice = {"role": "user", "content": "[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]\n- tools: missing credentials"}
     start = [*_source()[:2], notice, _facts("round 1")]
     first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
-    assert _notes(first) == [2] and first[3] == start[3]
-    assert "Note written by fold-1." in first[4]["tool_calls"][0]["function"]["arguments"]  # no pointer
+    assert first[:4] == start and _notes(first) == [4]
+    assert json.loads(first[5]["tool_calls"][0]["function"]["arguments"])["working_note"] == NOTE_POINTER.format(
+        unit_id=_capsule_metadata(first[4])[1]["unit_id"])
     request = [*first, _facts("round 3")]
-    assert sorted(standing_rows(request)) == [3]
+    assert sorted(standing_rows(request)) == [2, 3, *range(5, len(request))]
     second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
-    assert second[:4] == request[:4] and _notes(second) == [2, 4]
-    assert NOTE_POINTER.split("{")[0] in second[5]["tool_calls"][0]["function"]["arguments"]
-    assert sorted(standing_rows([*second, _facts("round 5")])) == [3, *range(5, len(second) + 1)]
+    assert second[:len(request)] == request and _notes(second) == [4, len(request)]
+    omitted = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-3",
+                    keep_unit_ids=[_unit_at(start, 3).unit_id])
+    assert notice not in omitted and start[3] in omitted and _notes(omitted) == [2]

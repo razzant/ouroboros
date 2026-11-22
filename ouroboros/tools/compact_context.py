@@ -68,11 +68,10 @@ def point_call_at_note(messages: list, receipt: dict, working_note) -> list:
 def standing_rows(messages: list, released=()) -> dict:
     """Positions that stand through an ordinary fold, each with the note whose rows they are ("" for the start).
 
-    The start: host-typed rows between the assignment and the first assistant answer, a note is none (untyped prose
-    there stays ordinary). An anchor: a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every row
+    The start: every row between the assignment and the first assistant answer (a note is none), typed or not. An
+    anchor: a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every row
     from that call to the next assistant row, the whole input of the request sent after that fold, while no removable
     raw unit (not a capsule, not owner words, not standing) lies before it; a note named in ``released`` has none."""
-    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
     from ouroboros.context_compaction import _capsule_metadata, context_units, owner_protected_unit_ids, unit_kind
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
@@ -80,7 +79,7 @@ def standing_rows(messages: list, released=()) -> dict:
         return {}
     end = next((i for i in range(first + 1, len(messages)) if messages[i].get("role") == "assistant"
                 and not _capsule_metadata(messages[i])[0]), len(messages))  # a note there is no answer
-    standing = {i: "" for i in range(first + 1, end) if messages[i].get(HOST_CONTEXT_KIND_KEY)}
+    standing = {i: "" for i in range(first + 1, end) if not _capsule_metadata(messages[i])[0]}
     units = context_units(messages, scope="dialogue")
     protected = owner_protected_unit_ids(messages, units)
     for unit in units:
