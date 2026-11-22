@@ -305,9 +305,11 @@
  */
 
 /**
- * `GET /api/onboarding/starter-skills`: groups are `{category, label, items: StarterSkillItem[]}`.
+ * `GET /api/onboarding/starter-skills`: groups are `{category, label, items: StarterSkillItem[]}`; `catalog_more`
+ * counts the read catalog's skills the step does not offer (null while no source is read; absent from older cores).
  * @typedef {Object} StarterSkillsResponse
  * @property {Object[]} groups
  * @property {Object[]} hub_rows
  * @property {SkillSourceRow[]} sources
+ * @property {(number|null)=} catalog_more
  */

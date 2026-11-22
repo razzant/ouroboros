@@ -549,6 +549,20 @@ test('the host’s identity check: its two causes, its answer and anything else 
     assert.notEqual(pairingCode(), pairingCode());
 });
 
+test('one muted line under the list counts the catalog’s other skills; none while the catalog is unread', async () => {
+    const lines = [];
+    for (const more of [24, 1, 0, null, undefined]) {
+        const answer = { ...structuredClone(STARTER), ...(more === undefined ? {} : { catalog_more: more }) };
+        const step = createStarterSkillsStep({ read: async () => answer });
+        await step.loading;
+        const host = fakeHost();
+        step.mount(host);
+        lines.push((host.innerHTML.match(/<p class="skills-starter-sub" data-starter-more[^>]*>([^<]*)<\/p>/) || [])[1] || '');
+        if (more === 24) assert.match(host.innerHTML, /data-i18n-fmt="\{n\} more skills in the catalog, after start\."/);
+    }
+    assert.deepEqual(lines, ['24 more skills in the catalog, after start.', '1 more skill in the catalog, after start.', '', '', '']);
+});
+
 test('categories of one skill close the list together as «More»; a list without them has none', async () => {
     const pairs = structuredClone(STARTER);
     pairs.groups = [{ category: 'a', label: 'A', items: [{ id: 'h/a1', name: 'a1' }, { id: 'h/a2', name: 'a2' }] },

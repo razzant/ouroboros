@@ -2995,7 +2995,9 @@ group whole in its column, and one column below that and on a phone; a group's h
 of a single skill close the list together as «More». The maintainer's recommended skills are
 ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
 or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
-installs nothing. Where the hub's skills come from and how they install is one small sentence under the list (Official
+installs nothing. Under the list one muted line counts the catalog's other skills, «24 more skills in the catalog,
+after start» (his 4A of 2026-11-21), from the sources already read; while none is read there is no line. Where the
+hub's skills come from and how they install is one small sentence under the list (Official
 skills from the hub without a review, the community's reviewed first), its two choices per source behind it in
 Settings' words. What is still being read stands under the list too, where the hub's skills join it, so their arrival
 moves no row; a refresh keeps the ticks, focus and the row being read. Entering the step, the rows arrive once in a

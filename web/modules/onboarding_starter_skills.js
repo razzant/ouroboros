@@ -67,7 +67,7 @@ const dataAttr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.t
  * nothing and reads nothing); `open` returns to the step from Summary. `read()` defaults to GET
  * /api/onboarding/starter-skills; `card` passes the connection card its check, randomness and encoder (tests). */
 export function createStarterSkillsStep({ offered = true, open = () => {}, keyLabels = {}, read = () => skillSourcesApi.starterSkills(), setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now, card = {} } = {}) {
-    const state = { status: 'loading', groups: [], ticked: new Set(), trust: {}, rows: [], sources: [], trustOpen: false, error: '', ticksChanged: false, untickNew: false };
+    const state = { status: 'loading', groups: [], ticked: new Set(), trust: {}, rows: [], sources: [], more: 0, trustOpen: false, error: '', ticksChanged: false, untickNew: false };
     let host = null;
     let view = '';  // what the mounted node shows: the step's list, Summary's row, or nothing
     let painted = '';
@@ -100,6 +100,7 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
             state.groups = [...groups.values()];
             state.rows = Array.isArray(data?.hub_rows) ? data.hub_rows.filter((row) => row?.id) : [];
             state.sources = Array.isArray(data?.sources) ? data.sources : [];
+            state.more = Number.isInteger(data?.catalog_more) && data.catalog_more > 0 ? data.catalog_more : 0;
             for (const row of state.rows) state.trust[row.id] ??= row.trust === 'trusted' ? 'trusted' : 'review';
             state.status = items().length || state.rows.length ? 'ready' : 'empty';
             state.error = '';
@@ -202,14 +203,17 @@ export function createStarterSkillsStep({ offered = true, open = () => {}, keyLa
         let order = 0;
         const next = () => Math.min(order++, ARRIVE_LAST);
         const pending = pendingText();
-        // A declared connection card leads; a group is its name and count over its rows. What is still being read
-        // stands under the list, where the hub's skills will join it: its going moves no row.
+        // A declared connection card leads; a group is its name over its rows. Under the list, one muted line counts
+        // the catalog's other skills (owner 21.11, 4A), none while it is unread; what is still being read stands
+        // there too, where the hub's skills will join the list: its going moves no row.
         const groups = listed();
+        const more = state.more === 1 ? '{n} more skill in the catalog, after start.' : '{n} more skills in the catalog, after start.';
         return `<div class="skills-starter-list"${arrive ? ' data-arrive' : ''}>
             ${connection ? connection.html(next()) : ''}
             ${items().length ? `<div class="skills-starter-bar"><span class="skills-starter-count" role="status" data-i18n-fmt="${COUNT}">${escapeHtml(countText())}</span><span class="skills-starter-bulk"><button type="button" data-starter-all="1">Tick all</button><span aria-hidden="true">·</span><button type="button" data-starter-all="0">Untick all</button></span></div>` : ''}
             <div class="skills-starter-groups">${groups.map(([group, rows]) => `<section class="skills-starter-group"><h3 style="--arrive: ${Math.min(order, ARRIVE_LAST)}">${escapeHtml(group.label)}</h3>
                 ${rows.map((item) => skillHtml(item, next())).join('')}</section>`).join('')}</div>
+            ${state.more ? `<p class="skills-starter-sub" data-starter-more data-i18n-fmt="${more}">${escapeHtml(fmt(more, { n: state.more }))}</p>` : ''}
             ${pending ? `<p class="skills-starter-sub" role="status">${escapeHtml(pending)}</p>` : ''}
             ${trustHtml()}
         </div>`;

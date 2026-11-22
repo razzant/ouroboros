@@ -358,11 +358,13 @@ class StarterSkillItem(TypedDict, total=False):
 
 class StarterSkillsResponse(TypedDict):
     """``GET /api/onboarding/starter-skills``: built-in and Official skills grouped by category (the ticked
-    ones are the starter list), the two hub rows whose trust the owner confirms, and source states."""
+    ones are the starter list), the two hub rows whose trust the owner confirms, source states, and how many skills
+    of the read catalog the step does not offer (``None`` while no source is read)."""
 
     groups: List[Dict[str, Any]]  # [{category, label, items: [StarterSkillItem]}]
     hub_rows: List[Dict[str, str]]  # [{id, name, trust, part}]
     sources: List[SkillSourceRow]
+    catalog_more: Optional[int]
 
 
 __all__ = [

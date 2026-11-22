@@ -132,6 +132,7 @@ def test_the_starter_item_carries_the_card_and_drops_the_code_from_its_prerequis
     assert items["builtin/demo"]["connection"]["skill"] == "demo"
     assert items["builtin/demo"]["needs_keys"] == ["DEMO_TOKEN", "DEMO_REGION"], "the code the card fills is no prerequisite"
     assert "connection" not in items["builtin/other"] and items["builtin/other"]["needs_keys"] == ["DEMO_CODE"]
+    assert skill_starter.starter_groups(tmp_path, rows=[])["catalog_more"] is None, "no source read: no count"
 
 
 def _client(*routes: Route, drive_root: pathlib.Path | None = None) -> TestClient:

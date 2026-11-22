@@ -106,8 +106,10 @@ def starter_ids(drive_root: pathlib.Path, settings: Optional[Dict[str, Any]] = N
 
 def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, Any]]] = None,
                    repo_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
-    """``GET /api/onboarding/starter-skills``: the offer grouped by category, ticks = starter list."""
-    from ouroboros.skill_source_catalog import snapshot_for
+    """``GET /api/onboarding/starter-skills``: the offer grouped by category, ticks = starter list, and
+    ``catalog_more``: how many skills of the catalog the step does not offer (owner 2026-11-21, 4A: «ещё N навыков в
+    каталоге, после запуска»), counted from the source snapshots already read; ``None`` while none is read."""
+    from ouroboros.skill_source_catalog import items_for, snapshot_for
     from ouroboros.skill_sources import load_sources
 
     rows = rows if rows is not None else load_sources()
@@ -115,8 +117,13 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
     labels: Dict[str, str] = {}
     order: List[str] = []
     statuses = []
+    catalog: List[Dict[str, Any]] = []  # every item of a read source beyond the built-ins
+    read = False
     for row in rows:
         snapshot, status = snapshot_for(drive_root, row, repo_dir=repo_dir)
+        if row["kind"] != "builtin" and snapshot is not None:
+            read = True
+            catalog.extend(items_for(row, snapshot))
         for category in (snapshot or {}).get("categories") or []:
             if category["id"] not in labels:
                 labels[category["id"]] = category["label"]
@@ -140,6 +147,7 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
             "needs_keys": [key for key in item.get("needs_keys") or [] if key not in writes],
             **({"connection": card} if card else {}),
         })
+    offered = {item["id"] for items in groups.values() for item in items}
     builtin_first = [cat for cat, items in groups.items() if any(i["builtin"] for i in items)]
     ranked = sorted(groups, key=lambda cat: (cat not in builtin_first,
                                              order.index(cat) if cat in order else len(order), cat))
@@ -149,6 +157,8 @@ def starter_groups(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, An
         "hub_rows": [{"id": row["id"], "name": row["name"], "trust": row["trust"], "part": row.get("part", "")}
                      for row in rows if row["kind"] == "hub" and row.get("part")],
         "sources": statuses,
+        "catalog_more": len({item["id"] for item in catalog if item["id"] not in offered and not item.get("withdrawn")})
+        if read else None,
     }
 
 
