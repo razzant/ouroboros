@@ -159,7 +159,7 @@ def _lane(root, monkeypatch, coin="", *, hold=None, carrier=True):
     light, namer = _Light(coin, hold), project_naming.llm_project_name
     monkeypatch.setattr(project_naming, "llm_project_name",
                         lambda *args, **kwargs: namer(*args, **{**kwargs, "llm_client": light}))
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "light-test")
+    monkeypatch.setattr("ouroboros.route_choice.credentialed_light_route", lambda use_local=None: ("light-test", False))
     for send in ("chat", "chat_async"):  # any other model client of the lane sends nothing
         monkeypatch.setattr(f"ouroboros.llm.LLMClient.{send}", lambda *_a, **_k: pytest.fail("no provider call"))
     get_direct_activity_registry().clear()

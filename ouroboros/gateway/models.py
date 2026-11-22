@@ -802,35 +802,16 @@ async def api_local_model_start(request: Request) -> JSONResponse:
         if refusal := local_launch_refusal(source=source, filename=filename, port=port, chat_format=chat_format):
             return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
 
-        from ouroboros.local_model import get_manager, _get_runtime_hint
-        mgr = get_manager()
+        from ouroboros.local_model import LocalModelStartConflict, LocalRuntimeMissing, get_manager
 
-        if mgr.is_running:
-            return JSONResponse({"error": "Local model server is already running"}, status_code=409)
-
-        # Preflight: check llama-cpp-python is installed BEFORE downloading the model.
-        # This prevents users from waiting through a large download only to hit an
-        # install error at the end.
-        # Run in a thread to avoid blocking the async event loop (subprocess.run, 15s timeout).
-        runtime_ok = await asyncio.to_thread(mgr.check_runtime)
-        if not runtime_ok:
-            return JSONResponse(
-                {
-                    "error": "runtime_missing",
-                    "message": (
-                        "llama-cpp-python is not installed. "
-                        "Use the 'Install Local Runtime' button to install it first."
-                    ),
-                    "hint": _get_runtime_hint(),
-                },
-                status_code=412,
-            )
-
-        # Download can be slow, run in thread to not block the async event loop
-        model_path = await asyncio.to_thread(mgr.download_model, source, filename)
-
-        mgr.start_server(model_path, port=port, n_gpu_layers=n_gpu_layers, n_ctx=n_ctx,
-                         chat_format=chat_format, source=source, filename=filename)
+        try:
+            model_path = await asyncio.to_thread(get_manager().start_model, source, filename, port=port,
+                                                 n_gpu_layers=n_gpu_layers, n_ctx=n_ctx, chat_format=chat_format,
+                                                 grant=body.get("install_id"))
+        except LocalModelStartConflict as exc:
+            return json_error(str(exc), 409)
+        except LocalRuntimeMissing as exc:
+            return JSONResponse({"error": "runtime_missing", "message": str(exc), "hint": exc.hint}, status_code=412)
         return JSONResponse({"status": "starting", "model_path": model_path})
     except Exception as e:
         return json_exception(e)
@@ -839,7 +820,9 @@ async def api_local_model_start(request: Request) -> JSONResponse:
 async def api_local_model_stop(request: Request) -> JSONResponse:
     try:
         from ouroboros.local_model import get_manager
-        get_manager().stop_server()
+        manager = get_manager(create=False)
+        if manager is not None and not await asyncio.to_thread(manager.stop_server):
+            return json_error("Local model exit is not confirmed", 409, code="local_model_stop_unconfirmed")
         return JSONResponse({"status": "stopped"})
     except Exception as e:
         return json_exception(e)
@@ -849,12 +832,8 @@ async def api_local_model_status(request: Request) -> JSONResponse:
     try:
         from ouroboros.local_model import get_manager
         mgr = get_manager()
-        # If runtime status is still unknown and no operation is running,
-        # run a quick probe so the Settings page can surface the Install button
-        # on the very first poll — before the user clicks Start.
-        if mgr._runtime_status == "unknown" and mgr.get_status() == "offline":
-            await asyncio.to_thread(mgr.check_runtime)
-        return JSONResponse({**mgr.status_dict(), "settings_application": mgr.settings_application(load_settings())})
+        status = await asyncio.to_thread(mgr.status_dict, check_runtime=True)
+        return JSONResponse({**status, "settings_application": mgr.settings_application(load_settings())})
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)})
 
@@ -1237,22 +1216,21 @@ async def api_local_model_install_runtime(request: Request) -> JSONResponse:
     - ``"installing"``   — install in progress
     - ``"install_ok"``   — install succeeded; caller may now start the model
     - ``"install_error"``— install failed; ``runtime_install_log`` has details
+
+    The reply to the call that admitted an install also carries ``install_id``, the receipt its deferred Start presents.
     """
     try:
         from ouroboros.deployment_policy import body_replacement_refusal
         from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
-        from ouroboros.local_model import get_manager
+        from ouroboros.local_model import LocalModelStartConflict, get_manager
 
         # pip writes into the interpreter this server runs: a managed deployment's administrator provisions it.
         if refusal := body_replacement_refusal():
             return json_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
-        mgr = get_manager()
-
-        current = mgr._runtime_status
-        if current == "installing":
-            return JSONResponse({"status": "already_installing"})
-
-        mgr.install_runtime()
-        return JSONResponse({"status": "installing"})
+        try:
+            status, install_id = get_manager().install_runtime()
+            return JSONResponse({"status": status, **({"install_id": install_id} if install_id else {})})
+        except LocalModelStartConflict as exc:
+            return json_error(str(exc), 409)
     except Exception as e:
         return json_exception(e)

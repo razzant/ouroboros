@@ -31,6 +31,7 @@ from ouroboros.skill_loader import (
     summarize_skills,
 )
 from ouroboros.execution_domain import build_dir, current as current_execution_domain, skill_state_dir
+from ouroboros.work_domain import WorkDomainRefused, WorkDomainUnsettled
 from ouroboros.work_skill_payloads import launch as work_launch  # managed: the reviewed payload's verified work copy
 from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.skill_review import review_skill as _review_skill_impl
@@ -218,7 +219,6 @@ def _stop_failed_skill_start(proc, launch, confirmed):
         except OSError:
             pass
     if launch is not None and not launch.settle():
-        from ouroboros.work_domain import WorkDomainUnsettled
         raise WorkDomainUnsettled("Script startup failed after spawn; its backend group is unconfirmed and custody "
                                   "is retained. Do not repeat blindly.", (proc.returncode, b"", b"", False))
 
@@ -1093,10 +1093,10 @@ def _handle_skill_exec(
     try:
         from ouroboros.marketplace.isolated_deps import python_runtime_binary
         if runtime in {"python", "python3"}:
-            isolated = python_runtime_binary(loaded.skill_dir)
+            isolated = python_runtime_binary(loaded.skill_dir, conclusive_absence=True)
             runtime_binary = str(isolated) if isolated is not None else runtime_binary
-    except Exception:
-        log.debug("Could not resolve isolated Python runtime", exc_info=True)
+    except (OSError, WorkDomainRefused, subprocess.TimeoutExpired) as exc:
+        return f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} isolated Python runtime is unobserved ({exc})."
     runtime_unavailable = ""
     if runtime_binary is None:
         reason = (f"is not in the allowlist {sorted(_ALLOWED_RUNTIMES)}" if runtime not in _ALLOWED_RUNTIMES
@@ -1289,10 +1289,11 @@ def _skill_execution_failure(ctx, skill_name, script_rel, runtime_binary, timeou
         error = f"runtime binary {runtime_binary!r} unavailable"
         answer = f"⚠️ SKILL_EXEC_ERROR: runtime binary {runtime_binary!r} is no longer available."
     else:
-        error = f"OS error running skill: {exc}"
-        partial = (f"\nexit_code: {exc.result[0]}\nstdout:\n{_cap(exc.result[1], _MAX_STDOUT_BYTES, 'stdout')}"
-                   f"\nstderr:\n{_cap(exc.result[2], _MAX_STDERR_BYTES, 'stderr')}"
-                   if isinstance(exc, WorkDomainUnsettled) and exc.result is not None else "")
+        error, partial = f"OS error running skill: {exc}", ""
+        if isinstance(exc, WorkDomainUnsettled) and (result := exc.result) is not None:
+            code, out, err = result[:3] if isinstance(result, tuple) else (result.returncode, result.stdout, result.stderr)
+            partial = (f"\nexit_code: {'unknown' if code is None else code}\nstdout:\n{_cap(out or b'', _MAX_STDOUT_BYTES, 'stdout')}"
+                       f"\nstderr:\n{_cap(err or b'', _MAX_STDERR_BYTES, 'stderr')}")
         answer = f"⚠️ SKILL_EXEC_ERROR: {error}{partial}"
     _emit_skill_lifecycle_event(ctx, event_type="skill_exec_failed", skill=skill_name, script=script_rel, error=error)
     return answer

@@ -55,6 +55,7 @@ jobs:
         timeout-minutes: 18
         run: |
           set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/ob688-evidence"
           chmod -R a+rwX "$RUNNER_TEMP/ob688-evidence"
           # No GTK from the builder, no display socket from the runner, no secrets,
           # no network and no privilege flag. Unconfined seccomp only lets a bwrap

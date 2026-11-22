@@ -28,7 +28,7 @@ import { createConsciousnessStep } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, createFlatKeyChoices, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
-import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './settings_policy.js';
+import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote, LOCAL_RUNTIME_ADMIN } from './settings_policy.js';
 
 (() => {
         // The served wizard document needs its own menu-key binding.
@@ -77,11 +77,9 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
         moreProvidersOpen: PROVIDER_FIELDS.some((field) => field.group === 'more' && field.inputType === 'password'
             && !field.settingKey.startsWith('OPENAI_COMPATIBLE_') && Boolean(INITIAL_STATE[field.stateKey])),
-        localStatusText: 'Status: Offline',
-        localStatusTone: 'muted',
+        localStatus: { text: 'Status: Offline', tone: 'muted', stage: '' },
         localTestResult: '',
         localTestTone: 'muted',
-        localRuntimeReady: false,
         // Agents step: what the step OBSERVED (never a guess), the owner's
         // explicit "finish without agent defaults" choice, and the typed reason
         // a completion attempt refused to write the preset.
@@ -104,6 +102,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }, INITIAL_STATE);
 
     let localStatusPollStarted = false;
+    let localStart = null;  // the Start whose reply the owner still waits on; Stop disowns it
     let agentsStep = null;
     let modelSources = [];
     let sourceRead = {};
@@ -509,16 +508,19 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const apiRequest = fetchJson;
 
     function renderLocalStatus() {
+        const { text, tone, stage } = state.localStatus;
         const statusEl = document.getElementById('wizard-local-status');
+        const startButton = document.getElementById('wizard-local-start');
         const stopButton = document.getElementById('wizard-local-stop');
         const testButton = document.getElementById('wizard-local-test');
         const resultEl = document.getElementById('wizard-local-test-result');
         if (statusEl) {
-            statusEl.textContent = state.localStatusText || 'Status: Offline';
-            statusEl.dataset.tone = state.localStatusTone || 'muted';
+            statusEl.textContent = text;
+            statusEl.dataset.tone = tone;
         }
-        if (stopButton) stopButton.disabled = !state.localRuntimeReady;
-        if (testButton) testButton.disabled = !state.localRuntimeReady;
+        if (startButton) startButton.disabled = ['loading', 'downloading', 'stopping', 'installing'].includes(stage);
+        if (stopButton) stopButton.disabled = !['downloading', 'loading', 'ready', 'stopping', 'installing', 'error'].includes(stage);
+        if (testButton) testButton.disabled = stage !== 'ready';
         if (resultEl) {
             resultEl.hidden = !state.localTestResult;
             resultEl.dataset.tone = state.localTestTone || 'muted';
@@ -533,24 +535,19 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     async function updateLocalStatus() {
-        if (!LOCAL_RUNTIME_CONTROLS) return;
         try {
             const data = await apiRequest('/api/local-model/status', { cache: 'no-store' });
-            const isReady = data.status === 'ready';
-            let text = 'Status: ' + ((data.status || 'offline').charAt(0).toUpperCase() + (data.status || 'offline').slice(1));
-            if (data.status === 'ready' && data.context_length) text += ` (ctx: ${data.context_length})`;
-            if (data.status === 'downloading' && data.download_progress) text += ` ${Math.round(data.download_progress * 100)}%`;
-            if (data.error) text += ` - ${data.error}`;
-            state.localRuntimeReady = isReady;
-            state.localStatusText = text;
-            state.localStatusTone = isReady ? 'ok' : (data.status === 'error' ? 'error' : 'muted');
-            renderLocalStatus();
+            const d = data.runtime_status === 'installing' ? { status: 'installing' } : data;  // the installer outranks an earlier error, as in Settings
+            let text = 'Status: ' + ((d.status || 'offline').charAt(0).toUpperCase() + (d.status || 'offline').slice(1));
+            if (d.status === 'installing') text += ' the local runtime…';
+            if (d.status === 'ready' && d.context_length) text += ` (ctx: ${d.context_length})`;
+            if (d.status === 'downloading' && d.download_progress) text += ` ${Math.round(d.download_progress * 100)}%`;
+            if (d.error) text += ` - ${d.error}`;
+            state.localStatus = { text, tone: d.status === 'ready' ? 'ok' : d.status === 'error' ? 'error' : 'muted', stage: d.error_stage || d.status };
         } catch (error) {
-            state.localRuntimeReady = false;
-            state.localStatusText = `Status: Error - ${error.message}`;
-            state.localStatusTone = 'error';
-            renderLocalStatus();
+            state.localStatus = { text: `Status: Error - ${error.message}`, tone: 'error', stage: '' };
         }
+        renderLocalStatus();
     }
 
     function readLocalModelBody() {
@@ -565,7 +562,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function startLocalStatusPolling() {
-        if (!LOCAL_RUNTIME_CONTROLS || localStatusPollStarted) return;
+        if (localStatusPollStarted) return;
         localStatusPollStarted = true;
         updateLocalStatus();
         setInterval(updateLocalStatus, 3000);
@@ -1216,6 +1213,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     return;
                 }
                 setLocalTestResult('', 'muted');
+                const mine = (localStart = {});
                 try {
                     const resp = await fetch('/api/local-model/start', {
                         method: 'POST',
@@ -1223,31 +1221,33 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                         body: JSON.stringify(body),
                     });
                     const data = await resp.json().catch(() => ({}));
+                    if (localStart !== mine) return;
                     if (resp.status === 412 && data.error === 'runtime_missing') {
-                        setLocalTestResult(
-                            'Local runtime (llama-cpp-python) is not installed.\n' +
-                            'Go to Settings › Models › Local model\n' +
-                            'and press "Install the local runtime".\n\n' +
-                            'Manual: ' + (data.hint || 'pip install llama-cpp-python[server]'),
-                            'error'
-                        );
+                        let message = 'The local runtime is unavailable.';
+                        if (bootstrap.deployment) message += ' ' + LOCAL_RUNTIME_ADMIN;
+                        else if (bootstrap.deployment === null) {
+                            message = data.message || message;
+                            if (data.hint) message += `\nInstall it in Settings › Models › Local model.\nBy hand: ${data.hint}`;
+                        }
+                        setLocalTestResult(message, 'error');
                     } else if (data.error) {
                         setLocalTestResult(`Start failed: ${data.error}`, 'error');
                     } else {
                         updateLocalStatus();
                     }
                 } catch (error) {
-                    setLocalTestResult(`Start failed: ${error.message}`, 'error');
+                    if (localStart === mine) setLocalTestResult(`Start failed: ${error.message}`, 'error');
                 }
             });
             document.getElementById('wizard-local-stop')?.addEventListener('click', async () => {
+                localStart = null;
                 try {
                     await apiRequest('/api/local-model/stop', { method: 'POST' });
                     setLocalTestResult('', 'muted');
-                    updateLocalStatus();
                 } catch (error) {
                     setLocalTestResult(`Stop failed: ${error.message}`, 'error');
                 }
+                void updateLocalStatus();
             });
             document.getElementById('wizard-local-test')?.addEventListener('click', async () => {
                 setLocalTestResult('Running tests...', 'muted');

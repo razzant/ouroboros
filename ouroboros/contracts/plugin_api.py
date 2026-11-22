@@ -478,7 +478,7 @@ class PluginAPI(Protocol):
         *,
         schema: Dict[str, Any],
     ) -> None:
-        """Register a host-rendered Settings panel with no extension JS."""
+        """Register a host-rendered Settings panel (no extension JS); requires the ``widget`` permission."""
         ...
 
     def register_supervised_task(

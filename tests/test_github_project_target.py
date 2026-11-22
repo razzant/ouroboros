@@ -12,6 +12,7 @@ import pytest
 from ouroboros.artifacts import actor_source_reference
 from ouroboros.tools import github, github_read
 from ouroboros.tools.registry import ToolContext
+from tests._github_process import stub_gh
 
 
 def _api_parts(argv):
@@ -19,7 +20,7 @@ def _api_parts(argv):
     route, hostname, fields, rest = "", "", {}, list(argv[2:])
     while rest:
         item = rest.pop(0)
-        if item in ("--method", "--hostname", "--input"):
+        if item in ("--method", "--hostname", "--input", "--jq"):
             value = rest.pop(0)
             hostname = value if item == "--hostname" else hostname
         elif item in ("-f", "-F"):
@@ -42,6 +43,39 @@ def _context(tmp_path, kind):
         ctx.is_direct_chat, ctx.project_id = True, "project-fixture"
         ctx.task_metadata = {"_project_room_dir": str(project)}
     return ctx, project if kind != "system" else system
+
+
+@pytest.mark.parametrize("phase,filename", [
+    ("start", None), ("start", "gh"), ("reply", None), ("reply", "gh"), ("unobserved_start", None),
+])
+def test_named_write_attributes_an_io_error_to_its_phase(monkeypatch, tmp_path, phase, filename):
+    ctx, project = _context(tmp_path, "queued")
+    project.rename(tmp_path / "moved")
+    ctx._active_builtin_tool_result = None
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs["cwd"]))
+        if phase == "unobserved_start":
+            raise OSError("lost the launcher pipe")
+        raise FileNotFoundError(2, "No such file or directory", filename)
+
+    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
+    if phase == "reply":
+        stub_gh(monkeypatch, run)
+    else:
+        monkeypatch.setattr(github, "Popen", run)
+    write = next(entry.handler for entry in github.get_tools() if entry.name == "github_write")
+    text = write(ctx, method="api", route="repos/{owner}/{repo}/issues", http_method="POST",
+                 repo="github.example/owner/selected", input={"title": "fixture"})
+    if phase == "start":
+        assert text.startswith("⚠️ GH_ERROR") and ctx._active_builtin_tool_result.meta["operation_outcome"] == "completed_no_effect"
+    else:
+        assert text.startswith("⚠️ GH_WRITE_UNKNOWN") and ctx._active_builtin_tool_result.meta["operation_outcome"] == "unknown"
+        warning = text.splitlines()[0]
+        assert "one write attempt" in warning and "do not resend" in warning and "was sent" not in warning
+    assert len(calls) == 1
+    assert calls[0][1] == str(ctx.task_drive_root()) and "POST" in calls[0][0]
 
 
 SHA, MOVED = "a" * 40, "b" * 40
@@ -104,7 +138,7 @@ def gh_calls(monkeypatch):
             output = json.dumps({"jobs": [_job(55, "test", conclusion="failure")]})
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     return calls
 
 
@@ -121,12 +155,12 @@ _CALLS = [
 
 
 _NEW_CALLS = [
-    ("github_read", {"method": "get", "kind": "run", "target": 11, "include": ["log"]}, ["run view", "run view"]),
+    ("github_read", {"method": "get", "kind": "run", "target": 11, "include": ["log"]}, ["api", "run view"]),
     ("github_read", {"method": "list", "kind": "artifact", "target": 11, "limit": 100}, ["run view", "api"]),
     ("github_read", {"method": "download", "kind": "artifact", "target": 23, "max_bytes": 4096}, ["repo view", "api", "api"]),
     ("github_write", {"method": "create_pr", "title": "New title", "head": "feature", "base": "main",
                       "expect": {"head_sha": SHA, "base_sha": MOVED}, "body": "New body"},
-     ["repo view", "api", "api", "pr list", "pr create", "pr view"]),
+     ["repo view", "api", "api", "pr list", "api", "pr view"]),
     ("github_write", {"method": "update", "kind": "pr", "target": 7, "expect": {"head_sha": SHA, "base_sha": MOVED},
                       "title": "New title", "body": "New body", "base": "release"},
      ["pr view", "api", "api", "pr view"]),
@@ -141,7 +175,7 @@ def complete_gh(monkeypatch):
     from ouroboros.tools import github_workflows
 
     calls = []
-    pr = {"number": 7, "url": f"{BASE}/pull/7", "state": "OPEN", "title": "Old title",
+    pr = {"id": "PR_node7", "number": 7, "url": f"{BASE}/pull/7", "state": "OPEN", "title": "Old title",
           "body": "Old body", "isDraft": True, "headRefName": "feature", "baseRefName": "main",
           "headRefOid": SHA, "headRepositoryOwner": {"login": "owner"}}
     archive_file = io.BytesIO()
@@ -169,11 +203,12 @@ def complete_gh(monkeypatch):
             return []
         if args[:2] == ["pr", "view"]:
             return dict(pr)
-        if args[:2] == ["pr", "create"]:
-            assert {"--title=New title", "--head=feature", "--base=main", "--body-file=-"} <= set(args)
-            assert kwargs["input"] == "New body"
+        if args[:2] == ["api", "repos/owner/selected/pulls"]:
+            assert args[args.index("--method") + 1] == "POST"
+            assert json.loads(kwargs["input"]) == {"title": "New title", "body": "New body", "head": "feature",
+                                                   "base": "main", "draft": False}
             pr.update(title="New title", body="New body", isDraft=False)
-            return pr["url"]
+            return {"number": 7, "html_url": pr["url"], "node_id": pr["id"]}
         if args[:2] == ["pr", "edit"]:  # Its preparation queries organization fields a repo-scoped token cannot read.
             return SimpleNamespace(returncode=1, stdout="", stderr=READ_ORG_REFUSAL)
         if args[:2] == ["pr", "ready"]:
@@ -182,6 +217,9 @@ def complete_gh(monkeypatch):
             return ""
         if args[:1] == ["api"]:
             path = args[1]
+            if path == "repos/owner/selected/actions/runs/11":
+                return {"id": 11, "run_attempt": 1, "status": "completed", "conclusion": "success",
+                        "html_url": f"{BASE}/actions/runs/11", "head_sha": SHA, "name": "CI"}
             if path in ("repos/owner/selected/git/ref/heads/feature",):
                 return {"object": {"sha": SHA}}
             if path in ("repos/owner/selected/git/ref/heads/main",
@@ -217,7 +255,7 @@ def complete_gh(monkeypatch):
         path.write_bytes(data)
         return github.GhCapture(path, len(data), hashlib.sha256(data).hexdigest(), False), 0, "", False
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     monkeypatch.setattr(github, "_capture_stdout", capture)
     return calls
 
@@ -228,7 +266,10 @@ def complete_gh(monkeypatch):
 def test_new_repository_tools_keep_target_through_read_and_readback(
         tmp_path, complete_gh, monkeypatch, kind, name, args, steps, repo):
     ctx, expected_cwd = _context(tmp_path, kind)
-    monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")
+    operation = "draft" if "draft" in args else args["method"]
+    # With no Project or explicit selector, ambient GH_REPO is the actual create target, not an ignored default.
+    ambient = "owner/selected" if kind == "system" and not repo and operation == "create_pr" else "unrelated/wrong-repo"
+    monkeypatch.setenv("GH_REPO", ambient)
     monkeypatch.setenv("GH_HOST", "configured.example")
     entry = next(item for item in github.get_tools() if item.name == name)
 
@@ -236,32 +277,40 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
 
     assert not result.startswith("⚠️"), result
     assert "repo" in entry.schema["parameters"]["properties"]
+    if args["method"] == "get" and not repo:
+        steps = ["repo view", *steps]  # Resolve the host as well as the slug before the first REST read.
     assert len(complete_gh) == len(steps)
     assert [argv[1] if argv[1] == "api" else " ".join(argv[1:3]) for argv, _ in complete_gh] == steps
-    operation = "draft" if "draft" in args else args["method"]
     result = json.loads(result.partition("\n")[2])
     result = result.get("view", "") + result.get("detail", "")
     api_paths = {
+        "get": ["repos/owner/selected/actions/runs/11"],
         "list": ["repos/owner/selected/actions/runs/11/artifacts?per_page=100&page=1"],
         "download": ["repos/owner/selected/actions/artifacts/23",
                                      "repos/owner/selected/actions/artifacts/23/zip"],
-        "create_pr": ["repos/owner/selected/git/ref/heads/feature",
-                             "repos/owner/selected/git/ref/heads/main"],
+        "create_pr": ["repos/owner/selected/git/ref/heads/feature", "repos/owner/selected/git/ref/heads/main",
+                      "repos/owner/selected/pulls"],
         "update": ["repos/owner/selected/git/ref/heads/release", "repos/owner/selected/pulls/7"],
     }
     assert [argv[2] for argv, _ in complete_gh if argv[1] == "api"] == api_paths.get(operation, [])
-    # A read naming its repository runs every leg, the generic API ones included, in the task's own task_drive.
-    scratch = ctx.task_drive_root() if name == "github_read" and repo else None
-    for argv, kwargs in complete_gh:
+    scratch = ctx.task_drive_root() if repo else None
+    for index, (argv, kwargs) in enumerate(complete_gh):
         assert kwargs["env"]["GH_HOST"] == "configured.example"
-        if argv[1] == "api":
+        assert kwargs["env"]["GH_TOKEN"] == kwargs["env"]["GITHUB_TOKEN"] == "fixture-token"
+        if argv[1] == "api" and "POST" not in argv and operation != "get":
             assert argv[-2:] == ["--hostname", "github.example"]
             assert kwargs["cwd"] == str(scratch or ctx.repo_dir)
-            assert kwargs["env"]["GH_REPO"] == "unrelated/wrong-repo"
+            assert kwargs["env"]["GH_REPO"] == ambient
             continue
         assert kwargs["cwd"] == str(scratch or expected_cwd)
-        if repo and argv[1:3] == ["repo", "view"]:
-            assert argv[3] == repo and "--repo" not in argv
+        if argv[1] == "api":
+            assert argv[-2:] == ["--hostname", "github.example"]
+        elif argv[1:3] == ["repo", "view"] and (repo or kind == "system"):
+            assert argv[3] == (repo or ambient) and "--repo" not in argv
+        elif (kwargs.get("capture")
+              or (operation == "create_pr" and argv[1] == "pr")
+              or (operation in {"update", "draft"} and index > 0 and argv[1] == "pr")):
+            assert argv[-2:] == ["--repo", "github.example/owner/selected"]
         elif repo:
             assert argv[-2:] == ["--repo", repo]
         else:
@@ -269,7 +318,7 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
         if kind != "system":
             assert "GH_REPO" not in kwargs["env"]
         else:
-            assert kwargs["env"]["GH_REPO"] == "unrelated/wrong-repo"
+            assert kwargs["env"]["GH_REPO"] == ambient
     if operation == "get":
         assert "job\tstep\tpassed" in result and "captured 16 bytes exactly" in result
         assert complete_gh[-1][1]["capture"] is True
@@ -282,7 +331,7 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
     else:
         assert "Read-back:" in result and "confirmed" in result
         # One mutation; the field edit is a REST PATCH at the read PR's own host, never `gh pr edit`.
-        assert sum(argv[1:3] in (["pr", "create"], ["pr", "ready"]) or "PATCH" in argv
+        assert sum(argv[1:3] == ["pr", "ready"] or "POST" in argv or "PATCH" in argv
                    for argv, _ in complete_gh) == 1
         assert not any(argv[1:3] == ["pr", "edit"] for argv, _ in complete_gh)
 
@@ -334,8 +383,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
     # An omitted repo names its one target before the first REST or GraphQL leg; the checks reader has none.
     assert len(gh_calls) == count + (not repo and args["method"] != "checks")
     assert "repo" in entry.schema["parameters"]["properties"]
-    # A read naming its repository needs no checkout: every leg, the ones that take no repo too, runs in its task_drive.
-    scratch = ctx.task_drive_root() if name == "github_read" and repo else None
+    scratch = ctx.task_drive_root() if repo else None
     for argv, kwargs in gh_calls:
         if argv[1:3] == ["repo", "view"]:
             assert argv[-2:] == ["--json", "nameWithOwner,url"]
@@ -490,6 +538,7 @@ def test_cli_store_metadata_enables_only_cli_tools_without_probing(tmp_path, mon
         raise AssertionError("discovery must not spawn an authentication probe")
 
     monkeypatch.setattr(subprocess, "run", no_probe)
+    monkeypatch.setattr(github, "Popen", no_probe)
     ctx, _ = _context(tmp_path, "queued")
     for name, _, _ in _CALLS:
         assert _builtin_tool_availability(name, ctx)[0] is True

@@ -19,7 +19,7 @@ import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.tool_capabilities import tool_result_limit
-from ouroboros.tools.github import _gh_run, _refuse
+from ouroboros.tools.github import _gh_run, _leg_target, _refuse, _repo_hint
 from ouroboros.tools.github_checks import _check_state, _gh_json, _one_line, _whole
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -31,8 +31,8 @@ _ZIP_MEMBERS_SHOWN = 40
 _READ_TIMEOUT, _LOG_TIMEOUT, _ARTIFACT_TIMEOUT = 30, 120, 180
 _RESULT_MARGIN = 200  # Characters kept free under the result limit.
 _REPO_URL_RE = re.compile(r"^https://([^/]+)/([^/]+)/([^/]+?)(?:/.*)?$")
-_RUN_FIELDS = "databaseId,url,status,conclusion,attempt,headSha,workflowName"
 _RUN_ARTIFACT_FIELDS = "databaseId,url,status,conclusion,headSha,workflowName"
+_LOG_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _deliver(read, text: str, payload: dict) -> str:
@@ -57,19 +57,31 @@ def _repo_from_url(url: object) -> Optional[Tuple[str, str, str]]:
     return match.groups() if match else None
 
 
-def _resolve_run(ctx: ToolContext, run_id: int, attempt: int, repo: str, fields: str,
+def _resolve_run(ctx: ToolContext, run_id: int, attempt: int, repo: str,
                  *, require_attempt: bool = True) -> Tuple[Optional[tuple], str]:
     """``(run, (host, owner, name), attempt)`` as GitHub records it, or the error.
 
     Log reads require a positive observed attempt and pin their later byte read to it. Artifact listings
     only require the run identity: GitHub's artifact API is scoped to the run across attempts."""
-    args = ["run", "view", str(run_id)] + (["--attempt", str(attempt)] if attempt else []) + ["--json", fields]
+    if require_attempt:
+        target, refusal = _leg_target(ctx, repo, require_target=True)
+        if target is None:
+            return None, refusal.text
+        route = f"repos/{target.slug}/actions/runs/{run_id}" + (f"/attempts/{attempt}" if attempt else "")
+        args = ["api", route] + (["--hostname", target.host] if target.host else [])
+    else:
+        args = ["run", "view", str(run_id), "--json", _RUN_ARTIFACT_FIELDS]
     res = _gh_run(args, ctx, timeout=_READ_TIMEOUT, repo=repo)
     if not res.ok:
         return None, res.text
     run = _gh_json(res, dict)
     if run is None:
         return None, _refuse(ctx, f"⚠️ TOOL_ERROR: failed to parse the workflow run JSON: {res.text[:500]}", "TOOL_ERROR")
+    if require_attempt:
+        # gh 2.45 cannot export the attempt in run view JSON. Take all run facts from the same REST response.
+        run = {"databaseId": run.get("id"), "url": run.get("html_url"), "attempt": run.get("run_attempt"),
+               "status": run.get("status"), "conclusion": run.get("conclusion") or "",
+               "headSha": run.get("head_sha"), "workflowName": run.get("name")}
     observed_id, observed_attempt = _whole(run.get("databaseId")), _whole(run.get("attempt"))
     if observed_id != run_id or (require_attempt and (observed_attempt is None or observed_attempt < 1
                                                     or (attempt and observed_attempt != attempt))):
@@ -80,6 +92,11 @@ def _resolve_run(ctx: ToolContext, run_id: int, attempt: int, repo: str, fields:
     if where is None:
         return None, _refuse(ctx, f"⚠️ TOOL_ERROR: GitHub returned no URL for run {run_id}; its repository cannot be named.",
                              "TOOL_ERROR")
+    if require_attempt:
+        requested = f"{target.host}/{target.slug}" if target.host else target.slug
+        if requested.casefold() != "/".join(where if target.host else where[1:]).casefold():
+            return None, _refuse(ctx, f"⚠️ TOOL_ERROR: run {run_id} names {'/'.join(where)}, outside the requested "
+                                      f"repository {requested}.", "TOOL_ERROR")
     return (run, where, observed_attempt), ""
 
 
@@ -120,12 +137,12 @@ def _run_line(run: dict) -> str:
             f"head {run.get('headSha') or 'unknown'}; {_one_line(run.get('url'), 200)}")
 
 
-def _repo_hint(repo: str) -> str:
-    return f", repo={repo!r}" if repo else ""
+def _log_text(text: str) -> str:
+    return _LOG_CONTROLS.sub(lambda match: f"\\x{ord(match[0]):02x}", text)
 
 
 def get_run(read) -> str:
-    """Capture the log of one completed run (or one of its jobs) exactly, retain it, show its tail."""
+    """Read a run or retain a completed run or job's log bytes and show its tail."""
     ctx, repo, args = read.ctx, read.repo, read.args
     run_id, job_id, attempt = args.get("target"), args.get("job_id", 0), args.get("attempt", 0)
     failed_only = args.get("failed_only", False)
@@ -148,15 +165,30 @@ def get_run(read) -> str:
     if not 1 <= tail <= _TAIL_LINES_MAX:
         return _refuse(ctx, f"⚠️ TOOL_ARG_ERROR: tail_lines is 1..{_TAIL_LINES_MAX}.", no_effect=True)
 
-    resolved, error = _resolve_run(ctx, run_id, attempt, repo, _RUN_FIELDS + ",jobs")
+    need_jobs = read.detail == "full" or (job_id > 0 and "log" in include)
+    resolved, error = _resolve_run(ctx, run_id, attempt, repo)
     if resolved is None:
         return error
     run, (host, owner, name), attempt_read = resolved
-    item = read.project(run if read.detail == "full" else {k: run.get(k) for k in _RUN_FIELDS.split(",")})
+    repo = f"{host}/{owner}/{name}"
+    if need_jobs:
+        res = _gh_run(["run", "view", str(run_id), "--attempt", str(attempt_read), "--json", "databaseId,url,jobs"],
+                      ctx, timeout=_READ_TIMEOUT, repo=repo)
+        if not res.ok:
+            return res.text
+        response = _gh_json(res, dict) or {}
+        jobs = response.get("jobs")
+        location = _repo_from_url(response.get("url"))
+        if (_whole(response.get("databaseId")) != run_id or not location or "/".join(location).casefold() != repo.casefold()
+                or not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs)):
+            return _refuse(ctx, f"⚠️ TOOL_ERROR: GitHub returned no readable jobs for run {run_id} "
+                                f"attempt {attempt_read}.", "TOOL_ERROR")
+    else:
+        jobs = []
+    item = read.project({**run, "jobs": jobs} if read.detail == "full" else run)
     if "log" not in include:
         return _completed_read(read, f"GitHub Actions run — {owner}/{name} run {run_id} attempt {attempt_read}\n" + _run_line(run),
                                {"item": item, "complete": True, "next_cursor": ""})
-    jobs = [job for job in run.get("jobs") or [] if isinstance(job, dict)]
     job = None
     if job_id:
         job = next((item for item in jobs if _whole(item.get("databaseId")) == job_id), None)
@@ -174,39 +206,55 @@ def get_run(read) -> str:
         return _refuse(ctx, f"⚠️ TOOL_ERROR: run {run_id} attempt {attempt_read} in {owner}/{name} is {status}; GitHub "
                             "serves the log of a completed run only, so no log was requested.", "TOOL_ERROR")
 
-    # Pinned to the attempt the metadata read observed: a re-run between the two reads cannot swap the bytes.
-    log_args = ["run", "view"] + ([] if job_id else [str(run_id)]) + ["--log-failed" if failed_only else "--log"]
-    log_args += (["--job", str(job_id)] if job_id else []) + ["--attempt", str(attempt_read)]
+    if status != "completed":
+        if failed_only:
+            return _refuse(ctx, f"⚠️ TOOL_ERROR: job {job_id} is completed but run {run_id} is {status}. REST serves "
+                                "the full job log. For --log-failed wait for the run, or request the full log explicitly.",
+                           "TOOL_ERROR")
+        log_args = ["api", f"repos/{owner}/{name}/actions/jobs/{job_id}/logs", "--hostname", host, "--include"]
+        # Older gh streams raw stdout; newer gh requires an explicit opt-in for escape sequences.
+        help_result = _gh_run(["api", "--help"], ctx, repo=repo)
+        if not help_result.ok:
+            return help_result.text
+        if "--allow-escape-sequences" in help_result.text:
+            log_args.append("--allow-escape-sequences")
+        source = "gh " + " ".join(log_args)
+        log_format, selection = "rest_job_log", "full REST job log"
+    else:
+        log_args = ["run", "view"] + (["--job", str(job_id)] if job_id else [str(run_id)])
+        log_args += ["--log-failed" if failed_only else "--log", "--attempt", str(attempt_read)]
+        source = "gh " + " ".join([*log_args, "--repo", repo])
+        log_format = "plain_text_stdout"
+        selection = ("gh --log-failed (step attribution unverified; can include successful or UNKNOWN STEP lines)"
+                     if failed_only else "full run/job log (--log)")
     with tempfile.TemporaryDirectory(prefix="gh-run-log-") as tmp:
         res = _gh_run(log_args, ctx, timeout=_LOG_TIMEOUT, repo=repo, capture_to=pathlib.Path(tmp) / "log.bin", max_bytes=cap)
         if not res.ok:
             if failed_only:
                 return _refuse(ctx, f"⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output; no REST "
-                                    f"fallback was used and the failed-step log was not captured: {res.text}", "TOOL_ERROR")
-            return res.text
+                                    f"fallback was used. {_log_text(res.text)}", "TOOL_ERROR")
+            return _log_text(res.text)
         capture = res.capture
         data = capture.path.read_bytes()
 
-    source = " ".join(["gh", *log_args] + (["--repo", repo] if repo else []))
     head = [f"GitHub Actions log — {owner}/{name} run {run_id} attempt {attempt_read}"
             + (f", job {job_id} {_one_line(job.get('name'), 80)} ({_check_state(job)})" if job else ""),
             _run_line(run),
             f"Source: {source}; captured {capture.size} bytes exactly" + (
                 f"; the {cap}-byte cap ended the capture: the log is longer and this is its first {capture.size} bytes"
                 if capture.truncated else ""),
-            "Format: gh CLI plain-text stdout; selection: "
-            + ("failed steps only (--log-failed)" if failed_only else "full run/job log (--log)")
-            + "; retained bytes are exact (the bounded preview decodes UTF-8 with replacement and normalizes CRLF)."]
+            f"Format: {'HTTP response body' if log_format == 'rest_job_log' else 'exact gh stdout'}; selection: {selection}. Preview decodes UTF-8 with replacement and escapes controls."]
+    head = [_log_text(line) for line in head]
     payload = {"item": item, "complete": not capture.truncated, "next_cursor": "",
                "capture": {"bytes": capture.size, "sha256": capture.sha256, "truncated": capture.truncated,
-                           "source": source, "format": "plain_text_stdout", "failed_only": failed_only,
+                           "source": source, "format": log_format, "selection": selection, "failed_only": failed_only,
+                           "host": host, "repo": f"{owner}/{name}", "max_bytes": cap,
                            "run_id": run_id, "attempt": attempt_read, "job_id": job_id or None,
                            "job_status": (str(job.get("status") or "unknown").lower() if job else None)}}
     if capture.truncated:
-        read.omitted.append(f"log exceeds max_bytes={cap}; retained only its first {capture.size} bytes")
+        read.omitted.append(f"log exceeded max_bytes={cap}; only its first {capture.size} bytes were captured")
     if not data:
-        head.append("The log is empty: " + ("GitHub lists no failed step here, so --log-failed prints nothing."
-                                           if failed_only else "gh printed no log line.") + " Nothing was retained.")
+        head.append("gh returned zero log bytes. Nothing was retained.")
         return _completed_read(read, "\n".join(head), payload)
     ref = _retain(ctx, source_id=f"gh-run-{run_id}-attempt-{attempt_read}" + (f"-job-{job_id}" if job_id else "")
                   + ("-failed" if failed_only else "") + "-log", data=data, extension="log")
@@ -222,15 +270,19 @@ def get_run(read) -> str:
     counts = f"Lines: {len(lines)}; showing the last {{shown}} (each clipped to {_LINE_CLIP} chars)."
     room = tool_result_limit("github_read") - _RESULT_MARGIN - sum(len(line) + 1 for line in head) - len(counts) - 8
     shown: List[str] = []
+    clipped_any = False
     for line in reversed(lines[-tail:]):
-        clipped = line if len(line) <= _LINE_CLIP else line[:_LINE_CLIP - 1] + "…"
+        clipped = _log_text(line[:_LINE_CLIP])
+        if max(len(line), len(clipped)) > _LINE_CLIP:
+            clipped = clipped[:_LINE_CLIP - 1] + "…"
+            clipped_any = True
         if len(clipped) + 1 > room:
             break
         room -= len(clipped) + 1
         shown.append(clipped)
     shown.reverse()
     payload["capture"].update(lines=len(lines), shown_lines=len(shown))
-    if len(shown) < len(lines) or any(len(line) > _LINE_CLIP for line in lines[-tail:]):
+    if len(shown) < len(lines) or clipped_any:
         read.omitted.append(f"log preview shows {len(shown)} of {len(lines)} lines, each clipped to {_LINE_CLIP} chars; read the retained bytes")
     result = "\n".join(head + [counts.format(shown=len(shown)), "---", *shown])
     return _incomplete_read(read, result, payload) if isinstance(ref, str) else _completed_read(read, result, payload)
@@ -246,7 +298,7 @@ def list_artifacts(read) -> str:
     page = page or 1  # An omitted page is the first.
     if page < 1:
         return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: cursor starts at page 1.", no_effect=True)
-    resolved, error = _resolve_run(ctx, run_id, 0, repo, _RUN_ARTIFACT_FIELDS, require_attempt=False)
+    resolved, error = _resolve_run(ctx, run_id, 0, repo, require_attempt=False)
     if resolved is None:
         return error
     run, (host, owner, name), _ = resolved

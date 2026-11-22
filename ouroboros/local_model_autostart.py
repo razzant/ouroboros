@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import logging
 
+from ouroboros import local_model
+
 log = logging.getLogger(__name__)
 
 
-def auto_start_local_model(settings: dict) -> None:
-    """Start local model in background after runtime preflight."""
+def auto_start_local_model(settings: dict, *, grant: str | None = None) -> None:
+    """Start local model in background after runtime preflight.
+
+    ``grant`` is boot's receipt for this Start (``server_runtime.local_model_boot_decision``): once a Stop has revoked
+    it, the manager refuses the Start and nothing is launched."""
     try:
-        from ouroboros.local_model import get_manager, _get_runtime_hint, local_model_settings
-
-        mgr = get_manager()
-        if mgr.is_running:
-            return
-
         source = str(settings.get("LOCAL_MODEL_SOURCE", "")).strip()
         filename = str(settings.get("LOCAL_MODEL_FILENAME", "")).strip()
         if not source:
@@ -27,32 +26,16 @@ def auto_start_local_model(settings: dict) -> None:
             return
         port = int(settings.get("LOCAL_MODEL_PORT", 8766))
         n_gpu_layers = int(settings.get("LOCAL_MODEL_N_GPU_LAYERS", 0))
-        n_ctx = int(local_model_settings(settings)["LOCAL_MODEL_CONTEXT_LENGTH"])
+        n_ctx = int(local_model.local_model_settings(settings)["LOCAL_MODEL_CONTEXT_LENGTH"])
         chat_format = str(settings.get("LOCAL_MODEL_CHAT_FORMAT", "")).strip()
 
-        if not mgr.check_runtime():
-            hint = _get_runtime_hint()
-            log.warning(
-                "Local model auto-start skipped: llama-cpp-python is not installed. "
-                "Install with: %s",
-                hint,
-            )
-            mgr._status = "error"
-            mgr._error = (
-                f"llama-cpp-python is not installed. Install with: {hint}"
-            )
-            return
-
-        log.info("Auto-starting local model: %s / %s", source, filename)
-        model_path = mgr.download_model(source, filename)
-        mgr.start_server(
-            model_path,
-            port=port,
-            n_gpu_layers=n_gpu_layers,
-            n_ctx=n_ctx,
-            chat_format=chat_format,
-            source=source, filename=filename,
-        )
-        log.info("Local model auto-started successfully")
+        local_model.get_manager().start_model(source, filename, port=port, n_gpu_layers=n_gpu_layers,
+                                              n_ctx=n_ctx, chat_format=chat_format, grant=grant)
+        log.info("Local model auto-start launched the server for %s / %s", source, filename)
+    except local_model.LocalModelStartConflict:
+        return
+    except local_model.LocalRuntimeMissing as exc:
+        hint = f"\nManual install: {exc.hint}" if exc.hint else ""
+        log.warning("Local model auto-start skipped. %s%s", exc, hint)
     except Exception as exc:
         log.warning("Local model auto-start failed: %s", exc)

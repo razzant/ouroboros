@@ -62,6 +62,7 @@ MODEL_ROUTE_OPTION_KEYS = (
 
 # Active projection used by every NEW run manifest and preflight. Heavy is not an
 # execution slot after Available subagents and must not leak in from ambient env/settings.
+EFFORT_SLOT_KEY = "OUROBOROS_EFFORT_TASK"
 ACTIVE_MODEL_SLOT_KEYS = (
     "OUROBOROS_MODEL",
     "OUROBOROS_MODEL_LIGHT",
@@ -72,7 +73,7 @@ ACTIVE_MODEL_SLOT_KEYS = (
     "OUROBOROS_WEBSEARCH_MODEL",
     # The review pool is the marked rows of the roster (OUROBOROS_SUBAGENTS); the
     # roster is projected separately (``available_subagents``), not as a slot.
-    "OUROBOROS_EFFORT_TASK",
+    EFFORT_SLOT_KEY,
     *MODEL_ROUTE_OPTION_KEYS,
 )
 
@@ -430,6 +431,10 @@ def model_slot_snapshot(settings_path: pathlib.Path | None = None, *,
     is handed the settings FILE and a fresh environment, so the launcher's own env is not part
     of its configuration at all and must not be reported as if it were: pass ``False`` there.
     """
+    return _model_slots(_slot_settings(settings_path), env_overrides)
+
+
+def _slot_settings(settings_path: pathlib.Path | None) -> dict[str, Any]:
     settings: dict[str, Any] = {}
     if settings_path and pathlib.Path(settings_path).exists():
         try:
@@ -438,6 +443,10 @@ def model_slot_snapshot(settings_path: pathlib.Path | None = None, *,
                 settings = loaded
         except Exception:
             settings = {}
+    return settings
+
+
+def _model_slots(settings: Mapping[str, Any], env_overrides: bool) -> dict[str, str]:
     slots: dict[str, str] = {}
     for key in ACTIVE_MODEL_SLOT_KEYS:
         value = os.environ.get(key) if env_overrides else None
@@ -679,14 +688,22 @@ def benchmark_run_manifest(
     metadata: dict[str, Any] | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Build the shared benchmark run manifest AND run the seed-provenance gate.
+    """Build the shared benchmark run manifest AND run its admission gates.
+
+    Launchers that submit a main effort tier opt in to resolving it at admission; descriptive
+    manifests (including prediction exports) keep the operator's original slot spelling.
 
     Callers must build this ONCE, as early as possible (right after argument parsing or
     readiness) and keep the returned dict: it is the gate that stops an unreproducible run
     BEFORE the first paid task, then the same dict is augmented and written at the end.
     Parameter budget note: this signature sits exactly on the 8-parameter cap asserted by
     ``tests/test_devtools_benchmarks.py`` — further knobs ride through ``metadata`` /
-    ``**overrides``, never as new parameters.
+    ``**overrides``, never as new parameters. The ones that decide which ACTOR the first write
+    names: ``model_slot_overrides`` (slots the generated job pins), ``forwarded_model_slot_keys``
+    (only these host env/settings slots survive the snapshot), ``container_model`` (resolve the
+    container roster here, adapter precedence, and name the host session seats it leaves out as
+    ``extra.triad_rows_not_executable_in_container``) and ``available_subagents`` (a caller-owned
+    serialized roster, for a launcher pinning its own child environment).
 
     A refusal raises ``BenchmarkAdmissionRefused`` (a ``RuntimeError``) only once the COMPLETE
     manifest exists, and carries it on the exception: prefer ``admit_benchmark_run()``, which
@@ -710,6 +727,22 @@ def benchmark_run_manifest(
     settings_authoritative_env = meta.get("settings_authoritative_env", False)
     if not isinstance(settings_authoritative_env, bool):
         raise ValueError("settings_authoritative_env metadata must be a boolean")
+    settings = _slot_settings(meta_settings_path)
+    # The EFFECTIVE actor this run will execute, resolved BEFORE the manifest exists: slots the
+    # generated job pins ride ``model_slot_overrides``, and ``forwarded_model_slot_keys`` keeps
+    # out of the first durable write every host value the run does not really forward. Without
+    # them the first write — and every refusal payload — names the ambient host settings
+    # instead of the actor the job actually runs.
+    model_slots = _model_slots(settings, not settings_authoritative_env)
+    forwarded_slot_keys = meta.get("forwarded_model_slot_keys")
+    if forwarded_slot_keys is not None:
+        allowed = {str(key) for key in forwarded_slot_keys}
+        model_slots = {key: value for key, value in model_slots.items() if key in allowed}
+    model_slots.update({
+        str(key): str(value)
+        for key, value in dict(meta.get("model_slot_overrides") or {}).items()
+        if str(value).strip()
+    })
     source = repo_provenance(repo_dir)
     gate = _seed_gate(source, require_clean=require_clean, expect=str(expect or ""))
     manifest: dict[str, Any] = {
@@ -726,10 +759,7 @@ def benchmark_run_manifest(
         "timeout_sec": meta.get("timeout_sec"),
         "isolated_data_root": str(meta.get("isolated_data_root") or ""),
         "output_paths": meta.get("output_paths") or {},
-        "model_slots": model_slot_snapshot(
-            meta_settings_path,
-            env_overrides=not settings_authoritative_env,
-        ),
+        "model_slots": model_slots,
         "provider_credentials": provider_credential_disclosure(
             meta_settings_path,
             include_claude_sdk_defaults=include_claude_sdk_defaults,
@@ -739,6 +769,60 @@ def benchmark_run_manifest(
         "extra": meta.get("extra") or {},
     }
     refusal = _seed_gate_refusal(gate, source)
+    stage, reason = "seed_gate", str(gate["reason"])
+    if meta.get("pin_main_effort") is True:
+        from devtools.benchmarks.common.model_slots import benchmark_main_effort
+
+        try:
+            manifest["model_slots"][EFFORT_SLOT_KEY] = benchmark_main_effort(
+                settings, env_overrides=not settings_authoritative_env, pin_default=True,
+            )
+        except ValueError as exc:
+            manifest["model_slots"].pop(EFFORT_SLOT_KEY, None)
+            # A seed refusal must not leave an unvalidated raw tier in the record;
+            # its original stage remains primary.
+            if not refusal:
+                stage, reason, refusal = "main_effort", str(exc), str(exc)
+    roster_declaration = meta.get("available_subagents")
+    container_model = str(meta.get("container_model") or "")
+    if roster_declaration is None and container_model:
+        from devtools.benchmarks.common.model_slots import container_subagents_setting, host_pool_session_targets
+
+        # The roster the container will run, resolved with the adapter's own env-then-settings
+        # precedence and BEFORE the first write, so a refusal names it too. A caller that owns
+        # the execution mapping (a launcher pinning its own child environment) passes the
+        # roster itself through ``available_subagents`` instead.
+        subagents_key = "OUROBOROS_SUBAGENTS"
+        raw_roster = None if settings_authoritative_env else os.environ.get(subagents_key)
+        if raw_roster is None:
+            raw_roster = settings.get(subagents_key)
+        try:
+            # The session seats that roster leaves out, parsed from the SAME raw value: the
+            # launcher declares them from this record and never re-reads Settings for them.
+            excluded_seats = host_pool_session_targets(raw_roster)
+            roster_declaration = container_subagents_setting(container_model, raw_roster)
+        except ValueError as exc:
+            # An invalid roster is never published as if it were an effective actor; the
+            # launcher's established refusal vocabulary carries it instead.
+            if not refusal:
+                stage, reason, refusal = "leaderboard_metadata", str(exc), str(exc)
+        else:
+            manifest["extra"] = {**(manifest["extra"] if isinstance(manifest["extra"], dict) else {}),
+                                 "triad_rows_not_executable_in_container": excluded_seats}
+    if roster_declaration is not None:
+        manifest["available_subagents"] = (
+            json.loads(roster_declaration) if str(roster_declaration).strip() else {}
+        )
+    if meta.get("container_lane_keys"):
+        from ouroboros.route_choice import box_checked, following_route
+
+        # Use the adapter's env-then-settings precedence and the real blank-Light rule.
+        lanes = {}
+        for key in meta["container_lane_keys"]:
+            raw = None if settings_authoritative_env else os.environ.get(key)
+            lanes[key] = box_checked(settings.get(key) if raw is None else raw)
+        _, lanes["USE_LOCAL_LIGHT"] = following_route("light", read={**model_slots, **lanes}.get)
+        manifest["extra"] = {**manifest["extra"], "admitted_local_lanes": lanes}
     if refusal:
         # The refused payload speaks the same terminal vocabulary as `finalize_run_manifest`, so
         # a refusal and a completed run are read the same way by whoever audits the sidecar.
@@ -746,7 +830,7 @@ def benchmark_run_manifest(
             **(manifest["extra"] if isinstance(manifest["extra"], dict) else {}),
             "outcome": "refused",
             "exit_code": 1,
-            "refusal": {"stage": "seed_gate", "reason": str(gate["reason"]), "exit_code": 1},
+            "refusal": {"stage": stage, "reason": reason, "exit_code": 1},
         }
         raise BenchmarkAdmissionRefused(refusal, manifest)
     return manifest

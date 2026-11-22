@@ -462,7 +462,7 @@ def test_effects_at_the_reader_boundary_keep_running_actor_facts(clock, isolated
     else:
         manager = local_model.LocalModelManager()
         monkeypatch.setattr(local_model, "get_manager", lambda: manager)
-        monkeypatch.setattr(manager, "get_status", lambda: "ready")
+        manager._status = "ready"
         manager._applied_settings = local_model.local_model_settings(initial)
         key, value = ("OUROBOROS_HOST_SERVICE_PORT", 8768) if case == "restart" else ("LOCAL_MODEL_CONTEXT_LENGTH", 32768)
         assert setting_effect(key) == case

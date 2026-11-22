@@ -478,6 +478,77 @@ test('the API section is badged by what is entered: a key or a local model reads
     assert.match(html, /data-collapse="api-access"\s+open>/);
 });
 
+test('a missing local runtime in setup offers installation only for an ordinary deployment', async () => {
+    for (const [kind, deployment] of [['ordinary', null], ['managed', { access_max: 'pro' }], ['unknown', undefined]]) {
+        const bootstrap = { ...BOOTSTRAP, deployment, supportsLocalRuntimeControls: true,
+            initialState: { ...BOOTSTRAP.initialState, localSource: '/models/test.gguf' } };
+        const requests = [];
+        const fetch = async (url, init = {}) => {
+            if (init.method === 'POST' && String(url).startsWith('/api/local-model/')) requests.push(String(url));
+            if (url === '/api/local-model/start') return { status: 412, json: async () => ({
+                error: 'runtime_missing', message: 'The server import failed.', hint: 'pip install fixture',
+            }) };
+            return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+        };
+        await withWizard(bootstrap, `local-missing=${kind}`, async ({ doc }) => {
+            doc.getElementById('wizard-local-start').fire('click');
+            await settle();
+            assert.deepEqual(requests, ['/api/local-model/start']);
+            const message = doc.getElementById('wizard-local-test-result').textContent;
+            if (kind === 'ordinary') assert.match(message, /Install it in Settings.*\nBy hand: pip install fixture/);
+            else {
+                assert.match(message, /runtime is unavailable/);
+                assert.equal(message.includes('Your administrator installs and updates the local runtime.'), kind === 'managed');
+                assert.doesNotMatch(message, /Install it|By hand|pip install/);
+            }
+        }, { fetch });
+    }
+});
+
+test('the wizard names an installing runtime, holds Start and leaves Stop for the installer', async () => {
+    const bootstrap = { ...BOOTSTRAP, supportsLocalRuntimeControls: true,
+        initialState: { ...BOOTSTRAP.initialState, localSource: '/models/test.gguf' } };
+    const fetch = async (url) => ({ ok: true, status: 200, text: async () => '', json: async () => (
+        url === '/api/local-model/status' ? { status: 'error', error_stage: 'startup_exit', runtime_status: 'installing',
+            error: 'Server process exited during startup (code 1)' } : {}) });
+    await withWizard(bootstrap, 'local-installing', async ({ doc }) => {
+        await settle();
+        const status = doc.getElementById('wizard-local-status');
+        assert.equal(status.textContent, 'Status: Installing the local runtime…', 'the installer outranks the exit it follows');
+        assert.equal(status.dataset.tone, 'muted');
+        assert.equal(doc.getElementById('wizard-local-start').disabled, true);
+        assert.equal(doc.getElementById('wizard-local-stop').disabled, false, 'Stop is what cancels the installer');
+    }, { fetch });
+});
+
+test('a Start reply that arrives after the wizard pressed Stop says nothing', async () => {
+    const bootstrap = { ...BOOTSTRAP, supportsLocalRuntimeControls: true,
+        initialState: { ...BOOTSTRAP.initialState, localSource: '/models/test.gguf' } };
+    const posts = [];
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const fetch = async (url, init = {}) => {
+        if (init.method === 'POST') posts.push(String(url));
+        if (url === '/api/local-model/start') {
+            await held;
+            return { ok: false, status: 409, json: async () => ({ error: 'Local model startup cancelled by Stop' }) };
+        }
+        return { ok: true, status: 200, text: async () => '', json: async () => (
+            url === '/api/local-model/status' ? { status: 'downloading', download_progress: 0.1, runtime_status: 'ok' } : { status: 'stopped' }) };
+    };
+    await withWizard(bootstrap, 'local-stop-then-late-start', async ({ doc }) => {
+        await settle();
+        doc.getElementById('wizard-local-start').fire('click');
+        await settle();
+        doc.getElementById('wizard-local-stop').fire('click');
+        await settle();
+        release();
+        await settle();
+        assert.deepEqual(posts, ['/api/local-model/start', '/api/local-model/stop']);
+        assert.equal(doc.getElementById('wizard-local-test-result').textContent, '', 'a cancellation the owner asked for is no failure');
+    }, { fetch });
+});
+
 test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {
     const lost = completionServer({ posted: new TypeError('Failed to fetch') });
     await withWizard(SUMMARY_FIRST, 'save=reply-lost', async ({ doc }) => {

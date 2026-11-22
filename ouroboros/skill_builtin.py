@@ -498,8 +498,13 @@ def _skills_needing_work(drive: pathlib.Path, names: Optional[List[str]], logger
     unknown = False
     for skill in found:
         try:
-            if _wants_lifecycle_work(drive, skill) and (
-                    skill_deps_not_ready(drive, skill, strict=True)[1] or _requested_on(drive, skill)):
+            if not _wants_lifecycle_work(drive, skill):
+                continue
+            deps_status, reason = skill_deps_not_ready(drive, skill, strict=True)
+            if deps_status == "unreadable":
+                unknown = True
+                logger.warning("Skill %s dependency state could not be read", skill.name)
+            elif reason or _requested_on(drive, skill):
                 pending.append(skill.name)
         except Exception:
             unknown = True

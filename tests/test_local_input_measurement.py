@@ -84,6 +84,39 @@ def test_unrecognized_handler_is_not_called_to_guess_its_behavior(native_model):
     assert not result["output_limit_enforced"] and native_model.seen == []
 
 
+@pytest.mark.parametrize("launch_id", [None, "fixture-launch"])
+def test_owned_model_list_adds_only_its_launch_header(monkeypatch, launch_id):
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER, with_launch_identity
+
+    if launch_id is None:
+        monkeypatch.delenv(LOCAL_LAUNCH_ENV, raising=False)
+    else:
+        monkeypatch.setenv(LOCAL_LAUNCH_ENV, launch_id)
+    models = {"object": "list", "data": [{"id": "fixture"}]}
+
+    async def catalogue(request):
+        return JSONResponse(models, status_code=int(request.query_params.get("status", 200)))
+
+    app = with_launch_identity(Starlette(routes=[
+        Route("/v1/models", catalogue, methods=["GET", "POST"]), Route("/other", catalogue),
+    ]))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+            reply = await client.get("/v1/models")
+            assert reply.status_code == 200 and reply.json() == models
+            assert reply.headers.get(LOCAL_LAUNCH_HEADER) == launch_id
+            for other in (await client.post("/v1/models"), await client.get("/other"),
+                          await client.get("/v1/models", params={"status": 503})):
+                assert LOCAL_LAUNCH_HEADER not in other.headers
+
+    asyncio.run(run())
+
+
 def test_count_waits_for_generation_without_using_its_interrupt_lock(native_model, monkeypatch):
     FastAPI = pytest.importorskip("fastapi").FastAPI
     server = pytest.importorskip("llama_cpp.server.app")

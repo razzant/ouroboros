@@ -705,8 +705,7 @@ class PluginAPIImpl:
         *,
         schema: Dict[str, Any],
     ) -> None:
-        """Validate and register a declarative Settings UI section."""
-        # Settings sections share the widget permission and host-rendered schema.
+        """Validate and register a declarative Settings section under the ``widget`` permission."""
         self._require("widget")
         clean_id = _assert_tool_name(section_id)
         key = f"{self._skill}:{clean_id}"

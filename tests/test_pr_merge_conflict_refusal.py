@@ -21,6 +21,7 @@ import pytest
 from ouroboros.task_results import load_task_result
 from ouroboros.tools import github
 from ouroboros.tools.registry import ToolContext
+from tests._github_process import stub_gh
 from tests.test_batch4_producer_custody import _consumers
 from tests.test_pr_merge_receipts import HEAD, MERGE, ROUTE, URL, FakeGh, sent
 
@@ -52,7 +53,7 @@ def _classify(tmp_path, monkeypatch, rc, stdout, stderr):
         seen.append((argv, kw.get("input")))
         return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
 
-    monkeypatch.setattr(github.subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     monkeypatch.setattr(github, "_gh_env", lambda _ctx: {})
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "")
     result = github._merge_answer(github._gh_run(SEND, ctx, input_data="{}"))
@@ -106,7 +107,7 @@ def test_a_merge_timeout_is_never_a_refusal(tmp_path, monkeypatch):
     def run(argv, **_kw):
         raise subprocess.TimeoutExpired(argv, 120)
 
-    monkeypatch.setattr(github.subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     monkeypatch.setattr(github, "_gh_env", lambda _ctx: {})
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="task-fixture")
     assert github._merge_answer(github._gh_run(SEND, ctx, input_data="{}")).failure == "timeout"
@@ -151,13 +152,13 @@ def chain(tmp_path, monkeypatch):
                 answered = answered[1:]
             rc, stdout, stderr = answered
             return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
-        if args[:2] == ["pr", "view"] and state.merges and state.observe:
+        if args[:2] == ["api", "graphql"] and state.merges and state.observe:
             state.observed.append(state.observe())  # a parallel reader while the handler still reads back
         result = fake(args, registry._ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0 if result.ok else 1, stdout=result.text if result.ok else "",
                                stderr="" if result.ok else result.text)
 
-    monkeypatch.setattr(github.subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     monkeypatch.setattr(github, "_gh_env", lambda _ctx: {})
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "")
     monkeypatch.setattr(github, "github_cli_configured", lambda: True)
@@ -620,17 +621,48 @@ def test_a_crash_after_githubs_durable_refusal_clears_without_running_the_handle
     assert retained_tool_custody(tmp_path, "root", load_task_result(tmp_path, "root")) == []
 
 
+def test_a_legacy_receipt_arriving_after_precheck_refuses_the_locked_claim(chain, monkeypatch):
+    from ouroboros import merge_receipts
+
+    write = merge_receipts.write_receipt
+    inserted = []
+
+    def before_claim(root, task_id, receipt, **kw):
+        if kw.get("claim"):
+            inserted.append(write(root, task_id, {
+                "schema": 1, "receipt_id": "legacy", "state": "settled", "repo": {"url": URL}, "number": 7,
+                "launch_operation_ids": ["op-old"], "requested": {"method": "squash", "expected_head_sha": HEAD},
+                "effect": {"ok": False, "failure": "timeout"}, "outcome": {"status": "unknown"}}))
+        return write(root, task_id, receipt, **kw)
+
+    monkeypatch.setattr(merge_receipts, "write_receipt", before_claim)
+    out = _merge(chain, HEAD)
+    assert "receipt_identity_unreadable" in out.text and "receipt_id=legacy" in out.text
+    assert out.meta["operation_outcome"] == "completed_no_effect"
+    assert len(inserted) == 1 and _receipts(chain) == inserted
+    assert not chain.merges and not any("PATCH" in c for c in chain.fake.calls)
+    assert _held(chain)
+
+
+_BOUND_PR = {"url": URL, "pr_node_id": "PR_7"}
+
+
+@pytest.mark.parametrize("bound", [True, False], ids=["known-node", "url-only"])
 @pytest.mark.parametrize("other,released", [
-    ({"repo": {"url": URL}, "outcome": {"status": "merged"}}, True),
-    ({"repo": {"url": URL}, "outcome": {"status": "merged"}, "effect": {"ok": False, "failure": "server_refused"}}, True),
-    ({"repo": {"url": URL}, "outcome": {"status": "queued", "reason": "auto_merge_pending"}}, False),
-    ({"repo": {"url": URL}, "outcome": {"status": "refused"}, "effect": {"ok": False, "failure": "server_refused"}},
-     False),
-    ({"repo": {"url": URL}, "outcome": {"status": "unknown", "reason": "pr_state_closed"}}, False),
-    ({"repo": {"url": URL.replace("/pull/7", "/pull/8")}, "outcome": {"status": "merged"}}, False),
-    ({"repo": {"url": "https://github.com/octo/other/pull/7"}, "outcome": {"status": "merged"}}, False),
-], ids=["merged", "merged-by-another-request", "queued", "refused", "closed", "other-pr", "other-repository"])
-def test_only_a_merged_readback_of_the_same_pr_in_the_same_task_ends_an_unconfirmed_hold(tmp_path, other, released):
+    ({"repo": _BOUND_PR, "outcome": {"status": "merged"}}, True),
+    ({"repo": {**_BOUND_PR, "url": "https://github.com/octo/renamed/pull/7"}, "outcome": {"status": "merged"},
+      "effect": {"ok": False, "failure": "server_refused"}}, True),
+    ({"repo": {"url": URL}, "outcome": {"status": "merged"}}, False),
+    ({"repo": {**_BOUND_PR, "pr_node_id": "PR_other"}, "outcome": {"status": "merged"}}, False),
+    ({"repo": _BOUND_PR, "outcome": {"status": "queued", "reason": "auto_merge_pending"}}, False),
+    ({"repo": _BOUND_PR, "outcome": {"status": "refused"}, "effect": {"ok": False, "failure": "server_refused"}}, False),
+    ({"repo": _BOUND_PR, "outcome": {"status": "unknown", "reason": "pr_state_closed"}}, False),
+    ({"repo": {**_BOUND_PR, "url": URL.replace("/pull/7", "/pull/8")}, "outcome": {"status": "merged"}}, False),
+    ({"repo": {**_BOUND_PR, "url": URL.replace("github.com", "github.example.test")},
+      "outcome": {"status": "merged"}}, False),
+], ids=["merged", "moved-merged-by-another-request", "legacy-merge", "different-node", "queued", "refused", "closed",
+        "other-pr", "other-host"])
+def test_only_a_merged_readback_of_the_same_pr_in_the_same_task_ends_an_unconfirmed_hold(tmp_path, other, released, bound):
     """The custody projection reads facts it is given and rewrites nothing; a live call stays its own blocker."""
     from ouroboros import merge_receipts
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
@@ -639,7 +671,9 @@ def test_only_a_merged_readback_of_the_same_pr_in_the_same_task_ends_an_unconfir
     write_task_result(tmp_path, "root", STATUS_RUNNING, root_task_id="root", delegation_role="root", launch_handoffs={
         "op-live": {"tool": "pr_merge", "task_id": "root", "root_task_id": "root", "claimed_at": "t",
                     "state": "claimed", "local_owner": {}, "owner_proof": {}}})
-    unknown = {"schema": 1, "receipt_id": "a", "state": "settled", "repo": {"url": URL}, "number": 7,
+    released = released and bound
+    unknown = {"schema": 1, "receipt_id": "a", "state": "settled",
+               "repo": _BOUND_PR if bound else {"url": URL}, "number": 7,
                "launch_operation_ids": ["op-a"], "requested": {"method": "squash", "expected_head_sha": HEAD},
                "effect": {"ok": False, "failure": "exit", "http_status": 502},
                "outcome": {"status": "unknown", "reason": "pr_state_open_after_unconfirmed_effect"}}

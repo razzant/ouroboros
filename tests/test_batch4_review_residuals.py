@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._github_process import stub_gh
 from tests.test_batch4_full_repair import _park
 from tests.test_batch4_producer_custody import _registry
 
@@ -38,21 +39,19 @@ def _github_task(tmp_path, monkeypatch, target):
             return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected", "url": "https://github.example/owner/selected"}), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
-    return registry, queue, workers, launched
+    return registry, queue, workers, launched, run
 
 
-@pytest.mark.parametrize("second", ["unavailable", "folderless"])
+@pytest.mark.parametrize("second", ["unavailable", "folderless", "start_failed"])
 def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tmp_path, monkeypatch, second):
     """A second subcall's target refusal cannot claim no effect for the already-launched first one."""
     import json
 
     from ouroboros.task_results import load_task_result
 
-    registry, queue, workers, launched = _github_task(tmp_path, monkeypatch, "workspace")
+    registry, queue, workers, launched, fake = _github_task(tmp_path, monkeypatch, "workspace")
     ctx, workspace = registry._ctx, registry._ctx.workspace_root
     ctx.task_metadata = {}
-    fake = subprocess.run
 
     def read_then_lose_target(argv, *args, **kwargs):
         if argv[:1] == ["gh"] and argv[1:3] == ["repo", "view"]:
@@ -62,17 +61,22 @@ def test_later_refusal_keeps_prior_effect_unknown_but_closes_local_invocation(tm
             launched.append(argv[1:3])
             if second == "unavailable":
                 workspace.rmdir()
-            else:
+            elif second == "folderless":
                 ctx.workspace_mode, ctx.workspace_root, ctx.project_id = "", None, "project-folderless"
             return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
                 {"number": 7, "title": "x", "state": "open", "html_url": "https://github.example/owner/selected/pull/7"}))
         return fake(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", read_then_lose_target)
+    def start(argv, **kwargs):
+        if second == "start_failed" and len(launched) == 2:
+            raise FileNotFoundError(2, "missing")
+
+    stub_gh(monkeypatch, read_then_lose_target, start=start)
     result = registry.execute_result("github_read", {"method": "get", "kind": "pr", "target": 7, "include": ["diff"], "repo": ""})
 
     assert launched == [["repo", "view"], ["api", "repos/owner/selected/pulls/7"]]
-    assert "GH_TARGET_" in result.text and result.status != "ok", result
+    marker = "GH_ERROR" if second == "start_failed" else "GH_TARGET_"
+    assert marker in result.text and result.status != "ok", result
     assert result.meta.get("operation_outcome") != "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})
     _park(tmp_path, monkeypatch, queue, workers)

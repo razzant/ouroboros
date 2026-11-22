@@ -41,6 +41,7 @@ from ouroboros.configured_subagents import (
     serialize_configured_subagents,
 )
 from ouroboros.provider_models import provider_for_model
+from ouroboros.settings_scales import requested_effort
 from ouroboros.reviewer_slot_config import ROUTE_KIND_API as REVIEWER_ROUTE_KIND_API
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION,
@@ -49,7 +50,7 @@ from ouroboros.route_spec import (
     route_spec_dict,
 )
 
-from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS, MODEL_ROUTE_OPTION_KEYS, MODEL_SLOT_KEYS
+from devtools.benchmarks.common.manifests import ACTIVE_MODEL_SLOT_KEYS, EFFORT_SLOT_KEY, MODEL_ROUTE_OPTION_KEYS, MODEL_SLOT_KEYS
 
 # Every model slot a single-model run pins. Superset that is correct for both the
 # settings.json-profile path (SWE-bench Pro) and the forwarded-env path
@@ -80,6 +81,24 @@ _ACTIVE_LOCAL_ROUTE_KEYS = (
     "USE_LOCAL_FALLBACK",
     "USE_LOCAL_CONSCIOUSNESS",
 )
+
+
+def benchmark_main_effort(settings: Mapping[str, Any], *, declared: Any = None,
+                          env_overrides: bool = True, pin_default: bool = False) -> str:
+    """Resolve a Harbor main tier: declaration, nonblank environment, saved setting."""
+    ambient = os.environ.get(EFFORT_SLOT_KEY) if env_overrides else None
+    for value in (declared, ambient, settings.get(EFFORT_SLOT_KEY)):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        try:
+            return requested_effort(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {EFFORT_SLOT_KEY}: {exc}") from exc
+    if pin_default:
+        from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+        return requested_effort(SETTINGS_DEFAULTS[EFFORT_SLOT_KEY])
+    return ""
 
 
 def _benchmark_actor(model: str) -> ConfiguredSubagent:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+import json
+from unittest.mock import Mock, patch
+
+import pytest
 
 from ouroboros import project_naming
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
@@ -15,6 +18,66 @@ class _ScopedNamingClient:
     def chat(self, **_kwargs):
         self.captured.append(current_usage_scope())
         return {"content": "Scoped title"}, {"cost": 0.25}
+
+
+_MAIN = "openai@absent::main"
+_CLOUD = "openai@fixture::cloud"
+_LOCAL = "spare (local)"
+
+
+@pytest.mark.parametrize("light, local_light, local_main, fallback, explicit, expected", [
+    ("", False, False, _LOCAL, None, (_LOCAL, True)),
+    ("", True, False, _CLOUD, None, (_MAIN, True)),
+    (_CLOUD, False, False, _LOCAL, None, (_CLOUD, False)),
+    ("", False, True, "", None, (_MAIN, True)),
+    (_CLOUD, False, False, "", True, (_CLOUD, True)),
+    # An explicit cloud override of a local Light binding sends the slot's credentialed cloud model
+    # (light -> fallback -> main): the unresolved local id never reaches a cloud send.
+    ("", True, False, _CLOUD, False, (_CLOUD, False)),
+    ("openai@absent::light", True, False, _CLOUD, False, (_CLOUD, False)),
+    (_LOCAL, False, True, _CLOUD, False, (_CLOUD, False)),
+    # An explicit local override keeps the route's own model as its label: a local call never sends it.
+    (_CLOUD, True, False, "", True, (_CLOUD, True)),
+    ("openai@absent::light", False, False, _CLOUD, True, ("openai@absent::light", True)),
+])
+def test_project_naming_sends_and_records_the_resolved_light_route(
+    tmp_path, monkeypatch, light, local_light, local_main, fallback, explicit, expected,
+):
+    from ouroboros import config, llm_observability, model_concurrency
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "OUROBOROS_MODEL": _MAIN, "OUROBOROS_MODEL_LIGHT": light, "USE_LOCAL_LIGHT": local_light,
+        "USE_LOCAL_MAIN": local_main, "OUROBOROS_MODEL_FALLBACKS": fallback,
+        "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "fixture", "api_key": "fixture"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings)
+    scopes = []
+    client = Mock(wraps=_ScopedNamingClient(scopes))
+    with patch.object(model_concurrency, "model_call_scope", wraps=model_concurrency.model_call_scope) as slot, \
+         patch.object(llm_observability, "persist_observed_call") as observed:
+        title = project_naming.llm_project_name("Owner request", use_local=explicit, llm_client=client,
+                                                drive_root=tmp_path, task_id="title")
+    assert title == "Scoped title"
+    assert slot.call_args.args == expected
+    sent = client.chat.call_args.kwargs
+    manifest = observed.call_args.kwargs["manifest"]
+    assert (sent["model"], sent["use_local"]) == (manifest["model"], manifest["use_local"]) == expected
+    assert sent["model_role"] == "light" and scopes[0].category == "project_naming"
+
+
+def test_explicit_remote_naming_with_only_local_models_keeps_the_heuristic(tmp_path, monkeypatch):
+    from ouroboros import config
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "OUROBOROS_MODEL": _LOCAL, "OUROBOROS_MODEL_LIGHT": _LOCAL,
+        "USE_LOCAL_MAIN": True, "OUROBOROS_MODEL_FALLBACKS": "",
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings)
+    client = Mock()
+    assert project_naming.llm_project_name("Owner request", use_local=False, llm_client=client) == "Owner request"
+    client.chat.assert_not_called()
 
 
 def test_project_namer_reconstructs_persisted_budget_scope_without_double_increment(
@@ -33,7 +96,7 @@ def test_project_namer_reconstructs_persisted_budget_scope_without_double_increm
     )
     monkeypatch.setenv("TOTAL_BUDGET", "9")
     monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "3")
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "openai/test-light")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai/test-light")
     captured = []
 
     with patch("supervisor.state.update_budget_from_usage") as legacy_increment:
@@ -62,7 +125,7 @@ def test_async_project_namer_preserves_active_tree_scope_across_to_thread(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "openai/test-light")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai/test-light")
     captured = []
     active = UsageScope(
         drive_root=tmp_path,

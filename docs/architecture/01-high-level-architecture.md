@@ -252,7 +252,7 @@ ouroboros/ — agent core and shared runtime (§6)
   capability_evidence.py, response_limits.py, density_probe.py — sourced capability, token-density and maximum-response evidence (`data/state/capability_evidence.json`; windows size sends and grant no review authority); the bounded cold-start review-density probe, re-exported by capability_evidence (§6 Prompt size, density and windows)
   context_layout.py — doc-layout SSOT; `book_navigation` in Low/Nano, full ARCHITECTURE in Max; reduction relocates, never silently truncates (§6 Context fitting)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
-  local_model_server.py — read-only local formatter measurement and serving-process probe
+  local_model_server.py — read-only formatter measurement and model-list launch stamp
   context_compaction.py, context_source_view.py, context_renewal.py, context_health.py, arrival_notes.py — atomic compaction, source-address recovery, same-task renewal, dated provenance capsules named at arrival, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
   context_runtime_facts.py, engine_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
@@ -543,7 +543,7 @@ ouroboros/ — agent core and shared runtime (§6)
     commit_gate.py — block classification, paid review-cycle counting and ceiling, the review-contract fingerprint
     git_rollback.py — Emits `rollback_request`; the supervisor runs the UI Rollback door's procedure (P4-S)
     git_pr.py — Five PR tools (non-core)
-    github.py, github_read.py, github_write.py — `github_read`, `github_write`, `pr_merge`; Project-bound gh unless a read names `repo`, unprobed credential discovery
+    github.py, github_read.py, github_write.py — `github_read`, `github_write`, `pr_merge`; explicit repo or Project checkout, unprobed credential discovery
     github_checks.py — checks method: runs/jobs/annotations/PR rollup, source gaps, one deadline
     github_workflows.py, github_pr_write.py — read get(run, log)/list(artifact)/download(artifact); write create_pr/update(pr)
     parallel_review.py — Prepares and admits every seat before the review wave sends (§6 Surfaces and money admission)

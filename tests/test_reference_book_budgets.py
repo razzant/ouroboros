@@ -24,33 +24,16 @@ import pytest
 from ouroboros.reference_books import (
     BOOK_ENTRYPOINTS, RULED_TEXTS, compose_book, load_reference_book, ruled_text_sizes, text_name,
 )
+from tests._pairwise_git import BASE_REF_ENV, git_read as _git, growth_base
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-BASE_REF_ENV = "OURO_SIZE_RATCHET_BASE_REF"
 MODE_ENV = "OURO_BOOK_GROWTH_MODE"
-
-
-def _git(repo: pathlib.Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, check=check, capture_output=True)
 
 
 def measures_one_change(environ) -> bool:
     """A pull request or a push to ``ouroboros`` is one change; a push to ``main`` or
     ``ouroboros-stable`` spans a whole release, which the pairwise rule cannot attribute."""
     return environ.get("GITHUB_EVENT_NAME") != "push" or environ.get("GITHUB_REF") == "refs/heads/ouroboros"
-
-
-def growth_base(repo: pathlib.Path, ref: str | None) -> str:
-    """The commit this change is measured from; ``""`` when the rule does not apply.
-
-    A run without a resolvable event base skips: a local or manual run has none, a tag push
-    carries all zeros, and HEAD's parent is not where a multi-commit change began.
-    """
-    ref = (ref or "").strip()
-    if not ref:
-        return ""
-    resolved = _git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
-    return resolved.stdout.decode("ascii").strip() if resolved.returncode == 0 else ""
 
 
 def composed_bytes(repo: pathlib.Path, book_id: str, ref: str = "") -> int | None:

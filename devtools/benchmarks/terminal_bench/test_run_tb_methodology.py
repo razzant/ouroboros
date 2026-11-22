@@ -98,6 +98,439 @@ def test_allow_agent_web_flips_kwarg(tmp_path):
     assert config["agents"][0]["kwargs"]["disable_agent_web"] is False
 
 
+@pytest.mark.parametrize("ambient", [True, False], ids=["ambient", "settings"])
+def test_job_config_preserves_main_and_review_effort(tmp_path, monkeypatch, ambient):
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    cfg = _cfg(jobs_dir=tmp_path)
+    cfg.settings_path.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "high"}), encoding="utf-8")
+    run_tb.apply_all_model(cfg.model, review_effort="low")
+    if ambient:
+        monkeypatch.setenv("OUROBOROS_EFFORT_TASK", " High ")
+    else:
+        monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    run_tb.harbor_command(cfg)
+    row = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))["agents"][0]
+    assert row["name"] == OuroborosTerminalBenchAgent.name()
+    assert row["kwargs"]["reasoning_effort"] == "high"
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, model_name=row["model_name"], **row["kwargs"])
+    env = agent._container_env()
+    assert env["OUROBOROS_EFFORT_TASK"] == "high"
+    assert [r["effort"] for r in _pool(env["OUROBOROS_SUBAGENTS"])] == ["low"]
+
+
+@pytest.mark.parametrize("ambient,saved,expected", [(" ", "high", "high"), ("low", "high", "low")])
+def test_main_effort_precedence_reaches_manifest_job_and_adapter(tmp_path, monkeypatch, ambient, saved, expected):
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    cfg = _cfg(jobs_dir=tmp_path)
+    cfg.settings_path.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": saved}), encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", ambient)
+    run_tb.harbor_command(cfg)
+    job = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert job["agents"][0]["kwargs"]["reasoning_effort"] == expected
+    assert run_tb.resolved_model_slots(cfg)["OUROBOROS_EFFORT_TASK"] == expected
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(cfg.settings_path))
+    assert agent._container_env()["OUROBOROS_EFFORT_TASK"] == expected
+    # A hand-authored job declaration wins over both of those sources.
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(cfg.settings_path), reasoning_effort="max")
+    assert agent._container_env()["OUROBOROS_EFFORT_TASK"] == "max"
+    # What `main` resolves at admission rides the config: BOTH consumers take that one
+    # actual value verbatim, even when the ambient tier diverges afterwards.
+    cfg.main_effort = expected
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "ultra")
+    run_tb.harbor_command(cfg)
+    job = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert job["agents"][0]["kwargs"]["reasoning_effort"] == expected
+    assert run_tb.resolved_model_slots(cfg)["OUROBOROS_EFFORT_TASK"] == expected
+
+
+@pytest.mark.parametrize("source", ["kwarg", "env", "settings"])
+def test_invalid_main_effort_is_not_forwarded_or_recorded(tmp_path, monkeypatch, source):
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    cfg = _cfg(jobs_dir=tmp_path)
+    cfg.settings_path.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "mystery"} if source == "settings" else {}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    if source == "env":
+        monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "mystery")
+    if source != "kwarg":
+        with pytest.raises(ValueError, match="OUROBOROS_EFFORT_TASK.*mystery"):
+            run_tb.harbor_command(cfg)
+        assert not (tmp_path / "agent_job_config.json").exists()
+    with pytest.raises(ValueError, match="OUROBOROS_EFFORT_TASK.*mystery"):
+        OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(cfg.settings_path),
+                                   reasoning_effort="mystery" if source == "kwarg" else None)._container_env()
+
+
+def test_invalid_main_effort_is_a_typed_refusal_at_admission(tmp_path, monkeypatch):
+    """Keep the refusal in the manifest, without leaving a partial submission."""
+    model = "openai/gpt-5.5"
+    run_root = tmp_path / "run"
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "mystery"}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
+    assert run_tb.main([
+        "--model", model, "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
+        "--settings-path", str(settings),
+    ]) == 1
+    extra = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))["extra"]
+    assert extra["outcome"] == "refused" and extra["refusal"]["stage"] == "main_effort"
+    assert "mystery" in extra["refusal"]["reason"]
+    # The invalid tier is the refusal's VALUE, never an accepted model setting: the admission
+    # gate in common/manifests.py pops it from model_slots before persisting the refusal.
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert "OUROBOROS_EFFORT_TASK" not in manifest["model_slots"]
+    assert not list((tmp_path / "submission").rglob("metadata.yaml"))
+    assert not (run_root / "harbor_command.txt").exists()
+
+
+def test_invalid_env_effort_is_refused_at_admission(tmp_path, monkeypatch):
+    """The ENVIRONMENT copy is gated too: model_slot_snapshot used to copy an invalid ambient
+    tier into model_slots BEFORE any validation, so the admission manifest recorded a
+    configuration the runtime would silently replace with its default."""
+    run_root = tmp_path / "run"
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "mystery")
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
+    assert run_tb.main([
+        "--model", "openai/gpt-5.5", "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
+        "--settings-path", str(settings),
+    ]) == 1
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["extra"]["outcome"] == "refused"
+    assert manifest["extra"]["refusal"]["stage"] == "main_effort"
+    assert "mystery" in manifest["extra"]["refusal"]["reason"]
+    assert "OUROBOROS_EFFORT_TASK" not in manifest["model_slots"]
+    assert not list((tmp_path / "submission").rglob("metadata.yaml"))
+    assert not (run_root / "harbor_command.txt").exists()
+
+
+def test_generated_job_pins_the_admitted_default_effort(tmp_path, monkeypatch):
+    """A run that declared NO tier pins the admitted default into the generated job: an
+    omitted kwarg lets the adapter re-resolve the tier from the host settings at TRIAL time,
+    so a settings save after admission would silently move the run off its admitted
+    configuration. A hand-authored job without the field keeps the adapter's former logic."""
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+    default = str(SETTINGS_DEFAULTS["OUROBOROS_EFFORT_TASK"])
+    cfg = _cfg(jobs_dir=tmp_path)
+    cfg.settings_path.write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    run_tb.harbor_command(cfg)
+    row = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))["agents"][0]
+    assert row["kwargs"]["reasoning_effort"] == default
+    assert run_tb.resolved_model_slots(cfg)["OUROBOROS_EFFORT_TASK"] == default
+    # A host-settings save AFTER generation cannot move the admitted tier any more.
+    cfg.settings_path.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "ultra"}), encoding="utf-8")
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(cfg.settings_path),
+                                        reasoning_effort=row["kwargs"]["reasoning_effort"])
+    assert agent._container_env()["OUROBOROS_EFFORT_TASK"] == default
+    # The hand-authored path (no declared kwarg) keeps the former saved-settings resolution.
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, host_settings_path=str(cfg.settings_path))
+    assert agent._container_env()["OUROBOROS_EFFORT_TASK"] == "ultra"
+
+
+@pytest.mark.parametrize("ambient,saved,expected", [
+    pytest.param(" \t", " High ", "high", id="whitespace-env"),
+    pytest.param("", "minimal", "minimal", id="empty-env"),
+    pytest.param(" Max ", "high", "max", id="env-wins"),
+    pytest.param("", " ", None, id="runtime-default"),
+])
+def test_run_tb_admits_one_effort_before_publishing_job(tmp_path, monkeypatch, ambient, saved, expected):
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+    key = "OUROBOROS_EFFORT_TASK"
+    expected = expected or SETTINGS_DEFAULTS[key]
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({key: saved}), encoding="utf-8")
+    monkeypatch.setenv(key, ambient)
+    admit = run_tb.admit_benchmark_run
+
+    def admit_then_settings_change(path, **kw):
+        manifest = admit(path, **kw)
+        assert json.loads(path.read_text(encoding="utf-8"))["model_slots"][key] == expected
+        settings.write_text(json.dumps({key: "ultra"}), encoding="utf-8")
+        monkeypatch.setenv(key, "ultra")
+        return manifest
+
+    monkeypatch.setattr(run_tb, "admit_benchmark_run", admit_then_settings_change)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _: "fixture")
+    out, submission = tmp_path / "run", tmp_path / "submission"
+    assert run_tb.main([
+        "--all-model", "openai/gpt-5.5", "--review-effort", " LoW ", "--allow-dirty-seed",
+        "--settings-path", str(settings), "--run-root", str(out), "--submission-root", str(submission),
+    ]) == 0
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    [job] = submission.rglob("agent_job_config.json")
+    row = json.loads(job.read_text(encoding="utf-8"))["agents"][0]
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path, model_name=row["model_name"], **row["kwargs"])
+    env = agent._container_env()
+    assert manifest["model_slots"][key] == row["kwargs"]["reasoning_effort"] == env[key] == expected
+    assert manifest["available_subagents"] == json.loads(env["OUROBOROS_SUBAGENTS"])
+    assert row["kwargs"]["available_subagents"] == env["OUROBOROS_SUBAGENTS"]
+    assert [r["effort"] for r in _pool(env["OUROBOROS_SUBAGENTS"])] == ["low"]
+
+
+def test_real_harbor_admits_generated_agent_before_trials(tmp_path, monkeypatch):
+    """Harbor admits the submitted effort but still refuses an unsupported base URL."""
+    pytest.importorskip("harbor")
+    from harbor.agents.installed.base import BaseInstalledAgent
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+    from harbor.models.trial.config import AgentConfig
+
+    cfg = _cfg(jobs_dir=tmp_path)
+    cfg.settings_path.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "high"}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    run_tb.harbor_command(cfg)
+    row = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))["agents"][0]
+    config = AgentConfig.model_validate(row)
+    assert config.name == "Ouroboros Installed"
+    cls = OuroborosTerminalBenchAgent
+    assert issubclass(cls, BaseInstalledAgent)
+    if hasattr(BaseInstalledAgent, "capabilities"):
+        from harbor.agents.factory import AgentFactory
+
+        assert AgentFactory.get_agent_class_from_config(config) is cls
+        assert cls.capabilities.windows is False and cls.capabilities.reasoning_effort is True
+        AgentFactory.run_preflight(config, skip_credential_checks=True)
+        with pytest.raises(ValueError, match="does not support base_url"):
+            AgentFactory.run_preflight(
+                AgentConfig.model_validate({**row, "base_url": "https://example.invalid"}),
+                skip_credential_checks=True,
+            )
+    else:
+        assert cls.SUPPORTS_WINDOWS is False
+    agent = cls(logs_dir=tmp_path, model_name=config.model_name, **config.kwargs)
+    assert agent._container_env()["OUROBOROS_EFFORT_TASK"] == "high"
+    assert agent._container_env()["OUROBOROS_SUBAGENTS"] == config.kwargs["available_subagents"]
+
+
+def test_plain_model_binds_roster_into_job_manifest_and_adapter(tmp_path, monkeypatch):
+    """The generated launch, manifest, and trial adapter share one declaration; no trial runs."""
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    model = "openai/gpt-5.5"
+    original = _roster(_pool_row("original", model, effort="medium"))
+    old_host = {
+        "OUROBOROS_MODEL": "old/host-main",
+        "OUROBOROS_MODEL_FALLBACK": "old/host-fallback",
+        "OUROBOROS_MODEL_FALLBACKS": "old/host-fallbacks",
+    }
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({**old_host, "OUROBOROS_SUBAGENTS": original}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fixture")
+    monkeypatch.setattr(run_tb.subprocess, "run", lambda *_a, **_k: pytest.fail("Harbor trial must not run"))
+    run_root, submission = tmp_path / "run", tmp_path / "submission"
+
+    assert run_tb.main([
+        "--model", model, "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(submission),
+        "--settings-path", str(settings),
+    ]) == 0
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["extra"]["outcome"] == "command_generated"
+    assert manifest["model_slots"]["OUROBOROS_MODEL"] == model
+    assert manifest["model_slots"]["OUROBOROS_MODEL_FALLBACKS"] == model
+    [job] = submission.rglob("agent_job_config.json")
+    assert job.is_file()
+    agent_row = json.loads(job.read_text(encoding="utf-8"))["agents"][0]
+    declared = agent_row["kwargs"]["available_subagents"]
+    assert json.loads(declared) == manifest["available_subagents"]
+
+    # A later settings save cannot change the generated job's launch or its manifest.
+    later = _roster(_pool_row("later", "later/reviewer"))
+    settings.write_text(json.dumps({**old_host, "OUROBOROS_SUBAGENTS": later}), encoding="utf-8")
+    agent = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "adapter-logs", model_name=agent_row["model_name"], **agent_row["kwargs"],
+    )
+    env = agent._container_env()
+    assert env["OUROBOROS_MODEL"] == model
+    assert env["OUROBOROS_MODEL_FALLBACK"] == model
+    assert env["OUROBOROS_MODEL_FALLBACKS"] == model
+    assert env["OUROBOROS_SUBAGENTS"] == declared
+
+    # A legacy direct job without the kwarg still derives from current settings.
+    legacy = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "legacy-logs", host_settings_path=str(settings), ouroboros_model=model,
+    )
+    assert "later/reviewer" in legacy._container_env()["OUROBOROS_SUBAGENTS"]
+
+    # Explicit empty is not missing: it suppresses the roster instead of rebuilding it.
+    empty = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "empty-logs", host_settings_path=str(settings),
+        ouroboros_model=model, available_subagents="",
+    )
+    from devtools.benchmarks.common.model_slots import disabled_subagents_setting
+
+    assert empty._container_env()["OUROBOROS_SUBAGENTS"] == disabled_subagents_setting()
+
+
+@pytest.mark.parametrize("saved", ["openai/gpt-5.2", ""], ids=["saved-model", "saved-blank"])
+def test_settings_save_after_admission_keeps_the_admitted_search_choice_and_excluded_seats(
+        tmp_path, monkeypatch, saved):
+    """ONE admission snapshot names the web search choice (a Model, or an explicit blank) and the
+    seats the container leaves out. An ordinary Settings save right after the first write moves
+    neither the declared rows, nor the generated job's kwarg, nor the environment the adapter
+    builds from that job. A job or config that names no choice gets no binding and keeps the
+    trial-time read. Synthetic settings, command generation only: no Harbor process, no trial."""
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    key, model, later = "OUROBOROS_WEBSEARCH_MODEL", "openai/gpt-5.5", "anthropic::host-search"
+    excluded = ["codex=gpt-5.6-sol"]
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({key: saved, "OUROBOROS_SUBAGENTS": _roster(
+        _pool_row("t1", model, delivery="packet"),
+        _pool_row("t2", excluded[0], kind="agent_session"),
+    )}), encoding="utf-8")
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    admit = run_tb.admit_benchmark_run
+
+    def admit_then_ordinary_save(path, **kw):
+        manifest = admit(path, **kw)
+        first = json.loads(path.read_text(encoding="utf-8"))  # the FIRST durable write
+        assert first["model_slots"].get(key, "") == saved
+        assert first["extra"]["triad_rows_not_executable_in_container"] == excluded
+        settings.write_text(json.dumps({key: later, "OUROBOROS_SUBAGENTS": _roster(
+            _pool_row("t3", "cursor=openai/gpt-5", kind="agent_session"),
+        )}), encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(run_tb, "admit_benchmark_run", admit_then_ordinary_save)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fixture")
+    monkeypatch.setattr(run_tb.subprocess, "run", lambda *_a, **_k: pytest.fail("Harbor trial must not run"))
+    run_root, submission = tmp_path / "run", tmp_path / "submission"
+    assert run_tb.main([
+        "--model", model, "--allow-agent-web", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(submission),
+        "--settings-path", str(settings),
+    ]) == 0
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["extra"]["outcome"] == "command_generated"
+    assert manifest["model_slots"].get(key, "") == saved
+    assert manifest["extra"]["triad_rows_not_executable_in_container"] == excluded
+    # The plan: metadata.yaml declares the admitted choice and the admitted seats, not the save.
+    meta = pathlib.Path(manifest["extra"]["metadata_yaml"]).read_text(encoding="utf-8")
+    planned = [saved] if saved else run_tb._planned_blank_search_models()
+    assert all(f"model_name: {json.dumps(model_id)}" in meta for model_id in planned)
+    assert f"# triad_rows_not_executable_in_container: {json.dumps(excluded)}" in meta
+    assert later not in meta and "cursor=openai/gpt-5" not in meta
+    # The generated job and the environment the adapter builds from it carry that same choice.
+    [job] = submission.rglob("agent_job_config.json")
+    row = json.loads(job.read_text(encoding="utf-8"))["agents"][0]
+    assert row["kwargs"]["web_search_model"] == saved
+    agent = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "adapter-logs", model_name=row["model_name"], **row["kwargs"],
+    )
+    assert agent._container_env().get(key, "") == saved
+    # Naming no choice is not a blank one: a hand-authored job still reads current Settings,
+    # and a config assembled without admission writes no kwarg for the adapter to obey.
+    legacy = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "legacy-logs", host_settings_path=str(settings), ouroboros_model=model,
+    )
+    assert legacy._container_env()[key] == later
+    run_tb.harbor_command(_cfg(jobs_dir=tmp_path / "manual"))
+    manual = json.loads((tmp_path / "manual" / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert "web_search_model" not in manual["agents"][0]["kwargs"]
+
+
+@pytest.mark.parametrize(
+    "cli, saved, admitted",
+    [("openai/gpt-5.2-light", "anthropic::fixture-host-light", "openai/gpt-5.2-light"),
+     ("", "openai/gpt-5.2", "openai/gpt-5.2"), ("", "", "")],
+    ids=["cli-named-light", "host-inherited-light", "admitted-blank-light"],
+)
+def test_settings_save_after_admission_keeps_the_admitted_light_choice(tmp_path, monkeypatch, cli, saved, admitted):
+    """Generated config and metadata agree after Settings is saved; a manual job keeps legacy choices."""
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    key, model, later = "OUROBOROS_MODEL_LIGHT", "openai/gpt-5.5", "anthropic::fixture-later-light"
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({key: saved, "USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True,
+                                    "OUROBOROS_SUBAGENTS": _roster(
+        _pool_row("t1", model, delivery="packet"),
+    )}), encoding="utf-8")
+    for name in (key, "OUROBOROS_SUBAGENTS", "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"):
+        monkeypatch.delenv(name, raising=False)
+    admit = run_tb.admit_benchmark_run
+
+    def admit_then_save(path, **kw):
+        manifest = admit(path, **kw)
+        first = json.loads(path.read_text(encoding="utf-8"))
+        assert first["model_slots"].get(key, "") == admitted
+        assert first["extra"]["admitted_local_lanes"] == {"USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True}
+        settings.write_text(json.dumps({key: later, "USE_LOCAL_MAIN": True, "USE_LOCAL_LIGHT": False}),
+                            encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(run_tb, "admit_benchmark_run", admit_then_save)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "fixture")
+    monkeypatch.setattr(run_tb.subprocess, "run", lambda *_a, **_k: pytest.fail("Harbor trial must not run"))
+    root, submission = tmp_path / "run", tmp_path / "submission"
+    assert run_tb.main(["--model", model, "--light-model", cli, "--allow-dirty-seed",
+                        "--run-root", str(root), "--submission-root", str(submission),
+                        "--settings-path", str(settings)]) == 0
+    manifest = json.loads((root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["extra"]["outcome"] == "command_generated"
+    assert manifest["model_slots"].get(key, "") == admitted
+    meta = pathlib.Path(manifest["extra"]["metadata_yaml"]).read_text(encoding="utf-8")
+    assert later not in meta
+    from yaml import safe_load
+
+    roles = {row["model_name"]: row["role"].split("+") for row in safe_load(meta)["models"]}
+    assert "light_safety_post_task_synthesis" in roles[admitted or model]
+    if admitted:
+        assert "light_safety_post_task_synthesis" not in roles[model]
+    [job] = submission.rglob("agent_job_config.json")
+    row = json.loads(job.read_text(encoding="utf-8"))["agents"][0]
+    assert row["kwargs"]["ouroboros_light_model"] == (admitted or None)
+    agent = OuroborosTerminalBenchAgent(logs_dir=tmp_path / "adapter", model_name=row["model_name"], **row["kwargs"])
+    env = agent._container_env()
+    assert env[key] == (admitted or model)
+    assert (env["USE_LOCAL_MAIN"], env["USE_LOCAL_LIGHT"]) == ("false", "true")
+    if not admitted:
+        factory = OuroborosTerminalBenchAgent(logs_dir=tmp_path / "factory", host_settings_path=str(settings),
+                                              ouroboros_model=model)
+        legacy = OuroborosTerminalBenchAgent(logs_dir=tmp_path / "legacy", host_settings_path=str(settings),
+                                             ouroboros_model=model, ouroboros_light_model="")
+        assert factory._container_env()[key] == "google/gemini-3.5-flash"
+        assert legacy._container_env()[key] == later
+
+
+def test_fresh_container_loader_keeps_the_authored_light_and_empty_roster(tmp_path, monkeypatch):
+    from ouroboros.config import settings_of_document
+    from ouroboros.configured_subagents import parse_configured_subagents
+    from ouroboros.route_choice import following_route
+    from ouroboros.settings_integrity import settings_read_environ
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import OuroborosTerminalBenchAgent
+
+    model = "openai/gpt-5.5"
+    keys = ("OUROBOROS_MODEL_LIGHT", "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "OUROBOROS_SUBAGENTS")
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    settings = tmp_path / "host.json"
+    settings.write_text("{}", encoding="utf-8")
+    agent = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path / "adapter", host_settings_path=str(settings),
+        ouroboros_model=model, ouroboros_light_model=None, available_subagents="",
+        use_local_main=True, use_local_light=True,
+    )
+    env = agent._container_env()
+    with settings_read_environ({key: env[key] for key in (*keys, "OUROBOROS_MODEL")}):
+        loaded = settings_of_document(None, present=False)
+    assert following_route("light", read=loaded.get) == (model, True)
+    roster = parse_configured_subagents(loaded["OUROBOROS_SUBAGENTS"])
+    assert not roster.enabled and not roster.items
+
+
 def test_pip_cache_mount_is_env_opt_in(monkeypatch, tmp_path):
     monkeypatch.delenv("OBO_TB_PIP_CACHE", raising=False)
     assert "--mounts" not in run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
@@ -224,7 +657,7 @@ def test_all_model_actor_is_durable_before_tb_external_probe(tmp_path, monkeypat
 def test_malformed_host_roster_is_a_typed_refusal_on_the_durable_manifest(tmp_path, monkeypatch):
     """The launcher structural gate: nothing reads files before admission, so a
     malformed roster (here: in the host settings file the adapter forwards) is
-    refused INSIDE the finalize seam — recorded on the durable manifest with the
+    refused AT ADMISSION — recorded on the durable manifest with the
     launcher's own vocabulary, no traceback, and no submission tree built."""
     model = "openai/gpt-5.5"
     run_root = tmp_path / "run"
@@ -282,8 +715,7 @@ def test_adapter_forwards_fixed_model_execution_contract(tmp_path, monkeypatch):
     (
         ("anthropic/claude-sonnet-4.6", False),
         ("owner/light (local)", True),
-    ),
-)
+    ), ids=["cloud-light", "local-light"])
 def test_harbor_smoke_child_uses_the_durable_pinned_actor(
     tmp_path, monkeypatch, light_model, uses_local_light
 ):
@@ -326,6 +758,9 @@ def test_harbor_smoke_child_uses_the_durable_pinned_actor(
             ouroboros_model=agent_kwargs["ouroboros_model"],
             ouroboros_light_model=agent_kwargs["ouroboros_light_model"],
             host_settings_path=agent_kwargs["host_settings_path"],
+            # The generated command now declares the admitted tier, so model it the way
+            # Harbor passes it through.
+            reasoning_effort=agent_kwargs["reasoning_effort"],
         )._container_env()
         subagents = json.loads(container_env["OUROBOROS_SUBAGENTS"])
         assert actor["mismatches"] == []
@@ -338,14 +773,21 @@ def test_harbor_smoke_child_uses_the_durable_pinned_actor(
             "USE_LOCAL_FALLBACK": False,
             "USE_LOCAL_CONSCIOUSNESS": False,
         }
+        # The admitted record — read here from the checkpoint written before the launch — names
+        # the pinned child actor, its forwarded web-search slot and the admitted tier, and binds
+        # the roster the child environment actually carries. The checkpoint is prepared /
+        # in-progress evidence, NOT proof that Harbor began a trial.
+        assert manifest["extra"]["outcome"] == "running"
+        assert manifest["extra"]["recovery_checkpoint"]["phase"] == "before_harbor_execution"
         assert manifest["model_slots"] == {
-            key: actor["model_slots"][key]
-            for key in (
-                "OUROBOROS_MODEL",
-                "OUROBOROS_MODEL_LIGHT",
-                "OUROBOROS_MODEL_FALLBACKS",
-            )
+            "OUROBOROS_MODEL": actor["model_slots"]["OUROBOROS_MODEL"],
+            "OUROBOROS_MODEL_LIGHT": actor["model_slots"]["OUROBOROS_MODEL_LIGHT"],
+            "OUROBOROS_MODEL_FALLBACKS": actor["model_slots"]["OUROBOROS_MODEL_FALLBACKS"],
+            "OUROBOROS_WEBSEARCH_MODEL": actor["model_slots"]["OUROBOROS_WEBSEARCH_MODEL"],
+            "OUROBOROS_EFFORT_TASK": agent_kwargs["reasoning_effort"],
         }
+        assert manifest["available_subagents"] == subagents
+        assert container_env["OUROBOROS_EFFORT_TASK"] == agent_kwargs["reasoning_effort"]
         assert container_env["OUROBOROS_MODEL"] == model
         assert container_env["OUROBOROS_MODEL_LIGHT"] == light_model
         assert container_env["OUROBOROS_MODEL_FALLBACK"] == model

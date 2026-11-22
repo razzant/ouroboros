@@ -635,10 +635,11 @@ def test_boot_autostart_starts_exactly_the_bound_local_server(install, monkeypat
     if managed:
         manage(install, monkeypatch, {"version": 1, "safety": {"checker": {"model": LOCAL}}})
     starts: list = []
-    manager = SimpleNamespace(is_running=False, check_runtime=lambda: True,
-                              download_model=lambda source, filename: f"/models/{filename}",
-                              start_server=lambda path, **kw: starts.append((path, kw)))
-    monkeypatch.setattr(local_model, "get_manager", lambda: manager)
+    manager = local_model.LocalModelManager()
+    monkeypatch.setattr(local_model, "_manager", manager)
+    monkeypatch.setattr(manager, "_probe_runtime", lambda: subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(manager, "download_model", lambda source, filename, **kwargs: f"/models/{filename}")
+    monkeypatch.setattr(manager, "start_server", lambda path, **kw: starts.append((path, kw)))
     auto_start_local_model(config.load_settings())
     (path, started), = starts
     assert (path, started["source"], started["filename"], started["port"], started["chat_format"]) == (
@@ -750,11 +751,12 @@ def test_only_the_bound_local_server_starts_for_a_local_checker(install, monkeyp
         manage(install, monkeypatch, {"version": 1, "access": {"max": "pro"},
                                       "safety": {"min_coverage": "full", "checker": checker}})
     effects: list = []
-    manager = SimpleNamespace(is_running=False, check_runtime=lambda: effects.append("probe") or True,
-                              download_model=lambda source, _filename: effects.append(("download", source)) or source,
-                              start_server=lambda path, **kw: effects.append(("start", path, kw["port"], kw["chat_format"])),
-                              stop_server=lambda: effects.append("stop"))
-    monkeypatch.setattr(local_model, "get_manager", lambda: manager)
+    manager = local_model.LocalModelManager()
+    monkeypatch.setattr(local_model, "_manager", manager)
+    monkeypatch.setattr(manager, "_probe_runtime", lambda: effects.append("probe") or subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(manager, "download_model", lambda source, _, **kwargs: effects.append(("download", source)) or source)
+    monkeypatch.setattr(manager, "start_server", lambda path, **kw: effects.append(("start", path, kw["port"], kw["chat_format"])))
+    monkeypatch.setattr(manager, "stop_server", lambda: effects.append("stop") or True)
     app = Starlette(routes=[Route("/api/local-model/start", api_local_model_start, methods=["POST"]),
                             Route("/api/local-model/stop", api_local_model_stop, methods=["POST"])])
     others = [{**bound, "source": "/fixture/employee.gguf"}, {**bound, "port": 8767}, {**bound, "chat_format": "arbitrary"}]

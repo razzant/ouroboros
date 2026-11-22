@@ -172,16 +172,11 @@ def enqueue_catalog(drive_root: pathlib.Path, tag: str, *, prefixes: Optional[Tu
 
 
 def _light_route() -> Tuple[str, bool, bool]:
-    """``(model, use_local, available)`` for the Light slot by its one rule (``route_choice.following_route``); a
-    cloud route without a credential takes the first credentialed slot, as project naming resolves it, and a
-    local-only install uses local."""
-    from ouroboros.provider_models import model_has_credentials, resolve_credentialed_model, review_model_uses_local
-    from ouroboros.route_choice import following_route
+    """The shared Light route and whether translation can send on it."""
+    from ouroboros.provider_models import model_has_credentials
+    from ouroboros.route_choice import credentialed_light_route
 
-    model, use_local = following_route("light")
-    if not use_local:
-        model = resolve_credentialed_model(model)
-        use_local = review_model_uses_local(model)
+    model, use_local = credentialed_light_route()
     return model, use_local, bool(model) and (use_local or model_has_credentials(model))
 
 

@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import os
 import pathlib
 import shutil
+import stat
 import tempfile
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from functools import partial
 from typing import List, Optional
 
 from ouroboros.config import get_runtime_mode
@@ -262,7 +265,9 @@ def copy_tree_checked(source: pathlib.Path, staging_dir: pathlib.Path) -> int:
                     if not advisory:
                         raise FetchError(reason)
                     log.warning("Cyber Pro skill copy advice: %s", reason)
-                size = path.stat().st_size
+                info = path.stat()
+                _reject_if(not stat.S_ISREG(info.st_mode), f"Skill file {rel} is not a regular file")
+                size = info.st_size
                 _reject_if(size > _MAX_PER_FILE_BYTES, f"Skill file {rel} is {size} bytes (cap {_MAX_PER_FILE_BYTES})")
                 total += size
                 count += 1
@@ -270,7 +275,10 @@ def copy_tree_checked(source: pathlib.Path, staging_dir: pathlib.Path) -> int:
                 _reject_if(count > _MAX_FILE_COUNT, f"Skill exceeds file count cap {_MAX_FILE_COUNT}")
                 target = staging_dir / pathlib.Path(*rel.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, target)
+                # Keep the usual rw creation mode. The kernel masks Git's execute bits at creation too.
+                opener = partial(os.open, mode=0o666 | (info.st_mode & 0o111))
+                with path.open("rb") as src, open(target, "xb", opener=opener) as dst:
+                    shutil.copyfileobj(src, dst)
         _reject_if(not ((staging_dir / "SKILL.md").is_file() or (staging_dir / "skill.json").is_file()),
                    "Skill folder has no SKILL.md or skill.json")
         return count

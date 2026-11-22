@@ -59,16 +59,22 @@ def isolated_bin_dirs(skill_dir: pathlib.Path) -> List[pathlib.Path]:
     return [path for path in candidates if work_domain.exists(path)]
 
 
-def _present(path: pathlib.Path) -> bool:
-    """``Path.is_file`` (links followed); a work path's own metadata, a link counting (a venv's interpreter is one)."""
-    return work_domain.kind(path) in ("file", "link") if work_domain.is_work(path) else path.is_file()
+def _present(path: pathlib.Path, *, conclusive_absence: bool = False) -> bool:
+    """``Path.is_file`` (links followed); a work path's own metadata, a link counting (a venv's interpreter is one).
+    A strict work observation that could not see the path raises; it never reads as absent."""
+    if not work_domain.is_work(path):
+        return path.is_file()
+    seen = work_domain.kind(path, conclusive_absence=conclusive_absence) if conclusive_absence else work_domain.kind(path)
+    if seen == "unknown":
+        raise OSError(f"the work domain could not say whether {path} is there")
+    return seen in ("file", "link")
 
 
-def _json(path: pathlib.Path) -> Dict[str, Any] | None:
+def _json(path: pathlib.Path, *, conclusive_absence: bool = False) -> Dict[str, Any] | None:
     """``read_json_dict``; a work file through the confined intake."""
     from ouroboros.work_skill_payloads import _json_read
 
-    return _json_read(path)
+    return _json_read(path, conclusive_absence=conclusive_absence)
 
 
 def _which(name: str, env: Dict[str, str], env_root: pathlib.Path) -> bool:
@@ -90,10 +96,10 @@ def _interpreter(env_root: pathlib.Path) -> str:
     return CONTAINER_PYTHON if work_domain.is_work(env_root) else sys.executable
 
 
-def python_runtime_binary(skill_dir: pathlib.Path) -> pathlib.Path | None:
+def python_runtime_binary(skill_dir: pathlib.Path, *, conclusive_absence: bool = False) -> pathlib.Path | None:
     bin_dir = isolated_env_dir(skill_dir) / "python" / ("Scripts" if os.name == "nt" else "bin")
     candidate = bin_dir / ("python.exe" if os.name == "nt" else "python")
-    return candidate if _present(candidate) else None
+    return candidate if _present(candidate, conclusive_absence=conclusive_absence) else None
 
 
 def python_env_binding(skill_dir: pathlib.Path) -> str:
@@ -107,10 +113,13 @@ def python_env_binding(skill_dir: pathlib.Path) -> str:
     venv = isolated_env_dir(skill_dir) / "python"
     if work_domain.is_work(venv):  # bound to the work container's own interpreter, never to this one
         try:
-            if not work_domain.is_dir(venv):
+            seen = work_domain.kind(venv, conclusive_absence=True)
+            if seen == "unknown":
+                return "unreadable"
+            if seen != "dir":
                 return "absent"
-            return "current" if python_runtime_binary(skill_dir) is not None else "unreadable"
-        except OSError:
+            return "current" if python_runtime_binary(skill_dir, conclusive_absence=True) is not None else "unreadable"
+        except (OSError, work_domain.WorkDomainRefused, subprocess.TimeoutExpired):
             return "unreadable"
     try:
         if not venv.is_dir():
@@ -693,15 +702,39 @@ def read_deps_state(
 ) -> Dict[str, Any]:
     """Return persisted deps.json, optionally verified against the live env.
 
-    Non-creating: a missing state dir reads like a missing file ({})."""
+    Non-creating: a confirmed missing runtime record reads as {}. An unobserved record
+    or live environment for a managed skill returns ``status: "unreadable"``.
+    """
+    managed = skill_dir is not None and work_domain.is_work(skill_dir)
     try:
         path = skill_state_dir_path(drive_root, skill_name) / DEPS_STATE_FILENAME
-        state = read_json_dict(path) or {}
     except Exception:
+        if managed:
+            return {"status": "unreadable", "error": "dependency record location unavailable"}
         return {}
+    if managed:
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            state = {}
+        except (OSError, ValueError, RecursionError):
+            return {"status": "unreadable", "error": "dependency record could not be read"}
+        else:
+            if not isinstance(state, dict) or not isinstance(state.get("status"), str) or not state["status"].strip():
+                return {"status": "unreadable", "error": "invalid dependency record"}
+    else:
+        try:
+            state = read_json_dict(path) or {}
+        except Exception:
+            return {}
     if skill_dir is None:
         return state
-    fingerprint = _json(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
+    try:
+        fingerprint = _json(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME, conclusive_absence=True) or {}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        if not managed:
+            raise
+        return {**state, "status": "unreadable", "error": f"isolated environment fingerprint is unobserved: {exc}"}
     if str(state.get("status") or "") != "installed":
         # The payload-resident fingerprint.json is AGENT-WRITABLE (it lives in
         # the skill dir): it may only ever corroborate a durable deps.json
@@ -740,7 +773,13 @@ def read_deps_state(
                     # stat needs byte verification, never a guessed digest match.
                     verify_exact_file(path, size_bytes=output["size_bytes"], sha256=output["sha256"],
                                       code_prefix="skill_output", label="installed output")
-            except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            except (OSError, work_domain.WorkDomainRefused, subprocess.TimeoutExpired) as exc:
+                if managed and not isinstance(exc, FileNotFoundError):
+                    return {**state, "status": "unreadable", "error": f"installed output unobserved: {exc}"}
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    raise
+                return {**state, "status": "stale", "error": f"installed output unavailable: {exc}"}
+            except (RuntimeError, ValueError, KeyError, TypeError) as exc:
                 return {**state, "status": "stale", "error": f"installed output unavailable: {exc}"}
     return _on_this_python(state, skill_dir)
 
@@ -755,5 +794,8 @@ def _on_this_python(state: Dict[str, Any], skill_dir: pathlib.Path) -> Dict[str,
     binding = python_env_binding(skill_dir)
     if binding == "current":
         return state
+    if binding == "unreadable" and work_domain.is_work(skill_dir):
+        return {**state, "status": "unreadable", "python_env": binding,
+                "error": "isolated Python environment is unobserved (the work domain did not say)"}
     return {**state, "status": "stale", "python_env": binding,
             "error": f"isolated Python environment does not run on this host's Python ({binding})"}

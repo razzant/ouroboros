@@ -34,13 +34,6 @@ log = logging.getLogger("ouroboros.project_naming")
 CONTINUE_TITLE_PREFIX = "Continue: "
 
 
-def _light_use_local(explicit: Optional[bool]) -> bool:
-    """The Light route's lane for naming: an explicit caller value, else the one rule of the Light slot
-    (``route_choice.following_route``), as every Light call asks it."""
-    from ouroboros.route_choice import following_route
-
-    return bool(explicit) if explicit is not None else following_route("light")[1]
-
 # Mirror gateway ``_MAX_DERIVED_NAME`` so heuristic and LLM names share one cap.
 MAX_PROJECT_NAME = 60
 
@@ -85,14 +78,6 @@ def clean_model_title(text: object, max_len: int = MAX_PROJECT_NAME) -> str:
     if len(line) > max_len:
         line = line[: max_len - 1].rstrip() + "…"
     return line
-
-
-def _light_naming_model() -> str:
-    """The light slot, resolved to a credentialed provider (empty light -> main)."""
-    from ouroboros.config import get_light_model
-    from ouroboros.provider_models import resolve_credentialed_model
-
-    return resolve_credentialed_model(get_light_model())
 
 
 def _naming_timeout_sec() -> float:
@@ -178,9 +163,9 @@ def llm_project_name(
     """SYNC bounded LLM-first project title. On ANY failure returns the heuristic
     fallback over ``fallback_candidates`` then ``owner_text``. Never raises.
 
-    ``use_local=None`` (the default) takes the Light slot's lane (``route_choice.following_route``) so a
-    local-only / local-light deployment names with its configured local model instead of a
-    remote provider. The provider call is wrapped in the #4 per-model concurrency slot so a
+    The Light route supplies the model and lane together. A local override keeps the selected model as its
+    label. A remote override can use a credentialed fallback or Main when Light cannot serve remotely.
+    The provider call is wrapped in the #4 per-model concurrency slot so a
     flurry of namers cannot storm one model's rate limit. One absolute deadline covers
     preparation, slot waiting and recovery; an earlier caller bound wins. Already-sent
     work retains settlement custody. When ``drive_root`` is given, the call
@@ -191,16 +176,16 @@ def llm_project_name(
     text = " ".join(str(owner_text or "").split())
     if not text:
         return fb
-    use_local = _light_use_local(use_local)
     try:
         deadline_ts = time.time() + _naming_timeout_sec()
         if caller_deadline_ts is not None:
             deadline_ts = min(deadline_ts, caller_deadline_ts)
         from ouroboros import model_concurrency
         from ouroboros.llm import LLMClient
+        from ouroboros.route_choice import credentialed_light_route
 
         client = llm_client or LLMClient()
-        model = _light_naming_model()
+        model, use_local = credentialed_light_route(use_local)
         # A title only needs the head of the request; bound the prompt input but mark the cut
         # explicitly (P1 — no SILENT truncation) rather than dropping the tail invisibly. The
         # full request is unaffected (this is only the naming prompt's view).

@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from devtools.benchmarks.common.manifests import openrouter_key_remaining, repo_provenance, write_json
-from devtools.benchmarks.common.model_slots import container_subagents_setting
+from devtools.benchmarks.common.model_slots import (
+    benchmark_main_effort, container_subagents_setting, disabled_subagents_setting,
+)
 from devtools.benchmarks.common.result_index import RUNTIME_TRUNCATION_REASON_CODES
 
 try:  # Harbor is an optional benchmark dependency.
@@ -34,7 +36,6 @@ except Exception:  # pragma: no cover - exercised when Harbor is absent.
     BaseInstalledAgent = object  # type: ignore[assignment]
     BaseEnvironment = Any  # type: ignore[assignment]
     AgentContext = Any  # type: ignore[assignment]
-
 
 _CONTAINER_SRC = "/opt/ouroboros-src"
 _CONTAINER_VENV = "/opt/ouroboros-venv"
@@ -187,7 +188,13 @@ def _source_copy_provenance(source: Path, copied_tree: Path | None = None) -> di
 class OuroborosTerminalBenchAgent(BaseInstalledAgent):
     """Install and run full Ouroboros inside the Terminal-Bench task container."""
 
-    SUPPORTS_WINDOWS = False
+    # Harbor checks the declared options before constructing the adapter.
+    if hasattr(BaseInstalledAgent, "capabilities"):
+        capabilities = BaseInstalledAgent.capabilities.model_copy(
+            update={"reasoning_effort": True, "windows": False},
+        )
+    else:  # Older Harbor reads class flags.
+        SUPPORTS_WINDOWS = False
 
     def __init__(
         self,
@@ -224,13 +231,21 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         # resolve the right per-task cache subtree instead of assuming one hardcoded org.
         dataset = str(kwargs.pop("dataset", "") or "")
         ouroboros_model = str(kwargs.pop("ouroboros_model", ""))
-        ouroboros_light_model = str(kwargs.pop("ouroboros_light_model", "google/gemini-3.5-flash"))
+        # No kwarg keeps the manual default. Legacy empty reads host Settings; an admitted null does not.
+        declared_light = kwargs.pop("ouroboros_light_model", "google/gemini-3.5-flash")
+        ouroboros_light_model = None if declared_light is None else str(declared_light)
         leave_server_running_for_verifier = bool(kwargs.pop("leave_server_running_for_verifier", True))
         # Declared reasoning effort of the submission key (job config kwargs).
         # Forwarded into the container as OUROBOROS_EFFORT_TASK below, so the
         # effort declared in the job config always equals the one the agent
         # actually runs with (leaderboard-honest labeling).
-        reasoning_effort = str(kwargs.pop("reasoning_effort", "") or "").strip().lower() or None
+        reasoning_effort = kwargs.pop("reasoning_effort", None)
+        available_subagents = kwargs.pop("available_subagents", None)
+        # The admitted web search Model of a generated job. An absent kwarg (a hand-authored
+        # job) keeps the trial-time resolution; an explicit blank is a choice and stays blank.
+        web_search_model = kwargs.pop("web_search_model", None)
+        self.use_local_main = kwargs.pop("use_local_main", None)
+        self.use_local_light = kwargs.pop("use_local_light", None)
         try:
             super().__init__(*args, logs_dir=logs_dir, model_name=model_name, **kwargs)
         except TypeError:
@@ -261,6 +276,8 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.ouroboros_light_model = ouroboros_light_model
         self.leave_server_running_for_verifier = bool(leave_server_running_for_verifier)
         self.reasoning_effort = reasoning_effort
+        self.available_subagents = available_subagents
+        self.web_search_model = web_search_model
         self._run_summary: dict[str, Any] = {}
         # Monotonic timestamp of run() start, so the deadline we hand the agent accounts for the
         # install/server time already consumed inside Harbor's external per-task wall-clock cap.
@@ -383,7 +400,6 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             # benchmark metric must stay single-model (a host-configured
             # fallback would silently contaminate the measurement).
             "OUROBOROS_WEBSEARCH_MODEL",
-            "OUROBOROS_EFFORT_TASK",
             "OUROBOROS_RETURN_REASONING",
             # Working-context mode (low | max) for context-ablation runs: the
             # container has no settings.json, so without this forward the
@@ -419,16 +435,45 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
 
         if self.ouroboros_model:
             env["OUROBOROS_MODEL"] = self.ouroboros_model
+        if self.available_subagents is not None:
+            # The generated job's declaration wins over every later host-settings save.
+            # Explicit empty means no roster and no trial-time rebuild; a missing kwarg
+            # keeps the legacy direct-job derivation below.
+            declared_roster = str(self.available_subagents)
+            if declared_roster.strip():
+                env["OUROBOROS_SUBAGENTS"] = declared_roster
+            else:
+                # A missing key would propose factory seats at settings load.
+                env["OUROBOROS_SUBAGENTS"] = disabled_subagents_setting()
+        elif self.ouroboros_model:
             # The container roster: the measured actor plus the review pool it
             # can run (a fixed-model host roster verbatim, else the host pool's
             # API seats, else one packet seat on the measured model).
             env["OUROBOROS_SUBAGENTS"] = container_subagents_setting(
                 self.ouroboros_model, env.get("OUROBOROS_SUBAGENTS"),
             )
+        if self.web_search_model is not None:
+            # Same rule for the web search Model: the generated job's admitted choice wins over
+            # the operator variable and every later host-settings save. Explicit blank drops the
+            # key, so the container plans its own Auto instead of a Model saved after admission.
+            declared_search = str(self.web_search_model)
+            if declared_search.strip():
+                env["OUROBOROS_WEBSEARCH_MODEL"] = declared_search
+            else:
+                env.pop("OUROBOROS_WEBSEARCH_MODEL", None)
+        from ouroboros.route_choice import box_checked
+
+        if self.use_local_main is not None:
+            env["USE_LOCAL_MAIN"] = "true" if box_checked(self.use_local_main) else "false"
+        if self.use_local_light is not None:
+            env["USE_LOCAL_LIGHT"] = "true" if box_checked(self.use_local_light) else "false"
+        elif self.ouroboros_light_model is None:
+            local = box_checked(env.get("USE_LOCAL_MAIN")) or box_checked(env.get("USE_LOCAL_LIGHT"))
+            env["USE_LOCAL_LIGHT"] = "true" if local else "false"
         if self.ouroboros_light_model:
             env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_light_model
-        if self.reasoning_effort:
-            env["OUROBOROS_EFFORT_TASK"] = self.reasoning_effort
+        if effort := benchmark_main_effort(settings, declared=self.reasoning_effort):
+            env["OUROBOROS_EFFORT_TASK"] = effort
 
         # Pin the fallback to the EFFECTIVE main model: the container has no
         # settings.json, so leaving the key unset resurrects the
@@ -444,6 +489,12 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 fallback_pin = str(_DEFAULTS.get("OUROBOROS_MODEL") or "")
             except Exception:
                 fallback_pin = ""
+        if self.ouroboros_light_model is None:
+            # A fresh container must see an authored slot to avoid its factory Light.
+            if fallback_pin:
+                env["OUROBOROS_MODEL_LIGHT"] = fallback_pin
+            else:
+                env.pop("OUROBOROS_MODEL_LIGHT", None)
         if fallback_pin:
             # Pin BOTH the legacy singular AND the current plural key. config.parse_fallback_chain
             # reads OUROBOROS_MODEL_FALLBACKS (plural) BEFORE the legacy singular, and the container's

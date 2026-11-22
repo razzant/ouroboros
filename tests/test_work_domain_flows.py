@@ -585,6 +585,11 @@ def test_an_installed_script_skill_runs_from_its_verified_work_copy_with_depende
     home = staging / "skills" / "probe" / loaded.content_hash
     assert status == "installed", detail
     assert (home / ".ouroboros_env" / "python").is_dir() and not (installed / "probe" / ".ouroboros_env").exists()
+    from ouroboros.skill_mcp import _not_ready
+    from ouroboros.skill_readiness import skill_readiness_for_execution
+
+    assert skill_readiness_for_execution(drive, loaded).ready
+    assert _not_ready(drive, loaded) == []
     first = json.loads(skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[]))
     assert first["exit_code"] == 0, first
     assert first["stdout"].split() == ["from-the-work-venv", "1", str(home / ".ouroboros_env" / "python")]
@@ -594,6 +599,577 @@ def test_an_installed_script_skill_runs_from_its_verified_work_copy_with_depende
     assert again["stdout"].split()[0] == "from-the-work-venv" and not (home / "scripts" / "planted.py").exists()
     assert (installed / "probe" / "scripts" / "run.py").read_text() == script  # the installed payload: untouched
     assert not docker.records()
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_a_mode_only_skill_change_reaches_its_work_copy(env, monkeypatch, tmp_path, mask):
+    """The same bytes can lose/regain Git's executable flag without changing the reviewed hash. The container
+    may mask group/other access on unpack; reuse that actual copy, not a chmod to the service's file mode."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+
+    installed = tmp_path / "installed-skills"
+    _ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('ok')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    imports = []
+    real_import = work_domain.import_tree
+
+    def count_import(destination, members):
+        imports.append(destination)
+        return real_import(destination, members)
+
+    run = work_domain.run_in_work
+    def in_container(argv, **kwargs):
+        return run(["sh", "-c", f'umask {mask:o}; exec "$@"', "sh", *argv], **kwargs)
+
+    monkeypatch.setattr(work_domain, "run_in_work", in_container)
+    monkeypatch.setattr(work_domain, "import_tree", count_import)
+
+    loaded = find_skill(drive, "probe")
+    home = work_skill_payloads.materialize_skill(drive, loaded, loaded.content_hash)
+    script = home / "scripts" / "run.py"
+    assert len(imports) == 1 and imports[0] != home and script.is_file()
+    assert not (script.stat().st_mode & 0o100), "the fresh copy of a written file carries no execute bit"
+
+    reused = work_skill_payloads.materialize_skill(drive, find_skill(drive, "probe"), loaded.content_hash)
+    assert reused == home and len(imports) == 1, "unchanged bytes and modes reuse the copy without an import"
+
+    (installed / "probe" / "scripts" / "run.py").chmod(0o755)  # same bytes, newly executable
+    changed = find_skill(drive, "probe")
+    assert changed.content_hash == loaded.content_hash, "modes are not bytes: the reviewed digest is unchanged"
+    again = work_skill_payloads.materialize_skill(drive, changed, changed.content_hash)
+    assert again == home and len(imports) == 2, "the mode-only change re-imported the payload"
+    mode = stat.S_IMODE(script.stat().st_mode)
+    assert mode & stat.S_IXUSR, "the replaced mode reached the work copy"
+    if os.geteuid() != 0:  # Privileged tar may preserve the archive's permissions.
+        assert mode == (0o755 & ~mask)
+    assert work_skill_payloads.materialize_skill(drive, changed, changed.content_hash) == home
+    assert len(imports) == 2, "the destination's own masked mode is reusable"
+
+    record = work_skill_payloads._record_path(drive, "probe")
+    row = json.loads(record.read_text())
+    del row["installed_exec"], row["unpacked_exec"]
+    record.write_text(json.dumps(row), encoding="utf-8")
+    inode = script.stat().st_ino
+    assert work_skill_payloads.materialize_skill(drive, changed, changed.content_hash) == home
+    assert script.stat().st_ino == inode, "a verified legacy copy keeps its actual payload inode"
+    count = 2 if mode & 0o111 == 0o111 else 3  # with narrowing, prove equality via staging first
+    assert len(imports) == count
+    row = json.loads(record.read_text())
+    assert row["installed_exec"] == {"scripts/run.py": 0o111}
+    assert row["unpacked_exec"] == {"scripts/run.py": mode & 0o111}
+
+    (installed / "probe" / "scripts" / "run.py").chmod(0o644)
+    assert work_skill_payloads.materialize_skill(drive, changed, changed.content_hash) == home
+    assert len(imports) == count + 1 and not script.stat().st_mode & 0o111
+    assert home not in imports and script.read_text() == "print('ok')\n"
+
+
+@pytest.mark.parametrize("old_mode,new_mode", [(0o600, 0o700), (0o700, 0o600)])
+def test_a_mode_only_refresh_keeps_an_already_admitted_script_path(env, monkeypatch, tmp_path, old_mode, new_mode):
+    """Pause the real consumer at its spawn handoff. Its already-selected path stays readable at each rename
+    boundary of a second, ordinary call, then both calls execute through the fixture's work runner."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    text = "print('admitted')\n"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", text)
+    docker = _managed(env, monkeypatch, staging_root=str(env.work / "staging"),
+                      skill_state_root=str(env.work / "skill-state"))
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    source = installed / "probe" / "scripts" / "run.py"
+    source.chmod(old_mode)
+    digest = find_skill(drive, "probe").content_hash
+    rename, run = work_domain.rename, skill_exec._run_skill_subprocess
+    admitted, reads = None, []
+
+    def observe_rename(origin, destination):
+        if admitted is not None:
+            reads.append(work_domain.read_bytes(admitted))
+        rename(origin, destination)
+        if admitted is not None:
+            reads.append(work_domain.read_bytes(admitted))
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    def refresh_before_spawn(cmd, **options):
+        nonlocal admitted
+        if admitted is None:
+            admitted = pathlib.Path(cmd[1])
+            assert admitted == pathlib.Path(options["cwd"]) / "scripts" / "run.py"
+            scripts_inode = work_domain.lstat(admitted.parent).st_ino
+            assert stat.S_IMODE(work_domain.lstat(admitted).st_mode) == old_mode
+            source.chmod(new_mode)
+            assert find_skill(drive, "probe").content_hash == digest
+            second = json.loads(execute())
+            assert second["stdout"].strip() == "admitted" and second["content_hash"] == digest
+            assert work_domain.lstat(admitted.parent).st_ino == scripts_inode
+            assert stat.S_IMODE(work_domain.lstat(admitted).st_mode) == new_mode
+        else:
+            assert pathlib.Path(cmd[1]) == admitted
+        return run(cmd, **options)
+
+    monkeypatch.setattr(work_domain, "rename", observe_rename)
+    monkeypatch.setattr(skill_exec, "_run_skill_subprocess", refresh_before_spawn)
+    first = json.loads(execute())
+    assert first["stdout"].strip() == "admitted" and first["content_hash"] == digest
+    assert reads and all(data == text.encode() for data in reads)
+    assert source.read_text() == text and stat.S_IMODE(source.stat().st_mode) == new_mode
+    assert not docker.records()
+
+
+@pytest.mark.parametrize("fault", ["unpack", "verify", "publish", "published", "unsettled"])
+def test_skill_exec_refresh_failure_keeps_the_legacy_payload_and_its_build(env, monkeypatch, tmp_path, fault):
+    from ouroboros import platform_layer, work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('verified')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    installed_script = installed / "probe" / "scripts" / "run.py"
+    installed_script.chmod(0o700)
+    digest = find_skill(drive, "probe").content_hash
+    home = staging / "skills" / "probe" / digest
+    hold = home.with_name(f".{home.name}.refresh")
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    assert json.loads(execute())["stdout"].strip() == "verified"
+    live = home / "scripts" / "run.py"
+    before = live.read_bytes(), live.stat().st_ino, stat.S_IMODE(live.stat().st_mode)
+    deps = home / ".ouroboros_env" / "node" / "node_modules"
+    deps.mkdir(parents=True)
+    (deps / "kept.txt").write_text("built", encoding="utf-8")
+    link = home / "node_modules"
+    link.symlink_to(".ouroboros_env/node/node_modules", target_is_directory=True)
+    home_inode, deps_inode, link_inode = home.stat().st_ino, deps.stat().st_ino, link.lstat().st_ino
+    record = work_skill_payloads._record_path(drive, "probe")
+    row = json.loads(record.read_text())
+    del row["installed_exec"], row["unpacked_exec"]
+    record.write_text(json.dumps(row), encoding="utf-8")
+    saved = record.read_bytes()
+    installed_script.chmod(0o600)  # same review hash, old copy no longer satisfies the new mode
+    assert find_skill(drive, "probe").content_hash == digest
+    real_import, real_rename = work_domain.import_tree, work_domain.rename
+    acquire = platform_layer.acquire_exclusive_file_lock
+    attempted = []
+
+    def unpack(destination, members):
+        assert destination == hold / "new"
+        if fault == "unpack":
+            raise OSError("synthetic unpack failure")
+        real_import(destination, members)
+        if fault == "verify":
+            work_domain.write_text(destination / "scripts" / "run.py", "print('bad candidate')\n")
+
+    def rename(source, target):
+        if source != hold / "new" / live.relative_to(home) or target != live.parent:
+            return real_rename(source, target)
+        attempted.append(live)
+        if fault == "publish":
+            assert "work-copy lock unavailable" in execute()  # a new materializer cannot join this publication
+            raise OSError("synthetic settled publish failure")
+        assert fault in ("published", "unsettled"), fault
+        real_rename(source, target)
+        assert work_domain.read_bytes(live) == before[0] and not work_domain.lstat(live).st_mode & 0o111
+        if fault == "published":  # readback must prove the move landed and restore the previous inode
+            raise OSError("synthetic settled error after publish")
+        observed = subprocess.CompletedProcess(["mv"], None, b"observed move output", None)
+        raise work_domain.WorkDomainUnsettled("synthetic unconfirmed backend move", observed)
+
+    def acquire_now(path, **kwargs):
+        if path.name == ".probe-work-payload.lock":
+            kwargs["timeout_sec"] = 0
+        return acquire(path, **kwargs)
+
+    messages = {"unpack": "synthetic unpack failure", "verify": "did not verify after it was unpacked",
+                "publish": "synthetic settled publish failure", "published": "synthetic settled error after publish",
+                "unsettled": "synthetic unconfirmed backend move"}
+    with monkeypatch.context() as patch:
+        patch.setattr(work_domain, "import_tree", unpack)
+        patch.setattr(work_domain, "rename", rename)
+        patch.setattr(platform_layer, "acquire_exclusive_file_lock", acquire_now)
+        answer = execute()
+        assert answer.startswith("⚠️ SKILL_EXEC_ERROR:") and messages[fault] in answer, answer
+        assert record.read_bytes() == saved
+        assert (home.stat().st_ino, deps.stat().st_ino, link.lstat().st_ino) == (home_inode, deps_inode, link_inode)
+        assert (link / "kept.txt").read_text() == "built"
+        if fault == "unsettled":
+            assert "exit_code: unknown" in answer and "observed move output" in answer and str(hold) in answer, answer
+            retained = hold / "previous" / "scripts" / "run.py"
+            assert (retained.read_bytes(), retained.stat().st_ino, stat.S_IMODE(retained.stat().st_mode)) == before
+            assert "retained work-copy refresh" in execute() and attempted == [live]
+        else:
+            assert (live.read_bytes(), live.stat().st_ino, stat.S_IMODE(live.stat().st_mode)) == before
+            assert not hold.exists()
+    if fault != "unsettled":
+        assert json.loads(execute())["stdout"].strip() == "verified"
+        assert not live.stat().st_mode & 0o111 and (link / "kept.txt").read_text() == "built"
+
+
+def test_an_unreadable_work_copy_moves_nothing_and_still_repairs_once_readable(env, monkeypatch, tmp_path):
+    """A copy the service cannot read is not a verdict: the refresh refuses to move the live name on it,
+    keeps the record as it was and the stage out of the tree, and says the bytes are unknown. Once the read
+    heals, the same refresh proceeds, and a genuinely drifted copy still repairs — the refusal never became
+    a policy against repair."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('readable')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    installed_script = installed / "probe" / "scripts" / "run.py"
+    installed_script.chmod(0o700)
+    digest = find_skill(drive, "probe").content_hash
+    home = staging / "skills" / "probe" / digest
+    hold = home.with_name(f".{home.name}.refresh")
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    assert json.loads(execute())["stdout"].strip() == "readable"
+    live = home / "scripts" / "run.py"
+    before = live.read_bytes(), live.stat().st_ino, stat.S_IMODE(live.stat().st_mode)
+    record = work_skill_payloads._record_path(drive, "probe")
+    row = json.loads(record.read_text())
+    del row["installed_exec"], row["unpacked_exec"]
+    record.write_text(json.dumps(row), encoding="utf-8")
+    saved = record.read_bytes()
+    installed_script.chmod(0o600)  # a mode change asks for a refresh; the unreadable read must refuse it instead
+    real_measure, real_rename = work_domain.measure, work_domain.rename
+    moves = []
+
+    def unreadable(path, *args, **kwargs):
+        if pathlib.Path(path) == live:
+            raise OSError(f"synthetic unreadable member {path}")
+        return real_measure(path, *args, **kwargs)
+
+    def count_moves(origin, destination):
+        moves.append((str(origin), str(destination)))
+        return real_rename(origin, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(work_domain, "measure", unreadable)
+        patch.setattr(work_domain, "rename", count_moves)
+        answer = execute()
+        assert answer.startswith("⚠️ SKILL_EXEC_ERROR:"), answer
+        assert "could not be verified against its record" in answer and "not proven changed" in answer, answer
+        assert moves == [], "an unreadable copy moved nothing"
+        assert (live.read_bytes(), live.stat().st_ino, stat.S_IMODE(live.stat().st_mode)) == before
+        assert record.read_bytes() == saved and not hold.exists()
+    assert json.loads(execute())["stdout"].strip() == "readable"  # the read healed: the same refresh proceeds
+    assert not live.stat().st_mode & 0o111
+    live.write_text("print('drifted')\n", encoding="utf-8")
+    assert json.loads(execute())["stdout"].strip() == "readable"  # a genuinely drifted copy still repairs
+    assert live.read_text() == "print('readable')\n"
+
+
+def test_lock_contention_answers_with_its_reason_and_changes_nothing(env, monkeypatch, tmp_path):
+    """A materializer that cannot take the work-copy lock in time refuses with the holder's reason and a
+    retry advice, having changed nothing; once the holder releases, the same call materializes."""
+    from ouroboros import platform_layer, work_skill_payloads
+    from ouroboros.execution_domain import _data_root
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('held')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    digest = find_skill(drive, "probe").content_hash
+    lock = _data_root() / "state" / "skills" / ".probe-work-payload.lock"
+    acquire = platform_layer.acquire_exclusive_file_lock
+    held = acquire(lock, owner_aware_stale=True)
+    assert held is not None
+
+    def no_wait(path, **kwargs):
+        if path.name == ".probe-work-payload.lock":
+            kwargs["timeout_sec"] = 0
+        return acquire(path, **kwargs)
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(platform_layer, "acquire_exclusive_file_lock", no_wait)
+            answer = execute()
+        assert answer.startswith("⚠️ SKILL_EXEC_ERROR:"), answer
+        assert "work-copy lock unavailable for skill 'probe' (contention)" in answer, answer
+        assert "retry after it finishes" in answer, answer
+        assert not (staging / "skills" / "probe" / digest).exists(), "contending changed nothing on disk"
+    finally:
+        platform_layer.release_exclusive_file_lock(lock, held)
+    assert json.loads(execute())["stdout"].strip() == "held"
+
+
+def test_a_retained_stage_without_moves_lets_admitted_runs_proceed_and_blocks_repair(env, monkeypatch, tmp_path):
+    """A retained refresh stage holding exactly its own staged candidate does not block the runs its record
+    still admits as-is — the stage stays for inspection, never cleaned. An empty stage, one holding a
+    rollback of moved entries, or a copy the record no longer admits keeps waiting for that inspection."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('admitted')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    installed_script = installed / "probe" / "scripts" / "run.py"
+    digest = find_skill(drive, "probe").content_hash
+    home = staging / "skills" / "probe" / digest
+    hold = home.with_name(f".{home.name}.refresh")
+    record = work_skill_payloads._record_path(drive, "probe")
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    assert json.loads(execute())["stdout"].strip() == "admitted"
+    hold.mkdir()
+    (hold / "new").mkdir()
+    (hold / "new" / "staged.txt").write_text("staged", encoding="utf-8")
+    saved = record.read_bytes()
+    again = json.loads(execute())  # the stage provably never touched the live copy: the admitted copy runs
+    assert again["stdout"].strip() == "admitted"
+    assert (hold / "new" / "staged.txt").read_text() == "staged" and record.read_bytes() == saved
+    (hold / "previous").mkdir()  # a moved entry's rollback stage: not provable, even for an admitted copy
+    assert "retained work-copy refresh" in execute()
+    (hold / "previous").rmdir()
+    installed_script.chmod(0o755)  # the record no longer admits the copy as-is: the repair waits too
+    assert "retained work-copy refresh" in execute()
+    (hold / "new" / "staged.txt").unlink()
+    (hold / "new").rmdir()  # an empty stage can still receive a fresh move's rollback: never provable
+    assert "retained work-copy refresh" in execute()
+    work_domain.remove_tree(hold)  # an operator's inspection resolves the stage
+    assert json.loads(execute())["stdout"].strip() == "admitted"
+    assert home.joinpath("scripts", "run.py").stat().st_mode & stat.S_IXUSR, "the awaited repair then ran"
+
+
+def test_a_byte_repairs_moves_never_precede_their_rollback_stage(env, monkeypatch, tmp_path):
+    """The retained-stage bypass leans on the repair paths' own order: no move of a live entry happens
+    before the rollback stage beside it exists. A byte repair observed through the moves it issues keeps
+    that order — each move into the live copy sees the stage already there."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('repaired')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    digest = find_skill(drive, "probe").content_hash
+    home = staging / "skills" / "probe" / digest
+    hold = home.with_name(f".{home.name}.refresh")
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    assert json.loads(execute())["stdout"].strip() == "repaired"
+    (home / "scripts" / "run.py").write_text("print('drifted')\n", encoding="utf-8")
+    real_rename, observed = work_domain.rename, []
+
+    def record_then_rename(origin, destination):
+        observed.append(((str(origin), str(destination)), sorted(entry.name for entry in hold.iterdir())))
+        return real_rename(origin, destination)
+
+    monkeypatch.setattr(work_domain, "rename", record_then_rename)
+    assert json.loads(execute())["stdout"].strip() == "repaired"
+    into_live = [names for (_origin, destination), names in observed
+                 if destination == str(home) or destination.startswith(f"{home}/")]
+    assert into_live, "the repair moved its staged entries back into the live copy"
+    assert all("previous" in names for names in into_live), observed
+
+
+def test_a_stamped_measure_reads_only_through_the_confined_intake(env, monkeypatch, tmp_path):
+    """``measure(stamp=True)`` is one confined read binding a metadata fact to the digested bytes: the stamp is
+    the ``fstat`` of the opened, identity-checked descriptor, and a stamped measure is refused without
+    ``strict``, whose work-domain fallback opens no file of its own to stamp. The default measure keeps its
+    exact ``{size, sha256}`` shape for every dict-equality consumer."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+
+    installed = tmp_path / "installed-skills"
+    _ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('stamped')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    loaded = find_skill(drive, "probe")
+    home = work_skill_payloads.materialize_skill(drive, loaded, loaded.content_hash)
+    leaf = home / "scripts" / "run.py"
+
+    with pytest.raises(work_domain.WorkDomainRefused, match="only through the confined intake"):
+        work_domain.measure(leaf, stamp=True)  # a fallback read could never stamp the object it digested
+    plain = work_domain.measure(leaf, strict=True)
+    assert set(plain) == {"size", "sha256"}, "the unstamped measure keeps the two-key shape consumers compare"
+    stamped = work_domain.measure(leaf, strict=True, stamp=True)
+    info = work_domain.lstat(leaf)
+    assert (stamped["size"], stamped["sha256"]) == (plain["size"], plain["sha256"])
+    assert (stamped["mode"], stamped["dev"], stamped["ino"], stamped["mtime_ns"]) == (
+        info.st_mode, info.st_dev, info.st_ino, info.st_mtime_ns)
+
+
+def test_the_copy_inventory_reads_each_regular_leaf_once_binding_its_mode_to_the_digested_bytes(
+        env, monkeypatch, tmp_path):
+    """The copy's inventory spends exactly one confined read per regular leaf, and both recorded facts — the
+    digest and the execute bits — are that one opened object's (``measure``'s stamp): no second look that a
+    leaf swapped between an ``lstat`` and the read could have missed binds the mode to other bytes."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+
+    installed = tmp_path / "installed-skills"
+    _ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('once')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    loaded = find_skill(drive, "probe")
+    home = work_skill_payloads.materialize_skill(drive, loaded, loaded.content_hash)
+    (home / "scripts" / "run.py").chmod(0o755)  # one leaf's bits must come from its own digested object
+
+    real_measure, real_lstat = work_domain.measure, work_domain.lstat
+    reads, stats = [], []
+
+    def observed_measure(path, *args, **kwargs):
+        result = real_measure(path, *args, **kwargs)
+        reads.append((pathlib.Path(path), args, kwargs, result))
+        return result
+
+    def observed_lstat(path):
+        stats.append(pathlib.Path(path))
+        return real_lstat(path)
+
+    monkeypatch.setattr(work_domain, "measure", observed_measure)
+    monkeypatch.setattr(work_domain, "lstat", observed_lstat)
+    found, exec_bits = work_skill_payloads._inventory(home)
+
+    assert stats == [], "no leaf metadata is looked up beside its own single read"
+    assert sorted(path.relative_to(home).as_posix() for path, _a, _k, _r in reads) == ["SKILL.md", "scripts/run.py"]
+    for path, args, kwargs, result in reads:
+        rel = path.relative_to(home).as_posix()
+        assert args == () and kwargs == {"strict": True, "stamp": True}, (rel, args, kwargs)
+        assert found[rel] == result["sha256"] and exec_bits[rel] == result["mode"] & 0o111, rel
+    assert exec_bits == {"SKILL.md": 0, "scripts/run.py": 0o111}, "one read's bits, ``0`` kept"
+
+
+def test_the_copys_digest_is_bound_to_the_installed_sources_per_install_note_bucket(env, monkeypatch, tmp_path):
+    """The staged snapshot is digested under the INSTALLED source's bucket, so a per-install note of that
+    bucket stays outside the release exactly as at review time; rebinding the bucket to the snapshot's own
+    temporary parent would hash the note and flip the check to the spurious "changed while it was copied"
+    refusal."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_identity import payload_bucket, payload_digest
+    from ouroboros.skill_loader import find_skill
+
+    installed = tmp_path / "clawhub"  # the bucket is the payload directory's parent name
+    _ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('noted')\n")
+    skill = installed / "probe"
+    (skill / ".clawhub.json").write_text("{}\n", encoding="utf-8")  # a per-install note: no release bytes
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    loaded = find_skill(drive, "probe")
+    digest = loaded.content_hash
+    assert payload_bucket(skill) == "clawhub"
+    assert payload_digest(skill, bucket="clawhub") == digest, "the review digest leaves its bucket's note out"
+    assert payload_digest(skill, bucket="ouroboros-skill-copy-standin") != digest, (
+        "under the snapshot's own parent name the note is hashed: a rebind flips to the spurious refusal")
+
+    home = work_skill_payloads.materialize_skill(drive, loaded, digest)
+    assert (home / "scripts" / "run.py").read_text() == "print('noted')\n"
+    assert (home / ".clawhub.json").read_text() == "{}\n", "the note rides into the copy; the release digest skips it"
+
+
+def test_a_payload_claiming_a_reserved_dependency_path_is_refused_before_anything_moves(env, monkeypatch, tmp_path):
+    """A manifest-declared entry under a reserved dependency path (the loader's walk skips ``node_modules``,
+    but a declared script rejoins the reviewed inventory) is refused at the staged snapshot: no stage, no
+    move, no record — those names belong to the copy's dependency build."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import SkillReviewState, compute_content_hash, find_skill, save_review_state
+
+    installed = tmp_path / "installed-skills"
+    _ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('ok')\n")
+    skill = installed / "probe"
+    (skill / "node_modules").mkdir()
+    (skill / "node_modules" / "dep.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        "---\nname: probe\ndescription: Probe.\nversion: 0.1.0\ntype: script\nruntime: python3\ntimeout_sec: 60\n"
+        "scripts:\n  - name: node_modules/dep.py\n    description: Probe.\n  - name: run.py\n    description: Probe.\n"
+        "---\n# body\n", encoding="utf-8")
+    save_review_state(drive, "probe", SkillReviewState(status="pass", content_hash=compute_content_hash(skill)))
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    loaded = find_skill(drive, "probe")
+    home = staging / "skills" / "probe" / loaded.content_hash
+    hold = home.with_name(f".{home.name}.refresh")
+    record = work_skill_payloads._record_path(drive, "probe")
+
+    with pytest.raises(work_domain.WorkDomainRefused, match="reserved work-copy dependency path"):
+        work_skill_payloads.materialize_skill(drive, loaded, loaded.content_hash)
+    assert not home.parent.exists() and not hold.exists(), "the refusal precedes any stage, move or home"
+    assert not record.exists(), "no record vouches for a copy that never staged"
+
+
+def test_an_unproven_move_readback_keeps_the_stage_and_is_never_read_as_settled(env, monkeypatch, tmp_path):
+    """A move whose readback cannot establish its outcome is ``_RefreshUncertain``: the staging tree is kept
+    with the moved live entry under ``previous``, no rollback or deletion guesses at the truth, the record is
+    never updated, and every later call refuses on the retained stage — an unproven move is never read as
+    settled, in either direction."""
+    from ouroboros import work_skill_payloads
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.tools import skill_exec
+
+    installed = tmp_path / "installed-skills"
+    ctx, drive = _installed_skill(env, monkeypatch, installed, "probe", "print('settled')\n")
+    staging, state = env.work / "staging", env.work / "skill-state"
+    _managed(env, monkeypatch, staging_root=str(staging), skill_state_root=str(state))
+    monkeypatch.setattr(work_skill_payloads, "CONTAINER_PYTHON", sys.executable)
+    monkeypatch.setitem(work_skill_payloads._CONTAINER_RUNTIMES, "python3", sys.executable)
+    digest = find_skill(drive, "probe").content_hash
+    home = staging / "skills" / "probe" / digest
+    hold = home.with_name(f".{home.name}.refresh")
+    record = work_skill_payloads._record_path(drive, "probe")
+
+    def execute():
+        return skill_exec._handle_skill_exec(ctx, skill="probe", script="scripts/run.py", args=[])
+
+    assert json.loads(execute())["stdout"].strip() == "settled"
+    saved = record.read_bytes()
+    live = home / "scripts" / "run.py"
+    live.write_text("print('drifted')\n", encoding="utf-8")  # a byte repair must move the live entry aside
+    before = live.read_bytes(), live.stat().st_ino
+    real_rename = work_domain.rename
+
+    def ambiguous_rename(source, target):
+        if pathlib.Path(source) == home / "scripts" and pathlib.Path(target) == hold / "previous" / "scripts":
+            real_rename(source, target)  # the move lands...
+            (home / "scripts").mkdir()   # ...and its name reappears: the readback cannot establish the outcome
+            return
+        real_rename(source, target)
+
+    monkeypatch.setattr(work_domain, "rename", ambiguous_rename)
+    answer = execute()
+    assert answer.startswith("⚠️ SKILL_EXEC_ERROR:"), answer
+    assert "cannot establish the outcome" in answer, answer
+    assert record.read_bytes() == saved, "an unproven move never updates the record"
+    retained = hold / "previous" / "scripts" / "run.py"
+    assert (retained.read_bytes(), retained.stat().st_ino) == before, "the moved live entry is the stage's custody"
+    assert (hold / "new" / "scripts" / "run.py").read_text() == "print('settled')\n"
+    assert "retained work-copy refresh" in execute(), "a later call refuses on the stage, never reads it as settled"
 
 
 def _clean_filter_witness(env, repo):

@@ -367,9 +367,22 @@ terminal-bench-2-1#121 — four of our submissions were gated by exactly this).
 `run_tb.py` therefore generates `agent_job_config.json` (agents[].name =
 "Ouroboros Installed" + import_path + kwargs) and launches via
 `harbor run -c <config>`; the job config on the Hub is immutable, so this is
-unfixable after upload. Optional: `OUROBOROS_EFFORT_TASK` at launch is recorded
-as `kwargs.reasoning_effort` (the submission's effort label) and forwarded back
-into the container, so the declared effort equals the effective one.
+unfixable after upload. To set the main agent's tier, supply `OUROBOROS_EFFORT_TASK`
+through the environment or `--settings-path`; a nonblank environment value wins.
+An empty or whitespace-only environment value leaves the saved setting in effect.
+The launcher records the requested tier in both `kwargs.reasoning_effort` and the
+run manifest; when nothing declares a tier, the generated job pins the runtime's
+saved default instead, so the adapter can never re-resolve the tier from a later
+host-settings save at trial time (a hand-authored job config WITHOUT the field
+keeps the adapter's own declared→environment→saved resolution). An invalid tier
+is refused at admission — a `main_effort` refusal that names the value and never
+records it as an accepted model setting — before any submission file is written.
+The adapter forwards the requested tier to the container and refuses unknown values.
+This records the request, not a provider's confirmation of applied effort.
+
+Harbor 0.26 checks the adapter's `reasoning_effort` capability before creating
+a trial. This option describes the main agent; `--review-effort` continues to
+select the reviewer's effort separately.
 
 Hard-won facts (verified against harbor 0.18.0 + leaderboard CI source):
 

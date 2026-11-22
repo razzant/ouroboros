@@ -56,12 +56,12 @@ def test_healthy_local_model_is_ready_when_informational_binding_fails(tmp_path,
     proc = SimpleNamespace(pid=os.getpid(), poll=lambda: None)
     manager._proc = proc
     manager._status = 'loading'
-    monkeypatch.setattr(manager, 'health_check', lambda: {'ok':True,'context_length':8192,'model_name':'fixture'})
+    monkeypatch.setattr(manager, 'health_check', lambda **_: {'ok':True,'context_length':8192,'model_name':'fixture'})
     if failure == 'metadata':
         monkeypatch.setattr(server_process, 'record_service_binding', lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError('start time unavailable')))
     elif failure == 'write':
         monkeypatch.setattr(server_process, 'update_json_locked', lambda *_a, **_k: (_ for _ in ()).throw(OSError('read-only filesystem')))
-    manager._wait_for_healthy(timeout=1)
+    manager._wait_for_healthy(proc=proc, port=manager.port, launch_id='fixture-launch', timeout=1)
     assert manager.is_running
     assert manager._proc is proc
     assert manager.status_dict()['context_length'] == 8192
@@ -81,12 +81,12 @@ def test_stale_health_response_cannot_publish_new_model_generation(tmp_path, mon
     current = SimpleNamespace(pid=os.getpid(), poll=lambda: None)
     manager._proc = previous
     manager._status = 'loading'
-    def health():
+    def health(**_):
         manager._proc = current
         return {'ok':True,'context_length':8192,'model_name':'old'}
     monkeypatch.setattr(manager, 'health_check', health)
     monkeypatch.setattr(server_process, 'record_service_binding', lambda *_a, **_k: pytest.fail('stale generation published'))
-    manager._wait_for_healthy(timeout=1)
+    manager._wait_for_healthy(proc=previous, port=manager.port, launch_id='fixture-launch', timeout=1)
     assert manager._status == 'loading'
     assert manager._proc is current
     assert manager._service_binding is None

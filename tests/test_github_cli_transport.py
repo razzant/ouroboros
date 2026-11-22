@@ -18,6 +18,7 @@ from ouroboros.tools import github as transport
 from ouroboros.tools.github_read import run_read
 from ouroboros.tools.github_write import run_write
 from ouroboros.tools.registry import ToolContext
+from tests._github_process import stub_gh
 
 
 @pytest.fixture(autouse=True)
@@ -44,8 +45,8 @@ def synthetic_credentials(monkeypatch):
 def test_transport_bounds_stderr_and_only_reads_gh_http_marker(
     monkeypatch, tmp_path, stderr, expected_status, expected_text,
 ):
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 7, "ignored stdout", stderr),
+    stub_gh(
+        monkeypatch, lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 7, "ignored stdout", stderr),
     )
     result = transport._gh_run(["api", "/user"], types.SimpleNamespace(repo_dir=tmp_path))
     assert (result.ok, result.exit_code, result.http_status, result.failure) == (False, 7, expected_status, "exit")
@@ -57,19 +58,26 @@ def test_transport_bounds_stderr_and_only_reads_gh_http_marker(
 
 
 @pytest.mark.parametrize("filename,failure,fragment", [
-    (None, "cli_missing", "`gh` CLI not found"),
+    (None, "pre_effect", "Could not start"),  # CreateProcess may omit the filename on Windows.
     ("/usr/local/bin/gh", "cli_missing", "`gh` CLI not found"),
     # a vanished working directory is a launch failure, not a missing CLI
-    ("/vanished/project", "exception", "/vanished/project"),
+    ("/vanished/project", "pre_effect", "/vanished/project"),
 ])
 def test_launch_failure_names_what_is_missing(monkeypatch, tmp_path, filename, failure, fragment):
     def run(cmd, **_kwargs):
         raise FileNotFoundError(2, "No such file or directory", filename)
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(transport, "Popen", run)
     result = transport._gh_run(["api", "/user"], types.SimpleNamespace(repo_dir=tmp_path))
     assert (result.ok, result.exit_code, result.http_status, result.failure) == (False, None, None, failure)
     assert fragment in result.text
+
+
+def test_unopenable_capture_named_gh_is_a_local_file_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(transport, "Popen", lambda *a, **kw: pytest.fail("gh started without a capture file"))
+    result = transport._gh_run(["api", "user"], types.SimpleNamespace(repo_dir=tmp_path),
+                               capture_to=tmp_path / "missing" / "gh", max_bytes=64)
+    assert result.failure == "pre_effect" and "capture file" in result.text
 
 
 @pytest.mark.parametrize("failure", ["cli_missing", "timeout", "exception"])
@@ -79,14 +87,17 @@ def test_transport_never_publishes_a_sidecar(monkeypatch, tmp_path, failure):
 
     def run(cmd, **kwargs):
         if failure == "cli_missing":
-            raise FileNotFoundError()
+            raise FileNotFoundError(2, "No such file or directory", "gh")
         if failure == "timeout":
             raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
         if failure == "exception":
             raise RuntimeError("synthetic ghp_SYNTHETIC1234567890")
         return subprocess.CompletedProcess(cmd, 1, "", "synthetic")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    if failure == "cli_missing":
+        monkeypatch.setattr(transport, "Popen", run)
+    else:
+        stub_gh(monkeypatch, run)
     result = transport._gh_run(["api", "/user"], ctx)
     assert result.failure == failure
     assert ctx._active_builtin_tool_result is sentinel

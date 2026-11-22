@@ -551,7 +551,7 @@ def read_in_work(path: Any, *, limit: Optional[int] = None) -> bytes:
     """A work file's bytes as the work domain reads it (its links followed in the container)."""
     target = container_path(path)
     argv = ["head", "-c", str(int(limit)), "--", target] if limit is not None else ["cat", "--", target]
-    result = run_in_work(argv, timeout_sec=_READ_TIMEOUT_SEC)
+    result = _confirmed(run_in_work(argv, timeout_sec=_READ_TIMEOUT_SEC), f"read of {path}")
     if result.returncode != 0:
         detail = (result.stderr or b"").decode("utf-8", "replace").strip()
         if "No such file" in detail or "not found" in detail.lower():
@@ -559,7 +559,7 @@ def read_in_work(path: Any, *, limit: Optional[int] = None) -> bytes:
         if "Is a directory" in detail:
             raise IsADirectoryError(errno.EISDIR, "a work folder, not a file", str(path))
         raise OSError(f"the work domain did not read {path} ({detail[:300] or result.returncode})")
-    return _confirmed(result, f"read of {path}").stdout
+    return result.stdout
 
 
 def _confined_link(rel: str, link: str) -> bool:
@@ -785,17 +785,23 @@ def read_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
         raise
 
 
-def measure(path: Any, sink: Any = None, *, strict: bool = False) -> Dict[str, Any]:
+def measure(path: Any, sink: Any = None, *, strict: bool = False, stamp: bool = False) -> Dict[str, Any]:
     """``{size, sha256}`` of a work file's bytes, copied into ``sink`` in bounded chunks: from the confined descent
     (regular files only, its identity checked after the open), else, for a link on its path, the work domain's own
     read streamed through a service temporary. ``strict`` (a policy-checked member) never falls back: a link or
-    an unreadable folder on its path is the member's ``OSError``, as the service's own member check refuses it."""
+    an unreadable folder on its path is the member's ``OSError``, as the service's own member check refuses it.
+    ``stamp`` adds the opened file's own ``mode``/``dev``/``ino``/``mtime_ns`` — from the ``fstat`` whose identity
+    the read was checked against, so one confined read binds a metadata fact to the digested bytes; it requires
+    ``strict``: the work-domain fallback opens no file of its own and can never stamp one."""
     import hashlib
 
     spelling = work_spelling(path)
     if not spelling:
         raise WorkDomainRefused(f"{path} is not a work-domain path")
+    if stamp and not strict:
+        raise WorkDomainRefused(f"{path}: a stamped measure reads only through the confined intake; nothing was read")
     digest, size = hashlib.sha256(), 0
+    stamped: Dict[str, Any] = {}
 
     def pour(handle: Any) -> None:
         nonlocal size
@@ -816,6 +822,9 @@ def measure(path: Any, sink: Any = None, *, strict: bool = False) -> Dict[str, A
             with handle:
                 if (observed.st_dev, observed.st_ino) != (info.st_dev, info.st_ino):
                     raise OSError(errno.ELOOP, "replaced while opened", spelling)
+                if stamp:
+                    stamped = {"mode": observed.st_mode, "dev": observed.st_dev,
+                               "ino": observed.st_ino, "mtime_ns": observed.st_mtime_ns}
                 pour(handle)
     except OSError as exc:
         if strict or exc.errno not in (errno.ELOOP, errno.EACCES, errno.EPERM, errno.ENOTDIR) or size:
@@ -827,7 +836,7 @@ def measure(path: Any, sink: Any = None, *, strict: bool = False) -> Dict[str, A
             spool.seek(0)
             pour(spool)
             _confirmed(result, f"read of {path}")  # the bytes poured into ``sink`` stand either way
-    return {"size": size, "sha256": digest.hexdigest()}
+    return {"size": size, "sha256": digest.hexdigest(), **stamped}
 
 
 def read_text(path: Any, *, encoding: str = "utf-8", errors: str = "strict") -> str:
@@ -894,9 +903,11 @@ def readlink(path: Any) -> str:
         return os.readlink(name, dir_fd=directory.handle)
 
 
-def kind(path: Any) -> str:
+def kind(path: Any, *, conclusive_absence: bool = False) -> str:
     """``file``, ``dir``, ``link``, ``other`` or ``missing``, from a path's own metadata (never followed). A link
-    on a work path's way (a folder made a link) makes it the work domain's own answer, resolved in its container."""
+    on a work path's way (a folder made a link) makes it the work domain's own answer, resolved in its container.
+    ``conclusive_absence`` reads that look's ``missing`` as ``unknown``; only a direct ``FileNotFoundError``
+    confirms absence for a managed dependency reader."""
     try:
         mode = lstat(path).st_mode
     except FileNotFoundError:
@@ -912,6 +923,8 @@ def kind(path: Any) -> str:
         answer = (result.stdout or b"").decode("utf-8", "replace").strip()
         if result.returncode != 0 or answer not in ("link", "dir", "file", "other", "missing"):
             raise OSError(f"the work domain did not report the kind of {path}") from exc
+        if answer == "missing" and conclusive_absence:
+            return "unknown"
         return answer
     if stat.S_ISLNK(mode):
         return "link"

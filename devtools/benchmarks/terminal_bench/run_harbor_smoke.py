@@ -16,9 +16,9 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from devtools.benchmarks.common.manifests import (
+    EFFORT_SLOT_KEY,
     admit_benchmark_run,
     finalize_run_manifest,
-    write_json,
 )
 from devtools.benchmarks.common.model_slots import (
     fixed_model_actor_snapshot,
@@ -79,6 +79,11 @@ def harbor_command(
     ]
     if host_settings_path:
         cmd.extend(["--agent-kwarg", f"host_settings_path={host_settings_path}"])
+    # The admitted tier, when the caller resolved one: declared, so Harbor forwards it to the
+    # adapter and the container cannot re-resolve it from a later host-settings save.
+    effort = str(opts.get("reasoning_effort") or "")
+    if effort:
+        cmd.extend(["--agent-kwarg", f"reasoning_effort={effort}"])
     cmd.extend(
         [
             "--agent-setup-timeout-multiplier",
@@ -199,20 +204,6 @@ def main() -> int:
     actual_include_filters = args.task or []
     effective_n_tasks = len(actual_include_filters) if actual_include_filters else int(args.n_tasks)
     task_names = actual_include_filters or [f"selection-slot-{idx + 1}" for idx in range(effective_n_tasks)]
-    cmd = harbor_command(
-        task_names=actual_include_filters,
-        model=actor_slots["OUROBOROS_MODEL"],
-        run_root=run_root,
-        dataset=args.dataset,
-        harbor_bin=args.harbor_bin,
-        n_tasks=effective_n_tasks,
-        n_concurrent=args.n_concurrent,
-        k=args.k,
-        agent_setup_timeout_multiplier=args.agent_setup_timeout_multiplier,
-        environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
-        light_model=actor_slots["OUROBOROS_MODEL_LIGHT"],
-        options={"execute": args.execute, "host_settings_path": str(settings_path)},
-    )
     ledger_output = (
         assert_file_output_outside_repo(pathlib.Path(args.ledger_output), repo_root)
         if args.ledger_output
@@ -224,19 +215,31 @@ def main() -> int:
     # nothing but the persisted refusal — no harbor invocation, no ledger, no settings render.
     manifest = admit_benchmark_run(
         manifest_path,
-        benchmark="terminal_bench",
+        benchmark="terminal_bench", settings_path=settings_path, pin_main_effort=True,
+        # No raw argv (the wrapper's flags carry no value today and must not leak one if that
+        # ever changes); the generated command below is the declaration.
+        argv=[],
+        # The compiled child actor is the ONLY source of these slots and of the roster: this
+        # launcher's own env/settings may name a different pool, and the child can differ from
+        # this host. The roster is the exact string the child environment carries.
+        harness={"agent_import": AGENT_IMPORT, "harbor_bin": args.harbor_bin,
+                 "fixed_model_actor": fixed_actor},
+        model_slot_overrides={
+            "OUROBOROS_MODEL": actor_slots["OUROBOROS_MODEL"],
+            "OUROBOROS_MODEL_LIGHT": actor_slots["OUROBOROS_MODEL_LIGHT"],
+            "OUROBOROS_MODEL_FALLBACKS": actor_slots["OUROBOROS_MODEL_FALLBACKS"],
+            "OUROBOROS_WEBSEARCH_MODEL": actor_slots["OUROBOROS_WEBSEARCH_MODEL"],
+        },
+        forwarded_model_slot_keys=(),
+        available_subagents=child_env["OUROBOROS_SUBAGENTS"],
         run_root=run_root,
         repo_dir=repo_root,
         requested_task_ids=list(actual_include_filters),
         require_clean=not args.allow_dirty_seed,
-        argv=sys.argv,
         output_paths={"harbor_output_dir": str(run_root)},
         dataset=args.dataset,
-        harness={"agent_import": AGENT_IMPORT, "harbor_bin": args.harbor_bin},
-        official_command=cmd,
         timeout_sec=None,
         isolated_data_root=args.isolated_data_root,
-        settings_path=settings_path,
         extra={
             "outcome": "started",
             "n_tasks": effective_n_tasks,
@@ -250,18 +253,29 @@ def main() -> int:
             },
         },
     )
-    manifest["model_slots"] = {
-        key: actor_slots[key]
-        for key in (
-            "OUROBOROS_MODEL",
-            "OUROBOROS_MODEL_LIGHT",
-            "OUROBOROS_MODEL_FALLBACKS",
-        )
-    }
-    manifest["available_subagents"] = fixed_actor["available_subagents"]
-    manifest["harness"]["fixed_model_actor"] = fixed_actor
-    # Durable before Harbor can spend: no ambient settings model/Heavy can survive.
-    write_json(manifest_path, manifest)
+    # The admitted tier rides the generated command: a declared `reasoning_effort` wins over any
+    # later host-settings save, so a trial cannot re-resolve its tier at run time. Built after
+    # admission because only the admission gate validates the tier.
+    main_effort = manifest["model_slots"][EFFORT_SLOT_KEY]
+    cmd = harbor_command(
+        task_names=actual_include_filters,
+        model=actor_slots["OUROBOROS_MODEL"],
+        run_root=run_root,
+        dataset=args.dataset,
+        harbor_bin=args.harbor_bin,
+        n_tasks=effective_n_tasks,
+        n_concurrent=args.n_concurrent,
+        k=args.k,
+        agent_setup_timeout_multiplier=args.agent_setup_timeout_multiplier,
+        environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
+        light_model=actor_slots["OUROBOROS_MODEL_LIGHT"],
+        options={
+            "execute": args.execute,
+            "host_settings_path": str(settings_path),
+            "reasoning_effort": main_effort,
+        },
+    )
+    manifest["official_command"] = cmd
     if not actual_include_filters:
         manifest["requested_count"] = effective_n_tasks
     with finalize_run_manifest(manifest_path, manifest) as final:
@@ -276,6 +290,9 @@ def main() -> int:
         observed_outcomes: list[dict[str, object]] = []
         if args.execute:
             before_results = set(_harbor_results(run_root))
+            # In-progress evidence before Harbor can spend: the admitted actor, its roster and
+            # the generated command are durable, so an interrupted launch is not "never started".
+            final.checkpoint("before_harbor_execution")
             try:
                 completed = subprocess.run(
                     cmd,

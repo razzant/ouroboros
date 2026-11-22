@@ -565,12 +565,17 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/local-model/start": Shape(
         "200:LocalModelStartResponse 400,403,409:ErrorResponse 412:LocalModelRuntimeMissingResponse", "LocalModelStartRequest",
         note="not idempotent; the request stays open while the model downloads; then poll status; "
-             "403 managed_by_deployment: the server a deployment checker answers from"),
-    "POST /api/local-model/stop": Shape("200:StatusResponse", note="status stopped; also aborts a runtime install"),
+             "403 managed_by_deployment: the server a deployment checker answers from; "
+             "409 also when its install_id was ended by a Stop or replaced by a newer install"),
+    "POST /api/local-model/stop": Shape("200:StatusResponse 409:ErrorResponse",
+                                       note="stopped confirms model absence or exit, not installer exit; "
+                                            "409 local_model_stop_unconfirmed retains model custody; repeatable; "
+                                            "a Stop revokes every install_id and boot's staged Start"),
     "POST /api/local-model/test": Shape("200:LocalModelTestResponse 400:ErrorResponse",
                                         note="two real completions; a failed probe is 200"),
-    "POST /api/local-model/install-runtime": Shape("200:StatusResponse 403:ErrorResponse",
-                                                   note="installing or already_installing; poll status runtime_status"),
+    "POST /api/local-model/install-runtime": Shape("200:LocalModelInstallResponse 403,409:ErrorResponse",
+                                                   note="installing carries the admitting caller's install_id, "
+                                                        "already_installing none; poll status runtime_status"),
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",

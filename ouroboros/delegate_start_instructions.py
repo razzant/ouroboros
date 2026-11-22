@@ -298,8 +298,8 @@ def in_place_binding_instruction(root: str, service: Any = None) -> str:
         "\n\nDELEGATED IN-PLACE BINDING (typed host fact): you work directly in "
         f"{str(root or '').strip() or '(unknown)'}, your host task's own folder, as it chose. Every change lands "
         "there as you make it and nothing is captured for a separate apply. Your host may be working there too: "
-        "change only what the assignment needs; never reset, clean, stash, check out or commit. Keep test "
-        "scratch, environments and caches outside every Git working tree, " + place + "."
+        "change only what the assignment needs; never reset, clean, stash, check out or commit. If the assignment "
+        "permits disposable test files, environments or caches, keep them outside every Git working tree, " + place + "."
     )
 
 

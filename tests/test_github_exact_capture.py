@@ -179,6 +179,18 @@ def test_capture_exit_failure_is_classified_like_the_text_branch_and_redacted(fa
         assert res.text == "⚠️ GH_ERROR: gh: token *** rejected | gh: Not Found (HTTP 404)"
 
 
+def test_a_cap_below_ghs_own_error_answer_reads_its_exit_not_its_head(fake_gh, tmp_path):
+    """Headers and a REST error body are never log bytes, even at a tiny cap."""
+    fake_gh.setenv("FAKE_GH_STDOUT_HEX", b'HTTP/2.0 404 Not Found\nX-Fixture: test\r\n\r\n{"message":"gone"}'.hex())
+    target = tmp_path / "out.bin"
+
+    res = transport._gh_run(["api", "repos/o/r/actions/jobs/5/logs", "--include"], _ctx(tmp_path),
+                            capture_to=target, max_bytes=10)
+
+    assert (res.ok, res.exit_code, res.http_status, res.failure, res.capture) == (False, None, 404, "exit", None)
+    assert target.read_bytes() == b"" and "HTTP 404" in res.text and "X-Fixture" not in res.text
+
+
 def test_capture_timeout_kills_the_process_and_reports_it(fake_gh, tmp_path):
     fake_gh.setenv("FAKE_GH_MODE", "sleep")
     fake_gh.setenv("FAKE_GH_SLEEP", "30")

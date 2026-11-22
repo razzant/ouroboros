@@ -1353,22 +1353,6 @@ def _resume_interrupted_project_deletions() -> None:
         log.debug("Project deletion recovery failed", exc_info=True)
 
 
-def _migrate_startup_cancel_latches(drive_root: pathlib.Path) -> None:
-    """Before restore/readers can quarantine an unstamped legacy cancel latch."""
-    try:
-        # Phase A boot migration: legacy ``cancel_requested`` status latches
-        # become ordinary durable cancel intents; the supervisor watchdog then
-        # drives each through custody to a real settled outcome.
-        from ouroboros.startup_migrations import migrate_cancel_latches
-
-        migrated = migrate_cancel_latches(drive_root)
-        if migrated:
-            log.info("Migrated %d legacy cancel latch(es) to durable intents: %s",
-                     len(migrated), migrated)
-    except Exception:
-        log.debug("Legacy cancel-latch migration failed", exc_info=True)
-
-
 def _publish_expired_quiz_frames(expired: list) -> None:
     """Tell already-rendered cards that a healed terminal expired their question:
     the same frame the task-done seam sends, from the supervisor-side healer that

@@ -42,7 +42,7 @@ OpenRouter/Anthropic-compatible output budgets use `max_tokens`; direct OpenAI u
 | Project naming LIGHT one-shot (`project_naming.llm_project_name`) | 256 |
 | Provider Test (`llm_probe`; direct OpenAI's tool call 4,096) | 16 |
 
-Naming/translation share one deadline across preparation, slots and recovery; naming captures it before scheduling so workers cannot renew it. Earlier bounds win; detached naming refreshes cost without publishing a title.
+Naming and translation use Light's model and lane; naming may pin the lane. One deadline spans preparation, slots and recovery. Naming binds it before scheduling; earlier bounds win. Detached naming updates only cost.
 
 ### Default settings
 

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools import github, github_write
+from tests._github_process import stub_gh
 from tests.test_github_project_target import _context
 from tests.test_github_read import API, BASE, SHA, _call, _comment, _issue, _pr
 
@@ -39,7 +40,7 @@ def gh(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=answer[0], stdout="", stderr=answer[1])
         return SimpleNamespace(returncode=0, stdout=answer, stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     world.ctx, world.cwd = _context(tmp_path, "queued")
     world.ctx._active_builtin_tool_result = None
 
@@ -417,6 +418,7 @@ def test_unanswered_create_confirms_only_the_acting_authors_row(gh, method, args
     assert receipt["outcome"] == ("confirmed" if author == gh.identity else "unknown")
     if author != gh.identity:
         assert receipt["observed_match"]["actor"] == author
+        assert "repo='github.example/owner/selected'" in receipt["lookup"]
         assert gh.result.meta["operation_outcome"] == "unknown"
     assert [s[0] for s in gh.sent()] == ["POST", "GET", "GET"]
     assert gh.sent()[-1][1] == "user" and all(_call(argv).hostname == "github.example" for argv, _kw in gh.calls)
@@ -464,7 +466,7 @@ def test_an_unanswered_send_is_looked_up_once_and_confirmed_when_found(gh, failu
 def test_an_unanswered_send_not_found_stays_unknown_and_is_never_resent(gh, lookup):
     gh.answer = lambda p, argv, kw: subprocess.TimeoutExpired(["gh"], 60) if p.method == "POST" else (json.dumps([_comment(2, body="other")]) if lookup == "absent" else (1, "HTTP 503"))
     line, receipt = _receipt(gh.write(method="comment", target=7, body="hello"))
-    assert line.startswith("⚠️ GH_WRITE_UNKNOWN: the request was sent and no answer proved its outcome; do not resend. Reconcile with "
+    assert line.startswith("⚠️ GH_WRITE_UNKNOWN: the tool made one write attempt. The outcome is unknown, so do not resend. Reconcile with "
                            "github_read(method='list', kind='comment', target=7, since='2026-10-22T09:58:00Z') before any further write. "
                            "github_write comment → selected Project#7: unknown")
     assert receipt["outcome"] == "unknown" and receipt["failure"] == "timeout" and receipt["error"].startswith("⚠️ GH_TIMEOUT")

@@ -7,6 +7,9 @@ import json
 import os
 from typing import Any
 
+LOCAL_LAUNCH_ENV = "OUROBOROS_LOCAL_MODEL_LAUNCH_ID"
+LOCAL_LAUNCH_HEADER = "X-Ouroboros-Local-Model-Launch"
+
 
 def input_fingerprint(payload: dict) -> str:
     """The native formatter's complete input, independent of generation length."""
@@ -128,13 +131,39 @@ def with_measurement_route(app):
     return app
 
 
+def with_launch_identity(app):
+    """Stamp the existing model list for launch attribution, not authentication."""
+    launch_id = os.environ.get(LOCAL_LAUNCH_ENV)
+    if not launch_id:
+        return app
+    # The launch environment survives a Windows venv redirector; its PID need not be the listener's PID.
+    header = (LOCAL_LAUNCH_HEADER.lower().encode("ascii"), launch_id.encode("ascii"))
+
+    def middleware(app):
+        async def serve(scope, receive, send):
+            if scope["type"] != "http" or scope["method"] != "GET" or scope["path"] != "/v1/models":
+                return await app(scope, receive, send)
+
+            async def identify(message):
+                if message["type"] == "http.response.start" and message["status"] == 200:
+                    message = {**message, "headers": [*message.get("headers", ()), header]}
+                await send(message)
+
+            await app(scope, receive, identify)
+
+        return serve
+
+    app.add_middleware(middleware)
+    return app
+
+
 def main():
     """Use the vendor's CLI/configuration/uvicorn lifecycle without a second server."""
     from llama_cpp.server import __main__ as server
 
     install_object_tool_arguments()
     create_app = server.create_app
-    server.create_app = lambda *args, **kwargs: with_measurement_route(create_app(*args, **kwargs))
+    server.create_app = lambda *args, **kwargs: with_launch_identity(with_measurement_route(create_app(*args, **kwargs)))
     try:
         server.main()
     finally:

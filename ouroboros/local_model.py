@@ -10,11 +10,15 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import Future
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Dict, Optional
+from uuid import uuid4
 
+from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER
 from ouroboros.platform_layer import (
-    IS_MACOS, terminate_process_tree, kill_process_tree,
-    subprocess_new_group_kwargs, subprocess_hidden_kwargs,
+    IS_MACOS, IS_WINDOWS, terminate_process_tree, kill_process_tree,
+    subprocess_new_group_kwargs, merge_hidden_kwargs,
 )
 
 log = logging.getLogger(__name__)
@@ -85,20 +89,25 @@ def _get_install_env() -> dict:
     return env
 
 
-def _get_runtime_hint() -> str:
-    """Return a human-readable llama-cpp-python install hint."""
-    prefix = 'CMAKE_ARGS="-DGGML_METAL=on" ' if IS_MACOS else ""
-    return f"{prefix}pip install llama-cpp-python[server]"
+class LocalModelStartConflict(RuntimeError):
+    """The requested local-model operation conflicts with one already in progress."""
 
 
-def _with_hidden_subprocess(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Add platform hidden-window flags to subprocess kwargs."""
-    hidden = subprocess_hidden_kwargs()
-    if hidden:
-        kwargs = dict(kwargs)
-        existing = kwargs.get("creationflags", 0)
-        kwargs["creationflags"] = existing | hidden.get("creationflags", 0)
-    return kwargs
+class LocalRuntimeMissing(RuntimeError):
+    """A failed server import and the installation advice this deployment permits."""
+
+    def __init__(self, detail: str = "") -> None:
+        from ouroboros.deployment_policy import body_replacement_refusal
+
+        message = "The local model runtime could not load llama-cpp-python."
+        self.hint = ""
+        if body_replacement_refusal():
+            message += " Your administrator installs and updates the local runtime."
+        else:
+            flags = 'CMAKE_ARGS="-DGGML_METAL=on" ' if IS_MACOS else ""
+            self.hint = flags + "pip install llama-cpp-python[server]"
+        super().__init__(f"{message}\n{detail[-500:]}" if detail else message)
+
 
 
 def _run_runtime_probe() -> subprocess.CompletedProcess:
@@ -142,6 +151,7 @@ class LocalModelManager:
         self._service_binding: Optional[dict] = None
         self._install_proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._pending_start: Optional[object] = None
         self._status = "offline"
         self._error: Optional[str] = None
         self._model_path: Optional[str] = None
@@ -154,21 +164,33 @@ class LocalModelManager:
         self._launch_settings: dict = {}
         self._applied_settings: dict = {}
         self._download_progress: float = 0.0
-        self._stderr_buf: bytes = b""
+        self._stderr_buf = bytearray()
         # Runtime (llama-cpp-python) install state
-        self._runtime_status: str = "unknown"  # unknown | ok | missing | installing | install_ok | install_error
+        self._runtime_status: str = "unknown"  # Last import or installation result.
         self._runtime_install_log: str = ""
-        # Cancellation flag — set in stop_server() so _run_install() can abort
-        # even before _install_proc is assigned, closing the panic-window race.
+        self._runtime_probe: Optional[Future] = None
+        self._runtime_probe_error = ""
+        self._installing = False
         self._install_cancelled = threading.Event()
         self._panic_requested = False
+        self._grants: Dict[str, str] = {}  # a deferred Start's receipts (boot's, an install's): every Stop revokes them
 
     def get_status(self) -> str:
-        if self._proc is not None and self._proc.poll() is not None:
-            self._status = "error"
-            self._error = f"Server exited with code {self._proc.returncode}"
+        with self._lock:
+            return self._status_locked()
+
+    def _status_locked(self) -> str:
+        if self._status in ("stopping", "stop_unconfirmed"):
+            return "stopping"  # Stop alone settles this child and its binding.
+        if self._proc is not None and (code := self._proc.poll()) is not None:
+            if self._status == "loading":
+                self._status = "startup_exit"
+                self._error = f"Server process exited during startup (code {code})"
+            else:
+                self._status = "error"
+                self._error = f"Server exited with code {code}"
             self._proc = None
-        return self._status
+        return "error" if self._status == "startup_exit" else self._status
 
     @property
     def port(self) -> int:
@@ -178,31 +200,39 @@ class LocalModelManager:
     def is_running(self) -> bool:
         return self.get_status() == "ready"
 
-    def status_dict(self) -> Dict[str, Any]:
-        return {
-            "status": self.get_status(),
-            "error": self._error,
-            "model_path": self._model_path,
-            "model_name": self._model_name,
-            "context_length": self._context_length,
-            "port": self._port,
-            "download_progress": self._download_progress,
-            "runtime_status": self._runtime_status,
-            "runtime_install_log": self._runtime_install_log[-500:] if self._runtime_install_log else "",
-        }
+    def status_dict(self, *, check_runtime: bool = False) -> Dict[str, Any]:
+        if check_runtime:
+            self._runtime_import(passive=True)
+        with self._lock:
+            result = {
+                "status": self._status_locked(),
+                "error": self._error or self._runtime_probe_error or None,
+                "model_path": self._model_path,
+                "model_name": self._model_name,
+                "context_length": self._context_length,
+                "port": self._port,
+                "download_progress": self._download_progress,
+                "runtime_status": "installing" if self._installing else self._runtime_status,
+                "runtime_install_log": self._runtime_install_log[-500:] if self._runtime_install_log else "",
+            }
+            if self._status == "startup_exit":
+                result["error_stage"] = "startup_exit"
+                if self._stderr_buf:
+                    result["error"] = f"{self._error}: {self._stderr_buf.decode('utf-8', errors='replace')[-500:]}"
+            return result
 
     def settings_application(self, settings: dict) -> dict:
         """A ready owned process applies its captured inputs; other states do not."""
         desired = local_model_settings(settings)
         with self._lock:
-            status = self.get_status()
+            status = self._status_locked()
             applied = dict(self._applied_settings) if status == "ready" else {}
         pending = sorted(key for key in desired if key in applied and desired[key] != applied[key])
         unknown = sorted(set(desired) - set(applied)) if status == "ready" else []
         if pending:
             action = "Stop, then Start" if desired["LOCAL_MODEL_SOURCE"] else "Stop"
             summary = f"Saved local model settings differ from the running model. Use {action} to apply them."
-        elif status != "ready" and desired["LOCAL_MODEL_SOURCE"]:
+        elif status not in ("ready", "stopping") and desired["LOCAL_MODEL_SOURCE"]:
             summary = "Local model settings are not applied to a ready model. Use the local model controls to start it."
         elif unknown:
             summary = "Some running local model settings were not reported."
@@ -210,93 +240,128 @@ class LocalModelManager:
             summary = ""
         return {"status": status, "pending_keys": pending, "unknown_keys": unknown, "summary": summary}
 
-    def check_runtime(self) -> bool:
-        """Check that the server the runtime is started as can import, and update runtime status.
+    @staticmethod
+    def _probe_runtime() -> subprocess.CompletedProcess:
+        kwargs = merge_hidden_kwargs({"capture_output": True, "text": True, "timeout": 15})
+        return subprocess.run([sys.executable, "-c", RUNTIME_PROBE], **kwargs)
 
-        Importing ``llama_cpp`` alone passed on an install whose server could not start (its web stack lacked a
-        module); the probe imports the server application, so a broken runtime offers its (upgrading) install."""
-        try:
-            probe = _run_runtime_probe()
-            if probe.returncode == 0:
-                self._runtime_status = "ok"
-                return True
-            self._runtime_status = "missing"
-            return False
-        except Exception as exc:
-            log.warning("Runtime check failed: %s", exc)
-            self._runtime_status = "missing"
-            return False
-
-    def install_runtime(self) -> None:
-        """Install llama-cpp-python in a tracked background thread."""
+    def _runtime_import(self, *, passive: bool = False, start: object | None = None) -> Optional[subprocess.CompletedProcess]:
+        """Pollers share one import, including an inconclusive result. An explicit Start checks again."""
         with self._lock:
-            if self._runtime_status == "installing":
-                log.info("Runtime install already in progress")
-                return
-            # stop_server may have cancelled a previous lifecycle.
+            if start is not None:
+                self._check_start_locked(start)
+            if passive and (self._installing or self._panic_requested or self._runtime_status != "unknown"
+                            or self._status_locked() != "offline"):
+                return None
+            probe = self._runtime_probe
+            run = probe is None or (probe.done() and not passive)
+            if run:
+                self._runtime_probe = probe = Future()
+                self._runtime_probe_error = ""
+
+        if run:
+            result, error = None, ""
+            try:
+                result = self._probe_runtime()
+            except Exception as exc:
+                error = f"Could not check the local model runtime: {exc}"
+            with self._lock:
+                if self._runtime_probe is probe and not self._installing:
+                    self._runtime_probe_error = error
+                    self._runtime_status = "unknown" if error else ("ok" if result.returncode == 0 else "missing")
+                probe.set_result((result, error))
+        result, error = probe.result()
+        if error and not passive:
+            raise RuntimeError(error)
+        return result
+
+    def check_runtime(self, *, start: object | None = None) -> bool:
+        """Probe the server application and its dependencies in the interpreter used at launch."""
+        return self._runtime_import(start=start).returncode == 0
+
+    def boot_grant(self) -> str:
+        """Boot's receipt for its staged Start: a Stop revokes it, and ``_starting`` then refuses that Start."""
+        with self._lock:
+            return self._grants.setdefault("boot", uuid4().hex)
+
+    def install_runtime(self) -> tuple[str, str]:
+        """Reserve the interpreter until pip and its verification finish: (status, install_id, "" if joined)."""
+        with self._lock:
+            if self._installing:
+                return "already_installing", ""
             if self._panic_requested:
                 raise RuntimeError("Local runtime install cancelled by Panic")
+            stopping = self._status_locked() == "stopping"
+            if stopping or self._pending_start is not None or self._proc is not None:
+                raise LocalModelStartConflict("Stop the local model before installing the runtime.")
             self._install_cancelled.clear()
-            self._runtime_status = "installing"
-            self._runtime_install_log = ""
-
-        threading.Thread(
-            target=self._run_install, daemon=True, name="llama-install"
-        ).start()
+            self._grants["install"] = install_id = uuid4().hex
+            self._runtime_probe = None
+            self._runtime_probe_error = self._runtime_install_log = ""
+            self._installing = True
+        try:
+            threading.Thread(target=self._run_install, daemon=True, name="llama-install").start()
+        except Exception as exc:
+            with self._lock:
+                self._installing = False
+                self._runtime_status, self._runtime_install_log = "install_error", str(exc)
+            raise
+        return "installing", install_id
 
     def _run_install(self) -> None:
-        """Background install worker."""
-        # Check before spawning to close the install_runtime -> Popen race.
-        if self._install_cancelled.is_set():
-            self._runtime_status = "missing"
-            return
-
-        cmd = _get_install_command()
-        env = _get_install_env()
-        log.info("Installing llama-cpp-python: %s", " ".join(cmd))
+        status, output = "install_error", ""
         try:
+            if self._install_cancelled.is_set() or self._panic_requested:
+                return
+            cmd = _get_install_command()
+            log.info("Installing llama-cpp-python: %s", " ".join(cmd))
             proc = subprocess.Popen(
-                cmd,
-                env=env,
-                **_with_hidden_subprocess({
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.STDOUT,
-                    "stdin": subprocess.DEVNULL,
-                    **subprocess_new_group_kwargs(),  # stopping the install signals its tree, never this server (#2353)
+                cmd, env=_get_install_env(),
+                **merge_hidden_kwargs({
+                    "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL,
+                    **subprocess_new_group_kwargs(),  # Stop signals the install's tree, never this server (#2353).
                 }),
             )
-            self._install_proc = proc
+            with self._lock:
+                self._install_proc = proc
+                stopped_during_spawn = self._install_cancelled.is_set()
+            if self._panic_requested:
+                self.panic_stop(request_only=True)
+            elif stopped_during_spawn:
+                self._stop_install_process(proc)
 
-            # stop_server may have run during Popen; kill immediately if so.
-            if self._install_cancelled.is_set():
-                try:
-                    terminate_process_tree(proc)
-                except Exception:
-                    pass
+            tail = b""
+            try:
+                if proc.stdout:
+                    with proc.stdout:
+                        while chunk := os.read(proc.stdout.fileno(), 4096):
+                            tail = (tail + chunk)[-4096:]
+            except (OSError, ValueError):
+                log.debug("Could not read pip output", exc_info=True)
+            finally:
+                proc.wait()
+            output = tail.decode("utf-8", errors="replace")
+            with self._lock:
                 self._install_proc = None
-                self._runtime_status = "missing"
-                return
-            output_bytes = _read_tail(proc.stdout, 4096) if proc.stdout else b""
-            proc.wait()
-            self._install_proc = None
-            self._runtime_install_log = output_bytes.decode("utf-8", errors="replace")
-
-            if proc.returncode == 0:
+                self._runtime_probe = None  # Only an import after pip exits can verify this install.
+            if proc.returncode == 0 and not self._install_cancelled.is_set():
                 if self.check_runtime():
-                    self._runtime_status = "install_ok"
+                    status = "install_ok"
                     log.info("llama-cpp-python installed successfully")
                 else:
-                    self._runtime_status = "install_error"
-                    self._runtime_install_log += "\nInstall succeeded but import still fails."
+                    output += "\nInstall succeeded but import still fails."
                     log.warning("llama-cpp-python install ran but import still fails")
-            else:
-                self._runtime_status = "install_error"
-                log.error("llama-cpp-python install failed (rc=%d)", proc.returncode)
+            elif proc.returncode and not self._install_cancelled.is_set():
+                log.error("llama-cpp-python install failed (rc=%s)", proc.returncode)
         except Exception as exc:
-            self._install_proc = None
-            self._runtime_status = "install_error"
-            self._runtime_install_log = str(exc)
-            log.error("llama-cpp-python install exception: %s", exc)
+            output += f"\n{exc}"
+            log.exception("Local runtime install failed")
+        finally:
+            with self._lock:
+                self._install_proc = self._runtime_probe = None
+                self._runtime_status = "unknown" if self._install_cancelled.is_set() else status
+                self._runtime_install_log = output
+                self._installing = False
 
     @staticmethod
     def _resolve_hf_path(source: str, filename: str) -> str:
@@ -326,6 +391,42 @@ class LocalModelManager:
                 filename, resolved,
             )
         return resolved
+
+    def _check_start_locked(self, start: object | None) -> None:
+        if self._panic_requested:
+            raise LocalModelStartConflict("Local model startup cancelled by Panic")
+        if self._pending_start is not start:
+            raise LocalModelStartConflict("Local model startup cancelled by Stop")
+
+    @contextmanager
+    def _starting(self, grant: Optional[str] = None):
+        with self._lock:
+            stopping = self._status_locked() == "stopping"
+            if self._panic_requested:
+                raise LocalModelStartConflict("Local model startup cancelled by Panic")
+            if grant is not None and grant not in self._grants.values():
+                raise LocalModelStartConflict("Local model startup cancelled: its install was stopped or replaced")
+            if self._installing:
+                raise LocalModelStartConflict("The local runtime is being installed.")
+            if stopping or self._pending_start is not None or self._proc is not None:
+                raise LocalModelStartConflict("The local model server is already starting, running, or stopping.")
+            self._pending_start = start = object()
+            self._status, self._error, self._download_progress = "loading", None, 0.0
+        try:
+            yield start
+            with self._lock:
+                self._check_start_locked(start)
+        except Exception as exc:
+            with self._lock:
+                self._check_start_locked(start)
+                if self._proc is None and self._status not in ("error", "startup_exit"):
+                    self._status, self._error = "error", str(exc)
+            raise
+        finally:
+            with self._lock:
+                # Stop may already have admitted another model.
+                if self._pending_start is start:
+                    self._pending_start = None
 
     @staticmethod
     def _normalize_hf_filename(filename: str):
@@ -362,113 +463,91 @@ class LocalModelManager:
             yield f"{prefix}-{str(i).zfill(shard_width)}-of-{str(total_shards).zfill(total_width)}{suffix}"
 
     def download_model(
-        self,
-        source: str,
-        filename: str = "",
-        progress_cb: Optional[Callable[[float], None]] = None,
+        self, source: str, filename: str = "", progress_cb: Optional[Callable[[float], None]] = None,
+        *, _start: object | None = None,
     ) -> str:
         """Resolve/download a .gguf; split GGUFs download all shards from shard 1."""
-        if os.path.isfile(source):
-            log.info("Using local model file: %s", source)
-            return source
-
-        if source.startswith("/") or source.startswith("~"):
-            expanded = os.path.expanduser(source)
-            if os.path.isfile(expanded):
-                return expanded
-            raise FileNotFoundError(f"Local model file not found: {expanded}")
+        with self._lock:
+            self._check_start_locked(_start)
+            if self._status == "startup_exit":
+                self._status, self._error = "offline", None
+        path = os.path.expanduser(source)
+        if os.path.isfile(path):
+            log.info("Using local model file: %s", path)
+            return path
+        if source.startswith(("/", "~")):
+            raise FileNotFoundError(f"Local model file not found: {path}")
 
         try:
             from huggingface_hub import hf_hub_download
-            from tqdm.auto import tqdm as _base_tqdm
+            from tqdm.auto import tqdm
         except ImportError:
-            raise RuntimeError(
-                "huggingface_hub is required for downloading models. "
-                "Install with: pip install huggingface_hub"
-            )
-
+            raise RuntimeError("Downloading a model requires huggingface_hub. You can also open a local model file.")
         if not filename:
-            raise ValueError(
-                "filename is required when source is a HuggingFace repo ID. "
-                "Example: filename='model-Q4_K_M.gguf' or 'quant/model-00001-of-00003.gguf'"
-            )
+            raise ValueError("filename is required when source is a HuggingFace repo ID. "
+                             "Example: filename='model-Q4_K_M.gguf' or 'quant/model-00001-of-00003.gguf'")
 
-        # Common UX fix: resolve basename-only HF shard filenames to subfolders.
         filename = self._resolve_hf_path(source, filename)
+        folder, basename = self._normalize_hf_filename(filename)
+        names, count = (basename,), 1
+        if shards := self._detect_shard_info(basename):
+            prefix, number, count, shard_width, total_width, suffix = shards
+            names = self._all_shard_basenames(prefix, count, suffix, shard_width, total_width)
+            if number != 1:
+                first = "/".join(filter(None, (folder, next(names))))
+                raise ValueError(f"Split GGUF: shard {number} of {count} specified. "
+                                 f"Please use the first shard to start the server. Change filename to: '{first}'")
 
-        subfolder, basename = self._normalize_hf_filename(filename)
-        shard_info = self._detect_shard_info(basename)
+        def progress(fraction):
+            with self._lock:
+                self._check_start_locked(_start)
+                self._download_progress = fraction
+            if progress_cb is not None:
+                progress_cb(fraction)
 
-        if shard_info is not None:
-            _prefix, shard_num, total_shards, _shard_w, _total_w, _suffix = shard_info
-            if shard_num != 1:
-                first_basename = next(self._all_shard_basenames(_prefix, total_shards, _suffix, _shard_w, _total_w))
-                first_filename = f"{subfolder}/{first_basename}" if subfolder else first_basename
-                raise ValueError(
-                    f"Split GGUF: shard {shard_num} of {total_shards} specified. "
-                    f"Please use the first shard to start the server. "
-                    f"Change filename to: '{first_filename}'"
-                )
-
-        self._status = "downloading"
-        self._download_progress = 0.0
-        log.info("Downloading %s/%s from HuggingFace...", source, filename)
-
-        # For split GGUFs, report global progress across all shards.
-        manager_ref = self
-
-        def _make_progress_tqdm(shard_index: int, total_shards_count: int):
-            class _ProgressTqdm(_base_tqdm):
+        def progress_bar(index):
+            class DownloadProgress(tqdm):
                 def update(self, n=1):
                     result = super().update(n)
                     try:
                         if self.total and self.total > 0:
-                            file_fraction = min(self.n / self.total, 1.0)
-                            global_fraction = (shard_index - 1 + file_fraction) / total_shards_count
-                            manager_ref._download_progress = global_fraction
-                            if progress_cb is not None:
-                                progress_cb(global_fraction)
+                            progress((index + min(self.n / self.total, 1.0)) / count)
+                    except LocalModelStartConflict:
+                        raise
                     except Exception:
                         pass
                     return result
-            return _ProgressTqdm
+            return DownloadProgress
 
-        def _download_one(basename_: str, subfolder_: Optional[str], shard_idx: int, total: int) -> str:
-            """Download one file; return the local path."""
-            return hf_hub_download(
-                repo_id=source,
-                filename=basename_,
-                subfolder=subfolder_ or None,
-                resume_download=True,
-                tqdm_class=_make_progress_tqdm(shard_idx, total),
-            )
-
+        first_path = None
         try:
-            if shard_info is not None:
-                first_path: Optional[str] = None
-                for idx, shard_basename in enumerate(
-                    self._all_shard_basenames(_prefix, total_shards, _suffix, _shard_w, _total_w), start=1
-                ):
-                    log.info(
-                        "Downloading shard %d/%d: %s/%s",
-                        idx, total_shards, subfolder or "", shard_basename,
-                    )
-                    p = _download_one(shard_basename, subfolder, idx, total_shards)
-                    if idx == 1:
-                        first_path = p
-                path = first_path  # type: ignore[assignment]
-            else:
-                path = _download_one(basename, subfolder, 1, 1)
-
-            self._download_progress = 1.0
-            if progress_cb:
-                progress_cb(1.0)
-            log.info("Model downloaded to: %s", path)
-            return path
-        except Exception as e:
-            self._status = "error"
-            self._error = f"Download failed: {e}"
+            for index, name in enumerate(names):
+                with self._lock:
+                    self._check_start_locked(_start)
+                    self._status = "downloading"
+                    self._download_progress = index / count
+                log.info("Downloading %s/%s (%s/%s)", source, name, index + 1, count)
+                path = hf_hub_download(repo_id=source, filename=name, subfolder=folder or None,
+                                       resume_download=True, tqdm_class=progress_bar(index))
+                if index == 0:
+                    first_path = path
+            progress(1.0)
+            log.info("Model downloaded to: %s", first_path)
+            return first_path
+        except Exception as exc:
+            with self._lock:
+                self._check_start_locked(_start)
+                self._status, self._error = "error", f"Download failed: {exc}"
             raise
+
+    def start_model(self, source: str, filename: str, *, grant: Optional[str] = None, **options: Any) -> str:
+        """Reserve one Start across the import probe, download and child publication; a deferred one names its grant."""
+        with self._starting(grant) as start:
+            if not self.check_runtime(start=start):
+                raise LocalRuntimeMissing()
+            path = self.download_model(source, filename, _start=start)
+            self.start_server(path, source=source, filename=filename, _start=start, **options)
+            return path
 
     def start_server(
         self,
@@ -479,161 +558,141 @@ class LocalModelManager:
         chat_format: str = "",
         source: str | None = None,
         filename: str | None = None,
+        *, _start: object | None = None,
     ) -> None:
         """Start the server; rechecks runtime as a safety net before Popen."""
-        with self._lock:
-            if self._panic_requested:
-                raise RuntimeError("Local model startup cancelled by Panic")
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError("Local model server is already running")
+        with (self._starting() if _start is None else nullcontext(_start)) as start:
+            probe = self._runtime_import(start=start)
+            with self._lock:
+                self._check_start_locked(start)
+                if probe.returncode != 0:
+                    raise LocalRuntimeMissing((probe.stderr or probe.stdout or "").strip())
+                self._model_path = model_path
+                self._status = "loading"
+                self._error = None
+                launch = local_model_settings({"LOCAL_MODEL_SOURCE": source, "LOCAL_MODEL_FILENAME": filename,
+                    "LOCAL_MODEL_PORT": port, "LOCAL_MODEL_N_GPU_LAYERS": n_gpu_layers,
+                    "LOCAL_MODEL_CONTEXT_LENGTH": n_ctx, "LOCAL_MODEL_CHAT_FORMAT": chat_format})
+                self._launch_settings = {key: value for key, value in launch.items()
+                                        if not ((key == "LOCAL_MODEL_SOURCE" and source is None)
+                                                or (key == "LOCAL_MODEL_FILENAME" and filename is None))}
+                self._applied_settings = {}
+                self._port = port = launch["LOCAL_MODEL_PORT"]
+                n_gpu_layers, chat_format = launch["LOCAL_MODEL_N_GPU_LAYERS"], launch["LOCAL_MODEL_CHAT_FORMAT"]
 
-            self._model_path = model_path
-            self._status = "loading"
-            self._error = None
-            launch = local_model_settings({"LOCAL_MODEL_SOURCE": source, "LOCAL_MODEL_FILENAME": filename,
-                "LOCAL_MODEL_PORT": port, "LOCAL_MODEL_N_GPU_LAYERS": n_gpu_layers,
-                "LOCAL_MODEL_CONTEXT_LENGTH": n_ctx, "LOCAL_MODEL_CHAT_FORMAT": chat_format})
-            self._launch_settings = {key: value for key, value in launch.items()
-                                    if not ((key == "LOCAL_MODEL_SOURCE" and source is None)
-                                            or (key == "LOCAL_MODEL_FILENAME" and filename is None))}
-            self._applied_settings = {}
-            self._port = port = launch["LOCAL_MODEL_PORT"]
-            n_gpu_layers, chat_format = launch["LOCAL_MODEL_N_GPU_LAYERS"], launch["LOCAL_MODEL_CHAT_FORMAT"]
+                # A Windows venv's python.exe is a redirector that runs the base interpreter as its child: start that
+                # interpreter, naming the venv (as extension_companion does), so the PID held here is the server's own.
+                base = getattr(sys, "_base_executable", None) or sys.executable
+                redirected = IS_WINDOWS and os.path.normcase(base) != os.path.normcase(sys.executable)
+                cmd = [
+                    base if redirected else sys.executable, "-m", "ouroboros.local_model_server",
+                    "--model", model_path,
+                    "--port", str(port),
+                    "--n_gpu_layers", str(n_gpu_layers),
+                ]
+                if chat_format:
+                    cmd.extend(["--chat_format", chat_format])
+                effective_ctx = launch["LOCAL_MODEL_CONTEXT_LENGTH"]
+                self._context_length = self._serving_context_length = effective_ctx
+                self._measurement_route = True
+                cmd.extend(["--n_ctx", str(effective_ctx)])
 
-            cmd = [
-                sys.executable, "-m", "ouroboros.local_model_server",
-                "--model", model_path,
-                "--port", str(port),
-                "--n_gpu_layers", str(n_gpu_layers),
-            ]
-            if chat_format:
-                cmd.extend(["--chat_format", chat_format])
-            effective_ctx = launch["LOCAL_MODEL_CONTEXT_LENGTH"]
-            self._context_length = effective_ctx
+                log.info("Starting local model server: %s", " ".join(cmd))
 
-            self._serving_context_length = effective_ctx
-            self._measurement_route = True
-            cmd.extend(["--n_ctx", str(effective_ctx)])
-
-            log.info("Starting local model server: %s", " ".join(cmd))
-
-            try:
-                probe = _run_runtime_probe()
-            except Exception as exc:
-                self._status = "error"
-                self._error = f"Failed to verify llama-cpp-python installation: {exc}"
-                raise RuntimeError(self._error) from exc
-            if probe.returncode != 0:
-                self._status = "error"
-                details = (probe.stderr or probe.stdout or "").strip()
-                hint = _get_runtime_hint()
-                self._error = f"llama-cpp-python is not installed or failed to import. Install with: {hint}"
-                if details:
-                    self._error += f": {details[-500:]}"
-                raise RuntimeError(self._error)
-
-            try:
-                _popen_kwargs = {
-                    "stdout": subprocess.DEVNULL,
-                    "stderr": subprocess.PIPE,
-                    "stdin": subprocess.DEVNULL,
-                    "env": {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (
-                        str(pathlib.Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))},
-                    **subprocess_new_group_kwargs(),
-                }
-                self._proc = subprocess.Popen(cmd, **_with_hidden_subprocess(_popen_kwargs))
-                if self._panic_requested:
-                    self.panic_stop(request_only=True)
                 try:
-                    from ouroboros.config import DATA_DIR
-                    from ouroboros.process_custody import record_process
-
-                    record_process(
-                        pathlib.Path(DATA_DIR),
-                        pid=self._proc.pid,
-                        cmd=cmd,
-                        purpose="local_model_server",
-                        scope="session",
+                    launch_id = uuid4().hex
+                    _popen_kwargs = dict(
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        env={**os.environ, **({"__PYVENV_LAUNCHER__": sys.executable} if redirected else {}),
+                             LOCAL_LAUNCH_ENV: launch_id, "PYTHONPATH": os.pathsep.join(filter(None, (
+                            str(pathlib.Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))},
                     )
-                except Exception:
-                    log.debug("local model custody record failed", exc_info=True)
-            except FileNotFoundError:
-                self._status = "error"
-                self._error = "Python executable not found. Cannot start local model server."
-                raise RuntimeError(self._error)
-
-            self._stderr_buf = b""
-            threading.Thread(
-                target=self._drain_stderr, daemon=True, name="local-model-stderr"
-            ).start()
-
-        threading.Thread(
-            target=self._wait_for_healthy, daemon=True, name="local-model-health"
-        ).start()
-
-    def _drain_stderr(self) -> None:
-        """Drain stderr to avoid pipe deadlock and retain a diagnostic tail."""
-        proc = self._proc
-        if proc is None or proc.stderr is None:
-            return
-        self._stderr_buf = _read_tail(proc.stderr, 2048)
-
-    def _wait_for_healthy(self, timeout: float = 300.0) -> None:
-        """Poll the local server until healthy or timed out."""
-        proc = self._proc
-        start = time.time()
-        while time.time() - start < timeout:
-            if self._proc is not proc:
-                return
-            if self._proc is None or self._proc.poll() is not None:
-                self._status = "error"
-                rc = self._proc.returncode if self._proc else "?"
-                stderr_tail = ""
-                if self._stderr_buf:
+                    _popen_kwargs.update(subprocess_new_group_kwargs())
+                    self._proc = subprocess.Popen(cmd, **merge_hidden_kwargs(_popen_kwargs))
+                    if self._panic_requested:
+                        self.panic_stop(request_only=True)
                     try:
-                        stderr_tail = self._stderr_buf.decode("utf-8", errors="replace")[-500:]
+                        from ouroboros.config import DATA_DIR
+                        from ouroboros.process_custody import record_process
+
+                        record_process(
+                            pathlib.Path(DATA_DIR),
+                            pid=self._proc.pid,
+                            cmd=cmd,
+                            purpose="local_model_server",
+                            scope="session",
+                        )
                     except Exception:
-                        pass
-                self._error = f"Server process exited during startup (code {rc})"
-                if stderr_tail:
-                    self._error += f": {stderr_tail}"
-                self._proc = None
-                return
-            try:
-                health = self.health_check()
-                if health.get("ok"):
-                    from ouroboros.config import DATA_DIR
-                    from ouroboros.server_process import record_service_binding
+                        log.debug("local model custody record failed", exc_info=True)
+                except FileNotFoundError:
+                    self._status = "error"
+                    self._error = "Python executable not found. Cannot start local model server."
+                    raise RuntimeError(self._error)
 
-                    with self._lock:
-                        # The health response belongs only to this live manager
-                        # generation; a concurrent stop/restart cannot publish it.
-                        if proc is None or self._proc is not proc or proc.poll() is not None:
-                            return
-                        try:
-                            self._service_binding = record_service_binding(
-                                DATA_DIR, "local_model", "127.0.0.1", self._port, pid=proc.pid)
-                        except Exception:
-                            self._service_binding = None
-                            log.warning("Local model service binding unavailable; health remains ready", exc_info=True)
-                        self._status = "ready"
-                        self._applied_settings = dict(self._launch_settings)
-                        self._context_length = health.get("context_length", 0)
-                        self._model_name = health.get("model_name", "")
-                    log.info(
-                        "Local model server ready (ctx=%d, model=%s)",
-                        self._context_length, self._model_name,
-                    )
-                    return
-            except Exception:
-                pass
-            time.sleep(2.0)
+                self._stderr_buf = bytearray()
+                proc = self._proc
+                threading.Thread(
+                    target=self._drain_stderr, args=(proc, self._stderr_buf), daemon=True, name="local-model-stderr"
+                ).start()
 
-        if self._proc is not proc:
+            threading.Thread(target=self._wait_for_healthy, kwargs={"proc": proc, "port": port, "launch_id": launch_id},
+                             daemon=True, name="local-model-health").start()
+
+    def _drain_stderr(self, proc: subprocess.Popen, buf: bytearray) -> None:
+        """Drain stderr to avoid pipe deadlock and retain a diagnostic tail."""
+        if proc.stderr is None:
             return
-        self._status = "error"
-        self._error = f"Server failed to become healthy within {timeout}s"
-        log.error(self._error)
+        try:
+            fd = proc.stderr.fileno()
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buf[:] = (buf + chunk)[-2048:]
+        except Exception:
+            pass
+
+    def _wait_for_healthy(self, *, proc: subprocess.Popen, port: int, launch_id: str, timeout: float = 300.0) -> None:
+        """Only a model list from the current live launch can establish readiness."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if self._proc is not proc or self._status_locked() != "loading" or self._panic_requested:
+                    return
+                if time.monotonic() >= deadline:
+                    self._status = "error"
+                    self._error = f"Server failed to become healthy within {timeout}s"
+                    log.error(self._error)
+                    return
+            try:
+                health = self.health_check(port=port, launch_id=launch_id)
+            except Exception:
+                health = {}
+            if not health.get("ok"):
+                time.sleep(2.0)
+                continue
+
+            from ouroboros.config import DATA_DIR
+            from ouroboros.server_process import record_service_binding
+
+            with self._lock:
+                if self._proc is not proc or self._status_locked() != "loading" or self._panic_requested:
+                    return
+                try:
+                    self._service_binding = record_service_binding(
+                        DATA_DIR, "local_model", "127.0.0.1", port, pid=proc.pid)
+                except Exception:
+                    self._service_binding = None
+                    log.warning("Local model service binding unavailable", exc_info=True)
+                if self._status_locked() != "loading" or self._panic_requested:
+                    return
+                self._applied_settings = dict(self._launch_settings)
+                self._context_length, self._model_name = health["context_length"], health["model_name"]
+                self._status = "ready"
+            log.info("Local model server ready (ctx=%s, model=%s)", health["context_length"], health["model_name"])
+            return
 
     def panic_stop(self, *, request_only: bool = False) -> list:
         """Signal our captured children before manager locks or cleanup waits."""
@@ -647,68 +706,79 @@ class LocalModelManager:
             self.stop_server()
         return requests
 
-    def stop_server(self) -> None:
-        """Stop the local model server subprocess and any ongoing install."""
-        # Abort install even before _install_proc exists.
-        self._install_cancelled.set()
-
-        with self._lock:
-            proc = self._proc
-            binding, self._service_binding = self._service_binding, None
-            install_proc = self._install_proc
-            self._proc = None
-            self._install_proc = None
-            self._status = "offline"
-            self._applied_settings = {}
-            self._error = None
-            self._context_length = 0
-
-            self._serving_context_length = 0
-            self._measurement_route = False
-            self._model_name = ""
-            self._stderr_buf = b""
-
-        if install_proc is not None:
-            log.info("Terminating ongoing llama-cpp-python install (pid=%s)...", install_proc.pid)
-            try:
-                terminate_process_tree(install_proc)
-                install_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    kill_process_tree(install_proc)
-                except Exception:
-                    pass
-
-        if proc is None:
+    @staticmethod
+    def _stop_install_process(proc: subprocess.Popen) -> None:
+        if proc.poll() is not None:
             return
-
-        log.info("Stopping local model server (pid=%s)...", proc.pid)
-        terminate_process_tree(proc)
-
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            log.warning("Local model server did not exit, force-killing")
-            kill_process_tree(proc)
+            terminate_process_tree(proc)
+            proc.wait(timeout=5)
+        except Exception:
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        if binding is not None and proc.poll() is not None:
+                kill_process_tree(proc)
+            except Exception:
+                log.warning("Could not stop the local runtime installer", exc_info=True)
+
+    def stop_server(self) -> bool:
+        """Confirm model exit; any installer keeps its independent cancellation and settlement."""
+        with self._lock:
+            self._grants.clear()  # every Stop request, a repeat included, ends the Starts that wait on a receipt
+            if self._status == "stopping":  # Another Stop is waiting on this child.
+                return False
+            self._install_cancelled.set()
+            if self._pending_start is not None:
+                self._pending_start = self._runtime_probe = None
+            proc, install_proc = self._proc, self._install_proc
+            self._status, self._error = "stopping", None
+
+        exited = proc is None
+        try:
+            if proc is not None:
+                for signal_child, timeout in ((terminate_process_tree, 10), (kill_process_tree, 5)):
+                    try:
+                        exited = proc.poll() is not None
+                        if not exited:
+                            signal_child(proc)
+                            exited = proc.wait(timeout=timeout) is not None
+                        if exited:
+                            break
+                    except (OSError, subprocess.SubprocessError):
+                        log.debug("Local model stop attempt (pid=%s) unconfirmed", proc.pid, exc_info=True)
+        finally:
+            with self._lock:
+                if exited:
+                    self._proc = None
+                    binding, self._service_binding = self._service_binding, None
+                    self._status, self._error = "offline", None
+                    self._applied_settings, self._stderr_buf = {}, bytearray()
+                    self._context_length = self._serving_context_length = 0
+                    self._download_progress = 0.0
+                    self._measurement_route, self._model_name = False, ""
+                else:
+                    self._status, self._error = "stop_unconfirmed", "Server exit is not confirmed"
+        if not exited:
+            return False
+        if binding is not None:
             from ouroboros.config import DATA_DIR
             from ouroboros.server_process import clear_service_binding
 
             clear_service_binding(DATA_DIR, "local_model", binding)
+        if install_proc is not None:
+            self._stop_install_process(install_proc)
+        return True
 
-    def health_check(self) -> Dict[str, Any]:
-        """Query local server health and loaded-model info."""
+    def health_check(self, *, port: int | None = None, launch_id: str | None = None) -> Dict[str, Any]:
+        """Read loopback metadata; readiness also requires the specified launch's own reply."""
         import requests
 
-        url = f"http://127.0.0.1:{self._port}/v1/models"
+        url = f"http://127.0.0.1:{self._port if port is None else port}/v1/models"
         with requests.Session() as session:
             session.trust_env = False  # Owned loopback never needs proxy discovery, in any process.
-            resp = session.get(url, timeout=5)
+            resp = session.get(url, timeout=5, allow_redirects=launch_id is None)
         resp.raise_for_status()
+        if launch_id is not None and (not launch_id or resp.status_code != 200
+                                      or resp.headers.get(LOCAL_LAUNCH_HEADER) != launch_id):
+            return {"ok": False, "error": "Model list did not identify the launched server"}
         data = resp.json()
         models = data.get("data", [])
         if not models:
@@ -729,7 +799,7 @@ class LocalModelManager:
             return self._published_serving_evidence()
         process = self._proc
         capacity = int(getattr(self, "_serving_context_length", 0) or 0)
-        known = bool(process is not None and process.poll() is None and self._status == "ready" and capacity > 0)
+        known = bool(self._status == "ready" and process is not None and process.poll() is None and capacity > 0)
         evidence = {"context_window": capacity if known else None, "confirmed": known,
                     "source": "owned_server_arguments" if known else "serving_window_unobserved",
                     "process_id": process.pid if known else None}
@@ -747,7 +817,7 @@ class LocalModelManager:
 
         if not in_worker_process():
             process = self._proc
-            live = process is not None and process.poll() is None and self._status == "ready"
+            live = self._status == "ready" and process is not None and process.poll() is None
             return {"model_path": str(self._model_path), "port": int(self._port)} if live and self._model_path else {}
         evidence = self._published_serving_evidence()
         if not evidence.get("confirmed"):

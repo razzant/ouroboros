@@ -291,6 +291,21 @@ def following_route(role: str, llm: Any = None, read: Callable[[str], Any] = _ru
     return str(llm.default_model() if llm is not None else _main_of(read)), box_checked(read("USE_LOCAL_MAIN"), typed=read is _runtime)
 
 
+def credentialed_light_route(use_local: Optional[bool] = None) -> Tuple[str, bool]:
+    """Bind the Light model and lane together — ONE ``(model, use_local)`` pair, never a model
+    of one slot with a lane re-derived from its spelling (Light naming/translation and project
+    naming dispatch exactly what this returns). An explicit local call needs no cloud
+    credentials. An explicit remote call (``use_local=False``) never sends a locally-pinned
+    slot's bare label to the cloud: the resolver keeps every walked candidate's own
+    ``USE_LOCAL_*`` lane and raises instead. An explicit cloud/Claudexor Light under a local
+    Main stays itself — its own credential answers before Main is ever consulted."""
+    model, local_slot = following_route("light")
+    if use_local or (use_local is None and local_slot):
+        return model, True
+    return provider_models.resolve_credentialed_route(
+        model, remote_only=use_local is not None, default_use_local=local_slot)
+
+
 def _local_flag(key: str) -> bool:
     return box_checked(runtime_setting(key, ""), typed=True)
 

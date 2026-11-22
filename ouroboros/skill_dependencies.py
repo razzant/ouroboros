@@ -150,8 +150,8 @@ def auto_install_specs_for_skill(drive_root: pathlib.Path, loaded: Any) -> List[
 def skill_deps_not_ready(drive_root: pathlib.Path, loaded: Any, *, strict: bool = False) -> tuple[str, str]:
     """``(status, reason)`` of unready dependencies; ``("", "")`` when ready.
 
-    A probe failure reads as ready for execution readers; ``strict`` re-raises it so a
-    caller selecting startup package work cannot mistake it for ready.
+    A probe failure reads as ready for execution readers, a work-domain refusal as ``deps_location_unavailable:<why>``;
+    ``strict`` re-raises either so a caller selecting startup package work cannot mistake it for ready.
     """
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash as _specs_hash
@@ -168,6 +168,10 @@ def skill_deps_not_ready(drive_root: pathlib.Path, loaded: Any, *, strict: bool 
         if str(deps_state.get("specs_hash") or "") != _specs_hash(auto_specs):
             return deps_status, "fingerprint"
         return "", ""
+    except work_domain.WorkDomainRefused as refused:
+        if strict:
+            raise
+        return f"deps_location_unavailable:{refused}", "refused"
     except Exception:
         if strict:
             raise
@@ -251,10 +255,13 @@ def ensure_skill_dependencies(drive_root: pathlib.Path, loaded: Any, *, progress
             return "failed", managed
         if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
             return "not_admitted", ""
-        if state.get("python_env") == "moved":
+        if state.get("status") != "unreadable" and state.get("python_env") == "moved":
             rebind_python_env(home)
-            if recorded(read_deps_state(drive_root, loaded.name, home)):
+            state = read_deps_state(drive_root, loaded.name, home)
+            if recorded(state):
                 return "installed", ""
+        if state.get("status") == "unreadable":
+            return "failed", str(state.get("error") or "dependency state could not be read")
         if progress is not None:
             progress("Installing packages…")
         install_isolated_dependencies(drive_root, loaded.name, home, auto_specs, review_dir=loaded.skill_dir)

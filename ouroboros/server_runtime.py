@@ -267,6 +267,18 @@ def needs_local_model_autostart(settings: dict) -> bool:
         return False
 
 
+def local_model_boot_decision(settings: dict) -> tuple[bool, str | None]:
+    """Whether boot starts the local model, with the manager's receipt for that Start (``None`` when it does not).
+
+    The lifespan decides here and its boot coordinator stages the autostart later: a Stop in between revokes the
+    receipt (``LocalModelManager.boot_grant``), so the staged Start is refused and never overrides it."""
+    if not needs_local_model_autostart(settings):
+        return False, None
+    from ouroboros.local_model import get_manager
+
+    return True, get_manager().boot_grant()
+
+
 def has_startup_ready_provider(settings: dict) -> bool:
     """Return True when the runtime has enough provider config to serve chat.
 

@@ -84,6 +84,13 @@ def test_settings_get_exposes_policy_state_in_existing_meta(monkeypatch):
     payload = json.loads(response.body)
     assert payload["_meta"]["policy_state"]["access"]["restart_required"] is True
 
+    def unavailable(_settings):
+        raise RuntimeError("policy projection unavailable")
+
+    monkeypatch.setattr(gateway, "_build_policy_state", unavailable)
+    partial = asyncio.run(gateway.api_settings_get(Request(scope)))
+    assert partial.status_code == 200 and "policy_state" not in json.loads(partial.body)["_meta"]
+
 
 def test_a_managed_deployment_projects_what_its_policy_fixes_and_no_secret(tmp_path, monkeypatch):
     import hashlib

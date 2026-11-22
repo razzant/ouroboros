@@ -15,12 +15,15 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import pathlib
 import subprocess
 import tarfile
 import textwrap
 
 import pytest
+
+from tests._pairwise_git import BASE_REF_ENV, git_read, growth_base
 
 SKILL_TEMPLATE = textwrap.dedent(
     """
@@ -363,6 +366,83 @@ def test_version_reads_through_the_shared_parser(tmp_path, text, expected):
                                            encoding="utf-8")
     assert _version(json_skill) == "0.2.0"
     assert _version(tmp_path / "missing") == ""
+
+
+def _bundled_versions_unchanged(repo, base, tip):
+    from ouroboros.contracts.skill_manifest import SkillManifestError, parse_skill_manifest_text
+    from ouroboros.skill_builtin import _MANIFEST_NAMES
+
+    def payloads(ref):
+        by_skill = {}
+        entries = git_read(repo, "ls-tree", "-rz", ref, "--", "skills").stdout
+        for entry in entries.split(b"\0"):
+            if not entry:
+                continue
+            mode_type_oid, path = entry.split(b"\t", 1)
+            parts = pathlib.PurePosixPath(os.fsdecode(path)).parts
+            if len(parts) < 3 or parts[1].startswith(".") or "__pycache__" in parts[2:] or parts[-1].endswith(".pyc"):
+                continue
+            by_skill.setdefault(parts[1], {})["/".join(parts[2:])] = mode_type_oid
+        return by_skill
+
+    def version(ref, name, files):
+        for manifest in _MANIFEST_NAMES:
+            if manifest in files:
+                data = git_read(repo, "show", f"{ref}:skills/{name}/{manifest}").stdout
+                try:
+                    return parse_skill_manifest_text(data.decode("utf-8")).version
+                except (UnicodeError, SkillManifestError):
+                    return ""
+        return None  # A directory of templates, for example, is not itself a shipped skill.
+
+    before, after = payloads(base), payloads(tip)
+    faults = []
+    for name in sorted(before.keys() & after.keys()):
+        if before[name] != after[name]:
+            old, new = version(base, name, before[name]), version(tip, name, after[name])
+            if old is not None and new is not None and (not new or new == old):
+                faults.append(name)
+    return faults
+
+
+@pytest.mark.size_ratchet
+def test_changed_bundled_payloads_change_version():
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    base = growth_base(repo, os.environ.get(BASE_REF_ENV))
+    if not base:
+        pytest.skip(f"{BASE_REF_ENV} names no base commit in this clone")
+    faults = _bundled_versions_unchanged(repo, base, "HEAD")
+    assert not faults, f"Bundled payload changed since {base[:12]}; change the manifest version for: {', '.join(faults)}"
+
+
+def test_bundled_version_check_compares_both_git_trees(tmp_path):
+    from tests._skill_source_fixtures import commit_all, git
+
+    git("init", "-q", cwd=tmp_path)
+    skills = tmp_path / "skills"
+    for name in ("body", "mode", "renamed", "removed", "released"):
+        (_write_skill(skills, name) / "tool").write_text("first")
+    _write_skill(skills / "templates", "example")
+    (skills / "json_only").mkdir()
+    (skills / "json_only" / "skill.json").write_text('{"name":"json_only","version":"1"}')
+    base = commit_all(tmp_path)
+    (skills / "body" / "tool").write_text("second")
+    (skills / "renamed" / "tool").rename(skills / "renamed" / "new-name")
+    # A second manifest cannot bump the version while the seed reads SKILL.md.
+    (skills / "body" / "skill.json").write_text('{"name":"body","version":"2"}')
+    (skills / "released" / "tool").write_text("second")
+    _write_skill(skills, "released", "0.9.0")  # reseed checks inequality, not order
+    _write_skill(skills, "added")
+    (skills / "json_only" / "extra").write_text("new")
+    git("rm", "-qr", "skills/removed", cwd=tmp_path)
+    (skills / "templates" / "example" / "tool").write_text("new")
+    (tmp_path / "outside").write_text("new")
+    git("add", "-A", cwd=tmp_path)
+    git("update-index", "--chmod=+x", "skills/mode/tool", cwd=tmp_path)
+    git("commit", "-qm", "candidate", cwd=tmp_path)
+    # An unstaged edit after the candidate cannot pay for its missing version.
+    _write_skill(skills, "mode", "2.0.0")
+    assert _bundled_versions_unchanged(tmp_path, base, "HEAD") == ["body", "json_only", "mode", "renamed"]
 
 
 def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypatch):

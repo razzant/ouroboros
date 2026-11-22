@@ -1021,6 +1021,7 @@ class LocalModelStartRequest(TypedDict):
     n_gpu_layers: NotRequired[int]  # default -1
     n_ctx: NotRequired[int]  # 0 means the factory LOCAL_MODEL_CONTEXT_LENGTH
     chat_format: NotRequired[str]
+    install_id: NotRequired[str]  # a Start deferred until its own install finished: that install's id (409 once revoked)
 
 
 class LocalModelStartResponse(TypedDict):
@@ -1028,8 +1029,17 @@ class LocalModelStartResponse(TypedDict):
     model_path: str
 
 
+class LocalModelInstallResponse(TypedDict):
+    """``POST /api/local-model/install-runtime``: ``installing`` carries the ``install_id`` of the install this call
+    admitted, the one receipt its caller's deferred Start may present (``LocalModelStartRequest``);
+    ``already_installing`` (another caller's install) carries none."""
+
+    status: Literal["installing", "already_installing"]
+    install_id: NotRequired[str]
+
+
 class LocalModelRuntimeMissingResponse(TypedDict):
-    """412: the local runtime is not installed; ``POST /api/local-model/install-runtime`` installs it."""
+    """412 when the server import fails. Managed deployments name the administrator and leave the install hint empty."""
 
     error: Literal["runtime_missing"]
     message: str
@@ -1037,13 +1047,13 @@ class LocalModelRuntimeMissingResponse(TypedDict):
 
 
 class LocalModelStatusResponse(TypedDict, total=False):
-    """``GET /api/local-model/status``. ``status``: offline, downloading, loading, ready or error
+    """``GET /api/local-model/status``. ``status``: offline, downloading, loading, ready, stopping or error
     (an internal failure answers 200 with only ``status`` and ``error``). ``runtime_status``:
-    unknown, ok, missing, installing, install_ok or install_error. ``settings_application`` says
-    whether the saved local-model settings are the ones running."""
+    unknown, ok, missing, installing, install_ok or install_error. ``settings_application`` compares saved and running."""
 
     status: Required[str]
     error: Optional[str]
+    error_stage: Literal["startup_exit"]  # the owned model process exited before readiness
     model_path: Optional[str]
     model_name: Any
     context_length: Any
@@ -1452,6 +1462,7 @@ __all__ = [
     "ModelCatalogItem", "ModelCatalogApiSource", "ModelCatalogResponse", "ModelProcessingEndpoint", "ModelProcessing",
     "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
+    "LocalModelInstallResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",
     "McpTestResponse",

@@ -637,3 +637,47 @@ def test_reasoning_beside_parsed_calls_reaches_progress_as_reasoning_only():
         _emit_round_progress(parsed["content"], parsed, lambda text, **meta: shown.append((text, meta)), trace)
         assert shown == [(reply.split("\n</think>")[0], {"narration": True, "reasoning": True})]
         assert trace["reasoning_notes"] == []  # reasoning is not the model's narration of its work
+
+
+def test_the_owned_server_stamps_the_model_list_of_the_app_it_creates(monkeypatch):
+    """Readiness waits for the launch id on the model list, so ``main()`` must wrap the app the vendor creates; the id
+    rides the environment, which survives a Windows venv redirector that a PID does not."""
+    import asyncio
+    import sys
+    import types
+
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from ouroboros import local_model_server
+    from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER
+
+    class Formatter:
+        def __call__(self, *, messages, **kwargs):
+            return messages
+
+    async def models(request):
+        return JSONResponse({"object": "list", "data": [{"id": "fixture"}]})
+
+    built = []
+    package, chat_format = types.ModuleType("llama_cpp"), types.ModuleType("llama_cpp.llama_chat_format")
+    server_package, server_main = types.ModuleType("llama_cpp.server"), types.ModuleType("llama_cpp.server.__main__")
+    chat_format.Jinja2ChatFormatter, package.llama_chat_format = Formatter, chat_format
+    server_main.create_app = lambda *a, **k: Starlette(routes=[Route("/v1/models", models)])
+    server_main.main = lambda: built.append(server_main.create_app())  # the vendor CLI builds its app by this name
+    package.server, server_package.__main__ = server_package, server_main
+    for name, module in (("llama_cpp", package), ("llama_cpp.llama_chat_format", chat_format),
+                         ("llama_cpp.server", server_package), ("llama_cpp.server.__main__", server_main)):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(local_model_server, "with_measurement_route", lambda app: app)  # its own tests cover the route
+    monkeypatch.setenv(LOCAL_LAUNCH_ENV, "fixture-launch")
+    local_model_server.main()
+    (app,) = built
+
+    async def stamp():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+            return (await client.get("/v1/models")).headers.get(LOCAL_LAUNCH_HEADER)
+
+    assert asyncio.run(stamp()) == "fixture-launch"

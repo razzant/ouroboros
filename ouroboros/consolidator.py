@@ -29,16 +29,17 @@ def _consolidation_route() -> Tuple[str, bool]:
 
     Reuse the lane resolver, so the Light slot follows its one rule (an empty
     slot is Main's route unless its own box sends it local). Remote routes
-    retain the provider-independence fallback; explicitly local routes must
-    never be rewritten to a remote credentialed model.
+    retain the provider-independence fallback, whose winner keeps the lane of
+    the slot it came from; explicitly local routes must never be rewritten to a
+    remote credentialed model.
     """
-    from ouroboros.provider_models import resolve_credentialed_model
+    from ouroboros.provider_models import resolve_credentialed_route
     from ouroboros.subagents import resolve_subagent_lane
 
     lane = resolve_subagent_lane("light")
     if lane.use_local_model:
         return lane.model, True
-    return resolve_credentialed_model(lane.model), False
+    return resolve_credentialed_route(lane.model)
 
 
 def _light_dispatch_binding() -> Dict[str, Any]:

@@ -4336,6 +4336,34 @@ def test_benchmark_admission_persists_the_refusal_before_enforcement_raises(tmp_
     assert pinned["seed_gate"]["allow_dirty_seed"] is True
 
 
+def test_seed_refusal_drops_unvalidated_raw_effort(tmp_path, monkeypatch):
+    """A seed refusal stays primary, but cannot preserve an invalid tier as accepted."""
+    from devtools.benchmarks.common.manifests import (
+        BenchmarkAdmissionRefused,
+        admit_benchmark_run,
+    )
+
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    (repo / "app.py").write_text("print('dirty')\n", encoding="utf-8")
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"OUROBOROS_EFFORT_TASK": "mystery"}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_EFFORT_TASK", raising=False)
+    path = tmp_path / "refused" / "run_manifest.json"
+
+    with pytest.raises(BenchmarkAdmissionRefused, match="reason=seed_dirty"):
+        admit_benchmark_run(
+            path, benchmark="unit", run_root=tmp_path / "run", repo_dir=repo,
+            requested_task_ids=["t"], settings_path=settings, pin_main_effort=True,
+        )
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["extra"]["refusal"] == {
+        "stage": "seed_gate", "reason": "seed_dirty", "exit_code": 1,
+    }
+    assert "OUROBOROS_EFFORT_TASK" not in persisted["model_slots"]
+
+
 def test_finalize_run_manifest_records_a_typed_outcome_on_every_exit_path(tmp_path):
     """The ONE finalization seam. Its whole point is the paths a launcher does NOT think about:
     an early typed return and an escaping exception. Several migrated launchers only ever updated
@@ -4957,6 +4985,15 @@ def test_swe_pro_manifest_records_the_derived_model_not_the_template(tmp_path, m
     assert len(snapshots) == 1
     assert getattr(snapshots[0].args[0], "id", "") == "seed"
     assert [(kw.arg, kw.value.value) for kw in snapshots[0].keywords] == [("env_overrides", False)]
+
+
+def test_descriptive_manifests_do_not_admit_a_harbor_job(tmp_path, monkeypatch):
+    from devtools.benchmarks.common.manifests import benchmark_run_manifest
+
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", " Export only ")
+    manifest = benchmark_run_manifest(benchmark="export", run_root=tmp_path, repo_dir=tmp_path,
+                                      requested_task_ids=[], require_clean=False)
+    assert manifest["model_slots"]["OUROBOROS_EFFORT_TASK"] == " Export only "
 
 
 def test_the_gate_catches_pre_admission_reads_parses_probes_and_nested_admission_args():
@@ -6451,9 +6488,9 @@ def test_run_tb_refuses_an_escaping_subtree_before_creating_anything(tmp_path, m
 def test_gaia_and_tb_launchers_run_the_shared_seed_gate(tmp_path, monkeypatch):
     """P5.4: GAIA and TB dropped their v6.75.0 `require_clean=False` pins AND route both manifest
     seams, so the refusal is DURABLE: the record reaches disk and no other artefact does. Asserting
-    only `pytest.raises` is what let an inert handler pass review, so every launcher's PERSISTED
-    outcome is checked here. Deterministic — the gate runs against a PURPOSE-BUILT dirty repo,
-    never the ambient checkout."""
+    only `pytest.raises` is what let an inert handler pass review, so each launcher's PERSISTED
+    outcome and real return are checked here. Deterministic — the gate runs against a
+    PURPOSE-BUILT dirty repo, never the ambient checkout."""
     import devtools.benchmarks.gaia.run_gaia as run_gaia
     from devtools.benchmarks.common.manifests import BenchmarkAdmissionRefused
     from devtools.benchmarks.terminal_bench import run_harbor_smoke, run_tb
@@ -6497,10 +6534,38 @@ def test_gaia_and_tb_launchers_run_the_shared_seed_gate(tmp_path, monkeypatch):
         raise AssertionError("harbor --version was probed before admission")
 
     monkeypatch.setattr(run_tb, "harbor_version", _no_probe)
+    # Admission resolves the roster from the operator environment first: pin it so this fixture's
+    # record cannot depend on — or carry — whatever roster the dev shell happens to set.
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     tb_root = tmp_path / "dirty-tb"
-    with pytest.raises(BenchmarkAdmissionRefused, match="seed_dirty"):
-        run_tb.main(["--model", "m", "--run-root", str(tb_root), "--settings-path", str(settings)])
-    assert _extra(tb_root)["refusal"]["stage"] == "seed_gate"
+    fixture_value = "harmless-fixture-value-0001"
+    tb_argv = [
+        "--model", "m", "--run-root", str(tb_root), "--settings-path", str(settings),
+        # A HARMLESS supplied configuration value, not a credential: only its NAME may persist.
+        "--agent-env", f"OUROBOROS_BENCH_FIXTURE={fixture_value}",
+    ]
+    # Run the launcher the way a shell runs it, so a regression that falls back to the raw process
+    # argv persists this value in the FIRST durable write and fails below.
+    monkeypatch.setattr(sys, "argv", ["run_tb.py", *tb_argv])
+    assert run_tb.main(tb_argv) == 1
+    tb_extra = _extra(tb_root)
+    assert tb_extra["outcome"] == "refused" and tb_extra["exit_code"] == 1
+    assert tb_extra["refusal"] == {
+        "stage": "seed_gate", "reason": "seed_dirty", "exit_code": 1,
+    }
+    # The refused record names the actor and roster this run pinned (not the ambient host
+    # slots), carries no raw argv, and has its container roster resolved before the first write.
+    tb_manifest_text = (tb_root / "run_manifest.json").read_text(encoding="utf-8")
+    tb_manifest = json.loads(tb_manifest_text)
+    assert fixture_value not in tb_manifest_text
+    assert tb_manifest["argv"] == []
+    # The NAME persists while the value does not — the durable-refusal leg of METHODOLOGY's
+    # "no value enters any artifact this launcher writes". (`provider_credentials` classifies which
+    # grants the SETTINGS FILE holds — not a run and not a charge — so it is not the evidence here.)
+    assert tb_extra["agent_env_keys"] == ["OUROBOROS_BENCH_FIXTURE"]
+    assert tb_manifest["model_slots"]["OUROBOROS_MODEL"] == "m"
+    assert tb_manifest["model_slots"]["OUROBOROS_MODEL_FALLBACKS"] == "m"
+    assert tb_manifest["available_subagents"]["items"][0]["route"]["target_id"] == "m"
     # No half-built submission tree (no job dir, no metadata.yaml).
     assert not (tb_root / "submission" / "submissions").exists()
 
@@ -6707,14 +6772,28 @@ def test_run_tb_manifest_records_the_model_the_run_actually_resolved(tmp_path, m
         return json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
 
     measured = tmp_path / "measured"
-    assert run_tb.main([
+    fixture_value = "harmless-fixture-value-0002"
+    measured_argv = [
         "--model", "anthropic/claude-fable-5",
         "--light-model", "google/gemini-3.5-flash",
         "--run-root", str(measured),
         "--submission-root", str(tmp_path / "submission"),
         "--settings-path", str(settings),
-    ]) == 0
+        # A HARMLESS supplied configuration value, not a credential: only its NAME may persist.
+        "--agent-env", f"OUROBOROS_BENCH_FIXTURE={fixture_value}",
+    ]
+    # Run the launcher the way a shell runs it, so a regression that falls back to the raw process
+    # argv persists this value in the FIRST durable write and fails below.
+    monkeypatch.setattr(sys, "argv", ["run_tb.py", *measured_argv])
+    assert run_tb.main(measured_argv) == 0
     manifest = _manifest(measured)
+    # The ordinary command-generation leg: a HARMLESS supplied configuration value never reaches
+    # the record — no raw argv, and the names-only declaration plus the redacted command persist.
+    assert fixture_value not in (measured / "run_manifest.json").read_text(encoding="utf-8")
+    assert fixture_value not in (measured / "harbor_command.txt").read_text(encoding="utf-8")
+    assert manifest["argv"] == []
+    assert manifest["extra"]["agent_env_keys"] == ["OUROBOROS_BENCH_FIXTURE"]
+    assert "OUROBOROS_BENCH_FIXTURE=<redacted>" in " ".join(manifest["official_command"])
     slots = manifest["model_slots"]
     # Measured model, not ambient or template decoys.
     assert slots["OUROBOROS_MODEL"] == "anthropic/claude-fable-5"

@@ -2047,6 +2047,10 @@ def register(api):
     # failed read locks fields and Save; reopen the form to retry. Password
     # fields are never pre-filled, so treat an empty password on save as
     # "unchanged". Reference: skills/telegram/plugin.py, GET+POST settings/save.
+    # Submit sends the form/action's values as JSON in a POST to its route.
+    # The result appears beside the button (message, state summary, default
+    # “Saved.”, or error). Settings ignores `method` and `target`: a sibling
+    # `json` component displays its own `value`/`data`, never the POST result.
     # A form whose fields are all disabled is a status (Telegram's Connection):
     # its neutral button checks again (busy_label) and refills them from the
     # POST answer, announcing no save; a disabled textarea is shown whole.
@@ -2054,7 +2058,7 @@ def register(api):
         "config",
         title="Search settings",
         schema={"components": [
-            {"type": "form", "route": "config/save", "method": "POST", "fields": [...]},
+            {"type": "form", "route": "config/save", "fields": [...]},
         ]},
     )
 

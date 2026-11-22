@@ -23,14 +23,16 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from devtools.benchmarks.common.manifests import (
-    ACTIVE_MODEL_SLOT_KEYS,
+    ACTIVE_MODEL_SLOT_KEYS, EFFORT_SLOT_KEY,
+    BenchmarkAdmissionRefused,
     admit_benchmark_run,
     finalize_run_manifest,
     model_slot_snapshot,
     write_json,
 )
 from devtools.benchmarks.common.model_slots import (
-    configured_subagents_snapshot,
+    benchmark_main_effort,
+    container_subagents_setting,
     fixed_model_actor_snapshot,
 )
 from devtools.benchmarks.common.run_roots import (
@@ -43,6 +45,7 @@ from devtools.benchmarks.common.run_roots import (
 )
 from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
 from ouroboros.config import EFFORT_SCALE
+from ouroboros.settings_scales import requested_effort
 
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
@@ -110,7 +113,7 @@ class HarborCommandConfig:
     task_filters: list[str]
     settings_path: pathlib.Path
     execute: bool
-    light_model: str
+    light_model: str | None  # an admitted blank rides the job as JSON null
     safety_mode: str = "light"
     setup_timeout_multiplier: float = 1.0
     build_timeout_multiplier: float = 1.0
@@ -119,6 +122,16 @@ class HarborCommandConfig:
     agent_env: tuple[str, ...] = ()
     verifier_env: tuple[str, ...] = ()
     harbor_env: str = ""
+    # None means this config was assembled without launcher admission; resolve its tier on use.
+    main_effort: str | None = None
+    # None resolves once from the host roster; explicit "" means no roster, never a rebuild.
+    available_subagents: str | None = None
+    # None means the job names no web search Model (no admission, or web tools off): no such
+    # kwarg, and the adapter resolves it at trial time, as before. Explicit "" is the admitted
+    # blank choice (the container's own Auto) and is carried as such — it is not that absence.
+    web_search_model: str | None = None
+    use_local_main: bool | None = None
+    use_local_light: bool | None = None
 
 
 def _host_roster_raw(settings: Mapping[str, Any] | None) -> Any:
@@ -130,13 +143,21 @@ def _host_roster_raw(settings: Mapping[str, Any] | None) -> Any:
     return raw
 
 
-def _container_review_pool(measured_model: str, settings: Mapping[str, Any] | None):
+def _container_review_pool(
+    measured_model: str, settings: Mapping[str, Any] | None, *,
+    available_subagents: str | None = None,
+):
     """The review-pool rows the container EXECUTES: the marked rows of the
-    roster the adapter forwards (``container_subagents_setting``)."""
-    from devtools.benchmarks.common.model_slots import container_subagents_setting
+    roster the adapter forwards (``container_subagents_setting``). When
+    ``available_subagents`` is given it IS that roster — the exact string
+    admission pinned and the generated job carries — so a Settings save between
+    admission and this render cannot move the rows that are declared."""
     from ouroboros.reviewer_slot_config import review_pool_rows
 
-    raw = container_subagents_setting(measured_model, _host_roster_raw(settings))
+    raw = (
+        available_subagents if available_subagents is not None
+        else container_subagents_setting(measured_model, _host_roster_raw(settings))
+    )
     return review_pool_rows({"OUROBOROS_SUBAGENTS": raw})
 
 
@@ -157,7 +178,8 @@ def triad_rows_not_executable_in_container(
 
 def _effective_helper_models(
     measured_model: str, light_model: str, *, disable_agent_web: bool = False,
-    settings: Mapping[str, Any] | None = None,
+    settings: Mapping[str, Any] | None = None, available_subagents: str | None = None,
+    web_search_model: str | None = None,
 ) -> list[tuple[str, str]]:
     """Resolve EVERY model that materially assists a measured run, with its role.
 
@@ -169,7 +191,9 @@ def _effective_helper_models(
     the measured model in metadata.yaml would misrepresent the submission.
     Values mirror what the container EXECUTES: the review pool is the marked
     rows of the roster the container adapter forwards (operator env first, else
-    the host settings file; ``container_subagents_setting``). Inside a
+    the host settings file; ``container_subagents_setting``). A launcher that already pinned
+    that roster for its job passes it as ``available_subagents``, so the declaration reads the
+    admitted snapshot instead of resolving the host value a second time. Inside a
     Terminal-Bench task nothing commits: the pool reaches the run through the
     result review, which runs every seat on its own delivery (owner R2,
     2026-09-01) — an api seat executes in the container and is declared by
@@ -180,14 +204,20 @@ def _effective_helper_models(
     host roster is a typed refusal (ValueError), never a declared-but-never-run
     default. The web search model is the value the adapter forwards (operator env first, else the
     host settings file); a blank one is planned as the recommended models of the container's own
-    Source (`_planned_blank_search_models`). Returns ordered (model_id, role) pairs, deduped by model id.
+    Source (`_planned_blank_search_models`). A launcher that admitted that choice passes it as
+    ``web_search_model`` — ``""`` is the admitted blank one — and nothing is read a second time.
+    Returns ordered (model_id, role) pairs, deduped by model id.
     """
-    websearch = os.environ.get("OUROBOROS_WEBSEARCH_MODEL")
-    if websearch is None and settings:
-        websearch = settings.get("OUROBOROS_WEBSEARCH_MODEL")
+    websearch = web_search_model
+    if websearch is None:
+        websearch = os.environ.get("OUROBOROS_WEBSEARCH_MODEL")
+        if websearch is None and settings:
+            websearch = settings.get("OUROBOROS_WEBSEARCH_MODEL")
     websearch = str(websearch or "").strip()
     ordered: list[tuple[str, str]] = [(measured_model, "agent")]
-    for row in _container_review_pool(measured_model, settings):
+    for row in _container_review_pool(
+        measured_model, settings, available_subagents=available_subagents,
+    ):
         ordered.append((row.target_id.strip(), "commit_review_triad"))
     if light_model.strip():
         ordered.append((light_model.strip(), "light_safety_post_task_synthesis"))
@@ -231,6 +261,8 @@ def _host_settings(settings_path: pathlib.Path) -> dict[str, Any]:
 def leaderboard_metadata(
     *, agent_name: str, org_name: str, model: str, light_model: str = "",
     disable_agent_web: bool = False, settings: Mapping[str, Any] | None = None,
+    available_subagents: str | None = None, web_search_model: str | None = None,
+    excluded_review_seats: list[str] | None = None,
 ) -> str:
     lines = [
         "agent_url: https://github.com/razzant/ouroboros",
@@ -240,6 +272,7 @@ def leaderboard_metadata(
     ]
     for model_id, role in _effective_helper_models(
         model, light_model, disable_agent_web=disable_agent_web, settings=settings,
+        available_subagents=available_subagents, web_search_model=web_search_model,
     ):
         if "/" in model_id:
             provider, display = model_id.split("/", 1)
@@ -250,7 +283,11 @@ def leaderboard_metadata(
         lines.append(f"    model_display_name: {json.dumps(display)}")
         lines.append(f"    model_org_display_name: {json.dumps(provider)}")
         lines.append(f"    role: {json.dumps(role)}")
-    not_executable = triad_rows_not_executable_in_container(model, settings)
+    # An admitted list IS the disclosure; only a call without one reads the host roster.
+    not_executable = (
+        triad_rows_not_executable_in_container(model, settings)
+        if excluded_review_seats is None else list(excluded_review_seats)
+    )
     if not_executable:
         # A comment, not a key: the leaderboard schema owns metadata.yaml's keys;
         # the typed field lives on run_manifest.json.
@@ -490,6 +527,28 @@ def confined_submission_subtree(raw_subtree: str, *, dataset: str) -> list[str]:
     return [safe_benchmark_id(part, field=field) for part in parts]
 
 
+def _effective_main_effort(config: HarborCommandConfig) -> str:
+    """Reuse the tier the launcher admitted; a manually assembled config resolves its own tier."""
+    if config.main_effort is not None:
+        return benchmark_main_effort({}, declared=config.main_effort, env_overrides=False, pin_default=True)
+    return benchmark_main_effort(_host_settings(config.settings_path), pin_default=True)
+
+
+def resolved_available_subagents(
+    config: HarborCommandConfig, *, host_settings: Mapping[str, Any] | None = None,
+) -> str:
+    """Bind the launch roster once per assembled config, for job and manifest alike.
+
+    An explicit empty string is a declaration, not a request to rebuild from trial-time settings.
+    """
+    if config.available_subagents is None:
+        settings = _host_settings(config.settings_path) if host_settings is None else host_settings
+        config.available_subagents = container_subagents_setting(
+            config.model, _host_roster_raw(settings),
+        )
+    return config.available_subagents
+
+
 def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
     """Write the agents[] section of the Harbor JobConfig for `harbor run -c`.
 
@@ -514,12 +573,21 @@ def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
         # (`~/.cache/harbor/tasks/packages/<org>/<name>/<digest>`): one org is not a constant.
         "dataset": config.dataset,
     }
-    effort = os.environ.get("OUROBOROS_EFFORT_TASK", "").strip().lower()
-    if effort:
-        # Label the submission key with the effort this run actually uses;
-        # the adapter forwards the kwarg back into the container env, so the
-        # declared effort always equals the effective one.
-        kwargs["reasoning_effort"] = effort
+    # Label the submission key with the effort this run actually uses — the admitted tier, or
+    # the admitted default when nothing declared one; the adapter forwards the kwarg back into
+    # the container env, so the declared effort always equals the effective one and can never
+    # be re-resolved from a later host-settings save.
+    kwargs["reasoning_effort"] = _effective_main_effort(config)
+    kwargs["available_subagents"] = resolved_available_subagents(config)
+    # An admitted web search Model rides the job too, and only when the config names one: ""
+    # is the blank choice the adapter keeps blank. A config that names none (None) adds no
+    # kwarg and no read here, so the adapter's own trial-time resolution stays what it was.
+    if config.web_search_model is not None:
+        kwargs["web_search_model"] = config.web_search_model
+    if config.use_local_main is not None:
+        kwargs["use_local_main"] = config.use_local_main
+    if config.use_local_light is not None:
+        kwargs["use_local_light"] = config.use_local_light
     job_config: dict[str, object] = {
         "agents": [
             {
@@ -551,7 +619,7 @@ _UNFORWARDED_MODEL_SLOT_KEYS = (
 )
 
 
-def resolved_model_slots(config: HarborCommandConfig) -> dict[str, str]:
+def resolved_model_slots(config: HarborCommandConfig, *, snapshot: Mapping[str, str] | None = None) -> dict[str, str]:
     """The model slots this run ACTUALLY uses, resolved the way the container resolves them.
 
     Derived from the assembled ``HarborCommandConfig`` — the very object ``harbor_command()``
@@ -571,7 +639,7 @@ def resolved_model_slots(config: HarborCommandConfig) -> dict[str, str]:
     """
     slots = {
         key: value
-        for key, value in model_slot_snapshot(config.settings_path).items()
+        for key, value in (snapshot if snapshot is not None else model_slot_snapshot(config.settings_path)).items()
         if key not in _UNFORWARDED_MODEL_SLOT_KEYS
     }
     if config.model:
@@ -579,10 +647,14 @@ def resolved_model_slots(config: HarborCommandConfig) -> dict[str, str]:
         slots["OUROBOROS_MODEL_FALLBACKS"] = config.model
     if config.light_model:
         slots["OUROBOROS_MODEL_LIGHT"] = config.light_model
+    # Record the same tier the launcher declares — including a saved tier under an empty env
+    # and the admitted default the generated job now always pins.
+    slots[EFFORT_SLOT_KEY] = _effective_main_effort(config)
     return {key: value for key, value in slots.items() if key in ACTIVE_MODEL_SLOT_KEYS}
 
 
-def augment_manifest(manifest: dict, config: HarborCommandConfig) -> None:
+def augment_manifest(manifest: dict, config: HarborCommandConfig, *, snapshot: Mapping[str, str] | None = None,
+                     host_settings: Mapping[str, Any] | None = None) -> None:
     """Mirror the run's resolved models into the manifest, once the job config exists.
 
     Same shape and same seam as GAIA's ``_augment_manifest`` (``gaia/run_gaia.py``): the
@@ -591,11 +663,9 @@ def augment_manifest(manifest: dict, config: HarborCommandConfig) -> None:
     filter identical across families is the point — an auditor reading any benchmark's
     ``run_manifest.json`` finds the model in the same place.
     """
-    manifest["model_slots"] = resolved_model_slots(config)
-    manifest["available_subagents"] = configured_subagents_snapshot(
-        config.settings_path,
-        exact_model=config.model,
-    )
+    manifest["model_slots"] = resolved_model_slots(config, snapshot=snapshot)
+    roster = resolved_available_subagents(config, host_settings=host_settings)
+    manifest["available_subagents"] = json.loads(roster) if roster.strip() else {}
 
 
 def harbor_command(config: HarborCommandConfig) -> list[str]:
@@ -971,7 +1041,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--review-effort",
-        default="low",
+        type=requested_effort, default="low",
         choices=list(EFFORT_SCALE),
         help="reasoning effort for the in-task review under --all-model (default low; cuts the review-latency tax)",
     )
@@ -1100,97 +1170,134 @@ def main(argv: list[str] | None = None) -> int:
     if report_grade_warning:
         print(report_grade_warning, file=sys.stderr)
     manifest_path = run_root / "run_manifest.json"
+    # The compiled fixed-model actor (when --all-model ran) rides admission itself: it is the one
+    # description of what the generated job will execute, so it belongs to the FIRST durable
+    # write and to every refusal payload, not only to a later rewrite.
+    harness: dict[str, Any] = {}
+    if fixed_actor:
+        harness["fixed_model_actor"] = fixed_actor
     # Admission is the outermost REFUSAL point and the first side effect: the manifest write below
     # is what materializes `run_root`. Everything that costs or publishes — the leaderboard
     # metadata render, the submission skeleton's CONTENTS, harbor's job config and the
     # `harbor --version` probe — happens INSIDE the finalize seam, so a refused run leaves one
-    # directory with the persisted refusal, never a half-built submission tree.
-    manifest = admit_benchmark_run(
-        manifest_path,
-        benchmark="terminal_bench",
-        run_root=run_root,
-        repo_dir=repo,
-        requested_task_ids=list(args.task or []),
-        require_clean=not args.allow_dirty_seed,
-        # dataset + official_command are promoted to top-level by benchmark_run_manifest;
-        # everything else must go through `extra` (the helper drops unknown top-level keys).
-        dataset=args.dataset,
-        extra={
-            "outcome": "started",
-            "k": int(args.k),
-            "n_concurrent": int(args.n_concurrent),
-            "timeout_multiplier": float(args.timeout_multiplier),
-            "setup_timeout_multiplier": float(args.setup_timeout_multiplier),
-            "build_timeout_multiplier": float(args.build_timeout_multiplier),
-            "resource_overrides": list(args.resource_override or []),
-            "disable_agent_web": bool(args.disable_agent_web),
-            "all_model": args.all_model or "",
-            # The measured models, recorded at ADMISSION so even a refused or crashed run names
-            # what it was about to measure. These are post-`--all-model` values (the override
-            # above rewrites both), i.e. what actually reaches the harbor job config — the same
-            # numbers `model_slots` carries once `augment_manifest` runs.
-            "model": args.model,
-            "light_model": args.light_model,
-            "leaderboard_valid": leaderboard_valid,
-            "report_grade": report_grade_value,
-            "report_grade_warning": report_grade_warning,
-            "leaderboard_submission_root": str(submission_root),
-            "submission_subtree": "/".join(subtree),
-            "metadata_yaml": str(metadata_path),
-            "base_job_config": str(args.base_job_config or ""),
-            # Harness/backend provenance. `harbor_env` is what was REQUESTED (empty = flag
-            # omitted); `harbor_env_effective` is what ran. `harbor_version` is resolved
-            # after admission (it shells out) and is "" when the binary could not be
-            # interrogated -- visibly unknown, never assumed.
-            "harbor_bin": str(args.harbor_bin),
-            "harbor_env": str(args.harbor_env or ""),
-            "harbor_env_effective": harbor_env_effective,
-            # NAMES only -- no value ever enters an artifact THIS launcher writes. Splitting on
-            # the first `=` is safe ONLY because `type=env_assignment` already refused any token
-            # without one: without that guard a `--ve <expanded-secret>` typo made the whole
-            # credential the "name" and persisted it here in the clear.
-            "agent_env_keys": [str(item).split("=", 1)[0] for item in (args.agent_env or [])],
-            "verifier_env_keys": [str(item).split("=", 1)[0] for item in (args.verifier_env or [])],
-            # Typed audit fact, not a string to grep: harbor writes these values into
-            # its own job/trial config+lock+result files under the job dir (partially
-            # redacted at best, verbatim when the NAME looks non-sensitive), so a
-            # submission built from this run MUST be value-scrubbed. See harbor_command().
-            "env_passthrough_persisted_by_harbor": bool(
-                list(args.agent_env or []) or list(args.verifier_env or [])
-            ),
-        },
+    # directory with the persisted refusal, never a half-built submission tree. A typed refusal
+    # (the seed gate, an invalid effort tier) is already durable on that manifest —
+    # `admit_benchmark_run` persisted it before re-raising — so this reports and exits, it never
+    # re-writes the record.
+    try:
+        manifest = admit_benchmark_run(
+            manifest_path,
+            benchmark="terminal_bench", settings_path=settings_path, pin_main_effort=True,
+            # Raw process argv can carry --agent-env/--verifier-env VALUES into the FIRST durable
+            # write; declare no argv and let the NAMES-only extra plus the redacted
+            # official_command carry the CLI declaration instead.
+            argv=[],
+            harness=harness,
+            # The actor the generated job pins, not the ambient host slots: --model/--light-model
+            # after --all-model, plus the only host slots this launcher really forwards (the host
+            # web-search model survives unless the fixed-model pin rewrote it in the environment).
+            model_slot_overrides={
+                "OUROBOROS_MODEL": args.model,
+                "OUROBOROS_MODEL_FALLBACKS": args.model,
+                "OUROBOROS_MODEL_LIGHT": args.light_model,
+            },
+            forwarded_model_slot_keys=_ALL_MODEL_SLOT_KEYS,
+            # The container roster, resolved before the first write with the adapter's own
+            # env-then-settings precedence; an invalid host roster keeps the launcher's
+            # established refusal vocabulary instead of escaping the seam.
+            container_model=args.model,
+            container_lane_keys=("USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"),
+            run_root=run_root,
+            repo_dir=repo,
+            requested_task_ids=list(args.task or []),
+            require_clean=not args.allow_dirty_seed,
+            # dataset + official_command are promoted to top-level by benchmark_run_manifest;
+            # everything else must go through `extra` (the helper drops unknown top-level keys).
+            dataset=args.dataset,
+            extra={
+                "outcome": "started",
+                "k": int(args.k),
+                "n_concurrent": int(args.n_concurrent),
+                "timeout_multiplier": float(args.timeout_multiplier),
+                "setup_timeout_multiplier": float(args.setup_timeout_multiplier),
+                "build_timeout_multiplier": float(args.build_timeout_multiplier),
+                "resource_overrides": list(args.resource_override or []),
+                "disable_agent_web": bool(args.disable_agent_web),
+                "all_model": args.all_model or "",
+                # The measured models, recorded at ADMISSION so even a refused or crashed run names
+                # what it was about to measure. These are post-`--all-model` values (the override
+                # above rewrites both), i.e. what actually reaches the harbor job config — the same
+                # numbers `model_slots` carries once `augment_manifest` runs.
+                "model": args.model,
+                "light_model": args.light_model,
+                "leaderboard_valid": leaderboard_valid,
+                "report_grade": report_grade_value,
+                "report_grade_warning": report_grade_warning,
+                "leaderboard_submission_root": str(submission_root),
+                "submission_subtree": "/".join(subtree),
+                "metadata_yaml": str(metadata_path),
+                "base_job_config": str(args.base_job_config or ""),
+                # Harness/backend provenance. `harbor_env` is what was REQUESTED (empty = flag
+                # omitted); `harbor_env_effective` is what ran. `harbor_version` is resolved
+                # after admission (it shells out) and is "" when the binary could not be
+                # interrogated -- visibly unknown, never assumed.
+                "harbor_bin": str(args.harbor_bin),
+                "harbor_env": str(args.harbor_env or ""),
+                "harbor_env_effective": harbor_env_effective,
+                # NAMES only -- no value ever enters an artifact THIS launcher writes. Splitting on
+                # the first `=` is safe ONLY because `type=env_assignment` already refused any token
+                # without one: without that guard a `--ve <expanded-secret>` typo made the whole
+                # credential the "name" and persisted it here in the clear.
+                "agent_env_keys": [str(item).split("=", 1)[0] for item in (args.agent_env or [])],
+                "verifier_env_keys": [str(item).split("=", 1)[0] for item in (args.verifier_env or [])],
+                # Typed audit fact, not a string to grep: harbor writes these values into
+                # its own job/trial config+lock+result files under the job dir (partially
+                # redacted at best, verbatim when the NAME looks non-sensitive), so a
+                # submission built from this run MUST be value-scrubbed. See harbor_command().
+                "env_passthrough_persisted_by_harbor": bool(
+                    list(args.agent_env or []) or list(args.verifier_env or [])
+                ),
+            },
+        )
+    except BenchmarkAdmissionRefused as refused:
+        print(f"[run_tb] REFUSED: {refused}", file=sys.stderr)
+        return 1
+    admitted_slots = manifest["model_slots"]
+    main_effort = admitted_slots[EFFORT_SLOT_KEY]
+    # The roster admission pinned IS the roster this run executes: the generated job config and
+    # the used-model rows `metadata.yaml` declares read this ONE string, so a Settings save
+    # between admission and the render cannot make the declaration name a pool the job does not
+    # carry. An empty declaration stays "" rather than a serialized "{}".
+    admitted_roster = (
+        json.dumps(manifest["available_subagents"], ensure_ascii=False, separators=(",", ":"))
+        if manifest.get("available_subagents") else ""
     )
-    if fixed_actor:
-        manifest["model_slots"] = {
-            key: value for key, value in fixed_actor["model_slots"].items()
-            if key not in _UNFORWARDED_MODEL_SLOT_KEYS
-        }
-        manifest["available_subagents"] = fixed_actor["available_subagents"]
-        manifest["harness"]["fixed_model_actor"] = fixed_actor
-        # Durable before job-config discovery/version probes and the Harbor subprocess.
-        write_json(manifest_path, manifest)
+    # The same snapshot's web search choice and excluded seats. The snapshot drops a blank
+    # Model, so an absent slot IS the admitted blank choice — carried on as an explicit "",
+    # never as "nothing declared". Neither value is read from Settings again.
+    admitted_search = admitted_slots.get("OUROBOROS_WEBSEARCH_MODEL", "").strip()
+    admitted_light = (admitted_slots.get("OUROBOROS_MODEL_LIGHT") or "").strip() or None
+    admitted_excluded = list(manifest["extra"]["triad_rows_not_executable_in_container"])
     with finalize_run_manifest(manifest_path, manifest) as final:
-        # Rendered FIRST inside the seam (after admission, before the submission
-        # skeleton exists): a malformed reviewer panel, or a row the container
-        # roster cannot resolve, is a typed refusal recorded on the durable
-        # manifest — never a traceback, never a half-built submission tree.
+        # Nothing below reads host Settings again: the used-model rows, the web search rows and
+        # the excluded-seat disclosure all read the ONE admission snapshot, so a save between
+        # admission and this render moves none of them. The typed refusal stays for a
+        # declaration that still cannot be rendered, before anything enters the submission tree.
         try:
-            host_settings = _host_settings(settings_path)
             metadata_text = leaderboard_metadata(
                 agent_name=args.agent_name, org_name=args.org_name, model=args.model,
-                light_model=args.light_model, disable_agent_web=bool(args.disable_agent_web),
-                settings=host_settings,
+                # The admitted follow-Main choice runs Light on Main without changing the job.
+                light_model=admitted_light or args.model, disable_agent_web=bool(args.disable_agent_web),
+                available_subagents=admitted_roster, web_search_model=admitted_search,
+                excluded_review_seats=admitted_excluded,
             )
-            # Typed provenance: the configured triad rows this container cannot run —
-            # on the manifest, as a metadata comment, and (owner R40) said ONCE, loudly,
-            # at admission: the run continues, but the operator must not learn this
-            # from the artifacts afterwards.
-            not_executable = triad_rows_not_executable_in_container(args.model, host_settings)
-            final["triad_rows_not_executable_in_container"] = not_executable
-            if not_executable:
+            # Typed provenance: the configured triad rows this container cannot run — on the
+            # manifest since admission, as a metadata comment, and (owner R40) said ONCE, loudly:
+            # the run continues, but the operator must not learn this from the artifacts afterwards.
+            if admitted_excluded:
                 print(
                     "[run_tb] WARNING: the configured review pool carries agent-session rows the "
-                    f"task container CANNOT run: {', '.join(not_executable)}. A Terminal-Bench container "
+                    f"task container CANNOT run: {', '.join(admitted_excluded)}. A Terminal-Bench container "
                     "has no harness CLI/daemon and no harness credentials, so these rows are not "
                     "forwarded, not declared as used models, and the container reviews with the "
                     "pool's API seats only. Configure api seats for a submittable run.",
@@ -1215,7 +1322,7 @@ def main(argv: list[str] | None = None) -> int:
             task_filters=list(args.task or []),
             settings_path=settings_path,
             execute=bool(args.execute),
-            light_model=args.light_model,
+            light_model=admitted_light,
             safety_mode=args.safety_mode,
             setup_timeout_multiplier=args.setup_timeout_multiplier,
             build_timeout_multiplier=args.build_timeout_multiplier,
@@ -1224,11 +1331,20 @@ def main(argv: list[str] | None = None) -> int:
             agent_env=tuple(args.agent_env or []),
             verifier_env=tuple(args.verifier_env or []),
             harbor_env=args.harbor_env,
+            main_effort=main_effort,
+            # The SAME admitted snapshot the declaration above read — the exact string the first
+            # write persisted — never a second resolution from settings a save could have moved.
+            available_subagents=admitted_roster,
+            # Named only where it can run: with the agent's web tools off the run declares no
+            # web search Model, so the job names none either and stays as it was.
+            web_search_model=None if args.disable_agent_web else admitted_search,
+            use_local_main=manifest["extra"]["admitted_local_lanes"]["USE_LOCAL_MAIN"],
+            use_local_light=manifest["extra"]["admitted_local_lanes"]["USE_LOCAL_LIGHT"],
         )
         # Recorded from the ASSEMBLED config, not from `args`: the job config below is what the
         # adapter reads, so binding the manifest to the same object is what keeps the recorded
         # model and the executed model from ever drifting apart.
-        augment_manifest(manifest, harbor_config)
+        augment_manifest(manifest, harbor_config, snapshot=admitted_slots)
         cmd = harbor_command(harbor_config)
         harbor_version_value = harbor_version(args.harbor_bin)
         manifest["official_command"] = redacted_command(cmd)
@@ -1249,6 +1365,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.execute:
             final.update({"outcome": "command_generated", "exit_code": 0})
             return 0
+        # In-progress evidence before Harbor can spend: the resolved actor, its roster and the
+        # redacted command are durable, so an interrupted launch is not "never started".
+        final.checkpoint("before_harbor_execution")
         completed = subprocess.run(cmd, cwd=repo, env={**os.environ, "PYTHONPATH": str(repo)})
         ledger: dict | None = None
         try:

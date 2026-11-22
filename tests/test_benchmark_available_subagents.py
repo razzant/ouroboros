@@ -860,7 +860,15 @@ def test_harness_and_harbor_manifests_use_exact_cli_model(tmp_path, monkeypatch)
     smoke_manifest = json.loads(
         (smoke_root / "run_manifest.json").read_text(encoding="utf-8")
     )
-    assert set(smoke_manifest["model_slots"].values()) == {measured}
+    assert set(smoke_manifest["model_slots"]) == {
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACKS",
+        "OUROBOROS_WEBSEARCH_MODEL",
+        "OUROBOROS_EFFORT_TASK",
+    }
+    assert {value for key, value in smoke_manifest["model_slots"].items()
+            if key != "OUROBOROS_EFFORT_TASK"} == {measured}
     assert "OUROBOROS_MODEL_HEAVY" not in smoke_manifest["model_slots"]
     assert _only_target(json.dumps(smoke_manifest["available_subagents"])) == measured
     assert_complete_actor(smoke_manifest)

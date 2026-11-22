@@ -7,6 +7,7 @@ are observed, not inferred. Closed proxies stand behind the socket: a gh that ig
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -24,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from ouroboros.tools import github
+from tests._github_process import stub_gh
 from tests.test_github_project_target import _api_parts, _context
 
 ENTERPRISE, PUBLIC_API = "ghe.example.test", "api.github.com"
@@ -56,7 +58,7 @@ def fake(monkeypatch, tmp_path):
         world.calls.append((argv, kwargs))
         return outcome(world.answer(argv, kwargs))
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     world.ctx, world.cwd = _context(tmp_path, "queued")
     world.ctx._active_builtin_tool_result = None
     tools = {entry.name: entry.handler for entry in github.get_tools()}
@@ -210,11 +212,12 @@ def test_a_single_slot_is_filled_too_and_branch_stays_with_gh(fake):
     assert fake.routes()[0][0] == "orgs/corp/x/{branch}"
 
 
-def test_a_later_step_cannot_leave_the_resolved_host(fake):
+@pytest.mark.parametrize("repo", ["", f"{ENTERPRISE}/corp/secret"])
+def test_a_later_step_cannot_leave_the_resolved_host(fake, repo):
     """A URL-derived leg meets the same pin: the list is withheld and the other host hears nothing."""
     row = {"number": 7, "node_id": "PR_7", "html_url": "https://github.com/corp/secret/pull/7", "head": {}, "base": {}}
     fake.answer = lambda argv, kwargs: json.dumps(row if "/pulls/7" in argv[2] else {})
-    text = fake.call("github_read", method="get", kind="pr", target=7)
+    text = fake.call("github_read", method="get", kind="pr", target=7, repo=repo)
     assert text.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and "github.com" in text
     assert [host for _route, host in fake.routes()] == [ENTERPRISE]
 
@@ -431,7 +434,7 @@ class _Handler(BaseHTTPRequestHandler):
     def answer(self):
         status, payload, headers = self.server.world.respond(
             self.headers.get("host") or "", self.command, self.path, self.headers.get("authorization") or "", self._body())
-        data = json.dumps(payload).encode("utf-8")
+        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.send_response(status)
         for key, value in {"Content-Type": "application/json", "Content-Length": str(len(data)), "Connection": "close", **headers}.items():
             self.send_header(key, value)
@@ -597,9 +600,18 @@ def test_list_pages_and_a_next_route_stay_on_the_project_host(two_hosts):
     assert two_hosts.seen[-1].path == "/api/v3/repositories/1/issues/7/timeline"
 
 
-def test_an_unanswered_comment_is_reconciled_with_the_project_hosts_lookup_and_actor(two_hosts):
+@pytest.mark.parametrize("moved", [False, True])
+def test_an_unanswered_comment_is_reconciled_with_the_project_hosts_lookup_and_actor(two_hosts, moved):
+    if moved:
+        two_hosts.cwd.rename(two_hosts.cwd.with_name("moved"))
+        for branch in ("{branch}", ":branch"):
+            refused = two_hosts.call("github_write", method="api", repo=f"{ENTERPRISE}/corp/secret",
+                                     route="repos/{owner}/{repo}/issues/7/comments?ref=" + branch,
+                                     http_method="POST", input={"body": "fixture"})
+            assert "GH_TARGET_UNAVAILABLE" in refused and not two_hosts.seen
     two_hosts.lost = {"POST /repos/corp/secret/issues/7/comments"}
-    text = two_hosts.call("github_write", method="comment", target=7, body="hello", expect={"state": "open"})
+    text = two_hosts.call("github_write", method="comment", target=7, body="hello", expect={"state": "open"},
+                          repo=f"{ENTERPRISE}/corp/secret" if moved else "")
     receipt = json.loads(text.partition("\n")[2])
     assert (receipt["outcome"], receipt["readback"]["via"], receipt["actor"]) == ("confirmed", "lookup", "ent-bot")
     legs = [(seen.method, seen.path) for seen in two_hosts.seen if seen.path != "/api/graphql"]
@@ -615,6 +627,260 @@ def test_an_unanswered_node_only_mutation_is_reconciled_on_the_project_host(two_
     assert (receipt["outcome"], receipt["readback"]["via"], receipt["actor"]) == ("confirmed", "lookup", "ent-bot")
     assert two_hosts.seen[-1].path == "/api/v3/user"
     _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
+
+
+@pytest.mark.parametrize("failed_only", [False, True], ids=["full", "failed"])
+def test_installed_gh_reads_completed_run_logs(two_hosts, monkeypatch, failed_only):
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tool_access import canonical_data_root
+
+    root = "/repos/corp/secret/actions"
+    run, repo = root + "/runs/11", f"{ENTERPRISE}/corp/secret"
+    pinned = run + "/attempts/2"
+    jobs = []
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for number, name, conclusion in [(55, "broken", "failure"), (56, "healthy", "success")]:
+            jobs.append({"id": number, "name": name, "status": "completed", "conclusion": conclusion,
+                         "steps": [{"number": 1, "name": "Check", "status": "completed", "conclusion": conclusion}]})
+            line = f"2026-11-01T00:00:00.0000000Z fixture-{name}\n"
+            archive.writestr(f"{name}/1_Check.txt", line)
+            archive.writestr(f"{number - 54}_{name}.txt", line)
+
+    def rest(forge, method, path, query, request):
+        assert method == "GET", (method, path)
+        if path in (run, pinned):
+            return 200, {"id": 11, "run_attempt": 2, "html_url": URL + "/actions/runs/11", "name": "CI",
+                         "status": "completed", "conclusion": "failure", "head_sha": SHA, "workflow_id": 42,
+                         "jobs_url": f"https://{forge.api}{forge.rest}{run}/jobs"}, {}
+        if path == root + "/workflows/42":
+            return 200, {"id": 42, "name": "CI"}, {}
+        if path == pinned + "/jobs":
+            return 200, {"total_count": len(jobs), "jobs": jobs}, {}
+        if path == pinned + "/logs":
+            return 200, stream.getvalue(), {"Content-Type": "application/zip"}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(two_hosts, "rest", rest)
+    text = two_hosts.call("github_read", method="get", kind="run", target=11, include=["log"],
+                          repo=repo, failed_only=failed_only)
+    assert not text.startswith("⚠️"), text
+    result = json.loads(text.partition("\n")[2])
+    capture = result["capture"]
+    flag = "--log-failed" if failed_only else "--log"
+    assert (capture["source"], capture["format"], capture["attempt"], capture["failed_only"]) == (
+        f"gh run view 11 {flag} --attempt 2 --repo {repo}", "plain_text_stdout", 2, failed_only)
+    stored = task_artifact_dir_path(canonical_data_root(two_hosts.ctx), two_hosts.ctx.task_id)
+    data = (stored / capture["retained"]["path"]).read_bytes()
+    assert capture["bytes"] == len(data) and capture["sha256"] == hashlib.sha256(data).hexdigest()
+    assert b"fixture-broken" in data
+    if not failed_only:
+        assert b"fixture-healthy" in data
+    paths = [seen.path.removeprefix("/api/v3") for seen in two_hosts.seen]
+    assert paths[0] == run and paths.count(pinned + "/logs") == 1
+    assert all("/jobs/" not in path and seen.method == "GET" for path, seen in zip(paths, two_hosts.seen))
+    _on_the_enterprise_host_only(two_hosts, "enterprise-hosts-token")
+    # gh versions differ in how much successful step text their failed-only output retains.
+    # Compare what the actual selected CLI printed, not an independently invented filter.
+    native = subprocess.run(["gh", "run", "view", "11", flag, "--attempt", "2", "--repo", repo],
+                            cwd=two_hosts.cwd, capture_output=True, timeout=30, check=True)
+    assert data == native.stdout
+
+
+def test_installed_gh_creates_and_merges_a_named_pr_after_checkout_moves(two_hosts, monkeypatch):
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+    from ouroboros.tool_access import canonical_data_root
+
+    world = two_hosts
+    world.cwd.rename(world.cwd.with_name("moved"))
+    repo = f"{ENTERPRISE}/corp/secret"
+    drive = canonical_data_root(world.ctx)
+    write_task_result(drive, world.ctx.task_id, STATUS_RUNNING, root_task_id=world.ctx.task_id)
+    original_graphql = world.graphql
+    pr = {}
+    base, merged = "b" * 40, "c" * 40
+    root = "/repos/corp/secret"
+
+    def graphql(forge, request):
+        query = request["query"]
+        if "query MergeReceiptPR(" in query:
+            assert "id number url" in query
+            variables = request["variables"]
+            assert (variables["owner"], variables["name"], variables["number"]) == ("corp", "secret", 7)
+            row = dict(pr)
+            if variables["comments"]:
+                after = variables["after"]
+                assert after in (None, "next")
+                body = "Discussion." if after is None else '```json\n[{"item":"x"}]\n```'
+                row["comments"] = {"nodes": [{"body": body}],
+                                   "pageInfo": {"hasNextPage": after is None, "endCursor": "next" if after is None else "end"}}
+            return 200, {"data": {"repository": {"pullRequest": row}}}, {}
+        if "pullRequests(" in query:
+            connection = {"nodes": [], "pageInfo": {"hasNextPage": False}, "totalCount": 0}
+            return 200, {"data": {"repository": {"pullRequests": connection}}}, {}
+        if "pullRequest(" in query:
+            return 200, {"data": {"repository": {"pullRequest": pr or None}}}, {}
+        return original_graphql(forge, request)
+
+    def rest(forge, method, path, query, request):
+        if method == "GET" and path in (root + "/git/ref/heads/feature", root + "/git/ref/heads/main"):
+            branch = path.rsplit("/", 1)[1]
+            return 200, {"ref": "refs/heads/" + branch, "object": {"sha": SHA if branch == "feature" else base}}, {}
+        if method == "POST" and path == root + "/pulls":
+            pr.update(id="PR_7", number=7, url=URL + "/pull/7", state="OPEN", title=request["title"], body=request["body"],
+                      headRefName=request["head"], headRefOid=SHA, headRepositoryOwner={"login": "corp"},
+                      baseRefName=request["base"], baseRefOid=base, isDraft=request["draft"],
+                      mergeStateStatus="CLEAN", autoMergeRequest=None, mergeCommit=None, mergedAt=None)
+            return 201, {"number": 7, "html_url": pr["url"], "node_id": pr["id"]}, {}
+        if method == "PUT" and path == root + "/pulls/7/merge":
+            pr.update(state="MERGED", mergeCommit={"oid": merged}, mergedAt="2026-11-01T00:00:00Z")
+            return 200, {"merged": True, "sha": merged}, {}
+        if method == "GET" and path == root + "/commits/" + merged:
+            return 200, {"commit": {"tree": {"sha": "d" * 40}}, "parents": [{"sha": base}, {"sha": SHA}]}, {}
+        if method == "PATCH" and path == root + "/pulls/7":
+            pr["body"] = request["body"]
+            return 200, {"number": 7, "body": pr["body"]}, {}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(world, "graphql", graphql)
+    monkeypatch.setattr(world, "rest", rest)
+    create = dict(method="create_pr", title="Remote PR", head="feature", base="main", body="Literal {branch}")
+    expect = {"head_sha": SHA, "base_sha": base}
+    assert "GH_TARGET_UNAVAILABLE" in world.call("github_write", **create, expect=expect)
+    assert not world.seen
+    assert "PR_PRECHECK_FAILED" in world.call("github_write", **create, expect={**expect, "head_sha": merged}, repo=repo)
+    assert not pr
+    result = world.call("github_write", **create, expect=expect, repo=repo)
+    assert json.loads(result.partition("\n")[2])["outcome"] == "confirmed", result
+    assert pr["body"] == create["body"]
+    merge = dict(number=7, method="merge", repo=repo)
+    stale = world.call("pr_merge", **merge, expected_head_sha=merged)
+    assert "HEAD_MOVED" in stale.upper(), stale
+    assert not load_task_result(drive, world.ctx.task_id).get("merge_receipts")
+    result = world.call("pr_merge", **merge, expected_head_sha=SHA)
+    [receipt] = load_task_result(drive, world.ctx.task_id)["merge_receipts"]
+    assert receipt["outcome"]["status"] == "merged" and receipt["publication"]["body"]["status"] == "published", result
+    assert receipt["observed_before"]["base_sha"] == receipt["observed_after"]["base_sha"] == base
+    assert receipt["repo"] == {"url": pr["url"], "pr_node_id": "PR_7"}
+    assert receipt["observed_after"]["url"] == pr["url"]
+    assert receipt["review"]["contributor_evidence"] == "present_invalid"  # The second comment page.
+    writes = [seen for seen in world.seen if seen.method != "GET" and seen.path != "/api/graphql"]
+    assert [(s.method, s.path.removeprefix("/api/v3")) for s in writes] == [
+        ("POST", root + "/pulls"), ("PUT", root + "/pulls/7/merge"), ("PATCH", root + "/pulls/7")]
+    assert writes[1].request["sha"] == SHA and writes[1].request["merge_method"] == "merge"
+    _on_the_enterprise_host_only(world, "enterprise-hosts-token")
+
+
+def test_installed_gh_reads_the_completed_jobs_bytes_during_an_active_run(two_hosts, monkeypatch):
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.tool_access import canonical_data_root
+
+    world = two_hosts
+    world.cwd.rename(world.cwd.with_name("moved"))
+    root = "/repos/corp/secret/actions"
+    run = root + "/runs/11"
+    log = root + "/jobs/55/logs"
+    data = b"\x1b[31mred\x1b[0m\x07\r\nnext\xc2\x9b\xff\nlast"
+    job = {"id": 55, "name": "test", "status": "completed", "conclusion": "failure"}
+    attempts = []
+
+    def rest(forge, method, path, query, request):
+        if path in (run, run + "/attempts/2", run + "/attempts/1"):
+            attempt = 2 if not attempts else 3  # The next unpinned read would observe a rerun.
+            if path != run:
+                attempt = int(path.rsplit("/", 1)[1])
+            attempts.append(attempt)
+            return 200, {"id": 11, "run_attempt": attempt, "html_url": URL + "/actions/runs/11", "name": "CI",
+                         "status": "in_progress", "head_sha": SHA, "workflow_id": 42,
+                         "jobs_url": f"https://{forge.api}{forge.rest}{run}/jobs"}, {}
+        if path == root + "/workflows/42":
+            return 200, {"id": 42, "name": "CI"}, {}
+        if path.startswith(run + "/attempts/") and path.endswith("/jobs"):
+            jobs = [job] if "/2/jobs" in path else []
+            return 200, {"total_count": len(jobs), "jobs": jobs}, {}
+        if path == log:
+            return 302, b"", {"Location": f"https://{forge.api}{forge.rest}{log}/download"}
+        if path == log + "/download":
+            return 200, data, {"Content-Type": "text/plain"}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(world, "rest", rest)
+    args = dict(method="get", kind="run", target=11, job_id=55, include=["log"], repo=f"{ENTERPRISE}/corp/secret")
+    for cap in (len(data), len(data) - 2):
+        world.seen.clear()
+        attempts.clear()
+        text = world.call("github_read", **args, max_bytes=cap)
+        assert not text.startswith("⚠️"), text
+        result = json.loads(text.partition("\n")[2])
+        capture = result["capture"]
+        kept = data[:cap]
+        assert (capture["host"], capture["repo"], capture["run_id"], capture["attempt"], capture["job_id"]) == (
+            ENTERPRISE, "corp/secret", 11, 2, 55)
+        assert (capture["format"], capture["bytes"], capture["max_bytes"], capture["sha256"], capture["truncated"]) == (
+            "rest_job_log", len(kept), cap, hashlib.sha256(kept).hexdigest(), cap < len(data))
+        stored = task_artifact_dir_path(canonical_data_root(world.ctx), world.ctx.task_id)
+        assert (stored / capture["retained"]["path"]).read_bytes() == kept
+        assert "\\x1b[31m" in result["view"] and "\\x9b" in result["view"] and "�" in result["view"]
+        assert all(ch not in result["view"] for ch in ("\x1b", "\x07", "\x9b", "\r"))
+        paths = [seen.path.removeprefix("/api/v3") for seen in world.seen]
+        assert attempts == [2, 2] and run + "/jobs" not in paths
+        assert paths.index(run + "/attempts/2/jobs") < paths.index(log)
+        assert paths.count(log) == paths.count(log + "/download") == 1
+        _on_the_enterprise_host_only(world, "enterprise-hosts-token")
+
+    for change, error in [({"attempt": 1}, "not a job"), ({"job_id": 0}, "completed run only"),
+                          ({"failed_only": True}, "full job log"), ({"job_id": 55}, "job is completed")]:
+        if change == {"job_id": 55}:
+            job["status"] = "in_progress"
+        world.seen.clear()
+        attempts.clear()
+        text = world.call("github_read", **{**args, **change})
+        assert text.startswith("⚠️") and error in text, text
+        assert all("/logs" not in seen.path for seen in world.seen)
+        _on_the_enterprise_host_only(world, "enterprise-hosts-token")
+
+
+@pytest.mark.parametrize("padding", [1, 262144])
+def test_installed_gh_error_answer_past_a_small_cap_is_classified_not_retained(two_hosts, monkeypatch, padding):
+    """A capped REST read checks the final HTTP status regardless of the error body's size."""
+    world = two_hosts
+    root, run = "/repos/corp/secret/actions", "/repos/corp/secret/actions/runs/11"
+    log = root + "/jobs/55/logs"
+    error = json.dumps({"message": "job log expired", "padding": "x" * padding}).encode("utf-8")
+    job = {"id": 55, "name": "test", "status": "completed", "conclusion": "failure"}
+    attempts = []
+
+    def rest(forge, method, path, query, request):
+        if path in (run, run + "/attempts/2", run + "/attempts/1"):
+            attempt = 2 if not attempts else 3  # The next unpinned read would observe a rerun.
+            if path != run:
+                attempt = int(path.rsplit("/", 1)[1])
+            attempts.append(attempt)
+            return 200, {"id": 11, "run_attempt": attempt, "html_url": URL + "/actions/runs/11", "name": "CI",
+                         "status": "in_progress", "head_sha": SHA, "workflow_id": 42,
+                         "jobs_url": f"https://{forge.api}{forge.rest}{run}/jobs"}, {}
+        if path == root + "/workflows/42":
+            return 200, {"id": 42, "name": "CI"}, {}
+        if path.startswith(run + "/attempts/") and path.endswith("/jobs"):
+            jobs = [job] if "/2/jobs" in path else []
+            return 200, {"total_count": len(jobs), "jobs": jobs}, {}
+        if path == log:
+            return 404, error, {}
+        return 404, {"message": "unexpected route"}, {}
+
+    monkeypatch.setattr(world, "rest", rest)
+    args = dict(method="get", kind="run", target=11, job_id=55, include=["log"], repo=f"{ENTERPRISE}/corp/secret")
+    world.seen.clear()
+    text = world.call("github_read", **args, max_bytes=10)
+    assert attempts == [2, 2]
+    assert text.startswith("⚠️ GH_ERROR:") and "HTTP 404" in text
+    assert "Retained:" not in text
+    paths = [seen.path.removeprefix("/api/v3") for seen in world.seen]
+    assert paths.count(log) == 1 and not any(p.endswith("/download") for p in paths)
+    _on_the_enterprise_host_only(world, "enterprise-hosts-token")
 
 
 def test_explicit_targets_keep_their_contract_from_any_project(two_hosts, monkeypatch):

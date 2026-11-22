@@ -1960,6 +1960,148 @@ def test_skill_exec_returns_controlled_error_when_payload_becomes_unreadable(
     assert "payload became unreadable" in result
 
 
+@pytest.mark.parametrize(
+    ("site", "record", "interpreter", "resolver", "outcome", "needle"),
+    [("copy", "ok", "absent", "alternative", "ran", ""),
+     ("copy", "ok", "unknown", "refused", "ERROR", "own Python is unobserved"),
+     ("copy", "ok", "refused", "refused", "ERROR", "own Python is unobserved"),
+     ("copy", "ok", "deadline", "refused", "ERROR", "own Python is unobserved"),
+     ("copy", "denied", "absent", "refused", "BLOCKED", "status='unreadable'"),
+     ("copy", "absent", "absent", "alternative", "BLOCKED", "status='missing'"),
+     ("copy", "nowhere", "absent", "refused", "BLOCKED", "status='deps_location_unavailable:"),
+     ("checkout", "ok", "refused", "alternative", "BLOCKED", "isolated Python runtime is unobserved")],
+    ids=["known-absence", "unknown", "refused", "deadline", "unreadable-record", "absent-record", "no-location",
+         "checkout"])
+def test_a_managed_pythons_observation_decides_admission_refusal_and_the_wrappers_type(
+        tmp_path, monkeypatch, site, record, interpreter, resolver, outcome, needle):
+    """A managed skill with an npm package recorded as installed in its work copy. Only the work domain's
+    edge is faked (fingerprint bytes, interpreter metadata, the container's own look); the real readiness,
+    ``read_deps_state``, resolver and ``skill_exec`` decide: a known absence keeps the alternative, an
+    unreadable source runs nothing, and a refusal is a typed result before any start."""
+    import errno
+    import subprocess
+
+    from ouroboros import work_domain, work_skill_payloads
+    from ouroboros.marketplace.install_specs import install_specs_hash
+    from ouroboros.process_interpreters import resolve_process_python
+    from ouroboros.skill_dependencies import auto_install_specs_for_skill
+    from ouroboros.skill_loader import find_skill, skill_state_dir
+
+    skills_root, work, spawned = tmp_path / "skills", tmp_path / "work", []  # the work copy is never created
+    manifest = _valid_script_manifest("demo").replace(
+        "scripts:\n", "install_specs:\n  - kind: npm\n    package: left-pad\nscripts:\n")
+    skill_dir = _build_skill(skills_root, "demo", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    ctx.task_metadata = {"skill": "demo"}
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "demo")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    specs = auto_install_specs_for_skill(ctx.drive_root, find_skill(ctx.drive_root, "demo"))
+    fingerprint = json.dumps({"status": "installed", "specs_hash": install_specs_hash(specs)})
+    state_dir = skill_state_dir(ctx.drive_root, "demo")
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "deps.json").write_text(fingerprint, encoding="utf-8")
+
+    home, env_dir = work / "demo", str(skill_dir / ".ouroboros_env")
+    gone, denied = FileNotFoundError(errno.ENOENT, "gone"), PermissionError(errno.EACCES, "denied")
+    unseen = str(skill_dir if site == "checkout" else home)  # where the work domain cannot say
+    real_lstat, real_read, real_launch = work_domain.lstat, work_domain.read_text, skill_exec_mod.work_launch
+
+    def inside(path):
+        return str(path).startswith((str(work), env_dir))
+
+    def lstat(path):  # the interpreter's own metadata
+        if not inside(path):
+            return real_lstat(path)
+        raise denied if interpreter != "absent" and str(path).startswith(unseen) else gone
+
+    def read_text(path, **kwargs):  # the fingerprint's bytes, or why they could not be read
+        if not inside(path):
+            return real_read(path, **kwargs)
+        if record != "ok":
+            raise {"denied": denied, "absent": gone}[record]
+        return fingerprint
+
+    def container(argv, **kwargs):  # the container's own look, asked after a permission on the service's descent
+        if interpreter == "refused":
+            raise work_domain.WorkDomainRefused("no CLI")
+        if interpreter == "deadline":
+            raise subprocess.TimeoutExpired(argv, 30)
+        return subprocess.CompletedProcess(argv, 0, b"missing\n", b"")
+
+    def location(*args, **kwargs):  # where the packages live in the work domain
+        if record == "nowhere":
+            raise work_domain.WorkDomainRefused("this deployment names no staging_root; nothing was started")
+        return home
+
+    def managed_launch(*args):  # only the launch sees a managed deployment
+        with patch.object(work_domain, "managed", return_value=True):
+            return real_launch(*args)
+
+    for owner, name, value in [
+            (work_domain, "is_work", inside), (work_domain, "container_path", str), (work_domain, "lstat", lstat),
+            (work_domain, "work_spelling", lambda path: str(path) if inside(path) else ""),
+            (work_domain, "read_text", read_text), (work_domain, "run_in_work", container),
+            (work_skill_payloads, "deps_home", location),
+            (work_skill_payloads, "materialize_skill", lambda *a, **k: home),
+            (skill_exec_mod, "work_launch", managed_launch),
+            (skill_exec_mod, "_run_skill_subprocess", lambda cmd, **k: spawned.append(cmd) or (0, b"ok", b"", False))]:
+        monkeypatch.setattr(owner, name, value)
+
+    _, trace = resolve_process_python(ctx, "run_command", {"cmd": ["python", "-V"], "cwd": ""}, runtime_mode="advanced")
+    result = skill_exec_mod._handle_skill_exec(ctx, skill="demo", script="scripts/hello.py")
+
+    reason = "skill_env_python_unavailable" if resolver == "refused" else "reviewed_skill_environment_unavailable"
+    assert trace is not None and (trace.error_reason or trace.fallback_reason) == reason
+    assert json.loads(result)["exit_code"] == 0 if outcome == "ran" else result.startswith(f"⚠️ SKILL_EXEC_{outcome}:")
+    assert needle in result and bool(spawned) == (outcome == "ran") and "SKILL_EXEC_TIMEOUT" not in result
+    assert outcome != "ran" or spawned[0][0] == "python3"  # the existing alternative: the container's own interpreter
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [("absent", ""), ("unreadable", "dependency record could not be read"),
+     ("invalid", "invalid dependency record")],
+    ids=["absent", "unreadable", "invalid"],
+)
+def test_managed_service_dependency_records_preserve_observation_and_admission(tmp_path, monkeypatch, kind, reason):
+    from ouroboros import work_domain
+    from ouroboros.marketplace import isolated_deps
+    from ouroboros.skill_dependencies import ensure_skill_dependencies
+    from ouroboros.skill_loader import find_skill, skill_state_dir
+
+    skills = tmp_path / "skills"
+    manifest = _valid_script_manifest("demo").replace(
+        "scripts:\n", "install_specs:\n  - kind: npm\n    package: left-pad\nscripts:\n",
+    )
+    skill_dir = _build_skill(skills, "demo", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "demo")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    loaded = find_skill(ctx.drive_root, "demo")
+    folder = skill_state_dir(ctx.drive_root, "demo")
+    folder.mkdir(parents=True, exist_ok=True)
+    state = folder / "deps.json"
+    if kind == "unreadable":
+        state.mkdir()  # a portable read error: this is a directory, not a readable record
+    elif kind == "invalid":
+        state.write_text('{"status": ""}', encoding="utf-8")
+
+    monkeypatch.setattr(work_domain, "managed", lambda: False)
+    monkeypatch.setattr(work_domain, "is_work", lambda path: path == loaded.skill_dir)
+    monkeypatch.setattr(isolated_deps, "_json", lambda *a, **kw: {})  # no separate work-side fingerprint
+
+    def no_installer(*args, **kwargs):
+        pytest.fail("an unobserved record does not authorize installing dependencies")
+
+    monkeypatch.setattr(isolated_deps, "install_isolated_dependencies", no_installer)
+    expected = {"status": "unreadable", "error": reason} if reason else {}
+    assert isolated_deps.read_deps_state(ctx.drive_root, "demo", loaded.skill_dir) == expected
+    if reason:
+        assert ensure_skill_dependencies(ctx.drive_root, loaded) == ("failed", reason)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

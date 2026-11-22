@@ -213,7 +213,7 @@ def test_no_provider_unrestored_wait_is_preserved_but_other_saved_work_recovers(
 
 def test_live_data_test_guard_precedes_every_recovery_read(roots, monkeypatch):
     root, repo = roots
-    monkeypatch.setattr(maintenance, "_migrate_startup_cancel_latches", lambda *a: pytest.fail("live read"))
+    monkeypatch.setattr("ouroboros.store_switch.require_published", lambda *_: pytest.fail("live store read"))
     assert maintenance._run_startup_task_recovery(root, repo, skip_live_data=True)["recovered"] == []
 
 
@@ -492,7 +492,6 @@ def test_real_supervisor_orders_custody_recovery_before_prune(roots, monkeypatch
     order = []
     open_dialogue = server._open_dialogue
     monkeypatch.setattr(server, "_open_dialogue", lambda settings, **kw: order.append("dialogue") or open_dialogue(settings, **kw))
-    monkeypatch.setattr(server, "_migrate_startup_cancel_latches", lambda root: order.append("migrate"))
     monkeypatch.setattr(server, "_startup_worker_pids", lambda root: order.append("capture-pids") or {777})
     monkeypatch.setattr(queue, "restore_pending_from_snapshot",
                         lambda **_kw: order.append("restore") or 0)

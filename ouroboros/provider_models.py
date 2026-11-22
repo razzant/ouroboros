@@ -431,30 +431,31 @@ def review_model_uses_local(model: str) -> bool:
     return local_only_review_route_env() or provider_for_model(str(model or "").strip()) == "local"
 
 
-def resolve_credentialed_model(default_model: str) -> str:
-    """Return ``default_model`` if its provider is credentialed, else the first
-    configured model slot whose provider has credentials (light → fallback →
-    main). Falls back to ``default_model`` when nothing is credentialed
-    so callers surface the original provider error rather than a silent swap."""
-    if model_has_credentials(default_model):
-        return default_model
-    # LIGHT/MAIN are single-model slots; FALLBACKS is a comma chain expanded via the
-    # shared SSOT parser (the live Fallbacks slot, route_choice)
-    # instead of testing the whole comma-string as one broken model id. Empty Light
-    # (default -> Main) simply contributes nothing here.
-    candidates: list[str] = []
-    light = str(runtime_setting("OUROBOROS_MODEL_LIGHT", "") or "").strip()
-    if light:
-        candidates.append(light)
-    candidates.extend(parse_fallback_chain())
-    for env_name in ("OUROBOROS_MODEL",):
-        raw = str(runtime_setting(env_name, "") or "").strip()
-        if raw:
-            candidates.append(raw)
-    for candidate in candidates:
-        if model_has_credentials(candidate):
-            return candidate
-    return default_model
+def _local_lane_box(key: str) -> bool:
+    return str(runtime_setting(key, "") or "").strip().lower() in {"1", "true"}
+
+
+def resolve_credentialed_route(default_model: str, *, remote_only: bool = False,
+                               default_use_local: bool = False) -> tuple[str, bool]:
+    """Try the selected model, Light, each fallback and Main as one ``(model, use_local)`` pair.
+
+    A candidate keeps its slot's lane (``(local)`` spelling or a ``USE_LOCAL_*`` box read as ``true``/``1``)
+    and needs no cloud key; an explicit remote call skips it, raising ``ValueError`` if no remote one
+    remains. A remote model without credentials is the last resort, so its provider reports the error."""
+    def lane(model: str, box: bool) -> bool:
+        return box or provider_for_model(model) == "local"
+
+    light, main = (str(runtime_setting(key, "") or "").strip() for key in ("OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL"))
+    candidates = [(default_model, lane(default_model, default_use_local)),
+                  (light, lane(light, _local_lane_box("USE_LOCAL_LIGHT"))),
+                  *((model, lane(model, _local_lane_box("USE_LOCAL_FALLBACK"))) for model in parse_fallback_chain()),
+                  (main, lane(main, _local_lane_box("USE_LOCAL_MAIN")))]
+    for model, local in candidates:
+        if model and ((local and not remote_only) or (not local and model_has_credentials(model))):
+            return model, local
+    if remote_only and candidates[0][1]:
+        raise ValueError("No remote model with usable credentials is available for this call.")
+    return candidates[0]
 
 
 def declared_model_settings(

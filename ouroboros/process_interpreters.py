@@ -26,6 +26,7 @@ import contextlib
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Mapping, Optional
@@ -42,7 +43,7 @@ from ouroboros.platform_layer import (
     project_venv_python,
     resolve_bundled_node,
 )
-from ouroboros.shell_parse import normalize_check_argv, shell_command_string, shell_tokens
+from ouroboros.shell_parse import shell_command_string, shell_tokens, verify_run_argv
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     build_resolved_resource_binding,
@@ -62,9 +63,6 @@ _NODE_FAMILY_TOKENS = frozenset({"node", "nodejs", "npm", "npx", "pnpm", "yarn",
 _NODE_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash"})
 _WINDOWS_LAUNCHER_SUFFIXES = (".exe", ".cmd", ".bat")
 _PROCESS_TOOLS = frozenset({"run_command", "run_script", "start_service", "verify_and_record"})
-# Mirrors the run-kind set of tools/verify.py (`_RUN_KINDS`); keep in sync when
-# a new verify run-kind is introduced there.
-_VERIFY_RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
 _VERIFIED_RESOLUTIONS = frozenset(
     {
         ("reviewed_skill_environment", "isolated_skill"),
@@ -153,10 +151,7 @@ def _python_request(tool_name: str, args: Mapping[str, Any]) -> tuple[str, list[
         return (requested, None) if requested in _PYTHON_TOKENS else ("", None)
 
     if tool_name == "verify_and_record":
-        kind = str(args.get("contract_kind") or "").strip()
-        if kind not in _VERIFY_RUN_KINDS:
-            return "", None
-        argv = normalize_check_argv(args.get("check")) or []
+        argv = verify_run_argv(args)
         if not argv:
             return "", None
         requested = str(argv[0]).strip()
@@ -201,13 +196,17 @@ def _reviewed_skill_python(
     another interpreter would run it without them, so the launch is refused
     rather than resolved further.  A never-installed (``absent``) env falls
     through as before, keeping authoring and repair runs possible.
+    The env and its interpreter are read at the verified execution domain's dependency location
+    (``work_skill_payloads.deps_home``), never at a service-side copy of the payload.
     """
 
     try:
+        from ouroboros import work_domain
         from ouroboros.marketplace.isolated_deps import python_runtime_binary, read_deps_state
         from ouroboros.skill_dependencies import unusable_python_env
         from ouroboros.skill_loader import find_skill, load_skill
         from ouroboros.skill_readiness import skill_readiness_for_execution
+        from ouroboros.work_skill_payloads import deps_home
 
         if binding is not None:
             if binding.root != "skill_payload":
@@ -228,15 +227,38 @@ def _reviewed_skill_python(
             return "", "reviewed_skill_environment_unavailable"
         if unusable_python_env(drive_root, loaded) in {"moved", "other_python", "unreadable"}:
             return "", "skill_env_python_unavailable"
-        if not skill_readiness_for_execution(drive_root, loaded).ready:
+        readiness = skill_readiness_for_execution(drive_root, loaded)
+        if not readiness.ready:
+            unavailable = any(b == "deps_not_ready:unreadable" or b.startswith("deps_location_unavailable:")
+                              for b in readiness.blockers)
+            return "", "skill_env_python_unavailable" if unavailable else "reviewed_skill_environment_unavailable"
+        # The exact interpreter of the environment the run executes against: deps_home (the reviewed
+        # payload's work copy under a managed deployment, the skill's own folder otherwise) — the home
+        # whose interpreter launch itself starts — read passively, never a service-side payload copy.
+        deps_dir = deps_home(drive_root, loaded)
+        deps_state = read_deps_state(drive_root, loaded.name, deps_dir)
+        deps_status = str(deps_state.get("status") or "")
+        if deps_status == "unreadable":
+            return "", "skill_env_python_unavailable"
+        if deps_status != "installed":
             return "", "reviewed_skill_environment_unavailable"
-        deps_state = read_deps_state(drive_root, loaded.name, loaded.skill_dir)
-        if str(deps_state.get("status") or "") != "installed":
-            return "", "reviewed_skill_environment_unavailable"
-        candidate = python_runtime_binary(loaded.skill_dir)
+        in_work = work_domain.is_work(deps_dir)
+        try:
+            candidate = python_runtime_binary(deps_dir, conclusive_absence=True) if in_work else python_runtime_binary(deps_dir)
+        except OSError:
+            if in_work:  # the work domain could not say: never another interpreter, which lacks the packages
+                return "", "skill_env_python_unavailable"
+            raise
+        if candidate is not None and in_work:
+            # python_runtime_binary has just found it in the work domain (work_domain.kind: file or link). The
+            # service's is_file/os.access describe another host; the launch itself proves it can run there.
+            return os.path.abspath(os.fspath(candidate)), ""
         usable = _usable_executable(str(candidate or ""))
         if usable:
             return usable, ""
+    except (work_domain.WorkDomainRefused, subprocess.TimeoutExpired):
+        # An unavailable work-domain lookup has not proved the reviewed interpreter absent.
+        return "", "skill_env_python_unavailable"
     except Exception:
         return "", "reviewed_skill_environment_probe_failed"
     return "", "reviewed_skill_environment_unavailable"
@@ -532,10 +554,7 @@ def _node_request(tool_name: str, args: Mapping[str, Any]) -> tuple[str, list[st
         requested = str(args.get("interpreter") or "python3").strip() or "python3"
         body = str(args.get("script") or "")
     elif tool_name == "verify_and_record":
-        kind = str(args.get("contract_kind") or "").strip()
-        if kind not in _VERIFY_RUN_KINDS:
-            return "", None, ""
-        argv = normalize_check_argv(args.get("check")) or []
+        argv = verify_run_argv(args)
         if not argv:
             return "", None, ""
         requested = str(argv[0]).strip()

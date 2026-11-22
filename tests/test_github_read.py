@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros.tools import github, github_checks, github_read
+from tests._github_process import stub_gh
 from tests.test_github_project_target import _context
 
 BASE = "https://github.example/owner/selected"
@@ -117,7 +117,7 @@ def gh(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=answer[0], stdout="", stderr=answer[1])
         return SimpleNamespace(returncode=0, stdout=answer, stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     world.ctx, world.cwd = _context(tmp_path, "queued")
     entry = next(item for item in github.get_tools() if item.name == "github_read")  # the registered, invocation-scoped handler
     world.read = lambda **args: entry.handler(world.ctx, **args)

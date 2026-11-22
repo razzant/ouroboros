@@ -318,8 +318,8 @@ def test_cooldown_error_kinds_include_rate_limit_but_not_in_retry_kinds():
 
 # ------------------------------------ credentialed-model resolver parses chain (C2)
 
-def test_resolve_credentialed_model_parses_fallbacks_chain(monkeypatch, tmp_path):
-    from ouroboros.provider_models import resolve_credentialed_model
+def test_resolve_credentialed_route_parses_fallbacks_chain(monkeypatch, tmp_path):
+    from ouroboros.provider_models import resolve_credentialed_route
     # Only OpenRouter is credentialed in this install; Light saved blank follows Main (route_choice).
     for k in ("GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD",
               "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY"):
@@ -330,7 +330,84 @@ def test_resolve_credentialed_model_parses_fallbacks_chain(monkeypatch, tmp_path
                    OUROBOROS_MODEL_LIGHT="", OUROBOROS_MODEL_FALLBACKS="gigachat::nocreds, anthropic/claude-sonnet-4.6")
     # The resolver must parse the chain and return the credentialed SECOND entry — not
     # test the raw comma-string as one (broken) model id, nor skip past it.
-    assert resolve_credentialed_model("gigachat::GigaChat") == "anthropic/claude-sonnet-4.6"
+    assert resolve_credentialed_route("gigachat::GigaChat") == ("anthropic/claude-sonnet-4.6", False)
+
+
+def test_credentialed_light_route_keeps_the_local_lane_of_bare_labels(monkeypatch, tmp_path):
+    """A bare label carries the local lane of the slot it came from. The confirmed gap
+    (Astra/Carbon): the credential walk lost USE_LOCAL_MAIN/USE_LOCAL_FALLBACK, so a keyless
+    install lost its local fallback (a dead cloud send) and a credentialed install re-routed
+    a locally-pinned Main to the cloud over the owner's checked box."""
+    from ouroboros.route_choice import credentialed_light_route
+
+    for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    saved_settings(monkeypatch, tmp_path,
+                   OUROBOROS_MODEL_LIGHT="openai::gpt-5.6-luna", USE_LOCAL_LIGHT=False,
+                   OUROBOROS_MODEL="bare-main", USE_LOCAL_MAIN=True,
+                   OUROBOROS_MODEL_FALLBACKS="", USE_LOCAL_FALLBACK=False)
+    # No cloud credential anywhere: the locally-pinned Main is the fallback, on its local lane.
+    assert credentialed_light_route() == ("bare-main", True)
+    # With cloud credentials: the checked box still wins — the bare label never goes to cloud.
+    saved_settings(monkeypatch, None, OPENROUTER_API_KEY="or-key")
+    assert credentialed_light_route() == ("bare-main", True)
+
+
+def test_resolve_credentialed_route_honors_the_fallback_lane_box(monkeypatch, tmp_path):
+    """USE_LOCAL_FALLBACK makes a bare chain entry a LOCAL candidate: it serves without any
+    cloud key, and the consolidator dispatches that winner on its own local lane."""
+    from ouroboros.consolidator import _consolidation_route
+    from ouroboros.provider_models import resolve_credentialed_route
+
+    for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_LIGHT="", USE_LOCAL_LIGHT=False,
+                   OUROBOROS_MODEL="main-x", USE_LOCAL_MAIN=False,
+                   OUROBOROS_MODEL_FALLBACKS="bare-fb", USE_LOCAL_FALLBACK=True)
+    assert resolve_credentialed_route("openai::gpt-5.6-luna") == ("bare-fb", True)
+    assert _consolidation_route() == ("bare-fb", True)
+
+
+def test_explicit_remote_call_never_cloud_sends_a_local_slot_label(monkeypatch, tmp_path):
+    """``use_local=False`` is an explicit remote call: a locally-pinned slot's bare label is
+    skipped even though the OpenRouter key COULD serve it, and a credentialed remote Main
+    answers instead."""
+    from ouroboros.route_choice import credentialed_light_route
+
+    for key in ("OPENAI_BASE_URL", "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    saved_settings(monkeypatch, tmp_path,
+                   OUROBOROS_MODEL_LIGHT="bare-light", USE_LOCAL_LIGHT=True,
+                   OUROBOROS_MODEL="openai::gpt-5.6-luna", USE_LOCAL_MAIN=False,
+                   OUROBOROS_MODEL_FALLBACKS="", USE_LOCAL_FALLBACK=False,
+                   OPENROUTER_API_KEY="or-key", OPENAI_API_KEY="openai-key")
+    assert credentialed_light_route(use_local=False) == ("openai::gpt-5.6-luna", False)
+
+
+def test_explicit_remote_call_raises_when_every_candidate_is_local(monkeypatch, tmp_path):
+    """With every candidate lane-local there is NO remote route to invent: the explicit
+    remote call raises instead of sending a checked-box bare label to the cloud."""
+    from ouroboros.route_choice import credentialed_light_route
+
+    saved_settings(monkeypatch, tmp_path,
+                   OUROBOROS_MODEL_LIGHT="bare-light", USE_LOCAL_LIGHT=True,
+                   OUROBOROS_MODEL="bare-main", USE_LOCAL_MAIN=True,
+                   OUROBOROS_MODEL_FALLBACKS="", USE_LOCAL_FALLBACK=False,
+                   OPENROUTER_API_KEY="or-key")
+    with pytest.raises(ValueError, match="No remote model"):
+        credentialed_light_route(use_local=False)
+
+
+def test_explicit_cloud_light_under_a_local_main_is_preserved(monkeypatch, tmp_path):
+    """An explicit cloud/Claudexor Light answers on its own credential before Main is ever
+    consulted: the local Main never swallows it and never lends it its checked box."""
+    from ouroboros.route_choice import credentialed_light_route
+
+    saved_settings(monkeypatch, tmp_path,
+                   OUROBOROS_MODEL_LIGHT="claudexor::claude=claude-sonnet-5-5", USE_LOCAL_LIGHT=False,
+                   OUROBOROS_MODEL="bare-main", USE_LOCAL_MAIN=True,
+                   OUROBOROS_MODEL_FALLBACKS="", USE_LOCAL_FALLBACK=False)
+    assert credentialed_light_route() == ("claudexor::claude=claude-sonnet-5-5", False)
 
 
 def test_empty_light_slot_inherits_main_routing_even_when_models_match(monkeypatch, tmp_path):

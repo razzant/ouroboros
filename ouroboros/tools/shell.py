@@ -35,6 +35,7 @@ from ouroboros.runtime_mode_policy import (
     is_protected_runtime_path,  # noqa: F401
 )
 from ouroboros.tools.commit_gate import _invalidate_advisory
+from ouroboros.tools.shell_guards import interpreter_family
 from ouroboros.shell_parse import POSIX_SHELL_HEADS, is_absolute_path_text, recover_stringified_argv  # noqa: F401
 from ouroboros.shell_parse import inline_operand_start
 from ouroboros.tools.tool_result import _publish_process_result
@@ -538,6 +539,33 @@ def _run_shell(
                 else text)
 
 
+def _node_stage_suffix(start: pathlib.Path, boundary: pathlib.Path) -> str:
+    """Carry an explicit Node type into private staging without leaving the bound root."""
+    from ouroboros.confined_files import read_confined_json
+
+    directory = start
+    while directory.is_relative_to(boundary) and directory.name != "node_modules":
+        try:
+            package = read_confined_json(boundary, (*directory.relative_to(boundary).parts, "package.json"), strict=True)
+        except OSError:
+            break  # No usable declaration here; do not guess from a more distant package.
+        if package is not None:
+            kind = package.get("type")
+            return ".mjs" if kind == "module" else ".cjs" if kind == "commonjs" else ".js"
+        if directory == boundary:
+            break
+        directory = directory.parent
+    return ".js"
+
+
+def _staged_script_suffix(interp: str, binding: ResolvedResourceBinding) -> str:
+    if "python" in pathlib.PurePath(interp).name:
+        return ".py"
+    if interpreter_family(interp) == "node":
+        return ".js" if binding.root == "active_workspace" else _node_stage_suffix(binding.target_path, binding.base_path)
+    return ".sh"
+
+
 @process_environment_tool
 def _run_script(
     ctx: ToolContext,
@@ -595,16 +623,21 @@ def _run_script(
             root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
         except Exception:
             root = pathlib.Path(ctx.drive_root) / "tmp_scripts"
-    suffix = ".py" if "python" in pathlib.PurePath(interp).name else ".sh"
+    suffix = _staged_script_suffix(interp, binding)
     run_dir = None
     script_path = root / f"script_{uuid.uuid4().hex}{suffix}"
+    # A named root's typeless Node script must not inherit an unrelated staging package.
+    # Only this invocation owns the neutral package.json; simultaneous calls may share root.
+    neutral_package = not active_workspace_script and suffix == ".js"
     shell_entered = False
     try:
         root.mkdir(parents=True, exist_ok=True)
-        if active_workspace_script:
+        if active_workspace_script or neutral_package:
             run_dir = pathlib.Path(tempfile.mkdtemp(prefix="script_", dir=root))
-            # Ignore only this invocation's files, not neighbouring user work.
-            (run_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+            if neutral_package:
+                (run_dir / "package.json").write_text("{}\n", encoding="utf-8")
+            else:
+                (run_dir / ".gitignore").write_text("*\n", encoding="utf-8")
             script_path = run_dir / f"script{suffix}"
         script_path.write_text(body, encoding="utf-8")
         try:
@@ -730,6 +763,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Run an inline script with a declared interpreter from a temporary script file in a private run directory inside the mapped workspace or the task drive. "
                 "For Python, this tool does not add the selected cwd to the import path. "
+                "Node uses .js in the workspace; outside it, an explicit package type in the selected root sets .mjs or .cjs. Imports resolve from the temporary file. "
                 "Keep reusable scripts in a skill payload and invoke those files with run_command. "
                 "The underlying command result echoes the resolved cwd."
             ),

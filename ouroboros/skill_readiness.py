@@ -300,26 +300,41 @@ def skill_readiness_for_execution(
             next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})
 
     try:
+        from ouroboros import work_domain
         from ouroboros.marketplace.install_specs import install_specs_hash
         from ouroboros.marketplace.isolated_deps import read_deps_state
         from ouroboros.skill_dependencies import (
             auto_install_specs_for_skill,
             manual_install_specs_for_skill,
         )
+        from ouroboros.work_skill_payloads import deps_home
 
         auto_specs = auto_install_specs_for_skill(pathlib.Path(drive_root), skill)
         if auto_specs:
-            deps_state = read_deps_state(pathlib.Path(drive_root), skill.name, skill.skill_dir)
-            deps_status = str(deps_state.get("status") or "pending")
-            if deps_status != "installed":
-                msg = f"deps_not_ready:{deps_status}"
+            # Readiness is the state the run will meet: the packages are built where the verified
+            # payload executes (deps_home — the reviewed payload's work copy under a managed
+            # deployment, the skill's own folder otherwise; skill_dependencies and skill_exec probe
+            # the same home), so this probe reads that location passively — no copy is made here, no
+            # grant touched. A dependency location the execution domain cannot name is an unknown to
+            # disclose, never a silent pass.
+            try:
+                deps_dir = deps_home(pathlib.Path(drive_root), skill)
+            except work_domain.WorkDomainRefused as refused:
+                msg = f"deps_location_unavailable:{refused}"
                 blockers.append(msg)
-                agent_fixable.append(msg)
-                next_actions.append(dict(_DEPENDENCY_ACTION))
-            elif deps_state.get("specs_hash") != install_specs_hash(auto_specs):
-                blockers.append("deps_stale")
-                agent_fixable.append("deps_stale")
-                next_actions.append(dict(_DEPENDENCY_ACTION))
+                owner_action.append(msg)
+            else:
+                deps_state = read_deps_state(pathlib.Path(drive_root), skill.name, deps_dir)
+                deps_status = str(deps_state.get("status") or "pending")
+                if deps_status != "installed":
+                    msg = f"deps_not_ready:{deps_status}"
+                    blockers.append(msg)
+                    agent_fixable.append(msg)
+                    next_actions.append(dict(_DEPENDENCY_ACTION))
+                elif deps_state.get("specs_hash") != install_specs_hash(auto_specs):
+                    blockers.append("deps_stale")
+                    agent_fixable.append("deps_stale")
+                    next_actions.append(dict(_DEPENDENCY_ACTION))
         # G3 (capinv-447) third readiness state: manually-installed dependencies
         # are DISCLOSED, not silently dropped from the dependency list. They do
         # not hard-block (the owner may have installed them system-wide, and no

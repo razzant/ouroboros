@@ -608,6 +608,7 @@ def test_registry_dispatch_calls_process_owner_once_before_safety_and_handler(
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
 
     calls: list[str] = []
+    checked_bindings = []
     denied = {"value": True}
 
     def guard(owner, args, runtime_mode, binding=None):
@@ -615,6 +616,7 @@ def test_registry_dispatch_calls_process_owner_once_before_safety_and_handler(
         assert args["cmd"] == ["echo", "ok"]
         assert runtime_mode == "advanced"
         assert binding is not None
+        checked_bindings.append(binding)
         calls.append("guard")
         if not denied["value"]:
             return None
@@ -631,7 +633,7 @@ def test_registry_dispatch_calls_process_owner_once_before_safety_and_handler(
     def handler(_ctx, contract_kind, check, _resolved_binding=None, **_kwargs):
         assert contract_kind == "explicit_command"
         assert check == ["echo", "ok"]
-        assert _resolved_binding is not None
+        assert _resolved_binding is checked_bindings[-1]
         calls.append("handler")
         return "OK"
 

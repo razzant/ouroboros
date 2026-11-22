@@ -18,6 +18,7 @@ from ouroboros import (
     model_wait,
     project_naming,
     review_verdict_extraction,
+    route_choice,
     safety,
     ui_translation,
     vision_routing,
@@ -33,7 +34,7 @@ REAL_SAFETY_CALL = safety._safety_model_call  # the shared supervisor fixture fa
 
 
 @pytest.fixture
-def call_env(tmp_path, monkeypatch):
+def transport_env(tmp_path, monkeypatch):
     from ouroboros import observability, pricing, request_wire_contract
 
     now, sends = [100.0], []
@@ -67,17 +68,23 @@ def call_env(tmp_path, monkeypatch):
 
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send)))
     client = LLMClient()
-    monkeypatch.setattr(client, "_resolve_remote_target", lambda model: route)
     monkeypatch.setattr(client, "_get_remote_client", lambda target: sdk)
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: "openai-compatible::unseen-light")
-    monkeypatch.setattr(ui_translation, "_light_route", lambda: ("openai-compatible::unseen-light", False, True))
     return SimpleNamespace(root=tmp_path, now=now, sends=sends, client=client, sdk=sdk, route=route,
                            observability=observability)
 
 
-def invoke(env, consumer):
+@pytest.fixture
+def call_env(transport_env, monkeypatch):
+    monkeypatch.setattr(transport_env.client, "_resolve_remote_target", lambda model: transport_env.route)
+    monkeypatch.setattr(route_choice, "credentialed_light_route",
+                        lambda use_local=None: ("openai-compatible::unseen-light", False))
+    monkeypatch.setattr(ui_translation, "_light_route", lambda: ("openai-compatible::unseen-light", False, True))
+    return transport_env
+
+
+def invoke(env, consumer, *, use_local=None):
     if consumer == "naming":
-        return project_naming.llm_project_name("Owner request", llm_client=env.client, use_local=False,
+        return project_naming.llm_project_name("Owner request", llm_client=env.client, use_local=use_local,
                                                drive_root=env.root, task_id="title-task")
     return ui_translation._call_light(env.root, [{"role": "user", "content": "Translate"}], client=env.client)[0]
 
@@ -238,7 +245,7 @@ def test_local_consumer_checks_preparation_deadline(call_env, monkeypatch, consu
     call_env.sdk.chat.completions.create = local_send
     monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
     monkeypatch.setattr(call_env.client, "_get_local_client", lambda: call_env.sdk)
-    monkeypatch.setattr(project_naming, "_light_use_local", lambda explicit: True)
+    monkeypatch.setattr(route_choice, "credentialed_light_route", lambda use_local=None: ("unseen-local", True))
     monkeypatch.setattr(ui_translation, "_light_route", lambda: ("unseen-local", True, True))
     if expired:
         spend_preparation(call_env, monkeypatch, 111)
@@ -267,14 +274,14 @@ def light_lane(call_env, monkeypatch, lane):
         call_env.sdk.chat.completions.create = local_send
         monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
         monkeypatch.setattr(call_env.client, "_get_local_client", lambda: call_env.sdk)
-        monkeypatch.setattr(project_naming, "_light_use_local", lambda explicit: True)
+        monkeypatch.setattr(route_choice, "credentialed_light_route", lambda use_local=None: ("unseen-local", True))
         monkeypatch.setattr(ui_translation, "_light_route", lambda: ("unseen-local", True, True))
         return ("local-model", {"provider": "local"}), lambda: timeouts
     seen = gigachat_network(monkeypatch, call_env, content="Useful title")
     route = {"provider": "gigachat", "resolved_model": "GigaChat-2", "usage_model": "gigachat::GigaChat-2",
              "access_token": "token", "base_url": "https://giga.test/api/v1"}
     monkeypatch.setattr(call_env.client, "_resolve_remote_target", lambda model: dict(route))
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: route["usage_model"])
+    monkeypatch.setattr(route_choice, "credentialed_light_route", lambda use_local=None: (route["usage_model"], False))
     monkeypatch.setattr(ui_translation, "_light_route", lambda: (route["usage_model"], False, True))
     return (route["usage_model"], route), lambda: [item.timeout["read"] for item in seen]
 
@@ -332,24 +339,42 @@ def spend_until(call_env, monkeypatch, elapsed, until):
     return slot_held_until(call_env, monkeypatch, "unseen-light", call_env.route, until)
 
 
-@pytest.mark.parametrize("expired", [False, True])
-def test_managed_naming_checks_preparation_before_model_create(call_env, monkeypatch, expired):
+@pytest.fixture
+def subscription_light(transport_env, monkeypatch):
+    from ouroboros import config, provider_models
+    from tests.test_llm_claudexor import MODEL
+
+    for key in provider_models.ROUTE_CREDENTIAL_SETTING_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    settings = transport_env.root / "settings.json"
+    settings.write_text(json.dumps({
+        "OUROBOROS_MODEL": "gguf (local)", "USE_LOCAL_MAIN": True, "LOCAL_MODEL_SOURCE": "/models/main.gguf",
+        "OUROBOROS_MODEL_LIGHT": MODEL, "USE_LOCAL_LIGHT": False,
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings)
+    assert not provider_models.any_api_connection_configured()
+    assert route_choice.following_route("main") == ("gguf (local)", True)
+    monkeypatch.setattr(transport_env.client, "_get_local_client", lambda: pytest.fail("Light was sent to llama.cpp"))
+    return transport_env
+
+
+@pytest.mark.parametrize("expired,use_local", [(False, None), (False, False), (True, None)])
+def test_managed_naming_checks_preparation_before_model_create(subscription_light, monkeypatch, expired, use_local):
     from ouroboros import llm_claudexor as transport
-    from tests.test_llm_claudexor import Gateway, MODEL, result
+    from tests.test_llm_claudexor import Gateway, result
 
     gateway = Gateway(results=[result(cash=0, knowledge="exact")])
     monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **kwargs: gateway)
-    monkeypatch.setattr(call_env.client, "_resolve_remote_target", LLMClient()._resolve_remote_target)
-    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: MODEL)
-    monkeypatch.setattr(ui_translation, "_light_route", lambda: (MODEL, False, True))
     if expired:
-        spend_preparation(call_env, monkeypatch, 111)
-        refused(call_env, "naming")
+        spend_preparation(subscription_light, monkeypatch, 111)
+        refused(subscription_light, "naming")
         assert not gateway.creates
     else:
-        assert invoke(call_env, "naming") == "Ответ 🐍"
+        assert invoke(subscription_light, "naming", use_local=use_local) == "Ответ 🐍"
         assert len(gateway.creates) == 1 and len(gateway.acks) == 1
-        assert ledger_rows(call_env.root)[-1]["state"] == "settled"
+        request = gateway.uploads[0][0]
+        assert (request["source"], request["model"]) == ("codex", "exact-model")
+        assert ledger_rows(subscription_light.root)[-1]["state"] == "settled"
 
 
 TRANSLATION = json.dumps({"translations": [{"id": 0, "text": "Настройки"}]}, ensure_ascii=False)

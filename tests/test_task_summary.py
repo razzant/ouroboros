@@ -183,7 +183,7 @@ def test_consolidation_route_uses_configured_light_model_when_openrouter_present
     # credentialed by the key above and MUST be kept verbatim. An ``openai::``
     # id would select the direct OpenAI transport instead — uncredentialed here
     # (no OPENAI_API_KEY) — and the documented provider-independence fallback in
-    # resolve_credentialed_model() would then rewrite it to the first credentialed
+    # resolve_credentialed_route() would then rewrite it to the first credentialed
     # slot, making the assertion depend on ambient OUROBOROS_MODEL* env leaked by
     # earlier tests in the same worker (the chronic v6.64.2..v6.65.4 CI red).
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai/gpt-5.5-mini")

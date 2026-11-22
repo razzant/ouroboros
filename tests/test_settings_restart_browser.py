@@ -25,11 +25,19 @@ def settings_server(request, tmp_path, monkeypatch):
     bootstrap = tmp_path / "bootstrap.py"
     fake_model = tmp_path / "fake_model.py"
     fake_model.write_text(textwrap.dedent('''\
-        import http.server, json, sys
+        import http.server, json, os, pathlib, sys
+        updated = pathlib.Path(__file__).with_suffix(".updated")
+        if sys.argv[1] == "--upgrade":
+            updated.touch()
+            sys.exit(0)
+        if pathlib.Path(sys.argv[2]).name == "new-format.gguf" and not updated.exists():
+            sys.exit("Fixture model header could not be loaded")
+        from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 body = json.dumps({"data": [{"id": "fixture", "context_window": 9999}]}).encode()
                 self.send_response(200)
+                self.send_header(LOCAL_LAUNCH_HEADER, os.environ[LOCAL_LAUNCH_ENV])
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -37,15 +45,31 @@ def settings_server(request, tmp_path, monkeypatch):
         http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
         '''), encoding="utf-8")
     bootstrap.write_text(textwrap.dedent(f'''\
-        import pathlib, runpy, subprocess, sys
+        import pathlib, runpy, subprocess, sys, time
         sys.path.insert(0, str(pathlib.Path.cwd()))
-        from ouroboros.local_model import LocalModelManager
-        LocalModelManager.download_model = lambda self, source, filename: str(pathlib.Path({str(tmp_path)!r}) / filename)
+        import huggingface_hub
+        from ouroboros import local_model
+        model_dir = pathlib.Path({str(tmp_path)!r})
+        def download(*, filename, tqdm_class, **kwargs):
+            if filename == "held-transfer.gguf":
+                with tqdm_class(total=4, disable=False) as progress:
+                    progress.update(1)
+                    deadline = time.monotonic() + 90
+                    while not (model_dir / "release-transfer").exists():
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("fixture download was never released")
+                        time.sleep(0.05)
+                    progress.update(3)
+            return str(model_dir / filename)
+        huggingface_hub.list_repo_files = lambda repo: []
+        huggingface_hub.hf_hub_download = download
+        local_model._get_install_command = lambda: [sys.executable, {str(fake_model)!r}, "--upgrade"]
         original_popen, original_run = subprocess.Popen, subprocess.run
         class Popen(original_popen):
             def __init__(self, command, **kwargs):
                 if isinstance(command, list) and "ouroboros.local_model_server" in command:
-                    command = [sys.executable, {str(fake_model)!r}, str(command[command.index("--port") + 1])]
+                    command = [sys.executable, {str(fake_model)!r}, command[command.index("--port") + 1],
+                               command[command.index("--model") + 1]]
                 super().__init__(command, **kwargs)
         def run(command, **kwargs):
             if isinstance(command, list) and command[-1] == {RUNTIME_PROBE!r}:
@@ -245,6 +269,255 @@ def test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_st
             page.screenshot(path=str(evidence / f'local-model-failure-{engine}.png'))
             print(page.locator('body').inner_text()[-4000:])
             raise
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
+def test_stop_during_download_starts_an_available_file_before_the_transfer_returns(settings_server, engine, width, free_tcp_port, tmp_path):
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import commit_row
+
+    available = tmp_path / "available.gguf"
+    available.touch()
+    release = tmp_path / "release-transfer"
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            page.goto(settings_server["url"], wait_until="domcontentloaded")
+            level = open_settings(page, "models/local", timeout=30_000)
+            commit_row(page, "LOCAL_MODEL_SOURCE", "fixture/repo")
+            commit_row(page, "LOCAL_MODEL_FILENAME", "held-transfer.gguf")
+            level.locator("details[data-settings-fold] > summary").click()
+            commit_row(page, "LOCAL_MODEL_PORT", free_tcp_port)
+            start = level.get_by_role("button", name="Start", exact=True)
+            stop = level.get_by_role("button", name="Stop", exact=True)
+            status = level.locator("#local-model-status")
+            start.click()
+            expect(status).to_contain_text("Downloading · 25%", timeout=30_000)
+            expect(start).to_be_disabled()
+            stop.click()
+            expect(status).to_contain_text("Offline", timeout=30_000)
+            commit_row(page, "LOCAL_MODEL_SOURCE", str(available))
+            start.click()
+            expect(status).to_contain_text("Ready", timeout=30_000)
+            with page.expect_response(lambda res: res.url.endswith("/api/local-model/start")
+                                      and res.request.post_data_json["source"] == "fixture/repo", timeout=30_000) as old:
+                release.touch()
+            assert old.value.status == 409
+            current = page.request.get(f"{settings_server['url']}/api/local-model/status").json()
+            assert (current["status"], current["model_path"]) == ("ready", str(available))
+            expect(level.locator("#local-model-action-status")).to_have_text("")
+            stop.click()
+            expect(status).to_contain_text("Offline", timeout=30_000)
+        finally:
+            release.touch()
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width,stop_before_reply", [
+    pytest.param("chromium", 1400, False, id="chromium-1400"),
+    pytest.param("webkit", 390, False, id="webkit-390"),
+    pytest.param("chromium", 1400, True, id="chromium-1400-stop-before-reply"),
+    pytest.param("webkit", 390, True, id="webkit-390-stop-before-reply"),
+])
+def test_local_model_update_after_startup_exit_requires_a_click(settings_server, engine, width, free_tcp_port, stop_before_reply):
+    from playwright.sync_api import expect, sync_playwright
+    from tests.settings_browser_helpers import commit_row
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            posts = []
+            page.on("request", lambda req: posts.append(req.url.rsplit("/", 1)[-1])
+                    if req.method == "POST" and "/api/local-model/" in req.url else None)
+            page.route("**/api/local-model/status", lambda route: route.fulfill(json={
+                "status": "error", "runtime_status": "ok", "error": "Fixture model header could not be loaded"}))
+            page.goto(settings_server["url"], wait_until="domcontentloaded")
+            level = open_settings(page, "models/local", timeout=30_000)
+            install = level.locator("#btn-local-install-runtime")
+            status = level.locator("#local-model-status")
+            expect(status).to_contain_text("Fixture model header could not be loaded", timeout=30_000)
+            expect(install).to_be_hidden()
+            page.unroute("**/api/local-model/status")
+            commit_row(page, "LOCAL_MODEL_SOURCE", "fixture/model")
+            commit_row(page, "LOCAL_MODEL_FILENAME", "new-format.gguf")
+            level.locator("details[data-settings-fold] > summary").click()
+            commit_row(page, "LOCAL_MODEL_PORT", free_tcp_port)
+            level.locator("#btn-local-start").click()
+            expect(status).to_contain_text("Fixture model header could not be loaded", timeout=30_000)
+            expect(install).to_be_visible(timeout=30_000)
+            expect(install).to_have_text("Update the local runtime")
+            expect(status).to_contain_text("A newer runtime may support this model.")
+            assert posts == ["start"]
+            stop = level.locator("#btn-local-stop")
+            expected_posts = ["start", "install-runtime"]
+            if stop_before_reply:
+                def next_polled_status():
+                    return page.wait_for_event("response", predicate=lambda res: res.url.endswith("/api/local-model/status")).json()
+
+                # Hold the browser's POST before admission, then forward it and keep its real reply until after Stop.
+                held = []
+                page.route("**/api/local-model/install-runtime", lambda route: held.append(route))
+                with page.expect_request("**/api/local-model/install-runtime"):
+                    install.click()
+                assert next_polled_status()["runtime_status"] == "ok"
+                expect(stop).to_be_disabled()
+                route, = held
+                reply = route.fetch()
+                receipt = reply.json()
+                assert reply.ok and receipt["status"] == "installing" and receipt["install_id"]
+                expect(status).to_contain_text("runtime installed", timeout=30_000)
+                expect(stop).to_be_enabled()
+                with page.expect_response("**/api/local-model/stop") as stopped:
+                    stop.click()
+                assert stopped.value.json() == {"status": "stopped"}
+                expect(status).to_contain_text("Offline", timeout=30_000)
+                with page.expect_response("**/api/local-model/install-runtime") as delivered:
+                    route.fulfill(response=reply)
+                assert delivered.value.json() == receipt
+                assert next_polled_status()["status"] == "offline"
+                expect(level.locator("#local-model-action-status")).to_have_text("Automatic start cancelled.")
+                expected_posts.append("stop")
+                assert posts == expected_posts
+                level.locator("#btn-local-start").click()
+            else:
+                evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(settings_server["data_dir"].parent)))
+                evidence.mkdir(parents=True, exist_ok=True)
+                install.scroll_into_view_if_needed()
+                page.screenshot(path=str(evidence / f"local-model-update-{engine}.png"))
+                install.click()
+            expect(status).to_contain_text("Ready", timeout=30_000)
+            expect(install).to_be_hidden()
+            assert posts == [*expected_posts, "start"]
+            stop.click()
+            expect(status).to_contain_text("Offline", timeout=30_000)
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
+def test_a_stop_from_another_client_ends_the_start_an_install_offered_even_across_a_later_install(
+        settings_server, engine, width, free_tcp_port):
+    """The page queued the Start its Update offered, with the ``install_id`` that install's reply gave it. Another client
+    then Stops and admits a fresh install; when the page's next status read finds ``install_ok`` the server refuses the
+    queued Start (409), the install's own result stays, and the page's explicit Start works."""
+    import time
+
+    from playwright.sync_api import expect, sync_playwright
+
+    from tests.settings_browser_helpers import commit_row
+
+    url = settings_server["url"]
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            page.goto(url, wait_until="domcontentloaded")
+            level = open_settings(page, "models/local", timeout=30_000)
+            install, status = level.locator("#btn-local-install-runtime"), level.locator("#local-model-status")
+            commit_row(page, "LOCAL_MODEL_SOURCE", "fixture/model")
+            commit_row(page, "LOCAL_MODEL_FILENAME", "new-format.gguf")
+            level.locator("details[data-settings-fold] > summary").click()
+            commit_row(page, "LOCAL_MODEL_PORT", free_tcp_port)
+            level.locator("#btn-local-start").click()
+            expect(install).to_have_text("Update the local runtime", timeout=30_000)
+            held, gate = [], {"open": False}  # the page's status reads wait while the other client acts
+            page.route("**/api/local-model/status", lambda route: route.continue_() if gate["open"] else held.append(route))
+            with page.expect_response("**/api/local-model/install-runtime") as admitted:
+                install.click()
+            first = admitted.value.json()["install_id"]
+            # The reply is handled (its Start queued) once the action line clears.
+            expect(level.locator("#local-model-action-status")).to_have_text("", timeout=30_000)
+
+            def installed():
+                deadline = time.monotonic() + 30
+                while page.request.get(f"{url}/api/local-model/status").json()["runtime_status"] != "install_ok":
+                    assert time.monotonic() < deadline, "the fixture's runtime update never finished"
+                    page.wait_for_timeout(100)
+
+            installed()
+            assert page.request.post(f"{url}/api/local-model/stop").json() == {"status": "stopped"}
+            second = page.request.post(f"{url}/api/local-model/install-runtime").json()
+            assert second["status"] == "installing" and second["install_id"] != first
+            installed()
+            gate["open"] = True
+            with page.expect_response("**/api/local-model/start") as attempt:
+                for route in held:
+                    route.continue_()
+            assert attempt.value.request.post_data_json["install_id"] == first
+            assert attempt.value.status == 409 and "cancelled" in attempt.value.json()["error"]
+            expect(level.locator("#local-model-action-status")).to_contain_text("Not started", timeout=30_000)
+            expect(status).to_contain_text("Offline", timeout=30_000)
+            assert page.request.get(f"{url}/api/local-model/status").json()["runtime_status"] == "install_ok"
+            level.locator("#btn-local-start").click()
+            expect(status).to_contain_text("Ready", timeout=30_000)
+            level.locator("#btn-local-stop").click()
+            expect(status).to_contain_text("Offline", timeout=30_000)
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
+def test_managed_deployment_never_offers_the_runtime_install(settings_server, engine, width, free_tcp_port):
+    """A managed deployment's administrator owns the program's interpreter (POST /api/local-model/install-runtime
+    refuses managed_by_deployment), so the local model page says who installs the runtime and never offers Install or
+    Update on any path: the note shows, a startup exit keeps its error and the hedged newer-runtime fact, and no
+    install-runtime request leaves the page."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from tests.settings_browser_helpers import commit_row
+
+    def managed_settings(route):
+        response = route.fetch()
+        if route.request.method == "POST":
+            route.fulfill(response=response)
+            return
+        data = response.json()
+        data.setdefault("_meta", {}).setdefault("policy_state", {})["deployment"] = {
+            "source": "file", "version": 1, "digest": "fixture", "access_max": None, "min_coverage": None,
+            "checker": None, "allowed_exits": [], "organization_rules": False, "extensions": None,
+        }
+        route.fulfill(response=response, json=data)
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            posts = []
+            page.on("request", lambda req: posts.append(req.url.rsplit("/", 1)[-1])
+                    if req.method == "POST" and "/api/local-model/" in req.url else None)
+            page.route("**/api/settings", managed_settings)
+            page.goto(settings_server["url"], wait_until="domcontentloaded")
+            level = open_settings(page, "models/local", timeout=30_000)
+            install = level.locator("#btn-local-install-runtime")
+            status = level.locator("#local-model-status")
+            note = level.locator("[data-local-model-managed]")
+            expect(note).to_be_visible(timeout=30_000)
+            expect(note).to_contain_text("Your administrator installs and updates the local runtime")
+            expect(install).to_be_hidden()
+            commit_row(page, "LOCAL_MODEL_SOURCE", "fixture/model")
+            commit_row(page, "LOCAL_MODEL_FILENAME", "new-format.gguf")
+            level.locator("details[data-settings-fold] > summary").click()
+            commit_row(page, "LOCAL_MODEL_PORT", free_tcp_port)
+            level.locator("#btn-local-start").click()
+            # The owned model process exits during startup: the error and the hedged runtime fact stay; the
+            # update control a click would only see refused never appears.
+            expect(status).to_contain_text("Fixture model header could not be loaded", timeout=30_000)
+            expect(status).to_contain_text("A newer runtime may support this model.")
+            expect(note).to_be_visible()
+            expect(install).to_be_hidden()
+            assert posts == ["start"], posts
+            evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(settings_server["data_dir"].parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            note.scroll_into_view_if_needed()
+            page.screenshot(path=str(evidence / f"local-model-managed-{engine}.png"))
         finally:
             browser.close()
 

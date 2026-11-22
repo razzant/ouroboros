@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -519,6 +522,61 @@ def test_credential_like_files_survive_git_install_update_and_merge_trees(drive,
     assert merged["base_available"] is True
     assert {rel: (drive / merged["new_tree"] / rel).read_bytes() for rel in files} == files
     assert {rel: (drive / merged["base_tree"] / rel).read_bytes() for rel in base} == base
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable file modes")
+def test_git_executables_survive_install_and_mode_only_replace_and_merge(drive, hub):
+    rows = hub.rows()[1:2]
+    git("config", "core.filemode", "true", cwd=hub.work)
+    skill = hub.work / "skills" / "notes"
+    for name, mode in (("first", 0o755), ("second", 0o644)):
+        script = skill / name
+        script.write_bytes(b"#!/bin/sh\nprintf fixture\n")
+        script.chmod(mode)
+    digest = hub.add_hosted("notes", official=True)
+    hub.commit("executable helper")
+    _refresh(drive, rows)
+    assert installer.install_item(drive, "ouroboros/notes", rows=rows)["digest"] == digest
+    target = drive / "skills" / "ouroboroshub" / "notes"
+
+    def check_modes(folder, executable, plain):
+        assert os.access(folder / executable, os.X_OK)
+        assert not (folder / plain).stat().st_mode & 0o111
+
+    check_modes(target, "first", "second")
+    assert subprocess.check_output([target / "first"], timeout=5) == b"fixture"
+    (skill / "first").chmod(0o644)
+    (skill / "second").chmod(0o755)
+    assert hub.add_hosted("notes", official=True) == digest
+    hub.commit("swap executable intent only")
+    _refresh(drive, rows)
+    assert installer.install_item(drive, "ouroboros/notes", rows=rows)["already_installed"]
+    check_modes(target, "first", "second")
+    merged = installer.update_installed(drive, "notes", mode="merge", rows=rows, actor="ouroboros")
+    assert merged["base_available"]
+    check_modes(drive / merged["base_tree"], "first", "second")
+    check_modes(drive / merged["new_tree"], "second", "first")
+    replaced = installer.update_installed(drive, "notes", mode="replace", digest=digest, rows=rows)
+    assert replaced["digest"] == digest
+    check_modes(target, "second", "first")
+    assert subprocess.check_output([target / "second"], timeout=5) == b"fixture"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX umask and special bits")
+def test_git_checked_copy_honors_execute_umask_and_strips_special_bits(tmp_path):
+    source = write_skill(tmp_path, "fixture")
+    script = source / "tool"
+    script.write_bytes(b"fixture")
+    script.chmod(0o7777)
+    stage = tmp_path / "stage"
+    # Group read is allowed, group execute is masked. Inferring x from r would widen this.
+    subprocess.run([sys.executable, "-c",
+                    "from pathlib import Path\nimport sys\n"
+                    "from ouroboros.marketplace.fetcher import copy_tree_checked\n"
+                    "copy_tree_checked(Path(sys.argv[1]), Path(sys.argv[2]))", str(source), str(stage)],
+                   check=True, cwd=Path(__file__).resolve().parents[1], umask=0o017, timeout=30)
+    assert stat.S_IMODE((stage / "tool").stat().st_mode) == 0o760
+    assert stat.S_IMODE((stage / "SKILL.md").stat().st_mode) == 0o660
 
 
 def test_copy_refuses_symlinks_and_oversized_trees(tmp_path):

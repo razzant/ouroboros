@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -250,6 +251,62 @@ def test_reviewed_skill_environment_precedes_executor(tmp_path, monkeypatch):
     assert trace.environment == "isolated_skill"
 
 
+def test_a_managed_skills_python_is_the_work_domains_not_the_service_hosts(tmp_path, monkeypatch):
+    """The real ``python_runtime_binary`` asks a synthetic work-domain observer about the exact lexical path."""
+    import ouroboros.marketplace.isolated_deps as isolated_deps
+    import ouroboros.skill_loader as skill_loader
+    import ouroboros.skill_readiness as skill_readiness
+    import ouroboros.work_domain as work_domain
+    import ouroboros.work_skill_payloads as payloads
+    from ouroboros.platform_layer import IS_WINDOWS
+
+    ctx = _context(tmp_path)
+    ctx.task_metadata = {"skill": "demo"}
+    agent_python = _executable(tmp_path / "agent" / "bin" / "python")
+    monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(agent_python))
+    work = tmp_path / "work"  # never created on the service host
+    home = work / "demo"
+    # the platform layout python_runtime_binary itself asks for
+    python = home / ".ouroboros_env" / "python" / ("Scripts" if IS_WINDOWS else "bin") / (
+        "python.exe" if IS_WINDOWS else "python")
+    asked, answer = [], {"value": "link"}
+
+    def kind(path, *, conclusive_absence=False):  # the strict look the resolver asks of a work path
+        asked.append(str(path))
+        if isinstance(answer["value"], Exception):
+            raise answer["value"]
+        return answer["value"]
+
+    # no declared packages: auto_install_specs_for_skill is empty, so unusable_python_env asks nothing
+    loaded = SimpleNamespace(name="demo", skill_dir=home, source="", manifest=SimpleNamespace(raw_extra={}))
+    monkeypatch.setattr(work_domain, "is_work", lambda path: str(path).startswith(str(work)))
+    monkeypatch.setattr(work_domain, "kind", kind)
+    monkeypatch.setattr(skill_loader, "find_skill", lambda *a, **k: loaded)
+    monkeypatch.setattr(skill_readiness, "skill_readiness_for_execution", lambda *a, **k: SimpleNamespace(ready=True))
+    monkeypatch.setattr(payloads, "deps_home", lambda *a, **k: home)
+    monkeypatch.setattr(isolated_deps, "read_deps_state", lambda *a, **k: {"status": "installed"})
+
+    def resolve():
+        asked.clear()
+        return resolve_process_python(ctx, "run_command", _tool_args("run_command"), runtime_mode="advanced")
+
+    resolved, trace = resolve()  # normal: present in the work domain, a link as a venv's python is
+    assert asked == [str(python)]
+    assert resolved["cmd"][0] == str(python)
+    assert trace is not None and trace.environment == "isolated_skill" and trace.verified
+
+    for unreadable in (OSError("the work domain did not say"), subprocess.TimeoutExpired("work-domain lookup", 30)):
+        answer["value"] = unreadable  # inconclusive, never another interpreter
+        resolved, trace = resolve()
+        assert resolved["cmd"][0] == "python"
+        assert trace is not None and trace.reason == trace.error_reason == "skill_env_python_unavailable"
+
+    answer["value"] = "missing"  # absent keeps today's choice (authoring, a skill without packages)
+    resolved, trace = resolve()
+    assert trace is not None and trace.environment != "isolated_skill"
+    assert resolved["cmd"][0] != str(python)
+
+
 def test_a_skill_whose_env_python_cannot_run_here_is_refused_not_rerouted(tmp_path, monkeypatch):
     """Agent or PATH python would run such a skill without its packages; a never-installed env (authoring, repair)
     and a skill without Python packages keep today's choice."""
@@ -264,7 +321,7 @@ def test_a_skill_whose_env_python_cannot_run_here_is_refused_not_rerouted(tmp_pa
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     monkeypatch.setattr(skill_loader, "find_skill", lambda *a, **k: SimpleNamespace(name="demo", skill_dir=skill_dir))
-    monkeypatch.setattr(skill_readiness, "skill_readiness_for_execution", lambda *a, **k: SimpleNamespace(ready=False))
+    monkeypatch.setattr(skill_readiness, "skill_readiness_for_execution", lambda *a, **k: SimpleNamespace(ready=False, blockers=[]))
 
     def resolve(kind):
         (skill_dir / ".ouroboroshub.json").write_text(json.dumps({"install_specs": {"auto": [{"kind": kind, "package": "x"}]}}))

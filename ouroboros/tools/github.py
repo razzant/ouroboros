@@ -5,20 +5,19 @@ the checks reader in ``github_checks`` and the merge receipt contract in ``merge
 module owns the transport, the repository binding and the registration.
 ``_gh_run`` is the structured transport read; ``_gh_cmd`` projects it onto the string ABI.
 ``GH_TARGET_INVALID`` / ``GH_TARGET_REQUIRED`` refusals enter the tool-result sidecar. A target
-(including an unbindable directory) or missing-CLI refusal raised before the invocation's first
-``gh`` launch is published ``completed_no_effect``. A ``github_read`` call naming a valid repo needs
-no checkout: every leg, including the subcalls that take no repo (PR counts, annotations, artifacts,
-whoami), runs in the task's own ``task_drive``, save a route whose ``{branch}`` gh fills from the
-selected folder.
+(including an unbindable directory) or process-start refusal raised before the invocation's first
+``gh`` launch is published ``completed_no_effect``. A public call naming its repository runs remote
+legs from the task drive. A route with a branch placeholder still reads the selected checkout.
 ``gh api`` takes a repository from the directory but its host from gh's default, so a ``repo=""``
 REST or GraphQL leg never leaves the host to gh: ``_selected_target`` resolves one (host, owner, name)
 per public invocation, and an unresolved target refuses instead of reaching the default host.
-Exact captures stream stdout to a capped file with size/sha256 and retain CRLF and final bytes;
-the cap bounds this destination, not gh internal downloads/cache. Stderr is drained and bounded.
+Exact captures retain CRLF and trailing bytes. For a REST job log the CLI prints the HTTP status
+first; only a successful response's body can enter the capped file. The cap does not bound gh's cache.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -30,23 +29,24 @@ import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import wraps
+from subprocess import Popen
 from typing import List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from ouroboros.platform_layer import PATH_SEP, common_tool_directories
+from ouroboros.platform_layer import IS_WINDOWS, PATH_SEP, common_tool_directories
 from ouroboros.secret_masking import redact_known_values
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult, _publish_tool_result, _replace_tool_result
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, publish_no_effect
 from ouroboros.utils import truncate_within_limit
 
 log = logging.getLogger(__name__)
 _GENERIC_TRANSPORT = object()
-# One public tool invocation's "a gh subprocess was already launched" fact.
+# Once a gh subprocess started, or its start became unobservable, this invocation cannot attest no earlier launch.
 _SUBMITTED: ContextVar[Optional[List[bool]]] = ContextVar("github_invocation_submitted", default=None)
 # The repository one public tool invocation resolved; empty until a leg needs it.
 _PINNED: ContextVar[Optional[List["GhTarget"]]] = ContextVar("github_invocation_target", default=None)
-# One public github_read invocation whose caller named a valid [HOST/]OWNER/REPO: it reads GitHub, not a checkout.
-_REMOTE_READ: ContextVar[bool] = ContextVar("github_invocation_remote_read", default=False)
+# Applies to every remote leg of one public call, including prechecks and receipt readbacks.
+_NAMED_REPO: ContextVar[bool] = ContextVar("github_invocation_named_repo", default=False)
 
 
 def _canonical_github_args(args: dict) -> dict:
@@ -57,17 +57,18 @@ def _canonical_github_args(args: dict) -> dict:
     return args
 
 
-def _one_invocation(handler, *, remote_read: bool = False):
-    """Scope ``_gh_run``'s first-submission fact, the resolved repository and, for ``remote_read`` (``github_read``),
-    whether the caller named a valid ``[HOST/]OWNER/REPO`` to one public tool invocation."""
+def _one_invocation(handler):
+    """Bind the named repository and first-submission fact to this public call."""
     @wraps(handler)
     def invoke(ctx, *args, **kwargs):
-        remote = remote_read and isinstance(kwargs.get("repo"), str) and _split_repo(kwargs["repo"]) is not None
-        token, pinned, remote_token = _SUBMITTED.set([False]), _PINNED.set([]), _REMOTE_READ.set(remote)
+        parts = _split_repo(kwargs["repo"]) if isinstance(kwargs.get("repo"), str) else None
+        token = _SUBMITTED.set([False])
+        pinned = _PINNED.set([GhTarget(*parts)] if parts and parts[0] else [])
+        remote_token = _NAMED_REPO.set(parts is not None)
         try:
             return handler(ctx, *args, **kwargs)
         finally:
-            _REMOTE_READ.reset(remote_token)
+            _NAMED_REPO.reset(remote_token)
             _PINNED.reset(pinned)
             _SUBMITTED.reset(token)
     return invoke
@@ -83,16 +84,19 @@ _GH_STATUS_RE = re.compile(
 # is not the expected sha, 422 validation failed or the endpoint was rate limited. Any other status (401, 403, 404,
 # 429, 5xx) or a lost answer stays unknown: the request may have been applied.
 _MERGE_REFUSED_STATUSES = frozenset({405, 409, 422})
+# Some exec and pipe-allocation errno names are platform-specific.
+_START_REFUSALS = {"E2BIG", "EAGAIN", "EISDIR", "ELOOP", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOEXEC", "ENOMEM", "ETXTBSY"}
 
 
 @dataclass(frozen=True)
 class GhCapture:
-    """The stdout bytes one exact-capture ``_gh_run`` wrote to its file, as written: no decoding, no strip."""
+    """Exact bytes acquired up to the cap: the CLI output or, for a framed REST request, the response body."""
     path: pathlib.Path
     size: int
     sha256: str
-    # The byte cap ended the read and the process; the file holds the first ``size`` bytes of a longer stream.
+    # When truncated the file holds the first ``size`` bytes of a longer stream.
     truncated: bool
+    http_status: int | None = None  # A framed REST read, not an exit status inferred after stopping gh.
 
 
 
@@ -102,11 +106,18 @@ class GhResult:
     text: str
     exit_code: int | None
     http_status: int | None
-    # "target" is a local refusal and "deadline" a request the checks reader never sent; neither is a subprocess
-    # exit or exception. "server_refused" / "malformed_response" type the merge's answer (``_merge_answer``).
+    # "target", "cli_missing" and "pre_effect" are local refusals; "deadline" is a check never sent.
+    # "server_refused" / "malformed_response" type the merge's answer (``_merge_answer``).
     failure: str
     # The exact branch's capture; None for the text transport and for every failure.
     capture: Optional[GhCapture] = None
+
+    @property
+    def not_submitted(self) -> bool:
+        """This leg could not send its request. Earlier legs have their own outcomes."""
+        from ouroboros.merge_receipts import NOT_SUBMITTED
+
+        return self.failure in NOT_SUBMITTED
 
 
 @dataclass(frozen=True)
@@ -145,7 +156,7 @@ def _merge_answer(res: GhResult) -> GhResult:
                    text="⚠️ GH_ERROR: unrecognized merge answer: " + truncate_within_limit(res.text, 300))
 
 
-def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str) -> GhResult:
+def _exit_failure(returncode: int, stderr: str) -> GhResult:
     """Classify a nonzero exit from its complete stderr, then keep a bounded head.
 
     Redact the WHOLE stderr first (a cut could split a token), read gh's own status marker before any
@@ -159,9 +170,70 @@ def _exit_failure(cmd: List[str], res: subprocess.CompletedProcess, stderr: str)
     status = _GH_STATUS_RE.search(err)
     head = " | ".join([line.strip() for line in err.splitlines() if line.strip()][:3])
     head = truncate_within_limit(head, 600)
-    return GhResult(False, "⚠️ GH_ERROR: " + head, res.returncode,
+    return GhResult(False, "⚠️ GH_ERROR: " + head, returncode,
                     int(status.group(1) or status.group(2)) if status else None, "exit")
 
+
+
+class _GhNotStarted(Exception):
+    """A local failure before gh could execute this leg."""
+
+    def __init__(self, failure: str, detail: str):
+        super().__init__(detail)
+        self.failure = failure
+
+
+def _gh_error_text(exc: Exception) -> str:
+    detail = redact_known_values(str(exc), [github_token_from_env_or_settings()])
+    return "⚠️ GH_ERROR: " + truncate_within_limit(detail, 600)
+
+
+def _start_gh(cmd: List[str], cwd: pathlib.Path, env: dict, **options) -> Popen:
+    may_have_started = True
+    try:
+        return Popen(cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+    except (OSError, ValueError) as exc:
+        # An unidentified I/O error can also come from the parent's pipes after process creation.
+        if (not isinstance(exc, (FileNotFoundError, NotADirectoryError, PermissionError, ValueError))
+                and errno.errorcode.get(exc.errno) not in _START_REFUSALS):
+            raise
+        may_have_started = False
+        missing = pathlib.Path(os.fsdecode(exc.filename)) if isinstance(exc, FileNotFoundError) and exc.filename else None
+        if missing is not None and missing != cwd and missing.name == cmd[0]:
+            raise _GhNotStarted("cli_missing", "`gh` CLI not found. Install GitHub CLI and ensure it is on PATH "
+                                "(https://cli.github.com/)") from exc
+        # Windows can omit the filename entirely. The failed start proves the phase, independently of its cause.
+        raise _GhNotStarted("pre_effect", f"Could not start `gh` in {cwd}: {exc}") from exc
+    finally:
+        submitted = _SUBMITTED.get()
+        if submitted is not None and may_have_started:
+            submitted[0] = True
+
+
+def _response_status(stream) -> int | None:
+    """Consume gh api --include's final status and header block; never retain header values.
+
+    gh 2.45 and 2.101 processResponse write the status with LF, then headers and a blank CRLF.
+    EOF before any bytes leaves gh's own transport error for the caller. No second request.
+    """
+    line = stream.readline(_CAPTURE_CHUNK + 1)
+    if not line:
+        return None
+    match = re.match(rb"HTTP/\d+(?:\.\d+)? ([1-5]\d\d)(?:[ \t]|\r?\n)", line)
+    if not match or not line.endswith(b"\n") or len(line) > _CAPTURE_CHUNK:
+        raise ValueError("gh returned an unreadable HTTP status line; no body was captured")
+    status = int(match[1])
+    if not 200 <= status < 300:
+        return status
+    left = _CAPTURE_CHUNK - len(line)
+    while left > 0:
+        header = stream.readline(left + 1)
+        left -= len(header)
+        if left >= 0 and header in (b"\r\n", b"\n"):
+            return status
+        if not header or not header.endswith(b"\n"):
+            break
+    raise ValueError("gh returned incomplete or oversized HTTP headers; no body was captured")
 
 
 def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, path: pathlib.Path,
@@ -169,13 +241,16 @@ def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, 
     """Stream the process's stdout into ``path`` up to ``max_bytes``: (GhCapture, returncode, stderr, timed_out).
 
     The cap stops stdout acquisition into our destination, not gh's internal network/cache work.
+    An included HTTP status is consumed before accepting body bytes, even when the cap is one byte.
     Stderr is drained on its own thread into a bounded buffer so neither pipe blocks the
     other; the deadline kills the process from a timer. The file holds exactly the bytes hashed. The sink
     is opened before the launch: an unwritable path fails here, never after a process started."""
-    sink = open(path, "wb")
     try:
-        proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sink = open(path, "wb")
+    except (OSError, ValueError) as exc:
+        raise _GhNotStarted("pre_effect", f"Could not open the capture file before starting `gh`: {exc}") from exc
+    try:
+        proc = _start_gh(cmd, cwd, env, stdin=subprocess.DEVNULL)
     except BaseException:
         sink.close()
         raise
@@ -199,12 +274,15 @@ def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, 
         proc.kill()
 
     drain, timer = threading.Thread(target=drain_stderr, daemon=True), threading.Timer(timeout, expire)
-    digest, written, truncated = hashlib.sha256(), 0, False
+    framed = cmd[1:2] == ["api"] and "--include" in cmd[2:]
+    digest, written, truncated, status = hashlib.sha256(), 0, False, None
     try:
         drain.start()
         timer.start()
         with sink:
-            while True:
+            if framed:
+                status = _response_status(proc.stdout)
+            while not framed or (status is not None and 200 <= status < 300):
                 chunk = proc.stdout.read(_CAPTURE_CHUNK)
                 if not chunk:
                     break
@@ -215,20 +293,20 @@ def _capture_stdout(cmd: List[str], cwd: pathlib.Path, env: dict, timeout: int, 
                     written += len(keep)
                 if len(keep) < len(chunk):
                     truncated = True
-                    proc.kill()
                     break
         proc.stdout.close()
-        returncode = proc.wait()
+        returncode = None if truncated or (status is not None and not 200 <= status < 300) else proc.wait()
     finally:
         timer.cancel()
         if proc.poll() is None:
             proc.kill()
-            proc.wait()
+        proc.wait()
+        proc.stdout.close()
         drain.join(timeout=5)
         proc.stderr.close()
     raw = _CAPTURE_STDERR_WITHHELD if err_total[0] > _CAPTURE_STDERR_CAP else b"".join(err_parts)
     stderr = raw.decode("utf-8", errors="replace")
-    return GhCapture(path, written, digest.hexdigest(), truncated), returncode, stderr, timed_out[0]
+    return GhCapture(path, written, digest.hexdigest(), truncated, status), returncode, stderr, timed_out[0]
 
 
 
@@ -313,27 +391,23 @@ def github_cli_configured() -> bool:
         return False
 
 
-def _refused(ctx: ToolContext, text: str, failure: str, typed: Optional[ToolResult] = None,
-             *, no_effect: Optional[bool] = None) -> GhResult:
-    """A local refusal; a caller may preserve a proven pre-effect failure after submission was marked."""
-    if no_effect is None:
-        no_effect = _no_launch_yet()
-    if no_effect:
-        typed = _replace_tool_result(typed or LegacyTextResultAdapter.from_text("", text),
-                                     meta_updates={"operation_outcome": "completed_no_effect"})
-    return GhResult(False, _publish_tool_result(ctx, typed) if typed else text, None, None, failure)
+def _refused(ctx: ToolContext, text: str, failure: str, typed: Optional[ToolResult] = None) -> GhResult:
+    """Attribute a local refusal to the whole invocation only before its first launch."""
+    if _no_launch_yet():
+        text = publish_no_effect(ctx, typed or text)
+    elif typed:
+        text = _publish_tool_result(ctx, typed)
+    return GhResult(False, text, None, None, failure)
 
 
 def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
             *, repo: object = _GENERIC_TRANSPORT, capture_to: Optional[pathlib.Path] = None,
             max_bytes: int = 0) -> GhResult:
     # Public repository tools pass repo, including '' for Project focus. Their generic follow-up legs
-    # inherit the invocation's read context. Publication/Hub calls omit repo outside that invocation,
+    # inherit the invocation's repository binding. Publication/Hub calls omit repo outside that invocation,
     # so target refusals here cannot shadow their final result with this tool's argument-error sidecar.
     # A refusal before this invocation's FIRST gh launch also attests that the
     # invocation had no effect; after any launch it attests nothing.
-    submitted = _SUBMITTED.get()
-    first_submission = submitted is not None and not submitted[0]
     if capture_to is not None and (input_data is not None or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("an exact capture takes a positive max_bytes and no stdin")
     if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
@@ -347,15 +421,14 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
         return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: this call resolved {pinned[0].slug} on {pinned[0].host}, but a "
                              f"later step named {named}; that step was not sent.", "target")
     try:
+        cwd = pathlib.Path(ctx.repo_dir)
         from ouroboros.tool_access import build_resolved_resource_binding, folderless_scratch_dir
 
-        cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
+        env = _gh_env(ctx)
         cmd = ["gh", *args]
         unbound = "⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {}"
-        # A github_read call that named its repository reads GitHub, not a checkout (#3613): each leg, the ones that
-        # take no repo included, runs in the task's own task_drive, save a route whose {branch} gh fills from the
-        # selected folder. The choice never depends on which folder exists: a fallback could read another repository.
-        remote = _REMOTE_READ.get() and repo != ""
+        # Select the cwd before submission. Retrying a failed write from another directory could repeat it.
+        remote = _NAMED_REPO.get() and repo != ""
         branch = remote and args[:1] == ["api"] and any(_BRANCH_SLOT.search(arg) for arg in args[1:])
         if remote and not branch:
             try:
@@ -406,43 +479,43 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                     cmd[3:3] = [repo]
                 else:
                     cmd.extend(["--repo", repo])
-        if submitted is not None:
-            submitted[0] = True
+    except Exception as exc:
+        return _refused(ctx, _gh_error_text(exc), "pre_effect")
+
+    try:
         if capture_to is not None:
             capture, returncode, stderr, timed_out = _capture_stdout(cmd, cwd, env, timeout, capture_to, max_bytes)
             if timed_out:
                 return GhResult(False, f"⚠️ GH_TIMEOUT: exceeded {timeout}s.", None, None, "timeout")
-            if capture.truncated:  # The cap ended the process; its exit says nothing about the command.
-                return GhResult(True, "", None, None, "", capture)
-            if returncode != 0:
-                return _exit_failure(cmd, subprocess.CompletedProcess(cmd, returncode, "", stderr), stderr)
-            return GhResult(True, "", returncode, None, "", capture)
-        res = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=timeout,
-            input=input_data,
-            env=env,
-        )
-        if res.returncode != 0:
-            return _exit_failure(cmd, res, res.stderr or "")
-        return GhResult(True, res.stdout.strip(), res.returncode, None, "")
-    except FileNotFoundError as e:
-        missing = str(getattr(e, "filename", "") or "")
-        if not missing or pathlib.Path(missing).name == "gh":
-            return _refused(
-                ctx, "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)",
-                "cli_missing", no_effect=first_submission)
-        detail = truncate_within_limit(redact_known_values(str(e), [github_token_from_env_or_settings()]), 600)
-        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
+            status = capture.http_status
+            if status is not None and not 200 <= status < 300:
+                return GhResult(False, f"⚠️ GH_ERROR: GitHub returned HTTP {status}; no log was captured.", None, status, "exit")
+            if returncode not in (None, 0):
+                return _exit_failure(returncode, stderr)
+            if "--include" in args and status is None:
+                return GhResult(False, "⚠️ GH_ERROR: gh returned no HTTP status; no log was captured.", returncode, None, "malformed_response")
+            return GhResult(True, "", returncode, status, "", capture)
+        stdin = subprocess.PIPE if input_data is not None else None
+        with _start_gh(cmd, cwd, env, stdin=stdin, encoding="utf-8") as proc:
+            try:
+                stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                if IS_WINDOWS:  # As in subprocess.run, join the Windows pipe readers after the kill.
+                    proc.communicate()
+                raise
+            except BaseException:
+                proc.kill()
+                raise
+            if proc.returncode != 0:
+                return _exit_failure(proc.returncode, stderr or "")
+            return GhResult(True, stdout.strip(), proc.returncode, None, "")
     except subprocess.TimeoutExpired:
         return GhResult(False, f"⚠️ GH_TIMEOUT: exceeded {timeout}s.", None, None, "timeout")
-    except Exception as e:
-        detail = truncate_within_limit(redact_known_values(str(e), [github_token_from_env_or_settings()]), 600)
-        return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
+    except _GhNotStarted as exc:
+        return _refused(ctx, _gh_error_text(exc), exc.failure)
+    except Exception as exc:
+        return GhResult(False, _gh_error_text(exc), None, None, "exception")
 
 
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
@@ -489,6 +562,11 @@ def _split_repo(repo: str) -> Optional[tuple]:
     return (match["host"] or "", match["owner"], match["name"]) if match else None
 
 
+def _repo_hint(repo: str) -> str:
+    """Repeat an explicit repository, including its host, in a follow-up call."""
+    return f", repo={repo!r}" if repo else ""
+
+
 def _no_launch_yet() -> bool:
     """Whether this public invocation has launched no ``gh`` yet, so a refusal can attest it had no effect.
 
@@ -518,6 +596,13 @@ def _project_is_bound(ctx: ToolContext) -> bool:
                 or metadata.get("_project_room_dir") or metadata.get("_project_room_note"))
 
 
+def _repo_identity(slug: object, url: object) -> Optional[GhTarget]:
+    """A repository response identifies a target only when its name and HTTPS URL agree."""
+    where = _TARGET_URL_RE.fullmatch(url) if isinstance(url, str) else None
+    target = GhTarget(*where.groups()) if where else None
+    return target if target and isinstance(slug, str) and target.slug.casefold() == slug.casefold() else None
+
+
 def _selected_target(ctx: ToolContext, *, refuse: bool = True) -> Tuple[Optional[GhTarget], Optional[GhResult]]:
     """The repository of a ``repo=""`` call as GitHub names it, resolved once per public invocation.
 
@@ -532,15 +617,14 @@ def _selected_target(ctx: ToolContext, *, refuse: bool = True) -> Tuple[Optional
     res = _gh_run(["repo", "view", "--json", "nameWithOwner,url"], ctx, repo=_ambient_repo(ctx))
     if submitted is not None:
         submitted[0] = launched
-    if res.failure in ("target", "cli_missing"):  # The transport already refused.
+    if res.not_submitted:  # The transport already refused.
         return None, res
     try:
         info = json.loads(res.text) if res.ok else {}
     except ValueError:
         info = None
-    where = _TARGET_URL_RE.fullmatch(str(info.get("url") or "")) if isinstance(info, dict) else None
-    target = GhTarget(*where.groups()) if where else None
-    if target is not None and target.slug.casefold() == str(info.get("nameWithOwner") or "").casefold():
+    target = _repo_identity(info.get("nameWithOwner"), info.get("url")) if isinstance(info, dict) else None
+    if target is not None:
         if pinned is not None:
             pinned.append(target)
         return target, None
@@ -649,16 +733,130 @@ def _send_facts(res: GhResult) -> str:
 
 
 
+_MERGE_PR_QUERY = """
+query MergeReceiptPR($owner: String!, $name: String!, $number: Int!, $comments: Boolean!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id number url state title body headRefOid baseRefName baseRefOid mergeStateStatus isDraft
+      autoMergeRequest { enabledAt } mergeCommit { oid } mergedAt
+      comments(first: 100, after: $after) @include(if: $comments) {
+        nodes { body } pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}"""
+
+
+def _read_merge_pr(ctx: ToolContext, repo: str, number: int, *, comments: bool = False) -> Optional[dict]:
+    """Read current guards and, for a new intent, search only until the contributor evidence is settled."""
+    from ouroboros.merge_receipts import _FULL_SHA_RE, _PR_URL_RE, contributor_evidence
+
+    target, _ = _leg_target(ctx, repo, require_target=True)
+    if target is None:
+        return None
+    host = target.host
+    prior_comments, cursors, node_id = "absent", set(), ""
+    after = None
+    while True:
+        bound = f"{host}/{target.slug}" if host else target.slug
+        res = _gh_graphql(ctx, _MERGE_PR_QUERY, {"number": number, "comments": comments, "after": after}, repo=bound)
+        if not res.ok:
+            return None
+        try:
+            answer = json.loads(res.text)
+            if answer.get("errors"):
+                return None
+            pr = answer["data"]["repository"]["pullRequest"]
+            where = _PR_URL_RE.fullmatch(pr["url"])
+            if (not where or int(where[4]) != number or pr["number"] != number
+                    or (host and where[1].casefold() != host.casefold())
+                    or f"{where[2]}/{where[3]}".casefold() != target.slug.casefold()
+                    or not isinstance(pr["id"], str) or not pr["id"].strip()
+                    or (node_id and node_id != pr["id"])):
+                return None
+            host, node_id = where[1], pr["id"]
+            if (not _FULL_SHA_RE.fullmatch(pr["baseRefOid"]) or not _FULL_SHA_RE.fullmatch(pr["headRefOid"])
+                    or not pr["baseRefName"] or not pr["mergeStateStatus"] or not pr["state"]
+                    or not isinstance(pr["isDraft"], bool) or "autoMergeRequest" not in pr
+                    or not isinstance(pr["body"], str) or "mergeCommit" not in pr or "mergedAt" not in pr):
+                return None
+            merge_commit = pr["mergeCommit"]
+            if merge_commit is not None and not (
+                isinstance(merge_commit, dict) and isinstance(merge_commit.get("oid"), str)
+                and _FULL_SHA_RE.fullmatch(merge_commit["oid"])
+            ):
+                return None
+            if not comments:
+                return pr
+            page = pr["comments"]
+            nodes = page["nodes"]
+            if not isinstance(nodes, list) or any(not isinstance(row.get("body"), str) for row in nodes):
+                return None
+            prior_comments = contributor_evidence("", nodes, prior=prior_comments)
+            # The body and guards belong to THIS read. Only evidence from earlier comments carries forward.
+            evidence = contributor_evidence(pr["body"], [], prior=prior_comments)
+            info = page["pageInfo"]
+            if evidence == "present_validated" or info["hasNextPage"] is False:
+                del pr["comments"]
+                return {**pr, "contributor_evidence": evidence}
+            after = info["endCursor"]
+            if info["hasNextPage"] is not True or not isinstance(after, str) or not after or after in cursors:
+                return None
+            cursors.add(after)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+
+
+def _publication_retry(receipt: dict) -> str:
+    """The exact publication-only call for one owed receipt, or '' unless the stored receipt itself carries the
+    PR identity ``run_pr_publication`` validates: a node id plus a canonical URL whose number is this PR's.
+    After a repository rename the receipt's own address is stale while its node survives: the receipt's last
+    observation names the address GitHub reported for that same node, so the retry is named there instead."""
+    from ouroboros.merge_receipts import _PR_URL_RE, _pr_keys
+
+    requested = receipt.get("requested") or {}
+    repo_row = receipt.get("repo") if isinstance(receipt.get("repo"), dict) else {}
+    key, scope = _pr_keys(repo_row)
+    if key is None or scope[1] != receipt.get("number"):
+        return ""
+    selector = "/".join(_PR_URL_RE.fullmatch(str(repo_row.get("url") or "")).groups()[:3])
+    observed = receipt.get("observed_after") if isinstance(receipt.get("observed_after"), dict) else {}
+    where = _PR_URL_RE.fullmatch(str(observed.get("url") or ""))
+    if where and where[1].casefold() == scope[0] and int(where[4]) == int(scope[1]):
+        selector = "/".join(where.groups()[:3])
+    return (f"pr_merge(number={receipt['number']}, expected_head_sha={requested.get('expected_head_sha')!r}, "
+            f"method={requested.get('method')!r}, publish_receipt_id={receipt['receipt_id']!r}, repo={selector!r})")
+
+
+def _publication_repair(receipt: dict) -> str:
+    """How an owed receipt's unconfirmed publication is retried: the exact publication-only call when the stored
+    receipt carries that identity, or plainly that these facts repair nothing — never an ordinary merge-request
+    suggestion or any new effect."""
+    retry = _publication_retry(receipt)
+    return (f"; retry observation/publication with {retry}." if retry else
+            "; this receipt cannot be repaired from the current facts "
+            "(its stored repository row names no pull request node this path can re-observe).")
+
+
 def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str,
               review_task_ids: Optional[List[str]] = None, reviewed_head_sha: str = "",
               reviewed_base_sha: str = "", review_scope: str = "full", review_verdict: str = "",
               review_record_id: str = "", repo: str = "", checks: Optional[List[dict]] = None,
-              continue_receipt_id: str = "") -> str:
+              continue_receipt_id: str = "", publish_receipt_id: str = "") -> str:
     """Thin transport binding; the receipt contract lives in ``merge_receipts``."""
-    from ouroboros.merge_receipts import REVIEW_SCOPES, _VERDICT_RE, _sha, run_pr_merge
+    from ouroboros.merge_receipts import REVIEW_SCOPES, _VERDICT_RE, _sha, run_pr_merge, run_pr_publication
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.update_qualification import STATES
 
+    # Omission and the documented empty string select an ordinary merge. An invalid
+    # explicit selector must not select a different effect.
+    for name, value in (("publish_receipt_id", publish_receipt_id), ("continue_receipt_id", continue_receipt_id), ("repo", repo)):
+        if not isinstance(value, str) or (value and not value.strip()):
+            return _refuse(ctx, f"⚠️ TOOL_ARG_ERROR: {name} needs a nonblank string; omit it or pass '' to use the default. "
+                                "Nothing was sent.", no_effect=True)
+
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: number must be a positive integer. Nothing was sent.", no_effect=True)
     if checks is not None and (not isinstance(checks, list) or any(
             not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip()
             or row.get("status") not in STATES or not isinstance(row.get("detail", ""), str) for row in checks)):
@@ -676,12 +874,27 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     declared = ({"reviewed_head_sha": _sha(reviewed_head_sha), "reviewed_base_sha": _sha(reviewed_base_sha),
                  "scope": review_scope, "verdict": review_verdict}
                 if (reviewed_head_sha or review_verdict or (review_task_ids and not record_id)) else None)
-    receipt = run_pr_merge(
-        ctx, lambda args, **kw: _gh_run(args, ctx, repo=repo, **kw), lambda args, **kw: _gh_run(args, ctx, **kw),
-        lambda args, **kw: _merge_answer(_gh_run(args, ctx, **kw)),
-        drive_root=canonical_data_root(ctx), task_id=str(ctx.task_id or ""), number=int(number or 0),
-        expected_head_sha=expected_head_sha, method=method, continue_receipt_id=str(continue_receipt_id or "").strip(),
-        review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id, "checks": checks})
+    def read_pr(number, **kw):
+        return _read_merge_pr(ctx, kw.pop("repo", repo), number, **kw)
+
+    publish_id, continue_id = publish_receipt_id.strip(), continue_receipt_id.strip()
+    if publish_id:
+        parts = _split_repo(repo)
+        if (not parts or not parts[0] or continue_id or checks is not None or review_task_ids or reviewed_head_sha
+                or reviewed_base_sha or review_verdict or record_id or review_scope != "full"):
+            return _refuse(ctx, "⚠️ TOOL_ARG_ERROR: publication retry requires a canonical HOST/OWNER/REPO and no review or "
+                                "continuation arguments; nothing was sent.", no_effect=True)
+        receipt = run_pr_publication(
+            ctx, read_pr, lambda args, **kw: _gh_run(args, ctx, **kw), drive_root=canonical_data_root(ctx),
+            task_id=str(ctx.task_id or ""), number=number, expected_head_sha=expected_head_sha,
+            method=method, publish_receipt_id=publish_id, repo=repo)
+    else:
+        receipt = run_pr_merge(
+            ctx, read_pr, lambda args, **kw: _gh_run(args, ctx, **kw),
+            lambda args, **kw: _merge_answer(_gh_run(args, ctx, **kw)), drive_root=canonical_data_root(ctx),
+            task_id=str(ctx.task_id or ""), number=number, expected_head_sha=expected_head_sha,
+            method=method, continue_receipt_id=continue_id,
+            review={"declared": declared, "task_ids": list(review_task_ids or []), "record_id": record_id, "checks": checks})
     if receipt.get("refused"):
         code = "TOOL_ARG_ERROR" if receipt["refused"] == "arguments" else "TOOL_ERROR"
         return _refuse(ctx, f"⚠️ PR_MERGE_REFUSED: {receipt['refused']} — {receipt.get('detail', '')}", code, no_effect=True)
@@ -704,7 +917,9 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
         lines.append(f"This request continues receipt {receipt['continues']}, whose own outcome stays as recorded"
                      + ("; the merge GitHub shows is not attributed to either request." if status == "merged" else "."))
     prior = receipt.get("prior_status", "unknown") if receipt.get("readback_only") else None
-    if receipt.get("rejoined"):
+    if receipt.get("publication_only"):
+        lines.append("Publication-only recovery read the bound receipt and sent no new merge request.")
+    elif receipt.get("rejoined"):
         lines.append("This decision already sent its request as this receipt, so this call only read GitHub back "
                      "and sent no new merge request. " + (f"Receipt {receipt['continued_by']} continued it since; "
                      "plain pr_merge calls observe that latest attempt." if receipt.get("continued_by") else after))
@@ -744,21 +959,27 @@ def _pr_merge(ctx: ToolContext, number: int, expected_head_sha: str, method: str
     # A refusal refreshes only a projection that already existed, and a repeat call would send a new request.
     owed = status in ("merged", "queued")
     stale = "; it may still show the earlier outcome, and a new pr_merge call would send a new merge request."
+    repair = _publication_repair(receipt) if owed else stale
     if (owed or publication) and (publication.get("body") or {}).get("status") != "published":
-        lines.append("⚠️ The PR-body receipt block was not confirmed"
-                     + ("; call pr_merge again to retry publication only." if owed else stale))
+        lines.append("⚠️ The PR-body receipt block was not confirmed" + repair)
     card = publication.get("card") or {}
     if (owed or publication) and card.get("status") not in ("owed", "delivered"):
-        lines.append("⚠️ The task-card receipt is not confirmed: " + str(card.get("reason") or "publication unknown")
-                     + ("; call pr_merge again for observation/publication only." if owed else stale))
+        lines.append("⚠️ The task-card receipt is not confirmed: "
+                     + str(card.get("reason") or "publication unknown") + repair)
     text = "\n".join(lines)
     word = "refused" if refused else status
     accepted = word in ("merged", "queued")
+    # A merge observed beside a refused request is never this operation's effect.
+    outcome = "completed_no_effect" if ended else "completed" if status == "merged" else "unknown"
+    if receipt.get("publication_only"):
+        accepted = ((publication.get("body") or {}).get("status") == "published"
+                    and card.get("status") in ("owed", "delivered") and not receipt.get("receipt_write_gap"))
+        outcome = "completed" if accepted else "unknown"
+        word = "publication_unconfirmed"
     return _publish_tool_result(ctx, ToolResult(
         status="ok" if accepted else "error", code="OK" if accepted else "TOOL_ERROR",
         text=text if accepted else f"⚠️ PR_MERGE_{word.upper()}: " + text,
-        # A merge GitHub shows beside this receipt's refused request is another request's, never this operation's.
-        meta={"operation_outcome": "completed_no_effect" if ended else "completed" if status == "merged" else "unknown"}))
+        meta={"operation_outcome": outcome}))
 
 
 def _github_read(ctx: ToolContext, method: str = "", repo: str = "", **args) -> str:
@@ -790,8 +1011,10 @@ def get_tools() -> List[ToolEntry]:
                 "auto-merge or the PR blocked, behind or conflicting), records the host review record you name or the "
                 "review you declare beside what the host observes, reads GitHub back, and writes the receipt to this "
                 "task's record, its card and the PR body. A missing review is recorded loudly, never a lock. A plain "
-                "repeat after an unknown or queued merge only reads GitHub back and publishes; continue_receipt_id is "
-                "the explicit decision to send one new request after an unconfirmed one. "
+                "repeat of an unknown or queued merge only reads back and publishes for the same recorded PR node. "
+                "publish_receipt_id retries only a stored merged or queued receipt's publication through an explicit "
+                "canonical repo and never sends a merge. "
+                "continue_receipt_id decides one new request after a bound unconfirmed one. "
                 "Distinct from stage_pr_merge, which stages a local merge for a reviewed commit."
             ),
             "parameters": {"type": "object", "properties": {
@@ -822,15 +1045,17 @@ def get_tools() -> List[ToolEntry]:
                                      "description": "Id of the host review record to bind (e.g. the review_record_id commit_reviewed "
                                                     "returns); the host then reads the reviewed subject and verdict from it instead "
                                                     "of your declaration. An id with no record is refused before any merge"},
+                "publish_receipt_id": {"type": "string", "default": "", "description": (
+                    "retry observation/publication of this task's bound merged or queued receipt; number, head and method must "
+                    "match and repo must explicitly name the canonical repository. No review arguments and never a new merge")},
             }, "required": ["number", "expected_head_sha", "method"]},
         }, _pr_merge),
     ]
     # Wrapped here, not at definition: nested handler calls share one invocation.
-    tools = [replace(entry, handler=_one_invocation(entry.handler, remote_read=entry.name == "github_read"))
-             for entry in tools]
+    tools = [replace(entry, handler=_one_invocation(entry.handler)) for entry in tools]
     for entry in tools:
         entry.schema["parameters"]["properties"]["repo"] = {
             "type": "string", "default": "",
-            "description": "Explicit [HOST/]OWNER/REPO. Omit for the active Project repository, on its own host; required for a Project without a repository folder. An omitted HOST follows GitHub CLI host configuration.",
+            "description": "Explicit [HOST/]OWNER/REPO works without a checkout except for {branch} routes. Omit for the active Project repository. An omitted HOST follows GitHub CLI host configuration.",
         }
     return tools

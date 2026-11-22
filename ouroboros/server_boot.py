@@ -129,7 +129,7 @@ def requeue_waiting_extensions(root: pathlib.Path) -> None:
 
 
 def start_background_services(settings: dict, *, local_model: bool, boot_managed_update: Callable[[], Any],
-                              warm_daemon: bool) -> None:
+                              warm_daemon: bool, local_grant: Optional[str] = None) -> None:
     """P2: finalize a pending managed merge update (post-boot smoke / boot-loop rollback) and run a
     one-shot boot-time update check (check-on-restart) so the main-screen Update badge reflects
     availability; both fail-soft. Local autostart goes FIRST: a local-only install's boot check
@@ -140,11 +140,14 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     provisioned homes only (``warm_daemon``): background work off the startup path, so a request
     reads the catalogue and never waits for it. A managed execution domain's dedicated containers
     are measured for Panic, also off the startup path (``execution_domain``). A sign-in entry naming
-    a copy of the app that is gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
+    a copy of the app that is gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft).
+    ``local_grant`` is the receipt the lifespan took when it decided on the autostart
+    (``server_runtime.local_model_boot_decision``): a Stop since then refuses the staged Start."""
     if local_model and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
 
-        threading.Thread(target=auto_start_local_model, args=(settings,), daemon=True, name="local-model-autostart").start()
+        threading.Thread(target=auto_start_local_model, args=(settings,), kwargs={"grant": local_grant},
+                         daemon=True, name="local-model-autostart").start()
     threading.Thread(target=boot_managed_update, daemon=True, name="boot-managed-update").start()
     if warm_daemon:
         from ouroboros.claudexor_daemon import warm_owned_daemon

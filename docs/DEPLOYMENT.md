@@ -612,9 +612,9 @@ service on a trusted Linux host and the work in containers of its own:
   work needs: private copies of work repositories and a native skill-payload run's copy (`copies`), a
   native run's read-only inputs (a session scratch its task owns and retires with it), session scratch
   and package download caches, private Git indexes (`tmp`), and each installed script skill's reviewed
-  payload (`skills/<name>/<content hash>`, verified against the service's digests before every run and
-  replaced if changed) with its dependencies built there. Without it, these are refused; nothing falls
-  back to the service.
+  payload (`skills/<name>/<content hash>`, checked before use). Refresh verifies a sibling stage;
+  mode-only changes replace leaves with hard-linked backups; dependency builds never move.
+  Inspect any `.<content hash>.refresh` after executor settlement, before retrying. No service fallback.
 - `dedicated_containers` belong to this installation alone. Panic sends one `docker kill` to the
   identities this server measured at its start (at Panic itself, when it had none) and never waits
   for it: what Docker answers before the exit is logged, anything else stays unconfirmed. Nothing

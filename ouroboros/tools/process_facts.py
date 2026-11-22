@@ -282,6 +282,7 @@ def _offered_read(ctx, reader, target, rows, end):
 def process_environment_scope(ctx, name, arguments):
     """One current Settings selection at dispatch, shared by nested launchers."""
     from ouroboros.config import load_settings, selection_settings
+    from ouroboros.shell_parse import VERIFY_RUN_KINDS
     from ouroboros.workspace_executor import resolve_process_env, validate_process_env
     from ouroboros.tools.tool_result import ToolResult
 
@@ -291,7 +292,8 @@ def process_environment_scope(ctx, name, arguments):
     if prior is None and name in {"run_command", "run_script", "verify_and_record"}:
         try:
             refs = validate_process_env(arguments.get("env_from_settings"))
-            if refs and name == "verify_and_record" and arguments.get("contract_kind") not in {"visible_verifier", "explicit_command", "explicit_metric"}:
+            # Settings selection still requires a canonical spelling.
+            if refs and name == "verify_and_record" and arguments.get("contract_kind") not in VERIFY_RUN_KINDS:
                 raise ValueError("env_from_settings applies only to run-kind verification")
             if refs and not settings_environment_allowed(ctx):
                 error = ToolResult(status="blocked", code="ACCESS_BLOCKED",

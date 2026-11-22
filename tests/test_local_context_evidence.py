@@ -2,7 +2,7 @@
 from ouroboros.local_model import RUNTIME_PROBE
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import ANY, MagicMock, Mock
 
 import pytest
 
@@ -71,8 +71,9 @@ def test_positive_reported_metadata_is_retained(manager, monkeypatch, window):
 def test_healthy_server_with_no_window_still_becomes_ready(manager, monkeypatch):
     import requests
     from ouroboros import server_process
+    from ouroboros.local_model_server import LOCAL_LAUNCH_HEADER
 
-    response = Mock()
+    response = Mock(status_code=200, headers={LOCAL_LAUNCH_HEADER: "fixture-launch"})
     response.json.return_value = {"data": [{"id": "local-fixture"}]}
     session = Mock()
     session.get.return_value = response
@@ -82,7 +83,7 @@ def test_healthy_server_with_no_window_still_becomes_ready(manager, monkeypatch)
     monkeypatch.setattr(requests, "Session", lambda: session_scope)
     monkeypatch.setattr(server_process, "record_service_binding", lambda *a, **k: None)
     manager._status = "loading"
-    manager._wait_for_healthy(timeout=1)
+    manager._wait_for_healthy(proc=manager._proc, port=manager.port, launch_id="fixture-launch", timeout=1)
     assert manager.is_running
     assert manager.get_context_length() == 0
     assert manager.serving_context_evidence()["confirmed"] is False
@@ -319,7 +320,7 @@ import json, os, socket, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import TCPServer
 
-from ouroboros.local_model_server import input_fingerprint
+from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER, input_fingerprint
 
 
 def no_reverse_dns(*args):
@@ -332,16 +333,19 @@ PORT, N_CTX = (int(sys.argv[sys.argv.index(flag) + 1]) for flag in ("--port", "-
 
 
 class Handler(BaseHTTPRequestHandler):
-    def reply(self, body):
+    def reply(self, body, *, launch_id=None):
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        if launch_id:
+            self.send_header(LOCAL_LAUNCH_HEADER, launch_id)
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):  # /v1/models reports training metadata only.
-        self.reply({"data": [{"id": "local-fixture", "meta": {"n_ctx_train": 131072}}]})
+    def do_GET(self):  # Model-list context metadata is still training metadata.
+        self.reply({"data": [{"id": "local-fixture", "meta": {"n_ctx_train": 131072}}]},
+                   launch_id=os.environ[LOCAL_LAUNCH_ENV])
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -422,7 +426,7 @@ def offline_manager(monkeypatch, tmp_path):
     manager = local_model.LocalModelManager()
     monkeypatch.setattr(local_model, "_manager", manager)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(manager, "check_runtime", lambda: True)
+    monkeypatch.setattr(manager, "check_runtime", lambda **kwargs: True)
     yield manager
     manager.stop_server()
 
@@ -439,9 +443,10 @@ def test_autostart_guard_admits_only_a_configured_source(offline_manager, monkey
                             "LOCAL_MODEL_PORT": 9123, "LOCAL_MODEL_N_GPU_LAYERS": 7,
                             "LOCAL_MODEL_CONTEXT_LENGTH": 8192, "LOCAL_MODEL_CHAT_FORMAT": "chatml"})
     if source.strip():
-        download.assert_called_once_with("fixture/source", "fixture.gguf")
+        download.assert_called_once_with("fixture/source", "fixture.gguf", _start=ANY)
         start.assert_called_once_with("/models/fixture.gguf", port=9123, n_gpu_layers=7, n_ctx=8192,
-                                      chat_format="chatml", source="fixture/source", filename="fixture.gguf")
+                                      chat_format="chatml", source="fixture/source", filename="fixture.gguf",
+                                      _start=download.call_args.kwargs["_start"])
         assert "LOCAL_MODEL_SOURCE is empty" not in caplog.text
     else:
         download.assert_not_called()
@@ -500,11 +505,11 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
     health_events = []
     original_health = offline_manager.health_check
 
-    def traced_health():
-        event = {"started": time.monotonic(), "port": offline_manager._port}
+    def traced_health(**launch):
+        event = {"started": time.monotonic(), "port": launch.get("port", offline_manager.port)}
         health_events.append(event)
         try:
-            event["result"] = original_health()
+            event["result"] = original_health(**launch)
             return event["result"]
         except Exception as error:
             event["error_type"] = type(error).__name__
@@ -610,10 +615,12 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         assert seen["reply"] == ("local answer", "local")
         sent = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
         assert [row["path"] for row in sent] == ["/extras/measure_chat", "/v1/chat/completions"]
-        # The launched server itself, or the interpreter a Windows venv redirector runs as its child.
-        assert all(owned["process_id"] in ((row["pid"], row["ppid"]) if os.name == "nt" else (row["pid"],))
-                   for row in sent)
+        assert all(row["pid"] == owned["process_id"] for row in sent)
         assert sent[-1]["body"]["max_tokens"] == 4096
+        # The manager accepts a measurement only from the same serving process.
+        counted = offline_manager.measure_prepared_input({"model": "local-model", "messages": [
+            {"role": "user", "content": "hi"}]})
+        assert counted["supported"] is True and counted["process_id"] == owned["process_id"]
 
         monkeypatch.setenv("LOCAL_MODEL_PORT", str(free_port()))
         elsewhere = spawn()  # This worker would dispatch to another endpoint.

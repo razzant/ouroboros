@@ -520,14 +520,54 @@ def test_the_local_runtime_install_refuses_before_pip(policy, monkeypatch, manag
     policy(managed)
     installs: list = []
     monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(
-        _runtime_status="missing", install_runtime=lambda: installs.append(1)))
+        install_runtime=lambda: installs.append(1) or ("installing", "fixture-install")))
     app = Starlette(routes=[Route("/install", api_local_model_install_runtime, methods=["POST"])])
     with TestClient(app) as client:
         answer = client.post("/install")
     if managed:
         assert answer.status_code == 403 and answer.json()["code"] == MANAGED and installs == []
     else:
-        assert answer.json() == {"status": "installing"} and installs == [1]
+        assert answer.json() == {"status": "installing", "install_id": "fixture-install"} and installs == [1]
+
+
+@pytest.mark.parametrize("managed", [True, False])
+@pytest.mark.parametrize("fails_at_launch", [False, True])
+def test_missing_local_runtime_advice_uses_the_install_authority_at_start_and_boot(
+    policy, monkeypatch, tmp_path, caplog, managed, fails_at_launch,
+):
+    from ouroboros import local_model
+    from ouroboros.gateway.models import api_local_model_start
+    from ouroboros.local_model_autostart import auto_start_local_model
+
+    policy(managed)
+    manager = local_model.LocalModelManager()
+    monkeypatch.setattr(local_model, "_manager", manager)
+    model = tmp_path / "fixture.gguf"
+    model.touch()
+    failed = subprocess.CompletedProcess([], 1, "", "fixture server import failed")
+    ok = subprocess.CompletedProcess([], 0, "", "")
+    for entry in ("start", "boot"):
+        manager.stop_server()
+        probes = iter([ok, failed] if fails_at_launch else [failed])
+        monkeypatch.setattr(manager, "_probe_runtime", lambda: next(probes))
+        if entry == "start":
+            app = Starlette(routes=[Route("/start", api_local_model_start, methods=["POST"])])
+            with TestClient(app) as client:
+                response = client.post("/start", json={"source": str(model)})
+            assert response.status_code == 412
+            body = response.json()
+            assert body["error"] == "runtime_missing"
+            assert ("pip install" in body["hint"]) is (not managed)
+            assert body["message"] == manager.status_dict()["error"]
+        else:
+            auto_start_local_model({"LOCAL_MODEL_SOURCE": str(model)})
+            assert manager.status_dict()["error"] in caplog.text
+            assert ("pip install" in caplog.text) is (not managed)
+        state = manager.status_dict()
+        assert state["status"] == "error" and state["runtime_status"] == "missing"
+        assert ("Your administrator installs and updates the local runtime" in state["error"]) is managed
+        assert "pip install" not in state["error"]
+        assert ("fixture server import failed" in state["error"]) is fails_at_launch
 
 
 @pytest.mark.parametrize("managed", [True, False])

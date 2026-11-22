@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools import github, github_read
+from tests._github_process import stub_gh
 from tests.test_github_project_target import _context
 
 BASE = "https://github.example/owner/selected"
@@ -51,7 +52,7 @@ def gh(monkeypatch):
             return SimpleNamespace(returncode=answer[0], stdout="", stderr=answer[1])
         return SimpleNamespace(returncode=0, stdout=answer if isinstance(answer, str) else json.dumps(answer), stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     return world
 
 
@@ -133,15 +134,18 @@ def test_an_unusable_host_repository_directory_is_a_visible_count_error(tmp_path
     gh.rows = _rows(1)
     counted = []
 
-    def run(argv, **kwargs):  # the real launcher refuses the missing cwd before gh could start
+    def start(argv, *, cwd, env):
         if argv[2] == "graphql":
-            counted.append(kwargs["cwd"])
-            if kwargs["cwd"] == str(ctx.repo_dir):
-                return _REAL_RUN(argv, **kwargs)
+            counted.append(cwd)
+            if cwd == str(ctx.repo_dir):  # The real launcher refuses the missing cwd.
+                _REAL_RUN(argv, cwd=cwd, env=env, timeout=30, check=True)
+
+    def run(argv, **kwargs):
+        if argv[2] == "graphql":
             return SimpleNamespace(returncode=0, stdout=json.dumps(_answer(_nodes(gh.rows, [3]))), stderr="")
         return SimpleNamespace(returncode=0, stdout=VIEW if argv[1:3] == ["repo", "view"] else json.dumps(gh.rows), stderr="")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run, start=start)
     text = _list(ctx)
 
     assert text.startswith("⚠️ GH_ERROR") and "PR 0" not in text, text
@@ -181,7 +185,7 @@ def test_an_unreadable_count_withholds_the_list(tmp_path, gh, monkeypatch, case)
             if argv[2] == "graphql":
                 raise subprocess.TimeoutExpired(argv, 30)
             return SimpleNamespace(returncode=0, stdout=VIEW if argv[1:3] == ["repo", "view"] else json.dumps(gh.rows), stderr="")
-        monkeypatch.setattr(subprocess, "run", run)
+        stub_gh(monkeypatch, run)
 
     text = _list(ctx)
 

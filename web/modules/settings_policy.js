@@ -11,6 +11,8 @@ const SAFETY_LEVELS = rowById('OUROBOROS_SAFETY_MODE').control.options;
 /** What a managed deployment's policy file fixes, or null outside one. */
 export const deploymentOf = (meta) => meta?.policy_state?.deployment || null;
 
+export const LOCAL_RUNTIME_ADMIN = 'Your administrator installs and updates the local runtime.';
+
 const RANKS = { access: ['light', 'advanced', 'pro', 'cyber_pro'], coverage: ['off', 'light', 'full'] };
 
 /** The options of Access (a ceiling) or a Supervisor level (a floor) the deployment allows, in their order. */

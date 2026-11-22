@@ -861,10 +861,10 @@ SCHEMA: Dict[str, Any] = {
         "total_count; checks = the recorded checks of one commit (target = PR number or full SHA, optional wait_seconds); "
         "api = any REST GET route (query string allowed, {owner}/{repo} placeholders follow repo) or a GraphQL query, "
         "never a mutation (that is github_write(method='api')). get kind='run', target=run_id, include=['log'] reads "
-        "a completed run's log, or a completed job's plain-text log while its parent run is still queued/in progress "
-        "(optional job_id, attempt, failed_only, max_bytes, tail_lines); exact gh stdout bytes, size and sha256 are "
-        "retained as task artifacts before a bounded preview. failed_only maps to gh --log-failed; a CLI failure is a "
-        "typed error and never silently falls back to REST. The stdout cap does not bound gh's internal cache. "
+        "a completed run's CLI log or a completed job's full REST log during an active run. job_id belongs to the "
+        "pinned attempt. Exact CLI log or REST body bytes, size and sha256 are retained before a bounded preview. failed_only "
+        "requires a completed run and uses gh --log-failed, which can include unrelated steps. The capture cap "
+        "does not bound gh's internal cache. "
         "list kind='artifact', target=run_id pages artifacts using limit/cursor; download kind='artifact', target=artifact_id "
         "requires max_bytes and retains the exact zip without extraction. Writes are github_write; merges are pr_merge."
     ),
@@ -882,7 +882,7 @@ SCHEMA: Dict[str, Any] = {
                                    "for github_write resolve_thread), files, diff, commits; run: log"},
         "job_id": {"type": "integer", "default": 0, "description": "Run log: job id belonging to the selected run/attempt; omitted reads all jobs"},
         "attempt": {"type": "integer", "default": 0, "description": "Run: 0 selects latest; logs pin the observed attempt before capture"},
-        "failed_only": {"type": "boolean", "default": False, "description": "Run log: failed steps only; empty when none failed"},
+        "failed_only": {"type": "boolean", "default": False, "description": "Request gh --log-failed on a completed run; step attribution is unverified"},
         "max_bytes": {"type": "integer", "description": "Run log: default 4 MiB, ceiling 32 MiB; artifact download: required explicit cap, ceiling 64 MiB"},
         "tail_lines": {"type": "integer", "default": 120, "description": "Run log preview: last 1–2000 lines, clipped to 400 chars each; read_file pages retained text"},
         "since": {"type": "string", "default": "", "description": "ISO-8601 UTC instant for supported list/facet timestamps; labels have no since filter"},

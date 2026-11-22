@@ -8,7 +8,7 @@ and names its enforcement or its absence.
 
 P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
 runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
-excluded) target roughly 1000 lines; test modules are outside the module band (their
+excluded) target roughly 1000 lines; `tests/` modules stay outside the band (their
 function cap stays; the diff pulse states lines per changed test module). The gates read
 exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
 Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical

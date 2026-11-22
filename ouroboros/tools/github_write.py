@@ -5,7 +5,7 @@ Every write returns ONE receipt ``{effect, target, url, id, actor, at, outcome}`
 human line; ``actor`` is GitHub's acting identity or null, and local times are labelled. The response is read back against what was
 sent where that is cheap. A send whose answer never came (timeout, 5xx, reset) is looked up once by
 its exact body, target and acting identity; found → confirmed, otherwise the outcome stays ``unknown`` and the text
-says so — nothing is resent. A direct API 4xx is ``not_applied``; PR writes settle by their own readback, even after a 4xx.
+says so — nothing is resent. A direct API 4xx is ``not_applied``; a PR field edit also checks its readback.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.github import (GhResult, _canonical_github_args, _gh_api, _gh_graphql, _graphql_operations, _http_refused,
-                                     _no_launch_yet, _refuse, _split_repo)
+                                     _no_launch_yet, _refuse, _repo_hint, _split_repo)
 from ouroboros.tools.github_read import _repo_of
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, publish_no_effect
 from ouroboros.utils import utc_now_iso
 
 METHODS = ("comment", "create_issue", "create_pr", "update", "review", "resolve_thread", "api")
@@ -52,6 +52,10 @@ class _Write:
         if no_effect is None:
             no_effect = code == "TOOL_ARG_ERROR" and _no_launch_yet()
         return _refuse(self.ctx, text, code, no_effect=no_effect)
+
+    def unsent(self, res: GhResult) -> str:
+        """This invocation's sole mutation did not start, even if its prechecks ran."""
+        return publish_no_effect(self.ctx, res.text, tool_name="github_write")
 
     def number(self) -> Optional[int]:
         target = self.args.get("target")
@@ -90,8 +94,8 @@ class _Write:
                 at: object = None, lookup: str = "", extra: Optional[dict] = None,
                 settlement: Optional[str] = None, result_status: Optional[str] = None) -> str:
         """Publish the one receipt shape; ``res`` is the failed transport answer when there is one."""
-        if res is not None and res.failure in ("target", "cli_missing"):
-            return res.text  # the transport already published its typed refusal; nothing was sent
+        if res is not None and res.not_submitted:
+            return self.unsent(res)
         response = response if isinstance(response, dict) else {}
         receipt: Dict[str, Any] = {**(extra or {}),
             "effect": effect, "target": target,
@@ -136,7 +140,7 @@ class _Write:
             if lookup:
                 receipt["lookup"] = lookup
             status, code, outcome = "error", "TOOL_ERROR", "unknown"
-            prefix = ("⚠️ GH_WRITE_UNKNOWN: the request was sent and no answer proved its outcome; do not resend. "
+            prefix = ("⚠️ GH_WRITE_UNKNOWN: the tool made one write attempt. The outcome is unknown, so do not resend. "
                       "Reconcile with " + (lookup or "github_read") + " before any further write. ")
         line = f"{prefix}github_write {self.method} → {target}: {receipt['outcome']}"
         if receipt.get("url"):
@@ -242,7 +246,7 @@ def _comment(write: _Write) -> str:
         res = write.graphql(_GQL["add_discussion_comment"], variables, repo_vars=False)
         target = f"{write.slug()} discussion #{number}" + (f" reply to {reply_to}" if reply_to else "")
         if not res.ok:
-            return write.receipt("discussion_comment.create", target, res=res, lookup=f"github_read(method='list', kind='discussion', target={number})")
+            return write.receipt("discussion_comment.create", target, res=res, lookup=f"github_read(method='list', kind='discussion', target={number}{_repo_hint(write.repo)})")
         comment = (((_parse(res) or {}).get("data") or {}).get("addDiscussionComment") or {}).get("comment") or {}
         readback = _readback({"body": body}, comment)
         return write.receipt("discussion_comment.create", target, url=comment.get("url"), oid=comment.get("id"),
@@ -251,10 +255,10 @@ def _comment(write: _Write) -> str:
         return error
     if reply_to:
         route, effect = f"repos/{{owner}}/{{repo}}/pulls/{number}/comments/{reply_to}/replies", "review_comment.reply"
-        lookup = f"github_read(method='list', kind='review_comment', target={number}, since='{{since}}')"
+        lookup = f"github_read(method='list', kind='review_comment', target={number}, since='{{since}}'{_repo_hint(write.repo)})"
     else:
         route, effect = f"repos/{{owner}}/{{repo}}/issues/{number}/comments", "issue_comment.create"
-        lookup = f"github_read(method='list', kind='comment', target={number}, since='{{since}}')"
+        lookup = f"github_read(method='list', kind='comment', target={number}, since='{{since}}'{_repo_hint(write.repo)})"
     res = write.rest(route, "POST", {"body": body})
     target = f"{write.slug()}#{number}" + (f" reply to {reply_to}" if reply_to else "")
     if res.ok:
@@ -300,7 +304,7 @@ def _create_issue(write: _Write) -> str:
         return write.receipt("issue.create", f"{write.slug(found.get('html_url'))}#{found.get('number')}", response=found,
                              readback={"verified": True, "mismatch": [], "via": "lookup"})
     return write.receipt("issue.create", f"{write.slug()} new issue {title[:60]!r}", res=res,
-                         lookup=f"github_read(method='list', kind='issue', state='all', since='{since}')")
+                         lookup=f"github_read(method='list', kind='issue', state='all', since='{since}'{_repo_hint(write.repo)})")
 
 
 def _update(write: _Write) -> str:
@@ -348,7 +352,7 @@ def _update(write: _Write) -> str:
     if current:
         return write.receipt("issue.update", target, response=current, readback={"verified": True, "mismatch": [], "via": "lookup"},
                              at=current.get("updated_at"), actor=_actor(current, "closed_by") if fields.get("state") == "closed" else None)
-    return write.receipt("issue.update", target, res=res, lookup=f"github_read(method='get', kind='issue', target={number})")
+    return write.receipt("issue.update", target, res=res, lookup=f"github_read(method='get', kind='issue', target={number}{_repo_hint(write.repo)})")
 
 
 def _review(write: _Write) -> str:
@@ -382,7 +386,7 @@ def _review(write: _Write) -> str:
                   lambda row: row.get("body") == body and row.get("state") == wanted["state"] and str(row.get("submitted_at") or "") >= write.lookup_since())
     if found:
         return write.receipt("pr_review.submit", target, response=found, readback={"verified": True, "mismatch": [], "via": "lookup"})
-    return write.receipt("pr_review.submit", target, res=res, lookup=f"github_read(method='list', kind='review', target={number})")
+    return write.receipt("pr_review.submit", target, res=res, lookup=f"github_read(method='list', kind='review', target={number}{_repo_hint(write.repo)})")
 
 
 def _resolve_thread(write: _Write) -> str:
@@ -409,7 +413,7 @@ def _resolve_thread(write: _Write) -> str:
         return write.receipt(effect, target, oid=thread, url="", actor=_actor(node, "resolvedBy") if expected else None, at=write.sent_at,
                              readback={"verified": True, "mismatch": [], "via": "lookup"}, extra={"at_source": "local"})
     return write.receipt(effect, target, res=res, oid=thread, url="", actor="", at="",
-                         lookup=f"github_read(method='api', graphql=<node(id:{thread!r}) isResolved>)")
+                         lookup=f"github_read(method='api', graphql=<node(id:{thread!r}) isResolved>{_repo_hint(write.repo)})")
 
 
 def _api(write: _Write) -> str:
@@ -451,7 +455,7 @@ def _api(write: _Write) -> str:
                              actor=_actor(first) if created else None, at=at or write.sent_at,
                              readback=None, extra=None if at else {"at_source": "local"})
     return write.receipt(effect, target, res=res, url="", oid="", actor="", at="",
-                         lookup="" if _definite(res) else "github_read(method='api', ...) on the same object")
+                         lookup="" if _definite(res) else f"github_read(method='api', ...{_repo_hint(write.repo)}) on the same object")
 
 
 def _first_object(data: dict) -> dict:
@@ -474,7 +478,7 @@ def _template(route: str, repo: str) -> str:
 
 def _definite(res: GhResult) -> bool:
     """Whether a failed send proves nothing was applied (a GitHub 4xx, a local refusal, no CLI)."""
-    return res.failure in ("target", "cli_missing") or _http_refused(res)
+    return res.not_submitted or _http_refused(res)
 
 
 def _confirm_own(write: _Write, rows: list, *, actor=_actor) -> Optional[dict]:
@@ -539,8 +543,8 @@ SCHEMA: Dict[str, Any] = {
         "code thread); create_issue = a new issue (title, body, labels); create_pr = open a PR from an existing head "
         "into base with title, body, draft and required expect={head_sha,base_sha}. update kind='pr' edits title/body/base "
         "with expect.head_sha (base also needs expect.base_sha), or toggles draft with expect.head_sha in a separate call. "
-        "These PR writes precheck and read back each field: not a server-side compare-and-swap; no push/fork/merge, "
-        "and a failed send or unverified readback stays unknown unless a field edit's 4xx left every sent field as read. "
+        "PR field prechecks and readbacks are not a server-side compare-and-swap; no push, fork or merge. "
+        "A create POST's 4xx means not applied; a field edit's 4xx also needs its sent fields unchanged. A lost answer stays unknown. "
         "Other updates change title, body, state open|closed, "
         "state_reason (completed, not_planned, reopened, duplicate) or labels (replaces) of an issue or PR; review = submit "
         "a pull request review (event APPROVE|REQUEST_CHANGES|COMMENT, body, inline comments [{path, line, body}]); "

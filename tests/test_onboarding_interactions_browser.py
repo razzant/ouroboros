@@ -173,6 +173,58 @@ def test_wizard_local_stop_failure_preserves_edit_and_retry_feedback(subscriptio
     capture(page, "wizard-local-stop-retried")
 
 
+@pytest.fixture(params=["chromium", "webkit"])
+def installing_runtime_ui(request, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    ui = request.getfixturevalue("subscription_ui")
+    ui["engine"] = request.param
+    return ui
+
+
+def test_wizard_installing_runtime_keeps_start_unavailable_and_accepts_ordinary_stop(installing_runtime_ui):
+    # While an install holds the runtime it outranks any earlier answer, as in Settings:
+    # Start stays unavailable, Stop stays the one ordinary action, and its accepted Stop
+    # returns the strip to Offline with no retry or unconfirmed Stop.
+    ui = installing_runtime_ui
+    page = ui["page"]
+    runtime = {"status": "offline", "runtime_status": "installing"}
+    stops = []
+
+    def local_controls(route):
+        response = route.fetch()
+        body = response.text().replace('"supportsLocalRuntimeControls": false',
+                                       '"supportsLocalRuntimeControls": true')
+        route.fulfill(response=response, body=body)
+
+    def stop(route):
+        stops.append(route.request.method)
+        # A cancelled install settles unknown; its result stays readable to a later poll.
+        runtime["runtime_status"] = "unknown"
+        route.fulfill(content_type="application/json", body='{"status":"stopped"}')
+
+    page.route("**/onboarding", local_controls)
+    page.route("**/api/local-model/status", lambda route: route.fulfill(
+        content_type="application/json", body=json.dumps(runtime)))
+    page.route("**/api/local-model/stop", stop)
+    _open_wizard(ui)
+    page.locator('[data-collapse="api-access"] > summary').click()
+    page.locator('[data-collapse="local-model"] > summary').click()
+    page.wait_for_function(
+        "document.querySelector('#wizard-local-status').textContent === 'Status: Installing the local runtime…'")
+    assert page.locator("#wizard-local-start").is_disabled()
+    assert page.locator("#wizard-local-stop").is_enabled()
+    assert page.locator("#wizard-local-test").is_disabled()
+    assert page.locator("#wizard-local-status").get_attribute("data-tone") == "muted"
+    capture(page, f"wizard-local-installing-{ui['engine']}")
+    page.click("#wizard-local-stop")
+    page.wait_for_function("document.querySelector('#wizard-local-status').textContent === 'Status: Offline'")
+    assert stops == ["POST"]
+    assert page.locator("#wizard-local-start").is_enabled()
+    assert page.locator("#wizard-local-stop").is_disabled()
+    assert page.locator("#wizard-local-test-result").is_hidden()
+    assert not any(path == "/api/onboarding/complete" for path, _ in ui["posts"])
+
+
 @pytest.mark.parametrize("viewport", [(980, 780), (390, 844)])
 def test_wizard_steps_taller_than_the_window_scroll_by_wheel_and_keyboard(subscription_ui, viewport):
     # A wizard step is a document. The app shell's fixed body must not reach it, or its footer

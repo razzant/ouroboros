@@ -790,12 +790,19 @@
  * @property {number=} n_gpu_layers
  * @property {number=} n_ctx
  * @property {string=} chat_format
+ * @property {string=} install_id
  */
 
 /**
  * @typedef {Object} LocalModelStartResponse
  * @property {'starting'} status
  * @property {string} model_path
+ */
+
+/**
+ * @typedef {Object} LocalModelInstallResponse
+ * @property {('installing'|'already_installing')} status
+ * @property {string=} install_id
  */
 
 /**
@@ -1144,10 +1151,10 @@
  */
 
 /**
- * `GET /api/local-model/status`.
- * @typedef {Object} LocalModelStatusResponse
+ * @typedef {Object} LocalModelStatusResponse Status from `GET /api/local-model/status`; `stopping` means exit is not yet confirmed.
  * @property {string} status
  * @property {?string=} error
+ * @property {'startup_exit'=} error_stage
  * @property {?string=} model_path
  * @property {*=} model_name
  * @property {*=} context_length

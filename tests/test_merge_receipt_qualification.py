@@ -19,6 +19,7 @@ import pytest
 from ouroboros import merge_receipts, review_ledger
 from ouroboros.tools import github
 from tests import test_pr_merge_receipts as merge_fixture
+from tests._github_process import stub_gh
 from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, NOT_MERGEABLE, ROUTE, TREE, _receipts, sent
 from tests._store_shared import delete_result, read_result, seed_result, unreadable_result
 from tests._cancel_intents_shared import DeliveryBus
@@ -50,8 +51,13 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
     def process(argv, **kw):
         assert kw["env"] == selected_env  # every call retains the same selected identity
         args = argv[1:]
-        if args[:1] == ["pr"]:
-            assert args[-2:] == ["--repo", repo]
+        if args[:2] == ["api", "graphql"]:
+            assert args == ["api", "graphql", "--input", "-", "--hostname", hostname]
+            request = json.loads(kw["input"])
+            assert (request["variables"]["owner"], request["variables"]["name"]) == ("chosen", "repository")
+            assert github._graphql_operations(request["query"]) == {"query"}
+            assert "pullRequest(number: $number)" in request["query"]
+            assert not any(field in request["query"] for field in ("organization", "reviewRequests", "team", "membersWithRole"))
         if args[:1] == ["api"] and "PATCH" in args:
             assert args == ["api", "repos/chosen/repository/pulls/7", "--hostname", hostname,
                             "--method", "PATCH", "--input", "-"]
@@ -65,7 +71,7 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
                                stderr="" if result.ok else result.text)
 
     monkeypatch.setattr(github, "_gh_run", REAL_GH)
-    monkeypatch.setattr(github.subprocess, "run", process)
+    stub_gh(monkeypatch, process)
     monkeypatch.setattr(github, "_gh_env", lambda ctx: selected_env)
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: selected_env["GH_TOKEN"])
     handler = next(entry.handler for entry in github.get_tools() if entry.name == "pr_merge")
@@ -76,12 +82,11 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
     assert writes == [{"body": expected}] and world.gh.pr["body"] == expected
     assert world.gh.pr["title"] == "demo"
     assert receipt["publication"]["card"]["status"] == "owed"
-    assert not any(c[:2] == ["pr", "edit"] or c[:2] == ["api", "graphql"] or c[0] == "auth"
-                   for c in world.gh.calls)
+    assert not any(c[:2] == ["pr", "edit"] or c[0] == "auth" for c in world.gh.calls)
 
 
 @pytest.mark.parametrize("failure", ["EOF", "gh: Server Error (HTTP 502)", "gh: Resource not accessible by integration (HTTP 403)",
-                                     "timeout"])
+                                     "timeout", "lost reply"])
 def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, failure):
     effects = []
 
@@ -91,12 +96,14 @@ def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, f
             effects.append(args)
             if failure == "timeout":
                 raise github.subprocess.TimeoutExpired(argv, 120)
+            if failure == "lost reply":
+                raise FileNotFoundError(2, "reading the response failed", "gh")
             return SimpleNamespace(returncode=1, stdout="", stderr=failure)
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0, stdout=result.text, stderr="")
 
     monkeypatch.setattr(github, "_gh_run", REAL_GH)
-    monkeypatch.setattr(github.subprocess, "run", process)
+    stub_gh(monkeypatch, process)
     monkeypatch.setattr(github, "_gh_env", lambda ctx: {})
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "")
     assert "PR_MERGE_UNKNOWN" in registered_merge(world)
@@ -109,26 +116,30 @@ def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, f
     assert _receipts(world)[0]["outcome"]["attribution"] == "unproven"
 
 
-@pytest.mark.parametrize("failure", ["cli_missing", "rejection"])
+@pytest.mark.parametrize("failure", ["cli_missing", "pre_effect", "rejection"])
 def test_a_proven_no_effect_failure_can_recover(world, monkeypatch, failure):
     attempts = []
 
+    def start(argv, **_):
+        if sent(argv[1:]):
+            attempts.append(argv[1:])
+            if len(attempts) == 1 and failure != "rejection":
+                raise FileNotFoundError(2, "missing", "gh" if failure == "cli_missing" else None)
+
     def process(argv, **kw):
         args = argv[1:]
-        if sent(args):
-            attempts.append(args)
-            if len(attempts) == 1:
-                if failure == "cli_missing":
-                    raise FileNotFoundError(2, "missing", "gh")
-                return SimpleNamespace(returncode=1, stdout=REFUSAL[0], stderr=REFUSAL[1])
+        if sent(args) and len(attempts) == 1 and failure == "rejection":
+            return SimpleNamespace(returncode=1, stdout=REFUSAL[0], stderr=REFUSAL[1])
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0, stdout=result.text, stderr="")
 
     monkeypatch.setattr(github, "_gh_run", REAL_GH)
-    monkeypatch.setattr(github.subprocess, "run", process)
+    stub_gh(monkeypatch, process, start=start)
     monkeypatch.setattr(github, "_gh_env", lambda ctx: {})
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "")
     assert "PR_MERGE_REFUSED" in registered_merge(world)
+    assert len(attempts) == 1
+    assert _receipts(world)[0]["effect"]["failure"] == ("server_refused" if failure == "rejection" else failure)
     assert "merge: merged" in registered_merge(world)
     assert len(attempts) == 2
     assert [r["outcome"]["status"] for r in _receipts(world)] == ["refused", "merged"]

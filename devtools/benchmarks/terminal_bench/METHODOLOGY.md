@@ -111,7 +111,17 @@ assumed in two places that used to hardcode TB2.1:
   and `metadata.yaml` declares no `web_search` role while they are off. A dataset whose
   own rules permit web access is run with the explicit `--allow-agent-web` flag, which
   prints a loud non-leaderboard-faithful warning for TB2.1 and is recorded in the manifest
-  and the disclosure ledger — never a silent default.
+  and the disclosure ledger — never a silent default. On such a run the web search Model is
+  read ONCE, by the admission snapshot that also derives the roster. A named Model and an
+  explicit blank (the container's own Auto Source) are both choices: `model_slots` names the
+  former and omits the latter, the generated job carries either as
+  `agents[0].kwargs.web_search_model` (`""` for a blank), and the adapter keeps it over the
+  operator variable and any later Settings save. `--all-model` pins the Model to the measured
+  model; a plain `--model` run reads the operator variable (a blank one counts), else the
+  `--settings-path` file. Only the forwarded value is pinned: which provider leg answers a
+  blank Model depends on the container's keys and is planned, not observed. A job without the
+  kwarg — a web-off run, a hand-authored job, a config assembled without admission — names
+  no choice, and the adapter resolves the Model at trial time as before.
 - **Every reviewer row the container can run is declared; the rest is disclosed (2026-09-02;
   review-pool adapter 2026-10-08).** The Required result review executes every review-pool row on its
   configured delivery (owner R2), so `metadata.yaml` declares the rows the container's panel
@@ -119,7 +129,9 @@ assumed in two places that used to hardcode TB2.1:
   The container roster is DERIVED from the host roster (`common/model_slots.py`,
   `container_subagents_setting`; the host roster is read operator-environment first, else the
   `--settings-path` file — the one precedence shared by `run_tb.py` and the container adapter's
-  `_container_env`): a host roster that already IS the fixed-model contract for the measured
+  `_container_env`), ONCE at admission: the generated `agent_job_config.json` and the used-model
+  rows `metadata.yaml` declares both carry that admitted roster, so a later Settings save moves
+  neither. A host roster that already IS the fixed-model contract for the measured
   model (the `--all-model` launcher wrote it) is forwarded verbatim, seat count and effort
   included; otherwise the container gets the canonical one-model actor plus the host pool's
   API seats as they are (their own model id, effort and delivery), and one packet seat on the
@@ -133,7 +145,10 @@ assumed in two places that used to hardcode TB2.1:
   disclosure `extra.triad_rows_not_executable_in_container` (the rows' `harness[=model]`
   targets, in row order) in `run_manifest.json`, as the same list in a comment line of
   `metadata.yaml`, and admission prints ONE loud warning naming the seats (owner R40) — so
-  configure api seats for a TB run. Runs before 2026-09-02 ran and declared only the panel's
+  configure api seats for a TB run. The list is named by the admission read that derives the
+  roster, so it is on the manifest from the first write and a later Settings save does not
+  move it; it is a disclosure only and never enters the generated job.
+  Runs before 2026-09-02 ran and declared only the panel's
   non-retrieving api rows, with the shipped defaults substituted when none existed; runs whose
   pool carries retrieving rows are not comparable on the acceptance axis with those, and a
   submission must be read against its own `metadata.yaml` and manifest. `metadata.yaml` cannot
@@ -144,15 +159,21 @@ assumed in two places that used to hardcode TB2.1:
   `subagent_id`, `route{kind, target_id[, profile_id]}`, `effort` and `delivery`
   (`packet`/`native`; `session` for an agent-session row) — the `--all-model` panel is packet
   seats on the measured model — beside `available_subagents` (the whole roster) and
-  `mismatches`. A plain `--model` run records only `extra.triad_rows_not_executable_in_container`;
-  the forwarded API seats' api-vs-native split is recoverable from the host roster they were
-  derived from (operator environment, else `--settings-path`) and is durable only when that
-  roster is persisted in the settings file — a pool supplied only through the operator's
-  environment leaves no durable per-delivery record on a plain `--model` run.
-- **Harbor version:** the pinned TB2.1 bench venv is harbor **0.18.0** (`~/ouro/venv-tb`). 0.20.0
-  is the current latest and is installed in a SEPARATE venv (`~/ouro/venv-fb`), reachable via
-  `--harbor-bin` and leaving `venv-tb` frozen at 0.18.0 so published TB2.1 numbers keep their
-  harness. Note `--base-job-config` is OURS, not a harbor flag — harbor only ever had
+  `mismatches`. A plain `--model` run also carries its bound roster in `available_subagents`
+  and in `agents[0].kwargs.available_subagents` of `agent_job_config.json`, so the per-delivery
+  record survives even when the source pool existed only in the operator's environment. A legacy
+  direct job without that kwarg keeps the adapter's former environment-then-settings derivation;
+  an explicit empty kwarg forwards a disabled empty catalog so fresh settings do not propose factory seats.
+- **Main and Light lanes:** admission freezes both local/cloud choices in `extra.admitted_local_lanes`
+  and forwards them in the generated job. A blank Light pins Main's model in the container, preserving
+  the role's explicit local override. Named Light keeps its own lane. An older direct job without
+  lane kwargs keeps the adapter's normal forwarding rule.
+- **Harbor version:** the pinned TB2.1 bench venv is harbor **0.18.0** (`~/ouro/venv-tb`), with
+  0.20.0 retained separately (`~/ouro/venv-fb`). Harbor 0.26 additionally checks the adapter's
+  `reasoning_effort` capability before creating a trial. `available_subagents` is an adapter-owned
+  kwarg popped before `BaseInstalledAgent` construction, not a Harbor-side schema, so the same
+  construction applies to 0.18/0.20/0.26. Note `--base-job-config` is OURS, not a harbor flag —
+  harbor only ever had
   `-c/--config`, in both versions. Since v6.79.0 the manifest and the disclosure ledger record
   `harbor_bin` / `harbor_version` / `harbor_env_effective`, so the harness and backend behind a
   number are read off the artifact instead of reconstructed from operator memory; an
@@ -231,8 +252,14 @@ leaderboard" for the verified mechanics. Methodology-relevant consequences:
   can never match against the trial-side agent name — the submission is
   permanently invalid and the uploaded job config cannot be fixed post hoc
   (terminal-bench-2-1#121). `run_tb.py` generates `agent_job_config.json`
-  accordingly; `OUROBOROS_EFFORT_TASK` is recorded as the declared
-  `reasoning_effort` of the submission key and forwarded into the container.
+  accordingly; the admitted `OUROBOROS_EFFORT_TASK` — or, when nothing declares
+  one, the runtime's saved default — is recorded as the declared
+  `reasoning_effort` of the submission key and forwarded into the container, so
+  a generated job never re-resolves its tier at trial time. An invalid tier is
+  refused at admission and never recorded as an accepted model setting. A hand-authored
+  direct job without the kwarg has no generated admission: its legacy
+  declared→environment→saved resolution still applies and validates when the adapter
+  builds the container environment, rather than pretending `run_tb.py` admitted it.
 - CI requires an **ATIF trajectory for every rewarded trial** (the direct
   `trajectory.json` upload; the trial row must carry `trajectory_path`). The
   adapter emits it in-container at the end of each trial; pre-existing runs

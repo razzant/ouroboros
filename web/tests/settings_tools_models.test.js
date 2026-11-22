@@ -46,6 +46,7 @@ function fakeServer(routes, values = {}) {
     const token = (key) => `${key}@${server.tokens[key] || 0}`;
     server.tokens = {};
     server.document = () => ({ ...structuredClone(server.values), _meta: {
+        policy_state: { access: {}, supervisor: {}, running_task_snapshot: false },
         effects: Object.fromEntries(Object.keys(server.values).map((key) => [key, EFFECT_OF(key)])),
         tokens: Object.fromEntries(Object.keys(server.values).map((key) => [key, token(key)])),
         setup_contract: { scopedModelCatalogs: true, modelSlots: contract.modelSlots } } });
@@ -1325,4 +1326,349 @@ test('two windows: Main\'s Ultrafast stands on its key as this page showed it; a
     const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
     assert.equal(sent.precondition.connection, 'openai@work#r1', 'the revision shown, sent as shown');
     assert.equal(other.server.values.OUROBOROS_MODEL, 'openai@work::gpt-b');
+});
+
+// The deployment policy fact of the local model page (`_meta.policy_state.deployment`): a managed deployment's
+// administrator owns the program's interpreter, so the runtime install is never offered there and the page says
+// who installs it; an ordinary install keeps its one intentional click.
+const DEPLOYMENT = Object.freeze({ source: 'file', version: 1, digest: 'fixture', access_max: null, min_coverage: null,
+    checker: null, allowed_exits: [], organization_rules: false, extensions: null });
+
+test('a managed deployment owns the runtime install: every status shape says who installs it and never offers the control', async (t) => {
+    const page = await open(t, 'models/local', { meta: { policy_state: { deployment: DEPLOYMENT } } });
+    const install = () => page.container.querySelector('#btn-local-install-runtime');
+    const note = () => page.container.querySelector('[data-local-model-managed]');
+    const status = () => page.container.querySelector('#local-model-status');
+    assert.equal(note().hidden, false, 'the page names who installs the runtime');
+    assert.match(note().textContent, /Your administrator installs and updates the local runtime/);
+    for (const [shape, words] of [
+        [{ status: 'offline', runtime_status: 'missing' }, /Offline/],
+        [{ status: 'error', error: 'Server process exited during startup (code 1)', error_stage: 'startup_exit', runtime_status: 'ok' },
+            /A newer runtime may support this model\./],
+        [{ status: 'error', error: 'install refused', error_stage: 'startup_exit', runtime_status: 'install_error' },
+            /the runtime install failed/],
+        [{ status: 'error', error: 'exited during startup', error_stage: 'startup_exit', runtime_status: 'install_ok' },
+            /Start tries the updated runtime\./],
+    ]) {
+        page.routes.set('/api/local-model/status', () => response(shape));
+        page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models/local' } });
+        await settle();
+        assert.equal(install().hidden, true, `install hidden for ${JSON.stringify(shape)}`);
+        assert.equal(note().hidden, false, `note shown for ${JSON.stringify(shape)}`);
+        assert.match(status().textContent, words, JSON.stringify(shape));
+    }
+});
+
+test('an ordinary install keeps its one-click runtime control, and a stale startup exit after a successful update offers nothing', async (t) => {
+    const page = await open(t, 'models/local');
+    const install = () => page.container.querySelector('#btn-local-install-runtime');
+    const note = () => page.container.querySelector('[data-local-model-managed]');
+    const status = () => page.container.querySelector('#local-model-status');
+    assert.equal(note().hidden, true, 'an ordinary install claims no administrator');
+    const shown = async () => { page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models/local' } }); await settle(); };
+    page.routes.set('/api/local-model/status', () => response({ status: 'loading', runtime_status: 'ok' }));
+    await shown();
+    assert.equal(page.container.querySelector('#btn-local-start').disabled, true);
+    assert.equal(page.container.querySelector('#btn-local-stop').disabled, false);
+    page.routes.set('/api/local-model/status', () => response({ status: 'error',
+        error: 'Server process exited during startup (code 1)', error_stage: 'startup_exit', runtime_status: 'ok' }));
+    await shown();
+    assert.equal(install().hidden, false);
+    assert.equal(install().textContent, 'Update the local runtime');
+    assert.match(status().textContent, /A newer runtime may support this model\./);
+    // The update succeeded while the page was away (a fresh mount sees only its evidence): no second Update
+    // offer without a new start, and the last failure stays visible until that start replaces it.
+    page.routes.set('/api/local-model/status', () => response({ status: 'error',
+        error: 'Server process exited during startup (code 1): stderr tail', error_stage: 'startup_exit', runtime_status: 'install_ok' }));
+    await shown();
+    assert.equal(install().hidden, true, 'no repeat offer after a successful update without a new start');
+    assert.match(status().textContent, /runtime installed/);
+    assert.match(status().textContent, /Start tries the updated runtime\./);
+    assert.match(status().textContent, /Server process exited during startup/);
+    // A failed install and a missing runtime stay the page's own retry.
+    page.routes.set('/api/local-model/status', () => response({ status: 'error', error: 'exited during startup',
+        error_stage: 'startup_exit', runtime_status: 'install_error', runtime_install_log: 'pip refused' }));
+    await shown();
+    assert.equal(install().hidden, false);
+    assert.equal(install().textContent, 'Install the local runtime');
+    page.routes.set('/api/local-model/status', () => response({ status: 'offline', runtime_status: 'missing' }));
+    await shown();
+    assert.equal(install().hidden, false);
+    assert.equal(install().textContent, 'Install the local runtime');
+});
+
+async function localControls(t, state) {
+    const page = await open(t, 'models/local', { values: { LOCAL_MODEL_SOURCE: 'first.gguf' } });
+    const button = (name) => page.container.querySelector(`#btn-local-${name}`);
+    const controls = {
+        state, routes: page.routes, start: button('start'), stop: button('stop'), install: button('install-runtime'),
+        source: page.container.querySelector('[data-setting-row="LOCAL_MODEL_SOURCE"]').querySelector('[data-setting-control]'),
+        status: page.container.querySelector('#local-model-status'), action: page.container.querySelector('#local-model-action-status'),
+        progress: page.container.querySelector('#local-model-progress-bar'),
+        async refresh() {
+            page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models/local' } });
+            await settle();
+        },
+    };
+    controls.progress.style = {};
+    page.routes.set('/api/local-model/status', () => response(controls.state));
+    await controls.refresh();
+    return controls;
+}
+
+test('Stop releases a pending Start and its late reply leaves the next model alone', async (t) => {
+    const ui = await localControls(t, { status: 'offline', runtime_status: 'install_ok' });
+    const first = deferred();
+    const actions = [];
+    ui.routes.set('/api/local-model/start', (_url, init) => {
+        const { source } = JSON.parse(init.body);
+        actions.push(source);
+        if (source === 'first.gguf') return first.promise;
+        ui.state = { status: 'ready', context_length: 4096, runtime_status: 'ok' };
+        return response({ status: 'starting' });
+    });
+    ui.routes.set('/api/local-model/stop', () => {
+        actions.push('stop');
+        ui.state = { status: 'offline', runtime_status: 'ok' };
+        return response({ status: 'stopped' });
+    });
+    await ui.start.fire('click');
+    await ui.refresh();
+    assert.equal(ui.stop.disabled, true, 'an earlier runtime install says nothing about admission of this Start');
+    await ui.stop.fire('click');
+    assert.deepEqual(actions, ['first.gguf']);
+    ui.state = { status: 'downloading', download_progress: 0.25, runtime_status: 'ok' };
+    await ui.refresh();
+    assert.match(ui.status.textContent, /Downloading · 25%/);
+    assert.equal(ui.progress.style.width, '25%');
+    assert.equal(ui.progress.parentElement.getAttribute('aria-valuenow'), '25');
+    assert.equal(ui.start.disabled, true);
+    assert.equal(ui.stop.disabled, false);
+    await ui.stop.fire('click');
+    await settle();
+    assert.equal(ui.progress.parentElement.hidden, true);
+    assert.equal(ui.start.disabled, false);
+    ui.source.value = 'available.gguf';
+    await ui.start.fire('click');
+    await settle();
+    first.resolve(response({ error: 'runtime_missing', hint: 'stale install hint' }, 412));
+    await settle();
+    assert.deepEqual(actions, ['first.gguf', 'stop', 'available.gguf']);
+    assert.equal(ui.status.textContent, 'Ready · context 4096');
+    assert.equal(ui.install.hidden, true);
+    assert.equal(ui.action.textContent, '');
+});
+
+test('An unconfirmed model exit leaves Stop retryable without admitting Start or Install', async (t) => {
+    const ui = await localControls(t, { status: 'ready', runtime_status: 'ok' });
+    let retry = false;
+    ui.routes.set('/api/local-model/stop', () => {
+        if (retry) {
+            ui.state = { status: 'offline', runtime_status: 'ok' };
+            return response({ status: 'stopped' });
+        }
+        ui.state = { status: 'stopping', runtime_status: 'ok', error: 'Server exit is not confirmed' };
+        return response({ code: 'local_model_stop_unconfirmed', error: 'Local model exit is not confirmed' }, 409);
+    });
+    await ui.stop.fire('click');
+    await settle();
+    assert.match(ui.status.textContent, /^Stopping/);
+    assert.match(ui.action.textContent, /exit is not confirmed/);
+    assert.equal(ui.start.disabled, true);
+    assert.equal(ui.install.disabled, true);
+    assert.equal(ui.stop.disabled, false);
+    retry = true;
+    await ui.stop.fire('click');
+    await settle();
+    assert.equal(ui.status.textContent, 'Offline');
+    assert.equal(ui.start.disabled, false);
+    assert.equal(ui.stop.disabled, true);
+});
+
+for (const [timing, stateAtStop] of [
+    ['before Stop', 'installing'], ['after Stop', 'installing'], ['after completion and Stop', 'install_ok'],
+]) {
+    test(`Stop during Update cancels the automatic Start when the install reply arrives ${timing}`, async (t) => {
+        const ui = await localControls(t, { status: 'error', error_stage: 'startup_exit', runtime_status: 'ok' });
+        const installReply = deferred();
+        const actions = [];
+        ui.routes.set('/api/local-model/install-runtime', () => {
+            actions.push('update');
+            return installReply.promise;
+        });
+        ui.routes.set('/api/local-model/stop', () => {
+            actions.push('stop');
+            ui.state = { status: 'offline', runtime_status: stateAtStop };
+            return response({ status: 'stopped' });
+        });
+        ui.routes.set('/api/local-model/start', (_url, init) => {
+            const { source, install_id } = JSON.parse(init.body);
+            assert.equal(install_id, undefined, 'an explicit Start carries no install receipt');
+            actions.push(source);
+            return response({ status: 'starting' });
+        });
+        assert.equal(ui.install.textContent, 'Update the local runtime');
+        assert.equal(ui.install.hidden, false);
+        const posting = ui.install.fire('click');
+        await ui.refresh();
+        assert.equal(ui.stop.disabled, true, 'sending the POST alone does not establish admission');
+        await ui.stop.fire('click');
+        assert.deepEqual(actions, ['update']);
+        ui.state.runtime_status = stateAtStop;
+        if (timing === 'before Stop') {
+            installReply.resolve(response({ status: 'installing', install_id: 'fixture-install' }));
+            await posting;
+        }
+        await ui.refresh();
+        if (stateAtStop === 'install_ok') {
+            assert.match(ui.status.textContent, /runtime installed/);
+            assert.equal(ui.action.textContent, 'Press Stop to cancel the pending model start.');
+        }
+        assert.equal(ui.stop.disabled, false);
+        assert.equal(ui.start.disabled, true);
+        assert.equal(ui.install.hidden, true);
+        await ui.install.fire('click');
+        await ui.stop.fire('click');
+        if (timing !== 'before Stop') installReply.resolve(response({ status: 'installing', install_id: 'fixture-install' }));
+        await posting;
+        await settle();
+        if (stateAtStop === 'install_ok') assert.equal(ui.action.textContent, 'Automatic start cancelled.');
+        assert.equal(ui.start.disabled, stateAtStop === 'installing');
+        ui.state = { status: 'offline', runtime_status: 'install_ok' };
+        await ui.refresh();
+        assert.deepEqual(actions, ['update', 'stop']);
+        assert.equal(ui.start.disabled, false);
+        ui.source.value = 'available.gguf';
+        await ui.start.fire('click');
+        await settle();
+        assert.deepEqual(actions, ['update', 'stop', 'available.gguf']);
+    });
+}
+
+for (const [acknowledgement, install_id] of [
+    ['installing', 'fixture-install'], ['installing', undefined],
+    ['already_installing', undefined], ['already_installing', 'fixture-install'],
+]) {
+    const queued = acknowledgement === 'installing' && Boolean(install_id);
+    test(`an ${acknowledgement} reply ${install_id ? 'with' : 'without'} an install_id ${queued ? 'queues the model with it' : 'queues no Start'}`, async (t) => {
+        const ui = await localControls(t, { status: 'offline', runtime_status: 'missing' });
+        const launches = [];
+        ui.routes.set('/api/local-model/install-runtime', () => {
+            ui.state.runtime_status = 'installing';
+            return response({ status: acknowledgement, install_id });
+        });
+        ui.routes.set('/api/local-model/start', (_url, init) => {
+            const body = JSON.parse(init.body);
+            launches.push([body.source, body.install_id]);
+            return response({ status: 'starting' });
+        });
+        ui.source.value = 'chosen.gguf';
+        await ui.install.fire('click');
+        await settle();
+        // A settings reread restores the saved first.gguf while pip finishes.
+        ui.state.runtime_status = 'install_ok';
+        await ui.refresh();
+        await ui.refresh();
+        assert.equal(ui.source.value, 'first.gguf');
+        assert.deepEqual(launches, queued ? [['chosen.gguf', 'fixture-install']] : []);
+    });
+}
+
+test('a queued Start the server refuses is reported once and no later poll attaches it to another install', async (t) => {
+    const ui = await localControls(t, { status: 'offline', runtime_status: 'missing' });
+    const bodies = [];
+    ui.routes.set('/api/local-model/install-runtime', () => {
+        ui.state.runtime_status = 'installing';
+        return response({ status: 'installing', install_id: 'fixture-install' });
+    });
+    ui.routes.set('/api/local-model/start', (_url, init) => {
+        bodies.push(JSON.parse(init.body));
+        return response({ error: 'Local model startup cancelled: its install was stopped or replaced' }, 409);
+    });
+    ui.source.value = 'chosen.gguf';
+    await ui.install.fire('click');
+    await settle();
+    ui.state.runtime_status = 'install_ok';
+    await ui.refresh();
+    assert.match(ui.action.textContent, /^Not started: Local model startup cancelled/);
+    for (const runtime_status of ['installing', 'install_ok']) {  // another install settles later
+        ui.state.runtime_status = runtime_status;
+        await ui.refresh();
+    }
+    assert.deepEqual(bodies.map((body) => body.install_id), ['fixture-install']);
+    assert.equal(ui.start.disabled, false);
+    await ui.start.fire('click');  // the owner's own Start is explicit
+    await settle();
+    assert.deepEqual(bodies.map((body) => body.install_id), ['fixture-install', undefined]);
+});
+
+test('an unread deployment fact is no bypass: the runtime control waits for a read that positively says unmanaged', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes);
+    const realSettings = env.routes.get('/api/settings');
+    env.routes.set('/api/settings', () => response({ error: 'read failed' }, 500));
+    env.routes.set('/api/local-model/status', () => response({ status: 'offline', runtime_status: 'missing' }));
+    const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: 'models/local' },
+        ask: async () => true };
+    const container = new NodeStub();
+    const handle = await settingsPageFor('models/local').mount(container, { path: 'models/local', row: '', ctx });
+    t.after(() => handle?.unmount?.());
+    await settle();
+    assert.equal(container.querySelector('#btn-local-install-runtime').hidden, true,
+        'a missing runtime is not a policy bypass');
+    assert.equal(container.querySelector('[data-local-model-managed]').hidden, true,
+        'an unread fact claims no administrator');
+    const shown = async () => {
+        env.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models/local' } });
+        await settle();
+    };
+    const button = container.querySelector('#btn-local-install-runtime');
+    const details = container.querySelector('#local-model-test-result');
+    const partial = () => response({ LOCAL_MODEL_SOURCE: 'fixture/model', _meta: { effects: {} } });
+    env.routes.set('/api/local-model/start', () => response({ error: 'runtime_missing', hint: 'pip install fixture' }, 412));
+    env.routes.set('/api/settings', partial);
+    await shown();
+    assert.equal(button.hidden, true);
+    container.querySelector('[data-setting-row="LOCAL_MODEL_SOURCE"]').querySelector('[data-setting-control]').value = 'fixture/model';
+    await container.querySelector('#btn-local-start').fire('click');
+    await settle();
+    assert.equal(button.hidden, true);
+    assert.match(container.querySelector('#local-model-action-status').textContent, /Reload Settings/);
+    assert.equal(details.hidden, true);
+    await button.fire('click');
+    assert.ok(!env.calls.includes('/api/local-model/install-runtime'));
+
+    env.routes.set('/api/settings', realSettings);
+    await shown();
+    assert.equal(button.hidden, false, 'the positively unmanaged read unlocks the one-click install');
+    assert.match(details.textContent, /pip install fixture/);
+    assert.equal(container.querySelector('[data-local-model-managed]').hidden, true);
+    env.routes.set('/api/settings', partial);
+    await shown();
+    assert.equal(details.hidden, true, 'a previous manual command cannot survive the lost policy fact');
+    env.routes.set('/api/local-model/status', () => response({ status: 'error', error_stage: 'startup_exit', runtime_status: 'ok' }));
+    await shown();
+    assert.equal(button.hidden, true, 'a later partial read also withholds Update');
+});
+
+test('a runtime_missing start names who installs the runtime where the deployment is managed', async (t) => {
+    const started = async (page) => {
+        page.routes.set('/api/local-model/start', () => response({ error: 'runtime_missing',
+            message: 'llama-cpp-python is not installed.', hint: 'pip install llama-cpp-python[server]' }, 412));
+        page.container.querySelector('[data-setting-row="LOCAL_MODEL_SOURCE"]').querySelector('[data-setting-control]').value = 'fixture/model';
+        await page.container.querySelector('#btn-local-start').fire('click');
+        await settle();
+    };
+    const managed = await open(t, 'models/local', { meta: { policy_state: { deployment: DEPLOYMENT } } });
+    await started(managed);
+    assert.match(managed.container.querySelector('#local-model-action-status').textContent, /Your administrator installs and updates/);
+    assert.equal(managed.container.querySelector('#btn-local-install-runtime').hidden, true);
+    const ordinary = await open(t, 'models/local');
+    await started(ordinary);
+    const result = ordinary.container.querySelector('#local-model-action-status');
+    assert.match(result.textContent, /Install it, and the model starts by itself/);
+    assert.equal(ordinary.container.querySelector('#btn-local-install-runtime').hidden, false);
+    assert.match(ordinary.container.querySelector('#local-model-test-result').textContent,
+        /By hand: pip install llama-cpp-python\[server\]/);
 });

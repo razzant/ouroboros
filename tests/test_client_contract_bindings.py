@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import pathlib
 import re
+import subprocess
 import threading
 import typing
 
@@ -214,8 +215,9 @@ def test_account_routes_refuse_malformed_input_in_their_published_shapes(client)
 def test_model_mcp_and_control_routes_answer_their_published_shapes(client, monkeypatch):
     from ouroboros import local_model
 
-    manager = local_model.get_manager()
-    monkeypatch.setattr(manager, "check_runtime", lambda: False)
+    manager = local_model.LocalModelManager()
+    monkeypatch.setattr(local_model, "_manager", manager)
+    monkeypatch.setattr(manager, "_probe_runtime", lambda: subprocess.CompletedProcess([], 1))
     local = client.get("/api/local-model/status")
     assert assert_bound("GET /api/local-model/status", local) == "LocalModelStatusResponse"
     not_running = client.post("/api/local-model/test")

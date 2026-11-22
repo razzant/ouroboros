@@ -5,8 +5,8 @@ stale head/base, an open duplicate or an already-ready pull request prevents an 
 while a fresh read admits it exactly once. Negative controls cover lost answers, failed readbacks
 and malformed JSON. A correctly authored shell script can compose the same operations; these
 are behavior regressions, not a benchmark against that valid alternative.
-Once a mutation was sent, the read-back speaks and the outcome stays unknown; the one exception is the field edit's
-definite HTTP 4xx with every sent field read back as the precheck read it, which is not applied.
+A direct create POST's HTTP refusal is not applied. A refused field edit also needs a readback of the unchanged
+fields; an inconclusive send is never retried.
 """
 
 import json
@@ -17,6 +17,7 @@ import pytest
 
 from ouroboros.github_pr_identity import pull_request_fields_from_cli, pull_request_fields_from_rest, same_pull_request
 from ouroboros.tools import github, github_pr_write
+from tests._github_process import stub_gh
 from tests.test_github_project_target import BASE, MOVED, READ_ORG_REFUSAL, SHA, _context
 
 BASE_SHA = "c" * 40
@@ -69,15 +70,14 @@ class FakeGitHub:
                 return github.GhResult(False, "⚠️ GH_ERROR: gh: Service Unavailable (HTTP 503)", 1, 503, "exit")
             return _answer(self.pr) if self.pr else github.GhResult(False, "⚠️ GH_ERROR: gh: Could not resolve to a PullRequest (HTTP 404)", 1, 404, "exit")
         self.wrote = True
-        flags = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in args if a.startswith("--") and "=" in a}
         if kind == "create":
-            head = flags["--head"]
-            owner, _sep, branch = head.rpartition(":")
+            fields = json.loads(input_data)
+            owner, _sep, branch = fields["head"].rpartition(":")
             owner = owner or "owner"
-            self.pr = {"number": 7, "url": URL, "state": "OPEN", "title": flags["--title"], "body": input_data,
-                       "isDraft": "--draft" in args, "headRefName": branch, "baseRefName": flags["--base"],
+            self.pr = {"id": "PR_fixture", "number": 7, "url": URL, "state": "OPEN", "title": fields["title"], "body": fields["body"],
+                       "isDraft": fields["draft"], "headRefName": branch, "baseRefName": fields["base"],
                        "headRefOid": self.refs[f"{owner}:{branch}"], "headRepositoryOwner": {"login": owner}}
-            return github.GhResult(True, URL, 0, None, "")
+            return _answer({"number": 7, "html_url": URL, "node_id": self.pr["id"]})
         if kind == "edit":
             fields = json.loads(input_data)
             self.pr.update({"baseRefName" if key == "base" else key: value for key, value in fields.items()})
@@ -90,8 +90,10 @@ class FakeGitHub:
         if args[:2] == ["repo", "view"]:
             return "repo"
         if args[0] == "api":
-            return "edit" if "--method" in args and args[args.index("--method") + 1] == "PATCH" else "ref"
-        return {"list": "list", "view": "view", "create": "create", "edit": "edit", "ready": "ready"}[args[1]]
+            if "--method" in args:
+                return {"POST": "create", "PATCH": "edit"}[args[args.index("--method") + 1]]
+            return "ref" if "/git/ref/heads/" in args[1] else "alias"
+        return {"list": "list", "view": "view", "ready": "ready"}[args[1]]
 
     def kinds(self):
         return [self.kind(call.args) for call in self.calls]
@@ -101,8 +103,35 @@ class FakeGitHub:
 
 
 def _open_pr(**over):
-    return {"number": 7, "url": URL, "state": "OPEN", "title": "Old title", "body": "Old body", "isDraft": True,
+    return {"id": "PR_fixture", "number": 7, "url": URL, "state": "OPEN", "title": "Old title", "body": "Old body", "isDraft": True,
             "headRefName": "feature", "baseRefName": "main", "headRefOid": SHA, "headRepositoryOwner": {"login": "owner"}, **over}
+
+
+def test_receipt_human_target_names_the_canonical_repo_not_an_unverified_url():
+    """Pure projection of ``_receipt``: once the run resolved a canonical repository, the numbered display
+    target shows OWNER/REPO from that binding, independent of a stored read-back URL naming another repo."""
+    seen = []
+
+    class Write:
+        pr_created = None
+        pr_observed = {"number": 7, "url": "https://github.example/some/where/pull/7"}
+        pr_repo = "github.example/owner/selected"
+        repo = ""
+        method = "update"
+        args = {"target": 7}
+
+        def slug(self, url=""):
+            return "unverified" if url else "fallback"
+
+        def receipt(self, effect, target, **kw):
+            seen.append(target)
+            return ""
+
+    github_pr_write._receipt(Write(), "", "completed", "ok")
+    assert seen == ["owner/selected#7"]
+    Write.pr_repo = ""
+    github_pr_write._receipt(Write(), "", "completed", "ok")
+    assert seen[1] == "unverified#7"  # without a canonical binding the observed URL still shows
 
 
 @pytest.fixture
@@ -171,22 +200,29 @@ def test_create_prechecks_then_sends_one_request_then_reads_back_every_field(fak
     assert gh.kinds() == ["repo", "ref", "ref", "list", "create", "view"]
     assert gh.calls[1].args == ["api", "repos/owner/selected/git/ref/heads/feature", "--hostname", "github.example"]
     assert gh.calls[2].args == ["api", "repos/owner/selected/git/ref/heads/main", "--hostname", "github.example"]
-    assert gh.calls[1].repo is gh.calls[2].repo is github._GENERIC_TRANSPORT and gh.calls[0].repo == gh.calls[4].repo == ""
+    assert gh.calls[1].repo is gh.calls[2].repo is github._GENERIC_TRANSPORT and gh.calls[0].repo == ""
+    assert all(call.repo == "github.example/owner/selected" for call in gh.calls[3:])
     create = gh.writes()
     assert len(create) == 1
-    assert create[0].args == ["pr", "create", "--title=Add thing", "--head=feature", "--base=main", "--body-file=-"]
-    assert create[0].input == "Why:\r\n- because\n" and create[0].timeout == 60
+    assert create[0].args == ["api", "repos/owner/selected/pulls", "--method", "POST", "--input", "-",
+                              "--hostname", "github.example"]
+    assert json.loads(create[0].input) == {"title": "Add thing", "head": "feature", "base": "main",
+                                           "body": "Why:\r\n- because\n", "draft": False}
+    assert create[0].timeout == 60
     assert text == (f"✅ PR #7 created: {URL}\n"
                     "Read-back: title confirmed; body confirmed (16 chars); base main confirmed; draft=False confirmed; "
                     f"head owner:feature confirmed; head at {SHA} confirmed")
     assert (_typed(ctx).status, _typed(ctx).code, _typed(ctx).meta["operation_outcome"]) == ("ok", "OK", "completed")
+    receipt = json.loads(_typed(ctx).text.partition("\n")[2])
+    assert receipt["id"] == receipt["readback"]["item"]["id"] == "PR_fixture"
 
 
-def test_create_draft_and_cross_owner_head_ride_as_flags_and_identity(fake, ctx):
+def test_create_draft_and_cross_owner_head_ride_as_fields_and_identity(fake, ctx):
     gh = fake()
     text = _pr(ctx, "create_pr", **{**CREATE, "head": "fork-user:feature", "expected_head_sha": MOVED, "draft": True})
     assert gh.calls[1].args[1] == "repos/fork-user/selected/git/ref/heads/feature"
-    assert gh.writes()[0].args == ["pr", "create", "--title=Add thing", "--head=fork-user:feature", "--base=main", "--body-file=-", "--draft"]
+    fields = json.loads(gh.writes()[0].input)
+    assert fields["head"] == "fork-user:feature" and fields["draft"] is True
     assert "draft=True confirmed; head fork-user:feature confirmed" in text
 
 
@@ -213,7 +249,7 @@ def test_create_refuses_when_a_pull_request_for_this_head_and_base_is_already_op
     assert gh.writes() == []
     assert text == (f"⚠️ PR_EXISTS: PR #7 {URL}: open, owner:feature → main, head {MOVED}, draft=True, title 'Old title' is already "
                     "open for owner:feature into main in the active Project repository; nothing was created. Change it with "
-                    "github_write(method='update', kind='pr', target=7).")
+                    "github_write(method='update', kind='pr', target=7, repo='github.example/owner/selected').")
     assert _typed(ctx).meta["operation_outcome"] == "completed_no_effect"
     # A same-named branch in another account is another head: not a duplicate.
     gh = fake(pr=_open_pr(headRepositoryOwner={"login": "fork-user"}, headRefOid=MOVED))
@@ -225,8 +261,46 @@ def test_create_accepted_but_readback_failed_keeps_the_identity_and_marks_fields
     text = _pr(ctx, "create_pr", **CREATE)
     assert len(gh.writes()) == 1
     assert text == (f"✅ PR #7 created: {URL}\n⚠️ Read-back failed (⚠️ GH_ERROR: gh: Service Unavailable (HTTP 503)): the pull "
-                    "request's fields are unconfirmed; read it with github_read(method='get', kind='pr', target=7).")
+                    "request's fields are unconfirmed; read it with github_read(method='get', kind='pr', target=7, "
+                    "repo='github.example/owner/selected').")
     assert (_typed(ctx).status, _typed(ctx).meta["operation_outcome"]) == ("ok", "unknown")
+
+
+def test_create_readback_must_match_the_response_node(fake, ctx):
+    gh = fake()
+
+    def another_node(args, ctx_, **kwargs):
+        res = FakeGitHub.__call__(gh, args, ctx_, **kwargs)
+        if gh.kind(args) == "create":
+            gh.pr["id"] = "PR_other"
+        return res
+
+    github_pr_write._gh_run = another_node
+    text = _pr(ctx, "create_pr", **CREATE)
+
+    assert "PR_CREATE_UNKNOWN" in text and "same PR node" in text and len(gh.writes()) == 1
+    receipt = json.loads(_typed(ctx).text.partition("\n")[2])
+    assert receipt["id"] == "PR_fixture" and receipt["readback"]["item"]["id"] == "PR_other"
+
+
+def test_create_head_movement_after_the_send_is_a_note_not_an_identity_failure(fake, ctx):
+    """Identity is the node, never the head commit: a push that lands between the create and the read-back settles
+    the creation and reports the movement the way an edit's read-back reports it."""
+    gh = fake()
+
+    def moved(args, ctx_, **kwargs):
+        res = FakeGitHub.__call__(gh, args, ctx_, **kwargs)
+        if gh.kind(args) == "create":
+            gh.pr["headRefOid"] = MOVED
+        return res
+    github_pr_write._gh_run = moved
+    text = _pr(ctx, "create_pr", **CREATE)
+    assert text.startswith(f"✅ PR #7 created: {URL}\n")
+    assert f"head moved to {MOVED} since you read it (you expected {SHA})" in text
+    assert (_typed(ctx).status, _typed(ctx).meta["operation_outcome"]) == ("ok", "completed")
+    receipt = json.loads(_typed(ctx).text.partition("\n")[2])
+    assert receipt["outcome"] == "confirmed" and receipt["readback"]["verified"] is True
+    assert receipt["readback"]["notes"] == [f"head moved to {MOVED} since you read it (you expected {SHA})"]
 
 
 def test_create_with_a_lost_answer_sends_once_and_settles_by_reading(fake, ctx):
@@ -243,34 +317,33 @@ def test_create_with_a_lost_answer_sends_once_and_settles_by_reading(fake, ctx):
     text = _pr(ctx, "create_pr", **CREATE)
     assert len(gh.writes()) == 1 and gh.kinds()[-1] == "list"
     assert text.startswith("⚠️ PR_CREATE_UNKNOWN: the create request for owner:feature into main in the active Project repository "
-                           "timed out: ⚠️ GH_TIMEOUT: exceeded 60s.. One request was sent and not retried; its effect is unknown "
+                           "timed out: ⚠️ GH_TIMEOUT: exceeded 60s.. The tool made one attempt. Its effect is unknown "
                            "until GitHub shows it. Read-back: PR #7 ")
     assert text.endswith("is open for this head and base at the expected commit — this call's effect or an earlier one; do not "
-                         "create again. Compare its fields and use github_write(method='update', kind='pr', target=7) if they differ.")
+                         "create again. Compare its fields and use github_write(method='update', kind='pr', target=7, "
+                         "repo='github.example/owner/selected') if they differ.")
     assert (_typed(ctx).code, dict(_typed(ctx).meta)) == ("TOOL_ERROR", {"operation_outcome": "unknown"})
 
 
-@pytest.mark.parametrize("failure,facts", [
-    (REFUSED, "ended with exit 1, HTTP 422: ⚠️ GH_ERROR: HTTP 422: Validation Failed (https://api.github.example/repos/owner/selected/pulls)"),
-    (TIMEOUT, "timed out: ⚠️ GH_TIMEOUT: exceeded 60s."),
-])
-def test_create_send_failure_keeps_the_exit_facts_and_never_attests_no_effect(fake, ctx, failure, facts):
-    """A nonzero exit is not proof GitHub rejected the request: the facts are kept, the read-back is dated, no no-effect."""
-    gh = fake(failing={"create": failure}, repo_hint=True)
-    text = _pr(ctx, "create_pr", **CREATE, repo="github.example/owner/selected")
-    assert len(gh.writes()) == 1
-    assert text == (f"⚠️ PR_CREATE_UNKNOWN: the create request for owner:feature into main in github.example/owner/selected {facts}. "
-                    "One request was sent and not retried; its effect is unknown until GitHub shows it. Read-back: GitHub listed no "
-                    "open pull request from owner:feature into main at that moment; a request it is still processing would appear "
-                    "later, so read again (github_read(method='list', kind='pr', repo='github.example/owner/selected')) before creating.")
-    assert (_typed(ctx).status, _typed(ctx).code, dict(_typed(ctx).meta)) == ("error", "TOOL_ERROR", {"operation_outcome": "unknown"})
+@pytest.mark.parametrize("failure,expected", [(REFUSED, "not_applied"), (TIMEOUT, "unknown"), (SERVER_ERROR, "unknown")])
+def test_create_distinguishes_api_rejection_from_an_unconfirmed_send(fake, ctx, failure, expected):
+    gh = fake(failing={"create": failure})
+    _pr(ctx, "create_pr", **CREATE, repo="github.example/owner/selected")
+    receipt = json.loads(_typed(ctx).text.partition("\n")[2])
+    assert len(gh.writes()) == 1 and receipt["outcome"] == expected
+    if expected == "not_applied":
+        assert gh.kinds()[-1] == "create" and receipt["http_status"] == 422
+    else:
+        assert gh.kinds()[-2:] == ["create", "list"]
+        assert receipt["failure"] == failure.failure and "repo='github.example/owner/selected'" in receipt["lookup"]
 
 
 def test_create_lost_answer_and_failed_readback_says_unknown(fake, ctx):
     gh = fake(failing={"create": TIMEOUT, "list": [_answer([]), REFUSED]})
     text = _pr(ctx, "create_pr", **CREATE)
     assert len(gh.writes()) == 1
-    assert "Read-back failed too (" in text and text.endswith("(github_read(method='list', kind='pr')) before creating again.")
+    assert "Read-back failed too (" in text and text.endswith(
+        "(github_read(method='list', kind='pr', repo='github.example/owner/selected')) before creating again.")
     assert _typed(ctx).meta["operation_outcome"] == "unknown"
 
 
@@ -323,12 +396,11 @@ def test_update_omitted_body_is_left_and_empty_body_clears_in_one_edit(fake, ctx
     assert gh.kinds() == ["view", "edit", "view"]
 
 
-def test_a_null_body_is_a_valid_empty_body_but_a_missing_body_key_never_confirms_anything(fake, ctx):
-    """GitHub answers null for an empty body: that compares as ""; an answer WITHOUT the key is malformed, so a
-    requested empty body can never be 'confirmed' by an answer that simply omitted the field."""
+def test_a_pr_view_with_no_body_text_cannot_confirm_an_empty_body(fake, ctx):
+    """The gh PR view contract carries a string, including an ordinary empty body."""
     gh = fake(pr=_open_pr(body=None))
     text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="New title", body="")
-    assert len(gh.writes()) == 1 and "body confirmed (0 chars)" in text
+    assert gh.writes() == [] and "(field 'body' is not text) is malformed" in text
 
     def drop_body(args, ctx_, **kwargs):
         res = FakeGitHub.__call__(gh, args, ctx_, **kwargs)
@@ -501,6 +573,7 @@ def test_head_movement_after_an_accepted_edit_is_a_note_not_a_failure(fake, ctx)
 
 @pytest.mark.parametrize("answer,why", [
     (_answer({}), "field 'number' is None"),
+    (_answer(_open_pr(id="")), "no pull request ID"),
     (_answer({**_open_pr(), "headRepositoryOwner": None}), "field 'headRepositoryOwner' is None"),
     (_answer({**_open_pr(), "body": 5}), "field 'body' is not text"),
 ])
@@ -566,13 +639,35 @@ def cli(ctx, monkeypatch):
             return _process(stdout=json.dumps({"object": {"sha": NEW_BASE_SHA}}))
         raise AssertionError(f"unexpected gh command: {argv!r}")
 
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
     state.apply = apply
     state.edit = lambda **args: registry.execute_result("github_write", {"method": "update", "kind": "pr", "target": 7, **args})
     state.patches = lambda: [argv for argv, _kw in state.calls if "PATCH" in argv]
     return state
+
+
+@pytest.mark.parametrize("failed_start,outcome", [("patch", "completed_no_effect"), ("readback", "unknown")])
+def test_a_start_failure_after_a_precheck_or_an_unanswered_patch(cli, monkeypatch, failed_start, outcome):
+    popen = github.Popen
+    starts = []
+
+    def start(argv, **kwargs):
+        starts.append("patch" if "PATCH" in argv else "readback" if "patch" in starts else "precheck")
+        if starts[-1] == failed_start:
+            raise FileNotFoundError(2, "could not start")
+        return popen(argv, **kwargs)
+
+    def lose_reply(_fields):
+        raise FileNotFoundError(2, "response lost", "gh")
+
+    monkeypatch.setattr(github, "Popen", start)
+    cli.answer = lose_reply
+    result = cli.edit(title="Edited", expect={"head_sha": SHA})
+    assert result.meta["operation_outcome"] == outcome
+    assert starts == (["precheck", "patch"] if failed_start == "patch" else ["precheck", "patch", "readback"])
+    assert len(cli.patches()) == (0 if failed_start == "patch" else 1)
 
 
 @pytest.mark.parametrize("pr_host,default_host", [("github.example", "github.com"), ("github.com", "enterprise.example")])
@@ -645,6 +740,50 @@ def test_field_edit_answers_settle_by_github_status_and_readback_without_replay(
         assert "One request was sent and not retried" in receipt["detail"]
 
 
+@pytest.mark.parametrize("repo", ["", "owner/previous", "github.example/owner/previous"])
+@pytest.mark.parametrize("operation", ["edit", "ready", "draft"])
+@pytest.mark.parametrize("same_id", [True, False], ids=["same-node-moved", "different-node-same-address"])
+def test_edits_use_the_read_pr_address_and_only_confirm_the_same_node(fake, ctx, monkeypatch, repo, operation, same_id):
+    canonical = "github.example/owner/selected"
+    fields = {"title": "Edited"} if operation == "edit" else {"draft": operation == "draft"}
+    gh = fake(pr=_open_pr(isDraft=operation != "draft", headRepositoryOwner={"login": "fork-user"}))
+
+    def latest(args, ctx_, **kwargs):
+        result = gh(args, ctx_, **kwargs)
+        if gh.kind(args) in {"edit", "ready"}:
+            if same_id:
+                gh.pr["url"] = "https://github.example/owner/moved/pull/7"
+            else:
+                gh.pr["id"] = "PR_other"
+        return result
+
+    monkeypatch.setattr(github_pr_write, "_gh_run", latest)
+    text = _pr(ctx, "update", number=7, expected_head_sha=SHA, repo=repo, **fields)
+
+    assert gh.kinds() == ["view", "edit" if operation == "edit" else "ready", "view"]
+    first, mutation, last = gh.calls
+    assert (first.repo, last.repo) == (repo, canonical)
+    assert all("id" in c.args[c.args.index("--json") + 1].split(",") for c in (first, last))
+    if operation == "edit":
+        assert mutation.args == PATCH and json.loads(mutation.input) == fields
+    else:
+        assert mutation.repo == canonical
+        assert mutation.args == ["pr", "ready", "7"] + (["--undo"] if operation == "draft" else [])
+    if same_id:
+        assert _typed(ctx).meta["operation_outcome"] == "completed" and gh.pr["url"] in text
+    else:
+        assert _typed(ctx).meta["operation_outcome"] == "unknown" and "different pull request ID" in text
+        assert f"repo={canonical!r}" in text
+
+
+def test_refused_edit_cannot_settle_from_a_different_pull_request(fake, ctx):
+    before = _open_pr()
+    gh = fake(pr=before, failing={"view": [_answer(before), _answer(_open_pr(id="PR_other"))], "edit": REFUSED})
+    text = _pr(ctx, "update", number=7, expected_head_sha=SHA, title="Edited")
+    assert gh.kinds() == ["view", "edit", "view"]
+    assert _typed(ctx).meta["operation_outcome"] == "unknown" and "different pull request ID" in text
+
+
 # --- set_github_pr_ready ----------------------------------------------------------------------------------------------
 
 def test_ready_marks_a_draft_ready_once_and_reads_the_state_back(fake, ctx):
@@ -672,7 +811,7 @@ def test_ready_refuses_a_moved_head_and_reports_a_lost_answer_by_the_readback(fa
     gh = fake(pr=_open_pr(isDraft=True), failing={"ready": TIMEOUT})
     text = _pr(ctx, "update", number=7, ready=True, expected_head_sha=SHA)
     assert len(gh.writes()) == 1
-    assert text.endswith("its effect is unknown until GitHub shows it. Read-back: GitHub still reported draft=True at that moment; a "
+    assert text.endswith("The tool made one attempt. Its effect is unknown until GitHub shows it. Read-back: GitHub still reported draft=True at that moment; a "
                          "request it is still processing could still land, so read again before resending.")
     assert _typed(ctx).meta["operation_outcome"] == "unknown"
     gh = fake(pr=_open_pr(isDraft=True), failing={"ready": REFUSED})
@@ -686,8 +825,48 @@ def test_ready_accepted_but_readback_failed_is_unknown_not_a_retry(fake, ctx):
     gh = fake(pr=_open_pr(isDraft=True), view_fails_after_write=True)
     text = _pr(ctx, "update", number=7, ready=True, expected_head_sha=SHA, repo="github.example/owner/selected")
     assert len(gh.writes()) == 1 and text.startswith("✅ gh accepted marking PR #7 ready for review.\n⚠️ Read-back failed")
-    assert text.endswith("read it with github_read(method='get', kind='pr', target=7, repo='github.example/owner/selected').")
+    assert text.endswith("read it with github_read(method='get', kind='pr', target=7, repo='github.example/owner/selected', "
+                         "detail='full'), compare its node_id with PR_fixture, and resend nothing.")
     assert (_typed(ctx).status, _typed(ctx).meta["operation_outcome"]) == ("ok", "unknown")
+
+
+def _write_text_and_receipt(ctx, **args):
+    entry = next(entry for entry in github.get_tools() if entry.name == "github_write")
+    text = entry.handler(ctx, method="update", kind="pr", **_method_args(args))
+    return text, json.loads(text.partition("\n")[2])
+
+
+@pytest.mark.parametrize("change", [{"title": "Edited"}, {"ready": True}], ids=["edit", "ready"])
+def test_an_accepted_write_with_a_lost_readback_keeps_the_attempts_pr_node_and_stays_unknown(fake, ctx, change):
+    gh = fake(pr=_open_pr(isDraft=True), view_fails_after_write=True)
+    text, receipt = _write_text_and_receipt(ctx, number=7, expected_head_sha=SHA, **change)
+    assert len(gh.writes()) == 1 and _typed(ctx).meta["operation_outcome"] == "unknown"
+    assert receipt["outcome"] == "unknown" and receipt["id"] == "PR_fixture"
+    readback = receipt["readback"]
+    assert readback["verified"] is False and readback["item"] is None and readback["current_read"].startswith("missing")
+    assert readback["attempt"] == {"repo": "github.example/owner/selected", "id": "PR_fixture", "number": 7, "url": URL}
+    read = "github_read(method='get', kind='pr', target=7, repo='github.example/owner/selected', detail='full')"
+    assert receipt["lookup"] == read and read in text and "fields=" not in receipt["lookup"]
+    assert "compare its node_id with PR_fixture, and resend nothing" in text
+
+
+def test_a_refused_write_with_a_lost_readback_keeps_the_attempts_pr_node_and_the_same_lookup(cli):
+    cli.answer = _refusal(422, "Validation Failed")
+    cli.views = [None, _process(stdout="<html>maintenance</html>")]
+    result = cli.edit(title="New title", expect={"head_sha": SHA})
+    receipt = json.loads(result.text.partition("\n")[2])
+    assert result.meta["operation_outcome"] == "unknown" and len(cli.patches()) == 1
+    assert receipt["outcome"] == "unknown" and receipt["id"] == "PR_fixture"
+    assert receipt["readback"]["attempt"]["id"] == "PR_fixture" and receipt["readback"]["item"] is None
+    assert receipt["lookup"].startswith("github_read(method='get', kind='pr', target=7") and receipt["lookup"].endswith(
+        "detail='full')")
+    assert receipt["lookup"] in result.text and "compare its node_id with PR_fixture, and resend nothing" in result.text
+
+
+def test_a_confirmed_readback_receipt_has_no_lookup_and_no_lost_read_attempt_marker(fake, ctx):
+    fake(pr=_open_pr(isDraft=True))
+    _text, receipt = _write_text_and_receipt(ctx, number=7, expected_head_sha=SHA, title="Edited")
+    assert receipt["outcome"] == "confirmed" and "lookup" not in receipt and "attempt" not in receipt["readback"]
 
 
 def test_ready_accepted_but_readback_still_draft_is_not_called_ready(fake, ctx):
@@ -715,13 +894,39 @@ def test_create_sends_the_explicit_repo_positionally_to_repo_view_and_as_a_flag_
         if argv[1:3] == ["repo", "view"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected", "url": BASE}), stderr="")
         return SimpleNamespace(returncode=0, stdout=json.dumps({"object": {"sha": MOVED}}), stderr="")
-    monkeypatch.setattr(subprocess, "run", run)
+    stub_gh(monkeypatch, run)
 
     text = _pr(ctx, "create_pr", **CREATE, repo="github.example/owner/selected")
 
     assert calls == [["gh", "repo", "view", "github.example/owner/selected", "--json", "nameWithOwner,url"],
                      ["gh", "api", "repos/owner/selected/git/ref/heads/feature", "--hostname", "github.example"]]
     assert text.startswith(f"⚠️ PR_PRECHECK_FAILED: head owner:feature is at {MOVED}, you expected {SHA}; nothing was created.")
+
+
+@pytest.mark.parametrize("case", ["same-casefolded", "host-mismatch", "name-url-mismatch", "rename", "wrong-alias"])
+def test_create_binds_the_confirmed_repository_before_any_mutation(fake, ctx, case):
+    selected = {
+        "same-casefolded": "GITHUB.EXAMPLE/Owner/Selected",
+        "host-mismatch": "other.example/owner/selected",
+        "name-url-mismatch": "github.example/owner/selected",
+        "rename": "github.example/owner/old-name",
+        "wrong-alias": "github.example/owner/old-name",
+    }[case]
+    gh = fake(failing={
+        "repo": _answer({"nameWithOwner": "owner/other" if case == "name-url-mismatch" else "owner/selected", "url": BASE}),
+        "alias": _answer({"full_name": "owner/selected", "html_url": BASE}) if case == "rename"
+                 else _answer({"full_name": "owner/old-name", "html_url": "https://github.example/owner/old-name"}),
+    })
+    text = _pr(ctx, "create_pr", **CREATE, repo=selected)
+    if case in {"same-casefolded", "rename"}:
+        assert text.startswith("✅ PR #7 created") and len(gh.writes()) == 1
+        assert all(c.repo == "github.example/owner/selected" for c in gh.calls if gh.kind(c.args) in {"create", "view", "list"})
+        if case == "rename":
+            assert gh.calls[1].args == ["api", "repos/owner/old-name", "--hostname", "github.example"]
+    else:
+        assert "PR_PRECHECK_FAILED" in text and not gh.writes()
+        assert gh.kinds() == (["repo", "alias"] if case == "wrong-alias" else ["repo"])
+        assert _typed(ctx).meta["operation_outcome"] == "completed_no_effect"
 
 
 def test_ready_argument_refusals(fake, ctx):
@@ -820,7 +1025,8 @@ def test_create_missing_url_never_invents_a_pr_number(fake, ctx, number):
     assert len(gh.writes()) == 1
     assert _typed(ctx).meta.get("operation_outcome", "unknown") == "unknown"
     if number == 7:
-        assert "PR #7 created" in text
+        assert "PR_CREATE_UNKNOWN" in text and "same PR node" in text
+        assert "PR #7 created" not in text
         assert "view" in gh.kinds()
     else:
         assert "PR_CREATE_UNKNOWN" in text and "valid PR number" in text

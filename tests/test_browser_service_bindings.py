@@ -51,6 +51,7 @@ def test_isolated_child_also_checks_the_configured_host_bindings(tmp_path, monke
 
 from ouroboros import config, server_process
 from ouroboros.browser_policy import runtime_service_kind
+from ouroboros.local_model_server import LOCAL_LAUNCH_ENV, LOCAL_LAUNCH_HEADER
 from ouroboros.platform_layer import subprocess_new_group_kwargs
 from ouroboros.server_entrypoint import bound_service_socket
 
@@ -115,8 +116,8 @@ def test_concurrent_bindings_merge_and_recycled_identity_is_not_live(tmp_path):
     assert not server_process.service_binding_is_live(stale)
 
 
-_MODEL_SERVER = '''from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
+_MODEL_SERVER = f'''from http.server import BaseHTTPRequestHandler, HTTPServer
+import os, socketserver
 class LoopbackHTTPServer(HTTPServer):
  def server_bind(self):
   # Numeric loopback fixture: no hostname semantics, skip HTTPServer's reverse DNS.
@@ -124,8 +125,11 @@ class LoopbackHTTPServer(HTTPServer):
   self.server_name, self.server_port = self.server_address[:2]
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
-  body=b'{"data":[{"id":"fixture","context_window":4096}]}'
-  self.send_response(200); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+  body=b'{{"data":[{{"id":"fixture","context_window":4096}}]}}'
+  self.send_response(200)
+  if launch_id := os.environ.get({LOCAL_LAUNCH_ENV!r}):
+   self.send_header({LOCAL_LAUNCH_HEADER!r}, launch_id)
+  self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
  def log_message(self,*args): pass
 server=LoopbackHTTPServer(('127.0.0.1',0),Handler)
 print(server.server_address[1],flush=True)
@@ -167,7 +171,9 @@ def test_child_observes_late_local_model_health_binding_and_stop(tmp_path, monke
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     model_script = tmp_path / "model_fixture.py"
     model_script.write_text(_MODEL_SERVER, encoding="utf-8")
+    launch_id = "fixture-launch"
     model = subprocess.Popen([sys.executable, str(model_script)], stdout=subprocess.PIPE,
+                             env={**os.environ, LOCAL_LAUNCH_ENV: launch_id},
                              text=True, **subprocess_new_group_kwargs())
     reader_code = """import json,sys
 from pathlib import Path
@@ -185,8 +191,8 @@ for line in sys.stdin:
             reader.stdin.write("read\n"); reader.stdin.flush()
             return json.loads(reader.stdout.readline())
         assert read() == {}
-        manager._proc, manager._port = model, port
-        manager._wait_for_healthy(timeout=2)
+        manager._proc, manager._port, manager._status = model, port, "loading"
+        manager._wait_for_healthy(proc=model, port=port, launch_id=launch_id, timeout=2)
         assert manager.is_running
         bound = read()["local_model"]
         assert bound["pid"] == model.pid and bound["port"] == port

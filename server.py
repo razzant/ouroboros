@@ -88,7 +88,6 @@ from ouroboros.server_liveness import (  # noqa: F401
 from ouroboros.server_liveness import BOOT, start_boot_coordinator, wait_event
 from ouroboros.server_maintenance import (  # noqa: F401
     bind_body_lifespan,
-    _migrate_startup_cancel_latches,
     _startup_worker_pids,
     _installed_skill_names,
     _periodic_supervisor_maintenance,
@@ -181,7 +180,7 @@ from ouroboros.config import (
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     has_startup_ready_provider,
-    needs_local_model_autostart,
+    local_model_boot_decision,
     setup_remote_if_configured,
     ws_heartbeat_loop,
 )
@@ -1129,7 +1128,7 @@ async def lifespan(app):
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
-    has_local = needs_local_model_autostart(settings)
+    has_local, local_grant = local_model_boot_decision(settings)  # the receipt is minted here: the coordinator stages the autostart later
 
     if not pytest_default_real_data_dir:
         store_switch.start(lifespan_drive_root, repo_dir=REPO_DIR, request_restart=_request_restart_exit)  # a pending switch, then the import owner off the ready path (P1)
@@ -1230,7 +1229,7 @@ async def lifespan(app):
         ("projects", lambda: live and server_boot.reconcile_projects(lifespan_drive_root)),
         ("log_listings", lambda: live and server_boot.remember_log_listings(lifespan_drive_root)),
         ("services", lambda: server_boot.start_background_services(
-            settings, local_model=has_local, boot_managed_update=_boot_managed_update_tasks, warm_daemon=live)),
+            settings, local_model=has_local, local_grant=local_grant, boot_managed_update=_boot_managed_update_tasks, warm_daemon=live)),
         ("host_service", lambda: server_boot.on_loop(_event_loop, server_boot.serve_host_service(lifespan_drive_root, boot))),
         ("review_jobs", lambda: live and server_boot.reconcile_review_jobs(lifespan_drive_root)),
         ("extensions", _extensions),
@@ -1327,9 +1326,10 @@ async def lifespan(app):
 
         try:
             from ouroboros.local_model import get_manager
-            get_manager().stop_server()
+            if (manager := get_manager(create=False)) is not None and not await asyncio.to_thread(manager.stop_server):
+                log.warning("Shutdown: local model exit is not confirmed")
         except Exception:
-            pass
+            log.warning("Shutdown: local model stop failed", exc_info=True)
         stop_owned_work(lifespan_drive_root)  # the generation's one bounded stop; a started one is joined
         server_boot.stop_extension_loop()
         try:
