@@ -1081,7 +1081,9 @@ def _record_panic_start(state: dict, root, identity: dict) -> None:
 
 
 def auto_resume_after_restart() -> None:
-    """Consume boot doors only after their work stops and controls are durable."""
+    """Consume boot doors only after their work stops and controls are durable. A Panic input: its start is
+    recorded first (``_record_panic_start``), then the holds' barrier, the disabled controls, the
+    ``panic_ingress_receipt``, and only then the flag is unlinked."""
     try:
         from ouroboros.delegate_recovery import import_legacy_restart, pending_owner_restart, consume_owner_restart
         from ouroboros.installation_stop import (PANIC_RECEIPT, panic_input, panic_received,

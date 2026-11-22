@@ -24,7 +24,11 @@ def control_actor() -> dict:
 
 @contextmanager
 def accepting_unknown(ids, text: str = ""):
-    """Bind, for this one call, the named held calls (operation or model attempt ids) to go on past."""
+    """Bind, for this one call, the named held calls (operation or model attempt ids) to go on past.
+
+    After the grant, lookup-only recovery keeps spend and effects unknown, the first active status re-holds
+    dispatch and delivery, a cascade Stop awaits binding and verified closure, terminals collect, and
+    delivery-parked answers reread owner input after waiting."""
     named = sorted({str(value) for value in ids or () if value})
     token = _ACCEPT_UNKNOWN.set({"ids": named, "text": str(text or "").strip()} if named else None)
     try:
