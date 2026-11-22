@@ -107,7 +107,10 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    visible (an unconfirmed Panic; a message not confirmed as saved, beside Send again);
    provenance, caveats, codes and any gap (`not recorded`, `not declared`,
    `not confirmed`) that changes neither are facts of the record and of details that pointer,
-   touch and keyboard open, never hover alone. A thing with an accepted name in the field keeps
+   touch and keyboard open, never hover alone. A host notice says what happened in one phrase of
+   owner words, then the owner's next step when there is one (a control, a place in Settings, or that
+   Ouroboros retries by itself once the retry is scheduled); its codes, raw errors, paths, worker slots
+   and commits are its details, behind Details for the owner and beside the phrase for the mind. A thing with an accepted name in the field keeps
    it (subagents, MCP servers, context window, max output tokens, worktrees, fallback models), the
    product's own things keep the product's names (rooms, places, wake-ups), and a plainer paraphrase
    replaces neither. Clarity comes from placement, never from
@@ -1144,7 +1147,8 @@ runtime's state (a settings change saved outside the app: one
 `settings_changed` row per save, what changed and who changed it; the app's own
 writes publish none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
-paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
+paragraph or text written for a model, and a notice's phrase, step and details follow principle 7
+(`ouroboros/host_notice.py`). `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
 its counted producer sites. Room status carries connection loss; reconnecting adds
 no feed row or counter in Main or a Project (`tests/test_reconnect_feed_browser.py`).
@@ -1156,7 +1160,8 @@ and System voice at render from a translation memory the install generated or
 imported, never from a dictionary in the repository: status words, cause
 sentences and question status by their stable code (`tr`), labels and help copy
 by their rendered English (the overlay), a relayed host sentence by its exact
-text (`tx`). Model-authored text, owner-supplied names, logs and code are never
+text (`tx`); a host notice's phrase by its text and its step by its code, joined by the host
+into the one line the window, Telegram and Copy say. Model-authored text, owner-supplied names, logs and code are never
 translated, and durable rows keep the English with their typed codes; a string
 the memory lacks stays English, never blank or guessed.
 
@@ -1185,10 +1190,10 @@ exception, not a pattern for new notices.
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
 words and the tone primitive. Functional icons keep state and accessible names.
-Known typed host prefixes are hidden only at display (`host_notice_text.js`);
-unlisted or ambiguous records remain literal. History, keys, exports and the
-existing Copy input are unchanged (Copy already uses translated text for two
-notice types). Authored text, quoted evidence, names, documents, logs and author
+A host notice writes no pictograph. For rows written before notices, known typed host prefixes
+are hidden only at display (`host_notice_text.js`) and unlisted or ambiguous records remain
+literal. History, keys and exports keep the stored bytes; Copy keeps a notice's line and, for two
+older notice types, their translated text. Authored text, quoted evidence, names, documents, logs and author
 widget icons/interiors are not chrome and keep their characters.
 
 Main's empty-chat greeting speaks in neither voice: it is host copy in a quiet

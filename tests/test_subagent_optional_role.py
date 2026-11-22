@@ -130,7 +130,7 @@ def test_role_reaches_child_prompt_and_durable_lifecycle_without_inference(tmp_p
     else:
         assert "[SUBAGENT ROLE]" not in prompt
     running = next(row for row in event_queue.queue if row.get("system_type") == "subagent_started")
-    assert running["text"] == f"▶️ Subagent {tid} running{suffix}."
+    assert running["text"] == f"Subagent running{suffix}." and running["progress_meta"]["notice"]["details"] == f"task {tid}"
     assert running["progress_meta"]["subagent_role"] == role
     supervisor.RUNNING[tid] = {"task": task}
     events._handle_send_message(running, supervisor)
@@ -148,7 +148,7 @@ def test_role_reaches_child_prompt_and_durable_lifecycle_without_inference(tmp_p
         "_files_prepared_attempt": int(task.get("_attempt") or 1),
     }, supervisor)
     terminal = next(row for row in supervisor.sent if row[2].get("system_type") == "subagent_terminal_notice")
-    assert terminal[1] == f"✅ Subagent {tid} completed{suffix}."
+    assert terminal[1] == f"Subagent completed{suffix}." and terminal[2]["progress_meta"]["notice"]["details"] == f"task {tid}"
     assert terminal[2]["progress_meta"]["subagent_role"] == role
     _assert_role(load_task_result(drive, tid), role)
 

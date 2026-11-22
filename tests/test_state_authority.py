@@ -131,7 +131,7 @@ def test_evolution_after_a_recovery_waits_for_the_owner_then_resumes(root, monke
     monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
     queue.enqueue_evolution_task_if_needed()
     assert pending == []  # a recovered "enabled" is not the owner's current decision
-    assert owner_evolution_start("resume", source="owner_chat") == ""
+    assert owner_evolution_start("resume", source="owner_chat") == {}
     queue.enqueue_evolution_task_if_needed()
     # The witnessed write-once binding survives; Start confirms evolution only.
     assert [task["chat_id"] for task in pending] == [7]
@@ -254,7 +254,7 @@ def test_stop_during_an_outage_outlives_the_primary_coming_back(root, monkeypatc
     assert lifecycle.evolution_stop_reason() == "stop_intent"
     assert not lifecycle.start_evolution_campaign("agent", source="agent_tool")
     assert lifecycle._read_evolution_campaign()["status"] == "active"  # no invented terminal status
-    assert owner_evolution_start("resume", source="owner_chat") == ""
+    assert owner_evolution_start("resume", source="owner_chat") == {}
     assert lifecycle.evolution_stop_reason() == "" and "stop_intent" not in lifecycle._read_evolution_campaign()
     assert state.control_is(state.load_state(), "evolution_mode_enabled", True)
 

@@ -1,6 +1,5 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` — the replaceable-client envelopes
- *  `api_types.js` indexes: the served main interface, the setup bootstrap, the settings writers' refusal,
- *  completion readback, the auth gate's JSON login and the `GET /api/contract` document. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.client_contracts` and `history_contracts` that `api_types.js` indexes: the served
+ *  interface, setup bootstrap, settings writers' refusal, completion readback, JSON login, `GET /api/contract` and chat history rows. */
 /**
  * One completion attempt read back: saved is true while the settings document holds its write, false when
  * refused before writing, null when unconfirmed. Only `receipt` (its own success envelope) completes.
@@ -492,6 +491,7 @@
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
+ * @property {import('./api_types.js').HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
@@ -717,10 +717,9 @@
 /**
  * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
  * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
- * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
- * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
- * reading.
- * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * how) or a host notice's line (`notice`), a photo, video or file's `caption` and a file's `filename`, a links row's
+ * `title` and `actions`, a question's `quiz` card, a Project lifecycle row's answer and ending; whether its words
+ * contain the query is the client's reading. `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
  * @typedef {Object} ChatSearchCandidate
  * @property {string} history_id
  * @property {string} row_address
@@ -747,6 +746,7 @@
  * @property {string=} task_name
  * @property {string=} completion_reason
  * @property {Object=} completion_notice
+ * @property {import('./api_types.js').HostNotice=} notice  // its line is the words the bubble draws; its details are not searched
  */
 
 /**

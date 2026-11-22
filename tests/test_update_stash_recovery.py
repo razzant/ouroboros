@@ -226,6 +226,9 @@ def test_real_conflict_census_and_stdout_are_recorded_before_cleanup_and_reach_n
     assert json.dumps(path) in result["stash_note"]
     assert "Git diagnostics:" in result["stash_note"]
     assert "git stash apply " + tx["stash_sha"] in result["stash_note"]
+    # RVD4 15: the owner's notice carries the exact command as its own one-line instruction, apart from Git's note.
+    notice = update_merge.boot_outcome_notice(result)["progress_meta"]["notice"]
+    assert (notice["step"], notice["instruction"]) == ("restore_kept_changes", "git stash apply " + tx["stash_sha"])
     assert _git(repo, "status", "--porcelain").stdout == ""
     assert tx["stash_sha"] in _git(repo, "stash", "list", "--format=%H").stdout
     event = next(row for row in _events(tmp_path) if row["type"] == "managed_update_stash_restore_failed")
@@ -319,6 +322,9 @@ def test_interrupted_restore_preserves_exact_stash_without_repin(tmp_path, monke
     assert result["stash_restore_status"] == "preserved" and "unconfirmed" in result["stash_note"]
     assert "git stash apply " + tx["stash_sha"] in result["stash_note"]
     assert "rescue-local-" not in result["stash_note"]
+    # RVD4 15: an interrupted apply's notice asks a look at the current files before its exact command.
+    notice = update_merge.boot_outcome_notice(result)["progress_meta"]["notice"]
+    assert (notice["step"], notice["instruction"]) == ("inspect_then_restore_kept_changes", "git stash apply " + tx["stash_sha"])
     assert (repo / "late.txt").read_text(encoding="utf-8") == "later work\n"
     assert tx["stash_sha"] in _git(repo, "stash", "list", "--format=%H").stdout
     assert not update_merge.active_update_tx()

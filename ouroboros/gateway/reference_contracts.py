@@ -41,3 +41,16 @@ class ChatReferenceFields(TypedDict, total=False):
 
 class SharedRowFrame(TypedDict, total=False):
     also_rooms: list[int]  # a live chat frame of a row other Projects show too: those rooms (``room_appearances.frame_rooms``)
+
+
+class HostNotice(TypedDict, total=False):
+    """A host notice on a System row (``ouroboros/host_notice.py``): the row's ``text`` is its one phrase."""
+    code: str  # the notice's stable code
+    step: str  # the owner's next step, a key of host_notice.STEPS; absent = no step
+    details: str  # the raw facts behind Details
+    instruction: str  # one line the owner acts on, as written (a Git command); a reader without Details says it under the line
+    line: str  # phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
+
+
+class HostNoticeField(TypedDict, total=False):
+    notice: HostNotice  # a System row's host notice, the same on its live frame and its history row (DESIGN principle 7)

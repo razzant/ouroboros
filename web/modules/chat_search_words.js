@@ -108,7 +108,7 @@ export function candidateBox(candidate, doc) {
     if (owned.length) ownerAttachmentNames(words('chat-attachments', ''), owned);
     const { rendered, rich } = bubbleWords(text, role, { markdown, systemType, source: candidate.source || '',
         attachments: attachmentViews(owned), narration: candidate.narration,
-        textPlaceholder: candidate.text_placeholder === true });
+        textPlaceholder: candidate.text_placeholder === true, notice: candidate.notice });
     const message = words(rich ? 'message ui-rich-content' : 'message', rendered, rich);
     if (systemType === 'project_completion_summary' && candidate.project_id) {
         paintProjectEnding(message, { role, completionNotice: candidate.completion_notice || null,

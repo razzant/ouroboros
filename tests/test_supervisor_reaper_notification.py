@@ -111,8 +111,8 @@ def test_reaper_delivered_terminal_with_popped_running_row_still_notifies(
 
     lines = _outage_lines(sent)
     assert lines, "reaper-delivered provider-death terminal must notify the owner"
-    assert "NOT completed" in lines[0]
-    assert "inspect the task details before starting another run" in lines[0]
+    assert "stopped this task" in lines[0] and "rootB" not in lines[0], "words in the row, its id in the notice"
+    assert lines[0].endswith("workspace files are kept."), "its step rides its notice, never its words"
     assert "re-run" not in lines[0]
     assert "resume" not in lines[0]
 
@@ -187,7 +187,7 @@ def test_subagent_provider_death_never_pings_the_owner(sent_and_ctx):
     )
 
     assert not _outage_lines(sent)
-    assert [text for _cid, text in sent if "Subagent kidE failed" in text]
+    assert [text for _cid, text in sent if text == "Subagent failed."]  # its id is the notice's detail
 
 
 def test_provider_incident_is_system_unkeyed_and_host_salvage_suppresses_duplicate(
@@ -215,14 +215,11 @@ def test_provider_incident_is_system_unkeyed_and_host_salvage_suppresses_duplica
     )
     assert len(sent) == 1
     _chat, text, kwargs = sent[0]
-    assert text == (
-        "🔌 Task root-origin was NOT completed.\n\n"
-        "A model-provider outage stopped this task. Partial work and workspace files "
-        "are preserved; inspect the task details before starting another run.\n\n"
-        "Plan review was still open when the outage forced finalization; "
-        "its details remain in the task."
-    )
-    assert kwargs == {"role": "system", "system_type": "terminal_incident"}
+    assert text == "A model-provider outage stopped this task; its partial work and workspace files are kept."
+    # One stable phrase and its step; the task's id and the open plan review are the notice's details (RV4 10).
+    assert kwargs == {"role": "system", "system_type": "terminal_incident", "progress_meta": {"notice": {
+        "code": "provider_outage", "step": "inspect_task", "details": "task root-origin\n\nPlan review was still open "
+        "when the outage forced finalization; its details remain in the task."}}}
     assert "task_id" not in kwargs
 
 

@@ -16,6 +16,7 @@ import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createTextBubbles } from './chat_text_bubble.js';
+import { noticeLine } from './host_notice_text.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
@@ -1073,9 +1074,11 @@ export function createChatInstance({
                     changed = Boolean(record.reviewController.update(pointer.group));
                 } else if (showPointerAck) {
                     const ack = String(row?.text || row?.content || '').trim();
+                    // A notice is a System row (its line; the original job behind Details); an older row, a progress note.
+                    const said = Boolean(noticeLine(row));
                     if (ack) changed = Boolean(addMessage(
-                        ack, 'assistant', !!row?.markdown, rawTs || row?.ts || null,
-                        true, { systemType: 'lifecycle_pointer' },
+                        ack, said ? 'system' : 'assistant', !said && !!row?.markdown, rawTs || row?.ts || null,
+                        !said, { systemType: 'lifecycle_pointer', ...(said ? { reply: row } : {}) },
                     ));
                 }
                 return changed;

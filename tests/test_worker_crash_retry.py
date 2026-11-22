@@ -613,6 +613,8 @@ def test_crash_toast_for_a_bound_task_goes_to_its_project_chat(tmp_path):
 
     incident_notice.assert_called_once()
     assert incident_notice.call_args[0][0] == 5151
+    # A crash that exhausted its retries still offers its manual step (RV4 11: "Please try again." did not vanish).
+    assert incident_notice.call_args.kwargs["progress_meta"]["notice"]["step"] == "try_again"
 
 
 def test_deep_self_review_crash_emits_task_done_event(tmp_path):
@@ -985,7 +987,8 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     else:
         job['task']['type'] = job['meta']['task']['type'] = 'evolution'
     monkeypatch.setattr(W, 'load_state', lambda: {'evolution_mode_enabled': False})
-    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **_k: None)
+    sent = []
+    monkeypatch.setattr(W, 'send_with_budget', lambda *_a, **kw: sent.append(kw))
     monkeypatch.setattr(W, 'reconstruct_task_cost', lambda *_a, **_k: {
         'cost_accounting_status': 'available', 'cost_final': False,
         'accounted_upper_bound_usd': 12.5, 'rounds': 7,
@@ -996,6 +999,9 @@ def test_existing_nonretry_reasons_and_cost_projection_survive_handoff(tmp_path,
     assert result['reason_code'] == ('evolution_stopped_no_retry' if cause == 'evolution_stopped'
                                      else 'worker_crash_owner_wait')
     assert result['status'] == ('cancelled' if cause == 'evolution_stopped' else 'failed')
+    if cause != 'evolution_stopped':  # RVD4 11: past an owner-wait checkpoint a repeat could redo completed actions
+        [notice] = [kw['progress_meta']['notice'] for kw in sent if 'notice' in (kw.get('progress_meta') or {})]
+        assert notice['code'] == 'worker_crash_owner_wait' and 'step' not in notice
     done = events.get_nowait()
     assert done['accounted_upper_bound_usd'] == 12.5 and done['rounds'] == 7
     q.enqueue_task.assert_not_called()
@@ -1145,7 +1151,8 @@ def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry
 
     current = load_task_result(tmp_path, job["task_id"], strict=True)
     assert (current["status"], current["reason_code"]) == ("failed", "task_exception")
-    assert current["result"] == "⚠️ Error during processing: ValueError: predecessor plan source unavailable"
+    # The record keeps the raw error in a sentence (the parent's digest, the CLI); the row says the phrase.
+    assert current["result"] == "This task stopped on an unexpected error: ValueError: predecessor plan source unavailable"
     assert current["terminal_time"]["source"] == "executor_terminal" and current["terminal_time"]["occurred_at"]
     assert "platform-level" not in json.dumps(current, ensure_ascii=False)
     # A host-written text: delivered as a System row, never as the model's answer.

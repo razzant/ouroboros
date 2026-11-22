@@ -36,6 +36,7 @@ from ouroboros.gateway.history_paging import (
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
+from ouroboros.host_notice import phrase, view as notice_view
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_completion_facts import (
@@ -237,12 +238,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
         if len(synthesized) >= _ORIGIN_SYNTH_CAP:
             omitted = sum(later["origin_id"] not in emitted_origins for later in origin_rows[index + 1:])
             if omitted:
-                synthesized.append({
-                    "text": (
-                        f"⚠️ OMISSION NOTE: {omitted} more archived project origin "
-                        "message(s) not rendered; full copies live in "
-                        "state/project_task_bindings.json (source_text)."
-                    ),
+                text, said = phrase("origin_omission", "{n} more archived Project start message(s) are not shown here; their "
+                                    "full copies are kept.", details="state/project_task_bindings.json (source_text)", n=omitted)
+                synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
+                    "text": text, **notice_view({"text": text, **said}),
                     "role": "system", "ts": str(ref.get("ts") or ""),
                     "is_progress": False, "system_type": "origin_omission",
                     "markdown": False, "source": "", "sender_label": "",
@@ -853,10 +852,9 @@ def _collect_chat_rows(
             _copy_task_summary_metadata(rec, entry)
             # Lineage, the origin label, the host's card placement (card_row / card_row_id) and a late-review
             # row's evidence pointer (#1369, stored on that type only) replay verbatim; an absent key is omitted.
-            for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin", "card_row", "card_row_id",
-                          "card_row_revision", "late_evidence", "narration"):
-                if field in entry:
-                    rec[field] = entry[field]
+            rec.update({field: entry[field] for field in (*SUBAGENT_MESSAGE_FIELDS, "initiator", "continue_requester", "place_origin",
+                        "card_row", "card_row_id", "card_row_revision", "late_evidence", "narration") if field in entry})
+            rec.update(notice_view(entry))  # a host notice's step and details, and its line in the install's language
             combined.append(rec)
     except StoreMigrating:
         raise  # the endpoint's own typed 503 (the store is importing), never a disclosed gap
@@ -934,6 +932,7 @@ def _collect_progress_rows(
             for field in _PROGRESS_META_FIELDS:
                 if field in entry:
                     rec[field] = entry[field]
+            rec.update(notice_view(entry))
             # Keep the event's own attempt, including zero. The executor records it as a string.
             if observation := executor_observation_meta(rec.pop("executor_observation", None), task_id=rec["task_id"], task_attempt=attempt):
                 rec["executor_observation"] = observation
@@ -1056,10 +1055,10 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
         active = queue_snapshot().get("active")
         if isinstance(active, dict) and active.get("status") == "running":
             label = "stale" if active.get("stale") else "running"
-            detail = active.get("error") or active.get("message") or active.get("status") or ""
+            said = "" if active.get("error") else str(active.get("message") or "")  # a raw error: its notice's detail
             text = (
                 f"Skill {active.get('kind') or 'operation'}: `{active.get('target') or 'skill'}`"
-                f" — {label}{f' — {detail}' if detail else ''}"
+                f" — {label}{f' — {said}' if said else ''}"
             )
             lifecycle = dict(active)
             lifecycle["phase"] = label
@@ -1085,6 +1084,10 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
                 "lifecycle": lifecycle,
                 "lifecycle_virtual": True,
             }
+            if active.get("error"):  # the running job's raw error stays behind Details; the skill's name is never translated
+                row["text"], said = phrase("skill_operation_error", f"Skill {active.get('kind') or 'operation'}: `{{target}}` — "
+                                           f"{label}", details=str(active["error"]), target=active.get("target") or "skill")
+                row.update(notice_view({**row, **said}))
             if row_matches_thread(chat_id, row):
                 return row
     except Exception as exc:

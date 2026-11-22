@@ -697,8 +697,8 @@ def test_rollback_request_handler_runs_the_door_and_tells_the_owner(monkeypatch)
 
     def door(target, *, door, request_restart):
         doors.append((target, door))
-        assert request_restart() is True
-        return 200, {"status": "ok", "message": "authority switch recorded", "switch_deferred": True}
+        restarting = request_restart()  # the real door's payload says whether its restart was requested
+        return 200, {"status": "ok", "message": "authority switch recorded", "restarting": restarting, "switch_deferred": True}
 
     monkeypatch.setattr(control, "rollback_through_door", door)
     ctx = SimpleNamespace(request_restart=lambda: restarts.append(1), load_state=lambda: {"owner_chat_id": 7},
@@ -706,7 +706,10 @@ def test_rollback_request_handler_runs_the_door_and_tells_the_owner(monkeypatch)
     _handle_rollback_request({"type": "rollback_request", "target": "v7.6.0", "target_sha": "abc"}, ctx)
     assert done.wait(10)
     assert doors == [("v7.6.0", "vcs_rollback")] and restarts == [1]
-    assert sent[0][0] == 7 and "authority switch" in sent[0][1] and sent[0][2]["system_type"] == "rollback_notice"
+    # The phrase says what happened; the door's own message is the notice's detail (host notice, RV4 20).
+    assert sent[0][0] == 7 and sent[0][2]["system_type"] == "rollback_notice"
+    assert sent[0][1] == "Ouroboros recorded a rollback at its own request; the code switches as it restarts."
+    assert "authority switch recorded" in sent[0][2]["progress_meta"]["notice"]["details"]
 
 
 def test_rollback_request_handler_reports_a_fence_refusal_with_its_blockers(monkeypatch):
@@ -718,10 +721,11 @@ def test_rollback_request_handler_reports_a_fence_refusal_with_its_blockers(monk
                         lambda target, *, door, request_restart: (409, {"error": "writers active", "blockers": ["active:x"]}))
     ctx = SimpleNamespace(request_restart=lambda: pytest.fail("no restart on a refusal"),
                           load_state=lambda: {"owner_chat_id": 7},
-                          send_with_budget=lambda chat_id, text, **kw: sent.append(text) or done.set())
+                          send_with_budget=lambda chat_id, text, **kw: sent.append((text, kw)) or done.set())
     _handle_rollback_request({"type": "rollback_request", "target": "v7.6.0"}, ctx)
     assert done.wait(10)
-    assert "refused" in sent[0] and "active:x" in sent[0]
+    [(text, kw)] = sent
+    assert "refused" in text and "active:x" in kw["progress_meta"]["notice"]["details"]
 
 
 def test_rollback_request_is_registered_as_a_supervisor_event():
@@ -744,16 +748,17 @@ def test_boot_smoke_rollback_records_the_switch_for_a_store_less_pre_update_tree
     monkeypatch.setattr(update_merge, "rollback_managed_update",
                         lambda reason, *, reopen_writer_admission: resets.append((reason, reopen_writer_admission)) or (True, "reset"))
     tx = {"phase": "pending_boot_smoke", "pre_update_sha": old, "pre_update_branch": "ouroboros"}
-    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[0] is True
+    # Only the intent is recorded: the door says so, and the checkout moves at the restart exit.
+    assert update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")[::2] == (True, {"rollback_deferred": True})
     intent = store_switch.read_switch_intent(root)
     assert intent["door"] == "boot_smoke_rollback" and intent["target_sha"] == old and intent["target_ref"] == "ouroboros"
     assert intent["reason"] == "post_boot_smoke_failed" and resets == []
     # The second failure before the restart is a refusal, not a second intent.
-    ok, message = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
-    assert ok is False and "intent" in message
+    ok, message, facts = update_merge._boot_smoke_rollback(tx, "post_boot_smoke_failed")
+    assert ok is False and "intent" in message and facts == {}
     # A store-bearing pre-update tree resets now, as before the store; a missing SHA is the owner's own refusal.
-    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset")
-    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset")
+    assert update_merge._boot_smoke_rollback({"pre_update_sha": new}, "x") == (True, "reset", {})
+    assert update_merge._boot_smoke_rollback({}, "y") == (True, "reset", {})
     assert resets == [("x", False), ("y", False)]
 
 

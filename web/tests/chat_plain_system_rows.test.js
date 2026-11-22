@@ -738,8 +738,8 @@ test('render arm order and enhancement guard are pinned in source', () => {
     assert.match(bubbleSource, /: renderChatMarkdown\(painted, \{ onPlain: \(\) => \{ unparsed = true; \} \}\);/);
     // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`. The words are `bubbleWords`'s,
     // which the bubble and the room's search (chat_search_words.js) share.
-    assert.match(bubbleSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration \}, text\);/);
-    assert.match(bubbleSource, /= bubbleWords\(text, role, \{ markdown, systemType, source,\n\s+attachments, narration: opts\.narration, textPlaceholder: opts\.textPlaceholder, skillReview: opts\.skillReview \}\);/);
+    assert.match(bubbleSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration, notice \}, text\);/);
+    assert.match(bubbleSource, /= bubbleWords\(text, role, \{ markdown, systemType, source,\n\s+attachments, narration: opts\.narration, textPlaceholder: opts\.textPlaceholder, skillReview: opts\.skillReview, notice \}\);/);
     assert.match(bubbleSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
     // The enhancement pass skips exactly the plain-system case: the bubble says whether its words are rich, and
     // the room enhances only those once mounted.

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, ReplyExcerpt, SharedRowFrame
+from ouroboros.gateway.reference_contracts import ChatReferenceFields, HostNoticeField, ReplyExcerpt, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -135,7 +135,7 @@ class TransportMetadata(TypedDict, total=False):
     sender_label: str
 
 
-class ChatOutbound(ChatReferenceFields, SharedRowFrame):
+class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     """Outbound WS chat frame."""
 
     presence_contact: NotRequired[PresenceContact]

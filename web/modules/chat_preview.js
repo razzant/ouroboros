@@ -17,9 +17,10 @@
  * and not aborted (a room's own in chat.js fetchHistory, app.js's link preparation, a Place's in place_history.js),
  * removes the record and every copy painted in this document at once, selection or not (`previewsRefused`);
  * api_client.js clears the record on sign-in, the core's sign-in page on every sign-out, and the registry's word that
- * a Project is going away takes its rooms' rows (`forgetProjectPreviews`, app.js). Its one import is the feed's tie
- * rule, so the two orders cannot fork. */
+ * a Project is going away takes its rooms' rows (`forgetProjectPreviews`, app.js). Its imports are the feed's tie
+ * rule and the words a bubble draws (a host notice's line), so neither the order nor the words fork. */
 import { compareHistoryPosition } from './chat_history_replay.js';
+import { hostRowDisplayText } from './host_notice_text.js';
 
 export const PREVIEW_KEY = 'ouroboros.chat-preview.v1';
 const MAX_CHARS = 200000, MAX_ROOMS = 8, MAX_ROWS = 80;
@@ -117,7 +118,7 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
             const raw = row.ts || now, position = row.history_position;
             const at = typeof raw === 'number' ? raw : Date.parse(String(raw));
             const source = position ? String(position.source) : '';
-            return { id: String(row.history_id), role: row.role, text: row.text, speaker: label(row.role, false,
+            return { id: String(row.history_id), role: row.role, text: hostRowDisplayText(row), speaker: label(row.role, false,
                 row.system_type, { source: row.source, senderLabel: row.sender_label, initiator: row.initiator }),
             ...(Number.isFinite(at) ? { at } : {}), ...(source ? { pos: [source, String(position.offset)] } : {}) };
         });

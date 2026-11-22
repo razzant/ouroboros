@@ -644,17 +644,20 @@ def _noticed_bootstrap(safe_restart_fn):
         if not ok or fell_back:
             headline = (str(msg).splitlines() or ["no detail"])[0]
             kept = headline.partition(": ")[2]  # after "Failed checkout <branch>"
-            text = (f"Startup fell back to the recovery point ({headline.rpartition(' ')[2]}): the working branch "
-                    "did not pass its import test and keeps that code for repair" if fell_back
-                    else f"Startup kept the current files: {kept}" if kept.startswith("Reset blocked (")
-                    else f"Startup bootstrap failed: {headline}")
+            # One phrase; Git's headline (its commit, branch and blocked paths) is the notice's detail.
+            text = ("Startup fell back to the recovery point: the working branch did not pass its import test and "
+                    "keeps that code for repair." if fell_back
+                    else "Startup kept the current files to protect local changes." if kept.startswith("Reset blocked (")
+                    else "Startup could not prepare this code.")
             try:
+                from ouroboros.host_notice import fields
                 from supervisor.message_bus import notification_chat_route, send_with_budget
                 from supervisor.state import load_state
 
                 owner_chat = notification_chat_route(load_state().get("owner_chat_id"))
                 if owner_chat is not None:
-                    send_with_budget(owner_chat, text, role="system", system_type="startup_notice")
+                    send_with_budget(owner_chat, text, role="system", system_type="startup_notice",
+                                     progress_meta=fields("startup_bootstrap", details=headline))
             except Exception:
                 log.warning("Bootstrap failure notice was not delivered", exc_info=True)
         return ok, msg

@@ -20,6 +20,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
+from ouroboros.host_notice import phrase
 from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
@@ -94,8 +95,8 @@ def _finished_with_warnings(
 
 def _completed_lifecycle_display(
     task_done_event: Dict[str, Any], result: Dict[str, Any] | None = None,
-) -> tuple[str, str] | None:
-    """Icon and verb for a `completed` lifecycle whose OUTCOME is not clean.
+) -> str | None:
+    """The verb for a `completed` lifecycle whose OUTCOME is not clean.
 
     #1087: the card and Telegram fold the axes into one phase; the chat line
     must speak the same word. A completed lifecycle can still end `error` (a
@@ -110,11 +111,11 @@ def _completed_lifecycle_display(
     record = result if isinstance(result, dict) else {}
     phase = outcome_phase(record, task_done_event)
     if phase == "error":
-        return "❌", "finished with a failed outcome"
+        return "finished with a failed outcome"
     if phase == "cancelled":
-        return "⏹", "stopped"
+        return "stopped"
     if _finished_with_warnings(task_done_event, record):
-        return "⚠️", "finished with warnings"
+        return "finished with warnings"
     return None
 
 
@@ -463,19 +464,17 @@ def _finish_task_done_dispatch(
                 or STATUS_COMPLETED
             )
             status_display = {
-                STATUS_COMPLETED: ("✅", "completed", "completed"),
-                STATUS_FAILED: ("❌", "failed", "failed"),
-                STATUS_REJECTED_DUPLICATE: ("⚠️", "rejected", "rejected"),
-                STATUS_CANCELLED: ("⏹️", STATUS_CANCELLED, STATUS_CANCELLED),
-                STATUS_INTERRUPTED: ("⏹️", STATUS_INTERRUPTED, STATUS_INTERRUPTED),
-            }.get(status, ("ℹ️", status or "done", status or "finished"))
-            icon, subagent_event, verb = status_display
+                STATUS_COMPLETED: ("completed", "completed"),
+                STATUS_FAILED: ("failed", "failed"),
+                STATUS_REJECTED_DUPLICATE: ("rejected", "rejected"),
+                STATUS_CANCELLED: (STATUS_CANCELLED, STATUS_CANCELLED),
+                STATUS_INTERRUPTED: (STATUS_INTERRUPTED, STATUS_INTERRUPTED),
+            }.get(status, (status or "done", status or "finished"))
+            subagent_event, verb = status_display
             if status == STATUS_COMPLETED:
-                # Icon and verb only: `subagent_event` and progress_meta `status`
-                # stay the lifecycle values every card and Telegram consumer keys on.
-                display = _completed_lifecycle_display(task_done_event, effective_result)
-                if display:
-                    icon, verb = display
+                # The verb only: `subagent_event` and progress_meta `status` stay the
+                # lifecycle values every card and Telegram consumer keys on.
+                verb = _completed_lifecycle_display(task_done_event, effective_result) or verb
             result_text = str(effective_result.get("result") or "")
             trace_text = str(effective_result.get("trace_summary") or "")
             constraint = effective_result.get("task_constraint")
@@ -550,9 +549,13 @@ def _finish_task_done_dispatch(
                 progress_meta["review_projection"] = task_done_event["review_projection"]
             if "model_execution" in task_done_event:
                 progress_meta["model_execution"] = task_done_event["model_execution"]
+            # Its id is a detail, never its words; its role is put back as written, never translated.
+            text, said = phrase("subagent_finished", f"Subagent {verb} ({{role}})." if role_suffix else f"Subagent {verb}.",
+                                details=f"task {task_id}", **({"role": role} if role_suffix else {}))
+            progress_meta.update(said)
             ctx.send_with_budget(
                 chat_id,
-                f"{icon} Subagent {task_id} {verb}{role_suffix}.",
+                text,
                 is_progress=True,
                 task_id=str(task_id or ""),
                 progress_meta=progress_meta,

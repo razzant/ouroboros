@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.host_notice import mind_text
 from tests._evolution_state_shared import _patch_commit_seam
 
 
@@ -625,7 +626,8 @@ def test_promote_to_stable_rechecks_evolution_claim_without_changing_normal_flow
         BRANCH_DEV="ouroboros",
         BRANCH_STABLE="ouroboros-stable",
         load_state=lambda: {"owner_chat_id": 1},
-        send_with_budget=lambda chat_id, message, **kw: sent.append(message),
+        # What a reader is told: the phrase, then its raw details (host_notice).
+        send_with_budget=lambda chat_id, message, **kw: sent.append(message + mind_text(kw.get("progress_meta") or {})),
     )
     monkeypatch.setattr(
         evolution_lifecycle,
