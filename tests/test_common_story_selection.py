@@ -680,8 +680,8 @@ def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_an
     """The proposal read refits my story now and with the selection as the next start of this task's one captured
     frame (``memory_floor.counterfactual_starts``): a long Main page an account would tell keeps Max out now and lets
     it in with the selection. The read writes nothing, and the production start fit agrees with both arms: the
-    captured view starts in Max with chapter maps, and after the real selection a fresh capture in the same frame
-    starts Max with the whole books."""
+    captured view starts in Low, temporarily, for the window, and after the real selection a fresh capture in the
+    same frame starts Max with the whole books."""
     from ouroboros import artifacts
     from tests import _memory_scale_fixture as scale
 
@@ -701,10 +701,10 @@ def test_the_proposal_fits_the_next_start_now_and_with_it_in_this_tasks_frame_an
     plan = scale.build(tmp_path, monkeypatch, window=found, snap=captured)
     _pages, read = _proposal_with(tmp_path, plan, target_id=g, replaces=[long])
     assert [re.search(rf"- {name}: starts ([^;]+);", read)[1] for name in ("now", "with this selection")] == [
-        "Max with chapter maps", "Max"]
-    assert "- now: starts Max with chapter maps; Max room crowded: window " in read
+        "Low, temporarily, for the window", "Max"]
+    assert "- now: starts Low, temporarily, for the window; Max room lost, cause memory: window " in read
     assert plan.initial_mode == "low"  # the production start of the captured view is the "now" arm: chapter maps
-    assert "This task started in Max with chapter maps (its start projection, a separate fact" in read
+    assert "This task started in Low, temporarily, for the window (its start projection, a separate fact" in read
     files, views, capture = tree(tmp_path), [], mv.capture_memory_view
     monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **kw: pytest.fail("the read wrote"))
     monkeypatch.setattr(mv, "capture_memory_view", lambda *a, **kw: (views.append(a[2]), capture(*a, **kw))[1])

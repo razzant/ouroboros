@@ -927,7 +927,7 @@ def _capture_context_core(
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
     skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
     if always_on := always_in_context_section(skills or []):  # a failure (empty, or None) is no skills here
-        semi_stable_parts.append(always_on)
+        semi_stable_parts.append(HostSection("always_on_skills", always_on))  # skills the request carries (max_room_fact)
     from ouroboros.safety_config import owner_rules_section
     semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole

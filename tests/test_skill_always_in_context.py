@@ -166,6 +166,9 @@ def test_children_get_it_unless_their_inputs_are_declared(tmp_path, selection, d
         child["task_contract"]["input_sources"] = selection
     core = context._capture_context_core(env, memory, child, None, None)
     assert ("KEPT_SENTINEL" in core.semi_stable_text) is delivered
+    # Its own named section: skills content the request carries, never core (``memory_floor.max_room_fact``)
+    assert [part.section_id for part in core.semi_stable_sections if "KEPT_SENTINEL" in part] == (
+        ["always_on_skills"] if delivered else [])
     assert "KEPT_SENTINEL" not in core.dynamic_text + core.dynamic_head_text
 
 

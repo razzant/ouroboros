@@ -1175,7 +1175,7 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
     line = context_view_facts.memory_facts(shaped, "low")
     assert f"; shown only by address: {cut}; held note heads: {held:,} tokens stand whole; marks in view 0" in line
     # Where the window took nothing from memory, or without held heads, the line is what it was.
-    assert "held note heads" not in context_view_facts.memory_facts(roomy, "low")
+    assert "held note heads:" not in context_view_facts.memory_facts(roomy, "low")  # the fact, not the measure's part
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         unheld = replace(_core(world), memory_view_json=captured.memory_view_json)
