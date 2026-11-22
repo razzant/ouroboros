@@ -11,21 +11,20 @@ jobs:
     env:
       PRODUCT: d68b232c60e1895b6b5aa7c18eb1e99d55f79325
       BASE: 18af9c0f67059645c901b4f90a62759f15a729b7
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/browsers
-      PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
       OUROBOROS_RUN_UI_SMOKE: '1'
       OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 3
+          fetch-depth: 4
           persist-credentials: false
       - name: Check the three input trees
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "$PRODUCT"
-          test "$(git rev-parse HEAD^^)" = "$BASE"
-          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/ui-browser-push.yml
+          git merge-base --is-ancestor "$PRODUCT" HEAD
+          test "$(git rev-parse "$PRODUCT^")" = "$BASE"
+          test "$(git diff --name-only "$PRODUCT" HEAD)" = .github/workflows/ui-browser-push.yml
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s/browsers\nPLAYWRIGHT_NODEJS_PATH=%s/node-standalone/bin/node\n' "$RUNNER_TEMP" "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           test "$(git diff --name-only "$BASE" "$PRODUCT")" = tests/test_project_work_card_browser.py
           git checkout --detach "$BASE"
           mkdir -p "$RUNNER_TEMP/proof"
