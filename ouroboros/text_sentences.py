@@ -11,6 +11,11 @@ def first_sentence(text: str) -> str:
     return _STOP.split(str(text).strip(), maxsplit=1)[0]
 
 
+def sentences(text: str) -> list[str]:
+    """``text`` split at every stop the openings read (the connections map factors a server's shared sentences by it)."""
+    return _STOP.split(str(text).strip())
+
+
 def first_whole_sentence(text: str) -> str:
     """The opening through the first stop that ends a sentence, for text whose line would mislead if cut inside one
     (an MCP tool's description in the connections map).

@@ -160,6 +160,8 @@ def test_shared_text_factors_only_whole_sentences_every_description_repeats():
     assert shared_text(["A. B. C.", "A. D. C."]) == ("A.", "C.")
     assert shared_text(["Get one.", "Get two."]) == ("", "")
     assert shared_text(["Only one tool."]) == ("", "")
+    # The owner's stops, CJK ones included: a shared opening goes to the header and each row keeps its own purpose.
+    assert shared_text(["仅供内部使用。 按标题查找工单。", "仅供内部使用。 按编号关闭工单。"]) == ("仅供内部使用。", "")
 
 
 def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their_bytes(registry, monkeypatch):
@@ -659,6 +661,19 @@ def test_an_integrating_focus_reads_first_sentences_and_the_listing_returns_the_
     resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
     assert _LINK_TYPES in registry.execute("list_available_tools", {"namespace": "mcp_slack"})  # the rest, one call away
+
+
+def test_a_shared_opening_in_any_script_goes_to_the_header_and_each_row_keeps_its_own_purpose(registry):
+    """The map factors a server's shared sentences by the same stops its lines end at: an opening every description
+    repeats, here closed by a CJK stop, is shown once, and each row shows its own first sentence, not the shared one."""
+    schema = {"type": "object", "properties": {}}
+    rows = [{"name": "lookup", "description": "仅供内部使用。 按标题查找工单。 返回前十条。", "input_schema": schema},
+            {"name": "resolve", "description": "仅供内部使用。 按编号关闭工单。 需要管理员。", "input_schema": schema}]
+    _servers(listing={"gitlab": rows, "slack": SLACK})
+    full, _ = connection_views(registry, helper=False)
+    assert "Every tool description begins: 仅供内部使用。\n" in full
+    assert "\n- lookup: 按标题查找工单。\n" in full and "\n- resolve: 按编号关闭工单。\n" in full
+    assert "返回前十条" not in full and "需要管理员" not in full
 
 
 def test_settings_weighs_the_map_an_integrating_focus_reads(registry):

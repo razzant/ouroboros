@@ -103,7 +103,8 @@ _WHOLE_SENTENCES = [
     ("Get one. Get two.", "Get one."),
     ("Get unread messages across all channels.", "Get unread messages across all channels."),
     ("Add or update a comment on a Jira issue", "Add or update a comment on a Jira issue"),
-    (_INITIAL_RUN + "End. Next.", _INITIAL_RUN + "End."),  # each stop looks back four characters, never at the prefix
+    # Each stop looks back four characters, never at the prefix; the id keeps the node name short (Windows caps it).
+    pytest.param(_INITIAL_RUN + "End. Next.", _INITIAL_RUN + "End.", id="a-long-run-of-initials"),
 ]
 
 
