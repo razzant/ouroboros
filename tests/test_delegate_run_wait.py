@@ -963,6 +963,10 @@ def test_a_runs_applied_access_is_compared_with_its_own_recorded_request(monkeyp
     assert run_result_line(ctx, started_only, derived) == ""
     assert run_result_line(ctx, started_only, {"requested": "readonly", "effective": "workspace_write"}) == (
         "access applied workspace_write, requested readonly [observed]")
+    both = SimpleNamespace(run_id="run-2", access="readonly", request_event={"request": {"access": "workspace_write"}})
+    assert run_result_line(ctx, both, {"effective": "workspace_write"}) == "", "the body is read before STARTED"
+    assert run_result_line(ctx, both, {"effective": "readonly"}) == (
+        "access applied readonly, requested workspace_write [observed]")
     old = SimpleNamespace(run_id="run-2", access="", request_event={})
     assert run_result_line(ctx, old, derived) == (
         "access applied readonly; this run's original request is not on record [observed]")
