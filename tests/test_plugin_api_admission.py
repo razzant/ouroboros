@@ -252,7 +252,10 @@ def test_builtin_trusted_basis_is_closed_to_fieldless_extensions(tmp_path):
 def test_builtin_reseed_with_unchanged_requested_sets_carries_grants(tmp_path, monkeypatch):
     """Owner «A» (§6.1-Δ): a bundled version bump with identical requested
     key/permission sets must not orphan the owner's grants (the telegram
-    precedent); a CHANGED requested set keeps the ordinary re-grant flow."""
+    precedent); a CHANGED requested set keeps the ordinary re-grant flow for what
+    it adds. Owner 1A (21.11, C10 consensus «carry»): the keys the installation was
+    granted and the manifest still declares follow the trusted re-seed, a newly
+    declared key is not granted by it."""
     import ouroboros.config as config
     from ouroboros.skill_builtin import install_builtin_skill, reseed_changed_builtins
     from ouroboros.skill_loader import load_skill, load_skill_grants, save_skill_grants
@@ -280,8 +283,12 @@ def test_builtin_reseed_with_unchanged_requested_sets_carries_grants(tmp_path, m
         tmp_path, "v3", plugin_api_line=api, version="0.3.0",
         extra_frontmatter="env_from_settings: [TELEGRAM_BOT_TOKEN, GITHUB_TOKEN]\n")) == 1
     third = load_skill(target, drive_root)
-    assert load_skill_grants(drive_root, "nativeext")["content_hash"] != third.content_hash, (
-        "a changed requested set must not silently carry old grants to the new hash"
+    from ouroboros.skill_loader import grant_status_for_skill
+
+    carried = grant_status_for_skill(drive_root, third)
+    assert carried["granted_keys"] == ["TELEGRAM_BOT_TOKEN"], "the granted, still declared key follows"
+    assert carried["missing_keys"] == ["GITHUB_TOKEN"] and carried["blocked"] is True, (
+        "a changed requested set must not silently grant what it adds"
     )
 
 

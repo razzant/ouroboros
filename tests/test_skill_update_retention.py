@@ -17,7 +17,7 @@ from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 from ouroboros.skill_source_catalog import tree_release_digest
 from tests._extension_loader_shared import extension_tool_answer, version_plugin
-from tests.test_skill_install_checks import registry_release, release  # noqa: F401  (fixtures)
+from tests.test_skill_install_checks import registry_release, release, set_mode  # noqa: F401  (fixtures)
 
 
 def _pending(release):  # noqa: F811
@@ -81,10 +81,14 @@ def test_clean_review_keeps_new_release_and_drops_durable_state(release):  # noq
     assert not (skill_state_dir(drive, "demo") / "update_backup.json").exists()
 
 
-def test_startup_restores_interrupted_update_and_leaves_running_review(release, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
+def test_startup_restores_interrupted_update_and_leaves_running_review(release, set_mode, monkeypatch, mode):  # noqa: F811
+    """An unfinished review of a review-each release is waited for while it runs and returned to the last accepted
+    release when it was interrupted, in every mode: Cyber Pro running the new bytes is no acceptance (05.10 D-A3)."""
     import os
     from ouroboros.utils import utc_now_iso
 
+    set_mode(mode)
     drive, _folder, _row, item = release
     previous, _ = _pending(release)
     job = skill_state_dir(drive, "demo") / "review_job.json"

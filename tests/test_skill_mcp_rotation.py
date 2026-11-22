@@ -113,9 +113,9 @@ def test_granted_value_rotation_reaches_worker_without_manual_refresh(installed,
         assert lister.discovery.wait(5)
 
 
-@pytest.mark.parametrize("gate", ["ready", "disabled", "mcp_disabled", "revoked", "unreviewed"])
+@pytest.mark.parametrize("gate", ["ready", "disabled", "mcp_disabled", "revoked", "revoked_covered", "unreviewed"])
 def test_rotation_does_not_relist_other_servers_or_unready_binding(installed, monkeypatch, gate):
-    from ouroboros.skill_loader import save_enabled, save_review_state, SkillReviewState
+    from ouroboros.skill_loader import save_enabled, save_review_state, save_skill_grants, SkillReviewState
 
     plain = {"id": "manual", "enabled": True, "transport": "stdio", "command": "unused"}
     remote = {"id": "remote", "enabled": True, "url": "https://example.test/mcp"}
@@ -133,8 +133,11 @@ def test_rotation_does_not_relist_other_servers_or_unready_binding(installed, mo
         save_enabled(installed.data, "weather", False)
     elif gate == "mcp_disabled":
         value["MCP_ENABLED"] = False
-    elif gate == "revoked":  # the owner's grant is gone (a record written later merges, never revokes)
+    elif gate in ("revoked", "revoked_covered"):  # the owner's grant is gone (a later write merges, never revokes)
         (installed.data / "state" / "skills" / "weather" / "grants.json").unlink()
+        if gate == "revoked_covered":  # an explicit decision that names the key and grants none of it
+            save_skill_grants(installed.data, "weather", [], content_hash=installed.revision,
+                              requested_keys=["WEATHER_API_KEY"])
     elif gate == "unreviewed":
         save_review_state(installed.data, "weather", SkillReviewState(status="pending", content_hash=installed.revision))
     _write(config.SETTINGS_PATH, {**value, "WEATHER_API_KEY": "key-two"})

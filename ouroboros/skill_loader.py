@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, canonical_skill_name, parse_skill_manifest_text
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.skill_grant_scope import REQUESTABLE_WHEN_ABSENT
 from ouroboros.contracts.schema_versions import with_schema_version
 # Peer-conflict projection lives in its own leaf (module-size gate); it is
 # re-exported here so every historical import site keeps working unchanged.
@@ -26,7 +27,7 @@ from ouroboros.skill_conflicts import (
     enabled_skill_conflicts,  # noqa: F401
     skill_conflict_status,  # noqa: F401
 )
-from ouroboros.skill_review_status import ACCEPTANCE_REASONS, STATUS_BLOCKERS, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, normalize_skill_review_status, skill_review_gate, status_from_findings
+from ouroboros.skill_review_status import STATUS_BLOCKERS, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, normalize_skill_review_status, skill_review_gate, status_from_findings
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 from ouroboros.review_records import validate_author_disposition
 from ouroboros.skill_schedule_suggestions import suggested_schedule_fields
@@ -632,9 +633,6 @@ def save_review_state(
     )
 
 
-REQUESTABLE_WHEN_ABSENT = frozenset({"TELEGRAM_BOT_TOKEN"})  # requested before Settings holds it
-
-
 def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str, Any]] = None) -> List[str]:
     """Return manifest-requested setting keys that require explicit owner grants.
 
@@ -694,17 +692,6 @@ def _unique_text(values: Any, *, upper: bool = False) -> List[str]:
     return out
 
 
-def _merge_allowed(*value_groups: Any, allowed: set[str], upper: bool = False) -> List[str]:
-    return [
-        item
-        for item in _unique_text(
-            (raw for group in value_groups for raw in (group or [])),
-            upper=upper,
-        )
-        if item in allowed
-    ]
-
-
 def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
     data = read_json_dict(skill_state_dir_path(drive_root, name) / GRANTS_FILENAME)
     if not isinstance(data, dict):
@@ -720,7 +707,8 @@ def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
         "requested_permissions": requested_permissions,
         "content_hash": str(data.get("content_hash") or ""),
         "updated_at": str(data.get("updated_at") or ""),
-        "install_identity": data.get("install_identity") if isinstance(data.get("install_identity"), dict) else None,
+        "permission_hash": str(data.get("permission_hash") or ""),
+        **{key: data[key] if isinstance(data.get(key), dict) else None for key in ("install_identity", "ended_identity")},
         "identity_ended_at": str(data.get("identity_ended_at") or ""),
     }
 
@@ -735,45 +723,25 @@ def save_skill_grants(
     granted_permissions: Optional[List[str]] = None,
     requested_permissions: Optional[List[str]] = None,
     install_identity: Optional[Dict[str, str]] = None,
+    scope: Optional[str] = None,
+    declared_keys: Optional[List[str]] = None,
 ) -> None:
-    """Persist grants, merging partial approvals for the same content hash (keys also for the same
-    ``install_identity``, ``skill_grant_scope``). Earlier approvals of items still requested stay: a key set
-    grown by saved Settings adds a missing key, never revokes another or grants it (``_merge_allowed`` keeps
-    only the current request). Without ``install_identity`` the record binds the exact bytes only."""
-    allowed = set(requested_core_setting_keys(requested_keys))
-    existing = load_skill_grants(drive_root, name)
-    persisted_match = str(existing.get("content_hash") or "") == str(content_hash or "")
-    same_install = bool(install_identity) and existing.get("install_identity") == install_identity
-    merged = _merge_allowed(
-        existing.get("granted_keys") if persisted_match or same_install else [],
-        granted_keys,
-        allowed=allowed,
-        upper=True,
-    )
-    allowed_permissions = set(requested_permissions or [])
-    existing_permissions = _merge_allowed(
-        existing.get("granted_permissions") if persisted_match else [],
-        granted_permissions,
-        allowed=allowed_permissions,
-    )
-    # Stamp at write (CPL4-C10): load_skill_grants normalizes to a fixed key
-    # set, so the stamp must be re-authored here rather than carried through
-    # the read-merge round trip.
-    atomic_write_json(
-        skill_state_dir(drive_root, name) / GRANTS_FILENAME,
-        with_schema_version(
-            {
-                "granted_keys": merged,
-                "requested_keys": sorted(allowed),
-                "granted_permissions": sorted(existing_permissions),
-                "requested_permissions": sorted(allowed_permissions),
-                "content_hash": str(content_hash or ""),
-                "updated_at": utc_now_iso(),
-                **({"install_identity": dict(install_identity)} if install_identity else {}),
-            },
-            SKILL_OWNER_STATE_SCHEMA_VERSION,
-        ),
-    )
+    """Persist grants (``skill_grant_scope.merged_record``): approvals of this installation (``scope``, else the
+    same content hash) stay, a write adds and never revokes, only the current request is recorded (a key Settings
+    gained later joins missing, never granted). ``granted_permissions=None`` leaves the last accepted version's
+    permissions as they were. Without ``install_identity`` the record binds the exact bytes only. Writers pass the
+    current request: an empty receipt (an empty request while a key was present) covers nothing, so that key is
+    pending, not revoked; a revocation deletes the record or names the key in a decision granting none of it."""
+    from ouroboros.skill_grant_scope import merged_record
+
+    record = merged_record(load_skill_grants(drive_root, name), granted_keys=granted_keys or [],
+                           allowed_keys=requested_core_setting_keys(requested_keys),
+                           granted_permissions=granted_permissions, allowed_permissions=requested_permissions or [],
+                           content_hash=content_hash, scope=scope, install_identity=install_identity,
+                           declared_keys=declared_keys)
+    # Stamp at write (CPL4-C10): load_skill_grants normalizes to a fixed key set, so the stamp is re-authored here.
+    atomic_write_json(skill_state_dir(drive_root, name) / GRANTS_FILENAME,
+                      with_schema_version({**record, "updated_at": utc_now_iso()}, SKILL_OWNER_STATE_SCHEMA_VERSION))
 
 
 def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict[str, Any]:
@@ -803,12 +771,13 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         list(skill.manifest.permissions or []),
         list(getattr(skill.manifest, "subscribe_events", []) or []),
     )
-    from ouroboros.skill_grant_scope import grant_view
+    from ouroboros.skill_grant_scope import grant_view, scope_for
 
     # Keys follow the installation, permissions the accepted bytes; what keeps nothing from running is
     # named apart (``pending_keys``, ``waiting_permissions``): ``skill_grant_scope``.
     grants = load_skill_grants(drive_root, skill.name)
-    view = grant_view(drive_root, skill, grants, requested, requested_permissions)
+    view = grant_view(grants, requested, requested_permissions, scope=scope_for(drive_root, skill, grants),
+                      content_hash=str(skill.content_hash or ""))
     granted, granted_permissions, earlier_grant = view["granted_keys"], view["granted_permissions"], view["earlier_grant"]
     missing = [key for key in requested if key not in set(granted)]
     missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
@@ -838,18 +807,6 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     }
 
 
-def bytes_accepted(skill: LoadedSkill) -> bool:
-    """Whether the current bytes are accepted: an acceptance basis for them (trusted source, owner skip/edit, the
-    author's acceptance) or a finished executable verdict about them; never Cyber alone, which also runs edited
-    bytes whose verdict is about earlier ones (stale)."""
-    gate = skill.review.gate_for(skill.content_hash)
-    if not gate["executable_review"]:
-        return False
-    if gate["blocking_reason"] in ACCEPTANCE_REASONS or gate.get("author_accepted"):
-        return True
-    return not gate["stale"] and gate["status"] != _REVIEW_STATUS_PENDING
-
-
 @dataclass
 class AutoGrantOutcome:
     granted: bool = False
@@ -876,12 +833,12 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         return outcome
     if not get_auto_grant_enabled():
         return outcome
+    from ouroboros.skill_grant_scope import bytes_accepted, install_identity, scope_for
+
     if skill.load_error or not bytes_accepted(skill):
         return outcome
     if not requested_keys and not requested_permissions:
         return outcome
-    from ouroboros.skill_grant_scope import install_identity
-
     save_skill_grants(
         drive_root,
         skill.name,
@@ -891,6 +848,7 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
         granted_permissions=requested_permissions,
         requested_permissions=requested_permissions,
         install_identity=install_identity(drive_root, skill),
+        scope=scope_for(drive_root, skill, load_skill_grants(drive_root, skill.name)),
     )
     return AutoGrantOutcome(
         granted=True,
@@ -1579,7 +1537,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
 
 __all__ = [
     "AutoGrantOutcome", "LoadedSkill",
-    "SkillReviewState", "auto_grant_if_enabled", "bytes_accepted",
+    "SkillReviewState", "auto_grant_if_enabled",
     "VALID_REVIEW_STATUSES", "compute_content_hash", "reduce_skill_content_hash", "discover_skills",
     "discover_selected_skill_candidates", "discover_skill_identity", "find_skill",
     "enabled_skill_conflicts", "skill_conflict_status",

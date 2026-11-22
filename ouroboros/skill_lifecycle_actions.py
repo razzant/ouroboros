@@ -288,12 +288,15 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
     if request.get("error"):
         return request
     keys, granted_permissions = request["keys"], request["permissions"]
-    from ouroboros.skill_grant_scope import install_identity
+    from ouroboros.skill_grant_scope import install_identity, scope_for
+    from ouroboros.skill_loader import load_skill_grants
 
+    # Only keys granted: the permissions of the last accepted version stay as they were (``None``), still waiting.
     save_skill_grants(drive_root, skill.name, keys, content_hash=skill.content_hash,
-                      requested_keys=request["allowed_keys"], granted_permissions=granted_permissions,
+                      requested_keys=request["allowed_keys"], granted_permissions=granted_permissions or None,
                       requested_permissions=request["allowed_permissions"],
-                      install_identity=install_identity(drive_root, skill))
+                      install_identity=install_identity(drive_root, skill),
+                      scope=scope_for(drive_root, skill, load_skill_grants(drive_root, skill.name)))
     if enable_after_grant:
         # The owner's explicit Enable survives an answered-pending grant, without another job or pip attempt.
         try:

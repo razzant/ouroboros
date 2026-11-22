@@ -115,9 +115,24 @@ def _legacy_remote_line(drive: pathlib.Path, seed: pathlib.Path, target: pathlib
     return ""
 
 
+def _pending_reseed(drive: pathlib.Path, name: str, staged: pathlib.Path, previous: Any) -> Optional[Dict[str, Any]]:
+    """The pending mark of a re-seed under a review-each built-in source: the staged release, digested as it lands."""
+    from ouroboros.skill_identity import payload_digest
+    from ouroboros.utils import utc_now_iso
+
+    if not previous or builtin_trust() == "trusted":
+        return None
+    manifest = _manifest(staged)
+    digest = payload_digest(staged, manifest_entry=str(getattr(manifest, "entry", "") or ""),
+                            manifest_scripts=getattr(manifest, "scripts", None), manifest=manifest, bucket="native")
+    old = previous.get("release") if isinstance(previous.get("release"), dict) else {}
+    return {"from_version": str(old.get("version") or ""), "from_digest": str(old.get("digest") or ""),
+            "version": _version(staged), "digest": digest, "requested_at": utc_now_iso()}
+
+
 def _write_record(drive_root: pathlib.Path, name: str, *, version: str, digest: str, base_digest: Optional[str],
                   turn_on_when_ready: bool, installed_by: str, reason: str = "", task_id: str = "",
-                  converted: bool = False) -> Dict[str, Any]:
+                  converted: bool = False, pending_update: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     from ouroboros.skill_install_record import write_install_record
 
     record: Dict[str, Any] = {
@@ -137,6 +152,8 @@ def _write_record(drive_root: pathlib.Path, name: str, *, version: str, digest: 
         record["task_id"] = task_id
     if converted:
         record["converted_from"] = SEED_MARKER
+    if pending_update:
+        record["pending_update"] = pending_update
     return write_install_record(drive_root, name, record)
 
 
@@ -155,10 +172,14 @@ def install_builtin_skill(
     Lands the bundled folder atomically, writes the install record, carries the owner's
     grants across a re-seed and applies the auto-grant setting. Enablement is left to the
     caller's ``reconcile_turn_on_when_ready`` (inside its lifecycle job) or the owner.
-    Refuses a name another installed payload already uses.
+    Refuses a name another installed payload already uses. Under a source policy that reviews
+    each release (05.10 D-A3) a re-seed records the new release as pending before its bytes
+    land, and nothing of the owner's grants reaches it until a recorded check or Skip
+    (``skill_acceptance.carry_if_accepted`` admits it then).
     """
     from ouroboros.config import DATA_DIR
     from ouroboros.skill_acceptance import carry_grants_to_current
+    from ouroboros.skill_install_record import read_install_record, update_install_record
     from ouroboros.skill_loader import auto_grant_if_enabled, discover_skill_identity, load_skill
 
     drive = pathlib.Path(drive_root or DATA_DIR)
@@ -183,14 +204,20 @@ def install_builtin_skill(
     staging_root.mkdir(parents=True, exist_ok=True)
     legacy_remote = _legacy_remote_line(drive, seed, target)
     staging = pathlib.Path(tempfile.mkdtemp(prefix=f"{name}-", dir=str(staging_root)))
+    pending = None
     try:
         shutil.copytree(seed, staging / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (staging / name / SEED_MARKER).write_text(f"seeded_from={seed_root.name}\nsource=builtin\n{legacy_remote}",
                                                   encoding="utf-8")
+        pending = _pending_reseed(drive, name, staging / name, read_install_record(drive, name))
+        if pending:  # before the new bytes land: they wait for their check
+            update_install_record(drive, name, pending_update=pending)
         from ouroboros.marketplace.fetcher import land_staged_tree
 
         land_staged_tree(staging / name, target, replacement_suffix="replaced-builtin")
     except OSError as exc:
+        if pending:  # the old release stays, accepted as it was
+            update_install_record(drive, name, pending_update=None)
         return {"ok": False, "name": name, "error": f"could not land built-in {name!r}: {exc}"}
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -204,9 +231,10 @@ def install_builtin_skill(
                 f"{getattr(skill, 'load_error', '') or 'no manifest'}"}
     record = _write_record(drive, skill.name, version=str(skill.manifest.version or ""), digest=skill.content_hash,
                            base_digest=None, turn_on_when_ready=turn_on_when_ready,
-                           installed_by=installed_by, reason=reason, task_id=task_id)
+                           installed_by=installed_by, reason=reason, task_id=task_id,
+                           pending_update=pending if pending and pending["digest"] == skill.content_hash else None)
     skill = load_skill(target, drive)  # the gate now reads the record just written
-    carried = carry_grants_to_current(drive, skill)
+    carried = record["basis"] == "trusted" and carry_grants_to_current(drive, skill, vouched=True)
     granted = auto_grant_if_enabled(drive, load_skill(target, drive))
     return {"ok": True, "name": skill.name, "digest": skill.content_hash, "basis": record["basis"],
             "turn_on_when_ready": bool(turn_on_when_ready), "grants_carried": carried,
@@ -574,9 +602,10 @@ def ensure_builtin_skills(drive_root: Optional[pathlib.Path] = None, *, log_obj:
         )
     except Exception:
         logger.warning("Skill identity conversion raised", exc_info=True)
-    from ouroboros.skill_grant_scope import import_grant_identities
-
-    import_grant_identities(drive, log_obj=logger)  # before a re-seed carries grants: they name their installation
+    try:  # before a re-seed carries grants: they name their installation
+        _bind_grants(drive, logger)
+    except Exception:
+        logger.warning("Grant installation import raised", exc_info=True)
     receipt = drive / "state" / "native_seed.json"
     identity = _seed_identity(repo)
     try:
@@ -585,6 +614,22 @@ def ensure_builtin_skills(drive_root: Optional[pathlib.Path] = None, *, log_obj:
         if dependency_pass:  # after the bundle phases, whether or not the receipt matched
             threading.Thread(target=_dependency_pass, args=(drive, None, logger),
                              name="skill-dependencies", daemon=True).start()
+
+
+def _bind_grants(drive: pathlib.Path, logger: Any) -> None:
+    """The grant installation import, after every source record exists (sidecar-era installs converted first, so
+    an import never binds an empty source), and once per data root the decisions of accepted skills that have none."""
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_acceptance import record_missing_decisions
+    from ouroboros.skill_grant_scope import import_grant_identities
+    from ouroboros.skill_install_record import convert_legacy_records
+    from ouroboros.skill_loader import discover_skills, find_skill
+
+    repo_path = get_skills_repo_path() or None
+    convert_legacy_records(drive)
+    import_grant_identities(drive, lambda name: find_skill(drive, name, repo_path=repo_path), log_obj=logger)
+    if not (drive / "state" / "skills" / ".grant-decisions.json").exists():
+        record_missing_decisions(drive, discover_skills(drive, repo_path=repo_path))
 
 
 def _reconcile_bundle(drive: pathlib.Path, seed_root: pathlib.Path, repo: pathlib.Path, receipt: pathlib.Path,

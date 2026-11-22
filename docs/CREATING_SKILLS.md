@@ -966,14 +966,18 @@ consent. The desktop launcher's owner-grant bridge records these grants.
 
 A key grant, core provider keys included, belongs to the installation it was given to (the install record's
 source and the payload's place, `ouroboros/skill_grant_scope.py`): it holds through edits of that payload while
-the manifest still declares the key, and ends at uninstall, for a same-named payload from another source or folder,
-and while a release of a source that reviews each skill waits for acceptance. Permissions stay bound to the accepted
-bytes. After an edit, a permission the host checks at each use (`notify_owner`, `inject_chat`, `call_peer`,
-`presence`) keeps the extension running and refuses that use, saying it waits for the check of the edited version;
+the manifest still declares the key. It does not reach a same-named payload from another source or folder, even
+with identical bytes, nor a release of a source that reviews each skill (built-ins under a «review each» policy
+included) before a recorded check or Skip; after an uninstall only a reinstall of the same installation with the
+same bytes keeps it. Only a recorded basis accepts bytes: Cyber Pro running them, with or without an author record,
+grants nothing. Permissions stay bound to the accepted bytes, and a grant of keys alone leaves them as they were.
+After an edit, a permission the host checks at each use (`notify_owner`, `inject_chat`, `call_peer`, `presence`)
+keeps the extension running and refuses that use, saying it waits for the check of the edited version;
 `page_module`, `context_snapshot`, `live_conversation` and chat event subscriptions act through what the load
 publishes, so the extension waits for the check. Every acceptance (a finished review, the author's acceptance, the
-owner's Skip or edit, an accepted release, a built-in re-seed) carries the installation's granted keys and its
-permissions to the accepted bytes.
+owner's Skip or edit, an accepted release, a re-seed of a trusted built-in) records a decision, empty included, and
+carries the installation's granted keys the manifest still declares (a dropped key is retired) and its permissions
+to the accepted bytes; a key granted later reaches a loaded extension by reloading it.
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are

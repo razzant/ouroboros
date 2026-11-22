@@ -277,13 +277,17 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
             record.get("pending_update") != pending or release.get("digest") != pending["digest"]):
         discard_update_snapshot(drive_root, name)
         return {"status": "superseded"}
+    from ouroboros.skill_grant_scope import bytes_accepted
+
     loaded = find_skill(drive_root, name, repo_path=get_skills_repo_path())
     current = not interrupted_landing and loaded is not None and release.get("digest") == pending["digest"]
+    # Only a recorded basis for these exact bytes settles the release (05.10 D-A3); Cyber Pro running them is none.
     if not landing_failed and not data.get("restore_started") and current and not loaded.load_error \
-            and loaded.review.gate_for(loaded.content_hash)["executable_review"]:
+            and bytes_accepted(loaded):
         update_install_record(drive_root, name, pending_update=None, update_rejected=None)
         keep_previous_payload(snapshot.backup_dir, name)
         update_backup_path(drive_root, name).unlink()
+        _follow_accepted_release(drive_root, name)
         return {"status": "accepted"}
     job = read_json_dict(review_job_state_path(drive_root, name)) or {}
     if not force and not interrupted_landing and not data.get("restore_started") and job.get("status") == "running" \
@@ -321,6 +325,22 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
         except Exception:
             log.warning("Restored update of %s needs extension reconciliation", name, exc_info=True)
     return {"status": "restored" if restored else "restore_failed", "reason": reason}
+
+
+def _follow_accepted_release(drive_root: pathlib.Path, name: str) -> None:
+    """After the mark is gone, in this order: read the skill again, carry this installation's grants to the
+    accepted release, and let the load follow (the owner's Skip and a restart's recovery settle here alike)."""
+    from ouroboros.config import get_skills_repo_path, load_settings
+    from ouroboros.skill_acceptance import carry_if_accepted
+    from ouroboros.skill_loader import find_skill
+
+    try:
+        carry_if_accepted(drive_root, find_skill(drive_root, name, repo_path=get_skills_repo_path()))
+        from ouroboros.extension_loader import reconcile_extension
+
+        reconcile_extension(name, drive_root, load_settings)
+    except Exception:
+        log.warning("Accepted release of %s needs its grants and load reconciled", name, exc_info=True)
 
 
 def _legacy_hub_source(catalog_url: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
