@@ -800,7 +800,7 @@ def test_an_unusable_saved_source_keeps_its_refusal_through_the_owners_resume(tm
 
     from ouroboros import working_checkpoint as wc
     from ouroboros.gateway.client_contracts import TaskResumeResponse
-    from ouroboros.work_stop import continuation_refusal
+    from ouroboros.work_stop import continuation_refusal, stop_presentation
     from supervisor import events_budget as eb
     from tests.test_resume_attempt_history import _events
 
@@ -839,10 +839,14 @@ def test_an_unusable_saved_source_keeps_its_refusal_through_the_owners_resume(tm
     assert offered == ("dispatch_outcome_unknown", "dispatch_outcome_unknown", False,
                        {ROOT: (True, True), CHOSEN: (False, False), OTHER: (False, False)}, []), offered
     assert continuation_refusal(rows[ROOT])["dispatch_unknown"] is True
+    assert event["refusal_basis"] == continuation_refusal(rows[ROOT])["refusal_basis"] == "saved_work_unverified"
+    words = "The saved work could not be verified for this attempt"
+    assert stop_presentation(rows[ROOT])["reason"]["text"] == words
     assert _model_selects(tmp_path, workers, q, CHOSEN, ROOT)["error"] == "root_resume_grant_missing"
     held = copy.deepcopy(rows[ROOT])
     again = q.resume_budget_paused_task(ROOT)
     assert (again["ok"], again["error"], again["action"]) == (False, "dispatch_outcome_unknown", "cancel_or_new_run")
+    assert again["refusal_basis"] == "saved_work_unverified" and again["message"] == "Resume refused: " + words
     assert rows[ROOT] == held, "this refusal authorizes no replay of the unusable source"
     # The owner's own choice of a child is still dispatched; the other child stays held.
     assert q.resume_budget_paused_task(CHOSEN)["ok"] is True

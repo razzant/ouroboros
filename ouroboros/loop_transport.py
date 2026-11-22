@@ -175,7 +175,7 @@ def new_generation_after_unknown(ctx: Any, accumulated_usage: Optional[Dict[str,
     pending = usage.get("_pending_transport_outcome") or {}
     return bool(ctx is not None and getattr(ctx, "task_id", "")
                 and not isinstance(usage.get(TRANSPORT_DEATHS_KEY), dict)
-                and not pending.get("same_operation_recoverable"))
+                and not pending.get("same_operation_recoverable") and not pending.get("processing_refusal_conflict"))
 
 
 def append_unknown_recovery_input(messages: list, accumulated_usage: dict, previous: Dict[str, Any], *,

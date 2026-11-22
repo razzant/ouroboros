@@ -365,7 +365,7 @@ test('the Stop confirmation of an accepted unbound start says the request, never
     assert.equal(asked[1].title, 'Stop this work now?');
     assert.equal(asked[1].danger, true);
     assert.equal(asked[1].confirmLabel, TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
-    assert.equal(asked[1].body, 'Stop is requested at once. A helper whose start was never confirmed may keep '
+    assert.equal(asked[1].body, 'Stop is requested at once. A subagent whose start was never confirmed may keep '
         + 'working until it is identified and its stop is confirmed.');
 });
 

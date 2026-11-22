@@ -275,6 +275,23 @@ test('a window without the summary row keeps the annotation and the answer and m
     } finally { f.close(); }
 });
 
+// A pruned result's frozen ending rides every row of its task (gateway/history: `_history_result_absent`), the
+// answer bubble included: it settles a card other rows made and makes none of its own.
+test('an answer carrying its task\'s frozen ending still mints no block in an addressing-only window', async () => {
+    const frozen = { status: 'completed', phase: 'done', ts: TS, provenance: 'canonical_task_result_after_finalization' };
+    const history = [{ ...ownerRow, chat_annotation: annotation },
+        { ...final, ts: TS, chat_id: 1, historical_terminal: frozen }];
+    const f = fixture(history);
+    try {
+        for (const revision of [1, 2]) {
+            await f.instance.refreshHistory({ revision });
+            assert.equal(Boolean(f.card()), false, `revision ${revision}: no block from the answer alone`);
+            assert.ok(f.answerVisible());
+            assert.ok(f.owner()?.querySelector('.msg-routing-annotation'));
+        }
+    } finally { f.close(); }
+});
+
 test('an old ephemeral marker cannot manufacture terminal status', () => {
     assert.equal(taskTerminalSummary({ type: 'task_done', task_id: TASK, ephemeral_decision: true }).terminal, false);
     assert.equal(taskTerminalSummary({ type: 'task_done', task_id: TASK, status: 'completed' }).terminal, true);

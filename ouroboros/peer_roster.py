@@ -280,16 +280,17 @@ def _queue_hold_facts(task: Dict[str, Any], stored: Dict[str, Any], waiting: Lis
 
 def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[List[str]] = None,
                 ) -> Dict[str, Dict[str, Any]]:
-    """What each task tree holds beyond its root, by the tree's root id: the queue's helper rows, the open
-    delegated runs (``work_projection._open_runs``) and ``starts`` -- every open (invocation, lookup_only) pair
-    this same read saw, recorded on each tree the read knows. Listing and display are separate questions (#3428):
-    a tree is LISTED (kept live for the roster) only while a helper row, an open run or an accepted lookup-only
-    decision reaches it; a root's own row answers its start set without opening any door. A read that could not
-    decode every row flags each tree ``starts_partial``: possibly short, never a complete list. Never raises; an
-    unreadable custody is named in ``gaps``."""
+    """What each task tree holds beyond its root, by the tree's root id: the queue's helper rows, its live
+    ``members`` for executor-observation matching (without opening a separate tree), the open delegated runs
+    (``work_projection._open_runs``) and ``starts`` -- every open (invocation, lookup_only) pair this same read
+    saw, recorded on each tree the read knows. Listing and display are separate questions (#3428): a tree is
+    LISTED only while a helper row, an open run or an accepted lookup-only decision reaches it; a root's own row
+    answers its start set without opening any door. A read that could not decode every row flags each tree
+    ``starts_partial``: possibly short, never a complete list. Never raises; unreadable custody is named in ``gaps``."""
     from supervisor.owner_pause_control import warm_paused_member
 
     trees: Dict[str, Dict[str, Any]] = {}
+    members: Dict[str, set] = {}
 
     def tree(root_id: str) -> Dict[str, Any]:
         return trees.setdefault(root_id, {"running": [], "pending": 0, "runs": []})
@@ -301,6 +302,8 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
                 continue
             task_id = str(row.get("id") or task.get("id") or "")
             root_id = str(task.get("root_task_id") or "").strip()
+            if task_id:
+                members.setdefault(root_id or str(task.get("original_task_id") or task_id), set()).add(task_id)
             if root_id and root_id != task_id:
                 # A member parked warm under its root's Pause holds its worker, but its stack waits.
                 if status_key == "running" and not warm_paused_member(row):
@@ -317,7 +320,9 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
 
         state, starts, unreadable = open_work_custody(root)
         for root_id, runs in _open_runs(root, state).items():
-            tree(root_id)["runs"].extend(runs)
+            entry = tree(root_id)
+            entry["runs"].extend(runs)
+            entry["members"] = members.get(root_id, ())
         # An accepted lookup-only start keeps its ended tree listed until the request binds or closes (#3428):
         # Inclusion stays the accepted decision's: an unaccepted ordinary start opens no door and draws no row.
         # What is DISPLAYED beside an entry this read made is every open (invocation, lookup_only) pair it saw
@@ -344,31 +349,38 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
     return trees
 
 
-def _tree_tails(root, tree, fence, root_task_id: str = "", *, unavailable=None) -> List[Dict[str, Any]]:
-    """What of a tree still runs, typed and worded as the owner's card says it (``work_status.work_tails``):
-    helpers the queue runs that its Pause has not parked, open runs typed by ``work_status.run_tail`` from their
-    own task's stored result, and the review work a settled Pause lets finish. Unbound starts come from the
-    tree's own ``_live_trees`` custody read whenever that read built the entry -- one coherent snapshot, so a
-    start binding between reads keeps the unconfirmed form instead of falling out of both. A fresh unbound read
-    is the last resort only for a tree dict this read did not build (a hand-built one, or an entry made before
-    the custody read failed), and its gap is disclosed."""
+def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task_id: str = "", *,
+                unavailable: Any = None) -> List[Dict[str, Any]]:
+    """The card and roster share the typed run, its member's observation (plus what the body's dated record last saw,
+    in past words, for a worker with no observer) and the words for each tail. Unbound starts come from the tree's
+    own ``_live_trees`` custody read whenever that read built the entry -- one coherent snapshot -- and fall back to
+    a fresh read with gap disclosure only when ``starts`` was not recorded."""
     from ouroboros.gateway import work_status as ws  # D01->D11 is lazy-only
-    from ouroboros.gateway.work_projection import _typed_unbound, unbound_run_tails, unconfirmed_stops
+    from ouroboros.gateway.work_projection import (
+        _typed_unbound, observe_member_runs, unbound_run_tails, unconfirmed_stops,
+    )
     from ouroboros.task_results import load_task_result
 
     tree = tree or {"running": [], "runs": []}
     fence = fence if isinstance(fence, dict) and fence.get("state") in {"requested", "paused"} else {}
     parked = {str(task) for task in fence.get("parked_members") or ()}
     runs = []
+    observed = {}
     for entry in tree["runs"]:
         try:
             owner = load_task_result(pathlib.Path(root), str(entry.task_id)) if entry.task_id else None
         except Exception:
-            owner = None  # an unreadable owner proves no failure: the run reads live, as on the card
-        stops = unconfirmed_stops(root, str(entry.task_id), owner) if entry.task_id else frozenset()
-        kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=str(entry.run_id) in stops,
+            owner = None  # an unreadable owner proves no failure: the observation below still speaks
+        stops = unconfirmed_stops(root, str(entry.task_id), owner) if entry.task_id else None
+        kind, state = ws.run_tail(getattr(entry, "source", ""), owner,
+                                  stop_unknown=stops is None or str(entry.run_id) in stops,
                                   start_state=getattr(entry, "resume_start_state", None))
-        runs.append({"run_id": str(entry.run_id), "kind": kind, "state": state})
+        run = {"run_id": str(entry.run_id), "kind": kind, "state": state}
+        runs.append(run)
+        if kind == "run" and str(entry.task_id or "") in tree.get("members", ()):
+            observed[(str(entry.task_id), str(entry.run_id), str(getattr(entry, "invocation_id", "") or ""))] = run
+    if observed:
+        observe_member_runs(root, observed, recorded=True)
     from supervisor.continuation_admission import model_handoffs
     root_task_id = root_task_id or str(fence.get("root_task_id") or "")
     entries = tree.get("starts")

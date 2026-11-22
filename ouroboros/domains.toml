@@ -551,6 +551,7 @@ D20 = "Presence"
 "ouroboros/openai_chat_custom.py" = "D02"
 "ouroboros/openai_chat_dispatch.py" = "D02"
 "ouroboros/openai_responses.py" = "D02"
+"ouroboros/opencode_go.py" = "D02"
 "ouroboros/openai_responses_custody.py" = "D02"
 "ouroboros/openrouter_attribution.py" = "D02"
 "ouroboros/outcome_receipt_store.py" = "D01"
@@ -1192,6 +1193,7 @@ allowed = [
   "D03->D17",
   "D03->D18",
   "D03->D19",
+  "D04->D01",
   "D04->D05",
   "D04->D13",
   "D04->D17",
@@ -1376,7 +1378,6 @@ lazy_only = [
   "D03->D14",
   "D03->D16",
   "D03->D20",
-  "D04->D01",
   "D04->D02",
   "D04->D03",
   "D04->D06",

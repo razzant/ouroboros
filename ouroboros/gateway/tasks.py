@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, migrating_error, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments, task_time_limits
+from ouroboros.gateway._helpers import (
+    UTF8JSONResponse, coerce_int, json_error, json_exception, migrating_error, request_drive_root,
+    request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments, task_time_limits,
+)
 from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view  # noqa: F401
 from ouroboros.gateway.contracts import TaskCreateRequest
 from ouroboros.gateway.completion_gist import short_gist
@@ -864,7 +867,7 @@ async def api_tasks_list(request: Request) -> JSONResponse:
         payload = await asyncio.to_thread(_tasks_list_payload, drive_root, wanted, limit, queue_only)
     except StoreMigrating:
         return json_error("the task store is importing; retry shortly", 503, reason_code="migrating")
-    return JSONResponse(payload)
+    return UTF8JSONResponse(payload)
 
 
 def _plan_objections_view(drive_root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -933,7 +936,7 @@ def _task_get_response(request: Request) -> JSONResponse:
     breakdown_view = _task_cost_breakdown_view(drive_root, data)
     if breakdown_view is not None:
         payload["cost_breakdown"] = breakdown_view
-    return JSONResponse(payload)
+    return UTF8JSONResponse(payload)
 
 
 def api_task_artifact(request: Request):
@@ -946,7 +949,7 @@ def api_task_artifact(request: Request):
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    name = str(request.path_params.get("name") or "").strip()
+    name = str(request.path_params.get("name") or "")
     if plain_segments(name) != [name]:
         return json_error("artifact name must be a simple filename", 400)
     source, relpath = request.query_params.get("source"), request.query_params.get("relpath")
@@ -1426,7 +1429,8 @@ async def api_task_resume(request: Request) -> JSONResponse:
     # exists (Panic's owner-only hold, an unresumable stop, a selection still to observe, money, custody...).
     status = 404 if error in {"task_not_pending", "missing_task_id"} else 409
     return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
-                             "action", "blockers", "message", "acceptable_unknown", "accepted_start_risks") if result.get(key)}},
+                             "action", "blockers", "message", "refusal_basis",
+                             "acceptable_unknown", "accepted_start_risks") if result.get(key)}},
                         status_code=status)
 
 

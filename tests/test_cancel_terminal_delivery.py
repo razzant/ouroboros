@@ -806,8 +806,9 @@ def test_cancel_receipt_promises_a_preview_only_when_it_carries_one(tmp_path, se
     if salvage:
         lead = head + (" Its completed result is preserved below." if completed else _UNREVIEWED_LEAD)
         stable = [lead, "", salvage, "", td._preview_note_line("", 0)]
-        assert text.startswith("\n".join(stable) + "\n"), text   # the pre-#1403 bytes
-        assert event["delivery_id"] == td.delivery_id_for(tid, "\n".join(stable))
+        shown = lead if completed else lead + " This saved task text may come from an earlier attempt."
+        assert text.startswith("\n".join([shown, *stable[1:]]) + "\n"), text
+        assert event["delivery_id"] == td.delivery_id_for(tid, "\n".join(stable))  # the legacy fallback ID
     else:
         assert text.startswith(head + "\n\n(no salvageable agent output was found for this task)\n"), text
         assert "below" not in text.lower() and "Below" not in text

@@ -379,31 +379,32 @@ def queued_admitted_dispatch(task: Any) -> bool:
                     "_terminalization_retry", "_continuation_prepared", *(() if intent else (BUDGET_HOLD_KEY,)))))
 
 
-def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, str]:
-    """Whether one PENDING row genuinely never dispatched (zero physical calls)."""
+def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, str, str]:
+    """Replay decision, existing refusal code, and the specific evidence behind a shared code."""
     from supervisor.restart_retention import never_started, returned_before_body
     from ouroboros.owner_wait import governing_continuation
-    from supervisor.schedule_occurrence import restore_allowed
+    from supervisor.schedule_occurrence import restore_verdict, schedule_refusal_basis
 
     if member.get("_owner_hold"):
-        return False, "owner_held"
+        return False, "owner_held", ""
     if member.get("_continuation_prepared"):
-        return False, "continuation_publication_unconfirmed"
+        return False, "continuation_publication_unconfirmed", ""
     if "_working_recovery" in member:
         # A locator alone does not authorize Resume: read its exact frozen source
         # and the target attempt's durable launch evidence, as assignment does.
-        from supervisor.task_admission import _working_resume_granted
+        from supervisor.task_admission import working_resume_refusal
 
         try:
-            if _working_resume_granted(member, q.DRIVE_ROOT):
-                return True, ""
+            basis = working_resume_refusal(member, q.DRIVE_ROOT)
         except (OSError, ValueError, TypeError, KeyError):
             log.warning("Saved work Resume evidence unavailable for %s", member.get("id"), exc_info=True)
-        return False, "dispatch_outcome_unknown"
-    if not restore_allowed(member):
-        return False, "dispatch_outcome_unknown"
+            basis = "resume_evidence_unavailable"
+        return (False, "dispatch_outcome_unknown", basis) if basis else (True, "", "")
+    verdict = restore_verdict(member)
+    if verdict != "replay":
+        return False, "dispatch_outcome_unknown", schedule_refusal_basis(verdict)
     if member.get("_owner_hold"):
-        return False, "owner_held"
+        return False, "owner_held", ""
 
     pause = member.get("_budget_pause") or (member.get("_budget_pause_hold") or {}).get("replaced_fence_pause") or {}
     legacy_saved_zero = (member.get("admitted_dispatch") in (None, "")
@@ -414,14 +415,14 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
                      and int(member.get("_attempt") or 1) == 1 and pause.get("replay_safe") is True
                      and pause.get("physical_calls") == 0 and pause.get("cause") == "owner_pause")
     if not (never_started(member) or legacy_saved_zero or prestart_zero or returned_before_body(member)):  # #2555
-        return False, "dispatch_outcome_unknown"
+        return False, "dispatch_outcome_unknown", "dispatch_unconfirmed"
     member_id = str(member.get("id") or "")
     cost_fields = q.reconstruct_task_cost(
         member_id, fields=True,
         drive_root=pathlib.Path(member.get("budget_drive_root") or q.DRIVE_ROOT),
     )
     if cost_fields.get("cost_accounting_status") != "available":
-        return False, "accounting_unavailable"
+        return False, "accounting_unavailable", ""
     retry_lineage = bool(
         int(member.get("_attempt") or 1) > 1 and not (returned_before_body(member) or {}).get("seed_return")  # D5
         or member.get("original_task_id") or member.get("timeout_retry_from")
@@ -430,7 +431,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
         int(cost_fields.get("total_rounds") or 0) == 0
         and not bool(cost_fields.get("ledger_integrity_degraded"))
         and not retry_lineage
-    ), "replay_unsafe"
+    ), "replay_unsafe", ""
 
 
 def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[str, Any]:
@@ -459,7 +460,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     census ties to no tree.
     """
     from ouroboros.control_actor import control_actor, observed_control_stop
-    from ouroboros.work_stop import clear_refusal, release_refusal, selection_record
+    from ouroboros.work_stop import clear_refusal, release_refusal, selection_record, unsafe_replay_response
     q = _queue_module()
     task_id = str(task_id or "").strip()
     if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT), control_actor()):
@@ -604,16 +605,12 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         authority = observation["authority"]  # a member's consumed Resume completes at its selection
         if authority["owner_fence"] and (selected_by or not authority["consumed_resume"]):
             return {"ok": False, "error": "selection_owner_held"}
-        nominated_safe, nominated_error = observation["safe"], observation["unsafe_error"]
+        nominated_safe = observation["safe"]
         # A zero-dispatch pause, or (owner 4A) held saved work this observation just revalidated: never a replay.
         nominated_safe = bool(nominated_safe and (pause.get("replay_safe") and pause.get("physical_calls") == 0
                                                   or pause.get("continuation") == "working" and "_working_recovery" in task))
         if not nominated_safe:
-            return {
-                "ok": False,
-                "error": nominated_error,
-                "action": "cancel_or_new_run",
-            }
+            return unsafe_replay_response(observation)
         if root_scope:
             # Root Resume selects the root alone; children remain behind this
             # same fence until individually selected under its root grant (Q9).

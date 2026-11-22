@@ -645,13 +645,15 @@ def registered_source_payload(payload: Mapping[str, Any]) -> Optional[Mapping[st
                  if item.candidate.candidate_sha256 == digest), None)
 
 
-def note_wire_send_succeeded(capture: Any) -> None:
+def note_wire_send_succeeded(capture: Any, target: Optional[Dict[str, Any]] = None, *, unpriced_add_on: bool = False) -> None:
     state = _WIRE_CALL_STATE.get()
-    if state.current is None or not isinstance(capture, PhysicalAttemptCapture):
+    if not isinstance(capture, PhysicalAttemptCapture):
         return
-    if getattr(capture, "candidate_raw_sha256", None) != state.current.candidate.candidate_sha256:
-        return
-    _WIRE_CALL_STATE.set(replace(state, settled=(state.current, capture)))
+    if target is not None:
+        target["received_attempt_id"] = capture.attempt_id
+        target["received_unpriced_add_on"] = unpriced_add_on
+    if state.current and capture.candidate_raw_sha256 == state.current.candidate.candidate_sha256:
+        _WIRE_CALL_STATE.set(replace(state, settled=(state.current, capture)))
 
 
 def note_wire_send_failed() -> None:
@@ -1269,12 +1271,12 @@ def plan_wire_retry_from_body_error(error: Any) -> Optional[Dict[str, Any]]:
 
 def _processing_retry(payload: Mapping[str, Any], error: Any,
                       target: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """One ordinary-speed retry after a released, typed no-start receipt."""
-    from ouroboros.llm_attempt import ProcessingNotStarted
+    """One ordinary-speed retry after a settled, typed no-start receipt."""
+    from ouroboros.transport_custody import ProcessingNotStarted
     from ouroboros.request_wire_receipts import rebind_processing_candidate
 
     capture = getattr(error, "physical_attempt_capture", None)
-    if not isinstance(error, ProcessingNotStarted) or getattr(capture, "state", None) != "released":
+    if not isinstance(error, ProcessingNotStarted) or getattr(capture, "state", None) != "settled":
         return None
     registered = _WIRE_CALL_STATE.get().current
     route = registered.target if registered is not None else target or {}
@@ -1286,9 +1288,8 @@ def _processing_retry(payload: Mapping[str, Any], error: Any,
         return None
     if provider in {"openai", "openrouter"}:
         field, standard = "service_tier", "default"
-        allowed = {"fast": {"fast", "priority"}, "economy": {"flex"}}.get(preference, set())
-        # An explicit extra_body override has precedence and must not be
-        # accidentally replaced by the top-level advisory projection.
+        allowed = {"fast": {"fast", "priority"}, "economy": {"flex"}, "ultrafast": {"ultrafast"}}.get(preference, set())
+        # The SDK merges extra_body last. Its explicit override owns this send.
         if isinstance(current.get("extra_body"), dict) and "service_tier" in current["extra_body"]:
             return None
     elif provider == "anthropic":
@@ -1317,10 +1318,11 @@ def plan_next_wire_retry(
     *,
     error: Any,
     body_error: bool = False,
+    processing_only: bool = False,
     target: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """One exception/body-parity entrypoint for the bounded transport drivers."""
-    if getattr(error, "stream_incomplete", False):
+    if getattr(error, "stream_incomplete", False) or getattr(error, "processing_refusal_conflict", False):
         return None
     state = _WIRE_CALL_STATE.get()
     registered, physical = state.current, state.physical_payload
@@ -1334,9 +1336,9 @@ def plan_next_wire_retry(
     if capture is not None and (not digest or getattr(capture, "candidate_raw_sha256", None) != digest):
         return None
     current = physical if physical is not None else payload
-    processing = _processing_retry(current, error, target)
-    if processing is not None:
-        return processing
+    from ouroboros.transport_custody import is_processing_refusal
+    if processing_only or is_processing_refusal(error):
+        return _processing_retry(current, error, target)
     planned = (
         plan_wire_retry_from_body_error(error)
         if body_error else

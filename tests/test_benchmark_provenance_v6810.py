@@ -71,6 +71,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "model_recents_pending": (False, "owner_model.py: the primary was saved but its suggestion write needs retry; no work is truncated"),
     "model_queue_publish_failed": (False, "owner_model.py: primary saved, queue publication unconfirmed; not a task terminal"),
     "model_wake_failed": (False, "owner_model.py: primary saved, wake unconfirmed; the same request can repair delivery"),
+    "main_binding_invalid": (False, "gateway/owner_settings.py and task_model_wait.py: a Main model/account binding refused with HTTP 400 before it is saved or served; no execution is truncated"),
+    "provider_response_failed": (False, "tools/search.py: a web-search provider's failed or incomplete response is reported to the calling tool as its own error; the task continues, never a task terminal"),
     # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
     "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
     "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
@@ -82,6 +84,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
     "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),
+    "missing_resume_reason": (False, "gateway/tasks.py: a Resume that accepts an unknown delegated start risk without a written reason is refused with HTTP 400 before the task resumes; no execution is truncated"),
     "input_source_selection_unsupported": (False, "HTTP 400 before root-task admission; no execution was truncated"),
     "task_source_invalid": (False, "gateway/task_archive.py: source selector basename differs from the requested artifact; HTTP 400, not a task terminal or trial truncation"),
     "artifact_archive_empty": (False, "gateway/task_archive.py: no eligible recorded directory member; HTTP refusal, not a task terminal"),

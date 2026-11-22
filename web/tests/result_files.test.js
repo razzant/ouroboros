@@ -6,7 +6,7 @@
 // Wrap up's saved work (`wrap_up_document`) leads the row past any number of files, uncounted.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { projectResultArtifacts, resultFilesItemHtml, syncResultFilesItem } from '../modules/result_files.js';
+import { projectResultArtifacts, resultFilesItemHtml, syncQuestionMaterials, syncResultFilesItem } from '../modules/result_files.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 const TASK = 'task-files';
@@ -73,6 +73,67 @@ test('the row bounds its length, escapes names and lists at most twenty tooltip 
     ]));
     assert.doesNotMatch(hostile, /<img|<b>/);
     assert.match(hostile, /&lt;img src=x onerror=1&gt;\.md/);
+});
+
+test('the Files row and material reader distinguish POSIX name bytes from literal escapes', () => {
+    const rawName = 'fixture-\uDCFF.txt';
+    const literalName = String.raw`fixture-\xff.txt`;
+    const normalName = 'файл🪶.txt';
+    const view = projectResultArtifacts(TASK, [
+        ...[rawName, literalName, normalName].map((name) => ({ name, status: 'ready' })),
+        { name: 'a', relpath: 'folder\uDC80/a', status: 'ready' },
+        ...[rawName, literalName].map((name) => ({ name, relpath: `regular/${name}`, status: 'ready' })),
+    ], { ['folder\uDC80']: { available: true, files: 1 } });
+    assert.deepEqual(view.files.map(({ name }) => name), [rawName, literalName, normalName]);
+    // Whitespace is part of a POSIX name, not a hint to select a different file.
+    const spaced = ` ${rawName} `;
+    assert.equal(projectResultArtifacts(TASK, [{ name: spaced }]).files[0].name, spaced);
+    assert.deepEqual(view.files.map(({ url }) => url), ['', '', `/api/tasks/${TASK}/artifacts/${encodeURIComponent(normalName)}`]);
+    const html = render(view);
+    assert.ok(html.includes(String.raw`fixture-\xff.txt · download unavailable`));
+    assert.ok(html.includes(String.raw`fixture-\\xff.txt · download unavailable`));
+    assert.ok(html.includes(String.raw`folder\x80/ · folder · 1 file · no archive`));
+    assert.ok(html.includes(`title="${String.raw`regular/fixture-\xff.txt`}\n${String.raw`regular/fixture-\\xff.txt`}"`));
+    assert.equal((html.match(/href=/g) || []).length, 1);
+    assert.match(html, /файл🪶\.txt<\/a>/);
+    assert.doesNotMatch(html, /[\uD800-\uDFFF]/u);
+
+    const { prior } = installDom();
+    try {
+        const card = document.createElement('div');
+        // The host retains a material under a safe name and carries its display text in `label`: a raw name byte
+        // arrives already spelled as a literal backslash and `udcff` (`_question_materials`) and shows as stored, not
+        // quoted again; a label still holding the raw byte (an older row) keeps the file rows' spelling.
+        // A name the address authority refuses is not a validated reference, so no row stands for it.
+        const hostLabel = String.raw`fixture-\udcff.txt`;
+        syncQuestionMaterials(card, [
+            ...[hostLabel, rawName, 'R&D — файл🪶.txt'].map((label, index) => ({ task_id: TASK, name: `material-${index}.txt`, label, sha256: 'fixture' })),
+            ...[rawName, literalName, normalName].map((name) => ({ task_id: TASK, name, sha256: 'fixture' })),
+        ]);
+        const materials = card.querySelector('.chat-quiz-materials');
+        assert.deepEqual(materials.children.map((child) => [child.tagName, child.textContent, child.href]), [
+            ['A', hostLabel, `/api/tasks/${TASK}/artifacts/material-0.txt`],
+            ['A', String.raw`fixture-\xff.txt`, `/api/tasks/${TASK}/artifacts/material-1.txt`],
+            ['A', 'R&D — файл🪶.txt', `/api/tasks/${TASK}/artifacts/material-2.txt`],
+            ['A', normalName, view.files[2].url],
+        ]);
+        // The retained copy's name stays the type/address identity; the label is display text and
+        // `saveAs` the safe save suggestion. The ordinary question download keeps the original filename.
+        const seen = [];
+        syncQuestionMaterials(document.createElement('div'), [
+            { task_id: TASK, name: 'material-0.md', label: 'Design.txt', sha256: 'x' },
+            { task_id: TASK, name: 'material-1.txt', label: hostLabel, sha256: 'x' },
+            { task_id: TASK, name: 'material-2.txt', label: rawName, sha256: 'x' },
+        ], (row, options) => { seen.push([row.filename, row.download_url, options]); return null; });
+        assert.deepEqual(seen, [
+            ['material-0.md', `/api/tasks/${TASK}/artifacts/material-0.md`, { displayName: 'Design.txt', saveAs: 'Design.txt' }],
+            ['material-1.txt', `/api/tasks/${TASK}/artifacts/material-1.txt`, { displayName: hostLabel, saveAs: 'material-1.txt' }],
+            ['material-2.txt', `/api/tasks/${TASK}/artifacts/material-2.txt`, { displayName: String.raw`fixture-\xff.txt`, saveAs: 'material-2.txt' }],
+        ]);
+        const plain = document.createElement('div');
+        syncQuestionMaterials(plain, [{ task_id: TASK, name: 'material-0.png', label: 'Design.png', sha256: 'x' }]);
+        assert.equal(plain.querySelector('a').download, 'Design.png');
+    } finally { restoreDom(prior); }
 });
 
 test('a card keeps one Files row in step with a settled detail only', () => {

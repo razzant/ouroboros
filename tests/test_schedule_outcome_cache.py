@@ -1,11 +1,13 @@
 """Outcome observation keeps terminal facts honest and never republishes quiet words."""
 import copy
+import datetime
 
 import pytest
 
 from ouroboros import task_results
+from ouroboros.store import StoreBusy
 from ouroboros.task_results import write_task_result
-from supervisor import queue_schedules as store, schedule_occurrence as occurrence
+from supervisor import queue_schedules as store, schedule_occurrence as occurrence, schedule_view
 from tests.test_schedule_occurrence import q, _row, _rows  # noqa: F401
 
 
@@ -34,13 +36,48 @@ def test_settled_outcomes_are_strictly_read_off_lock_on_disabled_consumed_rows(q
     q.queue.check_scheduled_tasks()
     outcome = _rows(q)["s1"]["last_outcome"]
     assert outcome == {"task_id": "last", "state": status, "quiet": quiet, "notice": bool(notice),
-                       "ended_at": outcome["ended_at"], "line": line}
+                       "ended_at": outcome["ended_at"], "line": line, "chat_id": None, "report_only": False}
     assert outcome["ended_at"] and reads == [("last", {"strict": True}, False)]
     path = q.root / "state/scheduled_tasks.json"
     before = path.read_bytes(), path.stat().st_mtime_ns
     q.queue.init(q.root)  # a process restart needs no in-memory cache to remember the result
     q.queue.check_scheduled_tasks()
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before and len(reads) == 1
+
+
+@pytest.mark.parametrize("report_only", [True, False])
+def test_old_excerpt_waits_for_classification_then_reuses_the_settled_runs_facts(q, monkeypatch, report_only):  # noqa: F811
+    from tests.test_schedule_report_door import run_metadata, ceiling
+
+    old_excerpt = "Earlier run's recorded words."
+    history(q, task={"text": "Check", "chat_id": 1}, last_outcome={
+        "task_id": "last", "state": "completed", "line": old_excerpt, "quiet": report_only})
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fields = {"metadata": run_metadata(), "task_contract": {"capability_ceiling": ceiling()}} if report_only else {}
+    write_task_result(q.root, "last", "completed", result=old_excerpt, chat_id=4477, **fields)
+    real, reads = task_results.load_task_result, []
+
+    def unavailable(*args, **kwargs):
+        reads.append("busy")
+        raise StoreBusy("result not yet readable")
+
+    monkeypatch.setattr(task_results, "load_task_result", unavailable)
+    q.queue.check_scheduled_tasks()
+    view = schedule_view.decorate(_rows(q)["s1"], now)
+    assert view["outcome"]["state"] == "completed" and view["outcome"]["line"] == ""
+    assert view["last_outcome"]["line"] == "" and "chat_id" not in view["outcome"]
+
+    def read(*args, **kwargs):
+        reads.append("settled")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(task_results, "load_task_result", read)
+    q.queue.check_scheduled_tasks()
+    q.queue.check_scheduled_tasks()
+    outcome = schedule_view.decorate(_rows(q)["s1"], now)["outcome"]
+    assert outcome["line"] == ("" if report_only else old_excerpt)
+    assert outcome["chat_id"] == 4477 and outcome["report_only"] is report_only
+    assert reads == ["busy", "settled"]
 
 
 _FAILED_RUN = {"audit_status": "ok", "open_run_ids": [], "pending_invocation_ids": [], "undisposed_patch_run_ids": [],

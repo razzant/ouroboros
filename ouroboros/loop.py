@@ -28,6 +28,7 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.anthropic_native_custody import custody_private_key
 from ouroboros.model_wait import ModelWaitInterrupted
+from ouroboros.loop_completion_schema import refused_door_end, resolve_completion_selection
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros import loop_output_exhaustion as output_recovery, working_checkpoint
 from ouroboros.context import build_user_content  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -97,7 +98,7 @@ log = logging.getLogger(__name__)
 def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_tools=False, assistant_message=None,
                              resume_candidate=False):
     """One completion request owner, with ordinary first/direct prose compatibility."""
-    from ouroboros.loop_delivery import consume_completion_request, hold_completion_response, observe_completion_hold
+    from ouroboros.loop_delivery import hold_completion_response, observe_completion_hold
     if assistant_message is not None and (unfinished := output_recovery.unfinished_reply(limit_ctx, assistant_message)) is not False:
         return unfinished  # a typed cut or tool-call finish: never selected, consumed or parked as an answer
     ctx = tools._ctx
@@ -111,12 +112,12 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
             _arm_delivery_control(tools, limit_ctx, limit_ctx.llm_trace, control="owner_revision_required")
         observe_completion_hold(tools, limit_ctx, "resume", "owner_input_changed")
         return None
-    selected = bool(getattr(ctx, "_completion_selected", None)) or consume_completion_request(
-        tools, limit_ctx, limit_ctx.llm_trace, content, emit_progress=emit_progress)
-    origin = "resume" if resume_candidate else "selection" if selected else "prose"
-    # A park records its own hold; after tools nothing was offered (ordinary work, or a refusal already observed).
-    if not selected and (after_tools or park_for_left_review(tools, limit_ctx, content, emit_progress, origin)):
+    if (selected := resolve_completion_selection(tools, limit_ctx, content, emit_progress=emit_progress)) is None:
         return None
+    origin = "resume" if resume_candidate else "selection" if selected else "prose"
+    # A park records its hold; after tools, no selection ends only at a final schedule refusal.
+    if not selected and (after_tools or park_for_left_review(tools, limit_ctx, content, emit_progress, origin)):
+        return refused_door_end(tools, limit_ctx, after_tools=True) if after_tools else None
     if selected:
         from ouroboros.loop_messages import owner_source_sha256
         observation = ctx._completion_selected.get("observation") or {}
@@ -157,11 +158,19 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
     return result
 
 
-# Bounded staleness for the two DECIDING cost surfaces (ceiling check,
-# milestone note): a round can block 900s in wait_tasks while children spend,
-# and the pacing refresh covers only deadline-less tasks — such a round pays
-# ONE tree projection read. Final-call affordability separately observes the
-# live shared wallet once per priced phase; other roots may spend between rounds.
+def _finish_tool_tail(limit_ctx, tools, emit_progress, *budget):
+    """A completed batch's tail. A finish it selected (or a restored one, still staged) is ready work: it meets the
+    candidate's fresh evidence, then only money that is actually gone, then its own gates, and returns without the
+    budget tail buying a wrap-up or a pause over it; held, the full budget decision precedes the next send. Any other
+    batch keeps the budget decision first and has nothing to finalize."""
+    staged = getattr(tools._ctx, "_completion_request", None)
+    if not (getattr(tools._ctx, "_completion_selected", None) or isinstance(staged, dict) and not staged.get("reply_later")):
+        return (_finish_tool_round_budget(limit_ctx, *budget)
+                or _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True))
+    _prepare_post_tool_budget_context(tools, limit_ctx, limit_ctx.llm_trace, *budget[2:])
+    return (_finish_tool_round_budget(limit_ctx, *budget, context_prepared=True, ready_finish=True)
+            or _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, after_tools=True)
+            or _finish_tool_round_budget(limit_ctx, *budget, context_prepared=True))
 
 
 # D18a: `context_fit` owns the transcript seal; re-exported here because the
@@ -649,25 +658,25 @@ def run_llm_loop(
             cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)  # a warm Resume may lift it (#2566)
 
             if pending_candidate or pending_tool_budget:
-                if not pending_candidate:
-                    budget_result = _finish_tool_round_budget(
-                        limit_ctx, budget_remaining_usd, cost_ceiling, active_model, active_use_local, active_effort)
-                    if budget_result is not None:
-                        return budget_result
-                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress,
-                                                        after_tools=not pending_candidate, resume_candidate=pending_candidate)
-                if final_result is not None:
-                    return final_result
+                tail_result = (
+                    _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, resume_candidate=True)
+                    if pending_candidate else
+                    _finish_tool_tail(limit_ctx, tools, emit_progress, budget_remaining_usd, cost_ceiling,
+                                      active_model, active_use_local, active_effort)
+                )
+                if tail_result is not None:
+                    return tail_result
                 pending_no_tool_budget = pending_no_tool_budget or pending_candidate
                 pending_candidate = pending_tool_budget = False
                 continue
 
             if pending_no_tool_budget:
                 pending_no_tool_budget = False
-                budget_result = _finish_no_tool_round_budget(limit_ctx, budget_remaining_usd, cost_ceiling)
-                if budget_result is not None:
+                if (budget_result := _finish_no_tool_round_budget(limit_ctx, budget_remaining_usd, cost_ceiling)) is not None:
                     return budget_result
 
+            if (refused := refused_door_end(tools, limit_ctx)) is not None:
+                return refused
             model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
                 from ouroboros.loop_llm_call import timeout_repeat_blocked

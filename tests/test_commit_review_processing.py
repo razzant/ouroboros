@@ -63,7 +63,7 @@ def dispatch(monkeypatch, tmp_path):
     return deliver
 
 
-@pytest.mark.parametrize(("processing", "local"), [("economy", False), ("", True)])
+@pytest.mark.parametrize(("processing", "local"), [("economy", False), ("ultrafast", False), ("", True)])
 def test_empty_pool_main_processing_survives_commit_vectors(monkeypatch, dispatch, local, processing):
     settings = {
         "OUROBOROS_SUBAGENTS": pool_roster(), "OUROBOROS_MODEL": MODEL,

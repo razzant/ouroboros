@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
-from tests._owner_continue_helpers import NONCE, _interrupted
+from tests._owner_continue_helpers import NONCE, _interrupted, _running_predecessor
 from tests._store_shared import delete_result, seed_result
 
 
@@ -155,6 +155,129 @@ def test_an_accounting_expiry_never_outranks_a_stop_or_a_whole_work_bound(tmp_pa
 
 
 _STAMP = "delegated_custody_unreconciled"
+
+
+@pytest.mark.parametrize("carried,recorded,resumed,source,limits,earlier,refusal", [
+    ("budget_exhausted", "dated", False, "owner_restart", {}, "budget_exhausted", ""),
+    ("budget_exhausted", "", False, "owner_restart", {}, None, ""),
+    ("budget_exhausted", "dated", False, "http_single", {}, "budget_exhausted", "stopped_by_owner"),
+    ("", "", False, "owner_restart", {"deadline_at": "2000-01-01T00:00:00+00:00"}, None, "hard_limit_reached"),
+    ("budget_exhausted", "dated", True, "owner_restart", {}, "budget_exhausted", ""),
+    ("budget_exhausted", "undated", True, "owner_restart", {}, None, ""),
+], ids=["dated-pause-from-its-producer", "lonely-inherited-code", "owner-stop", "recorded-deadline",
+        "dated-pause-lifted-by-the-real-resume", "undated-pause-lifted-by-the-real-resume"])
+def test_pool_cancel_names_an_earlier_stop_only_where_the_row_recorded_one(
+        tmp_path, monkeypatch, carried, recorded, resumed, source, limits, earlier, refusal):
+    """#3210. The cancel states its own cause (``cancel_origin``; ``reason_code`` becomes ``cancelled``) and may name beside
+    it, as an observation only (``earlier_stop``, which Continue never reads), a budget pause THIS row recorded: the code with
+    its producer's dated pause record (``worker_assignment``: ``paused_before_dispatch``, ``paused_at``), or that dated record
+    as the real explicit Resume (``queue_transitions``) leaves it: status ``resumed``, code cleared. A code alone proves no
+    event (no writer of a running or interrupted row records a budget stop), nor does an undated record (an event-shaped
+    pause, or what a held selection writes): that is unknown, not an earlier stop. A Stop and a deadline the work recorded
+    decide Continue as ever, label or none."""
+    from types import SimpleNamespace
+
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.owner_continue import continuation_eligibility
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import (
+        STATUS_INTERRUPTED, STATUS_RUNNING, STATUS_SCHEDULED, load_task_result, write_task_result,
+    )
+    from supervisor.queue_transitions import resume_budget_paused_task
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    events = []
+    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
+    tid = "pred-1"
+    pause = {"status": "paused_before_dispatch", "scope": "global", "physical_calls": 0, "replay_safe": True,
+             "auto_resume": False, "resume_policy": "manual_same_generation",
+             **({"paused_at": "2026-11-17T09:00:00+00:00"} if recorded == "dated" else {})}
+    if carried:  # ``worker_assignment``'s pause (one write: the code and its record, explicit zero calls) or the code alone
+        write_task_result(tmp_path, tid, STATUS_SCHEDULED, reason_code=carried, **({"resource_limit": pause} if recorded else {}))
+    if resumed:  # the REAL explicit Resume lifts it: its record kept whole under status ``resumed``, the code cleared
+        workers.PENDING.append({"id": tid, "type": "task", "chat_id": 7, "_attempt": 1,
+                                "admitted_dispatch": "none", "_budget_pause": pause})
+        assert (outcome := resume_budget_paused_task(tid))["ok"], outcome
+    _running_predecessor(tmp_path, tid)
+    write_task_result(tmp_path, tid, STATUS_RUNNING, task_attempt=1, result="Task is running.", **limits)
+    write_task_result(tmp_path, tid, STATUS_INTERRUPTED, result="Worker process died mid-task (attempt 1). Retrying.")
+    held = load_task_result(tmp_path, tid)
+    assert held.get("reason_code", "") == ("" if resumed else carried), "the premise: the code only rode along"
+    if resumed:  # what the real writer left: the pause record whole under a lifted status
+        assert held["resource_limit"]["status"] == "resumed" and held["resource_limit"].get("paused_at") == pause.get("paused_at")
+    if source:
+        intent = request_cancel(tmp_path, tid, source=source, requested_stop_policy="immediate",
+                                reason="Owner restart" if source == "owner_restart" else "Owner requested a stop")
+    assert workers._settle_terminalization_task(
+        {"id": tid, "_attempt": 1}, status="cancelled", reason="External cancellation", trigger="worker_pool_kill",
+        stop_source="owner_restart" if source else "", reconcile_delegate_custody=False)
+    assert [(e["task_id"], e["status"]) for e in events if e["type"] == "task_done"] == [(tid, "cancelled")]
+    row = load_task_result(tmp_path, tid, strict=True)
+    axes = normalize_outcome_axes(row)
+    execution = axes["execution"]
+    assert row["status"] == row["reason_code"] == execution["status"] == execution["reason_code"] == "cancelled"
+    assert execution.get("earlier_stop") == _ended_work_facts(row, tid).get("earlier_stop") == earlier
+    assert ("Earlier recorded stop:" in _completion_verdict(row, {})) is bool(earlier)
+    if source:
+        assert row["cancel_origin"]["request_id"] == intent["request_id"]
+    assert (row.get("cancel_origin") or {}).get("source") == (source or None)
+    verdict = continuation_eligibility(row, tid)
+    assert (verdict["eligible"], verdict["refusal"]) == (not refusal, refusal)
+    view_only = {**row, "outcome_axes": {**axes, "execution": {k: v for k, v in execution.items() if k != "earlier_stop"}}}
+    assert continuation_eligibility(view_only, tid) == verdict, "an observation: Continue never reads it"
+
+
+@pytest.mark.parametrize("settled,stop_source,refusal", [
+    ({"status": "failed", "reason_code": "budget_exhausted",
+      "result": "Budget exhausted after prior dispatch; cancel or start a new run."}, "", "hard_limit_reached"),
+    ({"status": "cancelled", "cancel_origin": {"source": "http_single", "reason": "Stop now"},
+      "result": "Task cancelled by user/agent request."}, "owner_restart", "stopped_by_owner"),
+], ids=["recorded-hard-limit", "owner-stop"])
+def test_a_writer_that_settles_the_row_after_the_pool_pre_read_keeps_its_whole_row(
+        tmp_path, monkeypatch, settled, stop_source, refusal):
+    """The pool writer reads the row before it writes, and the reducer lets a rewrite with the SAME terminal status
+    through, so a writer that settled the task in that gap lost its result, cause, author and stop origin to the
+    pool's own (an owner Stop turned into a Restart, a hard limit into a worker failure). The gap is generated
+    without a process: the real pre-read, then the neighbour's real publication, then the pool's write."""
+    from ouroboros import task_results
+    from ouroboros.owner_continue import continuation_eligibility
+    from tests._store_shared import read_result, result_signature
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    tid, status = "pred-1", settled["status"]
+    _running_predecessor(tmp_path, tid)
+    read, race = task_results.load_task_result, {"armed": True}
+
+    def read_then_lose_the_race(root, task_id, **kwargs):
+        seen = read(root, task_id, **kwargs)  # the row is still live: the pre-read passes
+        if race.pop("armed", False):
+            task_results.write_task_result(root, task_id, status, **{k: v for k, v in settled.items() if k != "status"})
+            race["after"] = (result_signature(root, task_id), read_result(root, task_id))
+        return seen
+
+    monkeypatch.setattr(task_results, "load_task_result", read_then_lose_the_race)
+    assert workers._write_failure_result(
+        tid, reason="External cancellation", status=status, stop_source=stop_source) == status
+    assert race["after"] == (result_signature(tmp_path, tid), read_result(tmp_path, tid)), "the pool's write left the row alone"
+    row = read_result(tmp_path, tid)
+    assert row["result"] == settled["result"] and row.get("cancel_origin") == settled.get("cancel_origin")
+    assert continuation_eligibility(row, tid)["refusal"] == refusal
+
+
+def test_legacy_cancel_with_its_own_technical_reason_still_admits_continue(tmp_path, monkeypatch):
+    from ouroboros.server_routing_context import _ended_work_facts
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, origin={})
+    row = seed_result(tmp_path, "pred-1", {**load_task_result(tmp_path, "pred-1"), "reason_code": "provider_failure"})
+    facts = _ended_work_facts(row, "pred-1")
+    assert facts["cause"] == "provider_failure" and "earlier_stop" not in facts
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"]
+    assert workers.PENDING[0]["metadata"]["continuation"]["cause"] == "provider_failure"
 
 
 @pytest.mark.parametrize("stored,admitted,cause_or_refusal", [

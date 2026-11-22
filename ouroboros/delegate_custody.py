@@ -1399,18 +1399,22 @@ def resolve_containment_fault(drive_root: Any, custody: RunCustody, reason: str,
 
 def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason: str, *, owner_stop=None) -> Dict[str, Any]:
     """Cancel once and verify terminality or absence in the owning store."""
+    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.transport_custody import is_pre_dispatch_transport_failure
 
-    from ouroboros.delegate_resume import prepare_recovered_cancel, recovered_cancel_detail
     recovered = getattr(custody, "resume_start_state", None) is not None
     if recovered and not custody.settled:
         if (observed := prepare_recovered_cancel(drive_root, gateway, custody, reason, owner_stop)) is not None:
             return observed
-    if custody.settled:
-        return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=False,
-                              control_status="", state="settled")
     accepted, control_status, control_error, unsent = False, "", "", False
+
+    def outcome(kind: str, state: str = "", **extra: Any) -> Dict[str, Any]:
+        return _cancel_result(drive_root, custody, kind, accepted=accepted,
+                              control_status=control_status, state=state, **extra)
+
+    if custody.settled:
+        return outcome(CANCEL_CONFIRMED, "settled")
     try:
         receipt = gateway.cancel_run(custody.run_id, reason=str(reason or ""))
         accepted = bool((receipt or {}).get("accepted"))
@@ -1427,34 +1431,25 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
     except ClaudexorUnavailable as exc:
         if daemon_says_absent(exc, gateway=gateway, run=custody):
             close_absent_run(drive_root, gateway, custody, "get_run_absent", absence=exc)
-            return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=accepted,
-                                  control_status=control_status, state="absent")
-        return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=accepted,
-                              control_status=control_status, state="",
-                              fault_reason="cancel_unreachable" if control_error else "cancel_unverified",
-                              detail=control_error or f"{exc.code}: {exc}", control_owed=unsent)
+            return outcome(CANCEL_CONFIRMED, "absent")
+        return outcome(CANCEL_CONTAINMENT_FAULT,
+                       fault_reason="cancel_unreachable" if control_error else "cancel_unverified",
+                       detail=control_error or f"{exc.code}: {exc}", control_owed=unsent)
     state = str(summary_of(detail).get("state") or "")
     if names_another_run(detail, custody.run_id) or recovered and not recovered_cancel_detail(gateway, custody, detail):
-        return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=accepted,
-                              control_status=control_status, state="", fault_reason="cancel_unverified",
-                              detail="read-back did not verify the same run and store", control_owed=unsent)
+        return outcome(CANCEL_CONTAINMENT_FAULT, fault_reason="cancel_unverified",
+                       detail="read-back did not verify the same run and store", control_owed=unsent)
     if state in TERMINAL_STATES:
         settle_run(drive_root, gateway, custody, detail)
         # A caller collecting this terminal needs the detail even if its next fetch fails.
-        return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=accepted,
-                              control_status=control_status, state=state,
-                              terminal_detail=detail)
+        return outcome(CANCEL_CONFIRMED, state, terminal_detail=detail)
     if control_error:
-        return _cancel_result(drive_root, custody, CANCEL_CONTAINMENT_FAULT, accepted=False,
-                              control_status=control_status, state=state,
-                              fault_reason="cancel_unreachable", detail=control_error, control_owed=unsent)
+        return outcome(CANCEL_CONTAINMENT_FAULT, state, fault_reason="cancel_unreachable",
+                       detail=control_error, control_owed=unsent)
     if accepted:
-        return _cancel_result(drive_root, custody, CANCEL_REQUESTED, accepted=True,
-                              control_status=control_status, state=state)
-    return _cancel_result(drive_root, custody, CANCEL_FAILED, accepted=False,
-                          control_status=control_status, state=state,
-                          fault_reason="cancel_rejected_run_still_live",
-                          detail=f"daemon refused the cancel; run state is {state or 'unknown'}")
+        return outcome(CANCEL_REQUESTED, state)
+    return outcome(CANCEL_FAILED, state, fault_reason="cancel_rejected_run_still_live",
+                   detail=f"daemon refused the cancel; run state is {state or 'unknown'}")
 
 
 def _cancel_result(drive_root: Any, custody: RunCustody, outcome: str, *, accepted: bool,
@@ -1471,7 +1466,9 @@ def _cancel_result(drive_root: Any, custody: RunCustody, outcome: str, *, accept
     elif outcome == CANCEL_CONFIRMED:
         resolve_containment_fault(drive_root, custody, "verified_terminal")
     result = {"outcome": outcome, "accepted": accepted, "control_status": control_status, "state": state,
-              "fault_reason": fault_reason, "detail": detail, "control_owed": control_owed}
+              "fault_reason": fault_reason, "detail": detail}
+    if control_owed:  # the owed control IS the new fact; without it the historical six-key shape stays untouched
+        result["control_owed"] = True
     # Keep the read-back for the caller. The custody event contains only the control facts.
     if terminal_detail is not None:
         result["terminal_detail"] = terminal_detail

@@ -904,6 +904,8 @@ def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypa
         assert commands.empty() and not workers.RUNNING
         held = continuation_refusal(row) or budget_hold_fact(row)
         assert held["reason"] == "dispatch_outcome_unknown", held
+        assert held["refusal_basis"] == ("dispatch_unconfirmed" if case == "already-launched" else
+                                         "schedule_receipt_unverified")
         return
     assert budget_hold_fact(row) is None
     sent = commands.get_nowait()
@@ -918,12 +920,12 @@ def test_the_continuation_proof_is_the_saved_steps_unlaunched_attempt(monkeypatc
     from supervisor import task_admission
     from supervisor.restart_retention import continues_saved_step
 
-    def granted(_task, _root):
+    def refusal(_task, _root):
         if proof == "unreadable":
             raise OSError("result unreadable")
-        return proof == "unlaunched"
+        return "" if proof == "unlaunched" else "dispatch_unconfirmed"
 
-    monkeypatch.setattr(task_admission, "_working_resume_granted", granted)
+    monkeypatch.setattr(task_admission, "working_resume_refusal", refusal)
     assert continues_saved_step({"id": "digest", "_working_recovery": {}}, "/drive") is (proof == "unlaunched")
     assert ("could not be proven" in caplog.text) is (proof == "unreadable")
     assert continues_saved_step({"id": "digest"}, "/drive") is False  # no saved step: nothing to continue

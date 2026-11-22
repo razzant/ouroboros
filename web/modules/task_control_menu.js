@@ -96,7 +96,7 @@ const STOP_CONFIRMS = Object.freeze({
 // A Stop over an accepted start whose outcome is unknown (#3428; the work projection's `unbound_start` on the
 // Activity trigger): the press records the request at once, but no engine run answers the start yet — the
 // confirmation says that truth instead of the bound run's immediate end.
-const UNBOUND_STOP_BODY = 'Stop is requested at once. A helper whose start was never confirmed may keep '
+const UNBOUND_STOP_BODY = 'Stop is requested at once. A subagent whose start was never confirmed may keep '
     + 'working until it is identified and its stop is confirmed.';
 
 function stopConfirm(action, anchor) {

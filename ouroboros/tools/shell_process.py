@@ -263,7 +263,7 @@ def start_refused_result(ctx: Any, exc: Exception, *, tool: str, where: str, sta
     that typed refusal. Pause, the store and every other error propagate for their own typed handling."""
     from ouroboros.owner_pause import OwnerPauseRefused
     from ouroboros.store import StoreError
-    from ouroboros.tools.shell import _pre_spawn_refusal
+    from ouroboros.tools.shell_effects import _pre_spawn_refusal
 
     if getattr(exc, "process_not_started", False) is not True or isinstance(exc, (OwnerPauseRefused, StoreError)):
         raise exc

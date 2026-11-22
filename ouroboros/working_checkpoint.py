@@ -737,18 +737,12 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
         episode_fields, observe_task_runs, set_budget_pause, task_owned_runs_open,
     )
     from ouroboros.model_wait import budget_paused_seconds
+    from ouroboros.owner_wait import working_resume_point
 
     _data, state = read_working(root, task_id, attempt)
     if not state or row.get("state") != STATE_PAUSING or row.get("source_ref"):
         return {}
-    working = state["working"]
-    pending = list(working.get("pending_tool_call_ids") or [])
-    point = {"round_idx": int(state.get("round_idx") or 0),
-             "phase": "partial_tool_batch_unknown" if pending else (
-                 "candidate" if working.get("boundary") == "candidate" else "boundary"),
-             "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
-             "abandoned_model_attempts": [], "budget_tail": str(working.get("budget_tail") or "tool"),
-             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
+    point = working_resume_point(state)
     reason = str(row.get("reason") or "budget")
     policy = (STOP_POLICY_TASK_OWNED if reason == "owner" else STOP_POLICY_ALL if reason == "budget"
               else STOP_POLICY_OBSERVE)

@@ -1,4 +1,5 @@
-"""``/api/state`` work projection contracts (v1): one row per work, one rollup per room.
+"""``/api/state`` work projection contracts (v1): one row per work, one rollup per room, and the owner's model and
+tier writes those rows and rooms carry (re-exported by ``client_contracts``, twinned in ``client_contract_types.js``).
 
 Descriptive, not runtime validation. The browser twin is ``web/modules/work_types.js``; the frozen census
 (``active_chat_activities``) stays beside these fields unchanged (docs/architecture/11-frozen-contracts-v1.md).
@@ -32,6 +33,12 @@ class WorkPrimaryRoute(ChatModelRoute):
     cited: NotRequired[CitedModelWords]
 
 
+class WorkPendingRoute(ChatModelRoute):
+    """The next route's scope, when known separately from the acting route's."""
+
+    basis: NotRequired[str]
+
+
 class WorkLead(WorkPrimaryRoute):
     """Acting route and chooser; a departure names the primary it left."""
 
@@ -39,7 +46,7 @@ class WorkLead(WorkPrimaryRoute):
     primary: NotRequired[WorkPrimaryRoute]
     since: NotRequired[str]
     cause: NotRequired[str]
-    pending: NotRequired[ChatModelRoute]
+    pending: NotRequired[WorkPendingRoute]
 
 
 ProcessingTier = Literal["", "standard", "fast", "economy", "ultrafast"]  # '' = no tier of its own: the default resolution
@@ -48,7 +55,7 @@ ProcessingTier = Literal["", "standard", "fast", "economy", "ultrafast"]  # '' =
 class ProcessingTiers(TypedDict):
     """Main's own tier ('' = none: Main takes the default) and the default every lead pays (Settings values)."""
 
-    main: Literal["", "standard", "fast", "economy"]
+    main: ProcessingTier
     default: Literal["", "standard", "fast", "economy"]
 
 
@@ -59,7 +66,7 @@ class ProcessingReceipt(TypedDict):
     requested: Optional[str]
     submitted: Optional[str]
     submittedNative: NotRequired[Optional[str]]
-    observed: str  # standard, fast, economy or unknown
+    observed: str  # standard | fast | economy | ultrafast | mixed | unknown
     observedNative: NotRequired[List[str]]
     reason: Optional[str]  # processing_not_submitted, submitted_mode_differs, provider_mode_changed
 
@@ -93,6 +100,65 @@ class TaskModelResponse(TypedDict):
     applied: Literal["next_step", "at_start"]
     lead: NotRequired[WorkLead]  # every model act
     processing: NotRequired[WorkProcessing]  # a tier act
+
+
+class ChatModelChoice(TypedDict):
+    """A room follows Main or chooses a route; a reference is never the same model pinned."""
+
+    kind: Literal["main", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+
+
+class MainBindingConditions(TypedDict):
+    """``GET /api/settings`` read tokens of Main's binding as the owner was shown it, compared under the writer's lock
+    (``409:settings_changed_elsewhere`` when one moved); ``connection`` is the shown ``_meta.connections[].revision``
+    of the API connection the written route sends to."""
+
+    OUROBOROS_MODEL: str
+    USE_LOCAL_MAIN: str
+    OUROBOROS_MODEL_ACCOUNTS: str
+    OUROBOROS_MODEL_PROCESSING_PREFERENCES: str
+    ultrafast: NotRequired[str]  # confirmed JSON [model, local, pin, store, fingerprint]; Auto binds no membership
+    connection: NotRequired[str]  # required where Ultrafast is written or carried on an API connection
+
+
+class OwnerChatModelRequest(ChatModelChoice):
+    """``POST /api/owner/chat-model``: a Project follows Main or chooses a model; without project_id this writes
+    Main itself, on the binding its ``if_unchanged`` names when sent (Main only)."""
+
+    project_id: NotRequired[str]
+    if_unchanged: NotRequired[MainBindingConditions]
+
+
+class OwnerChatModelResponse(TypedDict):
+    ok: bool
+    project_id: str
+    model_choice: NotRequired[ChatModelChoice]  # Project response
+    previous_model_choice: NotRequired[ChatModelChoice]
+    main_route: NotRequired[ChatModelRoute]  # Main response
+    previous_main_route: NotRequired[ChatModelRoute]
+    account: NotRequired[Literal["kept", "auto", "none"]]
+    window_reset: NotRequired[bool]
+
+
+class OwnerChatProcessingRequest(TypedDict):
+    """A room's processing tier for new owner work, or Main's own without project_id. An empty tier is Default;
+    ``if_unchanged`` belongs to Main's Ultrafast alone."""
+
+    processing: ProcessingTier
+    project_id: NotRequired[str]
+    if_unchanged: NotRequired[MainBindingConditions]
+
+
+class OwnerChatProcessingResponse(TypedDict):
+    ok: bool
+    project_id: str
+    processing_choice: NotRequired[ProcessingTier]  # Project response
+    previous_processing_choice: NotRequired[ProcessingTier]
+    main_processing: NotRequired[ProcessingTier]
+    previous_main_processing: NotRequired[ProcessingTier]
+    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
 
 
 class WorkReason(TypedDict):
@@ -149,7 +215,7 @@ class WorkTail(TypedDict):
     """What still runs beside or after the current episode, said as a second fact, never as the work's word."""
 
     kind: str  # helper | run | review | model
-    state: str  # live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
+    state: str  # live | unknown | open (an observed inactive run) | held (a paused helper)
     code: str
     text: str
     count: NotRequired[int]
@@ -183,9 +249,26 @@ class WorkEpisode(TypedDict):
     live: bool
 
 
+class WorkMemberState(TypedDict):
+    """One task's own activity. Concurrent execution is reported separately in its addressed tails."""
+
+    activity: Literal["working", "queued", "waiting", "paused", "unknown"]
+    transition: Literal["none", "finalizing", "pausing"]
+    call: Literal["", "preparing", "sending", "thinking", "working"]
+    live: bool  # this task executes, independent of its external runs
+    release: Literal["self", "owner", "mind", "none"]
+    confirmed: bool
+    turn: List[WorkTurn]
+    because: List[WorkReason]
+    tails: List[WorkTail]  # run/review IDs are external run IDs; model IDs are attempt IDs
+    mark: str  # the member's own mark, independent of its tails
+    queue_attempt: NotRequired[int]  # observed queue ordinal of this member's state, not an executor ordinal
+    last_resume: NotRequired[LastResume]
+
+
 class WorkMembers(TypedDict):
     ids: List[str]
-    states: NotRequired[Dict[str, Dict[str, Any]]]
+    states: NotRequired[Dict[str, WorkMemberState]]
 
 
 class WorkFocus(TypedDict):

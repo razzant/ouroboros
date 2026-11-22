@@ -35,8 +35,8 @@ from ouroboros.loop_nudges import accept_handover_selection, accept_preserved_ha
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.task_finalization import (
-    TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice,
-    set_terminal_plan_review_open,
+    TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, schedule_report_ctx,
+    set_terminal_host_notice, set_terminal_plan_review_open,
 )
 from ouroboros.tools.join_ledger import _child_disposition_state, _load_direct_child_results  # noqa: F401 -- loop re-exports both
 from ouroboros.tools.join_ledger import _child_result_sha256
@@ -139,12 +139,14 @@ def _record_forced_finalization(
     # Every rail returns this candidate's bytes. A wake's quiet selection stays
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
+    tools = getattr(ctx, "tools", None)  # the task's facts live on its tool context, never on the round limits
     if getattr(candidate, "quiet", False):
         ctx.accumulated_usage.update(wake_silent=True, terminal_origin=TERMINAL_ORIGIN_MODEL_FINAL)
+    elif schedule_report_ctx(getattr(tools, "_ctx", None)):
+        ctx.accumulated_usage["wake_silent"] = True  # an older schedule's report is a record before selection too
     else:
         ctx.accumulated_usage.pop("wake_silent", None)
     binding = dict(candidate.acceptance_binding or {}) if candidate is not None else {}
-    tools = getattr(ctx, "tools", None)
     current_fingerprint = str(
         getattr(getattr(tools, "_ctx", None), "_delivery_evidence_fingerprint", "")
         or ""
@@ -576,6 +578,8 @@ def _deliver_forced_late_results(ctx: _RoundLimitContext, llm_trace: Dict[str, A
 def _presence_forced_armed(tools_ctx: Any) -> bool:  # the host ceiling AND the Presence metadata
     contract = getattr(tools_ctx, "task_contract", None)
     metadata = getattr(tools_ctx, "task_metadata", None)
+    if schedule_report_ctx(tools_ctx):
+        return False  # a legacy schedule's report is a record, not a new forced Presence declaration
     return (isinstance(contract, dict) and isinstance(contract.get("capability_ceiling"), dict)
             and isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict))
 
@@ -873,8 +877,6 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
-    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
-    from ouroboros.model_wait import current_model_wait
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
     if admitted_request is None and _loop()._retire_main_reasoning(ctx):
@@ -888,11 +890,6 @@ def _call_forced_model_once(
         owner_ctx._forced_physical_context = None
     if physical is None:
         physical = _forced_physical_context(ctx, initial_messages if initial_messages is not None else ctx.messages)
-    waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
-        "task_metadata": getattr(owner_ctx, "task_metadata", {})},
-        context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
-        overrides=waiter.overrides if waiter else None)
     response_meta: Dict[str, Any] = {}
     from ouroboros.send_clock import main_clock_policy
 
@@ -950,14 +947,7 @@ def _call_forced_model_once(
             initial_messages=initial_messages,
             physical_context=physical,
             candidate_predicate=candidate_predicate if admitted_request is not None else None,
-            model_role=role,
-            model_account_override=account,
-            # The work's own tier, as its rounds and the priced wrap-up copy ask it (task_pacing).
-            processing_preference=task_processing_preference(
-                {"task_metadata": getattr(owner_ctx, "task_metadata", {})}, model_role=role),
-            # A forced final belongs to the loop invocation that is finishing, so it
-            # continues that same active turn instead of opening a new one.
-            model_turn_state=getattr(owner_ctx, "model_turn_state", None),
+            **task_pacing.wrapup_model_options(ctx),
             send_clock_policy=main_clock_policy(
                 getattr(owner_ctx, "task_metadata", {}), task_type=str(getattr(ctx, "task_type", "") or "")),
             configured_api_child=is_configured_api_child(owner_ctx),  # a forced call is still that actor's call

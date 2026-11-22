@@ -17,11 +17,16 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ouroboros.request_wire_recovery import request_wire_scoped
 from ouroboros.model_wait import dispatch_deadline_remaining_sec
-from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, is_openrouter_endpoint
+from ouroboros.opencode_go import is_go_chat_route
+from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, OPENROUTER_BASE_URL, is_openrouter_endpoint
+from ouroboros.transport_custody import (  # noqa: F401 -- the names this module published before they moved
+    apply_processing_preference, attempt_pricing_fields, carries_add_on_charge, processing_transport_modes,
+    provider_reported_cost_only, routing_admits_any_endpoint, sealed_provider_routing, submitted_processing_mode,
+)
 from ouroboros.provider_connections import connection_rows, connection_values
 from ouroboros.provider_models import (
     CONNECTIONS_KEY,
@@ -39,7 +44,6 @@ from ouroboros.provider_models import (
 )
 from ouroboros.config import runtime_setting
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Asks OpenRouter to report its upstream attempts, so a router's final status
 # cannot hide the cause an upstream returned (the attribution headers stay their own SSOT).
 OPENROUTER_METADATA_HEADERS = {"X-OpenRouter-Metadata": "enabled"}
@@ -76,6 +80,27 @@ def _resolve_or_provider(connection_routing: Any = None) -> Dict[str, Any]:
     Empty/unset/invalid -> ``{}`` (no routing)."""
     return {**_or_provider_value(runtime_setting("OUROBOROS_OR_PROVIDER")),
             **_or_provider_value(connection_routing)}
+
+
+def openrouter_chat_routing(target: Mapping[str, Any], messages: Optional[list]) -> Dict[str, Any]:
+    """Chat provider filters, with parameter and reasoning continuity pins taking precedence.
+
+    A pricing projection without a transcript (None) bounds both possible sends: a continuity
+    pin can widen Flex's price pool unless this family can replay even sealed reasoning anywhere.
+    The adapter always supplies its actual send copy, including an empty list when appropriate.
+    OpenRouter publishes the accepted fields per endpoint at ``/api/v1/models/{author}/{slug}/endpoints``.
+    """
+    from ouroboros.reasoning_artifacts import sealed_reasoning_is_portable, transcript_has_sealed_reasoning
+
+    model = str(target.get("resolved_model") or "").strip().lstrip("~")
+    pins = {"require_parameters": True} if model.startswith("anthropic/") else {}
+    pin_fallbacks = (not sealed_reasoning_is_portable(model) if messages is None
+                     else transcript_has_sealed_reasoning(messages, model))
+    if pin_fallbacks:
+        pins["allow_fallbacks"] = False
+    for key, value in _resolve_or_provider(target.get("provider_routing")).items():
+        pins.setdefault(key, value)
+    return pins
 
 
 def _resolver_route(model: str) -> RouteParts:
@@ -159,21 +184,32 @@ def _reply_dict(response: Any, target: Dict[str, Any]) -> Dict[str, Any]:
     """The reply body the normalizer reads; a Responses reply keeps exactly the fields its wire carried."""
     from ouroboros.openai_responses import response_body, responses_route
 
-    return response_body(response) if responses_route(target) else response.model_dump()
+    if responses_route(target):
+        return response_body(response)
+    from ouroboros._usage_response import has_reported_service_tier
+
+    body = response.model_dump()
+    if not has_reported_service_tier(response, body):
+        body.pop("service_tier", None)
+    return body
 
 
 def _remote_http_client(target: Dict[str, Any], *, async_client: bool = False) -> Tuple[Any, Dict[str, str]]:
     """The keepalive client and default headers for ``target``'s SDK client.
 
-    A target that refuses redirects (an attributed compatible OpenRouter endpoint) on an SDK
-    that cannot build a client holding that refusal keeps its route, key and SDK default client;
-    only the app identity the route added is left off, never carried by a followed redirect."""
+    If the SDK cannot disable redirects, omit optional OpenRouter attribution and
+    keep its route/key. OpenCode Go requires its conversation header, so cannot use
+    that fallback; neither identity may be carried to a redirect destination."""
     from ouroboros.net_transport import keepalive_http_client
 
     refuses = target.get("follow_redirects") is False
     http_client = keepalive_http_client(async_client=async_client, follow_redirects=not refuses)
     headers = dict(target.get("default_headers") or {})
     if http_client is None and refuses:
+        if is_go_chat_route(target.get("provider"), target.get("base_url")):
+            # Go requires the conversation headers, so the SDK's ordinary fallback
+            # (which may follow redirects) cannot serve this route.
+            raise RuntimeError("the OpenAI SDK cannot build a redirect-free client for OpenCode Go")
         logging.getLogger(__name__).warning(
             "openai SDK cannot build a client that refuses redirects; OpenRouter app attribution omitted")
         headers = {key: value for key, value in headers.items() if key not in OPENROUTER_APP_HEADERS}
@@ -252,7 +288,8 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
         attributed = is_openrouter_endpoint(base_url)
         return {"api_key": api_key, "base_url": base_url, "keyless": keyless,
                 "default_headers": dict(OPENROUTER_APP_HEADERS) if attributed else {},
-                **({"follow_redirects": False} if attributed else {}), **_DIRECT_LANE}
+                **({"follow_redirects": False} if attributed or is_go_chat_route(provider, base_url) else {}),
+                **_DIRECT_LANE}
     return {
         "api_key": get("api_key", "") if connection or api_key_override is None else api_key_override,
         "base_url": openrouter_base_url,

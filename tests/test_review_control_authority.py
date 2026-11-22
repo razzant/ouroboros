@@ -102,6 +102,7 @@ def test_control_refusal_cannot_erase_earlier_paid_or_unknown_history(prior, cur
 def test_native_control_refusal_preserves_only_an_available_report_draft(subject_repo, tmp_path, shape, paid_round):
     draft = "# Paid draft\n\nThe greeting file says hello.\n"
     admissions = []
+    paid_ids = []
     error = ua.ControlAuthorityUnavailable("invalid dispatch fence", cause="dispatch_fence_invalid")
 
     class RefusesAfterDraft(_ScriptedLLM):
@@ -110,7 +111,14 @@ def test_native_control_refusal_preserves_only_an_available_report_draft(subject
             if not self.script:
                 raise error
             message, usage = super().chat(**kwargs)
-            return message, {**usage, "cost": 0.125, "ledger_attempt_ids": ["paid-first"]}
+            usage.update(cost=0.125, cost_final=True)
+            # A paid first round has a settled attempt, even when the next call never leaves the host.
+            with ua.capture_attempt_ids() as ids:
+                ua.execute_physical_attempt(ua.AttemptRequest(model=kwargs["model"], provider="openai-compatible",
+                    drive_root=tmp_path, task_id="t-native", root_task_id="t-native", reservation_usd=0.125),
+                    lambda: message, extractor=lambda _: (usage, 0.125, True))
+            paid_ids.extend(ids)
+            return message, {**usage, "ledger_attempt_ids": list(ids)}
 
     llm = RefusesAfterDraft([{"content": draft, "tool_calls": [
         _tool_call("read_file", {"path": "greeting.txt"})]}] if paid_round else [])
@@ -134,7 +142,7 @@ def test_native_control_refusal_preserves_only_an_available_report_draft(subject
     assert len(llm.calls) == int(paid_round)
     if paid_round:
         assert custody["cost"] == 0.125
-        assert custody["ledger_attempt_ids"] == ["paid-first"]
+        assert len(paid_ids) == 1 and custody["ledger_attempt_ids"] == paid_ids
         assert draft.strip() in custody["native_terminal_round"].replace("\\n", "\n")
         assert custody["native_tool_receipts"][0]["path"] == "greeting.txt"
         assert custody["native_transcript_chars"] > 0

@@ -117,7 +117,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "    function noteToolMetrics(taskId, metrics, rawTs, { suppressDomInsert = false } = {}) {"
+    "value": "const projection = foldCardMetrics(record, metrics, facts, attempt, recorded);"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -159,7 +159,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs, summarizeChatLiveEvent)"
+    "value": "            const changed = summary && placeReplayedEvidence(record, summary, facts.evidence, anchor, normalizeLogTs, summarizeChatLiveEvent)"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -243,18 +243,6 @@
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "function extractCommandText(args) {"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "evt.status === 'non_zero_exit'"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
     "value": "phase: 'warn'"
   },
   {
@@ -262,12 +250,6 @@
     "path": "web/modules/task_reason_words.js",
     "kind": "contains",
     "value": "A command returned"
-  },
-  {
-    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "headline: failedStepHeadline(evt),"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",

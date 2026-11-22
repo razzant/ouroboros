@@ -300,17 +300,33 @@ def store_continuation_source(ctx: Any, state: dict, source_id: str) -> dict:
 REASON_OWNER_PAUSE_WARM = "owner_pause"
 
 
+def _resume_point(round_idx: int, pending: list[str], *, selected: bool, budget_tail: str,
+                  abandoned: tuple[str, ...] | list[str] = ()) -> dict:
+    return {"round_idx": int(round_idx),
+            "phase": "partial_tool_batch_unknown" if pending else "candidate" if selected else "boundary",
+            "unanswered_tool_call_ids": list(pending), "unanswered_policy": "not_re_executed_execution_unknown",
+            "abandoned_model_attempts": list(abandoned), "budget_tail": budget_tail}
+
+
 def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = False) -> dict:
     """Capture the phase once, whether the pause keeps its stack or releases it."""
     from ouroboros.budget_pause import pending_tool_call_ids
 
-    pending = pending_tool_call_ids(limit_ctx.messages)
-    selected = delivery_candidate or getattr(limit_ctx, "resume_candidate", False)
-    return {"round_idx": int(limit_ctx.round_idx),
-            "phase": "partial_tool_batch_unknown" if pending else "candidate" if selected else "boundary",
-            "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
-            "abandoned_model_attempts": list(getattr(ctx, "_abandoned_model_attempts", None) or []),
-            "budget_tail": getattr(limit_ctx, "budget_tail", "tool")}
+    return _resume_point(
+        int(limit_ctx.round_idx), pending_tool_call_ids(limit_ctx.messages),
+        selected=bool(delivery_candidate or getattr(limit_ctx, "resume_candidate", False)),
+        budget_tail=getattr(limit_ctx, "budget_tail", "tool"),
+        abandoned=list(getattr(ctx, "_abandoned_model_attempts", None) or []),
+    )
+
+
+def working_resume_point(state: dict) -> dict:
+    """Derive the same pause program counter from an expanded working-checkpoint state."""
+    working = state["working"]
+    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate",
+                            budget_tail=str(working.get("budget_tail") or "tool")),
+            "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
 
 
 def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
@@ -1239,8 +1255,21 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
     from ouroboros.loop_nudges import restore_authoring_handover
+    from ouroboros.task_finalization import schedule_report_ctx
 
     restore_authoring_handover(ctx, state, trace, usage)
+    schedule_report = schedule_report_ctx(ctx)
+    if schedule_report:
+        # Pre-upgrade rows had no wake_silent/quiet facts. The geometry is enough to keep the report a record.
+        for name in ("_completion_request", "_completion_selected"):
+            request = getattr(ctx, name, None)
+            if isinstance(request, dict) and request.get("source") == "presence_finish":
+                request["wake_silent"] = True
+        completion = getattr(ctx, "_presence_completion", None)
+        if isinstance(completion, dict):
+            completion["quiet"] = True
+            if completion.get("outcome") in {"message", "deferred"}:
+                completion["outcome"] = "silent"
     if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
         ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice
@@ -1255,6 +1284,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
+    if ctx._delivery_candidate is not None and schedule_report:
+        ctx._delivery_candidate.quiet = True  # a pre-upgrade report, selected or not, stays a record on every place state
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
         if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:

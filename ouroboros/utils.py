@@ -357,10 +357,33 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
     write_bytes_atomic(pathlib.Path(path), content.encode("utf-8"), fsync=fsync)
 
 
+_POSIX_SURROGATE_RE = _re.compile(r"[\udc80-\udcff]")
+
+
+def json_dumps_utf8(value: Any, **kwargs: Any) -> str:
+    """Keep POSIX name bytes in structured JSON, not in its UTF-8 carrier.
+
+    Escape after serialization so a literal backslash sequence remains distinct.
+    Leave valid Unicode and the encoder's formatting intact. Other lone surrogates
+    still fail at a strict UTF-8 boundary; this is not a prose encoder.
+    """
+    text = json.dumps(value, **kwargs)
+    return text if text.isascii() else _POSIX_SURROGATE_RE.sub(lambda match: f"\\u{ord(match[0]):04x}", text)
+
+
+def path_for_prose(path: str) -> str:
+    """Use an exact JSON string literal for POSIX byte names in UTF-8 prose.
+
+    Reserve the opening quote for that literal, so a real name cannot mimic it.
+    Ordinary paths keep their spelling; filesystem lookups use the original value.
+    """
+    return json_dumps_utf8(path, ensure_ascii=False) if path.startswith('"') or _POSIX_SURROGATE_RE.search(path) else path
+
+
 def machine_json(payload: Any) -> str:
     """The one compact text of machine JSON: state files, the current store's task bodies and every row
     ``append_jsonl`` writes (a row keeps each value; only the separators' spaces are not written)."""
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return json_dumps_utf8(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: bool = False,

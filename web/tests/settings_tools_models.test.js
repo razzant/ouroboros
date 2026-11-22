@@ -9,6 +9,7 @@ import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { applyMcpSettings, collectMcpSettings, refreshStatus } from '../modules/mcp_settings.js';
 import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
+import { modelCatalog } from '../modules/model_catalog_store.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
 import { localModelStatusWords } from '../modules/settings_local_model.js';
@@ -49,7 +50,8 @@ function fakeServer(routes, values = {}) {
         tokens: Object.fromEntries(Object.keys(server.values).map((key) => [key, token(key)])),
         setup_contract: { scopedModelCatalogs: true, modelSlots: contract.modelSlots } } });
     const write = (settings, precondition = {}) => {
-        const stale = Object.entries(precondition || {}).find(([key, held]) => held !== token(key));
+        // A connection's revision is compared with that connection as it is now (owner_settings.connection_revision).
+        const stale = Object.entries(precondition || {}).find(([key, held]) => key !== 'ultrafast' && held !== (key === 'connection' ? server.revision : token(key)));
         if (stale) return response({ saved: false, code: 'settings_changed_elsewhere', error: `${stale[0]} changed` }, 409);
         const changes = {};
         for (const [key, value] of Object.entries(settings)) {
@@ -1067,7 +1069,7 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     assert.match(head(page.container, 'fallback/2').textContent, /2.*kimi.*OpenRouter · by API key/s);
     const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
     assert.deepEqual(['light', 'safety', 'vision', 'consciousness', 'websearch'].map((slot) => value(`models:${slot}`)),
-        ['gpt-light', 'Light model', 'Main model', 'Main model', 'Auto']);
+        ['gpt-light', 'gpt-light · as Light', 'Main model', 'Main model', 'Auto'], 'an empty Supervisor names the model it checks with');
     assert.deepEqual(rowsOf('models', { fold: false }).map((row) => row.id), ['OUROBOROS_IMAGE_INPUT_MODE', 'models:context', 'models:local', 'models:catalogue']);
     assert.deepEqual(rowsOf('models', { fold: true }).map((row) => row.id), ['OUROBOROS_PROCESSING_PREFERENCE', 'OUROBOROS_PROMPT_CACHE_TTL', 'OUROBOROS_MODEL_MAX_CONCURRENCY']);
     // A request over the limit waits in line and is never sent elsewhere for waiting: the queue names no clock of its own.
@@ -1152,11 +1154,67 @@ test('the fallbacks\' order and removal are written on the list: the order throu
 });
 
 test('a route is said in the owner\'s words', () => {
-    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', source: 'Codex subscription · your accounts in turn' });
+    assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', label: 'Codex',
+        source: 'Codex subscription · your accounts in turn' });
     assert.equal(routeWords('anthropic@work::claude-opus').source, 'Anthropic (work) · by API key');
     assert.equal(routeWords('google/gemini-pro').name, 'gemini-pro');
-    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', follows: true });
+    assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', label: '', follows: true });
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
+});
+
+test('a subscription is named by its held descriptor, and keeps the old generic name without one', () => {
+    // An opaque source id is no readable name; only the catalogue's descriptor names its owner.
+    const sources = [{ id: 'claude', label: 'Claude Code', credentialHarness: 'claude' }];
+    assert.deepEqual(routeWords('claudexor::claude=claude-opus-5-5', { modelSources: sources }),
+        { name: 'claude-opus-5-5', mark: 'claude', label: 'Claude Code',
+            source: 'Claude Code subscription · your accounts in turn' });
+    assert.equal(routeWords('claudexor::future=gpt-x').label, 'future',
+        'no descriptor: the old generic label stands, never a guessed product name');
+    assert.equal(routeWords('claudexor::claude=claude-opus-5-5', { account: 'studio-01', modelSources: sources }).source,
+        'Claude Code subscription · account studio-01');
+});
+
+// The Models list's Main row: its mark and its source line come from the catalogue a model sheet already holds.
+// Nothing here reads the catalogue; a descriptor adopted later reaches only those two slots.
+test('the Models Main row wears its descriptor\'s mark and name, and a later descriptor reaches only them', async (t) => {
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    const value = 'claudexor::agy=claude-opus-5-5';
+    const page = await open(t, 'models', { values: { OUROBOROS_MODEL: value, OUROBOROS_MODEL_ACCOUNTS: { main: 'studio-01' } } });
+    const row = () => page.container.querySelector('.models-main-row');
+    const meta = () => inside(row(), '.models-main-meta');
+    const markNode = () => inside(meta(), '.model-source-mark');
+    const catalogueReads = () => page.calls.filter((url) => String(url).startsWith('/api/model-catalog')).length;
+    // Already held: the descriptor's mark and its name at the first paint, with no read of this page's own.
+    const reads = catalogueReads();
+    assert.equal(markNode().getAttribute('viewBox'), '0 0 180 180', 'a held descriptor draws its mark at first paint');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(inside(meta(), '[data-i18n-authored]').textContent, 'Antigravity work', 'the name is authored, not chrome');
+    // A held list that names no harness: the neutral initial and the old generic name, never a brand guessed from the id.
+    const rowNode = row();
+    modelCatalog.adopt({ items: [], model_sources: [] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.match(markNode().getAttribute('class'), /model-source-initial/, 'no descriptor: a neutral initial');
+    assert.match(meta().textContent, /Antigravity subscription · account studio-01/s,
+        'without a descriptor the old generic name stands, and no brand is chosen by the id alone');
+    // A descriptor adopted later brands the route it names: only the mark and its source line change.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
+    assert.equal(inside(meta(), '.model-source-mark').getAttribute('viewBox'), '0 0 180 180', 'the descriptor\'s Antigravity mark');
+    assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(catalogueReads(), reads, 'no read for a mark');
+    // The same descriptor again is a no-op: the drawn nodes stay the ones the owner sees.
+    const mark = inside(meta(), '.model-source-mark');
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(inside(meta(), '.model-source-mark'), mark, 'an unchanged result writes nothing');
+    // A descriptor that names no credential harness is no evidence of one: the neutral initial stays.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: '' }] });
+    await settle();
+    assert.match(inside(meta(), '.model-source-mark').getAttribute('class'), /model-source-initial/,
+        'an unbound opaque id is never branded');
+    assert.doesNotMatch(meta().innerHTML, /viewBox="0 0 180 180"/);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {
@@ -1178,4 +1236,93 @@ test('a saved local-model setting says it applies when the local model is restar
     assert.doesNotMatch(readFileSync(new URL('../modules/settings_local_model.js', import.meta.url), 'utf8'), /Restart (now|Ouroboros)|restart_required|['"]restart['"]/);
     assert.deepEqual(localModelStatusWords({ status: 'ready', context_length: 16384 }), { text: 'Ready · context 16384', tone: 'ok' });
     assert.deepEqual(localModelStatusWords({ status: 'error', error: 'no such file' }), { text: 'Error · no such file', tone: 'danger' });
+});
+
+test('an empty Safety Supervisor shows what the runtime gives it along Safety → Light → Main: the model, the account, the tier', async (t) => {
+    const page = await open(t, 'models', { values: { OUROBOROS_MODEL_LIGHT: '',
+        [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'fast', consciousness: 'economy' } } });
+    const value = (id) => inside(page.container.querySelector(`[data-setting-row="${id}"]`), '[data-row-value]')?.textContent;
+    assert.equal(value('models:safety'), 'gpt-main · account studio-01 · Fast · as Main, via Light');
+    // Light's own model ends the chain: Light's options, and none of Main's.
+    const light = await open(t, 'models', { values: { [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'fast' } } });
+    const lightValue = inside(light.container.querySelector('[data-setting-row="models:safety"]'), '[data-row-value]')?.textContent;
+    assert.equal(lightValue, 'gpt-light · as Light');
+});
+
+/* Two windows on Main's page: this one typed a new model; the other saved something meanwhile. */
+async function mainPage(t, values = {}, { revision = '' } = {}) {
+    forgetSettingRows();
+    const env = setup(t);
+    const server = fakeServer(env.routes, values);
+    server.revision = revision;  // the named key's revision, as the server words it now
+    const read = server.document;
+    if (revision) server.document = () => { const doc = read(); doc._meta.connections = [{ id: 'openai@work', revision: server.revision }]; return doc; };
+    const path = 'models/role/main';
+    const asked = [];
+    const ctx = { readSettings, openSettings: () => true, state: { activePage: 'settings', settingsPath: path },
+        ask: async (question) => { asked.push(question); return true; } };
+    const container = new NodeStub();
+    env.document.body.appendChild(container);  // the role editor finds its host by id in the document
+    const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx });
+    await settle();
+    t.after(() => handle?.unmount?.());
+    const page = { ...env, server, ctx, container, asked, handle,
+        press: async (target) => { await container.fire('click', { target }); await settle(); } };
+    const model = page.container.querySelector('[data-model-role-model]');
+    const elsewhere = (key, value) => { page.server.values[key] = value; page.server.tokens[key] = (page.server.tokens[key] || 0) + 1; };
+    const result = () => page.container.querySelector('[data-editor-result]').textContent;
+    return { ...page, elsewhere, result,
+        // The chooser's popup is layout work this DOM stub has none of; a disabled field never opens it, and the
+        // editor's own `input` listener, which is what is typed into, does not read that flag.
+        type: async (text) => { model.disabled = true; model.value = text; await model.fire('input', { target: model }); await settle(); },
+        save: () => page.press(page.container.querySelector('[data-editor-save]')) };
+}
+
+test('two windows: a new Main model saved here never takes a tier set elsewhere meanwhile; an unrelated save elsewhere keeps it saving', async (t) => {
+    const page = await mainPage(t);
+    await page.type('gpt-next');
+    page.elsewhere(MODEL_PROCESSING_PREFERENCES_KEY, { consciousness: 'economy', main: 'ultrafast' });
+    await page.save();
+    assert.deepEqual([page.server.posts, page.server.checker], [[], []], 'nothing is sent on a binding this page did not show');
+    assert.match(page.result(), /^Not saved\. Main's processing is Ultrafast now, set on another device\./);
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-main');
+    // Another window saved an unrelated setting: the model is written, standing on Main's whole binding.
+    const other = await mainPage(t);
+    await other.type('gpt-next');
+    other.elsewhere('OUROBOROS_MODEL_LIGHT', 'openai::gpt-other');
+    await other.save();
+    const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.deepEqual(Object.keys(sent.precondition).sort(), ['OUROBOROS_MODEL', MODEL_ACCOUNTS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, 'USE_LOCAL_MAIN'].sort());
+    assert.equal(other.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-next');
+});
+
+test('carrying stored Ultrafast to an unlisted model asks before the write', async (t) => {
+    const page = await mainPage(t, { [MODEL_ACCOUNTS_KEY]: {}, [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'ultrafast' } });
+    await page.type('gpt-next');
+    await page.save();
+    assert.equal(page.asked.length, 1);
+    assert.equal(page.asked[0].title, 'Ultrafast for Main');
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'claudexor::codex=gpt-next');
+    assert.match(page.result(), /^Saved/);
+    const sent = [...page.server.checker, ...page.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.ok(!('connection' in sent.precondition), 'a subscription has no key to bind');
+    assert.deepEqual(JSON.parse(sent.precondition.ultrafast), ['claudexor::codex=gpt-next', false, '', '', '']);
+});
+
+test('two windows: Main\'s Ultrafast stands on its key as this page showed it; a key rotated elsewhere refuses, an unrelated edit does not', async (t) => {
+    const keyed = { OUROBOROS_MODEL: 'openai@work::gpt-a', [MODEL_ACCOUNTS_KEY]: {}, [MODEL_PROCESSING_PREFERENCES_KEY]: { main: 'ultrafast' } };
+    const page = await mainPage(t, keyed, { revision: 'openai@work#r1' });
+    await page.type('gpt-b');
+    page.server.revision = 'openai@work#r2';  // the other window rotated the named key (or its API surface)
+    await page.save();
+    assert.deepEqual([page.server.posts, page.server.checker], [[], []], 'nothing is sent on a key the page did not show');
+    assert.match(page.result(), /^Not saved\. The key this model goes through changed on another device\./);
+    assert.equal(page.server.values.OUROBOROS_MODEL, 'openai@work::gpt-a');
+    const other = await mainPage(t, keyed, { revision: 'openai@work#r1' });
+    await other.type('gpt-b');
+    other.elsewhere('OUROBOROS_MODEL_LIGHT', 'openai::gpt-other');
+    await other.save();
+    const sent = [...other.server.checker, ...other.server.posts].find((post) => 'OUROBOROS_MODEL' in post.settings);
+    assert.equal(sent.precondition.connection, 'openai@work#r1', 'the revision shown, sent as shown');
+    assert.equal(other.server.values.OUROBOROS_MODEL, 'openai@work::gpt-b');
 });

@@ -88,20 +88,18 @@ coverage.
 
 ## Unknown model role at startup
 
-An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`
-means the code reading that setting does not recognize a role name. Current
-diagnostics name the setting and offending roles, without dumping their values.
-Older packages print `OUROBOROS_MODEL_CONTEXT_WINDOWS must contain only known
-model roles` without identifying the role; the same recovery below applies.
-Check for a misspelling or a version mismatch. The same strict rule applies to account pins
-and processing preferences: unknown entries are not silently ignored or changed
-to Auto, even when a context window is zero.
+**Main Ultrafast.** Confirm a move in Main or Settings → Models. For one waiting task, leave “Also save this role” off.
+Before rollback save Standard or Default. Older readers reject the whole settings file with `"main":"ultrafast"` in `OUROBOROS_MODEL_PROCESSING_PREFERENCES`.
+After an unexpected rollback, back up, restore a compatible reader and change the tier.
 
-The packaged launcher and the managed repository are separate. Updating the
-repository, including a manual `git pull` in a fork, does not replace an older
-executable. Current launchers can hand off to updated source after an import
-probe, but an older executable without that handoff still needs an application
-package update. New source cannot repair its frozen settings parser or logging.
+`OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)` identifies an unfamiliar
+role by name without logging its value. Older packages say `OUROBOROS_MODEL_CONTEXT_WINDOWS
+must contain only known model roles`. Check spelling and reader version. Account pins,
+processing preferences and context windows (including zero) all require known roles.
+
+The packaged launcher and managed checkout have separate readers. Current launchers
+can hand off to updated source after an import probe. A launcher without that handoff
+needs a compatible package even after a manual `git pull`.
 
 To recover without resetting the installation:
 

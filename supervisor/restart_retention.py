@@ -548,6 +548,7 @@ def hold_never_started(task: Dict[str, Any], running_ids: Iterable[str], interru
         return False  # recorded possible dispatch keeps the ordinary interruption path
     else:
         hold_budget_row(task, reason="dispatch_outcome_unknown",
+                        extra={"refusal_basis": "dispatch_unconfirmed"},
                         detail="an assignment may have reached a worker; reconcile its receipt before resuming",
                         result_root=pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT))
     return True
@@ -782,17 +783,21 @@ def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive
         kept = [task_id for task_id in kept if task_id not in orphaned]
 
 
-def continues_saved_step(task: Dict[str, Any], drive_root: Any) -> bool:
-    """A continuation of its own saved step whose next attempt never launched (``_working_resume_granted``): what a
-    returning door names a queued continuation by, and what returns a named one past a schedule's ``possible``
-    receipt at boot (#3192). An unreadable fact proves nothing."""
-    from supervisor.task_admission import _working_resume_granted
+def saved_step_refusal(task: Dict[str, Any], drive_root: Any) -> str:
+    """Why a possible dispatch cannot return as the next attempt of this exact saved step."""
+    from supervisor.task_admission import working_resume_refusal
 
+    if not isinstance(task.get("_working_recovery"), dict):
+        return "dispatch_unconfirmed"
     try:
-        return isinstance(task.get("_working_recovery"), dict) and _working_resume_granted(task, drive_root)
+        return working_resume_refusal(task, drive_root)
     except Exception:
         log.warning("Saved continuation of %s could not be proven", task.get("id"), exc_info=True)
-        return False
+        return "resume_evidence_unavailable"
+
+
+def continues_saved_step(task: Dict[str, Any], drive_root: Any) -> bool:
+    return not saved_step_refusal(task, drive_root)
 
 
 def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: List[Dict[str, Any]], *,

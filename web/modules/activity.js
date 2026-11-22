@@ -30,6 +30,7 @@ import {
     taskControlTriggerLabel,
 } from './task_control_menu.js';
 import { markView, statusMarkHtml } from './status_mark.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
 import { normalizeConsciousness } from './consciousness_api.js';
@@ -249,7 +250,10 @@ function scheduleRunHtml(s, timeZone) {
         const state = quiet && outcome.state === 'completed' ? tr('schedule.outcome.quiet', 'ran · no message') : outcome.state;
         // The line is the host's notice, else the run's own words (its sentence, or the end of its answer).
         const line = outcome.line ? ` · ${outcome.notice ? `notice: ${esc(outcome.line)}` : `<span data-i18n-authored>${esc(outcome.line)}</span>`}` : '';
-        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}`);
+        // The settled run's room, not the schedule's editable destination, owns its card.
+        const reference = outcome.chat_id == null ? '' : taskReferenceHtml(outcome.task_id, outcome.chat_id);
+        const door = reference ? ` ${reference}` : '';
+        parts.push(`last run: ${esc(state)}${outcome.ended_at ? ` · ${scheduleInstantHtml(outcome.ended_at, { timeZone, includeYear: true })}` : ''}${line}${door}`);
     }
     // Why the row did not do its job, as stored (a note whose chat write was not confirmed is consumed and never
     // retried, so this is the only place it says so) — once: a run whose own line already says it is not repeated.
@@ -506,23 +510,36 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // Any other run is named as its card is (the producer's suggested_name), never by its whole order.
             const named = t._presence_turn ? presenceWorkName(census, ownId) : String(t.suggested_name || t.title || '').trim();
             const label = esc(named || (t._presence_turn ? 'Live turn' : q.type || ownId || 'task'));
-            const spent = kind === 'running' ? elapsedWords(q.runtime_sec) : '';
+            // The queue and census are independent reads. Compare the same task's attempts; a helper's witness
+            // comes from its own member state, not its root. If they cannot be joined, keep the known phase by itself.
+            // Names, orders and control targets still address the task, not its attempt.
+            const censusRow = ownId ? activities.find((entry) => entry?.activity_id === ownId) : undefined;
+            const ownWork = workOfEpisode(census, ownId);
+            const member = ownWork ? null : memberState(census, ownId);
+            const projected = ownWork || member;
+            const censusAttempt = censusRow?.task_attempt ?? member?.queue_attempt;
+            const numbered = Number.isSafeInteger(q.attempt) && q.attempt >= 0
+                && Number.isSafeInteger(censusAttempt) && censusAttempt >= 0;
+            const queueBehind = numbered && q.attempt < censusAttempt;
+            const censusBehind = numbered && censusAttempt < q.attempt;
+            const hideQueueFacts = queueBehind || (!censusRow && member?.confirmed === true && !numbered);
+            const spent = kind === 'running' && !hideQueueFacts ? elapsedWords(q.runtime_sec) : '';
             const rt = spent ? ` · ${spent}` : '';
-            const projected = workOfEpisode(census, ownId) || memberState(census, ownId);
-            const view = workRowView(projected || { activity: 'unknown', confirmed: false });
+            const shown = censusBehind ? null : projected;  // the state the row may say; the controls keep `projected`
+            const view = workRowView(shown || { activity: 'unknown', confirmed: false });
             const parked = projected?.activity === 'paused';
             const kindLabel = view.word;
-            const outcome = ownId && ownOutcomePhase(activities.find((entry) => entry?.activity_id === ownId),
-                view.outcome || (projected?.activity === 'working' && projected.transition === 'none') ? '' : kindLabel);
+            const outcome = ownId && !censusBehind && ownOutcomePhase(censusRow,
+                view.outcome || (shown?.activity === 'working' && shown.transition === 'none') ? '' : kindLabel);
             // The chip already says Finalizing beside its outcome; retain only the work's other facts.
-            const secondary = outcome && view.outcome ? workLine(projected, kindLabel) : view.secondary;
+            const secondary = outcome && view.outcome ? workLine(shown, kindLabel) : view.secondary;
             // The projection owns the state; the current wait's recorded blockers
             // keep its specific cause readable after the Continue toast expires.
-            const waiting = t._budget_pause_hold;
-            const heldFacts = projected?.confirmed !== false && projected?.because?.[0]?.code === 'earlier_work_unconfirmed'
+            const waiting = hideQueueFacts ? null : t._budget_pause_hold;
+            const heldFacts = shown?.confirmed !== false && shown?.because?.[0]?.code === 'earlier_work_unconfirmed'
                 && waiting?.reason === 'continuation_writer_unsettled' && !waiting.selected ? heldWorkFacts(waiting.blockers) : '';
             const meta = `${outcome ? phaseSlot(outcome) : `${stateMark(view)}${esc(kindLabel)}`}${secondary ? ` · ${esc(secondary)}` : ''}${heldFacts ? ` · ${esc(heldFacts)}` : ''}${q.type ? ` · ${esc(q.type)}` : ''}${rt}`;
-            const hold = t.project_admission_hold;
+            const hold = hideQueueFacts ? null : t.project_admission_hold;
             const projectWait = hold?.label ? ` · ${esc(hold.label)}: ${esc(hold.detail || hold.reason)}` : '';
             // The trigger says what the press offers: a root's work controls, else the card-state set (click handler).
             const root = phases.has(ownId) || isRootTaskRow(t, ownId);
@@ -533,7 +550,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             // The whole order is the record: it waits behind the row's Details (owner seed S2).
             const order = t._presence_turn ? '' : String(t.description || t.objective || t.text || '');
             // The held cause is what the owner reads before Resume: it wraps, never ellipsized.
-            const html = `<div class="ui-row activity-row${projected?.activity === 'waiting' ? ' activity-held' : ''}">
+            const html = `<div class="ui-row activity-row${shown?.activity === 'waiting' ? ' activity-held' : ''}">
                 <span class="ui-row-title activity-name"${named ? ' data-i18n-authored' : ''}>${label}</span>
                 <span class="ui-row-meta activity-sub">${meta}${projectWait}</span>
                 <div class="ui-row-actions activity-row-actions">
@@ -541,7 +558,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 </div>
                 ${rowDetailsHtml({ key: `order:${ownId}`, open: isOpen(`order:${ownId}`), text: order, title: named })}
             </div>`;
-            return { html, rank: RANKS[projected?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working) };
+            return { html, rank: RANKS[shown?.activity] ?? (kind === 'pending' ? RANKS.queued : RANKS.working) };
         };
         // Queue facts keep their runtime/budget controls. The census adds only
         // missing identities; queued direct turns can appear in both sources. A live Presence turn its
@@ -711,6 +728,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     }
 
     mount.addEventListener('click', async (event) => {
+        if (openTaskReference(event)) return;
         const btn = event.target.closest('[data-act]');
         if (!btn || busy || btn.dataset.act === 'schedule-text') return;
         const act = btn.dataset.act;

@@ -213,6 +213,13 @@ def lifecycle_named(axes: Any, status: str) -> Any:
     return {**axes, "lifecycle": {**lifecycle, "status": status}}
 
 
+def observed_cancel_axes(axes: Any, **observations: str) -> dict:
+    """Add observations to the execution axis, every other axis stays; a cancel stating its own cause passes status and reason_code."""
+    axes = axes if isinstance(axes, dict) else {}
+    execution = axes.get("execution")
+    return {**axes, "execution": {**(execution if isinstance(execution, dict) else {}), **observations}}
+
+
 def is_reconciled_presence_placeholder(row: Dict[str, Any]) -> bool:
     """The orphan reconciler's failed mark on a lost presence turn: no terminal of its own ever ran."""
     meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -616,7 +623,7 @@ def write_task_result(
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
-        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
+        # (``_cancel_observed``) the supervisor performing a live cancellation. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
             replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))

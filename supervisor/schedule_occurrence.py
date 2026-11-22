@@ -474,7 +474,9 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
     }
     previous_id = str(record.get("last_task_id") or "")
     if previous_id:
-        outcome = record.get("last_outcome") or {}
+        from supervisor.schedule_view import visible_last_outcome
+
+        outcome = visible_last_outcome(record)
         task["metadata"]["schedule_occurrence"].update(
             previous_task_id=previous_id,
             previous=(copy.deepcopy(outcome) if outcome.get("task_id") == previous_id
@@ -1139,6 +1141,12 @@ def restore_allowed(task: Dict[str, Any]) -> bool:
 def restore_verdict(task: Dict[str, Any]) -> str:
     """Snapshot restore's reading of one schedule-born pending row (``_restore_reading``)."""
     return _restore_reading(task)[0]
+
+
+def schedule_refusal_basis(verdict: str) -> str:
+    """What the occurrence read established when it could not authorize replay."""
+    return {"possible": "dispatch_unconfirmed", "settled": "schedule_settled",
+            "busy": "schedule_receipt_busy"}.get(verdict, "schedule_receipt_unverified")
 
 
 def _restore_reading(task: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:

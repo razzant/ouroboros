@@ -1326,10 +1326,10 @@ def get_tools() -> List[ToolEntry]:
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
                     "Looks up the accepted run. A Resume risk decision makes it lookup-only. Otherwise it may replay "
-                    "the original request byte-identically under the same key. Omit subagent_id. Prompt is optional. "
-                    "Other arguments keep their recorded values. A conflicting value is refused. Use a plain call "
-                    "for intended new work. It creates a new invocation even "
-                    "with identical prompt."},
+                    "the original request byte-identically under the same key. Omit subagent_id or receive a typed "
+                    "conflict: a retry keeps the actor it recorded. Prompt is optional. Other arguments keep their "
+                    "recorded values; a conflicting value is refused. Use a plain call for intended new work. "
+                    "It creates a new invocation even with identical prompt."},
                 },
             },
         }, _published_entry(_delegate_start_entry),

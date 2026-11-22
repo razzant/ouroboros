@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.review_records import recorded_author_stop
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE, schedule_report_run
 from ouroboros import dialogue_store
 from ouroboros.utils import iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
 
@@ -47,13 +47,6 @@ AGENT_RECEIPT_ID_PREFIX = "agent-steer:"
 _RETAINED_AGENT_RECEIPTS = 64
 _COMPACT_AT_BYTES = 800_000
 log = logging.getLogger(__name__)
-
-
-def _row_chat_id(row: Dict[str, Any]) -> int:
-    try:
-        return int(row.get("chat_id", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 # The closed lifecycle vocabulary of a Project question, shared with
@@ -821,6 +814,7 @@ TASK_CAUSE_PHRASES = {
     "reaper_wedged_worker_alive": "The task timed out and its worker could not be confirmed stopped",
     "workers_unavailable": "The worker pool was unavailable, so the task was not scheduled",
     "worker_pool_unavailable": "No worker was available to run the task",
+    "evolution_disabled_in_light_mode": "Evolution is disabled in light runtime mode",
     "worker_crash_signal": "The worker process running the task crashed",
     "worker_crash_retry_exhausted": "The worker process running the task kept crashing until its retries ran out",
     "worker_crash_owner_wait": "The worker process died while the task was waiting; completed actions were not retried",
@@ -849,16 +843,22 @@ def _cause_phrase(code: str, undescribed: Optional[List[str]] = None) -> str:
     return TASK_CAUSE_PHRASES["reason_undescribed"]
 
 
-def terminal_delivery_clause(state: str, preserved_path: str = "") -> str:
+def terminal_delivery_clause(delivery: dict) -> str:
     """The card's one sentence about a delivery the host could not confirm (exhausted / unknown).
 
     An exhausted delivery names the saved copy when one exists and says so when it
     does not — never a claimed copy. The browser twin is terminalDeliveryClause.
     """
+    state = delivery.get("state")
+    if state == "exhausted" and delivery.get("scope") == "task":
+        return "Delivery attempts ran out for a terminal message from this task. The affected answer is unknown."
     sentence = TASK_CAUSE_PHRASES.get(f"terminal_delivery_{state}", "")
     if not sentence:
         return ""
     if state == "exhausted":
+        preserved_path = delivery.get("preserved_path", "")
+        if preserved_path is None:
+            return sentence + "; the saved copy for this answer could not be verified."
         sentence += (f"; a copy of the answer is saved at {preserved_path}." if preserved_path
                      else "; no copy of the answer could be saved.")
     return sentence
@@ -1014,17 +1014,9 @@ def resolve_legacy_continuation_narrative(
         return None
     for entry in ds.iter_probes(drive_root, "chat", [("task_id", tid)], newest_first=True):
         row = entry.row
-        if (
-            str(row.get("type") or "") != "task_summary"
-            or str(row.get("summary_kind") or "") != "authored_root_summary"
-            or str(row.get("summary_id") or "") != f"task-narrative:{tid}"
-            or str(row.get("task_id") or "") != tid
-            or not _narrative_result_ref_is_valid(row.get("result_ref"), tid)
-            or row.get("result_ref") != expected_ref
-            or not isinstance(row.get("source_coverage"), dict)
-            or row["source_coverage"].get("task_result") != expected_ref
-            or not str(row.get("text") or "").strip()
-        ):
+        # Same authored row `continuation_narrative_is_valid` owns, plus the exact expected ref.
+        if (str(row.get("type") or "") != "task_summary" or row.get("result_ref") != expected_ref
+                or not continuation_narrative_is_valid(row, tid)):
             continue
         return {
             "text": str(row.get("text") or ""),
@@ -1120,12 +1112,12 @@ def _completion_excerpt(result: Dict[str, Any], *, chat_id: Any = None,
     the row's destination: only there can the stop receipt already have
     published the same text, and only there does the label stand alone.
 
-    ``salvage_only`` is how the durable rows ask for that ONE excerpt and
-    nothing else: a cut of the model's own answer is already in the room the
-    row lives in, while salvaged bytes exist nowhere else.
+    Durable rows ask for ``salvage_only`` because the normal answer is already
+    in the room, but salvaged bytes are not. A legacy schedule's report stays
+    in its own result regardless of origin; neither a room nor a mirror quotes it.
     """
     salvaged = str(result.get("terminal_origin") or "") == TERMINAL_ORIGIN_HOST_SALVAGE
-    if salvage_only and not salvaged:
+    if schedule_report_run(result) or (salvage_only and not salvaged):
         return ""
     body = ""
     for key in ("summary", "result", "error"):
@@ -1266,7 +1258,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
                                  "outcome_axes": {"execution": execution}})[1] == "stop"
     reason, custody = _custody_debt_reason(raw_reason, result, event)
     typed = _code_text(execution.get("reason_code"))
-    if reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED:
+    earlier = execution.get("earlier_stop") if phase == "cancelled" else None
+    if ((reason in {REASON_FINAL_MESSAGE, ""} and typed != WARN_DELEGATED_CUSTODY_UNRECONCILED)
+            or (typed == "cancelled" and reason == earlier)):
         reason = typed or reason
     author_stop = completion.get("action") == "stop" and execution.get("status") != "cancelled" and not origin
     review_cause = (cause if status and (status != ACCEPTANCE_ACCEPTED or cause in TASK_CAUSE_PHRASES)
@@ -1291,7 +1285,8 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     elif held:
         # A task HELD by a blocking plan review states the objective's own reason.
         clause = _cause_phrase(str(objective.get("reason") or ""), undescribed)
-    elif reason in {REASON_FINAL_MESSAGE, ""} or (author_stop and reason == "plan_review_advisory"):
+    elif (reason in {REASON_FINAL_MESSAGE, ""} or (phase == "cancelled" and reason == "cancelled")
+          or (author_stop and reason == "plan_review_advisory")):
         # A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
         clause = (TASK_CAUSE_PHRASES["author_stop"] if author_stop
                   else TASK_CAUSE_PHRASES["plan_review_awaiting"] if plan_review_awaiting(event, result) and phase == "done" else "")
@@ -1313,6 +1308,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     warnings = list(objective.get("warnings") or []) if isinstance(objective.get("warnings"), list) else []
     warnings.append(objective.get("warning") or "")
     excluded = {"", "delegated_custody_unreconciled", "terminal_delivery_unknown", "terminal_delivery_exhausted"}
+    context = [f"Earlier recorded stop: {_cause_phrase(earlier, undescribed)}"] if isinstance(earlier, str) and earlier else []
+    if phase == "cancelled" and execution.get("cancel_policy_reason") == "evolution_disabled_in_light_mode":
+        context.insert(0, TASK_CAUSE_PHRASES["evolution_disabled_in_light_mode"])
     if not include_review_details:
         excluded |= DETAIL_ONLY_WARNINGS
     # The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
@@ -1333,7 +1331,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     remainder_clause = ("Uncommitted files in the saved candidate could not be checked" if remainder.get("state") == "unknown"
                         else f"{count} uncommitted file{'s' if count != 1 else ''} remain{'s' if count == 1 else ''} in the saved candidate"
                         if remainder.get("state") == "known" and type(count) is int and count > 0 else "")
-    line = _join_cause_clauses([clause, first_attempt, *warning_clauses, _cause_phrase(review_cause, undescribed),
+    line = _join_cause_clauses([clause, first_attempt, *context, *warning_clauses, _cause_phrase(review_cause, undescribed),
                                 _author_stop_rationale(decision, completion), remainder_clause,
                                 str((execution.get("evolution_cleanup") or {}).get("line") or ""),
                                 *_incident_cause_clauses(decision, reason),
@@ -1391,12 +1389,12 @@ def _run_lives_in_its_project(
 MAIN_MIRROR_OWED, MAIN_MIRROR_INELIGIBLE, MAIN_MIRROR_UNKNOWN = "owed", "ineligible", "unknown"
 
 
-def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *, event_queue: Any = None) -> tuple:
+def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *, event_queue: Any = None, receipts=None) -> tuple:
     from ouroboros.terminal_projection import retain_main_delivery, claim_main_delivery
     from supervisor.event_observation import delivery_outstanding
     from supervisor.terminal_delivery import enqueue_terminal_delivery, register_pending_delivery
 
-    event = retain_main_delivery(drive_root, tid, event)
+    event = retain_main_delivery(drive_root, tid, event, receipts=receipts)
     if event.get("terminal_projection_token"):
         if event_queue is None:
             from supervisor.workers import get_event_q
@@ -1424,7 +1422,7 @@ def _enqueue_main_completion(drive_root: Any, tid: str, event: Dict[str, Any], *
 def project_completion_delivery_outcome(
     drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
     result: Dict[str, Any], task_done_event: Dict[str, Any],
-    *, event_queue: Any = None, source_delivery: Optional[dict] = None,
+    *, event_queue: Any = None, source_delivery: Optional[dict] = None, receipts: Optional[dict] = None,
 ) -> tuple:
     """Owe Main's answer for Project roots, including conversations moved from Main.
 
@@ -1453,7 +1451,7 @@ def project_completion_delivery_outcome(
         ready = result.get("canonical_terminal_projection_ready")
         retained = ready.get("main_delivery") if isinstance(ready, dict) else None
         if isinstance(retained, dict) and isinstance(retained.get("event"), dict):
-            return _enqueue_main_completion(drive_root, tid, retained["event"], event_queue=event_queue)
+            return _enqueue_main_completion(drive_root, tid, retained["event"], event_queue=event_queue, receipts=receipts)
 
         if any(bool(row.get("_is_direct_chat")) for row in (evt, task, result, task_done_event)
                if isinstance(row, dict)):
@@ -1498,9 +1496,10 @@ def project_completion_delivery_outcome(
         # Text preserves only the labelled salvage excerpt, never a cut of the authored answer (which rides whole
         # in its typed key or not at all). The Project reference is the sole door, so the text invites nothing;
         # promising the same action in prose would duplicate it. Salvaged bytes exist nowhere else in this row.
+        from ouroboros.terminal_projection import completion_notice, current_answer_delivery
         excerpt = _completion_excerpt(result, chat_id=1, salvage_only=True)
-        delivery = source_delivery or {}
-        clause = terminal_delivery_clause(delivery.get("state", ""), delivery.get("preserved_path", ""))
+        delivery = current_answer_delivery(drive_root, {**result, "task_id": tid}, source_delivery, receipts=receipts)
+        clause = terminal_delivery_clause(delivery)
         source_clause = f"Source Project: {clause}" if clause else ""
         verdict = _join_cause_clauses([_completion_verdict(result, task_done_event), source_clause])
         # Web details retain undescribed codes; canonical text and Telegram retain the full verdict.
@@ -1508,7 +1507,6 @@ def project_completion_delivery_outcome(
         cause = _join_cause_clauses([_completion_verdict(result, task_done_event, undescribed=undescribed), source_clause])
         detail = " ".join(part for part in (verdict, excerpt) if part)
         from ouroboros.terminal_time import terminal_time_fact
-        from ouroboros.terminal_projection import completion_notice
         from ouroboros.project_completion_facts import completion_facts
         event = {
             "type": "send_message", "chat_id": 1, "task_id": tid,
@@ -1530,7 +1528,7 @@ def project_completion_delivery_outcome(
                 **mirrored_answer(result, outcome_phase(result, task_done_event)),
             },
         }
-        return _enqueue_main_completion(drive_root, tid, event, event_queue=event_queue)
+        return _enqueue_main_completion(drive_root, tid, event, event_queue=event_queue, receipts=receipts)
     except Exception:
         log.warning("Failed to enqueue Project completion summary for %s", tid, exc_info=True)
         return MAIN_MIRROR_UNKNOWN, False

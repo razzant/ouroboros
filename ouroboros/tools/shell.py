@@ -267,13 +267,7 @@ def _literal_argv_notes(cmd: List[str]) -> str:
     return "".join(notes)
 
 
-def _pre_spawn_refusal(ctx: ToolContext, text: str, *, tool: str = "run_command") -> str:
-    """This producer refused before submission; arbitrary errors carry no such fact."""
-    from ouroboros.tools.tool_result import LegacyTextResultAdapter, _replace_tool_result
-
-    result = LegacyTextResultAdapter.from_text(tool, text)
-    return _publish_tool_result(ctx, _replace_tool_result(
-        result, meta_updates={"operation_outcome": "completed_no_effect"}))
+from ouroboros.tools.shell_effects import _pre_spawn_refusal  # the leaf owns it; the process leaf refuses through it too
 
 
 @process_environment_tool

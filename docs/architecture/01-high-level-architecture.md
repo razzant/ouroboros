@@ -53,6 +53,7 @@ supervisor/ — background thread inside server.py (§5)
   queue.py — task queue (PENDING/RUNNING) with activity-based timeouts; the one task-state authority (§5); loop_load.py measures it
   queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported by `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
   queue_publication.py — marks under Q; the tick publishes outside Q by revision (§5)
+  work_stop_migration.py — One boot conversion of pre-selection queue carriers by the `work_stop_format` stamp; no execution authority (§5)
   cognitive_operations.py — operation leases and typed wait marks (`wait_for_tasks` picks a responsible parent) for silence attention and reply preparation; no durable ledger (§6)
   silence_attention.py — silence episodes and their mail to the source and one waiting ancestor (§5)
   task_model_wait.py — live model-wait projection with quota-clock reads for liveness (§6 Quota and auth waits)
@@ -135,7 +136,7 @@ ouroboros/ — agent core and shared runtime (§6)
   transcript_prefix.py — shared prefix digests/comparison, change counts by origin and signed-reasoning retirement; reporting/round facts cross the loop boundary only at call time (§6 Task lifecycle)
   loop_transport.py — transport-outage waits and provider-failure text (§6 Context fitting)
   loop_output_exhaustion.py — typed reply recovery (§6)
-  loop_delivery.py, delivery_facts.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
+  loop_delivery.py, delivery_facts.py, loop_budget.py, loop_completion_schema.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — `loop.py` rails for delivery and control; `loop_forced_finalization` owns the one forced call (§6 Task lifecycle)
   task_pacing.py — threshold facts, shared round-money reading, finalization reserve, `CostCeiling` and main-loop wire options (§6 Budget tracking)
   vision_routing.py, vision_image_limits.py, image_preparation.py — owner-mode image routing for Main, explicit VLM/caption sends, route limits and byte preparation (§6 Vision and local image evidence)
   fallback_cooldown.py — per-process 429-aware cooldown for the `OUROBOROS_MODEL_FALLBACKS` chain; advisory
@@ -189,7 +190,7 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_evidence.py — read-side execution evidence over custody rows (§6 Delegated subagents; §11.1)
   synthesis_cost_text.py — task_summary cost fields
   llm.py — multi-provider LLM routing (OpenRouter, OpenAI, compatible, Cloud.ru, MiniMax, DeepSeek, Z.ai, GigaChat, Anthropic); conversations stay function-shaped, exact-route adaptation lives in the request-wire leaves (§6 Context fitting; §7 Direct-provider routes)
-  llm_routing.py, llm_attempt.py, llm_messages.py, llm_capability_policy.py, llm_fallback.py, llm_pricing.py, llm_openai_compatible.py, openai_responses.py, llm_anthropic.py, llm_gigachat.py, llm_local.py, llm_claudexor.py, llm_substitution.py — leaves of `llm.py`: routing, attempt candidates and cache policy, transcript shaping, capability policy, the recovery ladder, price catalogs, one wire lane each, served-model substitution (§6 Caller-owned subscription model calls)
+  llm_routing.py, llm_attempt.py, llm_messages.py, llm_capability_policy.py, llm_fallback.py, llm_pricing.py, llm_openai_compatible.py, openai_responses.py, opencode_go.py, llm_anthropic.py, llm_gigachat.py, llm_local.py, llm_claudexor.py, llm_substitution.py — `llm.py` leaves: routes, attempt/cache policy, transcript and capability shaping, recovery, prices, wire formats (Go via compatible Chat), served-model substitution (§6 Caller-owned subscription model calls)
   llm_helper_window.py — helper windows and replies (§6)
   server_window.py, size_refusal.py, window_learning.py — windows, refusal numbers, retries (§6)
   llm_stream.py — SSE assembly inside one physical attempt (§6 Streams and transport waits)
@@ -390,6 +391,7 @@ ouroboros/ — agent core and shared runtime (§6)
   task_store.py, task_reads.py — Indexed facts/signatures, review/plan candidates, documents, display views; one captured value per statement, decoded after close; read/modify inside (PERSISTENCE.md)
   pause_notices.py — Confirmed-pause System disclosures: pending episodes, saved-chat receipts, off-loop local replay
   task_result_schema.py — Task-result schema admission: the `_schema_version` stamp, the classifier, and the quarantine an unstamped, future or malformed row lands in
+  queue_observation.py — Queue documents read by file identity: expands `$shared` task values, takes heartbeats and pool counts from the generation-matched stamp (§5)
   task_status.py — effective status, lineage and waits; `execution_owner` and dated `execution_observation` separate lifecycle from liveness (§5); the worker-side cancel predicate fails open toward liveness (§10 invariant 14)
   git_shell_policy.py — Shell Git argv checks
   protected_artifacts.py — Execute-only black-box policy for protected artifacts
@@ -495,6 +497,7 @@ ouroboros/ — agent core and shared runtime (§6)
     history_paging.py, history_chronology.py, chat_search.py — room pages/search of the dialogue store, Project `latest_arrival`; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
     projects.py, project_folder_contracts.py — GET/POST /api/projects, /from-task, /update, /delete, /folder
+    places_api.py — Owner place and circle choices; every write there is my human's (§12)
     _helpers.py — Shared request-root/coercion, the JSON body (`request_json_or`) and error envelope, `run_sync_to_completion`, the settled worker wait for request-owned blocking work
   tools/ — Auto-discovered tool plugins
     registry.py — Tool registry SSOT: loads tool modules, exposes schemas, executes safely; owns the shell-guard/process-tool membership sets

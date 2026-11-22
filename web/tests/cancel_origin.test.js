@@ -8,7 +8,8 @@ test('recorded cancellation: Python/browser parity including absent cause and pu
     const cases = JSON.parse(readFileSync(new URL('./fixtures/cancel_cause_parity.json', import.meta.url)));
     for (const { record, text } of cases) {
         assert.equal(taskReasonDetail(record), text, JSON.stringify(record));
-        assert.equal(taskTerminalSummary(record).body, text);
+        assert.equal(taskTerminalSummary({ ...record, type: 'task_done' }).body, text);
+        assert.equal(taskTerminalSummary({ ...record, system_type: 'task_summary' }).body, text);
     }
     assert.equal(taskReasonDetail({ status: 'cancelled', cancel_origin: { reason: '🙂'.repeat(200) } }),
         '🙂'.repeat(159) + '… (preview; the full reason is kept with the task)');
@@ -28,9 +29,10 @@ test('child live and replay use genuine lineage and keep saved work inspectable'
             type: 'send_message', is_progress: true, delegation_role: 'subagent',
             parent_task_id: 'root', subagent_task_id: 'child', result: 'Saved partial work',
             ...carried, ...frame,
+            outcome_axes: { ...frame.outcome_axes, execution: { earlier_stop: 'provider_failure' } },
         });
         assert.equal(view.phase, 'cancelled');
-        assert.equal(view.body, 'Stopped with the task tree it belongs to · Stopped with its parent task.');
+        assert.equal(view.body, 'Stopped with the task tree it belongs to · Stopped with its parent task · Earlier recorded stop: The model provider failed to answer, so the task could not finish.');
         assert.equal(view.activityPreview, view.body);
         assert.match(view.fullBody, /Saved partial work/);
         assert.doesNotMatch(view.body, /initiator:|root/);

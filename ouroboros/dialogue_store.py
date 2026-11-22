@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Op
 from ouroboros import room_messages, shared_values, store, store_empty, store_timing
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.store_capture import capture
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import json_dumps_utf8, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -148,9 +148,9 @@ def present(root: Any) -> bool:
 
 
 def encode(row: Dict[str, Any]) -> str:
-    """The exact text a chain line held, without the newline: the encoding the chat logs were written in while they
-    were files. Chain coordinates were measured on it, so it never follows ``append_jsonl``'s."""
-    return json.dumps(row, ensure_ascii=False)
+    """The dialogue line's JSON without the newline, with its original spacing for byte coordinates.
+    Escape POSIX name bytes so typed document rows also have a UTF-8 representation."""
+    return json_dumps_utf8(row, ensure_ascii=False)
 
 
 def decode(body: str) -> Dict[str, Any]:

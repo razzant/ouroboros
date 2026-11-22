@@ -829,13 +829,15 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
         action = "route_to_project" if bool(evt.get("routed_from_main")) else "promote_chat_to_task"
         reason = str(outcome.get("reason") or ("admission_rejected" if status == "needs_manual_target" else ""))
         address = _promotion_notice_transport(ctx, evt)
-        reply_to = _routing_notice_reply(ctx, evt)
+        progress_meta = {"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
+                         "reply_to": _routing_notice_reply(ctx, evt)}
+        if address:
+            progress_meta["transport"] = address
         ctx.send_with_budget(
             chat, f"{title} · {routing_refusal_cause(action, status, reason, None)}", role="system",
             system_type="task_start_unconfirmed" if status == "unconfirmed" else "task_not_started",
             task_id=str(outcome.get("task_id") or evt.get("task_id") or ""),
-            progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": reply_to, **({"transport": address} if address else {})},
+            progress_meta=progress_meta,
         )
     except Exception:
         log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)

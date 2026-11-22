@@ -219,6 +219,7 @@ def _chat_record(
     message_meta: Optional[Dict[str, Any]] = None,
     drive_root=None,
     require_write: bool = False,
+    room_echo: bool = False,
 ) -> Tuple[Any, Optional[dict]]:
     """``(root, the chat row as every reader expects it)``; ``(None, None)`` without a data root."""
     from supervisor import message_bus
@@ -261,6 +262,8 @@ def _chat_record(
             # The canonical append is the proof used by the live echo. Keep it
             # on that SAME row so history can replay the fact after a reload.
             record["ingress_accepted"] = True
+            if room_echo:
+                record["kind"] = "room_echo"
         if direction == "in" and client_message_id and require_write:  # a named acceptance: which process took it
             from ouroboros.process_custody import current_custody_session_id
 
@@ -744,6 +747,7 @@ def handle_web_message(
     from supervisor import message_bus as bus
     from ouroboros.chat_uploads import claim_refs
     from ouroboros.chat_references import delivery_reply, ingress_reply, projection_fields
+    from ouroboros.projects_registry import project_thread_chat_ids
     from ouroboros.room_appearances import frame_rooms
 
     # Web ownership stays user_id=1; positive chat_id selects Main/Project.
@@ -769,8 +773,9 @@ def handle_web_message(
     metadata = dict(task_metadata or {})
     host_fact = metadata.get("host_fact") or {}  # host call admission; browser ingress constructs its own metadata
     call_open = isinstance(host_fact, dict) and host_fact.get("kind") == "call_open"
-    if str(project_id or "").strip():
-        metadata.setdefault("project_id", str(project_id).strip())
+    project_id = str(project_id or "").strip()
+    if project_id:
+        metadata.setdefault("project_id", project_id)
     from ouroboros.chat_uploads import attachment_placeholder
 
     log_text = clean_text or str(image_caption or "").strip() or attachment_placeholder(image_base64, metadata)
@@ -796,6 +801,10 @@ def handle_web_message(
             receipt = bus.accept_chat(
                 thread_id, 1, log_text, ts=ts, source="web",
                 sender_session_id=sender_session_id, client_message_id=message_id,
+                # The Project form pairs its chosen chat with a project_id. That request can narrow
+                # its own echo. An id-only sender needs a registry witness for the same restriction.
+                room_echo=not call_open and thread_id != 1 and (
+                    bool(project_id) or thread_id in project_thread_chat_ids(bus.DATA_DIR)),
                 client_surface=(metadata.get("client_surface") if isinstance(metadata.get("client_surface"), dict) else None),
                 message_meta={"attachments": attachments, "text_placeholder": placeholder, "reply_to": reply,
                               "execution_transport": metadata.get("execution_transport"),
@@ -844,6 +853,8 @@ def handle_web_message(
                 "sender_session_id": sender_session_id, "client_message_id": message_id,
                 "ingress_accepted": True,  # Canonical row exists; execution is not promised.
             }
+            if row.get("kind") == "room_echo":
+                echo["kind"] = row["kind"]
             if row.get("subagents_mode") == "swarm":
                 echo["subagents_mode"] = "swarm"
             if placeholder:

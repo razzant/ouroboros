@@ -436,6 +436,64 @@ def test_two_waits_can_receive_same_request_id_without_control_collision(live_wa
     assert controller.auto_continue == {"main": False, "light": False}
 
 
+@pytest.mark.parametrize("role", ["main", "reviewer:main"])
+def test_main_wait_confirms_settings_before_exposing_switch(live_wait, monkeypatch, role):
+    from ouroboros import config
+    from ouroboros.gateway import owner_settings
+
+    root, _transport, _client, controller, _events, decide = live_wait
+    path = root / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    old = {"OUROBOROS_MODEL": MODEL, "OUROBOROS_MODEL_ACCOUNTS": '{"main":"first"}',
+           "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"ultrafast"}'}
+    path.write_text(json.dumps(old))
+    row = {"wait_id": "wait-one", "revision": 1, "task_attempt": 1, "state": "waiting", "role": role}
+    if role == "reviewer:main":
+        from ouroboros import review_operation
+        controller = review_operation._OperationWait(task=controller.task, drive_root=root, event_queue=None, worker_slot_held=False)
+        controller.owner_id = "fixture-review"
+        row.update(model_wait_owner_id=controller.owner_id, review_operation={"owner_id": controller.owner_id})
+        monkeypatch.setattr(review_operation, "review_operation_controller", lambda *_: controller)
+    model_wait.mutate_wait(root, "task-one", "wait-one", lambda _: row)
+    controller.waits["wait-one"] = dict(row)
+    action = _action_for({**row, "task_id": "task-one"}, "switch", model=MODEL,
+                         credential_profile_id="second", use_local=False, persist_role=True)
+    writer = owner_settings._owner_update_settings
+
+    def before_save(*args, **kwargs):
+        current = load_task_result(root, "task-one")["model_waits"]["wait-one"]
+        assert "pending_action" not in current  # even an eager direct-review controller cannot consume it
+        return writer(*args, **kwargs)
+
+    monkeypatch.setattr(owner_settings, "_owner_update_settings", before_save)
+    refused = decide(action)
+    assert refused.status_code == 400
+    reply = json.loads(refused.body)
+    assert not reply["saved"] and not reply["applied"] and "uncheck" in reply["error"]
+    assert json.loads(path.read_text()) == old
+    current = load_task_result(root, "task-one")["model_waits"]["wait-one"]
+    assert "pending_action" not in current
+    assert not (root / "memory/owner_mailbox/task-one.jsonl").exists()
+    assert decide({**action, "persist_role": False}).status_code == 202
+    if role == "reviewer:main":
+        controller._drain_controls()
+        assert controller.waits["wait-one"]["_action"]["credential_profile_id"] == "second"
+    assert json.loads(path.read_text()) == old
+
+    # A second wait on the same task with the same request id is another decision. An explicit
+    # Standard on Main now permits the persistent pin change and this wait owns its receipt.
+    next_row = {**row, "wait_id": "wait-two", "revision": 2}
+    model_wait.mutate_wait(root, "task-one", "wait-two", lambda _: next_row)
+    controller.waits["wait-two"] = dict(next_row)
+    path.write_text(json.dumps({**old, "OUROBOROS_MODEL_PROCESSING_PREFERENCES": '{"main":"standard"}'}))
+    monkeypatch.setattr(owner_settings, "_owner_update_settings", writer)
+    accepted = decide({**action, "decision_id": "model_wait:task-one:wait-two", "revision": 2})
+    assert accepted.status_code == 202 and json.loads(accepted.body)["saved"]
+    assert json.loads(json.loads(path.read_text())["OUROBOROS_MODEL_ACCOUNTS"])["main"] == "second"
+    controller._drain_controls()
+    assert controller.waits["wait-two"]["_action"]["request_id"] == action["request_id"]
+
+
 def test_permanent_switch_uses_existing_owner_writer_once(live_wait, monkeypatch):
     from ouroboros import config
 
