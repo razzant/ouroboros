@@ -10,8 +10,9 @@ without the 7 px text, the draft with it marked new, each frame a flat file in u
 with its version and engine. The stand, run alone at a phone, looks at the Dashboard and Extensions lists the phone
 lands on, then walks every view and page although the phone hides the list after the first press, and opens a Project
 room by its id. On a page of its own it tells what a press shows: a place that did not open, a tab whose declared panel
-does not exist, a list shown before its page. The stand runs in this test's interpreter, or in the one LOOK_STAND_PYTHON
-names (a Python with Playwright, for a test interpreter without it).
+does not exist, a list shown before its page. On a pair of its own it matches findings by what each control is (a shrunk
+sibling is new, a renamed class is not) and counts the reach a scrolling rail gives. The stand runs in this test's
+interpreter, or in the one LOOK_STAND_PYTHON names (a Python with Playwright, for a test interpreter without it).
 """
 from __future__ import annotations
 
@@ -164,23 +165,74 @@ print(json.dumps(seen))
 """
 
 
-@pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_the_stand_tells_what_a_press_shows(tmp_path, monkeypatch, engine):
+def _probe(monkeypatch, engine, script, tmp_path, *args):
+    """What ``script`` prints last, run with the stand, the engine's row, tmp_path and ``args`` in the stand's Python."""
     plugin = _plugin(monkeypatch)
     rows, missing, env = plugin.engine_rows([engine], {}, tmp_path / "tool-data")
     assert rows, missing
-    proc = subprocess.Popen([plugin._helper_python(), "-B", "-c", PROBE, str(STAND), json.dumps(rows[0]), str(tmp_path)],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=plugin._child_env(env),
-                            **plugin._group_kwargs())
+    proc = subprocess.Popen([plugin._helper_python(), "-B", "-c", script, str(STAND), json.dumps(rows[0]), str(tmp_path),
+                             *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=plugin._child_env(env), **plugin._group_kwargs())
     try:
         out, err = proc.communicate(timeout=240)
     finally:
         if proc.poll() is None:
             plugin._end_tree(proc)   # the probe and the browser it started, by its own PID
     assert proc.returncode == 0, err[-2000:]
-    seen = json.loads(out.strip().splitlines()[-1])
+    return json.loads(out.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_stand_tells_what_a_press_shows(tmp_path, monkeypatch, engine):
+    seen = _probe(monkeypatch, engine, PROBE, tmp_path)
     assert [(view["name"], view["target"]) for view in seen["views"]] == [
         ("Models", "models"), ("Gone", "panel-gone"), ("Here", "panel-here")], seen["views"]
     assert seen["shown"] == ["its page is not shown", "its panel panel-gone does not exist", ""], seen["shown"]
     assert seen["places"] == ["", "did not open", "did not open"], seen["places"]
     assert seen["landing"] is True and seen["landing_beside_its_page"] is False, seen
+
+
+PAIR = r"""
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("look_pair_stand", sys.argv[1])
+stand = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stand)
+row = json.loads(sys.argv[2])
+def rows(short, extra="", named=True):   # two rows of one renderer, `short` 20 px tall; `extra` classes the first
+    one = lambda slug, text: (f'<button type="button" class="section-row{extra if slug == "installed" else ""}"'
+                              + (f' data-extensions-open="{slug}"' if named else "")
+                              + (' style="height: 20px"' if slug == short else "") + f">{text}</button>")
+    return ("<style>button { display: block; box-sizing: border-box; width: 160px; height: 48px; border: 0; padding: 0; }"
+            '</style><section class="section-group"><div class="ui-card section-rows">' + one("installed", "Skills")
+            + one("tools", "MCP servers") + "</div></section>")
+with stand.Stand(engine=row["engine"], executable_path=row.get("executable_path"), sandbox=row.get("sandbox", True),
+                 launch_args=row.get("args") or (), fallback=False, keep_intercepted=False, out=sys.argv[3],
+                 web_root=sys.argv[3], url="http://127.0.0.1:9", twin=True, width=390, height=844, scale=1, touch=True) as s:
+    def pair(before, after):   # the served page beside the draft, measured and matched as look() does
+        s.twin.set_content(before)
+        s.page.set_content(after)
+        screen = stand._look_screen(s, {"name": "phone"}, "dark", "skills", None, "skills", "asked for",
+                                    {"frames": "none", "prefix": "probe-"}, "")
+        return [screen["new"].get("target-small", 0), [item["key"] for item in screen["findings"] if item.get("new")]]
+    seen = {"swapped": pair(rows("installed"), rows("tools")),
+            "renamed": pair(rows("installed", " old-row"), rows("installed", " new-row")),
+            "by_text": pair(rows("installed", named=False), rows("tools", named=False))}
+    s.page.set_viewport_size({"width": 600, "height": 700})
+    s.page.set_content(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    s.page.screenshot()
+    seen["small"] = sorted(item["where"] for item in s.measure(limit=20)["layout"]["findings"] if item["kind"] == "target-small")
+print(json.dumps(seen))
+"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_the_stand_matches_a_pair_by_what_each_control_is_and_counts_reach_a_rail_scrolls_to(tmp_path, monkeypatch,
+                                                                                               engine):
+    seen = _probe(monkeypatch, engine, PAIR, tmp_path, str(REPO / "tests" / "fixtures" / "design_skills" / "touch.html"))
+    assert seen["swapped"] == [1, ['button[data-extensions-open="tools"]']], seen   # the shrunk sibling is new
+    assert seen["renamed"] == [0, []], seen   # a class renamed alone leaves the short control as it was
+    assert seen["by_text"][0] == 1 and seen["by_text"][1][0].endswith('button "MCP servers"'), seen   # named by its text
+    # Under a finger the row a scrolling rail shows in part is not small, the one a wrapper cuts for good still is.
+    assert seen["small"] == ["a#inline", "a#listed", "button#bare", "button#clipped", "button#clipped-2", "button#masked",
+                             "button#short"], seen

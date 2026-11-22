@@ -438,7 +438,7 @@ class Stand:
         found = {"uneven_rows": [r for r in page.evaluate("() => window.__look.visualRows(64)") if r["spread"] >= 3],
                  "long_texts": page.evaluate("() => window.__look.texts(160)")}
         if MEASURE_JS:
-            options = {"limit": limit, "coarse": self.touch, **({"target": target} if target else {})}
+            options = {"limit": limit, "coarse": self.touch, "keys": True, **({"target": target} if target else {})}
             try:
                 found["layout"] = page.evaluate(f"({MEASURE_JS})({json.dumps(options)})")
             except Exception as exc:
@@ -614,14 +614,18 @@ def _facts(found: dict) -> dict:
             **({"unmeasured": unmeasured} if unmeasured else {})}
 
 
+def _key(item) -> tuple:   # a finding's kind and its elements' identities (measure.js keys), else where it stands
+    return item.get("kind"), item.get("key") or item.get("where")
+
+
 def _observed(found: dict):
-    """A screen's observations keyed by kind and where each stands (what measure.js counted beyond the examples it
-    listed, by kind alone), or None when measure.js did not measure the screen."""
+    """A screen's observations keyed by kind and the identity of what each is about (what measure.js counted beyond
+    the examples it listed, by kind alone), or None when measure.js did not measure the screen."""
     layout = found.get("layout")
     if not layout or found.get("layout_error"):
         return None
     findings = layout.get("findings") or []
-    keys, listed = Counter((item.get("kind"), item.get("where")) for item in findings), Counter(item.get("kind") for item in findings)
+    keys, listed = Counter(map(_key, findings)), Counter(item.get("kind") for item in findings)
     for kind, total in ((layout.get("facts") or {}).get("counts") or {}).items():
         keys[(kind, None)] += max(0, total - listed[kind])
     keys.update(("uneven-rows", tuple(row.get("items") or ())) for row in found["uneven_rows"])
@@ -639,7 +643,7 @@ def _mark_new(found: dict, served: dict) -> dict:
     added = mine - was
     left = Counter(added)
     for item in (found.get("layout") or {}).get("findings") or []:
-        key = (item.get("kind"), item.get("where"))
+        key = _key(item)
         item["new"] = left[key] > 0
         left[key] -= item["new"]
     return {"new": dict(Counter(kind for kind, _where in added.elements()))}

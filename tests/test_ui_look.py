@@ -557,6 +557,24 @@ def test_new_findings_are_matched_one_by_one_and_an_unmeasured_page_leaves_them_
     assert answer["screens_without_findings"] == [] and "snippet failed" in answer["summary"][0]["unmeasured"]
 
 
+def test_a_pair_matches_findings_by_the_identity_of_what_they_are_about():
+    row = "div.ui-card.section-rows > button.section-row"   # two rows of one renderer share their path
+
+    def found(*items):   # measure.js findings with the identities its keys option gives
+        findings = [{"kind": "target-small", "message": "160x20px hit target", "where": where, "value": None, "key": key}
+                    for where, key in items]
+        return {"uneven_rows": [], "long_texts": [],
+                "layout": {"facts": {"counts": {"target-small": len(findings)}}, "findings": findings}}
+
+    skills, mcp = 'button[data-extensions-open="installed"]', 'button[data-extensions-open="tools"]'
+    swapped = found((row, mcp))   # the draft grew Skills and shrank MCP servers, its sibling
+    assert stand._mark_new(swapped, found((row, skills))) == {"new": {"target-small": 1}}
+    assert swapped["layout"]["findings"][0]["new"] is True
+    renamed = found((row + ".new-row", skills))   # a class renamed, the short control unchanged
+    assert stand._mark_new(renamed, found((row + ".old-row", skills))) == {"new": {}}
+    assert renamed["layout"]["findings"][0]["new"] is False
+
+
 def test_a_place_that_lands_on_its_list_is_looked_at_before_its_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(_FakeStand, "lists", ("beta",))
     report = _look(tmp_path, monkeypatch, places=["beta"])
