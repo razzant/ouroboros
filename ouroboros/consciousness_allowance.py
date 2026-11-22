@@ -25,7 +25,11 @@ itself as rows age out without a new write. A store that cannot be read
 yields the typed ``allowance_unknown`` outcome — the caller refuses the start
 honestly. ``spend_by_cause`` partitions that same window into own thoughts,
 places and started work, with known dollars and unmetered calls; it introduces
-no extra allowance. Stamped root causes come from the existing money rows.
+no extra allowance. Stamped root causes come from the existing money rows. A Continue keeps its predecessor's
+recorded origin and whole-work billing group (``supervisor.continuation_admission``), and that origin decides: a
+Continue of work with owner origin (my human's own, or work a wake started on their verified words or card choice:
+``usage_origin.task_usage_scope``) spends that work's group, never this allowance, even when a wake continues it;
+a Continue of work a wake started on its own stays consciousness work, counted here.
 
 Only a display asks for ``forecast``: in the same read, each root's newest category row, so every counted row
 leaves the window at min(its own time + 24 h, that root's newest category row + 48 h), the very selections above
