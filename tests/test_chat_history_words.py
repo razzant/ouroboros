@@ -246,7 +246,13 @@ def test_chat_history_words_projects_whole_on_the_custom_route():
     for name in ("words", "room_id", "voice", "order"):
         assert entry.schema["parameters"]["properties"][name]["description"]
     assert entry.schema["parameters"]["properties"]["order"]["description"] == (
-        "With words: newest (default) or oldest first; oldest shows an original before its later restatements.")
+        "With words: newest (default) or oldest first by recorded time; oldest puts an original before its later "
+        "restatements.")
+    properties = entry.schema["parameters"]["properties"]
+    assert properties["count"]["description"] == (
+        "How many rows to return. With words, the first of the requested order; otherwise the latest.")
+    assert properties["offset"]["description"] == (
+        "How many rows to skip in that order. Without words, skip that many from the latest.")
     projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
     description = projected[0]["custom"]["description"]
     lead = " ".join(entry.schema["description"].split())
