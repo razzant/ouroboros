@@ -891,17 +891,17 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         incident_chat_id = _incident_chat_id(task, owner_chat_id, _q)
         if incident_chat_id is not None and not adopted_answer:
             try:
-                from ouroboros.host_notice import notice
+                from ouroboros.host_notice import phrase
                 from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
                 cause = TASK_CAUSE_PHRASES.get(terminal_reason, "")  # an unknown rail is named in the details only
+                # The cause is one of a closed table of host phrases, so it stays in the template; the seconds do not.
+                text, said = phrase("task_reaper_stopped", f"{cause + '; it' if cause else 'The task'} was stopped after "
+                                    "{seconds} s, and its worker restarted.", seconds=int(runtime_sec), details=(
+                                        f"task {task_id}, worker slot {worker_id}, {terminal_reason}. "
+                                        + _stop_detail(ceiling_reached, deadline_reached)))
                 send_with_budget(
-                    incident_chat_id,
-                    f"{cause + '; it' if cause else 'The task'} was stopped after {int(runtime_sec)} s, and its worker restarted.",
-                    is_progress=True, task_id=task_id,
-                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once,
-                                   "notice": notice("task_reaper_stopped", details=(
-                                       f"task {task_id}, worker slot {worker_id}, {terminal_reason}. "
-                                       + _stop_detail(ceiling_reached, deadline_reached)))},
+                    incident_chat_id, text, is_progress=True, task_id=task_id,
+                    progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once, **said},
                     role="system", system_type="task_reaper_notice")
             except Exception:
                 log.debug("Reaper: failed to send owner notification for %s", task_id, exc_info=True)

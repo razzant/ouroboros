@@ -1336,10 +1336,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             meta["transport"] = carried  # live only, after the rows are written: a room's binding stays its own
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
-        if meta.get("notice"):  # its line goes to readers only: the rows above were written without it
-            from ouroboros.host_notice import view
+        if meta.get("notice"):  # its line goes to readers only: the rows above were written without it; the send
+            from ouroboros.host_notice import view  # alone offers a phrase the translation memory lacks
 
-            meta.update(view({**meta, "text": _text, "role": role, "system_type": system_type}))
+            meta.update(view({**meta, "text": _text, "role": role, "system_type": system_type}, drive_root=DATA_DIR,
+                             record_misses=True))
 
         transport = dict(ts=msg_ts, is_progress=is_progress, task_id=task_id, progress_meta=progress_meta)
         if replay_delivery_id:

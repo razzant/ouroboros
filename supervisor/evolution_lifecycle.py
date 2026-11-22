@@ -1304,8 +1304,8 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
     owner_chat_id = int(load_state().get("owner_chat_id") or 0)
     if not owner_chat_id:
         return
-    objective = str(campaign.get("objective") or "").strip()
-    obj_short = (objective[:160] + "…") if len(objective) > 160 else objective
+    # The campaign's objective is its own detail, never the phrase's words (it is authored, never translated).
+    objective = f"objective: {str(campaign.get('objective') or '').strip() or 'autonomous self-improvement'}"
     if outcome == "absorbed":
         from ouroboros.review_overrides import landed_outcome
         from supervisor import queue
@@ -1318,13 +1318,12 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
             + ("it landed over a failed or missing review." if review else
                "whether it landed over a failed or missing review could not be read." if review is None
                else "no landing over a failed or missing review is recorded for it.")
-            + f" Reply if you want it reverted.\nObjective: {obj_short or 'autonomous self-improvement'}"
         )
-        notice = fields("evolution_cycle_absorbed", details=f"commit {commit_sha[:12]}" + (f"; review: {review}" if review else ""))
+        notice = fields("evolution_cycle_absorbed", step="reply_to_revert", details=f"commit {commit_sha[:12]}"
+                        + (f"; review: {review}" if review else "") + f"; {objective}")
     else:
-        msg = ("An evolution cycle was abandoned: no change was absorbed, and the next cycle can start."
-               f"\nObjective: {obj_short or 'autonomous self-improvement'}")
-        notice = fields("evolution_cycle_abandoned", details=str(tx.get("abandoned_reason") or "unspecified"))
+        msg = "An evolution cycle was abandoned: no change was absorbed, and the next cycle can start."
+        notice = fields("evolution_cycle_abandoned", details=f"{tx.get('abandoned_reason') or 'unspecified'}; {objective}")
     send_with_budget(owner_chat_id, msg, progress_meta=notice, role="system", system_type="evolution_cycle_outcome")
 
 

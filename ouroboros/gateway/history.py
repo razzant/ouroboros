@@ -36,7 +36,7 @@ from ouroboros.gateway.history_paging import (
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
-from ouroboros.host_notice import view as notice_view
+from ouroboros.host_notice import phrase, view as notice_view
 from ouroboros.gateway.completion_gist import short_gist
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_completion_facts import (
@@ -238,10 +238,10 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list, annotation
         if len(synthesized) >= _ORIGIN_SYNTH_CAP:
             omitted = sum(later["origin_id"] not in emitted_origins for later in origin_rows[index + 1:])
             if omitted:
-                text = f"{omitted} more archived Project start message(s) are not shown here; their full copies are kept."
+                text, said = phrase("origin_omission", "{n} more archived Project start message(s) are not shown here; their "
+                                    "full copies are kept.", details="state/project_task_bindings.json (source_text)", n=omitted)
                 synthesized.append({  # where they are kept is its notice's detail (DESIGN principle 7)
-                    "text": text, **notice_view({"text": text, "notice": {"code": "origin_omission", "details":
-                        "state/project_task_bindings.json (source_text)"}}),
+                    "text": text, **notice_view({"text": text, **said}),
                     "role": "system", "ts": str(ref.get("ts") or ""),
                     "is_progress": False, "system_type": "origin_omission",
                     "markdown": False, "source": "", "sender_label": "",
@@ -1084,8 +1084,10 @@ def _active_lifecycle_row(row_matches_thread) -> Optional[Dict[str, Any]]:
                 "lifecycle": lifecycle,
                 "lifecycle_virtual": True,
             }
-            if active.get("error"):  # the running job's raw error stays behind Details
-                row.update(notice_view({**row, "notice": {"code": "skill_operation_error", "details": str(active["error"])}}))
+            if active.get("error"):  # the running job's raw error stays behind Details; the skill's name is never translated
+                row["text"], said = phrase("skill_operation_error", f"Skill {active.get('kind') or 'operation'}: `{{target}}` — "
+                                           f"{label}", details=str(active["error"]), target=active.get("target") or "skill")
+                row.update(notice_view({**row, **said}))
             if row_matches_thread(chat_id, row):
                 return row
     except Exception as exc:

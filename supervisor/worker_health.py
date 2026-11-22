@@ -616,7 +616,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 progress_meta={
                     "task_incident": reason_code,
                     "toast_once": f"{incident_task_id}:{reason_code}:{attempt}",
-                    "notice": notice(reason_code, details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
+                    "notice": notice(reason_code, step="try_again", details=f"task {task_id}, {attempt} attempts, last exit code {exitcode}"),
                 },
                 role="system", system_type="worker_failure")
         except Exception:

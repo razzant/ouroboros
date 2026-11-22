@@ -20,7 +20,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-from ouroboros.host_notice import notice
+from ouroboros.host_notice import phrase
 from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
@@ -549,10 +549,13 @@ def _finish_task_done_dispatch(
                 progress_meta["review_projection"] = task_done_event["review_projection"]
             if "model_execution" in task_done_event:
                 progress_meta["model_execution"] = task_done_event["model_execution"]
-            progress_meta["notice"] = notice("subagent_finished", details=f"task {task_id}")  # its id, never its words
+            # Its id is a detail, never its words; its role is put back as written, never translated.
+            text, said = phrase("subagent_finished", f"Subagent {verb} ({{role}})." if role_suffix else f"Subagent {verb}.",
+                                details=f"task {task_id}", **({"role": role} if role_suffix else {}))
+            progress_meta.update(said)
             ctx.send_with_budget(
                 chat_id,
-                f"Subagent {verb}{role_suffix}.",
+                text,
                 is_progress=True,
                 task_id=str(task_id or ""),
                 progress_meta=progress_meta,
