@@ -251,9 +251,10 @@ def _later(first: Any, second: Any) -> bool:
 
 def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
     """Write a changed call outcome under the record's name lock; False when nothing was written (unchanged on
-    disk, older than the observation on disk, or the lock is busy: the next changed call writes it). The
-    observation is dated before the lock (``at``), so a writer that waited never moves the record back in time.
-    The server's catalog is never touched."""
+    disk, older than the observation on disk, a server whose published catalog no longer has this call's
+    identity, or the lock is busy: the next changed call writes it). The observation is dated before the lock
+    (``at``), so a writer that waited never moves the record back in time. The server's catalog is never
+    touched."""
     from ouroboros import store
 
     try:
@@ -263,6 +264,8 @@ def record_call(cfg: Any, *, ok: bool, code: str, method: str, at: str) -> bool:
                 cfg.id, identity(cfg)) else None
             if not call_changed(current, ok=ok, code=code) or _later((current or {}).get("at"), at):
                 return False  # unchanged, or an older observation than the one on disk
+            if (read_json_dict(catalog_path(cfg.id)) or {}).get("identity") != identity(cfg):
+                return False  # the server was replaced or removed while this call ran: the call's server is gone
             atomic_write_json(calls_path(cfg.id), {"_schema_version": 1, "server_id": cfg.id, "identity": identity(cfg),
                                                    "latest_call": call_mark(current, ok=ok, code=code, method=method, at=at)})
             return True
@@ -310,10 +313,11 @@ def publish(cfg: Any, envelope: dict) -> None:
 
 
 def prune_catalogs(configs: list) -> None:
-    """Server-owned boot/configuration event remover of catalogs and call records; never called by a reader."""
+    """Server-owned boot/configuration event remover of catalogs, then call records; never called by a reader.
+    A call record is removed under its own lock after a re-read; a busy lock is its writer's, and that writer
+    refuses a server whose catalog no longer has its identity (``record_call``)."""
     wanted = {cfg.id: identity(cfg) for cfg in configs}
-    directories = (config.DATA_DIR / "state" / "mcp" / "catalogs", config.DATA_DIR / "state" / "mcp" / "calls")
-    for path in [path for directory in directories for path in directory.glob("server-*.json")]:
+    for path in (config.DATA_DIR / "state" / "mcp" / "catalogs").glob("server-*.json"):
         expected = wanted.get(path.name[len("server-"):-len(".json")])
         try:
             try:
@@ -324,6 +328,21 @@ def prune_catalogs(configs: list) -> None:
                 path.unlink(missing_ok=True)
         except OSError:
             log.warning("Could not prune MCP catalog %s", path, exc_info=True)
+    for path in (config.DATA_DIR / "state" / "mcp" / "calls").glob("server-*.json"):
+        _prune_call_record(path, wanted.get(path.name[len("server-"):-len(".json")]))
+
+
+def _prune_call_record(path: Path, expected: str | None) -> None:
+    from ouroboros import store
+
+    try:
+        with store.name_lock(config.DATA_DIR, f"mcp/calls/{path.name[:-len('.json')]}.lock", timeout_sec=0):
+            if not expected or (read_json_dict(path) or {}).get("identity") != expected:
+                path.unlink(missing_ok=True)
+    except store.StoreBusy:
+        pass
+    except OSError:
+        log.warning("Could not prune MCP call record %s", path, exc_info=True)
 
 
 def catalog_notice(runtime: Any) -> str:

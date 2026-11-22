@@ -939,3 +939,40 @@ def test_an_older_observation_never_replaces_a_newer_mark_in_either_order():
     assert call_now()["since"] == earlier
     assert mcp_catalog.record_call(cfg, ok=True, code="", method="ping", at=later)
     assert call_now() == {"ok": True, "code": "", "method": "ping", "at": later}
+
+
+@pytest.mark.parametrize("removed", [False, True], ids=["replaced", "removed"])
+def test_a_call_that_ends_after_its_server_was_replaced_or_removed_writes_nothing(removed):
+    from concurrent.futures import ThreadPoolExecutor
+    from ouroboros.tools.tool_result import ToolResult
+
+    worker = publisher()
+    assert worker.refresh_server("demo")["published"]
+    arrived, resume = threading.Event(), threading.Event()
+
+    async def old_call(cfg, name, args, timeout):  # a call of the old server that is still running
+        arrived.set()
+        assert resume.wait(10)
+        return ToolResult(status="ok", code="OK", text="the old server answered")
+    worker._async_call_tool = old_call
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(worker._call_tool_result, "mcp_demo__ping", {})
+        try:
+            assert arrived.wait(10)
+            lister = publisher({"MCP_ENABLED": True, "MCP_SERVERS": []} if removed
+                               else settings(url="https://replacement.example.test/mcp"))
+            if removed:
+                mcp_catalog.prune_catalogs([])  # the owner removed it: catalog and record go
+            else:
+                assert lister.refresh_server("demo")["published"]  # the owner replaced its address
+                mcp_catalog.prune_catalogs([lister.server_config("demo")])
+                assert call_with(lister, TimeoutError("the new address is down")).code == "MCP_TIMEOUT"
+                new_mark = mcp_catalog.latest_call(lister.server_config("demo"))
+                assert new_mark["code"] == "MCP_TIMEOUT"
+        finally:
+            resume.set()
+        assert running.result(timeout=10).status == "ok"  # the old call's own answer still reaches its caller
+    if removed:
+        assert not mcp_catalog.calls_path("demo").exists()  # the late answer did not bring the record back
+    else:
+        assert mcp_catalog.latest_call(lister.server_config("demo")) == new_mark  # nor erased the new server's state
