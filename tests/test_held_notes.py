@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from ouroboros import (context, context_budget, context_fit, context_view_facts, held_notes, knowledge, knowledge_versions,
-                       memory_floor, memory_view)
+                       memory_floor, memory_view, memory_view_events)
 from ouroboros.agent import Env, _restore_saved_clocks
 from ouroboros.memory import Memory
 from ouroboros.memory_view_events import CARRIED_NAMES
@@ -371,6 +371,40 @@ def test_with_no_recorded_claim_helpers_start_and_are_scheduled_as_before(world,
                 baseline = _plan(world, task=child)
             plan = _plan(world, task=child)
             assert json.dumps(plan.messages_for(plan.initial_mode)) == json.dumps(baseline.messages_for(baseline.initial_mode))
+
+
+OWN_WAKE = {"initiator": "consciousness", "usage_category": "consciousness", "wake_cause": "own_clock",
+            "consciousness_cause": "own", "work_kind": "consciousness", "consciousness_autonomy": "act"}
+WAKE_TURN = {**TASK, "id": "wake-turn", "text": "[Wake-up · heartbeat]", "_is_direct_chat": True, "metadata": OWN_WAKE}
+
+
+def test_a_note_claiming_wake_stands_in_each_own_clock_wake_and_not_in_main_or_the_wakes_helper(world, actors,
+                                                                                                monkeypatch):
+    """With no note claiming ``wake`` a wake's request is byte for byte the one built without the name; a note that
+    claims it stands whole in the wake's request beside Main's notes, and not in a Main turn's or in that of a helper
+    the wake schedules, which carries Main's room only."""
+    _write(world, "main-page", "Main's working fact.", claims=("room:1",))
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_view_events, "is_own_clock_wake", lambda _facts: False)  # the names as they were
+        before = _plan(world, task=WAKE_TURN)
+    quiet = _plan(world, task=WAKE_TURN)
+    for mode in ("max", "low", "nano"):
+        assert json.dumps(quiet.messages_for(mode)) == json.dumps(before.messages_for(mode))
+    assert "Main's working fact." in _held(quiet) and "'wake'" not in _held(quiet)
+
+    _write(world, "own-time", "What I return to on my own clock.", claims=("wake",), title="My own time")
+    held = _held(_plan(world, task=WAKE_TURN))
+    assert "What I return to on my own clock." in held and "Matched claims: 'wake'" in held
+    assert "Main's working fact." in held
+    main = _plan(world)
+    assert "Main's working fact." in _held(main)
+    assert "What I return to on my own clock." not in json.dumps(main.messages_for(main.initial_mode))
+
+    _result, child = _scheduled(_scheduler(world, "wake-turn", OWN_WAKE))
+    assert child["metadata"][CARRIED_NAMES] == ["room:1"]
+    helper = _plan(world, task=child)
+    assert "Main's working fact." in _held(helper)
+    assert "What I return to on my own clock." not in json.dumps(helper.messages_for(helper.initial_mode))
 
 
 def test_reviewers_councils_safety_and_writers_never_reach_the_held_heads():

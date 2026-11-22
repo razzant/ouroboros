@@ -277,7 +277,7 @@ def test_settings_save_persists_ints_and_the_canonical_unlimited(monkeypatch):
             boundary.commit()
         return payload
 
-    monkeypatch.setattr(gws, "load_settings", lambda: {**SETTINGS_DEFAULTS, **saved})
+    monkeypatch.setattr(gws, "settings_read_view", lambda **_: ({**SETTINGS_DEFAULTS, **saved}, dict(saved)))
     monkeypatch.setattr(gws, "_owner_write_settings", _fake_write)
     monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
     monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)

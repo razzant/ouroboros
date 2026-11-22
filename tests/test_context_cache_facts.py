@@ -165,6 +165,12 @@ def test_only_a_stamped_cache_ttl_is_named(tmp_path, applied, bracket):
     assert "expire" not in line and "cold" not in line  # the fact, no forecast
 
 
+def test_the_round_facts_keep_a_recorded_ttl_without_inventing_response_age(tmp_path):
+    line = _facts_line(tmp_path, {"_last_prompt_cache_ttl": "5m"})
+    assert "previous usable input cache unknown; last recorded request cache TTL 5m" in line
+    assert "last response" not in line and "expire" not in line
+
+
 @pytest.mark.parametrize(("input_sources", "kind", "target"), [
     ("shared", "api_model", "openai/gpt-fixture"),
     ("declared", "agent_session", "codex=gpt-fixture"),

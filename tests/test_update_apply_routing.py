@@ -451,7 +451,7 @@ _SESSION_ROW = {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}
     ("vendor/fixture", True, "fast", False, 0.0),
     ("vendor/fixture", False, "standard", False, 0.0),
     ("vendor/fixture", False, "fast", True, 0.065536),
-    ("vendor/fixture", False, "ultrafast", True, 0.0),  # positive charge below display precision
+    ("vendor/fixture", False, "ultrafast", True, 0.000001 * 65_536 / 1e6),  # positive charge below display precision
     ("vendor/fixture (local)", False, "", True, None),  # explicitly remote despite the model spelling
 ])
 def test_assisted_update_admits_and_prices_the_selected_review_seat(monkeypatch, tmp_path, model, local,

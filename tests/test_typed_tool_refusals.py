@@ -49,11 +49,7 @@ _TYPED_MARKER = re.compile(r"^⚠️ +[A-Z][A-Z0-9_]{2,}(?=[\s:(]|$)")
 # repo-relative path -> (occurrences, why they stay). Every entry is the same class this
 # lint exists for, left in place because the file belongs to another package of the
 # autonomy sprint (issue #739 names the follow-up); the count may only shrink.
-ALLOWED: dict[str, tuple[int, str]] = {
-    "ouroboros/tools/control_task_results.py": (
-        1, "legitimate cache-horizon warning after a successful wait; no operation was refused",
-    ),
-}
+ALLOWED: dict[str, tuple[int, str]] = {}
 
 # Pre-existing returns whose marker identifier is interpolated. Growth fails; a stale
 # (larger) count is harmless here, because concurrent branches retire these sites one by one.

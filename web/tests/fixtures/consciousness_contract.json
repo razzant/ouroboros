@@ -5,7 +5,7 @@
     "bg_consciousness_state": {
       "enabled": true,
       "status": "sleeping",
-      "detail": "Sleeping until 09:30.",
+      "detail": "Sleeping until 09:30 (UTC+00:00).",
       "level": "act",
       "next_wake_at": "2026-10-24T09:30:00+00:00",
       "last_wake_at": "2026-10-20T12:40:00+00:00",
@@ -279,7 +279,7 @@
   "consciousness": {
     "enabled": true,
     "status": "sleeping",
-    "detail": "Sleeping until 09:30.",
+    "detail": "Sleeping until 09:30 (UTC+00:00).",
     "level": "act",
     "next_wake_at": "2026-10-24T09:30:00+00:00",
     "last_wake_at": "2026-10-20T12:40:00+00:00",

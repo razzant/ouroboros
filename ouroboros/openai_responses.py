@@ -243,8 +243,9 @@ def completion_view(body: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, 
             else json.dumps(call.get("arguments") or {})}} for call in calls]
     completion: Dict[str, Any] = {"id": body.get("id"), "choices": [{"message": message, **(
         {"finish_reason": finish} if status in {"completed", "incomplete"} else {})}], "model": body.get("model")}
-    if "service_tier" in body:
-        completion["service_tier"] = body["service_tier"]
+    for key in ("service_tier", "total_cost_usd"):  # the reported charge, zero included, as the ledger reads it
+        if key in body:
+            completion[key] = body[key]
     if isinstance(body.get("_stream_receipt"), dict):
         completion["_stream_receipt"] = body["_stream_receipt"]
     if terminal_failure:  # the provider's error object kept whole; its code moves to ``type`` under a status class
