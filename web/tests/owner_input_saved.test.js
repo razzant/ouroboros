@@ -631,7 +631,8 @@ test('after a host restart a kept send meets its saved row: delivery not confirm
         assert.deepEqual(reloaded.notes('cm-3')[0].textContent, 'Input saved');
         assert.deepEqual(reloaded.actions('cm-3'), []);
         assert.equal(reloaded.actions('cm-2').length, 2, 'the one the host never saw is still in doubt with its actions');
-        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-2', 'cm-3']);
+        assert.deepEqual(tab.kept().map((entry) => entry.frame.client_message_id), ['cm-1', 'cm-2', 'cm-3']);
+        assert.equal(tab.kept()[0].deliveryUnknown, true);
 
         // The pending row after a restart: the host no longer knows; the doubt replaces Input saved.
         tab.host.history = [tab.row('cm-1', reloadWords, { restarted: true }), tab.row('cm-3', pendingWords, { restarted: true })];
@@ -654,15 +655,20 @@ test('after a host restart a kept send meets its saved row: delivery not confirm
         reloaded.press('cm-1', 'Send as new');
         assert.equal(document.activeElement, document.byId.get('chat-input'), 'the composer is focused');
         assert.deepEqual(reloaded.sent.map((item) => item.frame.client_message_id), ['cm-2'], 'preparing the composer sends nothing');
-        assert.deepEqual(tab.kept(), []);
+        assert.ok(tab.kept().every(entry => entry.deliveryUnknown), 'the tab keeps all saved delivery doubts');
         assert.equal(reloaded.instance.hasPendingWork(), false);
         reloaded.instance.destroy();
 
-        // Nothing is kept any more: the next read shows these rows as history, like every other saved row.
+        // The next read keeps the warning and recovery action, including for rows absent from this history page.
         tab.host.history = [tab.row('cm-1', reloadWords, { restarted: true })];
         const later = tab.open();
-        await until(() => later.notes('cm-1').length === 1, 'history replays');
-        assert.deepEqual(later.notes('cm-1').map((node) => node.textContent), ['Input saved']);
+        await until(() => later.asNew('cm-1').length === 1, 'history replays the kept doubt');
+        assert.deepEqual(later.notes('cm-1').map((node) => node.textContent), [DOUBT]);
+        assert.deepEqual(later.retries('cm-1'), []);
+        later.echo('cm-1', reloadWords);
+        assert.deepEqual(tab.kept().map(entry => entry.frame.client_message_id), ['cm-2', 'cm-3']);
+        assert.deepEqual(later.asNew('cm-1'), [], 'Send as new leaves the bubble with the warning, not only the storage');
+        assert.deepEqual(later.notes('cm-1').map((node) => node.textContent), ['Input saved'], 'the saved tick stands in its place');
     } finally { tab.close(); }
 });
 
@@ -771,7 +777,7 @@ test('an echo sent before a deferred dispatch waits; a close offers Send again, 
         assert.deepEqual(room.notes('cm-2').map((node) => node.textContent), [DOUBT]);
         assert.deepEqual(room.retries('cm-2'), []);
         assert.equal(room.asNew('cm-2').length, 1, 'the doubt keeps its one action');
-        assert.deepEqual(tab.kept(), []);
+        assert.deepEqual(tab.kept().map(entry => [entry.frame.client_message_id, entry.deliveryUnknown]), [['cm-2', true]]);
         assert.equal(room.instance.hasPendingWork(), false);
     } finally { tab.close(); }
 });
@@ -785,7 +791,7 @@ test('a Telegram caption that ends like a tail is kept word for word, live and o
     const caption = 'Keep this note\n\n[Attached file: plan.pdf]';
     const telegram = { role: 'user', chat_id: 1, ts: TS, source: 'skill:telegram', sender_label: 'Telegram (Anton)',
         sender_session_id: '', attachments: [view] };
-    const message = (node) => node.innerHTML.match(/<div class="message[^"]*">([\s\S]*?)<\/div>/)[1];
+    const message = (node) => node.innerHTML.match(/<div class="message[^"]*" data-reply-body>([\s\S]*?)<\/div>/)[1];
     const live = fixture();
     try {
         live.echo({ ...telegram, content: caption, client_message_id: 'tg:1' });
@@ -816,6 +822,128 @@ test('Restart typed with a staged file stays the exact command; words around it 
         assert.equal(command.content, '/restart', 'exact, as the host gate matches it');
         assert.equal(command.attachments.length, 1, 'its file rides the same row');
         assert.equal(prose.content, '/restart please\n\n[Attached file: scan.pdf]', 'prose keeps the tail: never the command');
-        assert.ok(room.bubble('cm-1').innerHTML.includes('<div class="message">/restart</div>'));
+        assert.ok(room.bubble('cm-1').innerHTML.includes('<div class="message" data-reply-body>/restart</div>'));
     } finally { tab.close(); }
 });
+
+const DOUBT = 'Saved; delivery not confirmed.';
+
+// The receipt "saved, delivery unknown" belongs to the kept frame, never to the DOM: a bubble the feed released, a
+// tab nobody is looking at and a reload in between change nothing about it. The restored bubble shows the doubt and
+// its one action; the running host's own fact on the row takes both off the bubble itself, hidden tab or not.
+test('a saved row of an ended host met without its bubble, in an inactive tab, stays a doubt that a restored bubble shows and the host\'s fact removes', async () => {
+    const tab = keptTab();
+    try {
+        const first = tab.open();
+        await first.send('reload');
+        const { client_message_id: cmid, content: words } = first.sent[0].frame;
+        first.bubble(cmid).remove();                       // the feed released the bubble
+        document.hidden = true;                            // and the tab is inactive
+        first.echo(cmid, words, { restarted: true });      // the saved row of a host process that has since ended
+        assert.equal(tab.kept()[0].deliveryUnknown, true, 'the receipt is kept with the frame, not with the bubble');
+        assert.equal(first.instance.hasPendingWork(), false, 'a saved delivery doubt is not pending work');
+        first.instance.destroy();
+        document.hidden = false;
+
+        tab.host.history = [];                             // the next first read has no row to settle the kept copy
+        const reloaded = tab.open();
+        await until(() => reloaded.asNew(cmid).length === 1, 'the restored bubble shows the doubt and its one action');
+        assert.deepEqual(reloaded.notes(cmid).map((node) => node.textContent), [DOUBT]);
+        assert.deepEqual(reloaded.retries(cmid), [], 'nothing replays: the host would only rejoin it');
+        document.hidden = true;                            // inactive again when the host later confirms its dispatch
+        reloaded.echo(cmid, words);
+        assert.deepEqual(reloaded.asNew(cmid), [], 'Send as new leaves the bubble with the warning');
+        assert.deepEqual(reloaded.notes(cmid).map((node) => node.textContent), ['Input saved']);
+        assert.deepEqual(tab.kept(), [], 'and the kept copy with them');
+    } finally { document.hidden = false; tab.close(); }
+});
+
+test('the running host\'s pending fact ends a delivery doubt on the bubble and in the kept copy alike', async () => {
+    const tab = keptTab();
+    try {
+        const room = tab.open();
+        await room.send('pending later');
+        const { client_message_id: cmid, content: words } = room.sent[0].frame;
+        room.echo(cmid, words, { restarted: true });
+        assert.deepEqual(room.notes(cmid).map((node) => node.textContent), [DOUBT]);
+        assert.equal(tab.kept()[0].deliveryUnknown, true);
+        room.echo(cmid, words, { ingress_pending: true });  // the live host took the row and still owes its dispatch
+        assert.deepEqual(room.notes(cmid).map((node) => node.textContent), ['Input saved'], 'no warning of an ended host remains');
+        assert.deepEqual(room.asNew(cmid), []);
+        assert.equal(tab.kept()[0].deliveryUnknown, undefined, 'the kept copy no longer doubts it either');
+        room.echo(cmid, words);                             // then its dispatch
+        assert.deepEqual(tab.kept(), []);
+    } finally { tab.close(); }
+});
+
+function bubbleIn(root, id) {
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble user';
+    bubble.dataset.clientMessageId = id;
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    bubble.appendChild(time);
+    root.appendChild(bubble);
+    bubble.isConnected = true;
+    return bubble;
+}
+
+test('the host\'s dispatch fact takes a delivery doubt, a Not confirmed note and their actions off the bubble by itself', () => {
+    const env = installDom();
+    try {
+        const root = document.createElement('div');
+        root.isConnected = true;
+        const bubble = bubbleIn(root, 'cm-7');
+        const unconfirmed = createUnconfirmedSends({ send: () => ({ status: 'sent' }), root: () => root, onDomWrite: (fn) => fn(),
+            showToast() {}, compose() {} });
+        const buttons = () => bubble.querySelectorAll('[data-unconfirmed-action]').map((node) => node.dataset.unconfirmedAction);
+        const notes = () => [...bubble.querySelectorAll('[data-ingress-saved]'), ...bubble.querySelectorAll('[data-ingress-unconfirmed]')];
+        const saved = { role: 'user', client_message_id: 'cm-7', ingress_accepted: true };
+
+        unconfirmed.track({ type: 'chat', content: 'words', client_message_id: 'cm-7' });
+        unconfirmed.settle(saved);                                    // a row of an ended host
+        assert.deepEqual(buttons(), ['send_as_new']);
+        unconfirmed.settle({ ...saved, ingress_dispatched: true });   // no saved tick is drawn by anyone here: the fact alone clears
+        assert.deepEqual([buttons(), notes().length, unconfirmed.count], [[], 0, 0]);
+
+        unconfirmed.track({ type: 'chat', content: 'again', client_message_id: 'cm-7' });
+        unconfirmed.unsettle();                                       // the socket closed first: Not confirmed as saved
+        assert.deepEqual(buttons(), ['retry', 'discard']);
+        unconfirmed.settle({ ...saved, ingress_dispatched: true });
+        assert.deepEqual([buttons(), notes().length, unconfirmed.count], [[], 0, 0]);
+
+        unconfirmed.track({ type: 'chat', content: 'third', client_message_id: 'cm-7' });
+        markIngressSaved(root, { ...saved, ingress_pending: true });  // saved by the live host, dispatch still owed
+        unconfirmed.unsettle();                                       // a close then offers Send again on that note
+        assert.deepEqual(buttons(), ['retry', 'discard']);
+        unconfirmed.settle({ ...saved, ingress_dispatched: true });
+        assert.deepEqual(buttons(), [], 'a pending note keeps its tick and loses its actions');
+        assert.equal(notes().length, 1);
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a saved row of an ended host met before the kept bubble is shown is kept as unknown, and reconcile shows that bubble with the doubt', () => {
+    const env = installDom();
+    try {
+        const root = document.createElement('div');
+        root.isConnected = true;
+        const store = new Map([['k', JSON.stringify([{ frame: { type: 'chat', content: 'words', client_message_id: 'cm-9' }, views: [], ts: TS }])]]);
+        const unconfirmed = createUnconfirmedSends({ send: () => ({ status: 'sent' }), root: () => root, onDomWrite: (fn) => fn(),
+            showToast() {}, compose() {}, storage: { getItem: (key) => store.get(key) ?? null,
+                setItem: (key, value) => store.set(key, value), removeItem: (key) => store.delete(key) }, storageKey: 'k' });
+        unconfirmed.settle({ role: 'user', client_message_id: 'cm-9', ingress_accepted: true });  // no bubble in the feed yet
+        assert.equal(JSON.parse(store.get('k'))[0].deliveryUnknown, true, 'the receipt does not wait for a bubble');
+        const shown = [];
+        unconfirmed.reconcile((entry) => { shown.push(entry.frame.client_message_id); bubbleIn(root, entry.frame.client_message_id); });
+        assert.deepEqual(shown, ['cm-9'], 'the first read left it out, so the kept words bring the bubble back');
+        const note = root.querySelectorAll('[data-ingress-saved]')[0];
+        assert.equal(note?.textContent.startsWith(DOUBT), true, 'with the doubt on it');
+        assert.deepEqual(root.querySelectorAll('[data-unconfirmed-action]').map((node) => node.dataset.unconfirmedAction), ['send_as_new']);
+        assert.equal(unconfirmed.count, 0);
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+

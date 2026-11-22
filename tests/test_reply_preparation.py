@@ -964,3 +964,16 @@ def test_a_warm_pause_park_re_announces_only_on_the_owners_resume(world, outcome
                           detached=[])
     kinds = [event["type"] for event in _supervised(world, events)]
     assert ("typing_start" in kinds) is announced, kinds
+
+
+def test_a_connectors_structured_transport_keys_its_chat_and_never_stops_the_others(world):
+    """Only a host-proven Telegram address splits a chat by bot and conversation; another connector's binding,
+    whatever values it holds (here a mapping), is its chat's and never breaks the read for every chat."""
+    _direct(world, "turn-a", chat_id=1)
+    _direct(world, "turn-b", chat_id=9)
+    _direct(world, "turn-c", chat_id=9)
+    structured = {"kind": "slack", "conversation_id": {"team": "T1", "channel": "C1"}, "bot_id": ["B1"]}
+    world.bridge._chat_transports[9] = dict(structured)
+    state = reply_preparation(world.root)
+    assert sorted(row["chat_id"] for row in state["chats"]) == [1, 9], "one entry per chat, both chats typed"
+    assert [row["transport"] for row in state["chats"] if row["chat_id"] == 9] == [structured]

@@ -47,6 +47,7 @@ import json
 import logging
 import pathlib
 import re
+import secrets
 import threading
 from typing import Any, Callable, Dict, Optional, Sequence
 
@@ -114,6 +115,10 @@ def settings_document_mutation():
 
 class SettingsPreconditionFailed(RuntimeError):
     """A locked-in precondition refused the write; nothing was persisted."""
+
+
+class BindingRefused(ValueError):
+    """The proposed Main tier has no matching confirmed destination."""
 
 
 class SettingsChangedElsewhere(SettingsPreconditionFailed):
@@ -199,6 +204,7 @@ def settings_write_refusal(exc: Exception) -> JSONResponse | None:
 
     for error, status, code in (
         (DeploymentPolicyRefusal, 403, MANAGED_BY_DEPLOYMENT),
+        (BindingRefused, 400, "main_binding_invalid"),
         (SettingsLockUnavailable, 503, "settings_locked"),
         (SettingsDocumentBusy, 503, "settings_busy"),
         (SettingsDocumentUnreadable, 409, "settings_unreadable"),
@@ -451,15 +457,83 @@ def setting_tokens(document: dict, keys: Sequence[str]) -> dict[str, str]:
             for key in keys if _withheld(key, {}) != "secret"}
 
 
+CONNECTION_CONDITION = "connection"  # ``if_unchanged`` value: one ``_meta.connections[].revision``, its id included
+_CONNECTION_SALT = secrets.token_bytes(32)  # this process's only: a revision never outlives it, nor is it stored
+_REVISION_PROBE = "revision-probe"  # a model name of no connection's: only the connection's own facts differ
+
+
+def connection_revision(document: dict, connection: str, *, effective: dict | None = None) -> str:
+    """``<id>#<24 hex>``: what one API connection (picker id ``kind`` or ``kind@name``) sends to now, as
+    ``llm_routing.resolve_target`` reads it from ``document``: its base, API surface, headers, routing and
+    credential, none of a model. An OpenRouter connection's also holds the routing a request applies, the global
+    ``OUROBOROS_OR_PROVIDER`` under its own override (``llm_routing._resolve_or_provider``), since that decides which
+    endpoint carries a tier. Keyed by a salt of this process, so it reveals no secret, an unrelated setting never
+    moves it, and a restart makes every earlier one stale. A connection that cannot send is the refusal's own kind.
+    ``effective``: ``settings_in_place_of(document)`` when the caller already has it."""
+    import hmac
+    from hashlib import sha256
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import _or_provider_value, resolve_target
+    from ouroboros.provider_models import PROVIDER_KINDS
+
+    kind, _, name = connection.partition("@")
+    if kind not in PROVIDER_KINDS:
+        raise ValueError(f"'{connection}' names no API connection")
+    settings = settings_in_place_of(document) if effective is None else effective
+    try:
+        target = resolve_target(f"{connection}::{_REVISION_PROBE}", settings)
+        facts: Any = {key: ({k: v for k, v in value.items() if k != "model"} if key == "capability_route" else value)
+                      for key, value in target.items() if key not in ("resolved_model", "usage_model")}
+        if kind == "openrouter":  # the routing as a request reads it, the document's global filter included
+            facts["routing_applied"] = {**_or_provider_value(settings.get("OUROBOROS_OR_PROVIDER")),
+                                        **_or_provider_value(target.get("provider_routing"))}
+    except (ConnectionUnavailable, ValueError) as exc:
+        facts = ["unavailable", type(exc).__name__, str(getattr(exc, "code", "") or "")]
+    text = json.dumps([connection, facts], sort_keys=True, default=str, ensure_ascii=False, separators=(",", ":"))
+    return f"{connection}#{hmac.new(_CONNECTION_SALT, text.encode('utf-8'), sha256).hexdigest()[:24]}"
+
+
+def connection_revisions(rows: list, document: dict) -> list:
+    """``GET /api/settings`` ``_meta.connections`` with each row's ``revision`` (``connection_revision``). A row whose
+    revision cannot be taken goes without one: nothing can then be bound to it, never a stand-in that would match."""
+    out = []
+    effective = settings_in_place_of(document)  # once for the whole list
+    for row in rows:
+        try:
+            out.append({**row, "revision": connection_revision(document, str(row.get("id") or ""), effective=effective)})
+        except Exception:
+            log.warning("No revision for connection %r", row.get("id"), exc_info=True)
+            out.append(dict(row))
+    return out
+
+
+def connection_condition_valid(value: str) -> bool:
+    from ouroboros.provider_models import PROVIDER_KINDS, connection_id, parse_model_route
+
+    name, _, revision = value.partition("#")
+    route = parse_model_route(f"{name}::{_REVISION_PROBE}")
+    return bool(re.fullmatch(r"[0-9a-f]{24}", revision) and route.valid and route.kind in PROVIDER_KINDS
+                and connection_id(route.kind, route.connection) == name)
+
+
 def check_setting_tokens(document: dict, condition: Any) -> None:
     if condition is None:
         return
     if not isinstance(condition, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in condition.items()):
-        raise ValueError("'if_unchanged' must map setting keys to tokens")
-    actual = setting_tokens(document, tuple(condition))
-    if set(condition) - set(actual):
-        raise ValueError("Secret settings cannot have an 'if_unchanged' token")
-    if any(actual[key] != token for key, token in condition.items()):
+        raise BindingRefused("Reload Settings. Each if_unchanged condition needs a setting name and its read token.")
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    keys = tuple(key for key in condition if key not in (CONNECTION_CONDITION, "ultrafast"))
+    if any(key not in SETTINGS_DEFAULTS and key not in document for key in keys):
+        raise BindingRefused("Unknown settings condition. Reload Settings and choose again.")
+    if CONNECTION_CONDITION in condition and not connection_condition_valid(condition[CONNECTION_CONDITION]):
+        raise BindingRefused("Invalid connection revision. Reload Settings and choose the connection again.")
+    actual = setting_tokens(document, keys)
+    if set(keys) - set(actual):
+        raise BindingRefused("Secret settings cannot have an 'if_unchanged' token")
+    if CONNECTION_CONDITION in condition:  # the connection the write's route was shown on, compared as it is now
+        actual[CONNECTION_CONDITION] = connection_revision(document, condition[CONNECTION_CONDITION].partition("#")[0])
+    if any(condition[key] != token for key, token in actual.items()):
         raise SettingsChangedElsewhere("Changed on another device. Reload the current value before saving.")
 
 
@@ -722,6 +796,8 @@ def _owner_update_settings(
     whole_document: bool = False,
     if_unchanged: Optional[dict] = None,
     unset: Sequence[str] = (),
+    commit_if_current: Optional[Callable[[Callable[[], None]], bool]] = None,
+    check_unchanged: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
@@ -732,7 +808,8 @@ def _owner_update_settings(
     key by key while this request answers "saved" (BIBLE P1). Here ``transform`` receives
     the settings as they are INSIDE the lock and returns the document to persist, or
     ``None`` to persist nothing — which is also how a no-change decision avoids rewriting
-    the file at all.
+    the file at all. A conditional no-op may still need to validate its destination: ``check_unchanged``
+    sees the authored document from the same locked read, without inventing a write or reading the file again.
 
     ``expected_digest`` closes the other half: an endpoint that took a DECISION from an
     earlier read (the previous mode, whether anything changed at all) passes the digest
@@ -756,6 +833,9 @@ def _owner_update_settings(
     The read is strict: only an absent document is new, and a present one that does not read as
     an object refuses every writer with ``SettingsDocumentUnreadable``, its bytes untouched. A
     ``fields_on_saved_document`` transform receives that one read's authored document.
+
+    A waiting task may supply ``commit_if_current`` to commit inside its row transaction and publish the
+    decision only after the file lands. A replay can return False without calling the commit.
 
     Returns the commit's receipt (``_committed_changes``), taken under the same lock after the bytes
     land; empty when nothing was written or nothing changed."""
@@ -783,6 +863,8 @@ def _owner_update_settings(
         effective_before = _config.settings_of_document(document, present=_settings_document_present())
         proposed = transform(dict(document) if isinstance(transform, _SavedDocumentFields) else current)
         if proposed is None:
+            if check_unchanged is not None:
+                check_unchanged(document)
             return {}
         to_write = dict(proposed)
         if not whole_document:
@@ -790,15 +872,28 @@ def _owner_update_settings(
 
             for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
+        from ouroboros.gateway.owner_effort import check_main_ultrafast
+
+        # Main's Ultrafast binding judges the document as it would land (prepared, ``unset`` removed) before the
+        # prologue's own effects, so its refusal writes nothing (invariant 2).
         to_write = _config.prepare_settings_for_persist(
             to_write, authored_keys=authored_keys,
             allow_context_lowering=allow_context_lowering,
-            allow_safety_lowering=allow_safety_lowering)
+            allow_safety_lowering=allow_safety_lowering,
+            judge=lambda prepared: check_main_ultrafast(
+                document, {key: value for key, value in prepared.items() if key not in unset}, if_unchanged))
         for key in unset:
             to_write.pop(key, None)
-        write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
-        if boundary is not None:
-            boundary.commit()
+
+        def commit():
+            write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
+            if boundary is not None:
+                boundary.commit()
+
+        if commit_if_current is None:
+            commit()
+        elif not commit_if_current(commit):
+            return {}  # a replay found this decision already saved
         try:
             changes = _committed_changes(document, shown, to_write, effective_before)
             if boundary is not None:
@@ -852,7 +947,7 @@ __all__ = [
     "SettingsDocumentUnreadable",
     "SettingsLockUnavailable",
     "SettingsPreconditionFailed", "SettingsChangedElsewhere",
-    "OWNER_SETTING_WRITERS", "setting_tokens", "settings_receipt", "merged_changes", "settings_read_view", "settings_in_place_of",
+    "OWNER_SETTING_WRITERS", "CONNECTION_CONDITION", "connection_revision", "connection_revisions", "setting_tokens", "settings_receipt", "merged_changes", "settings_read_view", "settings_in_place_of",
     "project_settings_changes", "settings_unset_keys", "settings_roster_error", "settings_write_refusal",
     "UNREADABLE_SETTINGS_REFUSAL",
     "settings_document_mutation",

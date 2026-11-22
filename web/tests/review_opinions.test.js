@@ -63,6 +63,41 @@ test('a reviewed subject opens to one compact line per reviewer in words, the to
     assert.match(html, /<span class="review-check-line">chosen by Ouroboros · 2 of 2 ticked reviewers<\/span>/);
 });
 
+test('a seat that ran without an answer names what ran, apart from a request nothing was seen running', () => {
+    const asked = 'claudexor::codex=gpt-6.2-sol';
+    const failed = { model: '', requested_model: asked, observed_model: '', transport_status: 'error', parse_status: 'none' };
+    const html = open(reviewGroupsFromTaskDetail(detail({ aggregate_signal: 'QUORUM_FAILED', actors: [
+        // Ran on the route the reply named, and left no answer.
+        { ...failed, slot_id: 'ran', executions: [{ kind: 'api', model: 'anthropic/claude-opus-5.5' }], reported_cause: 'The route answered nothing.' },
+        // A session whose harness reported no model.
+        { ...failed, slot_id: 'unnamed', executions: [{ kind: 'harness', harness_id: 'codex' }] },
+        // Asked, with nothing observed running; and a seat never sent.
+        { ...failed, slot_id: 'asked', executions: [], reason: 'No reply was observed.' },
+        { ...failed, slot_id: 'unsent', executions: [], transport_status: 'not_dispatched', operation_state: 'not_dispatched' },
+        // Still running: what ran is named without a word about its answer.
+        { ...failed, slot_id: 'running', executions: [{ kind: 'api', model: 'anthropic/claude-opus-5.5' }], transport_status: 'pending', operation_state: 'in_flight' },
+        panel.actors[0],
+    ], record_state: 'pending' })));
+    const head = (slot) => seat(html, slot).match(/<div class="review-seat-head">[\s\S]*?<\/div>/)?.[0] || '';
+    assert.match(head('ran'), /data-harness-identity="api"[\s\S]*<span class="review-seat-name">anthropic\/claude-opus-5\.5<\/span><span class="review-seat-note">ran · no readable answer<\/span>/);
+    assert.match(head('ran'), /data-tone="warn">unavailable<\/span>/);
+    assert.match(seat(html, 'ran'), /Engine report: <\/span><span class="review-line-text">The route answered nothing\.<\/span>/);
+    assert.match(head('unnamed'), /data-harness-identity="codex"[\s\S]*<span class="review-seat-name">claudexor::codex=gpt-6\.2-sol<\/span><span class="review-seat-note">requested · ran, model not reported<\/span>/);
+    for (const slot of ['asked', 'unsent']) {
+        assert.match(head(slot), /<span class="review-seat-name">claudexor::codex=gpt-6\.2-sol<\/span><span class="review-seat-note">requested · not reported<\/span>/, slot);
+        assert.doesNotMatch(head(slot), /data-harness-identity|\bran\b/, slot);
+    }
+    assert.match(head('unsent'), /data-tone="warn">not sent<\/span>/);
+    assert.match(head('running'), /<span class="review-seat-note">ran<\/span>[\s\S]*review-state[^>]*>awaiting/);
+    // An answered seat is unchanged: its observed model, no note.
+    assert.match(head('seat-one'), /<span class="review-seat-name">same\/model<\/span><span class="review-seat-role">counted<\/span>/);
+    // Record facts keep the three apart: what was asked, what ran, whose answer was read.
+    assert.match(facts(html), /<dt>Reviewer ran model<\/dt><dd>requested claudexor::codex=gpt-6\.2-sol · ran api anthropic\/claude-opus-5\.5 · observed not reported<\/dd>/);
+    assert.match(facts(html), /<dt>Reviewer unnamed model<\/dt><dd>requested claudexor::codex=gpt-6\.2-sol · ran harness codex model not reported · observed not reported<\/dd>/);
+    assert.match(facts(html), /<dt>Reviewer asked model<\/dt><dd>requested claudexor::codex=gpt-6\.2-sol · observed not reported<\/dd>/);
+    assert.match(facts(html), /<dt>Reviewer seat-one model<\/dt><dd>requested not recorded · observed same\/model<\/dd>/);
+});
+
 test('a wave of advisers alone (Cyber Pro) tallies its advisers, never a counted 0 of 0', () => {
     const advisers = panel.actors.map((actor) => ({ ...actor, additional: true }));
     const alone = open(reviewGroupsFromTaskDetail(detail({ aggregate_signal: 'DEGRADED', actors: advisers,

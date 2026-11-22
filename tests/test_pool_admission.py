@@ -8,6 +8,7 @@ Every guard is shown both ways in its test.
 from __future__ import annotations
 
 import json
+import pathlib
 import time
 import threading
 
@@ -543,6 +544,8 @@ def test_the_published_facts_reach_the_mind_dated_and_the_worker_never_reads_the
     assert memory == document["memory_admission"] and memory["read_at"]
     assert (memory["starts_admitted"], memory["starting_processes"], memory["reason"]) == (3, 0, "memory_room")
     assert fact["recorded_max_workers"] is None and fact["acting_worker_count"] == 1
+    # The shipped per-root subagent number is none: the fact says so as null, and the note says what null means.
+    assert fact["max_active_subagents_per_root"] is None and "max_active_subagents_per_root" in fact["note"]
     assert "owner cap none (the machine's memory is the limit)" in line
     assert "available 4.0 GiB of 10.0 GiB, reserve 1.0 GiB" in line and "new processes admitted 3 (memory_room)" in line
 
@@ -641,6 +644,41 @@ def test_the_root_child_limit_counts_acting_children(assigning, monkeypatch):
     assert len(assigning.created) == 1
 
 
+@pytest.mark.parametrize("number", [None, "6"])
+def test_the_shipped_default_admits_a_roots_seventh_child_through_scheduling_and_assignment(assigning, monkeypatch,
+                                                                                         number):
+    """No monkeypatched number: the getter reads the shipped default (no number) or the owner's 6, and both the
+    scheduling decision and worker selection take it as it is; no number holds nothing behind six acting children."""
+    from supervisor.events_schedule_task import _active_cap_state
+    from ouroboros.config import get_max_active_subagents_per_root
+
+    from ouroboros import config
+
+    monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", raising=False)
+    if number is None:  # a fresh install, as the server loads and projects it: the shipped default reaches the reader
+        monkeypatch.setattr(config, "SETTINGS_PATH", assigning.root / "absent-settings.json")
+        config.apply_settings_to_env(config.load_settings(), environ=(environ := {}))
+        if "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT" in environ:
+            monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", environ["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"])
+    else:
+        monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", number)
+    machine(monkeypatch, 9)
+    assigning.original.rss = {"rss_bytes": GIB, "rss_measure": "current"}
+    for index in range(6):
+        workers.RUNNING[f"kid{index}"] = {**workers.RUNNING["owner"], "task": child(f"kid{index}"),
+                                          "worker_id": 20 + index}
+    seventh = child("seventh")
+    workers.PENDING.append(seventh)
+    blocked, refusal = _active_cap_state("owner", "owner", [], workers.RUNNING, get_max_active_subagents_per_root())
+    assert (blocked, refusal) == (number is not None, ""), "scheduling: queued only behind the owner's number"
+    workers.assign_tasks()
+    assert len(assigning.created) == (0 if number else 1), "assignment: the seventh starts while the pool admits it"
+    if number:  # the owner removes the number (No limit: the server's projection drops the variable)
+        monkeypatch.delenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT")
+        workers.assign_tasks()
+        assert len(assigning.created) == 1, "the held seventh starts at the next pass"
+
+
 def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assigning, monkeypatch):
     from ouroboros import config
 
@@ -662,65 +700,96 @@ def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assignin
 
 # ---- the owner's number: optional, read live, migration A ----------------------------------------------------------
 
-@pytest.mark.parametrize(("saved", "marked", "read"), [
-    (10, False, None),  # the form's 10, saved on every save: no choice
-    ("10", False, None),
-    (40, False, 40),  # the owner's own number stays his cap
-    (1, False, 1),  # off Colab a 1 is a choice (Colab's first-launch 1: tests/test_colab_bootstrap.py)
-    ("", False, None),
-    ("abc", False, 10),  # a typo is finite, never "no cap"
-    (0, False, 10),
-    (10, True, 10),  # after the format marker, 10 is the owner's again
+_WORKERS, _PER_ROOT = "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"
+
+
+@pytest.mark.parametrize(("key", "saved", "marked", "read"), [
+    (_WORKERS, 10, False, None),  # the form's 10, saved on every save: no choice
+    (_WORKERS, "10", False, None),
+    (_WORKERS, 40, False, 40),  # the owner's own number stays his cap
+    (_WORKERS, 1, False, 1),  # off Colab a 1 is a choice (Colab's first-launch 1: tests/test_colab_bootstrap.py)
+    (_WORKERS, "", False, None),
+    (_WORKERS, "abc", False, 10),  # a typo is finite, never "no cap"
+    (_WORKERS, 0, False, 10),
+    (_WORKERS, 10, True, 10),  # after the format marker, 10 is the owner's again
+    # The per-root subagent number: every save wrote the shipped 6 before it became optional.
+    (_PER_ROOT, 6, False, None),
+    (_PER_ROOT, "6", False, None),
+    (_PER_ROOT, 64, False, 64),  # the owner's own number stays
+    (_PER_ROOT, "", False, None),
+    (_PER_ROOT, "abc", False, 6),  # a typo is finite, never "no number"
+    (_PER_ROOT, 0, False, 6),
+    (_PER_ROOT, 6, True, 6),  # a 6 the new Settings saved carries the marker and is the owner's
 ])
-def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_path, monkeypatch, saved, marked,
+def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_path, monkeypatch, key, saved, marked,
                                                                          read):
     from ouroboros import config
-    from ouroboros.runtime_limits import get_max_workers
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.runtime_limits import get_max_active_subagents_per_root, get_max_workers
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
+    marker, getter = {_WORKERS: (OWNER_CAP_FORMAT_KEY, get_max_workers),
+                      _PER_ROOT: (SUBAGENT_CAP_FORMAT_KEY, get_max_active_subagents_per_root)}[key]
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"OUROBOROS_MAX_WORKERS": saved, **({OWNER_CAP_FORMAT_KEY: 1} if marked else {})}),
-                    encoding="utf-8")
+    path.write_text(json.dumps({key: saved, **({marker: 1} if marked else {})}), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
-    monkeypatch.delenv("OUROBOROS_MAX_WORKERS", raising=False)
+    monkeypatch.delenv(key, raising=False)
     loaded = config.load_settings()
-    assert loaded[OWNER_CAP_FORMAT_KEY] == 1, "the view carries the marker into the next save"
+    assert loaded[marker] == 1, "the view carries the marker into the next save"
     config.apply_settings_to_env(loaded, environ=(environ := {}))
-    if "OUROBOROS_MAX_WORKERS" in environ:  # the server's projection, which the supervisor reads on every pass
-        monkeypatch.setenv("OUROBOROS_MAX_WORKERS", environ["OUROBOROS_MAX_WORKERS"])
-    assert get_max_workers() == read
+    if key in environ:  # the server's projection, which the supervisor reads on every pass
+        monkeypatch.setenv(key, environ[key])
+    assert getter() == read
     config.save_settings(loaded)  # a read stays a read; the first save writes the marker: never again
     stored = json.loads(path.read_text(encoding="utf-8"))
-    assert stored[OWNER_CAP_FORMAT_KEY] == 1 and config.load_settings()["OUROBOROS_MAX_WORKERS"] == (
-        "" if read is None else read)
+    assert stored[marker] == 1 and config.load_settings()[key] == ("" if read is None else read)
+
+
+@pytest.mark.parametrize("fixture", ["settings_v6.113.4.json", "settings_v6.87.5.json"])
+def test_an_earlier_release_document_reads_its_saved_six_as_no_number(tmp_path, monkeypatch, fixture):
+    from ouroboros import config
+    from ouroboros.settings_scales import SUBAGENT_CAP_FORMAT_KEY
+
+    document = json.loads((pathlib.Path(__file__).parent / "fixtures" / "nminus1" / fixture).read_text(encoding="utf-8"))
+    assert document[_PER_ROOT] == 6 and SUBAGENT_CAP_FORMAT_KEY not in document, "the release saved its default"
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.delenv(_PER_ROOT, raising=False)
+    loaded = config.load_settings()
+    assert loaded[_PER_ROOT] == "" and loaded[SUBAGENT_CAP_FORMAT_KEY] == 1
+    config.save_settings(loaded)
+    assert config.load_settings()[_PER_ROOT] == "", "the next save keeps no number"
 
 
 @pytest.mark.parametrize("provenance", [False, True])
-def test_legacy_worker_cap_projection_does_not_undo_migration(tmp_path, monkeypatch, provenance):
+@pytest.mark.parametrize("key, legacy", [(_WORKERS, 10), (_PER_ROOT, 6)])
+def test_legacy_worker_cap_projection_does_not_undo_migration(tmp_path, monkeypatch, provenance, key, legacy):
     from ouroboros import config
-    from ouroboros.runtime_limits import get_max_workers
+    from ouroboros.runtime_limits import get_max_active_subagents_per_root, get_max_workers
     from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
-    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY, SUBAGENT_CAP_FORMAT_KEY
 
+    marker, getter = {_WORKERS: (OWNER_CAP_FORMAT_KEY, get_max_workers),
+                      _PER_ROOT: (SUBAGENT_CAP_FORMAT_KEY, get_max_active_subagents_per_root)}[key]
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"OUROBOROS_MAX_WORKERS": 10}), encoding="utf-8")
+    path.write_text(json.dumps({key: legacy}), encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
     inherited = {}
-    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, "OUROBOROS_MAX_WORKERS": 10}, environ=inherited)
-    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", inherited["OUROBOROS_MAX_WORKERS"])
+    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, key: legacy}, environ=inherited)
+    monkeypatch.setenv(key, inherited[key])
     monkeypatch.delenv(PROJECTED_SETTINGS_ENV, raising=False)
     if provenance:
         monkeypatch.setenv(PROJECTED_SETTINGS_ENV, inherited[PROJECTED_SETTINGS_ENV])
     loaded = config.load_settings()
-    assert loaded[OWNER_CAP_FORMAT_KEY] == 1 and loaded["OUROBOROS_MAX_WORKERS"] == ""
+    assert loaded[marker] == 1 and loaded[key] == ""
     config.apply_settings_to_env(loaded, environ=inherited)
-    assert "OUROBOROS_MAX_WORKERS" not in inherited
-    monkeypatch.delenv("OUROBOROS_MAX_WORKERS")
+    assert key not in inherited
+    monkeypatch.delenv(key)
     config.save_settings(loaded)
-    assert get_max_workers() is None
-    assert json.loads(path.read_text(encoding="utf-8"))["OUROBOROS_MAX_WORKERS"] == ""
-    config.save_settings({**loaded, "OUROBOROS_MAX_WORKERS": 10})
-    assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == 10, "after migration, a chosen 10 stays chosen"
+    assert getter() is None
+    assert json.loads(path.read_text(encoding="utf-8"))[key] == ""
+    config.save_settings({**loaded, key: legacy})
+    assert config.load_settings()[key] == legacy, "after migration, a chosen legacy number stays chosen"
 
 
 def test_the_environment_configures_only_an_unauthored_worker_cap(tmp_path, monkeypatch):

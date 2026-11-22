@@ -17,6 +17,7 @@ from ouroboros.delegate_reply import REPLY_TO_SCHEMA, validate_reply_target, rep
 from ouroboros.tools.arg_feedback import argument_refusal
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.utils import path_for_prose
 
 
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -38,8 +39,9 @@ def _delivery_path(ctx: ToolContext, file_path: str) -> tuple[Optional[pathlib.P
 
 def _file_not_found(ctx: ToolContext, file_path: str, fp: pathlib.Path) -> str:
     """A delivery miss; a relative request also names the workspace file it looked for."""
-    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {fp})"
-    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}{where}"))
+    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {path_for_prose(str(fp))})"
+    text = f"⚠️ File not found: {path_for_prose(file_path)}{where}"
+    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=text))
 
 
 def _detect_image_mime(data: bytes) -> str:
@@ -236,7 +238,7 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         "download_url_compat": compat_url,
         "file_ref": file_ref,
     }
-    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'", shown)
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{path_for_prose(fp.name)}'", shown)
 
 
 _MAX_LINK_ACTIONS = 12
@@ -941,7 +943,7 @@ def _close_owner_question(ctx: ToolContext, quiz_id: str, reason: str, question_
 
 
 def _question_materials(ctx: ToolContext, root: pathlib.Path, task_id: str, materials: Any) -> list:
-    """Retain explicitly named existing artifacts under this question author's custody."""
+    """Retain explicitly named existing artifacts under this question author's custody. ``label`` is display text: a POSIX name byte shows as its unquoted ``path_for_prose`` escape (distinct, since a backslash name is refused above); valid names, quote-leading included, stay as they are. Identity: the retained name, size and sha256."""
     if materials in (None, []):
         return []
     from types import SimpleNamespace
@@ -986,12 +988,12 @@ def _question_materials(ctx: ToolContext, root: pathlib.Path, task_id: str, mate
                        and pathlib.Path(str(item["path"])).name == name and any(
             pathlib.Path(str(item["path"])).resolve().parent == store for store in stores)), None)
         if not record or record.get("status") not in (None, "", "ready") or record.get("errors"):
-            raise ValueError(f"material {source_id}/{name} is not an available registered task artifact")
+            raise ValueError(f"material {source_id}/{path_for_prose(name)} is not an available registered task artifact")
         retained = copy_file_to_task_artifacts(SimpleNamespace(drive_root=root, task_id=task_id),
                                               record["path"], immutable=True, expected={key: record[key] for key in ("size", "sha256", "immutable") if key in record})
         if not retained:
-            raise ValueError(f"material {source_id}/{name} could not be retained")
-        selected.append({"task_id": task_id, "name": retained["name"], "label": name,
+            raise ValueError(f"material {source_id}/{path_for_prose(name)} could not be retained")
+        selected.append({"task_id": task_id, "name": retained["name"], "label": name.encode("utf-8", "backslashreplace").decode("utf-8"),
                          "size": retained["size"], "sha256": retained["sha256"],
                          "download_url": f"/api/tasks/{quote(task_id, safe='')}/artifacts/{quote(retained['name'], safe='')}"})
     return selected

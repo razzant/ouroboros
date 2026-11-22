@@ -20,7 +20,7 @@ import {
     placeService, placeStateOf, placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
 } from './consciousness_words.js';
 
-/** Ask the Skills page for one installed skill's card, or Browse filtered to connectors. */
+/** Ask Extensions for one installed skill's card on Skills, or Browse filtered to connectors. */
 export function openSkillsFor(detail) {
     globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-skills', { detail }));
 }

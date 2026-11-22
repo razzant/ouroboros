@@ -31,7 +31,7 @@ from ouroboros.gateway.owner_settings import (
     SettingsDocumentBusy,
     SettingsPreconditionFailed, settings_write_refusal,
     OWNER_SETTING_WRITERS, fields_on_saved_document,
-    settings_receipt, merged_changes, settings_read_view, settings_in_place_of, setting_tokens, settings_unset_keys,
+    settings_receipt, merged_changes, settings_read_view, settings_in_place_of, setting_tokens, settings_unset_keys, connection_revisions,
     settings_roster_error,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
@@ -893,7 +893,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         ),
         "automatic": automatic_catalog(document),
     }
-    meta["connections"] = connections_meta(settings, document)
+    meta["connections"] = connection_revisions(connections_meta(settings, document), document)  # each with its revision
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
     try:  # what the limits cannot count, said under them on Dashboard › Costs
         from ouroboros.pricing import spend_coverage

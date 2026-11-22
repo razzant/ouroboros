@@ -198,7 +198,7 @@ def test_retention_failure_keeps_body_outcome_and_explicit_gap(root, monkeypatch
 
 
 def test_failure_body_is_shared_by_evidence_and_settlement(root):
-    """Large SDK failure bodies need one decode per accounting/capture boundary."""
+    """Retention, charging and exception capture share the decoded SDK envelope."""
     body = {"id": "gen-decoded", "error": {"code": 500}, "usage": {"cost": .3}}
     reads = []
 
@@ -217,7 +217,22 @@ def test_failure_body_is_shared_by_evidence_and_settlement(root):
     current = row(root, ua.last_physical_attempt_capture().attempt_id)
     assert current["cost_usd"] == .3 and current["cost_final"] is True
     assert read_blob_ref(root, current["physical_failure"]["evidence_ref"])["body"] == body
-    assert len(reads) == 2  # Evidence/settlement share one; exception capture reads one.
+    assert reads == [True]
+
+
+def test_r3_non_json_http_failure_retains_actual_text_without_inventing_price(root):
+    import requests
+
+    response = requests.Response()
+    response.status_code = 502
+    response.encoding = "utf-8"
+    response._content = "synthetic gateway body: upstream unavailable".encode()
+    with pytest.raises(requests.HTTPError):
+        ua.execute_physical_attempt(ua.AttemptRequest(model="synthetic", provider="anthropic",
+            drive_root=root, task_id="child", root_task_id="parent"), response.raise_for_status)
+    current = row(root, ua.last_physical_attempt_capture().attempt_id)
+    assert (current["state"], current.get("cost_usd"), bool(current.get("cost_final"))) == ("unresolved", None, False)
+    assert read_blob_ref(root, current["physical_failure"]["evidence_ref"])["body"] == response.text
 
 
 def test_sdk_body_is_shared_without_losing_response_only_price(root):

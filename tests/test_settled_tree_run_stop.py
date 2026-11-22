@@ -92,12 +92,12 @@ def _ended_tree(drive, *, run_settled=False):
         assert custody.emit(drive, custody.SETTLED, {"run_id": "run-1", "task_id": HELPER, "state": "succeeded"})
 
 
-def _stop(drive, task_id=ROOT):
+def _stop(drive, task_id=ROOT, *, cascade=True, stop_action_id=""):
     """The owner's Stop through the real door, as the work row sends it (cascade, Stop now)."""
     app = Starlette(routes=[Route("/api/tasks/{task_id}/cancel", api_task_cancel, methods=["POST"])])
     app.state.drive_root = drive
     with TestClient(app) as client:
-        return client.post(f"/api/tasks/{task_id}/cancel", json={"cascade": True})
+        return client.post(f"/api/tasks/{task_id}/cancel", json={"cascade": cascade, "stop_action_id": stop_action_id})
 
 
 def _noop_incidents(drive, task_id):
@@ -183,3 +183,219 @@ def test_ouroboros_own_stop_reaches_the_same_run(qenv, monkeypatch):
     _drive_cancel_task_event(events[0], SimpleNamespace())
     assert engine.cancels == [("run-1", "owner_task_gone")] and reconcile.open_runs(qenv.drive) == []
     assert ci.active_intent(qenv.drive, ROOT) is None
+
+
+@pytest.mark.parametrize("remote", ["running", "lost_cancel_reply", "cancel_not_sent", "unreadable_run", "succeeded",
+                                    "renewed_stop", "renewed_stop_wrong_store", "renewed_stop_without_read"])
+def test_cascade_keeps_the_accepted_start_until_its_real_outcome(qenv, monkeypatch, remote):
+    import httpx
+
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from tests._delegated_transport_shared import Engine, _sweep
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    drive = qenv.drive
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    write_task_result(drive, ROOT, "completed", root_task_id=ROOT)
+    write_task_result(drive, HELPER, "completed", root_task_id=ROOT, parent_task_id=ROOT)
+    assert _decide(drive, _pending(drive, HELPER, "lost", tree=ROOT))
+    lost = remote == "lost_cancel_reply" or remote.startswith("renewed_stop")
+
+    class ControlEngine(Engine):
+        unsent = False
+        unreadable = False
+
+        def __call__(self, request):
+            if remote == "cancel_not_sent" and request.url.path.endswith("/control") and not self.unsent:
+                self.unsent = True
+                raise httpx.ConnectError("connect refused before control delivery", request=request)
+            if self.unreadable and request.method == "GET" and request.url.path.startswith("/v2/runs/"):
+                raise httpx.ReadTimeout("no run detail", request=request)
+            return super().__call__(request)
+
+    engine = ControlEngine(drive)
+    def attach():
+        gateway = engine.gateway()
+        if lost:
+            send = gateway.cancel_run
+            def lose_reply(rid, **kwargs):
+                send(rid, **kwargs)
+                raise ClaudexorUnavailable("daemon_unreachable", "cancel reply lost")
+            gateway.cancel_run = lose_reply
+        return gateway
+    monkeypatch.setattr(reconcile, "attach_only_gateway", attach)
+    assert _stop(drive, cascade=False).status_code == 404
+    assert ci.active_intent(drive, ROOT) is None
+    reply = _stop(drive, stop_action_id="first-press")
+    assert reply.status_code == 202 and reply.json()["cancel_state"] == "pending"
+    intent = ci.active_intent(drive, ROOT)
+    assert intent["scope"] == ci.SCOPE_CASCADE
+    _sweep(drive, engine)
+    qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+    assert ci.active_intent(drive, ROOT)["request_id"] == intent["request_id"]
+    assert engine.lookups and not engine.creates and not engine.cancels and not _noop_incidents(drive, ROOT)
+
+    job = engine.accept("lost", REQUEST, state="succeeded" if remote == "succeeded" else "running")
+    _sweep(drive, engine, live={HELPER})
+    engine.unreadable = remote == "unreadable_run"
+    rid = engine.commands[job]["run"]
+    qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+    if remote != "succeeded":
+        assert ci.active_intent(drive, ROOT)["request_id"] == intent["request_id"]
+        if remote == "cancel_not_sent":
+            assert not engine.cancels and run(drive, rid)._recovered_cancel == "not_issued"
+        qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+        assert engine.cancels == [rid]
+        expected = custody.CANCEL_CONTAINMENT_FAULT if lost else custody.CANCEL_REQUESTED
+        assert run(drive, rid)._recovered_cancel == expected
+        assert ci.active_intent(drive, ROOT)["request_id"] == intent["request_id"]
+        engine.unreadable = False
+        if remote.startswith("renewed_stop") or remote == "running":
+            assert _stop(drive, stop_action_id="first-press").status_code == 202
+            assert engine.cancels == [rid]
+            original_store = engine.store
+            if remote == "renewed_stop_wrong_store":
+                engine.store = "not-the-starts-store"
+            engine.unreadable = remote == "renewed_stop_without_read"
+            assert _stop(drive, stop_action_id="second-press").status_code == 202
+            assert _stop(drive, stop_action_id="first-press").status_code == 202
+            qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+            assert engine.cancels == [rid] * (2 if remote == "renewed_stop" else 1)
+            engine.store, engine.unreadable = original_store, False
+        engine.bind_run(job, "cancelled")
+        qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+    assert ci.active_intent(drive, ROOT) is None and not reconcile.open_runs(drive)
+    assert len(engine.cancels) == int(remote != "succeeded") + int(remote == "renewed_stop") and not engine.creates
+    assert load_task_result(drive, HELPER)["status"] == "completed"
+
+
+@pytest.mark.parametrize("verdict", ["single", "historical_cascade"])
+def test_only_an_open_cascade_reaches_late_work_of_a_finished_child(qenv, monkeypatch, verdict):
+    from tests._delegated_transport_shared import Engine, _sweep
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    drive = qenv.drive
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    write_task_result(drive, ROOT, "scheduled", root_task_id=ROOT)
+    write_task_result(drive, HELPER, "completed", root_task_id=ROOT, parent_task_id=ROOT)
+    assert _decide(drive, _pending(drive, HELPER, "lost", tree=ROOT))
+    engine = Engine(drive)
+    monkeypatch.setattr(reconcile, "attach_only_gateway", engine.gateway)
+    if verdict == "single":
+        qenv.q.PENDING.append({"id": ROOT, "type": "task", "root_task_id": ROOT, "chat_id": 0})
+        assert _stop(drive, cascade=False).status_code == 200
+    else:
+        # Historical terminal provenance alone never authorizes another cascade.
+        write_task_result(drive, ROOT, "cancelled", root_task_id=ROOT,
+                          cancel_origin={"request_id": "previous-stop", "scope": ci.SCOPE_CASCADE})
+    assert ci.active_intent(drive, ROOT) is None
+    assert load_task_result(drive, ROOT)["status"] == "cancelled"
+    job = engine.accept("lost", REQUEST)
+    _sweep(drive, engine)
+    _sweep(drive, engine)
+    qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+    assert [r.run_id for r in reconcile.open_runs(drive)] == [engine.commands[job]["run"]]
+    assert not engine.creates and not engine.cancels
+
+
+@pytest.mark.parametrize("bound_at_stop", [False, True], ids=["pending", "bound"])
+def test_stop_of_an_ended_branch_reaches_only_its_descendants(qenv, monkeypatch, bound_at_stop):
+    from tests._delegated_transport_shared import Engine, _sweep
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    drive = qenv.drive
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    write_task_result(drive, ROOT, "completed", root_task_id=ROOT)
+    for member, parent in [(HELPER, ROOT), ("bridge", HELPER), ("starter", "bridge"), ("sibling", ROOT)]:
+        write_task_result(drive, member, "completed", result=member, root_task_id=ROOT, parent_task_id=parent)
+    for starter in ("starter", "sibling"):
+        assert _decide(drive, _pending(drive, starter, starter, tree=ROOT))
+    engine = Engine(drive)
+    monkeypatch.setattr(reconcile, "attach_only_gateway", engine.gateway)
+    sibling = engine.accept("sibling", REQUEST)
+    job = engine.accept("starter", REQUEST) if bound_at_stop else None
+    _sweep(drive, engine, live={"starter", "sibling"})
+    assert _stop(drive, HELPER, cascade=False).status_code == 404
+    response = _stop(drive, HELPER)
+    assert response.status_code == 202 and response.json()["cancel_state"] == "pending"
+    intent = ci.active_intent(drive, HELPER)["request_id"]
+
+    def sweep_stop():
+        qenv.tl.sweep_cancel_intents(now=time.time() + 3600)
+
+    if job is None:
+        sweep_stop()
+        assert not engine.cancels and ci.active_intent(drive, HELPER)["request_id"] == intent
+        job = engine.accept("starter", REQUEST)
+        _sweep(drive, engine, live={"starter", "sibling"})
+    rid = engine.commands[job]["run"]
+    assert [r.run_id for r in reconcile.tree_open_runs(drive, HELPER)] == [rid]
+    sweep_stop()
+    sweep_stop()
+    assert engine.cancels == [rid] and ci.active_intent(drive, HELPER)["request_id"] == intent
+    engine.bind_run(job, "cancelled")
+    sweep_stop()
+    assert ci.active_intent(drive, HELPER) is None and _stop(drive, HELPER).status_code == 404
+    assert [r.run_id for r in reconcile.open_runs(drive)] == [engine.commands[sibling]["run"]]
+    assert engine.cancels == [rid] and not engine.creates
+    assert load_task_result(drive, "starter")["result"] == "starter"
+
+
+def test_a_crashed_cancel_handoff_lets_one_distinct_later_stop_reserve_again(qenv, monkeypatch):
+    """A CANCEL_HANDOFF whose sender never recorded CANCEL_OUTCOME keeps its identity and its sender as
+    an unresolved fault. While that sender's image may still run, every press stays read-only. Once it
+    is positively gone and the owning store still shows the run active, ONE distinct, later owner Stop
+    reserves a new handoff and reaches the engine; the same press and automatic reconciliation never do.
+    Before the fix the orphaned handoff folded to a dead "unknown" and every later Stop sent nothing."""
+    from ouroboros import process_custody
+    from ouroboros.delegate_custody_current import run
+    from tests._delegated_transport_shared import Engine, _rows, _sweep
+    from tests._owner_pause_ended_helpers import REQUEST, _decide, _pending
+
+    drive = qenv.drive
+    monkeypatch.setattr(custody, "_CUSTODY", {})
+    write_task_result(drive, ROOT, "completed", root_task_id=ROOT)
+    write_task_result(drive, HELPER, "completed", root_task_id=ROOT, parent_task_id=ROOT)
+    assert _decide(drive, _pending(drive, HELPER, "lost", tree=ROOT))
+    engine = Engine(drive)
+    job = engine.accept("lost", REQUEST)
+    _sweep(drive, engine, live={HELPER})
+    rid = engine.commands[job]["run"]
+    assert run(drive, rid).resume_start_state == "running"
+
+    class SenderExited(BaseException):
+        pass
+
+    def press(gateway, control_id, second=0):
+        stop = control_id and {"control_id": control_id, "requested_at": f"2999-01-01T00:00:0{second}+00:00"}
+        return custody.cancel_and_verify(drive, gateway, run(drive, rid), "owner_task_gone", owner_stop=stop or None)
+
+    with engine.gateway() as first:
+        def interrupted(*_args, **_kwargs):
+            raise SenderExited()
+        first.cancel_run = interrupted  # the sender dies at the physical cancel boundary
+        with pytest.raises(SenderExited):
+            custody.cancel_and_verify(drive, first, run(drive, rid), "owner_task_gone",
+                                      owner_stop={"control_id": "first-press", "requested_at": utc_now_iso()})
+    assert len(_rows(drive, custody.CANCEL_HANDOFF, run_id=rid)) == 1
+    assert _rows(drive, custody.CANCEL_OUTCOME, run_id=rid) == []
+    custody._CUSTODY.clear()  # the durable chain is the authority from here on
+
+    with engine.gateway() as second:
+        early = press(second, "impatient-press", 1)
+        assert engine.cancels == [] and early["outcome"] == custody.CANCEL_CONTAINMENT_FAULT, \
+            "the first sender's image may still deliver: a distinct press beside it only reads back"
+        # The restart: this pid now runs a later image, so the recorded sender is positively gone.
+        monkeypatch.setattr(process_custody, "current_custody_session_id", lambda: "image-after-restart")
+        assert press(second, "first-press", 2)["outcome"] == custody.CANCEL_CONTAINMENT_FAULT
+        assert press(second, "")["outcome"] == custody.CANCEL_CONTAINMENT_FAULT
+        assert engine.cancels == [], "the same press and automatic reconciliation stay read-only"
+        renewed = press(second, "second-press", 3)
+    assert engine.cancels == [rid], "one distinct, later owner Stop reserves and cancels again"
+    assert renewed["outcome"] in (custody.CANCEL_REQUESTED, custody.CANCEL_CONFIRMED), renewed
+    custody._CUSTODY.clear()
+    with engine.gateway() as third:
+        once_more = press(third, "third-press", 4)
+    assert engine.cancels == [rid], "the reserved handoff's outcome ends further presses"
+    assert once_more["outcome"] == custody.CANCEL_REQUESTED

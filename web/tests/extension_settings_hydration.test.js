@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings_extension_forms.js';
+import { settingsPageFor } from '../modules/settings_pages.js';
 
 const UNREADABLE_NOTE = 'Current values could not be read; Save is disabled so it does not overwrite them. '
     + 'Open this page again to retry.';
@@ -133,9 +134,44 @@ test('(c) an unreadable read disables Save and says why, in the shared warn tone
         assert.match(html, /type="submit" disabled>Save<\/button>/, label);
         assert.match(html, /data-extension-settings-status data-tone="warn">/, label);
         assert.ok(html.includes(UNREADABLE_NOTE), label);
-        // The form still renders; only Save is withheld, and nothing offers a way around it.
+        // The form still renders, but defaults cannot start a draft before a successful read.
         assert.match(html, /<option value="safe" selected>Safe<\/option>/, label);
+        assert.match(html, /<select class="ui-control" name="mode"[^>]* disabled>/, label);
+        assert.match(html, /name="chat_id"[^>]* value="" disabled>/, label);
+        assert.match(html, /name="token"[^>]* value="" disabled/, label);
         assert.doesNotMatch(html, /Edit anyway|data-extension-settings-read/, label);
+    }
+});
+
+test('the page retries a failed first field read when shown again', async () => {
+    const { host, root } = fakeHost();
+    host.contains = () => false;
+    const container = { ...root, replaceChildren(node) { node.parentElement = this; } };
+    host.remove = () => { host.parentElement = null; };
+    const path = 'skill/demo', win = new EventTarget();
+    const prior = { window: globalThis.window, document: globalThis.document };
+    Object.assign(globalThis, { window: win, document: { createElement: () => host, activeElement: null } });
+    let reads = 0, page;
+    const fetcher = stubFetch((url, init) => {
+        assert.notEqual(init?.method, 'POST');
+        if (url === '/api/extensions') return jsonResponse({ live: { settings_sections: sections() } });
+        assert.equal(url, '/api/extensions/demo/save');
+        return ++reads === 1 ? jsonResponse({}, 500) : jsonResponse({ mode: 'fast', chat_id: 'stored' });
+    });
+    try {
+        page = await settingsPageFor(path).mount(container, { path, ctx: { onScreen: () => true } });
+        assert.match(host.innerHTML, /type="submit" disabled>Save/);
+        assert.equal(page.unsaved(), false);
+        win.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path, place: 'skills' } }));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(reads, 2);
+        assert.match(host.innerHTML, /name="chat_id"[^>]* value="stored"/);
+        assert.match(host.innerHTML, /type="submit">Save/);
+        assert.doesNotMatch(host.innerHTML, /data-extension-settings-blocked| value="stored" disabled/);
+    } finally {
+        page?.unmount();
+        fetcher.restore();
+        Object.assign(globalThis, prior);
     }
 });
 
@@ -178,7 +214,7 @@ function formDouble(fieldNames) {
         disabled: true, dataset: {}, textContent: '', listeners: {},
         addEventListener(type, fn) { this.listeners[type] = fn; }, ...extra,
     });
-    const inputs = Object.fromEntries(fieldNames.map((name) => [name, control({ value: `typed ${name}` })]));
+    const inputs = Object.fromEntries(fieldNames.map((name) => [name, control({ name, value: `typed ${name}` })]));
     const parts = {
         '[data-extension-settings-edit-anyway]': control({ disabled: false }),
         'button[type="submit"]': control(),
@@ -230,12 +266,12 @@ test('Edit anyway is the owner\'s explicit choice: it unlocks the form, and only
 
 test('a form of read-only fields is a status: its check refreshes those fields in place and saves nothing', async () => {
     const component = {
-        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status', busy_label: 'Checking…',
+        type: 'form', id: 'connection', route: 'connection', method: 'POST', submit_label: 'Refresh status',
         fields: ['token_status', 'bridge_status', 'miniapp_status'].map((name) => ({ name, label: name, type: 'text', disabled: true })),
     };
     const reads = [
         { token_status: 'Not set (Settings → Secrets)', bridge_status: 'Waiting for a bot token', miniapp_status: 'Waiting for a bot token' },
-        { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
+        { token_status: 'Saved', bridge_status: 'Connected', miniapp_status: 'Ready' },
         { token_status: "Can't read saved settings now; the current token stays in use", bridge_status: 'Connected', miniapp_status: 'Ready', message: 'Status checked.' },
     ];
     const { html } = await render(() => jsonResponse(reads[0]), { component });
@@ -291,6 +327,53 @@ test('an editable form still saves, keeps what the owner typed and announces the
         fetcher.restore();
         globalThis.window = priorWindow;
     }
+});
+
+test('only a submitted field can dirty the form or replace its Save result', async () => {
+    const { form, inputs, parts } = formDouble(['mode', 'chat_id', 'token', 'local_only']);
+    delete form.dataset.extensionSettingsBlocked;
+    Object.values(inputs).forEach(input => { input.disabled = false; });
+    inputs.token.matches = () => true; // a text-like input reports its edit before blur
+    const host = { innerHTML: '', querySelectorAll: () => [form] };
+    const root = { querySelector: () => host };
+    const status = parts['[data-extension-settings-status]'];
+    const edits = new Map();
+    let reply, posted;
+    const fetcher = stubFetch((url, init) => {
+        if (init?.method !== 'POST') return jsonResponse({});
+        posted = JSON.parse(init.body);
+        return new Promise(resolve => { reply = resolve; });
+    });
+    const edit = (type, target) => form.listeners[type]({ type, target });
+    const submit = () => form.listeners.submit({ preventDefault() {} });
+    try {
+        await renderExtensionSettingsSections(root, sections(), { edits });
+        edit('input', inputs.token);
+        const sent = edits.get(form);
+        assert.ok(sent, 'a real password edit is retained');
+        const saving = submit();
+        const device = { name: '', dataset: { callDevice: 'mic' } };
+        edit('input', device);
+        edit('change', device);
+        edit('change', inputs.local_only);
+        assert.equal(edits.get(form), sent);
+        assert.equal(status.textContent, 'Saving…');
+        assert.equal('local_only' in posted, false);
+        reply(jsonResponse({ message: 'Saved.' }));
+        await saving;
+        assert.equal(edits.size, 0);
+        edit('change', inputs.token);
+        assert.equal(edits.size, 0, 'text blur is not a new edit');
+        assert.equal(status.textContent, 'Saved.');
+
+        const earlier = submit();
+        inputs.token.value = 'next synthetic value';
+        edit('input', inputs.token);
+        reply(jsonResponse({ message: 'Saved.' }));
+        await earlier;
+        assert.ok(edits.has(form), 'the earlier Save cannot acknowledge the newer draft');
+        assert.match(status.textContent, /Your latest edits are unsaved/);
+    } finally { fetcher.restore(); }
 });
 
 test('Telegram\'s Connection shows each long production sentence whole, posts what it shows and refreshes in place', async () => {

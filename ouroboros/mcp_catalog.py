@@ -282,10 +282,10 @@ class MCPNameResolution:
             text = f"⚠️ MCP_TOOL_NOT_FOUND: {name!r} is {self.detail or 'not in ' + where}. Nothing was executed."
             return ToolResult(status="error", code="UNKNOWN_TOOL", text=text)
         if self.status == "mcp_disabled":
-            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Tools to use this tool."
+            text = "⚠️ MCP_DISABLED: enable MCP in Extensions → MCP servers to use this tool."
         elif self.status == "server_disabled":
-            text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Settings → "
-                    f"Tools; {name!r} was not executed.")
+            text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Extensions → "
+                    f"MCP servers; {name!r} was not executed.")
         elif self.status == "skill_unavailable":  # the binding's own refusal (skill_mcp.bind_config)
             text = f"⚠️ {self.detail}"
         else:

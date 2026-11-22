@@ -99,7 +99,10 @@ test('actor subscription controls use the mapped account family and preserve unl
     assert.match(html, />Subscription model · model<\/span>/);
     const unknown = availableSubagentRowMarkup(actor(), { ...state, modelSources: [] });
     assert.match(unknown, /personal \(not checked\)/);
-    // With no catalog to map the id, the chip falls back to the source id
-    // itself and still never claims a harness it could not resolve.
-    assert.match(unknown, /data-harness-identity="opaque-source"/);
+    // With no descriptor to map the id, the chip wears the neutral mark and claims no harness it could not
+    // resolve; the source's own text is the label beside it.
+    assert.match(unknown, /data-harness-identity=""/);
+    assert.match(unknown, /class="harness-identity-mark" viewBox="0 0 24 24"/, 'the neutral mark, not a program\'s own');
+    assert.doesNotMatch(unknown, /data-harness-identity="opaque-source"/, 'an opaque source id is not a harness');
+    assert.match(unknown, />opaque-source · model<\/span>/, 'the source\'s own text is the label');
 });

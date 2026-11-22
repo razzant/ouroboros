@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import owner_pause
+from ouroboros.review_overrides import COUNTER_REL
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import git
 from ouroboros.tools.registry import ToolContext
@@ -13,8 +14,13 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
 )
+from ouroboros.utils import read_json_dict
 from supervisor import update_merge
 from tests import test_update_merge_assisted as assisted
+from tests._store_shared import read_result
+
+# The author's explicit continuation over the returned outcome (the public envelope).
+DECISION = {"disposition": "accepted", "rationale": "I read the returned outcome and accept the current bytes."}
 
 
 @pytest.fixture
@@ -211,3 +217,163 @@ def test_managed_resume_never_reads_or_rewrites_new_commit_review_custody(manage
     assert not getattr(f.ctx, "_review_resume_pending", False)
     assert getattr(f.ctx, "_current_review_attempt_number", None) is None
     assert f.effects.count("commit") == f.effects.count("review") == 1
+
+
+def _real_review_binding(f, monkeypatch):
+    """The review this managed commit continues over: a real NOT_DISPATCHED ledger record bound
+    to a real durable attempt, and the review cycle's own binding of that record."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, build_author_disposition_from_mapping
+    from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros.tools import commit_gate
+
+    ctx = f.ctx
+    # The real writers: the landing annotation on the record and the counter row are the effect
+    # under proof, so neither is mocked here.
+    monkeypatch.setattr(git, "record_bound_commit_success", commit_gate.record_bound_commit_success)
+    monkeypatch.setattr(git, "_record_commit_attempt", commit_gate._record_commit_attempt)
+    commit_gate._record_commit_attempt(ctx, "reviewed managed resolution", "reviewing", phase="review")
+    attempt = ctx._current_review_attempt_number
+    commit_gate.settle_commit_review_ledger(
+        ctx, "reviewed managed resolution", pre_fingerprint={}, blocked=False, block_reason="",
+        combined_findings=[], advisory_replay={"replay_reason": "free_replay",
+                                                "advisory_replay": "No new review wave was bought."})
+    record_id = ctx._current_review_record_id
+    assert record_id, "the review wrote a record"
+    source = load_state(ctx.drive_root).latest_attempt_for(
+        repo_key=make_repo_key(ctx.repo_dir), task_id=ctx.task_id, tool_name="commit_reviewed",
+        attempt=attempt)
+    assert source is not None and source.review_record_id == record_id, source
+    reference = {"surface": "commit", "repo_key": make_repo_key(ctx.repo_dir), "task_id": ctx.task_id,
+                 "tool_name": "commit_reviewed", "attempt": attempt, "review_record_id": record_id,
+                 "pre_review_fingerprint": source.pre_review_fingerprint}
+
+    def stage(ctx, commit_message, commit_start, **_kw):
+        f.effects.append("review")
+        fingerprint = git._fingerprint_staged_diff(f.repo)
+        assert fingerprint["ok"], fingerprint
+        # What the review cycle does for an author continuation: the validated reference, the
+        # decision, and the record it answers.
+        ctx._author_commit_source = source
+        ctx._author_commit_reference = dict(reference)
+        ctx._author_commit_decision = dict(DECISION)
+        # The author's decision on that record (the production builder; the release-metadata
+        # preflight that follows it is not part of this seam).
+        ctx._author_commit_record = build_author_disposition_from_mapping(
+            DECISION, subject_hash=fingerprint["fingerprint"],
+            reviewer_signal=str((ledger.load_record(ledger.ledger_root(ctx), record_id) or {})
+                                .get("verdict", {}).get("aggregate") or ""),
+            enforcement=RECORDED_REVIEW_AUTHORITY)
+        commit_gate.settle_commit_review_ledger(
+            ctx, commit_message, pre_fingerprint=fingerprint, blocked=False, block_reason="",
+            combined_findings=[], author_source=source)
+        assert ctx._current_review_record_id == record_id, ctx._current_review_record_id
+        return {"status": "passed", "pre_fingerprint": fingerprint, "post_fingerprint": fingerprint}
+
+    monkeypatch.setattr(git, "_run_reviewed_stage_cycle", stage)
+    return record_id, source
+
+
+def _paused_then_resumed(f, monkeypatch):
+    """The real pause after Git and a fresh worker's resume of that exact retained commit."""
+    f.mode["pause"] = "commit"
+    result = git._repo_commit_push(f.ctx, "reviewed managed resolution")
+    assert "OWNER_PAUSE" in result, result
+    commit = assisted._git(f.repo, "rev-parse", "HEAD").stdout.strip()
+    owner_pause.release_fence(f.drive, "resolver", reason="owner_resume")
+    f.mode["pause"] = ""
+    resumed = ToolContext(repo_dir=f.repo, drive_root=f.drive, branch_dev=f.ctx.branch_dev,
+                          task_id="resolver", task_metadata=f.ctx.task_metadata)
+    resumed.current_task_type = "task"
+    resumed.task_lifecycle_bound = True
+    result = git._repo_commit_push(resumed, "reviewed managed resolution")
+    assert result.startswith("OK: committed"), result
+    return resumed, commit
+
+
+def test_managed_resume_lands_on_the_review_record_it_continued_over(managed_commit, monkeypatch):
+    """#3451: a retained managed commit resumed by a fresh worker lands on the review record its
+    author continuation answered, with that outcome, once — the old verdict stands."""
+    from ouroboros import review_ledger as ledger
+
+    f = managed_commit
+    record_id, _source = _real_review_binding(f, monkeypatch)
+    before = ledger.load_record(ledger.ledger_root(f.ctx), record_id)
+    assert before["verdict"]["aggregate"] == "NOT_DISPATCHED", before["verdict"]
+    assert not before.get("commit_landings"), before.get("commit_landings")
+
+    resumed, commit = _paused_then_resumed(f, monkeypatch)
+
+    after = ledger.load_record(ledger.ledger_root(resumed), record_id)
+    assert after["verdict"] == before["verdict"], "the old verdict stands"
+    assert [row["commit_sha"] for row in after.get("commit_landings") or []] == [commit], after.get("commit_landings")
+    counter = read_json_dict(f.drive / COUNTER_REL) or {}
+    assert [row["sha"] for row in counter.get("landed") or []] == [commit], counter
+    expected = str((before.get("dispatch_refusal") or {}).get("kind") or "")
+    assert expected, before.get("dispatch_refusal")
+    assert counter["landed"][0]["reason"] == expected, counter
+    fact = (read_result(f.drive, "resolver") or {}).get("review_overrides") or {}
+    assert fact["landed"]["count"] == 1 and fact["landed"]["latest"]["sha"] == commit, fact
+
+
+def test_managed_resume_without_the_receipt_fields_attributes_nothing(managed_commit, monkeypatch):
+    """A receipt written before these fields stays unknown: no record, no outcome, no row."""
+    from ouroboros import review_ledger as ledger
+
+    f = managed_commit
+    record_id, _source = _real_review_binding(f, monkeypatch)
+    f.mode["pause"] = "commit"
+    assert "OWNER_PAUSE" in git._repo_commit_push(f.ctx, "reviewed managed resolution")
+    commit = assisted._git(f.repo, "rev-parse", "HEAD").stdout.strip()
+    tx = update_merge.read_update_tx()
+    tx["postcommit_resume"]["review_context"].pop("_current_review_record_id", None)
+    tx["postcommit_resume"]["review_context"].pop("_landing_override_reason", None)
+    update_merge.write_update_tx(tx)
+    owner_pause.release_fence(f.drive, "resolver", reason="owner_resume")
+    f.mode["pause"] = ""
+    resumed = ToolContext(repo_dir=f.repo, drive_root=f.drive, branch_dev=f.ctx.branch_dev,
+                          task_id="resolver", task_metadata=f.ctx.task_metadata)
+    resumed.current_task_type = "task"
+    resumed.task_lifecycle_bound = True
+    assert git._repo_commit_push(resumed, "reviewed managed resolution").startswith("OK: committed")
+
+    after = ledger.load_record(ledger.ledger_root(resumed), record_id)
+    assert not after.get("commit_landings"), after.get("commit_landings")
+    counter = read_json_dict(f.drive / COUNTER_REL) or {}
+    assert not counter.get("landed"), counter
+    assert assisted._git(f.repo, "rev-parse", "HEAD").stdout.strip() == commit
+
+
+def test_managed_resume_keeps_its_landing_outcome_out_of_the_next_call(managed_commit, monkeypatch):
+    """#3451: the outcome a resumed managed commit landed over belongs to THAT call.
+
+    The next commit call on the same ToolContext starts without it: its own per-call reset
+    clears the field the resume restored it into, so no later landing is attributed to the
+    old review outcome.
+    """
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_overrides import landing_reason
+
+    f = managed_commit
+    record_id, _source = _real_review_binding(f, monkeypatch)
+    before = ledger.load_record(ledger.ledger_root(f.ctx), record_id)
+    expected = str((before.get("dispatch_refusal") or {}).get("kind") or "")
+    assert expected, before.get("dispatch_refusal")
+
+    resumed, commit = _paused_then_resumed(f, monkeypatch)
+
+    # The resumed call landed over the outcome the receipt carried, and only over that one.
+    counter = read_json_dict(f.drive / COUNTER_REL) or {}
+    assert [row["sha"] for row in counter.get("landed") or []] == [commit], counter
+    assert counter["landed"][0]["reason"] == expected, counter
+    assert landing_reason(resumed) == expected, "the restored outcome is in force for this call"
+
+    # The next commit call on the SAME context.
+    result = git._repo_commit_push(resumed, "later work")
+    assert not result.startswith("OK"), result
+    assert landing_reason(resumed) == "", "the resumed outcome did not cross into the next call"
+
+    # And a landing on that later call records nothing over the old outcome.
+    git.note_override_landing(resumed, "0" * 40)
+    counter = read_json_dict(f.drive / COUNTER_REL) or {}
+    assert [row["sha"] for row in counter.get("landed") or []] == [commit], counter

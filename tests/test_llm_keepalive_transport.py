@@ -561,8 +561,8 @@ def test_tools_web_search_routes_through_net_transport_seam(monkeypatch):
     monkeypatch.setattr(nt_mod, "web_search_openai_client", seam)
     monkeypatch.setattr(
         search_mod,
-        "_resolve_openai_client_settings",
-        lambda: ("key", "https://api.test/v1", "openai", "official"),
+        "_search_target",
+        lambda *_args: {"api_key": "key", "base_url": "https://api.test/v1"},
     )
     ctx = SimpleNamespace(task_metadata={}, pending_events=[], task_id="")
 

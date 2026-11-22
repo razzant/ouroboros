@@ -1,7 +1,7 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch, fetchJson } from './api_client.js';
 import { setResult } from './ui_primitives.js';
-import { parseModelSource } from './route_editor_primitives.js';
+import { catalogEntryIdentity } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
 const buttonRefreshes = new WeakMap();
@@ -70,7 +70,23 @@ export function catalogReadState(data = {}) {
     return Array.isArray(data.items) ? 'ok' : 'not_read';
 }
 
-/** Enrich the existing editor state; a read gap cannot erase last-known choices. */
+/**
+ * A read that produced no usable evidence of its own: the whole read failed or never reached the server. A read
+ * that STATES its failure is one, whatever rows it carried; a read that only lists a source's errors is not — the
+ * rows that came are real, and the catalog keeps its usual life (no read per opened capsule). A successful empty
+ * read (the catalog really lists nothing) and a partial one are not failures either; both keep their rows, and only
+ * a failure asks the next opening to read again.
+ */
+export function catalogReadFailed(data = {}) {
+    const state = catalogReadState(data);
+    if (state === 'transport') return true;
+    if (state !== 'failed') return false;
+    return data?.read_state ? true : !Array.isArray(data.items);
+}
+
+/** Enrich the existing editor state; a read gap cannot erase last-known choices. `current` is the answer this read
+ *  itself gave (null when it listed nothing): what a gap keeps from an earlier read is shown and proves nothing of
+ *  what an account or a transport serves now (chat_model_routes.js `tiers`). */
 export function mergeModelCatalog(previous = {}, incoming = {}) {
     const read_state = catalogReadState(incoming);
     const retain = read_state !== 'ok';
@@ -92,6 +108,7 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
         errors: incoming.errors || (incoming.error ? [{ error: incoming.error }] : []),
         items: merge('items', (item) => JSON.stringify([item.value || item.id, item.credential_profile_id || ''])),
         model_sources: merge('model_sources', (source) => source.id),
+        current: 'current' in incoming ? incoming.current : Array.isArray(incoming.items) ? incoming : null,
     };
 }
 
@@ -122,8 +139,10 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
             code: 'scoped_catalog_unsupported', error: 'This core lists all models together. Read the full model catalog.' }] };
         if (params.has('view')) return { ...previous, items: [] };
         const provider = params.get('provider_id');
+        // A legacy row is scoped by the identity the catalog states (its `provider_id` and opaque `id` when it has
+        // them), never by reparsing a value that may hold another connection's spelling.
         return { ...previous, items: (previous.items || []).filter(item => provider === 'local' ? item.use_local
-            : !item.use_local && parseModelSource(item.value || item.id).source === provider) };
+            : !item.use_local && catalogEntryIdentity(item).source === provider) };
     }
     function reset() {
         for (const { controller } of requests.values()) controller.abort();
@@ -132,6 +151,14 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
     }
     return {
         get(query) { return snapshots.get(String(query)); },
+        invalidate(query) {
+            const key = String(query);
+            const pending = requests.get(key);
+            pending?.controller.abort();
+            requests.delete(key);
+            snapshots.delete(key);
+            return Boolean(pending);
+        },
         read(query, { force = false, joinPending = false } = {}) {
             const key = String(query);
             const pending = requests.get(key);
@@ -139,19 +166,27 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
             if (!force && snapshots.has(key)) return Promise.resolve(snapshots.get(key));
             pending?.controller.abort();
             const controller = new AbortController();
-            const promise = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
+            let timer;
+            const timeout = new Promise(resolve => {
+                timer = setTimeout(() => {
+                    resolve({ read_state: 'transport', errors: [{ error: 'Model catalog read timed out.' }] });
+                    controller.abort();
+                }, MODEL_CATALOG_TIMEOUT_MS);
+            });
+            const read = Promise.resolve().then(() => fetchScope(key, controller.signal)).then(data => {
                 const field = key === 'view=sources' ? 'model_sources' : 'items';
                 if (!Array.isArray(data?.[field])) throw new Error(data?.error || 'Model catalog response is unreadable.');
                 return data;
-            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }))
+            }).catch(error => ({ read_state: 'transport', errors: [{ error: error.message || String(error) }] }));
+            const promise = Promise.race([read, timeout])
                 .then(data => {
-                    if (controller.signal.aborted) return;
+                    if (requests.get(key)?.controller !== controller) return;
                     requests.delete(key);
                     const merged = mergeModelCatalog(snapshots.get(key), data);
                     snapshots.set(key, merged);
                     onUpdate(key, merged);
                     return merged;
-                });
+                }).finally(() => clearTimeout(timer));
             requests.set(key, { controller, promise });
             return promise;
         },
@@ -165,7 +200,7 @@ export function createScopedModelCatalog({ fetchCatalog = fetchJson, onUpdate = 
  * An empty list replaces that source too; identical model names in other sources are unrelated. */
 export function withConnectionCatalogs(catalog = {}, connectionCatalogs = {}) {
     return { ...catalog, read_state: catalogReadState(catalog), items: [
-        ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, parseModelSource(item.value || item.id).source)),
+        ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, catalogEntryIdentity(item).source)),
         ...Object.values(connectionCatalogs).flat(),
     ] };
 }
@@ -285,6 +320,12 @@ function fillCatalogDatalist(data) {
         }
     }
     broadcastCatalog(data);
+}
+
+/** A connection changed: a catalog read already out answers for the earlier source, so it is not broadcast (nor
+ *  adopted by any reader); the next refresh is this source's. */
+export function invalidateModelCatalogReads() {
+    catalogRefreshSeq += 1;
 }
 
 export async function refreshModelCatalog({ button } = {}) {

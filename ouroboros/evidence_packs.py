@@ -18,7 +18,7 @@ import zlib
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import store
-from ouroboros.shared_values import splice
+from ouroboros.shared_values import splice_chunks
 from ouroboros.utils import _atomic_overwrite, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
 
 PACKS_REL = pathlib.Path("observability/packs")
@@ -658,7 +658,6 @@ def _shared_whole(root: pathlib.Path, sha256: str, size: int, max_bytes: Optiona
         return None
     if admit is not None:
         admit(placement)
-    skeleton = read_loose_gzip(placement, max_bytes)
     cache, place = _PART_CACHE.get(), os.path.realpath(root)
 
     def part(digest: str) -> bytes:
@@ -670,9 +669,9 @@ def _shared_whole(root: pathlib.Path, sha256: str, size: int, max_bytes: Optiona
                 cache.offer(root, digest, raw)
         return raw
 
-    raw = splice(skeleton, part, context=f"view {sha256[:12]}")
-    if max_bytes is not None and len(raw) > max_bytes:
-        raise ValueError("blob exceeds byte limit")
+    with gzip.open(placement, "rb") as handle:  # the bound holds the whole: a token may outgrow the element it names
+        raw = splice_chunks(iter(lambda: handle.read(1 << 20), b""), part, limit=max_bytes,
+                            context=f"view {sha256[:12]}")
     if size not in (-1, len(raw)) or hashlib.sha256(raw).hexdigest() != sha256:
         raise EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
     return raw
