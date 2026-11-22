@@ -8,6 +8,7 @@
 import { fmt, tr } from './i18n.js';
 import { formatMsgTime } from './chat_activity.js';
 import { attachmentViews } from './chat_attachments.js';
+import { validExcerpt } from './chat_reply_excerpt.js';
 import { ellipsize, fitText } from './text_fit.js';
 
 const ROLES = ['user', 'assistant', 'system'];
@@ -48,9 +49,11 @@ export function normalizeReplyRef(raw) {
         address: oneSpace(raw.address),
         chat_id: Number.isInteger(chatId) ? chatId : 1,
         role,
+        ...(raw.quote_role === 'user' ? { quote_role: 'user' } : {}),
         author_label: oneSpace(raw.author_label) || authorOf(role),
         kind: KINDS.includes(raw.kind) ? raw.kind : 'message',
         snippet: oneSpace(raw.snippet),
+        ...(validExcerpt(raw.excerpt) ? { excerpt: { text: raw.excerpt.text, start_utf16: raw.excerpt.start_utf16 } } : {}),
         // The acceptance-time lookup was unresolved; a click retries the current source state.
         unresolved: raw.unresolved === true,
         ts: oneSpace(raw.ts),
@@ -92,19 +95,22 @@ export function normalizeRelay(raw) {
  * (`Replying to`) and a cancel button beside the jump button; otherwise it is the quote inside a bubble.
  * Returns null for a reference with nothing to show.
  */
-export function createReplyQuote(raw, { onJump = null, onCancel = null, composer = false, formatTime = formatMsgTime } = {}) {
+export function createReplyQuote(raw, { onJump = null, onCancel = null, composer = false, onDomWrite, formatTime = formatMsgTime } = {}) {
     const ref = normalizeReplyRef(raw);
     if (!ref) return null;
     const author = ref.author_label || tr('chat.reply.unknown_author', 'Message');
     const when = formatTime(ref.ts)?.short || '';
     const root = node('div', composer ? 'chat-quote chat-quote--composer' : 'chat-quote');
     if (composer) root.setAttribute('role', 'group');
-    root.dataset.author = ref.role || 'neutral';
+    root.dataset.author = ref.quote_role || ref.role || 'neutral';
     root.dataset.kind = ref.kind;
+    if (ref.excerpt) { root.dataset.excerpt = '1'; root.dataset.address = ref.address; }
     root.dataset.mode = composer ? 'composer' : 'reply';
 
     const main = node('button', 'chat-quote-main');
     main.type = 'button';
+    // Mixed chrome and source words: the chrome below uses tr; the DOM overlay must not walk the text or aria-label.
+    main.dataset.i18nAuthored = '';
     if (ref.media) {
         // A photo's thumbnail leads the panel (decorative: the panel's name already says what is quoted).
         const thumb = node('img', 'chat-quote-thumb');
@@ -116,18 +122,23 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
         main.append(thumb);
     }
     const head = node('span', 'chat-quote-head');
-    if (composer) head.append(node('span', 'chat-quote-lead', tr('chat.reply.replying_to', 'Replying to')));
+    const selectionLead = ref.excerpt ? tr('chat.reply.sender_selection', 'Selected by sender · Source:') : '';
+    if (selectionLead) head.append(node('span', 'chat-quote-lead', selectionLead));
+    else if (composer) head.append(node('span', 'chat-quote-lead', tr('chat.reply.replying_to', 'Replying to')));
     head.append(node('span', 'chat-quote-author', author));
     if (when) head.append(node('span', 'chat-quote-when', `· ${when}`));
     // A message with no words (a photo, a file) has no snippet: the panel names what it holds instead of staying empty.
-    const snippet = ref.snippet || (ref.unresolved ? tr('chat.reply.unresolved_retry', 'Open quoted message')
+    const snippet = ref.excerpt?.text || ref.snippet || (ref.unresolved ? tr('chat.reply.unresolved_retry', 'Open quoted message')
         : ref.media ? tr('chat.reply.photo', 'Photo') : tr('chat.reply.attachment', 'Attachment'));
     // One line, cut on a word with a clean ending (text_fit.js), never a CSS ellipsis after a full stop.
-    main.append(head, fitText(node('span', 'chat-quote-text'), snippet, 1));
-    const lead = composer ? tr('chat.reply.replying_to', 'Replying to') : tr('chat.reply.reply_to', 'Reply to');
+    const words = node('span', 'chat-quote-text', snippet);
+    main.append(head, words);
+    if (!ref.excerpt) fitText(words, snippet, 1);
+    const lead = selectionLead || (composer ? tr('chat.reply.replying_to', 'Replying to') : tr('chat.reply.reply_to', 'Reply to'));
     main.setAttribute('aria-label', `${lead} ${author}${when ? `, ${when}` : ''}: ${snippet}`);
     main.addEventListener('click', () => onJump?.(ref));
     root.append(main);
+    if (ref.excerpt) clampWithToggle(words, root, { onDomWrite, lines: 1 });
 
     if (composer) {
         const cancel = node('button', 'chat-quote-cancel');
@@ -153,7 +164,7 @@ export const RELAY_CARD_LINES = 2;
  * control floats on a row of its own. The toggle shows only while the clamp hides text or the text is open.
  * `fit` may measure a CSS-only clamp when authored child nodes must remain intact.
  */
-export function clampWithToggle(text, host, { onDomWrite = (write) => write(), fit = fitText } = {}) {
+export function clampWithToggle(text, host, { onDomWrite = (write) => write(), fit = fitText, lines = CLAMP_LINES } = {}) {
     if (!text || !host) return null;
     const document = text.ownerDocument || globalThis.document;
     const words = text.textContent;
@@ -173,11 +184,11 @@ export function clampWithToggle(text, host, { onDomWrite = (write) => write(), f
         toggle.setAttribute('aria-expanded', String(open));
         toggle.textContent = open ? tr('chat.clamp.show_less', 'Show less') : tr('chat.clamp.show_all', 'Show all');
         toggle.hidden = false;
-        fit(text, words, open ? 0 : CLAMP_LINES, onFit);
+        fit(text, words, open ? 0 : lines, onFit);
         return true;
     }));
     host.append(toggle);
-    fit(text, words, CLAMP_LINES, onFit);
+    fit(text, words, lines, onFit);
     return toggle;
 }
 

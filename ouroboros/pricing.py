@@ -11,7 +11,7 @@ import json
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 import logging
 
@@ -37,9 +37,18 @@ class PricingSchedule(tuple):
         value.source = dict(source or {})
         return value
 
+PriceRows = Dict[str, Tuple[Optional[float], ...]]
+
+
+class PartialEndpointCatalog(NamedTuple):
+    """Individually bound endpoint rows, never a price bound for the pool."""
+
+    rows: PriceRows
+
+
 # Prices are intentionally never seeded from hand-maintained model rows. Each
 # provider cache contains only data returned by that exact route's catalog.
-_cached_pricing: Dict[str | tuple[str, str], Dict[str, Tuple[Optional[float], ...]]] = {}
+_cached_pricing: Dict[str | tuple[str, str], PriceRows | PartialEndpointCatalog] = {}
 _pricing_fetched_at: Dict[str | tuple[str, str], float] = {}
 _pricing_retry_after: Dict[str | tuple[str, str], float] = {}
 _pricing_fetch_in_progress: set[str | tuple[str, str]] = set()
@@ -54,7 +63,7 @@ def _pricing_ttl_sec() -> float:
         return 21600.0
 
 
-def _fetch_live_rows(provider: str, model: str = "") -> Dict[str, Tuple[Optional[float], ...]]:
+def _fetch_live_rows(provider: str, model: str = "") -> PriceRows | PartialEndpointCatalog:
     if provider == "openrouter":
         if model:
             from ouroboros.llm_pricing import fetch_openrouter_endpoint_pricing
@@ -74,47 +83,63 @@ CATALOG_PROVIDERS = frozenset({"openrouter", "cloudru"})
 
 def get_pricing(
     *, provider: str = "openrouter", allow_live_fetch: bool = True, model: str = "",
-) -> Dict[str, Tuple[Optional[float], ...]]:
+) -> PriceRows:
     """Return pricing from the exact provider route's live catalog.
 
     Direct/OpenAI-compatible/GigaChat routes have no automatic catalog here and
     therefore return an empty mapping. A cold/expired fetch is bounded to five
     seconds; failures expose unknown pricing rather than a fabricated fallback.
-    An exact OpenRouter model selects its endpoint-tagged tariff catalog lazily,
-    sharing this cache's TTL and in-flight owner. It never fetches all endpoints.
+    An OpenRouter route (``model``) selects its endpoint-tagged tariff catalog lazily, sharing this cache's TTL
+    and in-flight owner, keyed by its exact public slug (``llm_pricing.openrouter_endpoint_slug``: case kept, a
+    ``:nitro``/``:floor`` shortcut shares its model's read). A route with no public slug reads, shares and scans
+    nothing: it never falls back to the all-model catalog or another route's warm rows. An incomplete pool
+    prices nothing here; the catalog's endpoint-specific view still reports individually bound facts.
     """
     provider = str(provider or "").strip().lower()
     if provider not in CATALOG_PROVIDERS or (model and provider != "openrouter"):
         return {}
-    exact = str(model or "").strip()  # the slug the endpoints API names; the cache keys its identity
-    model = normalize_model_identity(exact) if exact else ""
-    key = (provider, model) if model else provider
+    rows = _read_endpoint_catalog(model, allow_live_fetch) if model else _read_catalog(provider, "", allow_live_fetch)
+    return {} if isinstance(rows, PartialEndpointCatalog) else dict(rows)
+
+
+def _read_endpoint_catalog(model: str, allow_live_fetch: bool = True) -> PriceRows | PartialEndpointCatalog:
+    from ouroboros.llm_pricing import openrouter_endpoint_slug
+
+    slug = openrouter_endpoint_slug(model)
+    return _read_catalog(("openrouter", slug), slug, allow_live_fetch) if slug else {}
+
+
+def _read_catalog(key: str | tuple[str, str], slug: str,
+                  allow_live_fetch: bool) -> PriceRows | PartialEndpointCatalog:
+    """One catalog through the shared cache: ``key`` is a provider (its all-model catalog) or
+    ``(provider, slug)`` (one model's endpoints, never answered stale)."""
+    provider = key[0] if isinstance(key, tuple) else key
     with _pricing_lock:
-        cached = dict(_cached_pricing.get(key, {}))
-        fresh = bool(_pricing_fetched_at.get(key)) and (
+        cached = _cached_pricing.get(key, {})
+        retry_later = time.time() < _pricing_retry_after.get(key, 0.0)
+        fresh = retry_later if isinstance(cached, PartialEndpointCatalog) else bool(_pricing_fetched_at.get(key)) and (
             time.time() - _pricing_fetched_at[key]
         ) < _pricing_ttl_sec()
-        retry_later = time.time() < _pricing_retry_after.get(key, 0.0)
         if not allow_live_fetch or fresh or retry_later or key in _pricing_fetch_in_progress:
-            return {} if model and not fresh else cached
+            return {} if slug and not fresh else cached
         _pricing_fetch_in_progress.add(key)
     try:
-        rows = _fetch_live_rows(provider, exact) if model else _fetch_live_rows(provider)
+        rows = _fetch_live_rows(provider, slug) if slug else _fetch_live_rows(provider)
     except Exception as exc:
         log.warning("Failed to fetch %s pricing catalog: %s", provider, exc)
         rows = {}
     with _pricing_lock:
         _pricing_fetch_in_progress.discard(key)
-        _cached_pricing[key] = dict(rows)
-        if rows:
+        _cached_pricing[key] = rows
+        if rows and not isinstance(rows, PartialEndpointCatalog):
             _pricing_fetched_at[key] = time.time()
             _pricing_retry_after.pop(key, None)
         else:
             _pricing_fetched_at.pop(key, None)
-            # Avoid adding the same five-second outage delay to every dispatch.
-            # This is process-local and deliberately short, not a stale tariff cache.
+            # A missing or incomplete catalogue prices nothing. Avoid its outage delay
+            # on every dispatch, but retry on the short cooldown, not the tariff TTL.
             _pricing_retry_after[key] = time.time() + 30.0
-        return dict(rows)
+        return rows
 
 
 def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str]]:
@@ -126,7 +151,8 @@ def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str
     (``context_anchor.cited_limit_refusal``), never a planning limit: one model id spans endpoints with different
     windows, and the observation scope does not name the serving one."""
     limits: Dict[int, Tuple[str, str]] = {}
-    for tag, row in get_pricing(provider=provider, model=parse_model_route(model).model).items():  # the slug, however the route spells it
+    route = str(model or "").strip()  # none names no endpoints: never the all-model catalogue
+    for tag, row in (get_pricing(provider=provider, model=route) if route else {}).items():
         source = getattr(row, "source", {})
         for key, kind in (("max_prompt_tokens", "input"), ("context_length", "total")):
             if type(source.get(key)) is int and source[key] > 0 and (
@@ -135,11 +161,206 @@ def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str
     return limits
 
 
+# The tier a call asked, from a host tier or the native word its request carried; another word ("auto") prices
+# nothing. An explicit Standard (``default``) keeps every other tier out, a sort shortcut's admission included.
+# ``ordinary`` is no tier: see ``_ordinary_bound``.
+_POOL_MODES = {"standard": "standard", "default": "standard", "fast": "fast", "priority": "fast",
+               "economy": "economy", "flex": "economy", "ultrafast": "ultrafast"}
+# The endpoint tiers each asked tier may be served and billed by (OpenRouter's service-tier routing): Ultrafast and
+# Priority fall back down. Flex with no Flex endpoint routes normally at the default router (``_ROUTED_NORMALLY``),
+# where a Priority endpoint of an open-weight model takes part (no catalogue field says which models are open-weight),
+# never Ultrafast.
+_ROUTED_NORMALLY = ("standard", "fast")
+_POOL_TIERS = {"ultrafast": ("ultrafast", "fast", "standard"), "fast": ("fast", "standard"), "standard": ("standard",),
+               "economy": _ROUTED_NORMALLY}
+
+
+def _no_dearer(row: tuple, ceiling: tuple) -> bool:
+    """Whether neither ``row``'s input nor its output rate is proven above ``ceiling``'s; an unknown rate proves nothing."""
+    for index in (0, 3):
+        if row[index] is not None and ceiling[index] is not None and float(row[index]) > float(ceiling[index]):
+            return False
+    return True
+
+
+def _rates_at(row: tuple, prompt_tokens: int) -> tuple:
+    """The rates ``row`` bills a prompt of ``prompt_tokens`` at: its last input-length tier reached, else its base."""
+    rates = row
+    for minimum, tier in getattr(row, "tiers", ()):
+        if prompt_tokens >= int(minimum):
+            rates = tier
+    return rates
+
+
+def processing_pool(endpoints: Mapping[str, tuple], mode: str, *, prompt_tokens: int = 0,
+                    pinned: bool = False) -> List[tuple]:
+    """The endpoint tariffs (``get_pricing`` rows of one model) a call asked at host tier ``mode`` may be billed by.
+
+    Flex takes its Flex endpoints and any other its rule could admit: no dearer by input and by output than one of
+    them, at base rates or at this prompt's input-length band (either reading the provider may apply), an unknown
+    rate proving nothing; without a Flex endpoint, what normal routing reaches (``_POOL_TIERS``). An endpoint whose
+    tier is unknown (``source["processing"]`` absent) may serve any tier, so it is in every pool; with provider
+    routing ``pinned`` (an order or preset may admit any endpoint) the whole list is. The bound overstates rather
+    than prices the call below what it may cost."""
+    rows = list(endpoints.values())
+    if pinned:
+        return rows
+
+    def tier(row: tuple) -> Optional[str]:
+        return getattr(row, "source", {}).get("processing")
+
+    unknown = [row for row in rows if tier(row) is None]
+    prompt = max(0, int(prompt_tokens or 0))
+    flex = [row for row in rows if tier(row) == "economy"] if mode == "economy" else []
+    if flex:
+        return flex + [row for row in rows if tier(row) not in (None, "economy") and any(
+            _no_dearer(row, ceiling) or _no_dearer(_rates_at(row, prompt), _rates_at(ceiling, prompt))
+            for ceiling in flex)] + unknown
+    return [row for row in rows if tier(row) in _POOL_TIERS[mode]] + unknown
+
+
+def _endpoint_cost(row: tuple, prompt_tokens: int, completion_tokens: int,
+                   cache_usage: Optional[Dict[str, Any]]) -> Optional[float]:
+    """One endpoint's whole cost for this call, or None when its token rates cannot price it."""
+    if getattr(row, "source", {}).get("unpriced"):
+        return None
+    return _cost_from_pricing(row, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=True)
+
+
+def _ordinary_bound(rows: Mapping[str, tuple], prompt_tokens: int, completion_tokens: int,
+                    cache_usage: Optional[Dict[str, Any]]) -> Optional[float]:
+    """``processing_mode="ordinary"``: an upper bound for a public OpenRouter call that carries no native tier, which
+    a workspace default or preset the host cannot see may serve at ANY tier, Ultra included.
+
+    It prices every endpoint on the selected model's fresh list. Missing tier or billing evidence leaves
+    the bound unknown."""
+    if not rows or any(not getattr(row, "source", {}).get("processing") for row in rows.values()):
+        return None
+    costs = [_endpoint_cost(row, prompt_tokens, completion_tokens, cache_usage) for row in rows.values()]
+    return max(costs) if all(cost is not None for cost in costs) else None
+
+
+def _routing_pinned(route: str, *, flex: bool = False) -> bool:
+    """Whether OpenRouter provider routing for ``route`` as settings read NOW (``OUROBOROS_OR_PROVIDER`` merged with
+    its connection's own, ``llm_routing._resolve_or_provider``) may admit endpoints a tier pool leaves out
+    (``llm_routing.routing_admits_any_endpoint``). Only a figure with no candidate reads it: a candidate's own routing
+    (``AttemptRequest.provider_routing_pinned``) is what its send carries."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import _resolve_or_provider, resolve_target, routing_admits_any_endpoint
+
+    try:
+        target = resolve_target(route)
+    except ConnectionUnavailable:
+        return True  # the connection's routing cannot be read: only the whole list bounds its calls
+    return routing_admits_any_endpoint(_resolve_or_provider(target.get("provider_routing")), flex=flex)
+
+
+def wrapup_screen_bound(model: str, native_tier: str, output_limit: int, *,
+                        routing_pinned: Optional[bool] = None) -> Optional[float]:
+    """A transcript-independent public router bound for an authored last-fit screen.
+
+    None means there is no tariff to consult. Infinity asks for the actual candidate: the previous
+    round's input count cannot bound a new prompt, a cache write, or a prompt-dependent tier.
+    Only a flat output-only tariff can clear this screen without reading the transcript.
+    ``routing_pinned`` is the screened candidate's own routing fact; None reads the settings (``_routing_pinned``).
+    """
+    from ouroboros.llm_pricing import openrouter_endpoint_slug
+
+    if not openrouter_endpoint_slug(model) or (native_tier and native_tier not in _POOL_MODES):
+        return None
+    rows = get_pricing(provider="openrouter", model=model)
+    if not rows:
+        return None
+    mode = _POOL_MODES.get(native_tier)
+    if not native_tier and any(not getattr(row, "source", {}).get("processing") for row in rows.values()):
+        return None  # even the exact ordinary request would have no bound
+    pool = (processing_pool(rows, mode, pinned=_routing_pinned(model) if routing_pinned is None else routing_pinned)
+            if mode and mode != "economy" else list(rows.values()))  # Flex eligibility depends on input length
+    if not pool:
+        return None
+    cache_writes = normalize_model_identity(model).startswith("anthropic/")
+    highest_output = 0.
+    for row in pool:
+        if getattr(row, "source", {}).get("unpriced"):
+            return float("inf") if mode == "economy" else None
+        for rates in (row, *(tier for _, tier in getattr(row, "tiers", ()))):
+            input_rates = (rates[0], rates[1], rates[2], getattr(rates, "cache_write_1h", None)) if cache_writes else rates[:1]
+            if any(rate != 0 for rate in input_rates) or rates[3] is None:
+                return float("inf")
+            highest_output = max(highest_output, rates[3])
+    return highest_output * output_limit / 1_000_000
+
+
+def endpoint_processing(catalog: PriceRows | PartialEndpointCatalog, only: Optional[list[str]] = None) -> Dict[str, Any]:
+    """One model's endpoint catalogue as the tiers it lists: ``{modes, complete, endpoints}``.
+
+    ``modes`` are the host tiers some endpoint's own tier word reads as, in ``CALL_TIERS`` order; ``complete`` says
+    every endpoint's word was read (a catalogue fact, never a price or a key's entitlement), so an empty or unread
+    catalogue is ``[]`` and false. Each endpoint keeps its ``tag``, its native ``service_tier`` only where its record
+    carries the field (null stays null), ``mode`` where read, and ``price`` only where its figure is honest
+    (``llm_pricing.openrouter_catalog_price``): a tier without a price is still a tier."""
+    from ouroboros.model_slots import CALL_TIERS
+
+    partial = isinstance(catalog, PartialEndpointCatalog)
+    endpoints = catalog.rows if partial else catalog
+    if only:
+        endpoints = {tag: row for tag, row in endpoints.items() if tag in only}
+    listed = [{"tag": source["endpoint_tag"], **{key: source[key] for key in ("service_tier", "price") if key in source},
+               **({"mode": source["processing"]} if source.get("processing") else {})}
+              for source in (getattr(row, "source", {}) for row in endpoints.values()) if source.get("endpoint_tag")]
+    seen = {row["mode"] for row in listed if "mode" in row}
+    return {"modes": [mode for mode in CALL_TIERS if mode in seen],
+            "complete": not (partial or only) and len(listed) == len(endpoints) and bool(listed)
+                        and all("mode" in row for row in listed),
+            "endpoints": listed}
+
+
+def route_processing(value: str, read_settings: Any) -> Dict[str, Any]:
+    """``GET /api/model-catalog?processing_model=``: the tiers one OpenRouter route's model lists, ``{value, processing}``.
+
+    Only a public slug (``llm_pricing.openrouter_endpoint_slug``) reads anything: then the settings
+    (``read_settings()``), and only on a configured OpenRouter connection whose resolved base is OpenRouter's own its
+    public endpoint list, through the pricing cache. Any other value, connection or base, an unread or empty list
+    is ``[]`` and not complete. With provider restrictions, only explicitly included endpoint tags can
+    attest a tier. Aliases, broader provider families and other routing rules stay unverified."""
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_pricing import openrouter_endpoint_slug
+    from ouroboros.llm_routing import _or_provider_value, processing_transport_modes, resolve_target
+    from ouroboros.provider_connections import connection_configured, connection_routes, connection_rows
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    unknown = {"value": value, "processing": {"modes": [], "complete": False, "endpoints": []}}
+    if not openrouter_endpoint_slug(value):
+        return unknown
+    settings = dict(read_settings())
+    rows, connection = connection_rows(settings.get(CONNECTIONS_KEY)), parse_model_route(value).connection
+    own = next((known for known in connection_routes(rows) if (known.kind, known.connection) == ("openrouter", connection)),
+               None)
+    if own is None or not connection_configured(own, settings.get, rows):
+        return unknown
+    try:
+        target = resolve_target(value, settings)
+    except ConnectionUnavailable:
+        return unknown
+    if target.get("provider") != "openrouter" or not processing_transport_modes(target):
+        return unknown
+    routing = {**_or_provider_value(settings.get("OUROBOROS_OR_PROVIDER")),
+               **_or_provider_value(target.get("provider_routing"))}
+    if set(routing) - {"only", "allow_fallbacks"} or routing.get("allow_fallbacks", True) is not True:
+        return unknown
+    only = routing.get("only")
+    if "only" in routing and (not isinstance(only, list) or not only or
+                              not all(isinstance(tag, str) and tag for tag in only)):
+        return unknown
+    return {"value": value, "processing": endpoint_processing(_read_endpoint_catalog(value), only)}
+
+
 def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: int, *,
                            cache_usage: Optional[Dict[str, Any]] = None,
                            allow_live_fetch: bool = True,
                            provider: Optional[str] = None,
-                           processing_mode: str = "") -> Optional[float]:
+                           processing_mode: str = "",
+                           routing_pinned: Optional[bool] = None) -> Optional[float]:
     """Estimate cost from exact provider/model data, preserving unknown as None.
 
     ``cache_usage`` and everything after it are KEYWORD-ONLY: the 4th slot used
@@ -162,11 +383,14 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
       split, every write bills the reported tier — the pre-split behavior, never
       a loosened ratio.
 
-    A named ``processing_mode`` uses an OpenRouter endpoint-pool upper estimate
-    with literal tier prices, including Standard fallback for Priority. It is
-    not an exact endpoint quote; missing eligible tariffs keep the amount unknown.
-    Empty mode retains the legacy model-catalog estimate. Provider-reported cost
-    remains the settlement authority.
+    A named ``processing_mode`` (a host tier or its native word) uses an OpenRouter endpoint-pool upper estimate
+    with literal tier prices (``processing_pool``); it is not an exact endpoint quote, and a missing tariff or a
+    charge token rates cannot carry keeps the amount unknown. ``ordinary`` (only a public OpenRouter reservation or
+    preflight that carries no native tier asks it) bounds every tier on the selected model (``_ordinary_bound``).
+    Empty mode keeps the legacy model-catalog estimate: a reference figure, no bound on the endpoint that serves the
+    call, and it adds no per-model read. Provider-reported cost remains the settlement authority.
+    ``routing_pinned`` is the priced candidate's own routing fact (``llm_routing.routing_admits_any_endpoint``);
+    None, for a figure with no candidate, reads the settings (``_routing_pinned``).
     """
     raw_model = str(model or "").strip()
     normalized = normalize_model_identity(raw_model)
@@ -174,20 +398,19 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     if route == "local":
         return 0.0
     if processing_mode:
-        mode = {"standard": "default", "fast": "priority"}.get(processing_mode, processing_mode)
-        if route != "openrouter" or mode not in {"default", "priority", "flex"}:
-            return None
+        from ouroboros.llm_pricing import openrouter_endpoint_slug
+
+        mode = _POOL_MODES.get(processing_mode)
+        if route != "openrouter" or not openrouter_endpoint_slug(raw_model) or (
+                mode is None and processing_mode != "ordinary"):
+            return None  # no public slug: nothing to price it by, and no scan of the whole catalogue
         endpoints = get_pricing(provider=route, model=raw_model, allow_live_fetch=allow_live_fetch)
-        # A bound over all published tier-eligible routes, not a quote from an
-        # endpoint we did not select. Retain unhealthy rows: health can change
-        # during dispatch without invalidating the tariff we must reserve for.
-        # OpenRouter priority may fall back to Standard; Flex uses only Flex
-        # when present, otherwise the provider routes normally at Standard.
-        tiers = {row.source.get("service_tier") for row in endpoints.values()}
-        eligible = ({"priority", "default"} if mode == "priority" else
-                    {"flex"} if mode == "flex" and "flex" in tiers else {"default"})
-        costs = [_cost_from_pricing(row, prompt_tokens, completion_tokens, cache_usage, exact_cache_tiers=True)
-                 for row in endpoints.values() if row.source.get("service_tier") in eligible]
+        if mode is None:
+            return _ordinary_bound(endpoints, prompt_tokens, completion_tokens, cache_usage)
+        pinned = bool(endpoints) and (_routing_pinned(raw_model, flex=mode == "economy")
+                                      if routing_pinned is None else routing_pinned)
+        pool = processing_pool(endpoints, mode, prompt_tokens=prompt_tokens, pinned=pinned)
+        costs = [_endpoint_cost(row, prompt_tokens, completion_tokens, cache_usage) for row in pool]
         return max(costs) if costs and all(cost is not None for cost in costs) else None
     model_pricing = get_pricing(provider=route, allow_live_fetch=allow_live_fetch)
     pricing = model_pricing.get(normalized)
@@ -416,7 +639,7 @@ def normalize_usage_cost(usage: Dict[str, Any], *, model: str, use_local: bool,
         log.warning("Provider reported an invalid cost (type=%s) for %s; keeping unknown, skipping estimation",
                     type(raw_cost).__name__, display_model)
         usage["cost_invalid"] = True
-    elif cost is None and provider != "claudexor":
+    elif cost is None and provider != "claudexor" and not usage.get("provider_reported_cost_only"):
         processing_mode = observed_processing_mode(provider, usage)
         cost = estimate_cost_optional(
             display_model, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0),
@@ -572,7 +795,8 @@ def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
 
 def spend_coverage(settings: Mapping[str, Any], subagents: Any = None) -> Tuple[List[str], List[Dict[str, str]]]:
     """What spends money the limits cannot count, as Dashboard › Costs names it under them: ``(not counted,
-    partly counted)``. Not counted: a role whose route has no known price (``all model roles`` when none of the
+    partly counted)``. Not counted: a role whose route has no known price, a catalog kind's route resolved to another
+    endpoint included (``all model roles`` when none of the
     configured ones has; the Safety Supervisor only while a Safety mode asks it), a leg of built-in web search (a
     later one runs when the earlier fails, as a fallback model does), enabled API helpers (``Agents``;
     ``subagents`` is the resolved list, else the document's). Partly counted, ``{name, condition}``: a group whose
@@ -580,11 +804,23 @@ def spend_coverage(settings: Mapping[str, Any], subagents: Any = None) -> Tuple[
     ``off_peak_usd`` prices text input alone, so Vision, whose every call carries an image, is not counted there."""
     from ouroboros.settings_scales import normalize_safety_mode
 
+    def private_base(model: str) -> bool:
+        """A route whose resolved endpoint is not its provider's public one is priced only by what that endpoint
+        reports (``llm_routing.provider_reported_cost_only``), whatever the public catalog lists; a connection
+        that cannot resolve keeps its kind's answer."""
+        from ouroboros.llm_routing import provider_reported_cost_only, resolve_target
+
+        try:
+            return provider_reported_cost_only(resolve_target(model, dict(settings)))
+        except Exception:
+            return False
+
     def source(model: str, local: bool) -> str:
         if not model:
             return "catalog"
         route = parse_model_route(model)
-        return price_source("local" if local else route.kind, settings, "" if local else route.model)
+        said = price_source("local" if local else route.kind, settings, "" if local else route.model)
+        return "unknown" if said == "catalog" and private_base(model) else said
 
     def condition(sources: List[str]) -> str:
         return ("unknown" if "unknown" in sources else "off_peak_usd" if "off_peak_usd" in sources

@@ -386,9 +386,9 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
     const sheet = (options, tier = '') => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value },
         { tier }).cacheWrite;
-    assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
+    assert.equal(sheet({ cacheTier: '1h' }), '', 'without a requested tier, the workspace may apply another rate');
     assert.equal(sheet({ cacheTier: '1h' }, 'standard'), 'Cache write: $6.40 per 1M tokens.');
-    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h' }, 'fast'),
+    assert.deepEqual([sheet({ cacheTier: '5m' }, 'standard'), sheet({ cacheTier: 'default' }, 'standard'), sheet({}, 'standard'), sheet({ cacheTier: '1h' }, 'fast'),
         sheet({ cacheTier: '1h' }, 'economy'), sheet({ cacheTier: '1h' }, 'ultrafast')], ['', '', '', '', '', '']);
     for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
         { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
@@ -449,7 +449,7 @@ test('where a row\'s context runs on Fast, Ultrafast or Economy the composer lis
     // The catalog's price is Standard's: the context's tier decides (model_list.js asks it per row, `tierOf`).
     const index = buildModelIndex({ catalog: { items: [OPUS] } });
     const price = (tier) => describeRoute(index, { model: OPUS.value }, { tier }).price;
-    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['$4 in / $20 out', '$4 in / $20 out', '', '', '']);
+    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['Catalog rate · $4 in / $20 out', '$4 in / $20 out', '', '', '']);
     const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
     const read = async (settings) => {
         const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),

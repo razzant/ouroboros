@@ -538,7 +538,7 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness", "free_storage",
+    "maintain_harness", "free_storage", "propose_payload_release",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
@@ -588,9 +588,12 @@ COMPLETION_RECEIPT_TOOLS = frozenset({
 })
 
 
+SCHEMA_DISCOVERY_TOOLS = frozenset({"enable_tools", "list_available_tools"})
+
+
 def completion_observation_calls(calls: object) -> list:
     """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
     write that answered exactly ``OK`` (a warning or a partial write is read first)."""
     return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
-        call.get("tool") in {"enable_tools", "list_available_tools"}
+        call.get("tool") in SCHEMA_DISCOVERY_TOOLS
         or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

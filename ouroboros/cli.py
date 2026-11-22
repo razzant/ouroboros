@@ -18,6 +18,8 @@ import urllib.request
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
+from ouroboros.utils import json_dumps_utf8
+
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -267,7 +269,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raise CLIError(f"task creation did not return task_id: {created}")
     if args.detach:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         else:
             print(task_id)
         return 0
@@ -275,7 +277,7 @@ def _run_command(args: argparse.Namespace) -> int:
     wait_timeout = _deadline_wait_timeout(timeout)
     if args.no_stream:
         if args.jsonl:
-            print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
+            print(json_dumps_utf8({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
         result = _wait_task(client, task_id, timeout_sec=wait_timeout)
     else:
         _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=wait_timeout)
@@ -294,11 +296,11 @@ def _run_command(args: argparse.Namespace) -> int:
         pathlib.Path(args.patch_out).expanduser().write_bytes(patch_bytes)
     if args.result_json_out:
         pathlib.Path(args.result_json_out).expanduser().write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            json_dumps_utf8(result, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
     if args.jsonl:
-        print(json.dumps({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
+        print(json_dumps_utf8({"type": "final", "task_id": task_id, "result": result}, ensure_ascii=False))
     elif args.patch:
         if patch_bytes is None:
             patch_bytes = _patch_bytes_from_result(client, task_id, result, strict=True)
@@ -359,7 +361,7 @@ def _logs_tail_command(args: argparse.Namespace) -> int:
         _print_json(data)
     else:
         for entry in data.get("entries", []):
-            print(json.dumps(entry, ensure_ascii=False))
+            print(json_dumps_utf8(entry, ensure_ascii=False))
     return 0
 
 
@@ -373,7 +375,7 @@ def _log_row_identity(entry: Dict[str, Any]) -> tuple:
     stable hash of the row with the positional fields stripped."""
     payload = {key: value for key, value in entry.items() if key not in ("_line", "_source_root")}
     digest = hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        json_dumps_utf8(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
     return (str(entry.get("_source_root") or ""), str(entry.get("ts") or ""), digest)
 
@@ -389,7 +391,7 @@ def _logs_follow_command(args: argparse.Namespace) -> int:
             if marker in seen:
                 continue
             seen.add(marker)
-            print(json.dumps(entry, ensure_ascii=False), flush=True)
+            print(json_dumps_utf8(entry, ensure_ascii=False), flush=True)
         time.sleep(max(0.5, float(args.interval)))
 
 
@@ -934,7 +936,7 @@ def _watch_task(
                 duplicate = bool(identity) and identity in seen
                 if not duplicate:
                     if jsonl:
-                        print(json.dumps(event, ensure_ascii=False), flush=True)
+                        print(json_dumps_utf8(event, ensure_ascii=False), flush=True)
                     elif not quiet:
                         rendered = _render_event_for_stderr(event)
                         if rendered:
@@ -1208,7 +1210,7 @@ def _is_terminal_success(result: Dict[str, Any]) -> bool:
 
 
 def _print_json(data: Any) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(json_dumps_utf8(data, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:

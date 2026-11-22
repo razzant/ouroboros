@@ -162,6 +162,42 @@ def test_the_exception_writer_stores_a_failed_lifecycle_and_keeps_its_loop_evide
     assert result_signature(tmp_path, "done-task") == signature and _raw_body(tmp_path, "done-task") == settled
 
 
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_a_forked_starts_early_failure_names_its_attempt_and_the_dead_worker_pickup_adopts_it(tmp_path, monkeypatch, attempt):
+    """Before its start record (``_persist_running_record``) a forked executor has no row of its own, while the
+    canonical row's assignment mirror already names the attempt: the exception terminal states the work order's
+    attempt, so the saved ``task_exception`` end is that attempt's own and beats the death, as the book states."""
+    import supervisor.worker_process as worker_process
+    from ouroboros.headless import prepare_terminal_task_files
+    from supervisor import worker_assignment, workers
+
+    pool, child = tmp_path / "pool", tmp_path / "child"
+    pool.mkdir()
+    child.mkdir()
+    monkeypatch.setattr(workers, "DRIVE_ROOT", pool)
+    task = {"id": "forked-early", "type": "task", "_attempt": attempt, "delegation_role": "subagent",
+            "parent_task_id": "root-1", "root_task_id": "root-1", "budget_drive_root": str(pool), "drive_root": str(child)}
+    worker_assignment._mirror_assigned_running_status(task)
+    assert load_task_result(pool, "forked-early")["task_attempt"] == attempt and load_task_result(child, "forked-early") is None
+    runner = SimpleNamespace(env=SimpleNamespace(drive_root=child, drive_path=lambda name: child / name))
+    worker_process._record_task_exception(runner, task, ValueError("boom"), pool)
+
+    assert _raw_body(child, "forked-early")["task_attempt"] == attempt
+    assert prepare_terminal_task_files(pool, task)["terminal_source_present"] is True
+    adopted = load_task_result(pool, "forked-early")
+    assert (adopted["status"], adopted["reason_code"], adopted["task_attempt"]) == ("failed", "task_exception", attempt)
+    assert adopted["terminal_time"]["source"] == "executor_terminal"
+
+
+def test_an_exception_end_of_a_work_order_that_names_no_attempt_states_none(tmp_path):
+    from ouroboros.agent import _task_exception_terminal
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _task_exception_terminal(SimpleNamespace(drive_root=tmp_path), {"id": "no-attempt", "type": "task"}, RuntimeError("boom"), logs)
+    assert "task_attempt" not in _raw_body(tmp_path, "no-attempt")  # unknown stays unknown: never a guessed number
+
+
 def _axes(lifecycle, execution="infra_failed"):
     axes = terminal_outcome_axes(lifecycle=lifecycle, execution=execution, reason_code="provider_unavailable")
     axes["lifecycle"]["observed_at"] = "kept"  # unknown lifecycle detail survives alignment

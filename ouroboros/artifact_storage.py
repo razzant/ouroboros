@@ -143,7 +143,7 @@ def compress_in_place(path: pathlib.Path, *, owned: Optional[Callable[[], bool]]
 
 
 def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool]] = None,
-                        background: bool = False) -> str:
+                        background: bool = False, serial: Optional[Callable[[], Any]] = None) -> str:
     """Compress PATH in place, logical size, bytes and sha256 preserved, or say why it stayed: the one
     floor every caller shares. ``unsupported`` off macOS and Windows; one ``lstat`` decides
     ``not_regular``, ``dataless`` (macOS: evicted, a read would download it), ``small`` (under 64 KiB),
@@ -154,8 +154,9 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
     cannot shrink by one allocation block is ``incompressible``; free space below the file's size is
     ``low_space``. macOS hashes, writes a ``ditto --hfsCompression`` sibling (``compression_sibling``;
     BACKGROUND, the ``record_compression`` job's, runs it at the utility disk tier through ``taskpolicy``),
-    verifies and fsyncs it, asks OWNED (else ``not_owned``), then re-stats the original right before the
-    replace (device, inode, size, mtime: else ``changed``) and syncs the folder (``store.fsync_directory``); NTFS
+    verifies and fsyncs it, takes SERIAL (a context yielding whether it holds the record's owner lock, the task's
+    custody lock the owner's Storage release shares; else ``busy``) around asking OWNED (else ``not_owned``), the
+    re-stat of the original (device, inode, size, mtime: else ``changed``) and the replace, then syncs the folder (``store.fsync_directory``); NTFS
     asks OWNED, compresses in place through its file control and verifies the bytes after. Anything else is
     ``failed``, the original untouched."""
     path = pathlib.Path(path)
@@ -167,7 +168,7 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
         if reason:
             return reason
         if sys.platform == "darwin":
-            return _compress_macos(path, before, owned, background)
+            return _compress_macos(path, before, owned, background, serial)
         return _compress_ntfs(path, owned)
     except (OSError, subprocess.SubprocessError):
         return "failed"
@@ -262,7 +263,7 @@ def _extended_attribute(path: pathlib.Path, attribute: int, layout: str) -> Opti
 
 
 def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[Callable[[], bool]],
-                    background: bool = False) -> str:
+                    background: bool = False, serial: Optional[Callable[[], Any]] = None) -> str:
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
     from ouroboros.store import fsync_directory
@@ -285,13 +286,17 @@ def _compress_macos(path: pathlib.Path, before: os.stat_result, owned: Optional[
             os.fsync(reader)
         finally:
             os.close(reader)
-        if owned is not None and not owned():  # it may wait on the store: before the last look, never after
-            return "not_owned"
-        now = os.lstat(path)
-        if (now.st_dev, now.st_ino, now.st_size, now.st_mtime_ns) != (
-                before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
-            return "changed"  # a writer touched it since: its bytes win
-        os.replace(temporary, path)
+        # The last look and the replace share the release's lock: a file released after the hash never returns.
+        with (serial() if serial is not None else contextlib.nullcontext(True)) as held:
+            if not held:
+                return "busy"
+            if owned is not None and not owned():  # it may wait on the store: before the last look, never after
+                return "not_owned"
+            now = os.lstat(path)
+            if (now.st_dev, now.st_ino, now.st_size, now.st_mtime_ns) != (
+                    before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                return "changed"  # a writer touched it since (or the owner released it): its state wins
+            os.replace(temporary, path)
         fsync_directory(path.parent)  # and its new entry, where the platform syncs a directory
         return "compressed"
     finally:

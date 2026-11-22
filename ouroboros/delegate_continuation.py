@@ -146,7 +146,7 @@ _UNDECIDED_OFFERS = frozenset({"execution_budget_unknown", "deadline_unknown", "
 
 
 def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable_handles=(),
-                      every_offer: bool = False) -> bool:
+                      every_offer: bool = False, ownership: Any = None) -> bool:
     """Retain a registration until its owner line and every root's Continue offer end.
 
     Each root of the recorded Continue chain (the original root and every
@@ -162,7 +162,9 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
 
     The sweep supplies its live census and exact reserved handles. Addressed result
     reads validate retry and Continue edges; missing/changed evidence keeps the
-    registration. This observation grants no continuation or execution authority.
+    registration. A caller rechecking under the queue lock passes the signed
+    reads its unlocked check prepared, not the earlier verdict. This observation
+    grants no continuation or execution authority.
     """
     if entry.review_owned or not entry.run_id:
         return False
@@ -186,7 +188,7 @@ def still_continuable(drive: Any, entry: Any, live_task_ids=None, *, recoverable
             and row.get('superseded_by') == row.get('retry_task_id')))
 
     live = set(live_task_ids)
-    reads = TaskOwnershipRead(drive)
+    reads = ownership if ownership is not None else TaskOwnershipRead(drive)
     root = entry.root_task_id or entry.task_id
     pending, seen = [entry.task_id, root], set()
     try:

@@ -109,8 +109,10 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
         if at and at <= now:
             out["time_passed_on"] = at.isoformat()
     last_id = str(row.get("last_task_id") or "")
-    cached = row.get("last_outcome") or {}
+    cached = visible_last_outcome(row)
     observed = bool(last_id and cached.get("task_id") == last_id)
+    if "last_outcome" in out:
+        out["last_outcome"] = cached
     out.pop("outcome", None)
     if last_id:
         out["outcome"] = dict(cached) if observed else {"state": "pending_observation", "task_id": last_id}
@@ -127,6 +129,16 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
                              "reason": row.get("delete_reason", ""), "work_in_flight": work_in_flight,
                              "restorable": not consumed and not row.get("followup_hold")}
     return out
+
+
+def visible_last_outcome(row):
+    """An unclassified historical preview waits for its source read; state is still observed."""
+    cached = dict(row.get("last_outcome") or {})
+    if not isinstance(cached.get("report_only"), bool):
+        cached.pop("chat_id", None)
+        if "line" in cached:
+            cached["line"] = ""
+    return cached
 
 
 def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:

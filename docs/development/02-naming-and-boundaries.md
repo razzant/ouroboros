@@ -304,12 +304,13 @@ tri-state facts. Provenance grants no runtime authority; cited docstrings/contra
 | Location | Fact | Evidence & re-probe | If stale |
 |---|---|---|---|
 | `ouroboros/tools/imagegen.py`; `ouroboros/gateways/image_api.py` | Image wire facts | [Dated sources](../IMAGE_GENERATION.md#direct-api-contracts); re-check each exact route | Stale positives refuse requests; negatives hide capability |
+| `ouroboros/opencode_go.py` | Go Chat URL: own User-Agent, `x-opencode-session` per conversation | [Go](https://opencode.ai/docs/console/go/#where-can-i-use-it), 2026-11-18, docs only; recheck a real tool exchange | A missing ID can refuse a send; a shared one can mix conversations |
 | `ouroboros/llm_attempt.py::supports_message_cache_control` | Cache markers OpenRouter accepts or translates (`anthropic/`, `google/gemini-`, `openai/`) | `openai/`: OpenRouter caching guide in docstring, no live probe; re-probe before widening | False positive invalidates a request; false negative loses the prompt cache |
 | `ouroboros/request_wire_recovery.py` | A compatible route refuses a cache hint | Its refusal after a repaired success, 14 days per route profile | A fixed server regains hints at expiry |
 | `ouroboros/provider_models.py::MINIMAX_FLASH_EFFORT_ALIASES`, `ANTHROPIC_THINKING_OFF_TYPES` | Direct MiniMax-M3.1-Flash: low/medium/high/xhigh/max; absent=max, none=400. Direct Sonnet 5.5: none=`between_tools`, `disabled`=400 | [MiniMax](https://platform.minimax.io/docs/api-reference/text-openai-api.md), 2026-11-01, no live send; [Anthropic](https://platform.claude.com/docs/en/build-with-claude/thinking) and a live 400, 2026-11-16; recheck before widening | Removed: none fails; stale: new tiers rewritten |
 | `ouroboros/llm_attempt.py::openai_family_model` | OpenAI's public API checks caches only at message ends without an explicit breakpoint | Docstring probe; before widening, re-probe `cached_tokens` across two conversations, never a substring such as `gpt` | Stale positive moves a prefix-caching family's boundary; stale negative pays cold prefixes |
 | `ouroboros/transcript_prefix.py` | Anthropic prefix binding (Opus 5.5/Fable 5.1/Sonnet 5.5/Haiku 5.5): signed reasoning is bound to system/tools/history; accounts created from 2026-08-31 return 400 on mismatch, older log unless opted in. A prefix change retires signed `anthropic-*` blocks on all routes/accounts (owner decision 2026-10-21) | [Anthropic migration guide, Breaking change 3](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide#breaking-changes); direct Opus 5.5 probe 2026-10-21 | Re-probe exact route/account before edits; excess trust causes 400s, excess retirement loses reasoning |
-| `ouroboros/llm_openai_compatible.py` OpenRouter `extra_body.provider.require_parameters` for `anthropic/` | Anthropic models on OpenRouter route only to endpoints accepting every sent parameter | Undated; OpenRouter per-endpoint `supported_parameters` (`/api/v1/models/{author}/{slug}/endpoints`); a declared exception of `tests/test_model_name_invariance.py` | Stale positive narrows failover; stale negative routes to an endpoint that drops or refuses a parameter |
+| `llm_routing.openrouter_chat_routing`, `processing_transport_modes` | OpenRouter `anthropic/`: `provider.require_parameters`; Ultra on router Chat or direct Responses | Endpoint `supported_parameters` (undated; `tests/test_model_name_invariance.py`); tier guides dated in the latter function | Excess filtering narrows failover; missing filters drop/refuse fields. Stale tiers hide usable choices or send unsupported ones |
 | `ouroboros/reasoning_artifacts.py::SIGNED_PORTABLE` and its sealed classifier | Which families' sealed reasoning artifacts survive a same-model cross-provider replay; readable artifacts are portable by shape | Vouched roster and shape-first classifier, fail-closed on unreadable artifacts; extend only by fresh cross-provider replay of that family | False positive 400s the replayed turn (strip-and-retry is the net); false negative pins a portable transcript to one endpoint |
 | `ouroboros/provider_models.py::_ANTHROPIC_MODEL_ALIASES` / `migrate_model_value` | Direct-provider id spelling compatibility | Shipped mapping; a catalog confirms a current id, never a saved spelling's intent; retire an alias only through a documented window | Removing an alias breaks upgrades; guessing one silently reroutes |
 | `ouroboros/server_runtime.py::_SHIPPED_LEGACY_HEAVY_DEFAULTS`, `_SCOPE_REVIEW_PRIOR_DEFAULTS`, `_normalize_direct_scope_review_model` | Only the retired Heavy/scope keys classify exact former Ouroboros defaults; active slots keep saved ids; no retired-model list exists | Release history, under regression tests; a catalog shows availability, never intent | Over-broad classification overwrites an owner's choice; a retired model fails loudly at first call |
@@ -322,25 +323,20 @@ tri-state facts. Provenance grants no runtime authority; cited docstrings/contra
 
 ### Provider Independence
 
-One configured provider must be sufficient for the agent loop, commit review, scope
-policy, safety, and context/memory flows; core capability must not acquire a hidden
-OpenRouter or second-provider dependency. (SSOT; CHECKLISTS item 11(h) and ARCHITECTURE
-point here.)
+One configured provider must suffice for the loop, commit review, scope, safety and
+context/memory. No hidden OpenRouter or second provider (SSOT for ARCHITECTURE and CHECKLISTS 11(h)).
 
-Tool-schema changes are provider-contract changes: validate the full shipped registry
-against JSON Schema and the cross-provider subset, then run the bounded canaries
-through Main's transports; PR jobs stay secretless, malformed arguments and invalid
-schemas stay red, and no prose parser, provider hop or unbounded retry is added to make
-the contract green (ARCHITECTURE §8 "CI topology").
+Tool schemas are provider contracts. Validate the shipped registry against JSON Schema and its
+cross-provider subset; run bounded Main-transport canaries. PR jobs stay secretless;
+bad arguments/schemas stay red. No prose parser, provider hop or unbounded retry
+to make the contract green (ARCHITECTURE §8 "CI topology").
 
-Adding or changing a provider updates one coherent route contract: credential and
-readiness detection with exact model-id migration; Main/Light/Fallback and
-factory review-pool defaults that never overwrite explicit owner choices; canonical
-tool/reasoning/image/cache intent at `llm.py`, with wire projection and exact-route
-recovery in the small transport leaves; nullable pricing and truthful capability
-omissions; review and scope routing with sourced context-window evidence for send
-sizing; direct-provider and single-provider regression tests; and the route's real
-streamed wire recorded (redacted) into `tests/fixtures/llm_wire/` and replayed, because
+A provider change covers the route: credentials, readiness and exact model-id migration;
+Main/Light/Fallback and factory review-pool defaults preserving explicit choices;
+canonical tool/reasoning/image/cache intent in `llm.py`, wire projection and exact-route
+recovery in transport leaves; nullable pricing and honest capability gaps; review/scope
+routing and sourced context windows for sizing; direct- and single-provider regression tests.
+Record and replay the route's real, redacted stream in `tests/fixtures/llm_wire/`:
 a handmade fixture proves no dialect.
 
 Local-only installs keep their local route; an unauthored slot is proposed blank.

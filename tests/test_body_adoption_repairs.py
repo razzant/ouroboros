@@ -373,6 +373,27 @@ def test_transfer_waits_for_the_previous_owners_processes(body, monkeypatch):
     assert moved["task_id"] == "root-second" and moved["owners"] == ["root-first", "root-second"]
 
 
+def test_transfer_hold_with_positive_and_gap_names_addresses_and_unknown_without_transferring(body, monkeypatch):
+    """#3176: a held transfer with both record addresses and a -1 gap refuses truthfully and changes nothing."""
+    serving, data = body
+    first = make_ctx(serving, data, "root-held")
+    body_candidate.prepare(first)
+    row = body_candidate.find("root-held")
+    monkeypatch.setattr(body_candidate, "_recorded_terminal", lambda task_id, root: True)
+    monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda root, task_id: [4242, -1])
+    second = make_ctx(serving, data, "root-holder")
+    with pytest.raises(body_candidate.CandidateRefused) as refused:
+        body_candidate._transfer(second, row, "root-holder", via="test")
+    refused_text = refused.value.text
+    assert refused.value.code == "CANDIDATE_OWNER_PROCESSES_LIVE"
+    assert "4242" in refused_text and "not proof of a live process" in refused_text
+    assert "-1" not in refused_text  # the gap is told as unreadable state, never printed as a pid
+    assert "could not be read" in refused_text
+    assert "do not clean or write into the candidate's folder" in refused_text
+    kept = body_candidate.find("root-held")
+    assert kept["task_id"] == "root-held" and kept["owners"] == ["root-held"], "the hold changed nothing"
+
+
 def test_live_lineage_processes_reads_the_ownership_set_and_treats_unreadable_as_live(body, monkeypatch):
     serving, data = body
     records = [{"host_pid": 11, "owner_task": "root-a", "ledger_entry": {"pid": 11}},

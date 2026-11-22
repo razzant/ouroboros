@@ -454,6 +454,29 @@ def test_unknown_writer_status_refuses_another_author_until_readable(door, monke
     assert response.json()["task_id"] != handle and len(door.pending) == 2
 
 
+def test_a_stop_in_flight_rides_the_request_beside_its_honest_status(door):
+    """A Stop recorded for the running writer is the host's pending cancel, never a status of its own: the request
+    keeps ``running`` and gains ``cancel_state``. No intent, another task's intent or a settled end adds nothing."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+
+    _offer(door.root)
+    task_id = _request(door).json()["task_id"]
+
+    def request():
+        return ul.project_letter_for_panel({"running_sha": BASE, "checked_target_sha": TARGET}, drive_root=door.root)["request"]
+
+    write_task_result(door.root, task_id, "running")
+    assert request()["status"] == "running" and "cancel_state" not in request()
+    write_task_result(door.root, "another", "running")
+    request_cancel(door.root, "another", source="owner", reason="a Stop of other work")
+    assert "cancel_state" not in request()
+    request_cancel(door.root, task_id, source="owner", reason="the owner pressed Stop")
+    assert (request()["status"], request()["cancel_state"]) == ("running", "pending")
+    _finish(door.root, task_id, "cancelled")
+    assert request()["status"] == "cancelled" and "cancel_state" not in request()
+
+
 @pytest.mark.parametrize(("binding", "chat"), [("known_empty", 1), ("external", 77), ("unconfirmed", 0)])
 def test_write_is_main_work_until_an_owner_message_binds_a_chat(door, binding, chat):
     """Write before any owner message (the binding known empty) is Main's work, where the panel's door

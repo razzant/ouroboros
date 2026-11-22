@@ -179,7 +179,7 @@ def chat_observed(
         manifest=_base_manifest(call_type, kwargs),
     )
     try:
-        msg, usage = llm.chat(**kwargs)
+        msg, usage = llm.chat(**kwargs, chat_conversation_id=call_id)
     except Exception as exc:
         safe = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
         reply = getattr(exc, "reply_message", None)  # a non-result reply keeps its output and usage on record

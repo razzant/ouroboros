@@ -17,6 +17,7 @@ import copy
 from typing import Any, Dict, List
 
 from ouroboros.anthropic_native_custody import custody_private_key, scrub_native_custody
+from ouroboros.context_budget import REPLY_SOURCE_SHA_KEY
 from ouroboros.llm_attempt import _VALID_CACHE_TTLS
 from ouroboros.provider_models import normalize_model_identity
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -65,7 +66,11 @@ def project_wire_messages(messages, *, delivery_marks=False):
         if isinstance(value, (list, tuple)):
             return [project(child) for child in value]
         return value
-    return project(messages)
+    projected = project(messages)
+    for message in projected:
+        if isinstance(message, dict):
+            message.pop(REPLY_SOURCE_SHA_KEY, None)  # row metadata; same-named native fields stay opaque
+    return projected
 
 
 def own_lane_image_marker(lane: str, caption: str = "") -> str:
