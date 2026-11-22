@@ -45,10 +45,10 @@ from ouroboros.dialogue_words import Field, WordQuery, excerpt, fields_of, match
 log = logging.getLogger(__name__)
 
 # The bound limits the number of candidate rows whose originals one call rechecks; past it the scan answers
-# whole. On a real 974 MB stream 17,620 candidates took 5.9 s end to end (about 335 µs a candidate), so 50,000
-# candidates cost about 17 s on the postings path, where the scan of that stream costs about the same; rows of the
-# generated test store are twenty times smaller. A named limit, not built: on a store far larger than that one
-# the hand-over point should follow the row count.
+# whole. On a real 974 MB stream, fetching and re-checking 17,620 candidates took 5.9 s on a warm cache (about
+# 335 µs a candidate), without ordering and rendering; 50,000 candidates would cost about 17 s of that work,
+# where a scan of that stream took about 40 s. Rows of the generated test store are twenty times smaller. A
+# named limit, not built: on a store far larger than that one the hand-over point should follow the row count.
 RECHECK_BOUND = 50_000
 EXCERPT_CHARS = 240  # the shown part of one field around its first match; the row's reader holds it whole
 ORDERS = ("newest", "oldest")
