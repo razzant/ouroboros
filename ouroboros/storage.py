@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 from ouroboros.storage_deleted import FolderMark, OpenMarks, StorageDeletedProjects, marks_below, outside_order, read_folders, saved_folders  # their owner
-from ouroboros.storage_free import StorageFree  # the tray's envelope, homed with its owner; resolved for the contract schema
+from ouroboros.storage_free import StorageFree, generation_closed  # the tray's envelope (contract schema); the generation door
 from ouroboros.storage_removers import StorageRemover  # each place's removers, homed with their reader
 
 log = logging.getLogger(__name__)
@@ -734,16 +734,16 @@ class StorageCounter:
         return response
 
     def start(self, data_root: Any, repo_dir: Any) -> bool:
-        """Start one count unless one runs; False means the caller joined the running one."""
+        """Start one count unless one runs, Stop came or the generation closed; False: joined the running one or refused."""
         with self._lock:
-            if self._stopped.is_set() or (self._thread is not None and self._thread.is_alive()):
+            if self._stopped.is_set() or generation_closed() or (self._thread is not None and self._thread.is_alive()):
                 return False
+            self._thread = threading.Thread(target=self._run, args=(pathlib.Path(data_root), pathlib.Path(repo_dir)),
+                                            name="storage-count", daemon=True)  # first: the exit census names it from here
             self._cancel = False
             self._error = None
             self._counting = {"started_at": utc_now_iso(), "place": "", "current": "", "places_done": 0,
                               "places_total": len(PLACES), "bytes": 0, "files": 0, "done": []}
-            self._thread = threading.Thread(target=self._run, args=(pathlib.Path(data_root), pathlib.Path(repo_dir)),
-                                            name="storage-count", daemon=True)
             try:
                 self._thread.start()
             except RuntimeError:
@@ -759,25 +759,25 @@ class StorageCounter:
                 return False
             self._cancel = True
             process = self._process
-        if process is not None:
-            self._signal(process)
+        self._signal(process)
         return True
 
     def stop(self) -> None:
-        self._stopped.set()
-        self.cancel()
+        self._stopped.set()  # never under the lock a page read holds across the saved file: Panic must not wait
+        self._signal(self._process)  # the run thread publishes its child, then rechecks Stop
 
     def live_children(self) -> list:
-        """Exit census after Stop: include an unfinished spawn until its owner returns."""
+        """Exit census after Stop: an admitted count (its thread not started yet) or an unfinished spawn until its owner returns."""
         process, thread = self._process, self._thread
         if process is not None and process.poll() is None:
             return [process]
-        return [thread] if thread is not None and thread.is_alive() else []
+        return [thread] if thread is not None and (thread.is_alive() or thread.ident is None) else []
 
     @staticmethod
     def _signal(process) -> None:
-        with contextlib.suppress(OSError):
-            process.kill()  # its own process group: the signal reaches only our child
+        if process is not None:  # not published yet, or already reaped
+            with contextlib.suppress(OSError):
+                process.kill()  # its own process group: the signal reaches only our child
 
     def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
         from ouroboros.startup_historical_audit import read_job_lines, spawn_maintenance_job
@@ -803,12 +803,12 @@ class StorageCounter:
                 final.update(line)
 
         try:
-            process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
-            with self._lock:
-                self._process = process
-            if self._cancel or self._stopped.is_set():
-                self._signal(process)
-            exit_code = read_job_lines(process, on_line, self._signal)
+            if not self._stopped.is_set():  # admitted as Stop landed: spawn nothing after it
+                process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
+                self._process = process  # no lock: Stop and Cancel set their flag, then read this; the check below reads theirs
+                if self._cancel or self._stopped.is_set():
+                    self._signal(process)
+                exit_code = read_job_lines(process, on_line, self._signal)
         except Exception as exc:
             failure = type(exc).__name__
             log.warning("Storage count could not run", exc_info=True)
