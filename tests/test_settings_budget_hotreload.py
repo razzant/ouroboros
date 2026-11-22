@@ -20,7 +20,7 @@ def _settings_client(monkeypatch, tmp_path, current: dict):
     monkeypatch.setattr(srv, "save_settings", fake_save_settings)
     monkeypatch.setattr(gateway_settings, "_owner_write_settings", fake_save_settings)
     # The saved document is this store, so an unedited model role is no proposal that moves under a save.
-    monkeypatch.setattr(gateway_settings, "_owner_settings_document", lambda: dict(current))
+    monkeypatch.setattr(gateway_settings, "settings_read_view", lambda **_: (dict(current), dict(current)))
     monkeypatch.setattr(srv, "_apply_settings_to_env", lambda *_a, **_k: None)
     monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: False)
     monkeypatch.setattr(srv, "apply_runtime_provider_defaults", lambda s: (dict(s), False, []))

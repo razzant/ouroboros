@@ -40,10 +40,10 @@ def _entry(name: str, handler=None) -> ToolEntry:
     )
 
 
-def _schema_names(registry: ToolRegistry, *, core_only: bool = False) -> list[str]:
+def _schema_names(registry: ToolRegistry) -> list[str]:
     return [
         str(item.get("function", {}).get("name") or "")
-        for item in registry.schemas(core_only=core_only)
+        for item in registry.schemas()
     ]
 
 
@@ -280,7 +280,7 @@ def test_extension_collision_is_not_disclosed_without_an_acting_grant(
                     ),
                 )
             )
-            registry.schemas(core_only=True)
+            registry.schemas()
             collisions = [
                 item for item in registry.capability_omissions()
                 if item.get("reason") == "name_collision"

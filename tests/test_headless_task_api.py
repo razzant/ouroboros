@@ -8,7 +8,6 @@ workspace root, subagent role and lineage.
 from __future__ import annotations
 
 import json
-import subprocess
 
 import pytest
 from starlette.applications import Starlette
@@ -31,12 +30,12 @@ from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies
     _managed_worker_pool_available,
 )
 from tests._store_shared import read_result, result_exists, result_signature, seed_result, unreadable_result
+from tests._workspace_git import git_repository
 
 
 def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
     repo.mkdir()
     data = tmp_path / "data"
@@ -403,11 +402,9 @@ def test_compose_task_text_extends_existing_headless_workspace_block(tmp_path):
 
 def test_task_api_rejects_unsafe_task_id_and_system_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    git_repository(repo, unborn=True)
     data = tmp_path / "data"
     data.mkdir()
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: task)
@@ -455,8 +452,7 @@ def test_task_api_identity_collision_check_is_strict_not_fail_soft(tmp_path, mon
     from ouroboros.store_import import ensure_current_store
 
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
     repo.mkdir()
     data = tmp_path / "data"
@@ -514,11 +510,9 @@ def test_resolve_workspace_root_blocks_case_variant_control_plane(tmp_path):
 
 def test_task_api_rejects_forged_subagent_without_child_drive_side_effect(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    git_repository(repo, unborn=True)
     data = tmp_path / "data"
     data.mkdir()
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: pytest.fail("forged subagent enqueued"))
@@ -547,11 +541,9 @@ def test_task_api_rejects_forged_subagent_without_child_drive_side_effect(tmp_pa
 
 def test_task_api_rejects_external_lineage_forgery(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    git_repository(repo, unborn=True)
     data = tmp_path / "data"
     data.mkdir()
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: pytest.fail("forged lineage enqueued"))
@@ -578,11 +570,9 @@ def test_task_api_rejects_external_lineage_forgery(tmp_path, monkeypatch):
 
 def test_task_api_preserves_top_level_actor_id_after_metadata_sanitization(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    git_repository(workspace, unborn=True)
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    git_repository(repo, unborn=True)
     data = tmp_path / "data"
     data.mkdir()
     captured = []

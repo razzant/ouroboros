@@ -110,7 +110,7 @@ The desktop packages already contain an optional CLI installer. On macOS, after 
 [download-linux-appimage-x86_64]: https://github.com/razzant/ouroboros/releases/download/v7.12.0/Ouroboros-7.12.0-linux-x86_64.AppImage
 [download-linux-x86_64]: https://github.com/razzant/ouroboros/releases/download/v7.12.0/Ouroboros-7.12.0-linux-x86_64.tar.gz
 
-Ouroboros bundles [Claudexor](https://github.com/razzant/claudexor) as its local execution layer for delegated coding and hosted-agent review. Ouroboros owns the task, memory, review, and final integration, while Claudexor runs the selected connected coding harness and returns durable execution evidence. [Explore Claudexor](https://claudexor.ai/).
+Ouroboros bundles [Claudexor](https://github.com/razzant/claudexor) as its local execution layer for delegated coding and hosted-agent review. Ouroboros owns the task, memory, review, and final integration, while Claudexor runs the selected connected coding harness and returns durable execution evidence. [Explore Claudexor](https://claudexor.ai/) · [Use Claudexor in Hermes, Pi, or OpenClaw](https://claudexor.ai/#agent-hosts).
 
 The technical report, [Ouroboros: A Self-Developing Frontier Coding Agent with Reviewed Core Evolution](https://arxiv.org/abs/2608.08311), describes the reviewed core-evolution system, the 161-day Hope deployment, and the benchmark campaigns summarized below. [Paper page](https://ouroboros-agent.ai/paper/) · [Hugging Face](https://huggingface.co/papers/2608.08311) · [Projects and research citing Ouroboros](https://ouroboros-agent.ai/community/)
 
