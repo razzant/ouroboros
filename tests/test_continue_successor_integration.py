@@ -29,6 +29,7 @@ from ouroboros.workspace_copies import admitted_copy_metadata
 from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from tests._store_shared import read_result, result_signature, seed_result
+from tests._workspace_git import seeded_repository as repo
 
 # Actual Git subprocess fixtures follow the repository's real-process lane.
 
@@ -39,18 +40,6 @@ LINEAGE_KEYS = {"decision_authority", "original_parent_task_id"}
 
 def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True).stdout
-
-
-def repo(path, files):
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Fixture")
-    git(path, "config", "user.email", "fixture@example.invalid")
-    for name, content in files.items():
-        (path / name).write_bytes(content)
-    git(path, "add", "-A")
-    git(path, "commit", "-qm", "fixture")
-    return path
 
 
 @pytest.fixture

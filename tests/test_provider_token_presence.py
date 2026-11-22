@@ -159,18 +159,50 @@ ANTHROPIC = {"ANTHROPIC_API_KEY": "anthropic-fixture-key"}
     ({"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 5}, [None, 2, 5, None]),
     ({"input_tokens": 100, "output_tokens": 6, "cache_read_input_tokens": 40,
       "cache_creation_input_tokens": 25}, [165, 6, 40, 25]),
+    # No fresh input reported: 20,000 reads alone are no inclusive prompt, in the rows or in the billing shape.
+    ({"output_tokens": 3, "cache_read_input_tokens": 20_000}, [None, 3, 20_000, None]),
 ])
 def test_anthropic_native_presence_reaches_round_and_usage_rows(tmp_path, monkeypatch, offline, raw, expected):
+    accumulated = {}
     step = {"kind": "response", "status_code": 200, "json": {
         "id": "msg_presence", "role": "assistant", "content": [{"type": "text", "text": "done"}],
         "stop_reason": "end_turn", "usage": raw}}
     round_counts, usage_counts, usage = _loop_round(
-        tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step)
+        tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step, accumulated=accumulated)
     assert round_counts == usage_counts == expected
-    # Billing-facing counters keep their historical synthesis; only the event fact is new.
+    # Billing-facing counters keep their historical synthesis; only the event fact is new. The inclusive prompt
+    # needs the reply's fresh input: without it the loop's size anchor and density read no number.
     parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens",
                                                  "cache_creation_input_tokens")]
-    assert [usage[key] for key in COUNTERS] == [sum(parts), int(raw.get("output_tokens") or 0), parts[1], parts[2]]
+    prompt = sum(parts) if "input_tokens" in raw else None
+    assert [usage[key] for key in COUNTERS] == [prompt, int(raw.get("output_tokens") or 0), parts[1], parts[2]]
+    assert accumulated["_last_round_cache_usage"]["prompt_tokens"] == prompt
+
+
+@pytest.mark.parametrize("output,bill,cost,final,partial", [
+    # A non-numeric count must not cost the reply its independently reported bill: today the
+    # adapter's int() raises after the send and the whole normalization (bill included) is lost.
+    pytest.param("abc", 0.031, 0.031, True, False, id="non-numeric-keeps-the-reported-bill"),
+    # Without a bill a malformed count prices nothing on any lane: the loop's estimator
+    # refuses the adapter's partial row exactly as the settlement does.
+    pytest.param(0.5, None, None, False, True, id="fraction-prices-nothing-on-any-lane"),
+])
+def test_anthropic_malformed_output_count_reaches_the_loop_without_losing_money(
+        tmp_path, monkeypatch, offline, output, bill, cost, final, partial):
+    body = {"id": "msg_money", "role": "assistant", "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": output, "cache_read_input_tokens": 5}}
+    if bill is not None:
+        body["total_cost_usd"] = bill
+    step = {"kind": "response", "status_code": 200, "json": body}
+    round_counts, usage_counts, usage = _loop_round(
+        tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step)
+    # The v2 rows read the reported fact: the inclusive prompt is unknown (writes unreported),
+    # the malformed output is unknown, the healthy read keeps its 5.
+    assert round_counts == usage_counts == [None, None, 5, None]
+    assert (usage["prompt_tokens"], usage["completion_tokens"], usage["cached_tokens"]) == (25, None, 5)
+    assert usage["cost"] == cost and usage["cost_final"] is final
+    assert (usage.get("cost_coverage") == "partial") is partial
 
 
 def _switch_facts(accumulated, model, round_idx):
@@ -261,28 +293,43 @@ def test_gigachat_presence_reaches_round_and_usage_rows(tmp_path, monkeypatch, o
     # A provider extension cannot supply the host's event fact.
     ({"prompt_tokens": 200, "completion_tokens": 10, "reported_tokens": dict.fromkeys(COUNTERS, 999)},
      [200, 10, None, None]),
+    ({"prompt_tokens": 200, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 40}},
+     [200, 10, 40, None]),
+    # A malformed nested read or output count ends neither the usable reply nor its usage fold, and reaches no row
+    # or total as -1, a clamped 0 or a truncated number.
+    ({"prompt_tokens": 200, "completion_tokens": -1, "prompt_tokens_details": {"cached_tokens": "abc"}},
+     [200, None, None, None]),
+    ({"prompt_tokens": 200, "completion_tokens": "abc", "prompt_tokens_details": {"cached_tokens": -1}},
+     [200, None, None, None]),
+    ({"prompt_tokens": 200, "completion_tokens": 0.5, "prompt_tokens_details": {"cached_tokens": 2.5}},
+     [200, None, None, None]),
 ])
 def test_openai_compatible_reported_nested_zero_reaches_round_and_usage_rows(
     tmp_path, monkeypatch, offline, raw, expected,
 ):
+    accumulated = {}
     step = {"kind": "response", "body": {
         "id": "gen-presence", "choices": [{"index": 0, "finish_reason": "stop",
                                            "message": {"role": "assistant", "content": "ok"}}],
         "usage": raw}}
     round_counts, usage_counts, usage = _loop_round(
-        tmp_path, monkeypatch, "x-ai/grok-4.5", {"OPENROUTER_API_KEY": "or-fixture-key"}, step)
+        tmp_path, monkeypatch, "x-ai/grok-4.5", {"OPENROUTER_API_KEY": "or-fixture-key"}, step, accumulated=accumulated)
     assert round_counts == usage_counts == expected
     assert "cached_tokens" not in usage or usage["cached_tokens"] == 40  # only a positive count is lifted
+    billed = [usage.get(key) for key in COUNTERS]  # the billing shape holds a reported count or nothing
+    assert all(count is None or (type(count) is int and count >= 0) for count in billed)
+    assert [accumulated[key] for key in COUNTERS] == [count or 0 for count in billed]
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ({"input_tokens": 9, "output_tokens": 4}, [None, 4, None, None]),
+    # No cache field reported: the row's own prompt, its read and write counts unknown.
+    ({"input_tokens": 9, "output_tokens": 4}, [9, 4, None, None]),
     ({"input_tokens": 9, "output_tokens": 4, "cache_read_input_tokens": 300,
       "cache_creation_input_tokens": 0}, [309, 4, 300, 0]),
 ])
 def test_anthropic_web_search_leg_reports_the_native_total(tmp_path, monkeypatch, offline, raw, expected):
-    """The provider-owned web search reads raw native usage outside the adapter: its uncached
-    ``input_tokens`` is not the total prompt the v2 row claims."""
+    """The provider-owned web search states the counts of its own attempt row: with reads reported the prompt
+    is the inclusive total, never the uncached ``input_tokens`` alone."""
     from ouroboros.tools.search import _web_search_anthropic
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-fixture-key")
@@ -365,6 +412,44 @@ def _billing_reference(total, *usages):
         else:
             total["cost_final"] = False
     return {key: total.get(key) for key in (*BILLING, "cost", "cost_final")}
+
+
+@pytest.mark.parametrize("raw,completion,cached,prompt", [
+    # A reported zero is the one measured zero; an omitted output count stays unknown (never
+    # a synthesized 0); a fraction, a bool or a non-numeric string is no count and neither
+    # zeroes the row nor kills its healthy neighbours.
+    pytest.param({"input_tokens": 20, "output_tokens": 0, "cache_read_input_tokens": 5}, 0, 5, 25,
+                 id="reported-output-zero"),
+    pytest.param({"input_tokens": 20, "cache_read_input_tokens": 5}, None, 5, 25, id="output-omitted"),
+    pytest.param({"input_tokens": 20, "output_tokens": 0.5, "cache_read_input_tokens": 5}, None, 5, 25,
+                 id="output-fraction"),
+    pytest.param({"input_tokens": 20, "output_tokens": True, "cache_read_input_tokens": 5}, None, 5, 25,
+                 id="output-bool"),
+    pytest.param({"input_tokens": 20, "output_tokens": "abc", "cache_read_input_tokens": 5}, None, 5, 25,
+                 id="output-non-numeric"),
+    # The read counter keeps its unreported billing zero (cache routing reads it); a malformed
+    # read stays unknown and takes the inclusive prompt with it (native_prompt_tokens).
+    pytest.param({"input_tokens": 20, "output_tokens": 1}, 1, 0, 20, id="read-omitted-keeps-billing-zero"),
+    pytest.param({"input_tokens": 20, "output_tokens": 1, "cache_read_input_tokens": 0.5}, 1, None, None,
+                 id="read-fraction"),
+    pytest.param({"input_tokens": 20, "output_tokens": 1, "cache_read_input_tokens": "abc"}, 1, None, None,
+                 id="read-non-numeric"),
+])
+def test_anthropic_adapter_counts_stay_truthful_next_to_a_malformed_one(
+        monkeypatch, offline, raw, completion, cached, prompt):
+    """The row-lane sibling of ``anthropic_token_counts``' independence test: the billing-shaped
+    counters keep each counter's own truth (#1578's billing/event split), so the loop never
+    reads a laundered zero and the reported bill stays reachable."""
+    from ouroboros._usage_response import malformed_token_counts
+
+    usage = _adapter_usage(monkeypatch, raw)
+    assert (usage["completion_tokens"], usage["cached_tokens"], usage["prompt_tokens"]) == (
+        completion, cached, prompt)
+    if malformed_token_counts(raw):
+        assert usage["cost"] is None and usage["cost_coverage"] == "partial"
+    else:
+        assert usage["cost"] == pytest.approx(0.001) and usage["cost_estimated"]
+        assert "cost_coverage" not in usage
 
 
 @pytest.mark.parametrize("seed,raws,expected", [

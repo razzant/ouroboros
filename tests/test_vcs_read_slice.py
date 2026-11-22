@@ -11,21 +11,27 @@ import subprocess
 
 import pytest
 
+from tests import _worlds
+from tests._workspace_git import git_repository, world_git
+
 
 def git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
 
-def repo(path: pathlib.Path) -> pathlib.Path:
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "config", "user.name", "Test")
-    git(path, "config", "user.email", "test@example.com")
+def _lay_repo(folder: pathlib.Path) -> None:
+    path = git_repository(folder / "repo", unborn=True)
+    world_git(path, "config", "user.name", "Test")
+    world_git(path, "config", "user.email", "test@example.com")
     # Payloads the reads must return byte-exact are LF on every host (a fresh repository converts nothing).
     (path / "note.txt").write_text("first\n", encoding="utf-8", newline="\n")
-    git(path, "add", "note.txt")
-    git(path, "commit", "-qm", "first")
-    return path
+    world_git(path, "add", "note.txt")
+    world_git(path, "commit", "-qm", "first")
+
+
+def repo(path: pathlib.Path) -> pathlib.Path:
+    # tests._worlds by module name: this module's ``world`` is its fixture
+    return _worlds.clone_repository(_worlds.world("vcs-read-slice-repo", _lay_repo) / "repo", path)
 
 
 @pytest.fixture
@@ -62,9 +68,11 @@ def read_ok(ctx, **args):
 def test_repository_is_selected_before_path_and_nested_repo_is_distinct(world):
     _registry, ctx, _system, project = world
     nested = repo(project / "nested")
+    git(nested, "commit", "--amend", "-qm", "first in nested")  # copies of one world share a HEAD: not this one
     (project / "note.txt").write_text("project dirty\n", encoding="utf-8")
     (nested / "note.txt").write_text("nested dirty\n", encoding="utf-8")
     head = git(nested, "rev-parse", "HEAD")
+    assert head != git(project, "rev-parse", "HEAD")  # a read of the project's history cannot pass for the nested one
 
     from ouroboros.tools.tool_resolution import _build_builtin_target_binding
 
@@ -143,8 +151,7 @@ def test_identity_unborn_dirty_refs_merge_base_and_linked_worktree(world):
     # Direct binding uses the same prepared root; a nested unborn repository
     # under the active workspace is enough to exercise the no-HEAD case.
     unborn_nested = project / "unborn"
-    unborn_nested.mkdir()
-    git(unborn_nested, "init", "-q")
+    git_repository(unborn_nested, unborn=True)
     state = json.loads(read_ok(ctx, action="identity", repository="unborn").split("\n\nVCS target:")[0])
     assert state["head"] is None and state["branch"]
 

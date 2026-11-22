@@ -385,21 +385,19 @@ def test_an_unsupported_engine_build_refuses_the_answer_typed(tmp_path, monkeypa
     assert json.loads(result.text)["reason"] == "interaction_answers_unsupported"
 
 
-def test_the_supervising_wake_and_its_cache_horizon_note_stay_valid_json(tmp_path, monkeypatch):
-    """The note is a FIELD of the wake payload, stamped once at the wake's publication
+def test_the_supervising_wake_and_its_response_facts_stay_valid_json(tmp_path, monkeypatch):
+    """The response facts are part of the wake payload, stamped once at publication
     (never appended after the rendered JSON, which once left the whole result unparseable
     for every reader of this family). Drives the REAL addressed read of a publication: a
-    control present after the read wakes with the note, and without the read's window
+    control present after the read wakes with the facts, and without the read's window
     waited_sec or cancel advice."""
     import json
     import time
 
     import ouroboros.delegate_supervision as supervision
-    import ouroboros.tools.control as control
     from ouroboros.gateways import claudexor as gw
 
     _own_run(tmp_path)
-    monkeypatch.setattr(control, "cache_horizon_note", lambda *_a, **_k: "the prompt cache expires soon")
 
     class _Alive:
         engine_version = "3.10.2"
@@ -414,10 +412,13 @@ def test_the_supervising_wake_and_its_cache_horizon_note_stay_valid_json(tmp_pat
     # The first check lets the publication read; a later one (after it) delivers a control.
     monkeypatch.setattr(supervision, "_control_wakes",
                         lambda _ctx: checks.append(1) or ([{"type": "deadline"}] if len(checks) > 1 else []))
-    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-family", task_attempt=1)
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-family", task_attempt=1,
+                          _accumulated_usage={"_last_prompt_cache_ttl": "5m",
+                                              "_last_round_cache_usage": {"finished_at": 1000.0}})
     raw = supervision._publish(ctx, {"runs": ["run-1"], "armed_at": "now", "armed_epoch": time.time()}, "").text
     payload = json.loads(raw)          # the contract: still ONE JSON object
-    assert payload["cache_horizon_note"] == "the prompt cache expires soon"
+    assert payload["previous_model_response"] == {
+        "finished_at": "1970-01-01T00:16:40+00:00", "request_cache_ttl": "5m"}
     assert payload["status"] in {"progress", "no_progress"}
     assert payload["wake_events"] == [{"type": "deadline"}]
     assert "waited_sec" not in payload and "delegate_cancel" not in str(payload.get("note") or "")

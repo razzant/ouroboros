@@ -59,9 +59,26 @@ def test_schedule_digest_distinguishes_unreadable_from_empty(tmp_path, root_only
     assert unreadable["unavailable"] and "standing" not in unreadable
     assert unreadable["pointer"] == "manage_schedules(action='list')"
     path.write_text('{"tasks": []}', encoding="utf-8")
-    empty = _scheduled_tasks_digest(env)
-    assert "unavailable" not in empty
-    assert empty["standing"] == empty["attention"] == empty["one_shots"] == []
+    assert _scheduled_tasks_digest(env) == {}  # nothing to show, which an unreadable table never reads as
+
+
+def test_an_install_with_nothing_to_show_has_no_schedule_block(tmp_path):
+    """No schedule, or only consumed history, prints no block; one switched-off standing row prints its count."""
+    env = _make_health_env(tmp_path)
+    path = tmp_path / "state" / "scheduled_tasks.json"
+
+    def runtime():
+        return json.loads(build_runtime_section(env, {"id": "turn", "type": "task"}).split("\n\n", 1)[1])
+
+    assert "scheduled_tasks" not in runtime()  # no table at all
+    history = {"id": "once", "enabled": False, "completed_at": "2026-09-30T03:00:00+00:00",
+               "trigger": {"type": "once", "run_at": "2026-09-29T00:30:00+00:00"}}
+    path.write_text(json.dumps({"tasks": [history]}), encoding="utf-8")
+    assert "scheduled_tasks" not in runtime()
+    idle = {"id": "idle", "enabled": False, "trigger": {"type": "cron", "expr": "0 9 * * *"}}
+    path.write_text(json.dumps({"tasks": [history, idle]}), encoding="utf-8")
+    assert runtime()["scheduled_tasks"] == {"standing": [], "attention": [], "one_shots": [], "omitted_count": 0,
+                                            "inactive_standing_count": 1, "pointer": "manage_schedules(action='list')"}
 
 
 @pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
@@ -118,7 +135,7 @@ def test_runtime_keeps_the_admitted_occurrences_due_time_after_schedule_advances
         **({"previous": previous} if previous is not None else {}),
     }
     if trigger == "once":
-        assert not any(runtime["scheduled_tasks"][group] for group in ("standing", "attention", "one_shots"))
+        assert "scheduled_tasks" not in runtime  # its consumed row is history: nothing to show
     else:
         assert runtime["scheduled_tasks"]["standing"][0]["next_run_at"] != due
 

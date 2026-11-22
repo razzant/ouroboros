@@ -102,7 +102,6 @@ _MOVED_OWNERS = {
     "_subtask_outcome_summary": control_task_results,
     "_get_task_result": control_task_results,
     "_wait_attention_poll": control_task_results,
-    "cache_horizon_note": control_task_results,
     "_wait_for_task": control_task_results,
     "_count_live_sibling_children": control_task_results,
     "_UNMINTED_WAIT_GRACE_SEC": control_task_results,

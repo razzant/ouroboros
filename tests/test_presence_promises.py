@@ -146,20 +146,27 @@ def test_the_place_sees_its_pending_promises_in_its_focus_and_digest(table):
     from ouroboros.presence_context import frame_focus_content
     assert asked in frame_focus_content(task, "hello")
 
-    # Its runtime schedule digest is the same scoped view; the owner keeps the whole table.
+    # Its runtime schedule digest is the same scoped view; the owner keeps the whole table, every enabled standing
+    # row of his included, which never reaches the place's.
+    from supervisor.schedule_lifecycle import upsert_scheduled_task
+
+    upsert_scheduled_task({"id": "owner-cron", "name": "Owner's daily mail", "timezone": "UTC",
+                           "trigger": {"type": "cron", "expr": "0 9 * * *"},
+                           "task": {"type": "task", "text": "Owner work"}}, drive_root=root)
     env = SimpleNamespace(drive_root=root)
     scoped = context_module._scheduled_tasks_digest(env, task)
     names = [entry["id"] for group in ("standing", "attention", "one_shots") for entry in scoped[group]]
     assert set(names) == {asked, withdrawn} and foreign not in names and binding
+    assert not scoped["standing"] and scoped["inactive_standing_count"] == 0
     owner = context_module._scheduled_tasks_digest(env, {"id": "owner-turn", "metadata": {}})
     assert foreign in [entry["id"] for group in ("standing", "attention", "one_shots") for entry in owner[group]]
-    assert context_module._scheduled_tasks_digest(env, {"metadata": {"presence": {"binding_id": ""}}}) == {
-        "standing": [], "attention": [], "one_shots": [], "omitted_count": 0, "pointer": "manage_schedules(action='list')"}
+    assert [entry["id"] for entry in owner["standing"]] == ["owner-cron"]
+    assert context_module._scheduled_tasks_digest(env, {"metadata": {"presence": {"binding_id": ""}}}) == {}
     from ouroboros.agent import Env
 
     runtime = context_module.build_runtime_section(Env(repo_dir=pathlib.Path(__file__).resolve().parents[1],
                                                        drive_root=root), task)
-    assert asked in runtime and foreign not in runtime
+    assert asked in runtime and foreign not in runtime and "owner-cron" not in runtime
 
 
 

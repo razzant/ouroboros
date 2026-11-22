@@ -216,7 +216,7 @@ ouroboros/ — agent core and shared runtime (§6)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
   safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet and who wrote each row
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
-  consciousness.py, consciousness_wake.py, consciousness_transitions.py, consciousness_view.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes (§6 Background consciousness)
+  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_clock.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input and what stands in it, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes; named-time and zone facts (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task; later changes of its room's and global marks reach a running task's next round as a host row (§6)
@@ -399,7 +399,7 @@ ouroboros/ — agent core and shared runtime (§6)
   argv_budget.py — Argv admission counts encoded bytes of argv plus environment (ARG_MAX charges both); asked by skill_exec before exec
   workspace_executor.py, workspace_executor_paths.py, docker_process_observer.py — backends/output paths (§6); liveness needs `sh`, `cat`, `/proc` (§9)
   deliverables_paths.py — Lexical and case-folded deliverables path views
-  tool_capabilities.py — SSOT for the core, parallel-safe, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
+  tool_capabilities.py — SSOT for the core, inert-read, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility, Nano's standing set (others: tool_capabilities.py)
