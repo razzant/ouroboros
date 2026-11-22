@@ -44,12 +44,13 @@ import json
 import weakref
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
-from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len
+from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len, message_chunks
 from .telegram_i18n import Index
 from .telegram_state import _data_dir, _message_ref, _read_json_file, _state_file
 
 _QUIZ_STATE_FILE = "quiz_state.json"
 _MAX_REMEMBERED = 50
+_MAX_SECRET_MESSAGES = 5000
 _CALLBACK_PREFIX = "qz:"
 _BUTTON_LABEL_MAX = 40
 _ANSWER_ECHO_MAX = 200
@@ -227,7 +228,9 @@ def answered_edit_reserve(lang: str) -> int:
 
 
 async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_text: str,
-                         keyboard: List[List[dict]], reserve: int = _ANSWERED_EDIT_RESERVE) -> Tuple[int, bool]:
+                         keyboard: List[List[dict]], reserve: int = _ANSWERED_EDIT_RESERVE,
+                         sent_ids: Optional[List[int]] = None,
+                         on_part: Optional[Callable[[int], None]] = None) -> Tuple[int, bool]:
     """Send the card; return the keyboard message id and whether it overflowed.
 
     A card that fits Telegram's per-message limit (UTF-16 units) WITH room for
@@ -235,27 +238,42 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
     keyboard. A longer one is sent as ordered plain parts through the client's
     chunker, then the compact keyboard message; nothing authored is truncated.
     """
+    def _record_mid(mid: int) -> None:
+        if mid <= 0:
+            return
+        if sent_ids is not None:
+            sent_ids.append(mid)
+        if callable(on_part):
+            on_part(mid)
+
     async def send(text: str) -> int:
         # An open question (no options) carries no keyboard: a plain message
         # the owner replies to, remembered exactly like a keyboard message.
         if keyboard:
-            return int(await client.send_message_with_inline_keyboard(
+            mid = int(await client.send_message_with_inline_keyboard(
                 chat_id, text, keyboard, parse_mode="") or 0)
-        return int(await client.send_message(chat_id, text, parse_mode="") or 0)
+        else:
+            mid = int(await client.send_message(chat_id, text, parse_mode="") or 0)
+        _record_mid(mid)
+        return mid
 
     full = f"{body}\n{hint_text}"
     if _u16len(full) + reserve <= _TELEGRAM_TEXT_LIMIT:
         return await send(full), False
-    await client.send_message(chat_id, body, parse_mode="")
+    limit = int(getattr(client, "text_limit", _TELEGRAM_TEXT_LIMIT) or _TELEGRAM_TEXT_LIMIT)
+    for part in (message_chunks(body, "", limit=limit) or [body]):
+        part_id = int(await client.send_message(chat_id, part, parse_mode="") or 0)
+        _record_mid(part_id)
     return await send(f"{compact}\n{hint_text}"), True
 
 
 def _load(api) -> Dict[str, Any]:
     data = _read_json_file(_state_file(api, _QUIZ_STATE_FILE))
     data = data if isinstance(data, dict) else {}
-    quizzes, bots = data.get("quizzes"), data.get("bots")
+    quizzes, bots, secrets = data.get("quizzes"), data.get("bots"), data.get("secret_messages")
     return {"quizzes": dict(quizzes) if isinstance(quizzes, dict) else {},
-            "bots": dict(bots) if isinstance(bots, dict) else {}}
+            "bots": dict(bots) if isinstance(bots, dict) else {},
+            "secret_messages": dict(secrets) if isinstance(secrets, dict) else {}}
 
 
 def _bot_cards(data: Dict[str, Any], bot: str) -> Tuple[Dict[str, Any], str]:
@@ -287,13 +305,52 @@ def _forward_only(held: Any, record: Dict[str, Any]) -> Dict[str, Any]:
 
 def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
     """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``),
-    whose lifecycle only moves forward (``_forward_only``)."""
+    whose lifecycle only moves forward (``_forward_only``). Secret-card message IDs are
+    retained separately so split or older secret cards never lose local reply refusal."""
     data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     key = f"{prefix}{token}"
-    quizzes[key] = _forward_only(quizzes.pop(key, None), record)
+    stored = _forward_only(quizzes.pop(key, None), record)
+    quizzes[key] = stored
     for stale in list(quizzes)[:-_MAX_REMEMBERED]:
         quizzes.pop(stale, None)
+    if stored.get("secret"):
+        secrets = data.setdefault("secret_messages", {})
+        cid = int(stored.get("chat_id") or 0)
+        all_ids = [int(x or 0) for x in [stored.get("message_id"), *(stored.get("message_ids") or [])]]
+        for mid in dict.fromkeys(x for x in all_ids if x > 0):
+            skey = f"{prefix}{cid}:{mid}"
+            secrets.pop(skey, None)
+            secrets[skey] = {
+                "task_id": str(stored.get("task_id") or ""), "quiz_id": str(stored.get("quiz_id") or ""),
+                "chat_id": cid, "message_id": mid, "options": [], "secret": True,
+            }
+        for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
+            secrets.pop(stale, None)
+    path = _state_file(api, _QUIZ_STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)
+
+
+def remember_secret_message(api, bot: str, chat_id: int, message_id: int,
+                            task_id: str = "", quiz_id: str = "") -> None:
+    """Persist one sent secret-card message ID immediately so partial multi-chunk sends never leak replies."""
+    mid, cid = int(message_id or 0), int(chat_id or 0)
+    if mid <= 0:
+        return
+    data = _load(api)
+    _, prefix = _bot_cards(data, bot)
+    secrets = data.setdefault("secret_messages", {})
+    skey = f"{prefix}{cid}:{mid}"
+    secrets.pop(skey, None)
+    secrets[skey] = {
+        "task_id": str(task_id or ""), "quiz_id": str(quiz_id or ""),
+        "chat_id": cid, "message_id": mid, "options": [], "secret": True,
+    }
+    for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
+        secrets.pop(stale, None)
     path = _state_file(api, _QUIZ_STATE_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -342,18 +399,28 @@ def quiz_for_message(api, bot: str, chat_id: int, message_id: int) -> Optional[D
         return None
 
     def sent_as_this(record: Any) -> bool:
-        return (isinstance(record, dict) and int(record.get("chat_id") or 0) == int(chat_id)
-                and int(record.get("message_id") or 0) == int(message_id))
+        if not isinstance(record, dict) or int(record.get("chat_id") or 0) != int(chat_id):
+            return False
+        if int(record.get("message_id") or 0) == int(message_id):
+            return True
+        return int(message_id) in [int(x or 0) for x in (record.get("message_ids") or [])]
 
     data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     for key, record in quizzes.items():
         if key.startswith(prefix) and sent_as_this(record):
             return dict(record)
+    secrets = data.get("secret_messages") or {}
+    direct_secret = secrets.get(f"{prefix}{int(chat_id)}:{int(message_id)}")
+    if isinstance(direct_secret, dict):
+        return dict(direct_secret)
     if bot and not _message_ref(api, bot, chat_id, message_id):
         for record in data["quizzes"].values():
             if sent_as_this(record):
                 return {**record, "message_id": 0, "ambiguous": True}
+        legacy_secret = secrets.get(f"{int(chat_id)}:{int(message_id)}")
+        if isinstance(legacy_secret, dict):
+            return {**legacy_secret, "message_id": 0, "ambiguous": True}
     return None
 
 

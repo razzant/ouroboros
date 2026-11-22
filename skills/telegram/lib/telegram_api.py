@@ -876,8 +876,8 @@ class TelegramClient:
         return data
 
     async def get_updates(self, offset: int) -> list[dict]:
-        payload = await self.call("getUpdates", data={"timeout": 20, "offset": offset}, timeout=25)
-        return list(payload.get("result") or [])
+        data = {"timeout": 20, "offset": offset, "allowed_updates": '["message","edited_message","callback_query","message_reaction","message_reaction_count","channel_post","edited_channel_post","my_chat_member"]'}
+        return list((await self.call("getUpdates", data=data, timeout=25)).get("result") or [])
 
     async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML", *,
                            disable_notification: bool = False) -> int:
@@ -1086,12 +1086,12 @@ _MENU_TEXTS_EN = {
         "🤖 **Ouroboros Telegram Help**\n\n"
         "Available commands:\n"
         "• `/menu` — Show interactive control panel with active tabs\n"
-        "• `/language` — Change the interface language of this installation\n"
-        "• `/status` — Request live system status (if allowed)\n"
-        "• `/panic` — Emergency stop for the bound owner, in every mode\n"
-        "• `/help` — Show this friendly usage guide\n\n"
+        "• `/mode` — Switch owner DM (`direct` / `presence`) and mirror mode\n"
+        "• `/main <text>` — Send one message straight to Main chat (shortcut `/m`)\n"
+        "• `/language` — Change interface language  |  `/help` — Show this guide\n"
+        "• `/status` — Request live system status  |  `/panic` — Emergency stop\n\n"
         "Modes description (changed in Web UI → Settings → Telegram):\n"
-        "• **strict** — allow only `/menu`, `/help`, `/language` and owner `/panic`\n"
+        "• **strict** — allow only `/menu`, `/mode`, `/main`, `/help`, `/language` and owner `/panic`\n"
         "• **safe_commands** — allow status monitoring\n"
         "• **full_access** — allow status + background loop start/stop"
     ),

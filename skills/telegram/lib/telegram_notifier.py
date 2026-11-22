@@ -58,7 +58,8 @@ def _save_notif_state(api, data: Dict[str, Any]) -> None:
 def _pinned_chat_id(settings: Dict[str, Any]) -> int:
     raw = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
     try:
-        return int(raw)
+        cid = int(raw)
+        return cid if cid > 0 else 0
     except ValueError:
         return 0
 
@@ -286,15 +287,22 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
 _ROOT_SUMMARY_KIND = "terminal_root_projection"
 
 
+from .telegram_mirror import PRESENCE_CHAT_ID_MIN, is_presence_room_event
+
+
 def _announce_summary(row: Dict[str, Any], *, notify_all: bool) -> bool:
     """The existing toggle controls every extra finish notice, never ordinary replies."""
     if str(row.get("summary_kind") or "") != _ROOT_SUMMARY_KIND:
         return False
     if row.get("quiet_effective") is True:
         return False
+    if is_presence_room_event(row) or (isinstance(row.get("presence_provenance"), dict) and row.get("presence_provenance")):
+        return False
     try:
         chat_id = int(row.get("chat_id") or 0)
     except (TypeError, ValueError):
+        return False
+    if chat_id >= PRESENCE_CHAT_ID_MIN:
         return False
     if chat_id != WEB_UI_CHAT_ID and not is_project_chat_id(chat_id):
         return False

@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse
 
 from ..scripts.telegram_settings import TelegramSettingsError
 from .miniapp_registration import _read_status
+from .telegram_mirror import VALID_MIRROR_MODES
 from .telegram_outbox import outbox_for
 from .telegram_state import _load_settings, _state_file
 from .telegram_token import accepted_token, binding_for
@@ -58,7 +59,7 @@ def _bridge_status(api) -> dict[str, Any]:
     if command_mode not in _VALID_COMMAND_MODES:
         command_mode = _COMMAND_MODE_STRICT
     mirror_mode = str(settings.get("TELEGRAM_MIRROR_MODE") or "all").strip().lower()
-    if mirror_mode not in {"all", "telegram_only"}:
+    if mirror_mode not in VALID_MIRROR_MODES:
         mirror_mode = "all"
     reason_code = ""
     # The poller's record for this exact generation: a replaced token's refusal or wait never speaks for this one.

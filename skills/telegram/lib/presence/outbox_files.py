@@ -1,0 +1,238 @@
+"""The skill's own copies of files queued for Presence sending.
+
+``telegram_send`` copies each file here when it queues it, unchanged and under its own name, and records the copy's
+size and SHA-256 and the path it came from in the row as ``_frozen``. The outbox sends that copy, checked against the
+record before each attempt. The copy stays with the row's custody history, as the row does, whatever the row's end:
+an uncertain send keeps the exact bytes it may have delivered. The caller's file is read once and never changed,
+moved or removed. Only a copy that no row names, made by a ``telegram_send`` that queued nothing, is removed.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import os
+import pathlib
+import re
+import threading
+import uuid
+from typing import Any, Callable, Dict, Iterator, List, Sequence
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+
+DIRECTORY = "outbox_files"
+_CHUNK = 1024 * 1024
+MAX_OUTBOX_FILES_BYTES = 512 * 1024 * 1024
+_LOCKS_GUARD = threading.Lock()
+_THREAD_LOCKS: Dict[str, threading.Lock] = {}
+
+
+class CopyTooLarge(ValueError):
+    """The file grew past the upload limit while it was being copied; nothing was kept."""
+
+
+class OutboxStorageFull(OSError):
+    """The skill's frozen outbox_files store reached its disk cap."""
+
+
+class StagingStorageFull(OSError):
+    """The skill's inbound staging store reached its disk cap."""
+
+
+@contextlib.contextmanager
+def _quota_lock(state_dir: Any, name: str) -> Iterator[None]:
+    base = pathlib.Path(state_dir)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = base / f".{name}.quota.lock"
+    key = os.path.realpath(lock_path)
+    with _LOCKS_GUARD:
+        tlock = _THREAD_LOCKS.setdefault(key, threading.Lock())
+    with tlock:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def _dir_bytes(root: pathlib.Path) -> int:
+    total = 0
+    if not root.is_dir():
+        return 0
+    for item in root.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def stage_budget_remaining(state_dir: Any, cap_bytes: int) -> int:
+    """Current remaining staging byte budget under the atomic staging quota lock."""
+    if cap_bytes <= 0:
+        return 0
+    staging_root = pathlib.Path(state_dir) / "staging"
+    with _quota_lock(state_dir, "staging"):
+        return max(0, int(cap_bytes) - _dir_bytes(staging_root))
+
+
+def commit_staged_file(state_dir: Any, temp_path: pathlib.Path, destination: pathlib.Path, cap_bytes: int) -> None:
+    """Atomically verify actual downloaded bytes against ``cap_bytes`` and move into ``staging/``."""
+    temp_path, destination = pathlib.Path(temp_path), pathlib.Path(destination)
+    staging_root = pathlib.Path(state_dir) / "staging"
+    with _quota_lock(state_dir, "staging"):
+        actual = temp_path.stat().st_size if temp_path.is_file() else 0
+        current = _dir_bytes(staging_root)
+        if cap_bytes > 0 and current + actual > cap_bytes:
+            with contextlib.suppress(OSError):
+                temp_path.unlink(missing_ok=True)
+            raise StagingStorageFull(f"staging disk cap ({cap_bytes:,} bytes) reached")
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temp_path.replace(destination)
+
+
+def sweep_staging_tmp(state_dir: Any) -> None:
+    """Remove leftover interrupted staging downloads in ``staging_tmp/`` on startup."""
+    tmp_root = pathlib.Path(state_dir) / "staging_tmp"
+    if not tmp_root.is_dir():
+        return
+    for item in tmp_root.iterdir():
+        if item.is_file():
+            with contextlib.suppress(OSError):
+                item.unlink(missing_ok=True)
+
+
+def remove_staged_files(
+    state_dir: Any, staged: Sequence[pathlib.Path], *, on_error: Callable[[str], None] = lambda _m: None
+) -> None:
+    staging_root = (pathlib.Path(state_dir) / "staging").resolve(strict=False)
+    parents = set()
+    for path in staged:
+        try:
+            path.unlink(missing_ok=True)
+            parents.add(path.parent)
+        except OSError:
+            on_error(f"telegram presence: could not remove staged file {path.name}")
+    for parent in parents:
+        resolved = parent.resolve(strict=False)
+        if resolved != staging_root and resolved.is_relative_to(staging_root):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
+
+
+def safe_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:160] or "event"
+
+
+def declared_size(attachment: Dict[str, Any]) -> int:
+    try:
+        return int(attachment.get("file_size") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def safe_filename(value: str) -> str:
+    name = pathlib.PurePath(value.replace("\\", "/")).name
+    clean = re.sub(r"[^A-Za-z0-9_. -]+", "_", name).strip(" .")
+    if len(clean) > 160:
+        suffix = pathlib.PurePath(clean).suffix
+        clean = clean[: 160 - len(suffix)] + suffix if len(suffix) < 160 else clean[:160]
+    return clean or "attachment"
+
+
+def keep(source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: int = MAX_OUTBOX_FILES_BYTES) -> Dict[str, Any]:
+    """Copy ``source`` into a new folder of its own and return the row's record of the copy.
+
+    The copy reaches the disk (fsync) before the row that names it can be queued, so a row never names a partial
+    copy. Any failure removes what was written and raises: ``OSError``, ``OutboxStorageFull`` or ``CopyTooLarge``.
+    """
+    source = pathlib.Path(source)
+    root = pathlib.Path(state_dir) / DIRECTORY
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with _quota_lock(state_dir, "outbox_files"):
+        current = _dir_bytes(root)
+        if storage_cap > 0 and current >= storage_cap:
+            raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) reached")
+        folder = root / uuid.uuid4().hex
+        folder.mkdir(mode=0o700)
+        target = folder / source.name
+        digest, size = hashlib.sha256(), 0
+        try:
+            read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            src_fd = os.open(source, read_flags)
+            with os.fdopen(src_fd, "rb") as reader:
+                src_size = os.fstat(reader.fileno()).st_size
+                if src_size > max_bytes:
+                    raise CopyTooLarge(f"{source.name} exceeds {max_bytes:,} bytes")
+                if storage_cap > 0 and current + src_size > storage_cap:
+                    raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
+                created = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+                with os.fdopen(created, "wb") as writer:
+                    while chunk := reader.read(_CHUNK):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise CopyTooLarge(f"{source.name} grew past {max_bytes:,} bytes while it was copied")
+                        if storage_cap > 0 and current + size > storage_cap:
+                            raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
+                        digest.update(chunk)
+                        writer.write(chunk)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+        except BaseException:
+            discard([{"path": str(target)}], state_dir)
+            raise
+    return {"path": str(target), "sha256": digest.hexdigest(), "size": size, "source": str(source)}
+
+
+def records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The copies a row names."""
+    kept = payload.get("_frozen")
+    return [item for item in kept if isinstance(item, dict) and item.get("path")] if isinstance(kept, list) else []
+
+
+def verify(payload: Dict[str, Any]) -> None:
+    """Raise ``ValueError`` unless every copy the row names still has the size and SHA-256 recorded when queued."""
+    for record in records(payload):
+        name = pathlib.PurePath(str(record["path"])).name
+        digest, size = hashlib.sha256(), 0
+        try:
+            with open(record["path"], "rb") as reader:
+                while chunk := reader.read(_CHUNK):
+                    size += len(chunk)
+                    digest.update(chunk)
+        except OSError as exc:
+            raise ValueError(
+                f"the copy of {name} kept when it was queued cannot be read ({type(exc).__name__}); not sent"
+            ) from exc
+        if size != record.get("size") or digest.hexdigest() != record.get("sha256"):
+            raise ValueError(f"the copy of {name} kept when it was queued has changed since; not sent")
+
+
+def discard(kept: List[Dict[str, Any]], state_dir: Any) -> None:
+    """Remove copies that no row names: a ``telegram_send`` that queued nothing made them.
+
+    Only a file directly inside one of this skill's copy folders is removed, never anything outside them.
+    """
+    root = os.path.realpath(pathlib.Path(state_dir) / DIRECTORY)
+    for record in kept:
+        path = str(record.get("path") or "")
+        folder = os.path.realpath(os.path.dirname(path))
+        if not path or os.path.dirname(folder) != root:
+            continue
+        try:
+            os.unlink(os.path.join(folder, os.path.basename(path)))
+        except FileNotFoundError:
+            pass
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass

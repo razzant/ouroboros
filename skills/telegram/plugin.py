@@ -43,6 +43,45 @@ from .lib.telegram_state import (
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
+from .lib.telegram_mirror import (
+    MIRROR_MODE_CONTROL_ONLY,
+    MIRROR_MODE_MAIN,
+    OWNER_CHAT_MODE_DIRECT,
+    OWNER_CHAT_MODE_PRESENCE,
+    VALID_MIRROR_MODES,
+    VALID_OWNER_CHAT_MODES,
+    mirror_quizzes_enabled as _mirror_quizzes_enabled,
+    owner_chat_mode as _owner_chat_mode,
+    target_chat as _target_chat,
+)
+from .lib.telegram_panels import (
+    _MODE_TEXTS,
+    _bot_commands,
+    _build_language_keyboard,
+    _build_menu_keyboard,
+    _build_menu_mind,
+    _build_menu_settings,
+    _build_menu_status,
+    build_mode_panel,
+    settings_section_schema,
+)
+from .lib.telegram_media_handlers import (
+    is_native_audio_document as _is_native_audio_document,
+    make_document_handler,
+    make_links_handler,
+    make_photo_handler,
+    make_video_handler,
+)
+from .lib.telegram_presence_bridge import (
+    handle_mode_command,
+    handle_non_owner_update,
+    make_presence_status,
+    maybe_send_presence_hint,
+    mode_panel_for_chat,
+    presence_runtime,
+    try_presence_runtime,
+)
+from .lib.presence.tools import register_presence_tools
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
 from .lib.telegram_outbox import outbox_for
 from .lib.telegram_share import make_prepare_share
@@ -55,7 +94,7 @@ from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .lib.telegram_token import _report_failure, _wait_for_bot_token, binding_for, make_token_observer
 from .lib.telegram_connection import (  # status of the token, the bridge and the Mini App
     _COMMAND_MODE_FULL, _COMMAND_MODE_STRICT, _VALID_COMMAND_MODES, _fail_permanent_poll_rejection,
-    _make_status, _save_bridge_status, connection_components, poll_failure_reason, register_connection,
+    _make_status, _save_bridge_status, poll_failure_reason, register_connection,
 )
 from .lib.telegram_connection import _bridge_status, _connection_fields  # noqa: F401 — the plugin's status facade
 from .scripts.telegram_settings import (
@@ -102,6 +141,15 @@ def _telegram_client(api, event=None, chat_id: int = 0, server: tuple[str, str |
 _POLL_GENERATION_STARTED = time.time()
 
 _SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z]")
+_MAIN_CMD_RE = re.compile(r"^/(?:main|m)(?:@[^\s]+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+def _presence_runtime(api):
+    return presence_runtime(api, trust_env=_HONOR_ENV_PROXIES)
+
+
+def _try_presence_runtime(api):
+    return try_presence_runtime(api, trust_env=_HONOR_ENV_PROXIES)
 
 # In strict/safe modes slash commands are still controlled locally. In
 # full_access mode a reviewed+granted chat transport is allowed to forward the
@@ -151,115 +199,14 @@ def _is_exact_bot_command(text: str, command: str) -> bool:
     )
 
 
-def _build_menu_keyboard(command_mode: str, lang: str = "en") -> tuple[str, list[list[dict]]]:
-    """Return (header_text, inline_keyboard_rows) for the /menu command."""
-    t = _LOCALIZED_TEXTS[lang]
-    if command_mode == _COMMAND_MODE_STRICT:
-        return (
-            t["menu_title_strict"],
-            [[{"text": t["btn_settings"], "callback_data": "nav:settings"}]],
-        )
-
-    header = t.format("menu_title", command_mode=command_mode, language=telegram_i18n.label(lang))
-    keyboard = [
-        [
-            {"text": t["btn_metrics"], "callback_data": "nav:status"},
-            {"text": t["btn_mind"], "callback_data": "nav:mind"},
-        ],
-        [
-            {"text": t["btn_tasks"], "callback_data": "nav:tasks"},
-        ],
-        [
-            {"text": t["btn_settings"], "callback_data": "nav:settings"},
-        ]
-    ]
-    return header, keyboard
+async def _mode_panel_for_chat(api, chat_id: int, lang: str) -> tuple[str, list[list[dict]]]:
+    return await mode_panel_for_chat(
+        api, chat_id, lang, is_bg_active=_is_bg_consciousness_active, runtime_getter=_try_presence_runtime
+    )
 
 
-def _build_menu_status(command_mode: str, lang: str = "en", info_text: str = "") -> tuple[str, list[list[dict]]]:
-    """Return status header and keyboard with Refresh and Back button."""
-    t = _LOCALIZED_TEXTS[lang]
-    header = t.format("metrics_title", info_text=info_text)
-    keyboard = [
-        [{"text": t["btn_refresh"], "callback_data": "cmd_act:update_status"}],
-        [{"text": t["btn_back"], "callback_data": "nav:menu"}]
-    ]
-    return header, keyboard
-
-
-def _build_menu_mind(command_mode: str, lang: str = "en", bg_enabled: bool = False) -> tuple[str, list[list[dict]]]:
-    """Return mind controlling header and buttons."""
-    t = _LOCALIZED_TEXTS[lang]
-    state_str = t["mind_state_active"] if bg_enabled else t["mind_state_sleeping"]
-    header = t.format("mind_title", state_str=state_str)
-
-    row = []
-    if command_mode == _COMMAND_MODE_FULL:
-        if bg_enabled:
-            row.append({"text": t["btn_stop_bg"], "callback_data": "cmd_act:bg_stop"})
-        else:
-            row.append({"text": t["btn_start_bg"], "callback_data": "cmd_act:bg_start"})
-
-    keyboard = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([{"text": t["btn_back"], "callback_data": "nav:menu"}])
-    return header, keyboard
-
-
-def _bot_commands(command_mode: str, lang: str = "") -> list:
-    """Localized '/' menu: owner Panic in every mode; other controls in full_access."""
-    t = _LOCALIZED_TEXTS[lang]
-    cmds = [
-        {"command": "menu", "description": t["cmd_menu"]},
-        {"command": "language", "description": t["cmd_language"]},
-        {"command": "status", "description": t["cmd_status"]},
-        {"command": "help", "description": t["cmd_help"]},
-        {"command": "panic", "description": t["cmd_panic"]},
-    ]
-    if command_mode == _COMMAND_MODE_FULL:
-        cmds += [
-            {"command": "evolve", "description": t["cmd_evolve"]},
-            {"command": "bg", "description": t["cmd_bg"]},
-            {"command": "review", "description": t["cmd_review"]},
-            {"command": "restart", "description": t["cmd_restart"]},
-        ]
-    return cmds
-
-
-def _build_menu_settings(api, command_mode: str, lang: str = "en") -> tuple[str, list[list[dict]]]:
-    """Return (header_text, inline_keyboard_rows) for the Settings panel."""
-    t = _LOCALIZED_TEXTS[lang]
-    header = t["settings_title"]
-    silent_on = _is_silent_mode_enabled(_load_settings(api))
-    silent_label = t["btn_silent_on"] if silent_on else t["btn_silent_off"]
-    keyboard = [
-        [
-            {"text": t["btn_language"], "callback_data": "nav:language"},
-        ],
-        [
-            {"text": silent_label, "callback_data": "cmd_act:toggle_silent"},
-        ],
-        [{"text": t["btn_back"], "callback_data": "nav:menu"}]
-    ]
-    return header, keyboard
-
-
-def _build_language_keyboard(lang: str = "") -> tuple[str, list[list[dict]]]:
-    """(header_text, inline_keyboard_rows) for the install's interface language: English,
-    every language with a translation memory on disk (the current one marked), and the
-    hint that any other language is one ``/language <name>`` away."""
-    t = _LOCALIZED_TEXTS[lang]
-    header = t.format("lang_title", language=telegram_i18n.label(lang))
-    rows = [[{"text": t["lang_english"], "callback_data": "set_lang:en"}]]
-    for item in telegram_i18n.known_languages():
-        tag = str(item.get("language") or "")
-        if not tag or telegram_i18n.english(tag):
-            continue
-        mark = "• " if tag == lang else ""
-        rows.append([{"text": f"{mark}{item.get('label') or tag}", "callback_data": f"set_lang:{tag}"}])
-    rows.append([{"text": t["btn_back"], "callback_data": "nav:menu"}])
-    return header, rows
+async def _handle_mode_command(api, client, chat_id: int, text: str, lang: str) -> None:
+    await handle_mode_command(api, client, chat_id, text, lang, panel_builder=_mode_panel_for_chat)
 
 
 async def _choose_language(api, requested: str, lang: str, notify) -> str:
@@ -319,37 +266,6 @@ def _host_headers(api) -> Dict[str, str]:
     return {"X-Skill-Token": api.get_skill_token().use_in_request()}
 
 
-def _target_chat(settings: Dict[str, Any], event: Dict[str, Any]) -> int:
-    mirror_mode = str(settings.get("TELEGRAM_MIRROR_MODE") or "all").strip().lower()
-    configured = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
-    if configured:
-        try:
-            chat_id = int(configured)
-        except ValueError:
-            return 0
-        if mirror_mode == "all":
-            # Mirror everything (web UI + Telegram) to the pinned chat
-            return chat_id
-        # telegram_only: only forward events that originate from Telegram transport
-        transport = event.get("transport") if isinstance(event.get("transport"), dict) else {}
-        if transport.get("kind") == "telegram":
-            return chat_id
-        # ...and the owner's notes, skill notices and the Safety Supervisor's notices: System rows
-        # written for the owner, which an owner who left the web should still get on the phone.
-        if event.get("role") == "system" and event.get("system_type") in {"reminder", "skill_notice", "safety_notice"}:
-            return chat_id
-        return 0
-    # No pinned chat configured — only forward events that originate from
-    # a Telegram transport conversation so local UI events are never leaked.
-    transport = event.get("transport") if isinstance(event.get("transport"), dict) else {}
-    if transport.get("kind") != "telegram":
-        return 0
-    try:
-        return int(transport.get("conversation_id") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
     """POST one JSON payload to the loopback Host Service; return ``(status, body)``."""
     try:
@@ -375,11 +291,18 @@ async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict
     return int(response.status_code), (body if isinstance(body, dict) else {})
 
 
+def _is_panic_text(text: Any) -> bool:
+    cleaned = str(text or "").strip()
+    m = _MAIN_CMD_RE.match(cleaned)
+    if m:
+        cleaned = (m.group(1) or "").strip()
+    return cleaned.lower().startswith("/panic")
+
+
 def _panic_update(update: Dict[str, Any]) -> bool:
-    """Whether an update is a /panic message: the one test for an owner Panic, early or in order; its sender is
-    checked by the caller (``_authorized_owner``)."""
+    """Whether an update is a /panic message (normalizing /main or /m wrappers before freshness/early checks)."""
     message = update.get("message") or {}
-    return str(message.get("text") or message.get("caption") or "").strip().lower().startswith("/panic")
+    return _is_panic_text(message.get("text") or message.get("caption") or "")
 
 
 # The pause before an update the host did not accept is asked again; any other failure is never retried.
@@ -389,8 +312,8 @@ _NOT_ACCEPTED_RETRY_SEC = 2.0
 async def _inject(api, payload: Dict[str, Any]) -> None:
     settings = _load_settings(api)
     pinned_chat = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
-    if not pinned_chat:
-        api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is not configured or bound.")
+    if not pinned_chat or str(payload.get("chat_id") or "").strip() != pinned_chat:
+        api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is unbound or does not match sender.")
         return
     status, body = await _host_post(api, "/chat/inject", payload)
     if status == 503 and body.get("code") == "not_accepted":
@@ -491,30 +414,64 @@ def _poller_preferences(api):
     return settings, pinned, maximum, mode, telegram_i18n.language()
 
 
+_LAST_COMMAND_SCOPE: Dict[str, tuple[str, str, tuple[str, str] | None, float]] = {}
+
+
+def _should_sync_commands(state_key: str, bot_id_val: str, pinned_chat: str) -> bool:
+    target = (bot_id_val, pinned_chat)
+    synced_bot, synced_chat, failed_target, failed_at = _LAST_COMMAND_SCOPE.get(state_key, ("", "", None, 0.0))
+    return (synced_bot, synced_chat) != target and (failed_target != target or time.monotonic() - failed_at >= 60.0)
+
+
+async def _sync_bot_commands(api, client, command_mode: str, lang: str, pinned_chat: str) -> None:
+    """Keep owner admin commands scoped to the bound owner DM and clear the public default scope."""
+    state_key = os.path.realpath(api.get_state_dir())
+    prev_bot, prev_chat, _, _ = _LAST_COMMAND_SCOPE.get(state_key, ("", "", None, 0.0))
+    try:
+        if prev_bot == client.bot_id and prev_chat and prev_chat != pinned_chat and prev_chat.isdigit() and int(prev_chat) > 0:
+            await client.call("setMyCommands", data={"commands": "[]", "scope": json.dumps({"type": "chat", "chat_id": int(prev_chat)})})
+            prev_bot, prev_chat = "", ""
+        # Always clear Telegram's default scope so owner commands never appear in groups or non-owner DMs.
+        await client.call("setMyCommands", data={"commands": "[]", "scope": json.dumps({"type": "default"})})
+        if pinned_chat.isdigit() and int(pinned_chat) > 0:
+            await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang)),
+                                                     "scope": json.dumps({"type": "chat", "chat_id": int(pinned_chat)})})
+        _LAST_COMMAND_SCOPE[state_key] = (client.bot_id, pinned_chat, None, 0.0)
+        api.log("info", "Telegram bot commands configured successfully")
+    except TelegramBindingChanged:
+        raise  # a stale client is never reported ready
+    except Exception as exc:
+        _LAST_COMMAND_SCOPE[state_key] = (prev_bot, prev_chat, (client.bot_id, pinned_chat), time.monotonic())
+        api.log("warning", f"Failed to set Telegram bot commands: {exc}")
+
+
 async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) -> str | None:
-    callback = update.get("callback_query") or {}
-    message = update.get("message") or {}
+    callback, message = update.get("callback_query") or {}, update.get("message") or {}
     chat = ((callback.get("message") or {}).get("chat") or (message.get("chat") or {}))
     sender = callback.get("from") or message.get("from") or {}
-    chat_id = int(chat.get("id") or 0)
-    user_id = int(sender.get("id") or 0)
+    chat_id, user_id = int(chat.get("id") or 0), int(sender.get("id") or 0)
     if chat_id <= 0 or user_id <= 0:
         return None
-    if not pinned_chat:
+    live_pinned = str(_load_settings(api).get("TELEGRAM_CHAT_ID") or "").strip()
+    if pinned_chat and not live_pinned:
+        return None  # owner binding was cleared mid-batch; never re-TOFU or keep old access
+    active_pinned = live_pinned
+    if not active_pinned:
         if str(chat.get("type") or "") != "private" or chat_id != user_id:
             return None
         merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_CHAT_ID": str(chat_id)})
-        pinned_chat = str(chat_id)
-    if str(chat_id) == pinned_chat and str(user_id) == pinned_chat:
-        return pinned_chat
-    if callback:
+        active_pinned = str(chat_id)
         try:
-            await client.answer_callback_query(
-                str(callback.get("id") or ""),
-                text=_LOCALIZED_TEXTS[lang]["not_authorized"],
-            )
+            await _sync_bot_commands(api, client, _poller_preferences(api)[3], lang, active_pinned)
+        except TelegramBindingChanged:
+            raise
         except Exception:
             pass
+    if str(chat_id) == active_pinned and str(user_id) == active_pinned:
+        return active_pinned
+    if callback:
+        with contextlib.suppress(Exception):
+            await client.answer_callback_query(str(callback.get("id") or ""), text=_LOCALIZED_TEXTS[lang]["not_authorized"])
     return None
 
 
@@ -526,21 +483,25 @@ async def _edit_panel(api, client, chat_id: int, message_id: int, text: str, key
 
 
 async def _validate_bot(api, client, command_mode: str, lang: str, generation: int | None = None) -> None:
-    """Validate the token (getMe) and finish bridge startup bookkeeping; ready names the exact binding proved."""
-    await client.call("getMe")
-    # Menu discovery follows command mode; owner Panic has its own immediate door.
+    """Validate the token (getMe) and finish bridge + Presence startup bookkeeping."""
+    me_payload = await client.call("getMe")
+    me = me_payload.get("result") if isinstance(me_payload, dict) and isinstance(me_payload.get("result"), dict) else {}
+    me_id = str(me.get("id") or client.bot_id or "").strip()
+    me_username = str(me.get("username") or "").strip()
+    pinned_chat = ""
     try:
-        await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang))})
-        api.log("info", "Telegram bot commands configured successfully")
-    except TelegramBindingChanged:
-        raise  # a stale client is never reported ready
-    except Exception as exc:
-        api.log("warning", f"Failed to set Telegram bot commands: {exc}")
+        pinned_chat = str(_load_settings(api).get("TELEGRAM_CHAT_ID") or "").strip()
+    except TelegramSettingsError:
+        pinned_chat = ""
+    await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
     if generation is not None:
         binding = binding_for(api)
         if not binding.current(generation):
             raise TelegramBindingChanged(getattr(client, "accepted", 0))
         binding.mark_validated(generation)
+    runtime = _try_presence_runtime(api)
+    if runtime is not None:
+        runtime.on_bot_validated(client.token, me_id, me_username)
     _save_bridge_status(api, "ready", bot=client.bot_id, generation=generation)
     api.log("info", f"Telegram poller started (command_mode={command_mode}, lang={lang})")
 
@@ -632,6 +593,9 @@ async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, 
         elif target == "settings":
             header, keyboard = _build_menu_settings(api, command_mode, lang)
             await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+        elif target == "mode":
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
         return lang
 
     # --- Command Actions / Control (Category 2) ---
@@ -660,6 +624,19 @@ async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, 
             toast_key = "quiet_toggled_on" if new_value == "on" else "quiet_toggled_off"
             await client.answer_callback_query(cb_id, text=_LOCALIZED_TEXTS[lang][toast_key])
             header, keyboard = _build_menu_settings(api, command_mode, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+        elif action == "toggle_quizzes":
+            local_settings = _load_settings(api)
+            new_value = "off" if _mirror_quizzes_enabled(local_settings) else "on"
+            merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_MIRROR_QUIZZES": new_value})
+            confirm()
+            m = _MODE_TEXTS[lang]
+            await client.answer_callback_query(
+                cb_id, text=m["quizzes_updated_on"] if new_value == "on" else m["quizzes_updated_off"]
+            )
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
             await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
             return lang
 
@@ -702,6 +679,53 @@ async def _handle_poll_callback(api, client, update, pinned_chat, command_mode, 
             await asyncio.sleep(0.8)
             bg_enabled = _is_bg_consciousness_active(api)
             header, keyboard = _build_menu_mind(command_mode, lang, bg_enabled)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+    # --- Handle owner DM chat mode, mirror mode and preset buttons ---
+    if cb_data.startswith("set_mode:"):
+        chosen = cb_data.split(":", 1)[1].strip().lower()
+        if chosen in VALID_OWNER_CHAT_MODES:
+            merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_OWNER_CHAT_MODE": chosen})
+            confirm()
+            m = _MODE_TEXTS[lang]
+            toast = m["mode_updated_presence"] if chosen == OWNER_CHAT_MODE_PRESENCE else m["mode_updated_direct"]
+            await client.answer_callback_query(cb_id, text=toast)
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+    if cb_data.startswith("set_mirror:"):
+        chosen = cb_data.split(":", 1)[1].strip().lower()
+        if chosen in VALID_MIRROR_MODES:
+            merge_settings(pathlib.Path(api.get_state_dir()), {"TELEGRAM_MIRROR_MODE": chosen})
+            confirm()
+            await client.answer_callback_query(cb_id, text=_MODE_TEXTS[lang].format("mirror_updated", mode=chosen))
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+
+    if cb_data.startswith("set_preset:"):
+        chosen = cb_data.split(":", 1)[1].strip().lower()
+        m = _MODE_TEXTS[lang]
+        if chosen == "presence_control":
+            merge_settings(
+                pathlib.Path(api.get_state_dir()),
+                {"TELEGRAM_OWNER_CHAT_MODE": OWNER_CHAT_MODE_PRESENCE, "TELEGRAM_MIRROR_MODE": MIRROR_MODE_CONTROL_ONLY},
+            )
+            confirm()
+            await client.answer_callback_query(cb_id, text=m["preset_presence_applied"])
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
+            await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
+            return lang
+        if chosen == "direct_main":
+            merge_settings(
+                pathlib.Path(api.get_state_dir()),
+                {"TELEGRAM_OWNER_CHAT_MODE": OWNER_CHAT_MODE_DIRECT, "TELEGRAM_MIRROR_MODE": MIRROR_MODE_MAIN},
+            )
+            confirm()
+            await client.answer_callback_query(cb_id, text=m["preset_direct_applied"])
+            header, keyboard = await _mode_panel_for_chat(api, cb_chat_id, lang)
             await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
             return lang
 
@@ -753,7 +777,11 @@ async def _poller(api) -> None:
         try:
             started = await _start_poller(api)
             break
-        except TelegramRequestRejected:
+        except TelegramRequestRejected as exc:
+            runtime = _try_presence_runtime(api)
+            if runtime is not None:
+                rejected_token = fingerprint[0] if fingerprint is not None else accepted_token()
+                runtime.on_token_rejected(rejected_token, str(exc))
             await park_until_settings_change(api, fingerprint, binding)
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue
@@ -766,6 +794,9 @@ async def _poller(api) -> None:
         revalidating = False
         try:
             if not accepted_token():
+                runtime = _try_presence_runtime(api)
+                if runtime is not None:
+                    runtime.on_token_cleared()
                 await _wait_for_bot_token(api, binding)
             saved = _saved_server(api)
             token_changed = not binding.current(generation)
@@ -778,10 +809,17 @@ async def _poller(api) -> None:
                 (client, generation), server = _bridge_client(api, server=saved), saved
                 cursor.follow(saved[0], bot_id(client.token))
                 if token_changed:
+                    runtime = _try_presence_runtime(api)
+                    if runtime is not None:
+                        runtime.on_token_changed()
                     _save_bridge_status(api, "connecting", "telegram_token_changed", bot=client.bot_id, generation=generation)
                     api.log("info", "Telegram bot token changed; polling follows the saved token.")
                     degraded = ""
                 else:
+                    if not validated:
+                        runtime = _try_presence_runtime(api)
+                        if runtime is not None:
+                            runtime.on_token_changed()
                     api.log("info", "Telegram Bot API settings changed; polling follows the saved server.")
             if not validated:
                 revalidating = True
@@ -792,6 +830,9 @@ async def _poller(api) -> None:
                 # Answered for the previous token: neither confirmed nor handled, so the same bot's
                 # rotated token receives these updates again and another bot never sees them.
                 continue
+            runtime = _try_presence_runtime(api)
+            if runtime is not None:
+                runtime.on_poll_ok()
             if degraded_cause:
                 api.log("info", f"Telegram poller recovered after {degraded_cause}; polling resumed.")
                 degraded_cause = ""
@@ -801,11 +842,18 @@ async def _poller(api) -> None:
             retry_delay = TELEGRAM_RETRY_INITIAL_SEC
             if updates:
                 local_settings, pinned_chat, max_updates, command_mode, lang = _poller_preferences(api)
+            elif validated:
+                try:
+                    pinned_chat = str(_load_settings(api).get("TELEGRAM_CHAT_ID") or "").strip()
+                except Exception:
+                    pass
+            if validated and _should_sync_commands(os.path.realpath(api.get_state_dir()), client.bot_id, pinned_chat):
+                await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
 
             deferred, lang = await handle_poll_batch(
                 api, client, updates, cursor, binding, generation, pinned_chat, max_updates, command_mode, lang,
                 authorize=_authorized_owner, is_panic=_panic_update, on_message=_handle_owner_message,
-                on_callback=_handle_poll_callback,
+                on_callback=_handle_poll_callback, on_non_owner=_handle_non_owner_update,
             )
             await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
@@ -813,6 +861,9 @@ async def _poller(api) -> None:
         except (TelegramRequestRejected, TelegramTransportError) as exc:
             # Only getUpdates and getMe reach here: a 409 is another poller of this token, which may stop.
             if isinstance(exc, TelegramRequestRejected) and not exc.transient and exc.status_code != 409:
+                runtime = _try_presence_runtime(api)
+                if runtime is not None:
+                    runtime.on_token_rejected(client.token, str(exc))
                 _fail_permanent_poll_rejection(api, exc, revalidating, client.bot_id, generation)
                 await park_until_settings_change(api, (client.token, server), binding)
                 server, validated, degraded = None, False, ""
@@ -820,6 +871,9 @@ async def _poller(api) -> None:
             # Transition logging only: one line entering degraded, one on
             # recovery; consecutive transient failures stay quiet while the
             # monotone backoff (reset by any successful poll) paces retries.
+            runtime = _try_presence_runtime(api)
+            if runtime is not None:
+                runtime.on_poll_error(str(exc))
             if not degraded_cause:
                 degraded_cause = type(exc).__name__
                 api.log("warning", f"Telegram poller degraded ({degraded_cause}): {exc}")
@@ -839,13 +893,58 @@ async def _poller(api) -> None:
             raise
 
 
+async def _handle_non_owner_update(api, client, update: Dict[str, Any], pinned_chat: str) -> None:
+    await handle_non_owner_update(
+        api,
+        client,
+        update,
+        pinned_chat,
+        runtime_getter=_try_presence_runtime,
+        lang=telegram_i18n.language(),
+        post=_host_post,
+    )
+
+
+async def _maybe_send_presence_hint(api, client, chat_id: int, lang: str, runtime) -> None:
+    await maybe_send_presence_hint(api, client, chat_id, lang, runtime, is_bg_active=_is_bg_consciousness_active)
+
+
+async def _record_owner_sighting(api, client, update: Dict[str, Any]) -> None:
+    runtime = _try_presence_runtime(api)
+    if runtime is not None:
+        try:
+            await runtime.ingest_update(update, account_id=client.bot_id, record_only=True)
+        except Exception:
+            pass
+
+
 async def _handle_owner_message(
     api, client, update: Dict[str, Any], update_id: int, command_mode: str, lang: str, *, reply_target=None,
 ) -> None:
-    """One authorized owner message: local /menu /language /help, command-mode
-    translation, a reply to a quiz card (#472), then text/photo/file relay (#668).
+    """One authorized owner message: local /menu /mode /language /help /panic, /main override,
+    command-mode translation, quiz replies, then Presence custody (presence mode) or Main inject (direct mode).
     Owner binding is already enforced by the caller (TOFU for every command mode).
     """
+    ingested_to_presence = False
+
+    def mark_ingested() -> None:
+        nonlocal ingested_to_presence
+        ingested_to_presence = True
+
+    try:
+        await _handle_owner_message_inner(
+            api, client, update, update_id, command_mode, lang,
+            reply_target=reply_target, mark_ingested=mark_ingested,
+        )
+    finally:
+        if not ingested_to_presence:
+            await _record_owner_sighting(api, client, update)
+
+
+async def _handle_owner_message_inner(
+    api, client, update: Dict[str, Any], update_id: int, command_mode: str, lang: str,
+    *, reply_target=None, mark_ingested=lambda: None,
+) -> None:
     message = update.get("message") or {}
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
@@ -865,6 +964,11 @@ async def _handle_owner_message(
             await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         else:
             await client.send_message(chat_id, header)
+        return
+
+    # Handle /mode locally — always allowed so owner can inspect/switch DM and mirror modes in any command mode.
+    if _is_exact_bot_command(cleaned_text, "/mode") or cleaned_text.startswith("/mode ") or cleaned_text.startswith("/mode@"):
+        await _handle_mode_command(api, client, chat_id, text, lang)
         return
 
     # Handle /language locally — always allowed. Bare: the keyboard. With an argument
@@ -926,6 +1030,21 @@ async def _handle_owner_message(
             await _choose_language(api, requested, lang, _reply)
             return
 
+    # Explicit one-shot Main escape hatch: `/main <text>` or `/m <text>` bypasses Presence mode.
+    force_direct = False
+    main_match = _MAIN_CMD_RE.match(text)
+    if main_match:
+        inner = (main_match.group(1) or "").strip()
+        if not inner and not (message.get("photo") or []) and telegram_inbound.inbound_file(message) is None:
+            await client.send_message(chat_id, _MODE_TEXTS[lang]["main_empty"])
+            return
+        force_direct = True
+        text = inner
+        if caption and _MAIN_CMD_RE.match(caption):
+            caption = (_MAIN_CMD_RE.match(caption).group(1) or "").strip()
+
+    is_slash_cmd = bool(_SLASH_COMMAND_RE.match(text) or (caption and _SLASH_COMMAND_RE.match(caption)))
+
     # Translate commands to safe natural-language text.
     # _translate_command returns None when the command is rejected.
     safe_text = _translate_command(text, command_mode)
@@ -943,13 +1062,13 @@ async def _handle_owner_message(
             )
         return
 
-    if quiz_ref is not None and quiz_ref.get("ambiguous") and not _SLASH_COMMAND_RE.match(text):
+    if not force_direct and quiz_ref is not None and quiz_ref.get("ambiguous") and not _SLASH_COMMAND_RE.match(text):
         # An old card's number names no question for sure: an answer or a turn meant for it stays
         # here, before any download; a command keeps its dispatch, as below.
         await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
                                               request_key=update_key(update), lang=lang, post=_host_post)
         return
-    if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
+    if not force_direct and safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
             # that question, not a new chat turn (#472).
@@ -961,6 +1080,18 @@ async def _handle_owner_message(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
+
+    # Dual-lane Owner DM routing: in `presence` mode, ordinary non-command messages commit to
+    # Presence SQLite custody and fail closed (never silently falling back to Main `/chat/inject`).
+    if not force_direct and not is_slash_cmd and _owner_chat_mode(_load_settings(api)) == OWNER_CHAT_MODE_PRESENCE:
+        presence_rt = _try_presence_runtime(api)
+        if presence_rt is None:
+            raise InjectNotAccepted("Presence runtime unavailable")
+        inserted = await presence_rt.ingest_update(update, account_id=client.bot_id, record_only=False)
+        mark_ingested()
+        if inserted:
+            await _maybe_send_presence_hint(api, client, chat_id, lang, presence_rt)
+        return
     def read_target():
         return _reply_target(api, client.bot_id, chat_id, message)
 
@@ -1149,9 +1280,14 @@ def _typing_cue(api) -> TypingCue:
     """The bridge's one typing refresher over the host's reply-preparation projection, paced per accepted token."""
     def targets(state: Dict[str, Any]) -> set:  # a proven address types only in its bot and chat (TypingCue._send)
         settings, bot = _load_settings(api), bot_id(binding_for(api).snapshot()[0])
-        transports = [row.get("transport") or {} for row in state.get("chats") or [] if isinstance(row, dict)]
-        return {chat for transport in transports if (chat := _target_chat(settings, {"transport": transport}))
-                and _carried_here(bot, transport, chat)}
+        rows = [row for row in state.get("chats") or [] if isinstance(row, dict)]
+        return {
+            chat
+            for row in rows
+            if (transport := row.get("transport") or {}) is not None
+            and (chat := _target_chat(settings, {"chat_id": row.get("chat_id"), "transport": transport}))
+            and _carried_here(bot, transport, chat)
+        }
 
     return TypingCue(read_state=lambda: host_reply_preparation(_data_dir(api)), targets=targets,
                      client_factory=lambda: _telegram_client(api), warn=lambda text: api.log("warning", text),
@@ -1163,187 +1299,54 @@ def _cue_message(cue: TypingCue | None, chat_id: int):
     return cue.message(chat_id) if cue is not None else contextlib.nullcontext(lambda: None)
 
 
-def _make_photo(api):
+def _bridged_handler(handler):
     async def handle(event: Dict[str, Any]) -> None:
-        try:
-            local_settings = _load_settings(api)
-            chat_id = _target_chat(local_settings, event)
-            image_base64 = str(event.get("image_base64") or "").strip()
-            if chat_id and image_base64:
-                client = _telegram_client(api, event, chat_id)
-                # Media cannot replace a text bubble in Telegram — break the
-                # silent chain so the next outbound starts a fresh message.
-                _clear_silent_msg(api, chat_id)
-                caption = str(event.get("caption") or "")
-                caption = await client.media_caption(chat_id, caption)
-                await client.send_photo(
-                    chat_id,
-                    image_base64,
-                    caption=caption,
-                    mime=str(event.get("mime") or "image/png"),
-                )
-        except Exception as exc:
-            _report_failure(api, "photo", exc)
+        await handler(_bridged(event))
+
     return handle
+
+
+def _make_photo(api):
+    return _bridged_handler(make_photo_handler(
+        api,
+        load_settings=lambda a: _load_settings(a),
+        target_chat=lambda s, e: _target_chat(s, e),
+        client_factory=lambda *a, **k: _telegram_client(*a, **k),
+    ))
 
 
 def _make_video(api):
-    async def handle(event: Dict[str, Any]) -> None:
-        try:
-            local_settings = _load_settings(api)
-            chat_id = _target_chat(local_settings, event)
-            video_base64 = str(event.get("video_base64") or "").strip()
-            if chat_id and video_base64:
-                client = _telegram_client(api, event, chat_id)
-                # Media cannot replace a text bubble — reset silent tracking.
-                _clear_silent_msg(api, chat_id)
-                caption = str(event.get("caption") or "")
-                caption = await client.media_caption(chat_id, caption)
-                mime = str(event.get("mime") or "video/mp4")
-                import base64 as _base64
-                files = {"video": ("video.mp4", _base64.b64decode(video_base64), mime)}
-                data = {"chat_id": str(chat_id), "caption": markdown_to_telegram_html(caption), "parse_mode": "HTML"}
-                await client.call("sendVideo", data=data, files=files, timeout=40)
-        except Exception as exc:
-            _report_failure(api, "video", exc)
-    return handle
+    return _bridged_handler(make_video_handler(
+        api,
+        load_settings=lambda a: _load_settings(a),
+        target_chat=lambda s, e: _target_chat(s, e),
+        client_factory=lambda *a, **k: _telegram_client(*a, **k),
+    ))
 
 
 def _make_document(api):
-    async def handle(event: Dict[str, Any]) -> None:
-        file_handle = None
-        try:
-            local_settings = _load_settings(api)
-            chat_id = _target_chat(local_settings, event)
-            file_base64 = str(event.get("file_base64") or "").strip()
-            file_ref = event.get("file_ref") if isinstance(event.get("file_ref"), dict) else None
-            if chat_id and (file_base64 or file_ref):
-                client = _telegram_client(api, event, chat_id)
-                # Media/files cannot replace a text bubble — reset silent tracking.
-                _clear_silent_msg(api, chat_id)
-                import base64 as _base64
-                filename = str(event.get("filename") or "file")
-                caption = str(event.get("caption") or "")
-                if file_ref:
-                    from ouroboros.gateway.files import resolve_task_file_reference
-
-                    task_id = str(event.get("task_id") or file_ref.get("task_id") or "")
-                    source = await asyncio.to_thread(resolve_task_file_reference, _data_dir(api), task_id, file_ref)
-                    if file_ref["size"] > _MAX_TELEGRAM_UPLOAD_BYTES:
-                        t = _LOCALIZED_TEXTS[telegram_i18n.language()]
-                        notice = t.format("file_too_large_notice", filename=filename)
-                        status = await asyncio.to_thread(_read_status, api)
-                        if status.get("state") == "ready" and status.get("public_url"):
-                            try:
-                                await client.send_message_with_inline_keyboard(chat_id, notice,
-                                    [[{"text": t["btn_open_app"], "web_app": {"url": status["public_url"]}}]])
-                                return
-                            except TelegramRequestRejected as exc:
-                                if not exc.plain_retry_safe:
-                                    raise
-                                with replacing_request():
-                                    await client.send_message(chat_id, notice + " " + t["file_open_app_hint"], parse_mode="")
-                                return
-                        await client.send_message(chat_id, notice + " " + t["file_open_app_hint"], parse_mode="")
-                        return
-                    file_handle = source.open("rb")
-                    file_bytes = file_handle
-                else:
-                    file_bytes = _base64.b64decode(file_base64)
-                mime = str(event.get("mime") or "application/octet-stream")
-                caption = await client.media_caption(chat_id, caption)
-                if _is_native_audio_document(filename, mime):
-                    try:
-                        await client.send_audio(
-                            chat_id,
-                            file_bytes,
-                            filename=filename,
-                            caption=caption,
-                            mime=mime,
-                        )
-                    except TelegramRequestRejected as exc:
-                        # Fall back to a plain document only on a definitive
-                        # format rejection (HTTP 400). Auth failures and
-                        # transient errors (429/5xx) re-raise: retrying the
-                        # upload there risks a duplicate delivery.
-                        if exc.status_code != 400 or exc.transient:
-                            raise
-                        if file_handle is not None:
-                            file_handle.seek(0)
-                        with replacing_request():
-                            await client.send_document(
-                                chat_id,
-                                file_bytes,
-                                filename=filename,
-                                caption=caption,
-                            )
-                else:
-                    await client.send_document(
-                        chat_id,
-                        file_bytes,
-                        filename=filename,
-                        caption=caption,
-                    )
-        except Exception as exc:
-            _report_failure(api, "document", exc)
-        finally:
-            if file_handle is not None:
-                file_handle.close()
-    return handle
-
-
-def _is_native_audio_document(filename: str, mime: str) -> bool:
-    extension = pathlib.Path(str(filename or "")).suffix.casefold()
-    normalized_mime = str(mime or "").split(";", 1)[0].strip().casefold()
-    return extension in {".mp3", ".m4a"} or normalized_mime in {
-        "audio/mpeg",
-        "audio/mp3",
-        "audio/mp4",
-        "audio/x-m4a",
-    }
+    return _bridged_handler(make_document_handler(
+        api,
+        load_settings=lambda a: _load_settings(a),
+        target_chat=lambda s, e: _target_chat(s, e),
+        client_factory=lambda *a, **k: _telegram_client(*a, **k),
+        read_status=lambda a: _read_status(a),
+    ))
 
 
 def _make_links(api):
-    async def handle(event: Dict[str, Any]) -> None:
-        try:
-            local_settings = _load_settings(api)
-            chat_id = _target_chat(local_settings, event)
-            if not chat_id:
-                return
-            client = _telegram_client(api, event, chat_id)
-            title = str(event.get("title") or "").strip() or "Links"
-            raw_actions = event.get("actions") if isinstance(event.get("actions"), list) else []
-            actions = []
-            for action in raw_actions:
-                if not isinstance(action, dict):
-                    continue
-                label = str(action.get("label") or "").strip()
-                url = str(action.get("url") or "").strip()
-                if label and url:
-                    actions.append((label, url))
-            # Shared link-action contract cap: ouroboros.tools.core._MAX_LINK_ACTIONS.
-            actions = actions[:12]
-            if not actions:
-                return
-            _clear_silent_msg(api, chat_id)
-            keyboard = [[{"text": label, "url": url}] for label, url in actions]
-            try:
-                await client.send_message_with_inline_keyboard(chat_id, title, keyboard)
-            except TelegramRequestRejected as exc:
-                if not exc.plain_retry_safe:
-                    raise
-                api.log("warning", "Telegram links keyboard failed; sending a plain list.")
-                plain_text = "\n".join([title, *(f"{label} — {url}" for label, url in actions)])
-                with replacing_request():
-                    await client.send_message(chat_id, plain_text, parse_mode="")
-        except Exception as exc:
-            _report_failure(api, "links", exc)
-    return handle
+    return _bridged_handler(make_links_handler(
+        api,
+        load_settings=lambda a: _load_settings(a),
+        target_chat=lambda s, e: _target_chat(s, e),
+        client_factory=lambda *a, **k: _telegram_client(*a, **k),
+    ))
 
 
 def _make_quiz(api, cue: TypingCue | None = None):
     async def handle(event: Dict[str, Any]) -> None:
         try:
+            event = _bridged(event)
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
@@ -1394,6 +1397,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
             # arrives as plain parts followed by the compact keyboard message.
             # Creation holds the card's lock so a lifecycle fact cannot edit (or
             # miss) a card mid-send.
+            sent_ids: list[int] = []
             async with telegram_quiz.card_lock(token), _cue_message(cue, chat_id) as delivered:
                 message_id, overflowed = await telegram_quiz.send_quiz_card(
                     client, chat_id, body=body, compact=compact,
@@ -1401,19 +1405,18 @@ def _make_quiz(api, cue: TypingCue | None = None):
                                else telegram_quiz.hint_open(lang)),
                     keyboard=telegram_quiz.quiz_keyboard(token, labels),
                     reserve=telegram_quiz.answered_edit_reserve(lang) + _u16len(prefix),
+                    **({"sent_ids": sent_ids, "on_part": lambda mid: telegram_quiz.remember_secret_message(
+                        api, client.bot_id, chat_id, mid, task_id, quiz_id)} if secret else {}),
                 )
                 delivered()
-                if overflowed:
-                    settled_text = compact
-                elif wait_for_answer:
-                    # The answer edit keeps optional history, not a live waiting claim.
-                    settled_text = telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
-                else:
-                    settled_text = body
+                settled_text = (compact if overflowed else
+                                telegram_quiz.render_quiz_text(question, plain_labels, stake, "", **card)
+                                if wait_for_answer else body)
                 telegram_quiz.remember_quiz(api, client.bot_id, token, {
                     "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                     "message_id": int(message_id or 0), "options": labels,
-                    "text": prefix + settled_text, **({"secret": True} if secret else {}),
+                    "text": prefix + settled_text,
+                    **({"secret": True, "message_ids": sent_ids} if secret else {}),
                 })
                 await telegram_quiz.apply_retained_fact(
                     api, token, lang, client_factory=lambda: _telegram_client(api), published=event)
@@ -1435,19 +1438,30 @@ def _make_quiz_state(api):
     return handle
 
 
+def _make_presence_status(api):
+    return make_presence_status(api, runtime_getter=_presence_runtime)
+
+
 def register(api):
     telegram_i18n.configure(_data_dir(api))
     binding = binding_for(api)
     binding.read_now(api)  # the token in force from the first send; the observer keeps it current
+    presence = _presence_runtime(api)
     if callable(getattr(api, "on_unload", None)):
-        api.on_unload(binding.close)  # unload, Off or a revoked grant: no client of this load sends again
+        def _unload() -> None:
+            binding.close()
+            presence.stop(wait_sec=2.0)
+
+        api.on_unload(_unload)  # unload, Off or a revoked grant: no client or worker of this load sends again
     cue = _typing_cue(api)  # Telegram failures stay inside it, so they never spend restart budget
     api.register_supervised_task("poller", _make_poller(api), restart_policy="on_failure", max_restarts=10)
+    api.register_supervised_task("presence", presence.run, restart_policy="on_failure", max_restarts=10)
     api.register_supervised_task("notifier", _make_notifier(api, trust_env=_HONOR_ENV_PROXIES), restart_policy="on_failure", max_restarts=10)
     api.register_supervised_task("typing_cue", cue.run, restart_policy="on_failure", max_restarts=10)
     # Every mirrored message goes through one durable, ordered journal (lib/telegram_outbox.py).
     outbox = outbox_for(api)
     api.register_supervised_task("outbox", outbox.run, restart_policy="on_failure", max_restarts=10)
+    register_presence_tools(api, presence)
 
     def routed(event):  # each content handler's first filter: no target chat, nothing to save
         return bool(_target_chat(_load_settings(api), _bridged(event)))
@@ -1460,126 +1474,23 @@ def register(api):
     api.subscribe_event("chat.quiz", outbox.subscriber("quiz", _make_quiz(api, cue), routed=routed))
     api.subscribe_event("chat.quiz_state", outbox.subscriber(  # a card's edit: only once a card is remembered
         "quiz_state", _make_quiz_state(api), routed=lambda event: telegram_quiz.card_follows(api, event)))
-    # GET hydrates the declarative form with what is stored; POST saves it.
+    # GET status feeds Circles place discovery and connector health; settings/save hydrates/saves Telegram settings.
+    api.register_route("status", handler=_make_presence_status(api), methods=("GET",))
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     register_connection(api)  # Connection's status and its kept-copies form
-    api.register_settings_section(
-        "telegram",
-        title="Telegram",
-        schema={
-            "components": [
-                {
-                    "type": "markdown",
-                    "text": (
-                        "The bot token lives in Settings → Secrets (TELEGRAM_BOT_TOKEN). While this skill is on, a saved, "
-                        "replaced or cleared token reaches the text bridge and the Mini App within seconds; saving it grants, "
-                        "turns on or resumes nothing; Connection below shows what actually runs. "
-                        "If Telegram needs a proxy, configure Telegram proxy below. It applies to all Telegram API calls, "
-                        "including the menu button; the Mini App tunnel and web traffic keep their existing routes.\n\n"
-                        "**Command mode**: controls which slash commands can be sent from Telegram. "
-                        "Use `/menu` in Telegram to see available commands as inline buttons.\n\n"
-                        "**Mirror mode**: *all* mirrors every chat message (including web UI) to Telegram — requires Chat ID. "
-                        "*Telegram only* mirrors Telegram-originated conversations, plus Ouroboros's reminders, skill notices and Safety notices "
-                        "when a Chat ID is set.\n\n"
-                        "**Mini App Beta** uses a best-effort Cloudflare Quick Tunnel with no SLA and no SSE support. "
-                        "It targets native Telegram clients; Telegram WebA/WebK are not supported."
-                    ),
-                },
-                *connection_components(),
-                {
-                    "type": "form",
-                    "route": "settings/save",
-                    "method": "POST",
-                    "fields": [
-                        {"name": "telegram_proxy_status", "label": "Saved Telegram proxy (at form load)",
-                         "type": "text", "disabled": True, "default": "Not configured"},
-                        {"name": "TELEGRAM_PROXY", "label": "Telegram proxy", "type": "password",
-                         "placeholder": "scheme://[user:password@]host:port",
-                         "help": "Optional HTTP, HTTPS, SOCKS5 or SOCKS5h proxy for Telegram only. "
-                                 "Leave empty to keep the saved proxy. Disable and re-enable the skill after changing it."},
-                        {"name": "clear_telegram_proxy", "label": "Clear saved Telegram proxy", "type": "checkbox",
-                         "help": "Remove the proxy instead of replacing it."},
-                        {"name": "TELEGRAM_API_BASE", "label": "Bot API base URL", "type": "text",
-                         "placeholder": "https://api.telegram.org",
-                         "help": "Origin of a telegram-bot-api server you run, e.g. http://127.0.0.1:8081. Every "
-                                 "Telegram call goes there; polling after its current long poll or retry wait (up to "
-                                 "about a minute). Empty: the cloud. Moving the bot to another server: quit first (skill's notes)."},
-                        {"name": "TELEGRAM_API_FILES_DIR", "label": "Bot API files directory", "type": "text",
-                         "placeholder": "/absolute/path/to/server-file-store",
-                         "help": "For a server started with --local: its file store, mounted at the same absolute "
-                                 "path here. Downloads read files only inside it. Empty: HTTP downloads only."},
-                        {"name": "TELEGRAM_COMMAND_MODE", "label": "Command mode", "type": "select",
-                         "options": [
-                             {"value": "full_access", "label": "Full access (default)"},
-                             {"value": "safe_commands", "label": "Safe commands only"},
-                             {"value": "strict", "label": "Strict"},
-                         ],
-                         "help": "Panic is available in every mode. Full access forwards raw owner commands. "
-                                 "Safe otherwise allows /status and /bg status only; Strict blocks other slash commands.",
-                         "placeholder": "full_access"},
-                        {"name": "TELEGRAM_MIRROR_MODE", "label": "Mirror mode", "type": "select",
-                         "options": [
-                             {"value": "all", "label": "Mirror all messages (web + Telegram)"},
-                             {"value": "telegram_only", "label": "Telegram conversations, plus reminders, skill notices and Safety notices"},
-                         ],
-                         "placeholder": "all"},
-                        {"name": "TELEGRAM_CHAT_ID", "label": "Telegram Chat ID", "type": "text", "placeholder": "required for 'all' mode"},
-                        {"name": "TELEGRAM_MAX_UPDATES_PER_POLL", "label": "Max updates per poll", "type": "number", "placeholder": "20"},
-                        {"name": "TELEGRAM_SILENT_MODE", "label": "Silent mode", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off"},
-                             {"value": "on", "label": "On (without sound)"},
-                         ],
-                         "help": "On sends replies, the final answer and progress without sound; a progress update replaces the one just before it. Questions, files and problems keep their sound.",
-                         "placeholder": "off"},
-                        {"name": "TELEGRAM_SUBAGENT_CARDS", "label": "Subagent cards", "type": "select",
-                         "options": [
-                             {"value": "on", "label": "On"},
-                             {"value": "off", "label": "Off"},
-                         ],
-                         "help": "One updating message per subagent.",
-                         "placeholder": "on"},
-                        {"name": "TELEGRAM_MIRROR_PROGRESS", "label": "Mirror progress telemetry", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off (default)"},
-                             {"value": "on", "label": "On"},
-                         ],
-                         "help": "On streams the main agent's progress; Off keeps replies only.",
-                         "placeholder": "off"},
-                        {"name": "TELEGRAM_MINIAPP_ENABLED", "label": "Telegram Mini App", "type": "select",
-                         "options": [
-                             {"value": "on", "label": "On (default after owner binding)"},
-                             {"value": "off", "label": "Off — keep text bridge only"},
-                         ],
-                         "placeholder": "on"},
-                        {"name": "TELEGRAM_NOTIFY_TASKS", "label": "Notify on task completion", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off — no extra completion messages"},
-                             {"value": "on", "label": "On — completion messages"},
-                         ],
-                         "help": "Off also suppresses extra failure and cancellation notices. Replies, files and "
-                                 "questions still arrive; task details retain all outcomes and review evidence.",
-                         "placeholder": "off"},
-                        {"name": "TELEGRAM_NOTIFY_BUDGET", "label": "Notify on budget thresholds", "type": "select",
-                         "options": [
-                             {"value": "off", "label": "Off"},
-                             {"value": "on", "label": "On — ⚠️ at 80% / 90% / 100%"},
-                         ],
-                         "placeholder": "off"},
-                    ],
-                    "submit_label": "Save Telegram settings",
-                },
-            ]
-        },
-    )
+    api.register_settings_section("telegram", title="Telegram", schema=settings_section_schema())
     # Unsupported OS/architecture degrades inside register_miniapp(). Invalid
     # host runtime or unsafe/unwritable state must fail the complete load rather
     # than leave a partially registered skill claiming to be healthy.
     companion = "miniapp_gateway" if register_miniapp(api) else ""
     # One observer applies a saved, replaced or cleared token to every part, the Mini App included,
     # independent of the poller's long poll or a parked rejection.
-    api.register_supervised_task("token_watch", make_token_observer(api, companion, cue.wake),
+    def _on_token_change() -> None:
+        presence.on_token_changed()
+        cue.wake()
+
+    api.register_supervised_task("token_watch", make_token_observer(api, companion, _on_token_change),
                                  restart_policy="on_failure", max_restarts=10)

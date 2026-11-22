@@ -376,10 +376,19 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.21\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
-    for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
-                 "lib/telegram_health.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
-                 "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):
+    assert "version: 1.5.0\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    for path in ("plugin.py", "ui/icon.svg", "lib/telegram_api.py", "lib/telegram_connection.py",
+                 "lib/telegram_copies.py", "lib/telegram_health.py", "lib/telegram_media_handlers.py",
+                 "lib/telegram_mirror.py", "lib/telegram_notifier.py", "lib/telegram_outbox.py",
+                 "lib/telegram_panels.py", "lib/telegram_poll_binding.py", "lib/telegram_presence_bridge.py",
+                 "lib/telegram_quiz.py", "lib/telegram_share.py", "lib/telegram_state.py",
+                 "lib/presence/__init__.py", "lib/presence/custody.py", "lib/presence/custody_schema.py",
+                 "lib/presence/delivery.py", "lib/presence/discovery.py", "lib/presence/events.py",
+                 "lib/presence/file_access.py", "lib/presence/formatting.py", "lib/presence/host.py",
+                 "lib/presence/outbox_files.py",
+                 "lib/presence/outbox_worker.py", "lib/presence/runtime.py", "lib/presence/status.py",
+                 "lib/presence/tools.py", "lib/presence/transport.py", "scripts/cloudflare_tunnel.py",
+                 "scripts/companion.py", "scripts/sidecar.py", "scripts/telegram_settings.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 

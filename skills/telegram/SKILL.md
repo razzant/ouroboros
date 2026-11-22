@@ -1,22 +1,83 @@
 ---
 name: telegram
-description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.21
+description: Unified Telegram owner control bridge, Mini App gateway, and Circles/Presence transport over a single bot token.
+version: 1.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
 runtime: python3
 os: any
-permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
+permissions: [net, fs, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process, tool, presence]
 env_from_settings: [TELEGRAM_BOT_TOKEN]
 secret_fields:
   botToken: TELEGRAM_BOT_TOKEN
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
-conflicts: [telegram-bridge, telegram-miniapp-poc]
-when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
+conflicts: [telegram-bridge, telegram-miniapp-poc, telegram-bot]
+when_to_use: The owner wants to control Ouroboros, open the Mini App, and connect private chats, groups, forum topics, or channels as Presence places through one Telegram bot.
+icon: ui/icon.svg
+tools:
+  - name: telegram_send
+    effect: message
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    description: Queue a proactive Telegram text, photo, document, video, audio, voice, animation or album for durable Presence delivery.
+  - name: telegram_moderate
+    effect: write
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    description: Queue exact-message deletion or member restriction, ban, or unban with durable receipts.
+  - name: telegram_operation
+    effect: write
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    sends:
+      when:
+        method: [editMessageText]
+      target: chat_id
+      conversation: chat_id
+      thread: topic_id
+      text: text
+    description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
+  - name: telegram_react
+    effect: gesture
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    message: message_id
+    description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
+  - name: telegram_typing
+    effect: write
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    description: Ask for "typing…" in this turn's own chat while actually preparing a reply; a request, not speech, no receipt.
+  - name: telegram_receipt
+    effect: read
+    target: []
+    description: Inspect delivery state and provider receipts for a queued Presence Telegram operation.
+contributes:
+  - id: place
+    provides: place
+    label: Telegram
+    destination: vendor:Telegram
+    scope: account
+    source: {route: status, refresh_s: 15}
+    icon: ui/icon.svg
+    settings: telegram
+    facts:
+      - any_message
+      - direct_message
+      - mention
+      - reply_to_me
+      - from_bot
+      - {id: signal.words, label: "Words you chose appear (connector setting)"}
+    wakes: [direct_message, mention, reply_to_me]
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
-  token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
+  what_model_sees: Six Presence tools (telegram_send, telegram_react, telegram_operation, telegram_moderate, telegram_typing, telegram_receipt) for Places connected in Circles; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing. In owner DM direct mode, owner text, photos and files enter Main chat with host reply references and quiz decision ingress; in owner DM presence mode, ordinary owner DM messages enter Presence custody while /menu, /mode, /main <text>, /panic, slash commands, quizzes and the Mini App remain live.
+  token_effect: Six compact Telegram tool schemas when enabled; incoming media arrive as ordinary attachments or staged Presence files.
 timeout_sec: 60
 companion_processes:
   - name: miniapp_gateway
@@ -28,8 +89,8 @@ companion_processes:
 
 # Telegram
 
-One owner-only Telegram integration provides both the established bot bridge
-and the optional Mini App. The first positive private Telegram chat binds as
+One unified Telegram integration provides the owner control bridge, the optional
+Mini App, and Circles/Presence transport over a single bot token. The first positive private Telegram chat binds as
 the sole owner. Text, photos and files (documents, video, audio and voice notes within
 this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
@@ -204,7 +265,7 @@ into Ouroboros's protected form in the web or desktop app, it goes to Settings, 
 agent learns only that it was saved. Saving grants, enables and resumes nothing. Another
 secret request mirrored here arrives as a short note saying where to enter it, without
 buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice message, a
-slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
+slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/mode`, `/help`,
 bare `/language` and `/panic`.
 
 The bridge marks questions that wait for an owner answer and clears the
@@ -327,7 +388,7 @@ as well unless the server's host is listed in `NO_PROXY`; the Mini App
 companion never uses those proxies. If the server refuses
 the token for good, polling waits, sending it nothing more, until the token,
 the base or the files directory changes. This skill neither installs nor runs
-the server; it keeps polling (no webhook) and keeps its 10 MiB download and
+the server; it keeps polling (no webhook) and keeps its 10 MiB owner-bridge / 20 MiB Presence download and
 50 MiB upload limits.
 
 A server started with `--local` answers `getFile` with an absolute path in its
@@ -422,3 +483,43 @@ Only the running companion process remembers this wait: a restart, an Update or 
 token starts without it. Each run is a new origin: an earlier one's saved text
 preview stays in Telegram's storage after a later sign-out. It targets native clients;
 Telegram WebA/WebK are unsupported.
+
+## Unified Presence, Owner DM Modes, and Mirror Filtering (1.5.0)
+
+One bot token (`TELEGRAM_BOT_TOKEN`), one `getUpdates` poller, and one `getMe` validation now serve
+the owner bridge, the Cloudflare Quick Tunnel Mini App, and Circles/Presence places together —
+eliminating 409 polling conflicts and sharing `TELEGRAM_PROXY`, `TELEGRAM_API_BASE`, and
+`TELEGRAM_API_FILES_DIR` across every path without calling `deleteWebhook`. `setMyCommands` always
+clears Telegram's public `default` scope and installs owner admin commands only on the bound owner
+chat scope (immediately on TOFU binding and on every validation), so admin commands never appear in
+groups or non-owner DMs. Upgrading from 1.4.x adds `fs`, `tool`, and `presence` permissions; installs
+without `auto_grant` will require re-granting permissions in Extensions → Skills before reload.
+
+- **Owner DM chat mode (`TELEGRAM_OWNER_CHAT_MODE`: `direct` | `presence`, default `direct`)**:
+  - `direct`: ordinary owner DM messages go straight to Main chat (`/chat/inject`) as before.
+  - `presence`: ordinary owner DM messages, edits, and reactions commit to Presence SQLite custody
+    (`custody.sqlite3`) and fail closed (never silently falling back to Main). If the DM Place is
+    unconnected, Silent/Paused, or Background Consciousness is sleeping, the bot sends a throttled
+    actionable hint.
+  - In **both** modes, owner control commands (`/menu`, `/mode`, `/main <text>` / `/m <text>`,
+    `/language`, `/help`, `/panic`, `/status`, `/bg`, `/evolve`, `/review`, `/restart`), inline panel
+    buttons, quiz cards, secret-request guards, and the Mini App remain immediately available on the
+    owner control lane. Switching modes mid-flight never disrupts messages already in Presence custody.
+- **Outbound mirror modes (`TELEGRAM_MIRROR_MODE`, default `all`) and `TELEGRAM_MIRROR_QUIZZES` (`on` | `off`, default `on`)**:
+  - `all`: mirrors all owner chat messages (web + Telegram) to the pinned DM.
+  - `main`: mirrors Main replies, owner/Presence notices, Telegram-originated turns, and optional
+    question cards while filtering raw Project room chatter and subagent cards.
+  - `telegram_only`: mirrors Telegram-originated conversations plus `reminder`, `skill_notice`, and
+    `safety_notice` System rows.
+  - `control_only`: mirrors Telegram command/chat replies, owner and Presence `main_notice` rows,
+    and optional question cards (ideal alongside `TELEGRAM_OWNER_CHAT_MODE=presence`).
+  - Presence rooms (`chat_id >= 2^40`) are owned by the Presence outbox (`custody.sqlite3`) and are
+    never mirrored through `chat.outbound` in any mode, preventing duplicate delivery.
+- **Circles / Presence transport**: private chats, groups, supergroups, forum topics, channels,
+  reactions, albums, and `my_chat_member` discovery are ingested into `custody.sqlite3`; private,
+  group, and supergroup chats appear in `GET status` `connect` discovery (`contributes: place`,
+  `ui/icon.svg`, `words`, `management_group_id`), while channels are configured via Whole account
+  or `configure_presence`. Outbound actions go through `telegram_send`, `telegram_react`,
+  `telegram_operation`, `telegram_moderate`, `telegram_typing`, and `telegram_receipt` with
+  at-most-once send/reaction fencing, frozen upload copies (`outbox_files/`), v2 continuation,
+  and `/presence/delivery` history reporting.
