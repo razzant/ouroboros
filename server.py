@@ -360,6 +360,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         if panic and bound_owner:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset
+        # A task's owner binding and the owner's zone match the bridge's positive identities, not the display defaults above.
+        bound_external_owner = is_external_transport and bound_owner and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
 
         # The writer validates or mints the canonical row and may resolve Reply in task metadata.
         origin_message_ref = record_inbound_message(
@@ -381,7 +383,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 live["owner_id"] = user_id
                 live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
-            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_owner, message=origin_message_ref, at=now_iso)
+            consciousness_clock.note_owner_zone(live, task_metadata, own=not is_external_transport or bound_external_owner, message=origin_message_ref, at=now_iso)
 
         try:
             ctx.update_state(_stamp_owner_activity)
@@ -488,10 +490,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                     "accepted_source_row": msg.get("accepted_source_row") if reply_source else None,
                     "origin_message_snapshot": msg.get("_origin_snapshot"), "origin_unkept": msg.get("_origin_unkept") is True,
                     "source": source, "received_at": str(msg.get("received_at") or ""),
-                    # Match the bridge's positive identities, not the display defaults above.
-                    "bound_external_owner": (is_external_transport and ext_known and owner_ext_id is not None
-                                             and all(type(value) is int and value > 0 for value in (sender_id, conversation_id))
-                                             and bound_pair == (sender_id, conversation_id)),
+                    "bound_external_owner": bound_external_owner,
                 },
             )
     return offset

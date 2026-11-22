@@ -169,6 +169,16 @@ def test_an_unidentified_external_sender_is_not_my_human_where_no_external_owner
     assert _intake(monkeypatch, ctx, _message("Asia/Tokyo", name="w1"))["zone"] == "Asia/Tokyo", "the web owner's own"
 
 
+def test_a_display_default_sender_in_the_bound_owner_chat_is_not_my_human(monkeypatch):
+    """The zone takes the bridge's positive identities, as a task's owner binding does (``bound_external_owner``): in
+    a private chat bound as (42, 42), a message without a sender id reads as the chat's id only by display default."""
+    ctx = _Ctx({**BOUND, "owner_external_id": 42})
+    nameless = {**_message("Europe/Berlin", chat=42, source="skill:telegram-bridge", name="d1"), "from": {}}
+    assert _intake(monkeypatch, ctx, nameless) is None
+    owner = _message("Europe/Berlin", chat=42, sender=42, source="skill:telegram-bridge", name="d2")
+    assert _intake(monkeypatch, ctx, owner)["zone"] == "Europe/Berlin", "the bound owner's own positive pair"
+
+
 def test_a_message_without_a_zone_keeps_the_earlier_dated_fact(monkeypatch):
     earlier = {"zone": "Europe/Moscow", "at": "2026-11-20T22:42:11+00:00", "message": {"client_message_id": "old"}}
     ctx = _Ctx({**BOUND, clock.OWNER_ZONE_STATE_KEY: earlier})
