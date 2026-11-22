@@ -662,8 +662,9 @@ def test_a_full_fold_stands_after_the_start_and_releasing_its_note_or_omitting_i
     omitted = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-4",
                     keep_unit_ids=[_unit_at(request, at + 1).unit_id])
     assert request[2] not in omitted and request[at + 1] in omitted  # the mind's explicit choice still decides
-    tail = _fold(tmp_path, monkeypatch, ctx, [*request, *_long_read("two")], "fold-6", fold_last_n=2)
-    assert "fold-1" in _calls(tail) and "two" not in _calls(tail)  # fold_last_n selects no standing tool unit
+    interim = {"role": "assistant", "content": "An interim reply."}
+    tail = _fold(tmp_path, monkeypatch, ctx, [*request, interim, *_long_read("two")], "fold-6", fold_last_n=2)
+    assert "fold-1" in _calls(tail) and interim in tail and "two" not in _calls(tail)  # no standing unit counts
     from ouroboros.context_source_view import superseded_host_fact
     # The facts line counts a superseded row that does not stand (round 4 after the read, which the row being written
     # supersedes) and not the standing rounds 1 and 3 before it.
