@@ -785,3 +785,28 @@ def test_a_completed_sign_in_clears_a_sign_in_refusal_but_not_a_transport_failur
     started = asyncio.run(mcp_oauth.begin(cfg))
     assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="c", iss="https://auth.example"))["ok"]
     assert (mcp_catalog.latest_call(cfg) is None) is cleared, mcp_catalog.latest_call(cfg)
+
+
+def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_unknown_and_a_new_one_is_dated(
+        monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    times = iter(["2026-11-20T08:00:00+00:00", "2026-11-20T09:00:00+00:00"])
+    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    old = {"v": 1, "url": cfg.url, "client": {"client_id": "c", "issuer": "https://auth.example"},
+           "pending": {"nonce": "n", "started": "2026-11-19T21:00:00+00:00"},  # what the v1 writer left
+           "sign_in": {"state": "sign_in_required", "reason": "token_rejected", "since": "2026-11-19T21:07:00+00:00"}}
+    mcp_oauth._path(cfg.id).parent.mkdir(parents=True, exist_ok=True)
+    mcp_oauth._path(cfg.id).write_text(json.dumps(old), encoding="utf-8")
+    assert mcp_oauth.status(cfg)["since"] is None  # 21:07 was only its latest refusal; the start is unknown
+    _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
+    upgraded = _file(cfg)
+    assert upgraded["v"] == 2 and upgraded["sign_in"]["since"] is None  # a repeat keeps the unknown start
+    assert upgraded["client"] == old["client"] and upgraded["pending"] == old["pending"]
+    mcp_oauth._save(cfg, {**upgraded, "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
+                          "metadata": {"token_endpoint": "https://auth.example/token"},
+                          "sign_in": {"state": "signed_in", "since": "2026-11-20T07:00:00+00:00"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired):
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert mcp_oauth.status(cfg)["since"] == "2026-11-20T08:00:00+00:00"  # a fresh requirement is dated
