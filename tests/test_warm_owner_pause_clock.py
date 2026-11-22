@@ -205,3 +205,115 @@ def test_shutdown_preserves_warm_start_through_actual_budget_resume(tmp_path, mo
     assert result["ok"], result
     granted = load_task_result(tmp_path, "author")["budget_pause"]["grant"]
     assert granted["paused_duration_sec"] == 270, "prior and warm/cold time are each excluded once"
+
+
+@pytest.mark.parametrize("bound", ["deadline_passed", "lifetime_exhausted", "still_eligible"])
+def test_warm_resume_checks_the_clock_before_accepting_a_lost_start(tmp_path, monkeypatch, clock, bound):
+    from ouroboros import delegate_custody
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests._owner_pause_ended_helpers import _pending, _resume, _tail_tree
+
+    tid = "root-1"
+    _, pool_workers, fake_gateway = _tail_tree(tmp_path, monkeypatch, tail=lambda root: _pending(root, tid, "lost"))
+    assert request_owner_pause(tid, request_id="fixture-pause")["ok"]
+    ctx, limit = _loop_ctx(tmp_path, tid)
+    fence = owner_pause.read_fence(tmp_path, tid)
+    when = clock[0]
+    wait = owner_wait.checkpoint_owner_wait(ctx, limit.messages, limit.llm_trace, limit.accumulated_usage,
+        limit.round_idx, limit.tool_schemas, limit.owner_msg_seen,
+        pause={"fence_id": fence["fence_id"], "generation": fence["generation"], "detached_reviews": ["review"]})
+    meta = pool_workers.RUNNING[tid]
+    meta["owner_wait"] = owner_wait.set_owner_wait(tmp_path, tid, {**wait, "state": "waiting"})
+    meta.update(started_at=when - 100.0, sleep_parked_at=when, budget_paused_sec=15.0,
+                model_wait_quota_clock={"elapsed_sec": 5.0, "observed_at": when})
+    expired = [False]
+    monkeypatch.setattr(config, "get_task_abs_ceiling_sec", lambda: 80.0 if expired[0] else 100.0)
+    if bound == "deadline_passed":
+        meta["task"]["deadline_at"] = dt.datetime.fromtimestamp(when + 1, dt.timezone.utc).isoformat()
+    choice, = _resume("owner", selected=tid)["acceptable_unknown"]
+    clock[0] += 200.0  # Only the calendar deadline runs during the warm wait.
+    expired[0] = bound == "lifetime_exhausted"  # A changed ceiling must be read on the confirm.
+    resumed = _resume("owner", [choice], selected=tid)
+    decisions = delegate_custody.invocation_record(tmp_path, "lost").get("resume_decisions") or {}
+    assert not fake_gateway.starts
+    if bound == "still_eligible":
+        assert resumed["ok"] and resumed["warm"] and decisions[tid]["creation"] == "lookup_only", resumed
+    else:
+        assert not resumed.get("ok") and resumed["error"] == bound and not decisions, resumed
+        assert owner_pause.read_fence(tmp_path, tid) == fence
+
+
+def test_owner_mail_arriving_during_a_warm_selected_answer_park_holds_the_answer(tmp_path, monkeypatch):
+    """A stack that waited under an owner Pause with its selected answer re-enters the final's
+    owner-input check on return: my human's words accepted while it was parked hold the retained
+    answer for a revision round. Before the fix the loop returned the original answer after one
+    model call, ignoring the correction accepted during the park."""
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store, owner_wait
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_relay import quote_rows
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import write_task_result
+    from supervisor.owner_pause_control import request_owner_pause
+    from supervisor.steering import _handle_steer_task
+    from tests._budget_pause_exact_helpers import _install_queue, _supervisor_ctx
+    from tests._delivery_candidate_shared import _run_loop
+    from tests._owner_pause_ended_helpers import _resume
+
+    def context(root, row):
+        metadata = {"origin_message_ref": build_owner_message_ref(
+            chat_id=row["chat_id"], client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])}
+        return SimpleNamespace(task_id="parent1", drive_root=root, budget_drive_root=root,
+                               current_chat_id=1, task_metadata=metadata, pending_events=[], event_queue=None,
+                               drive_logs=lambda: root / "logs")
+
+    tid = "parent1"
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 5.0)
+    task = {"id": tid, "root_task_id": tid, "type": "task", "chat_id": 2}
+    write_task_result(tmp_path, tid, "running", root_task_id=tid)
+    workers.RUNNING[tid] = {"task": task, "worker_id": 0, "attempt": 1, "started_at": time.time()}
+    queue.ACCEPTANCE_FENCES[tid] = {"status": "active", "owner_message_generation": 2}
+    parks = []
+
+    def pause_after_selection(*_args):
+        if not parks:
+            assert request_owner_pause(tid, request_id="answer-park")["ok"]
+        return ""
+
+    def resume_with_mail(ctx, checkpoint):
+        parks.append(checkpoint["owner_pause"]["resume_point"]["phase"])
+        wait = owner_wait.set_owner_wait(tmp_path, tid, {**checkpoint, "state": "waiting"})
+        workers.RUNNING[tid]["owner_wait"] = wait
+        row = {"chat_id": 1, "direction": "in", "ts": "2026-11-19T00:00:00Z",
+               "text": "Replace the selected answer with revised.", "client_message_id": "during-park",
+               "attachments": []}
+        dialogue_store.append(tmp_path, "chat", row)
+        quotes, error = quote_rows(context(tmp_path, row), [format_address(row_address(row))])
+        assert not error
+        supervisor = _supervisor_ctx(tmp_path, workers, queue, [], [])
+        supervisor.bridge = None
+        _handle_steer_task({"target_task_id": tid, "message": "New words from the owner", "quotes": quotes,
+                            "relay_id": "relay-1", "routing_token": "relay-1", "chat_id": 1,
+                            "client_message_id": "during-park", "issuer": {"kind": "task"}}, supervisor)
+        assert queue.ACCEPTANCE_FENCES[tid]["owner_message_generation"] == 3
+        grant = _resume("owner", selected=tid)
+        assert grant["ok"] and grant["warm"], grant
+        return "control:owner_resume"
+
+    def configure(ctx):
+        ctx.task_attempt, ctx.task_id, ctx.budget_drive_root = 1, tid, tmp_path
+        ctx.owner_wait_callback = resume_with_mail
+        # As the agent binds every task: the final's owner-input check runs under this admission.
+        ctx.owner_message_admission_lock = threading.Lock()
+        ctx.owner_message_admission_agent = SimpleNamespace(_busy=True, _current_task_id=tid,
+                                                            _accepting_owner_messages=True)
+
+    monkeypatch.setattr("ouroboros.place_reply.routeless_note", pause_after_selection)
+    monkeypatch.setattr("ouroboros.review_pause.live_detached_operations", lambda _: [{"operation_id": "critic"}])
+    response, _, _, calls = _run_loop(tmp_path, monkeypatch, ["original", "revised"], setup_context=configure)
+    assert parks == ["candidate"]
+    assert response == "revised" and len(calls) == 2, "the parked answer holds; a round reads the owner's words"

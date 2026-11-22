@@ -299,7 +299,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         return wrapper;
     }
 
-    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+    async function showModal({ title, message, input = false, initialValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }) {
         const result = await openConfirmDialog({
             title,
             body: message,
@@ -307,7 +307,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             initialValue,
             confirmLabel,
             cancelLabel,
-            danger: /delete|discard/i.test(confirmLabel),
+            danger,
         });
         return typeof result === 'boolean' ? { confirmed: result, value: '' } : result;
     }
@@ -317,7 +317,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const result = await showModal({
             title: 'Discard changes?',
             message: 'You have unsaved edits in the current file. Leave without saving?',
-            confirmLabel: 'Discard',
+            confirmLabel: 'Discard', danger: true,
             cancelLabel: 'Stay',
         });
         return Boolean(result?.confirmed);
@@ -668,7 +668,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             title: 'New folder',
             message: 'Name',
             input: true,
-            confirmLabel: 'Create',
+            confirmLabel: 'Create', danger: false,
             cancelLabel: 'Cancel',
         });
         const name = (result?.value || '').trim();
@@ -733,7 +733,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             message: entry.type === 'dir'
                 ? `Delete "${entry.name}" and all its contents? This cannot be undone.`
                 : `Delete "${entry.name}"? This cannot be undone.`,
-            confirmLabel: 'Delete',
+            confirmLabel: 'Delete', danger: true,
             cancelLabel: 'Cancel',
         });
         if (!result?.confirmed) return;

@@ -318,11 +318,11 @@ def test_a_helper_that_handed_off_or_stored_its_answer_sustains_nothing(world):
 
 
 def test_a_park_request_and_a_slot_held_on_mail_are_waits_not_work(world):
-    """A held in-slot wait outranks the wait tool's own ``kind=tool`` lease: a batch with a
-    wait tool runs serially (``tool_calls_can_run_parallel``), so no other tool of the same
+    """A held in-slot wait outranks the wait tool's own ``kind=tool`` lease: a wait tool runs
+    alone in its batch (``tool_capabilities.call_segments``), so no other tool of the same
     round is working beside it."""
     from ouroboros import model_sleep
-    from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
+    from ouroboros.tool_capabilities import call_segments
     from supervisor.cognitive_operations import _handle_cognitive_operation
 
     root = _pooled(world, "root-s", chat_id=4)
@@ -345,8 +345,8 @@ def test_a_park_request_and_a_slot_held_on_mail_are_waits_not_work(world):
     assert _chats(world) == [4]
     announced = events.get_nowait()
     assert announced["type"] == "typing_start" and announced["task_id"] == "root-s"
-    calls = [{"function": {"name": name}} for name in ("await_messages", "read_file")]
-    assert not tool_calls_can_run_parallel(calls), "a wait tool never shares its round with working tools"
+    assert call_segments(["await_messages", "read_file"]) == [[0], [1]], (
+        "a wait tool never shares its round with working tools")
 
 
 def _hold(world, ctx, run_id, monkeypatch):
@@ -964,3 +964,16 @@ def test_a_warm_pause_park_re_announces_only_on_the_owners_resume(world, outcome
                           detached=[])
     kinds = [event["type"] for event in _supervised(world, events)]
     assert ("typing_start" in kinds) is announced, kinds
+
+
+def test_a_connectors_structured_transport_keys_its_chat_and_never_stops_the_others(world):
+    """Only a host-proven Telegram address splits a chat by bot and conversation; another connector's binding,
+    whatever values it holds (here a mapping), is its chat's and never breaks the read for every chat."""
+    _direct(world, "turn-a", chat_id=1)
+    _direct(world, "turn-b", chat_id=9)
+    _direct(world, "turn-c", chat_id=9)
+    structured = {"kind": "slack", "conversation_id": {"team": "T1", "channel": "C1"}, "bot_id": ["B1"]}
+    world.bridge._chat_transports[9] = dict(structured)
+    state = reply_preparation(world.root)
+    assert sorted(row["chat_id"] for row in state["chats"]) == [1, 9], "one entry per chat, both chats typed"
+    assert [row["transport"] for row in state["chats"] if row["chat_id"] == 9] == [structured]

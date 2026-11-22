@@ -55,7 +55,7 @@ _CONTEXT = _object({
     "required_book_tokens": {"type": "integer", "minimum": 0},
 })
 _CONTEXT["properties"].update(preferred_mode={"enum": ["", "max", "low", "nano"]}, mode_cause={  # optional: receipts
-    "enum": ["", "memory", "route", "window", "after_start"]},  # retained before these facts carry neither
+    "enum": ["", "memory", "request", "route", "window", "after_start"]},  # retained before these facts carry neither
     prefix={"type": ["object", "null"]},  # what the candidate did to its route's cached start (transcript_prefix)
     no_memory_tokens=_NULL_INT)  # Low's missed target at the start: the request with no memory (memory_floor)
 _CAPTURE = _object({
@@ -73,6 +73,7 @@ _CAPTURE = _object({
     "processing_basis": {"type": ["object", "null"]},
     "effort": {"type": ["object", "null"]},
     "prompt_tokens_bounded_estimate": {"type": "integer", "minimum": 0},
+    "provider_reported_cost_only": {"type": "boolean"},
 })
 _CUSTODY = _object({
     "operation_id": _STRING, "invocation_id": {"type": "string", "minLength": 1},

@@ -22,8 +22,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
 
     The PUBLIC schema is the model contract (`ToolEntry("schedule_subagent", …)` in `get_tools`,
     with `additionalProperties: False`). Ordinary arguments are derived from this one mapping;
-    the only non-public exception is the bounded D23 legacy selector set carried through the
-    registry for deterministic migration. This avoids the former pair of hand-maintained public
+    the only non-public exceptions are the bounded D23 legacy selector set carried through the
+    registry for deterministic migration and ``title``, refused there with the call that works. This avoids the former pair of hand-maintained public
     parameter lists drifting apart (BIBLE P7).
 
     Returns a FRESH mapping per call, exactly as the inline literal did, so a caller that mutates
@@ -133,11 +133,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
         **input_files_parameter(
-            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
-            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
-            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
-            "start verifies them."),
-        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
+            "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
+            "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
+            "unless it explicitly replaces the selection."),
+        "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree, directly or by applying its own children's patches. Pro runtime mode needs it, Cyber Pro does not, lower modes refuse either way; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
             "type": "array", "items": {"type": "string"},
@@ -232,8 +231,12 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str]
         elif parsed <= utc_now():
             problems.append(f"deadline_at is already in the past ({deadline_at}); a child bound to it would "
                             "finalize before doing any work.")
+    if "title" in params:  # start_task's card name; this call names no card
+        problems.append(f"title={params['title']!r} is no schedule_subagent field: objective names the work"
+                        + ("" if str(params.get("objective") or "").strip() else " and is required")
+                        + ", and the optional role becomes part of the child's assignment; send the call without title.")
     for field in ("objective", "expected_output"):
-        if not str(params.get(field) or "").strip():
+        if not str(params.get(field) or "").strip() and (field, "title" in params) != ("objective", True):
             problems.append(f"{field} is required.")
     raw_claims = params.get("acceptance_claims")
     if raw_claims is not None and (not isinstance(raw_claims, list) or any(not isinstance(item, str) for item in raw_claims)):
@@ -338,11 +341,17 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
                         "for a read-only child; omit it or write_surface.")
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
-        if str(params.get("write_surface") or "").strip().lower() not in {"self_worktree", "external_workspace", "genesis"} \
-                or not default_shaped_directory_options(directory_options.get("directory_strategy"),
-                                                        directory_options.get("scope_paths")):
+        surface = str(params.get("write_surface") or "").strip().lower()
+        in_the_way = [] if surface in {"self_worktree", "external_workspace", "genesis"} else [
+            f"write_surface={params['write_surface']!r}" if params.get("write_surface") else "no write_surface"]
+        if not default_shaped_directory_options(directory_options.get("directory_strategy"),
+                                                directory_options.get("scope_paths")):
+            in_the_way += ["directory_strategy='copy'"] * (directory_options.get("directory_strategy") == "copy") + [
+                "scope_paths"] * bool(directory_options.get("scope_paths"))
+        if in_the_way:
             return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface "
-                        "and no directory options.")
+                        f"and no directory options; in the way: {', '.join(in_the_way)}. Omitting workspace removes "
+                        "this conflict.")
         directory_options["workspace"] = "in_place"
 
     # Folder geometry is a WRITE-side request: a read-only child reads the selected

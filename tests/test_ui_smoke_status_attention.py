@@ -253,6 +253,25 @@ def test_task_status_stays_factual_in_main_and_project_chat(
             "status": "scheduled",
             "ts": "2026-08-24T12:00:01+00:00",
         })
+        # A nested card says its own member's state (#3929): a scheduled row alone proves no current phase, so the
+        # child is Working once the host reports it running, as the worker's own host frame does.
+        emit(page, {
+            "type": "chat",
+            "role": "system",
+            "system_type": "host_progress",
+            "narration": False,
+            "is_progress": True,
+            "chat_id": chat_id,
+            "task_id": child_id,
+            "delegation_role": "subagent",
+            "subagent_event": "running",
+            "subagent_task_id": child_id,
+            "parent_task_id": continuing_root,
+            "root_task_id": continuing_root,
+            "subagent_role": "route-checker",
+            "content": "Child checks the delegated route",
+            "ts": "2026-08-24T12:00:01+00:00",
+        })
 
         parent = direct_card(scope, continuing_root)
         child = scope.locator(

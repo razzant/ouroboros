@@ -273,18 +273,33 @@ def test_a_reached_global_limit_admits_a_wave_that_needs_no_paid_admission(gate,
     """A reached global limit refuses paid admission only: a wave of subscription seats fits, a wave
     with one priced seat is declined whole, and a root cap at zero still binds every seat."""
     subscription = "claudexor::codex=gpt-6-astra"
-    monkeypatch.setattr(ua, "_reservation_cost", lambda request: {subscription: None, "triad/a": 1.0}[request.model])
+    prices = {subscription: None, "triad/free": 0.0, "triad/a": 2.5e-7}
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: prices[request.model])
     with ua.usage_scope(ua.UsageScope(drive_root=gate, task_id="other-root", root_task_id="other-root")):
         other = ua.reserve_attempt(ua.AttemptRequest(model="triad/a", provider="test", source="main"))
         ua.mark_dispatched(other)
         ua.settle_attempt(other, {}, cost_usd=100.0, cost_final=True)
     wave = dict(root_task_id=ROOT, prompt_chars=10, task_id=ROOT)
-    free = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=10.0, **wave)
-    assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
+    for free_seats in ([subscription], [subscription, "triad/free"]):
+        free = ua.review_wave_admission(gate, models=free_seats, root_limit_usd=10.0, **wave)
+        assert (free["fits"], free["binding_axis"], free["remaining_usd"]) == (True, "global", 0.0)
     mixed = ua.review_wave_admission(gate, models=[subscription, "triad/a"], root_limit_usd=10.0, **wave)
     assert (mixed["fits"], mixed["binding_axis"]) == (False, "global")
+    assert mixed["slot_bounds"] == [None, 2.5e-7] and mixed["estimated_wave_usd"] == 2.5e-7
     capped = ua.review_wave_admission(gate, models=[subscription], root_limit_usd=0.0, **wave)
     assert (capped["fits"], capped["binding_axis"]) == (False, "root")
+
+
+def test_sub_microdollar_seat_and_wave_are_visible_in_the_refusal(gate, tmp_path, monkeypatch):
+    _seed_settled(gate, fence=4.0, cost=4.0)
+    monkeypatch.setattr(ua, "_reservation_cost", lambda request: 1e-7)
+    llm = LedgerLLM()
+    ctx, (err, _, _, _) = _run(gate, tmp_path, monkeypatch, llm, fence=4.0)
+    said = _returned(ctx, err)
+    assert llm.calls == []
+    assert "reservation upper bound would have been <$0.000001" in said
+    for model in (COUPLING_MODEL, *PACKET_MODELS):
+        assert f"{model} <$0.000001" in said
 
 
 def test_a_fence_reached_mid_wave_refuses_the_remaining_seats_with_custody(gate, tmp_path, monkeypatch):
@@ -386,13 +401,16 @@ def test_paid_seats_are_priced_seat_by_seat_before_the_first_paid_call(gate, tmp
     before any seat is called."""
     seen = {}
     order = []
+    monkeypatch.delenv("OUROBOROS_PROCESSING_PREFERENCE", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", raising=False)
 
     def _gate(ctx, *, surface, models, prompt_chars, max_completion_tokens, extra=None,
-              categories="", slot_ids=""):
+              categories="", slot_ids="", processing_preferences="", use_local=None):
         order.append("admission")
         seen.update(surface=surface, models=models, prompt_chars=prompt_chars,
                     max_completion_tokens=max_completion_tokens, extra=extra,
-                    categories=categories, slot_ids=slot_ids)
+                    categories=categories, slot_ids=slot_ids,
+                    processing_preferences=processing_preferences, use_local=use_local)
         return None
 
     monkeypatch.setattr("ouroboros.tools.review_helpers.review_wave_budget_gate", _gate)
@@ -420,6 +438,68 @@ def test_paid_seats_are_priced_seat_by_seat_before_the_first_paid_call(gate, tmp
     # so its bound is read under the seat's own cache split, never the caller's.
     assert seen["categories"] == ["multi_model_review_review"] * 3
     assert seen["slot_ids"] == ["slot_native", "slot_1", "slot_2"]
+    # Unbound rows: each send resolves its role's tier (none set) on the remote route its model names.
+    assert seen["processing_preferences"] == ["", "", ""] and seen["use_local"] == [False, False, False]
+
+
+class _EnvelopeLLM(LedgerLLM):
+    """``LedgerLLM`` that keeps each seat's physical send arguments, as the substrate's executors pass them."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent = {}
+
+    def chat(self, **kwargs):
+        with self.lock:
+            self.sent[kwargs["model_role"]] = dict(kwargs)
+        return super().chat(**kwargs)
+
+
+def test_each_seat_is_admitted_with_the_locality_and_tier_its_send_carries(gate, tmp_path, monkeypatch):
+    """The commit gate admits every API seat with exactly what that seat's send carries: its own tier (an explicit
+    empty kept, an unbound one resolved through its ``reviewer:<slot>`` role as every send is) and its locality. The
+    caller-to-send identity is read off the substrate's real executors, then priced by the real projection: the local
+    seat as the local lane's own $0 request, never as its remote model's tariff."""
+    from ouroboros.model_slots import resolve_processing_preference
+    from ouroboros.tools import review_helpers
+
+    monkeypatch.setenv("OUROBOROS_PROCESSING_PREFERENCE", "fast")
+    monkeypatch.delenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", raising=False)
+    prepared = _prepared(tmp_path)
+    prepared["row_plan"].update(processing_preferences=["economy", "", None], use_local=[None, True, False])
+    monkeypatch.setattr(review, "_prepare_unified_review", lambda *_a, **_k: (prepared, None, False))
+    seen = {}
+    real_gate = review_helpers.review_wave_budget_gate
+
+    def _gate(ctx, **kwargs):
+        seen.update(kwargs)
+        return real_gate(ctx, **kwargs)
+
+    priced = []
+
+    def _cost(request):
+        priced.append((request.provider, request.model, request.processing_preference, request.submitted_processing_mode))
+        return BOUNDS.get(request.model, 0.0) if request.provider != "local" else 0.0
+
+    monkeypatch.setattr(review_helpers, "review_wave_budget_gate", _gate)
+    monkeypatch.setattr(ua, "_reservation_cost", _cost)
+    llm = _EnvelopeLLM()
+    _done, (review_err, _coupling, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=10.0)
+
+    assert review_err is None, review_err
+    assert seen["slot_ids"] == ["slot_native", "slot_1", "slot_2"]
+    assert seen["processing_preferences"] == ["economy", "", "fast"]
+    assert seen["use_local"] == [False, True, False]
+    for index, slot_id in enumerate(seen["slot_ids"]):
+        sent = llm.sent[f"reviewer:{slot_id}"]
+        assert sent["model"] == seen["models"][index]
+        assert bool(sent["use_local"]) is seen["use_local"][index]
+        assert resolve_processing_preference(sent["model_role"], override=sent["processing_preference"]) == (
+            seen["processing_preferences"][index])
+    # The admission's own pricing; each seat's send then reserves under its own request (provider "test" here).
+    assert [fact for fact in priced if fact[0] != "test"] == [
+        ("openrouter", COUPLING_MODEL, "economy", "flex"), ("local", "local-model", "", ""),
+        ("openrouter", "triad/b", "fast", "priority")]
 
 
 def test_review_wave_admission_prices_per_slot_and_discloses_holds(gate, monkeypatch):
@@ -563,11 +643,10 @@ def test_each_seat_is_priced_under_its_own_cache_split_not_the_callers(tmp_path,
     from ouroboros import pricing as pricing_mod
     from ouroboros.pricing import infer_provider_from_model
 
-    class _P(tuple):
-        tiers = ()
-
     model = "anthropic/claude-fable-5"
-    monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: {model: _P((10.0, 1.0, 12.5, 50.0))})
+    source = {"provider": "openrouter", "model": model, "endpoint_tag": "fixture", "service_tier": None, "processing": "standard"}
+    tariff = pricing_mod.PricingSchedule((10.0, 1.0, 12.5, 50.0), cache_write_1h=23.0, source=source)
+    monkeypatch.setattr(pricing_mod, "get_pricing", lambda **k: {"fixture" if k.get("model") else model: tariff})
     ua._reset_task_cache_splits()
     provider = infer_provider_from_model(model)
     caller = ua.UsageScope(drive_root=tmp_path, task_id=ROOT, root_task_id=ROOT, root_limit_usd=1000.0)
@@ -583,7 +662,7 @@ def test_each_seat_is_priced_under_its_own_cache_split_not_the_callers(tmp_path,
         with ua.usage_scope(seat_scope):
             expected_cold = ua._reservation_cost(ua.AttemptRequest(
                 model=model, provider=provider, prompt_tokens_estimate=100_000,
-                max_completion_tokens=1000, task_id=ROOT))
+                max_completion_tokens=1000, task_id=ROOT, estimate_ordinary_pool=True))
             ua.stash_task_cache_split(ROOT, model, 90_000, provider=provider, ttl_seconds=300.0)
         warm_seat = ua.review_wave_admission(
             tmp_path, categories="multi_model_review_review", slot_ids="slot_native", **kwargs)["slot_bounds"][0]

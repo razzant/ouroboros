@@ -294,6 +294,31 @@ def test_a_batch_that_fits_is_delivered_byte_identical_without_sources_or_receip
     assert not _source_dir(tmp_path, ctx.task_id).exists()
 
 
+def test_a_batch_that_fills_the_window_exactly_is_a_fit_not_a_projection(tmp_path):
+    """A chosen read at the last available token still takes the whole-fit path."""
+    ctx = _ctx(tmp_path)
+    body = "x" * 120_000
+    reserve = 2_000
+
+    def rows():
+        # A CHOSEN form: the call named its range, so the produced body IS the
+        # requested one (it may use the frame's free room, not the eighth).
+        return [_row("chosen", "read_file", body, args={"path": "m.py", "max_lines": 600})]
+
+    probe = []
+    _messages, _trace = _deliver(ctx, rows(), measured_fit(reserve=reserve, calls=probe))
+    whole = probe[0]["estimated_input_tokens"]  # the measured whole batch
+    assert whole > 0
+    for room, fits in ((1, True), (0, True), (-1, False)):
+        messages, trace = _deliver(ctx, rows(), measured_fit(window=whole + reserve + room, reserve=reserve))
+        if fits:
+            assert "tool_result_delivery" not in trace, (room, trace)  # a fit leaves no receipt
+            assert messages[0]["content"] == body, room  # and no cut
+            assert all("result_partial" not in row for row in trace["tool_calls"]), room
+        else:
+            assert trace["tool_result_delivery"][0]["status"] != "complete", (room, trace)
+
+
 # --- the envelope -----------------------------------------------------------
 
 def test_source_write_failure_is_disclosed_without_any_readability_claim(tmp_path, monkeypatch):
@@ -517,6 +542,7 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_result_view({"view_tail_chars": "500"}) == (0, 500)
     assert requested_result_view({"view_head_chars": -3}) == (0, 0)
     assert requested_result_view({"path": "a", "max_lines": 10}) == (None, None)
+    assert requested_result_view({"path": "a", "end_line": 100}) == (None, None)  # read_file's accepted spelling
     assert requested_result_view({"task_id": "t", "source_start_char": 0, "source_end_char": 9}) == (None, None)
     assert requested_result_view({"task_id": "t", "offset": 2, "limit": 5}) == (None, None)
     assert requested_result_view({"run_id": 7, "page": 2}) is None
@@ -534,6 +560,27 @@ def test_requested_result_view_classifies_declared_range_parameters():
     assert requested_call_view("enable_tools", {"tools": "mcp_gmail"}) == (None, None)  # a catalog view the mind asked for
     assert requested_call_view("read_file", {"path": "a"}) is None
     assert requested_call_view("knowledge_read", {"topic": "x", "end_char": 2000}) == (None, None)
+
+
+def test_a_namespace_listing_is_a_chosen_view_and_an_unscoped_listing_is_not(tmp_path):
+    """The connections map sends an integrating focus to list_available_tools(namespace=...) for complete MCP
+    descriptions: that listing reaches the model whole when it fits the window, though larger than the unasked share;
+    the same text from an unscoped call keeps the bounded head and tail."""
+    from ouroboros.tool_capabilities import requested_call_view
+
+    text = "- 'tool' → mcp_docs__tool [not loaded]: " + "Read one page. " * 4_000 + "WARNING: never on prod.\n" + "z" * 60_000
+    delivered = {}
+    for case, args in (("scoped", {"namespace": "mcp_docs"}), ("unscoped", {})):
+        rows = [_row(case, "list_available_tools", text, args=args)]
+        messages, trace = _deliver(_ctx(tmp_path, f"listing-{case}"), rows, measured_fit(window=60_000, reserve=2_000))
+        delivered[case] = (messages[0]["content"], trace)
+    assert len(text) // 4 > 60_000 // 8  # past the unasked eighth, inside the window
+    assert delivered["scoped"][0] == text and not delivered["scoped"][1]["tool_calls"][0].get("result_partial")
+    assert "WARNING: never on prod." not in delivered["unscoped"][0]
+    assert delivered["unscoped"][1]["tool_calls"][0]["result_source_view"]["requested"] is False
+    assert requested_call_view("list_available_tools", {"namespace": "mcp_docs", "view_head_chars": 10}) == (10, 0)
+    assert requested_call_view("list_available_tools", {"namespace": "builtin"}) == (None, None)  # any named namespace
+    assert requested_call_view("list_available_tools", {"namespace": " "}) is None
 
 
 def test_a_gateway_page_and_a_catalog_view_stay_protected_from_the_passes():

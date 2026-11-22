@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { attachChatInputSizing, chatInputSizingMode } from '../modules/chat_input_sizing.js';
+import { attachChatInputSizing, caretRowShown, chatInputSizingMode } from '../modules/chat_input_sizing.js';
 
 const LINE = 23.2;
 const CHAR = 8;
@@ -56,7 +56,12 @@ class Field {
     get clientHeight() { return this.width ? Math.round(this.borderBox - this.frame) : 0; }
     get scrollHeight() { return this.width ? Math.round(Math.max(this.borderBox - this.frame, this.rows * LINE + this.pad)) : 0; }
     get scrollTop() { return this._scrollTop; }
-    set scrollTop(value) { this._scrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); }
+    // A write that moves the scroll owes a `scroll` event, as an engine sends one after the task that wrote it.
+    set scrollTop(value) {
+        const top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+        if (top !== this._scrollTop) this.scrollOwed = true;
+        this._scrollTop = top;
+    }
 }
 
 /* A probe textarea laid out like an engine's content sizing: `a a` is two 10px lines
@@ -479,6 +484,22 @@ test('dispose disconnects, cancels a queued frame and makes later calls inert', 
     sizing.dispose();
 });
 
+test('a caret-following field hears caret moves without an edit while attached, and only then', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    const heard = () => { const set = new Map();
+        return { set, addEventListener: (type, fn) => set.set(type, fn), removeEventListener: (type, fn) => set.get(type) === fn && set.delete(type) }; };
+    const doc = heard(), field = Object.assign(new Field(), heard(), { ownerDocument: doc });
+    const plain = Object.assign(new Field(), heard(), { ownerDocument: heard() });
+    attachChatInputSizing(plain).dispose();
+    assert.equal(plain.set.size + plain.ownerDocument.set.size, 0, 'a field that follows no caret hears none of it');
+    const sizing = attachChatInputSizing(field, { followCaret: true });
+    assert.deepEqual([[...field.set.keys()].sort(), [...doc.set.keys()]], [['keyup', 'pointerup', 'scroll'], ['selectionchange']]);
+    doc.set.get('selectionchange')(); // nothing focused: nothing to note, nothing thrown
+    sizing.dispose();
+    assert.equal(field.set.size + doc.set.size, 0, 'dispose removes every caret listener');
+});
+
 test('a viewport resize that moves the cap re-measures the same width in a frame, one that moves nothing writes nothing', (t) => {
     const priorWindow = globalThis.window;
     t.after(() => { globalThis.window = priorWindow; });
@@ -520,9 +541,109 @@ test('a viewport resize that moves the cap re-measures the same width in a frame
     }
 });
 
+test('a fold narrowing the field around a middle caret lays out once a frame, and only through the caret\'s line', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    const doc = globalThis.document;
+    // The caret probe: text wrapped at the probe's width; the caret's top is the rows wrapped above it.
+    const rowsAbove = (text, width) => {
+        const perLine = Math.max(1, Math.floor(width / CHAR)), parts = text.split('\n'), last = parts.pop();
+        return parts.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / perLine)), 0)
+            + Math.floor(last.length / perLine);
+    };
+    const laid = [];
+    let probe = null;
+    const create = doc.createElement;
+    doc.createElement = (tag) => (tag !== 'div' ? create(tag) : (probe = Object.assign(create(tag),
+        { append() {}, getBoundingClientRect: () => ({ top: 0 }) })));
+    doc.createTextNode = (data) => { laid.push(data.length); return { data }; };
+    doc.createRange = () => ({ setStart(node, offset) { this.before = node.data.slice(0, offset); }, collapse() {},
+        getBoundingClientRect() { return { top: rowsAbove(this.before, parseFloat(probe.style.width)) * LINE }; } });
+    const heard = new Map();
+    const field = Object.assign(new Field({ style: { lineHeight: `${LINE}px`, paddingLeft: '4px', paddingRight: '4px' } }),
+        { ownerDocument: doc, addEventListener: (type, fn) => heard.set(type, fn), removeEventListener: (type) => heard.delete(type) });
+    doc.activeElement = field;
+    const sizing = attachChatInputSizing(field, { followCaret: true });
+    // Seven lines above the caret, each a little shorter: one more of them takes a third row at each narrower width.
+    const long = [96, 94, 90, 88, 86, 84, 80];
+    const draft = Array.from({ length: 40 }, (_, n) => `${String(n).padStart(2, '0')} ${n < long.length ? 'w'.repeat(long[n] - 3) : 'word '.repeat(12)}`).join('\n');
+    const at = draft.indexOf('\n20 ') + 11, lineEnd = draft.indexOf('\n', at) + 1;
+    field.type(draft, at);
+    sizing.sync();
+    // The caret's line the last in view: every row added above it takes it out, and the frame scrolls it back.
+    field.scrollTop = 5 + rowsAbove(draft.slice(0, at), field.clientWidth - 8) * LINE + LINE + 5 - field.clientHeight;
+    heard.get('scroll')();
+    field.scrollOwed = false;
+    const perFrame = [];
+    let corrections = 0;
+    for (const width of [390, 380, 370, 360, 350, 340, 330]) { // the capsule row folding over 300 ms
+        const before = laid.length;
+        field.width = width;
+        engine.report();
+        engine.flush();
+        perFrame.push(laid.length - before);
+        const top = 5 + rowsAbove(draft.slice(0, at), field.clientWidth - 8) * LINE;
+        assert.ok(top >= field.scrollTop - 1 && top + LINE <= field.scrollTop + field.clientHeight + 1, `caret in view at ${width}`);
+        // The frame's own correction scrolled the field: its scroll event arrives before the next frame.
+        if (field.scrollOwed) { field.scrollOwed = false; corrections += 1; heard.get('scroll')(); }
+    }
+    assert.equal(corrections, 7, 'each narrower width scrolls the field to keep the caret');
+    assert.deepEqual(perFrame, [2, 1, 1, 1, 1, 1, 1], 'the old width\'s line is the frame before\'s measurement, a correction\'s own scroll or not');
+    assert.ok(laid.every((length) => length === lineEnd), 'the text through the caret\'s line, not the whole draft');
+    sizing.dispose();
+});
+
+test('the caret\'s line is shown while half of its line box is inside the field', () => {
+    const view = { top: 911, height: 33 };
+    // Linux Chromium's own reveal: the caret's shorter box at the top edge, its line box 1.3 px above it.
+    assert.equal(caretRowShown(view, 909.7, LINE), true);
+    assert.equal(caretRowShown(view, 911 - LINE / 2, LINE), true, 'half above the top edge');
+    assert.equal(caretRowShown(view, 911 - LINE / 2 - 1, LINE), false, 'more than half above it');
+    assert.equal(caretRowShown(view, 911 + 33 - LINE / 2 + 1, LINE), false, 'more than half below the bottom edge');
+    assert.equal(caretRowShown(view, 911 + 33, LINE), false, 'wholly below');
+});
+
+test('a middle caret the engine revealed by its own box, its line just above the top edge, is kept as the field narrows', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    const doc = globalThis.document;
+    const rowsAbove = (text, width) => {
+        const perLine = Math.max(1, Math.floor(width / CHAR)), parts = text.split('\n'), last = parts.pop();
+        return parts.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / perLine)), 0)
+            + Math.floor(last.length / perLine);
+    };
+    let probe = null;
+    const create = doc.createElement;
+    doc.createElement = (tag) => (tag !== 'div' ? create(tag) : (probe = Object.assign(create(tag),
+        { append() {}, getBoundingClientRect: () => ({ top: 0 }) })));
+    doc.createTextNode = (data) => ({ data });
+    doc.createRange = () => ({ setStart(node, offset) { this.before = node.data.slice(0, offset); }, collapse() {},
+        getBoundingClientRect() { return { top: rowsAbove(this.before, parseFloat(probe.style.width)) * LINE }; } });
+    const heard = new Map();
+    const field = Object.assign(new Field({ style: { lineHeight: `${LINE}px`, paddingLeft: '4px', paddingRight: '4px' } }),
+        { ownerDocument: doc, addEventListener: (type, fn) => heard.set(type, fn), removeEventListener: (type) => heard.delete(type) });
+    doc.activeElement = field;
+    const sizing = attachChatInputSizing(field, { followCaret: true });
+    const draft = [...Array.from({ length: 8 }, () => 'w'.repeat(90)), ...Array.from({ length: 20 }, (_, n) => `Line ${n}.`)].join('\n');
+    const at = draft.indexOf('Line 9.');
+    field.type(draft, at);
+    sizing.sync();
+    const lineTop = (width) => 5 + rowsAbove(draft.slice(0, at), width - 8) * LINE;
+    field.scrollTop = lineTop(field.clientWidth) + 1.3;
+    heard.get('scroll')();
+    const revealed = field.scrollTop;
+    field.width = 330;  // the busy Send narrows the row: the long lines above take more rows
+    engine.report();
+    engine.flush();
+    const top = lineTop(field.clientWidth);
+    assert.ok(top > revealed + field.clientHeight, 'the narrower wrap took it out of the old place');
+    assert.ok(top >= field.scrollTop - 1 && top + LINE <= field.scrollTop + field.clientHeight + 1, 'scrolled back, whole');
+    sizing.dispose();
+});
+
 test('the keyboard going away without a resize gives a capped draft its resting cap back in a frame', (t) => {
-    // app.js drops body.keyboard-open in the focusout's own frame and the cap (style.css, a quarter of the keyboard's
-    // viewport) returns to 140px with no resize: the written 62px changes no size a ResizeObserver could report.
+    // When the keyboard layout releases its cap the CSS limit returns to 140px with no resize. This owner's
+    // written 62px does not itself notify a ResizeObserver; the viewport owner decides when to release the cap.
     for (const fieldSizing of [false, true]) {
         const engine = installEngine({ fieldSizing });
         t.after(engine.restore);

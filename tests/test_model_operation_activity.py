@@ -68,14 +68,14 @@ def test_observed_phases_deduplicate_and_rejoin_one_generation(setup, method):
     assert len(ledger(root)) == 1 and ledger(root)[0]["state"] == "settled"
 
 
-def test_a_max_start_with_chapter_maps_is_named_max_with_maps():
-    """Owner 15.11.2026, 4A: no second meaning for ``low``. Task-local Low is the owner's Max with chapter maps; Low
-    and Nano show maps; Max shows the whole books unless a delegated child reads them as maps by design."""
-    from ouroboros.physical_attempt_context import shown_mode
+def test_a_low_the_window_took_from_max_is_named_low_beside_the_owners_max():
+    """Owner 21.11.2026: a start the window took from my human's Max runs in Low, temporarily, for the window, and is
+    named Low, while the owner's choice stays Max beside it (``preferred_at_send``); Low and Nano show maps; Max shows
+    the whole books unless a delegated child reads them as maps by design."""
+    from ouroboros.physical_attempt_context import attempt_fact, shown_mode
 
-    assert shown_mode("low", "max") == ("max", "maps")
-    assert shown_mode("low", "low") == ("low", "maps") and shown_mode("nano", "max") == ("nano", "maps")
-    assert shown_mode("max", "max") == ("max", "whole") and shown_mode("max", "max", compact=True) == ("max", "maps")
+    assert shown_mode("low") == ("low", "maps") and shown_mode("nano") == ("nano", "maps")
+    assert shown_mode("max") == ("max", "whole") and shown_mode("max", compact=True) == ("max", "maps")
     from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
     def books(kind):  # a delegated child and a nanny read compact books (``context.py``); an owner's turn whole ones
@@ -85,6 +85,13 @@ def test_a_max_start_with_chapter_maps_is_named_max_with_maps():
                                          preferred_mode="max")
         return attempt_fact(SimpleNamespace(physical_context=context, state="dispatched", attempt_id="a"))["books"]
     assert [books(kind) for kind in ("child", "nanny", "owner_turn")] == ["maps", "maps", "whole"]
+    for preferred in ("max", ""):  # a row written before the owner's mode was kept: task-local Low is only under Max
+        context = PhysicalAttemptContext(profile="task_local_low", rendered_mode="low", measurement_basis="cold_estimate",
+                                         route_fp="", round_id="r", target_total_tokens=None, capacity_total_tokens=None,
+                                         context_target_miss=False, automatic_pass_used=False, preferred_mode=preferred,
+                                         mode_cause="request")
+        fact = attempt_fact(SimpleNamespace(physical_context=context, state="dispatched", attempt_id="a"))
+        assert (fact["applied"], fact["books"], fact["preferred_at_send"], fact["cause"]) == ("low", "maps", "max", "request")
 
 
 @pytest.mark.parametrize("detail", [
@@ -269,9 +276,9 @@ def test_a_sent_attempts_context_reaches_its_activity_record_bound_to_its_ledger
     fact = meta["context_attempt"]
     assert {key: fact[key] for key in ("attempt_id", "ledger_state", "preferred_at_send", "applied", "books", "profile",
                                        "cause", "round_id", "task_attempt", "call_attempt")} == {
-        "attempt_id": sent[0]["attempt_id"], "ledger_state": "settled", "preferred_at_send": "max", "applied": "max",
+        "attempt_id": sent[0]["attempt_id"], "ledger_state": "settled", "preferred_at_send": "max", "applied": "low",
         "books": "maps", "profile": "task_local_low", "cause": "memory", "round_id": "exec-1:round:4",
-        "task_attempt": 3, "call_attempt": 1}  # the owner's Max whose books went to chapter maps stays Max (4A)
+        "task_attempt": 3, "call_attempt": 1}  # Low, temporarily, for the window; the owner's choice stays Max (21.11)
     # Live: the ledger's dispatch is heard while ``llm.chat`` still waits (``physical_attempt_context.dispatched``):
     # one ``dispatched`` frame right after ``started``, before the first provider observation; then every frame of
     # the active call carries it; the provider's own progress stays ``model_activity`` beside it.
@@ -282,7 +289,7 @@ def test_a_sent_attempts_context_reaches_its_activity_record_bound_to_its_ledger
     assert len(carried) - 2 == sum(e["phase"] == "observed" for e in recorded)
     live = rows[0]["context_attempt"]  # what the public row held while the call waited
     assert (live["attempt_id"], live["ledger_state"], live["applied"], live["books"], live["cause"]) == (
-        sent[0]["attempt_id"], "dispatched", "max", "maps", "memory")
+        sent[0]["attempt_id"], "dispatched", "low", "maps", "memory")
     after = gateway_state._chat_activities_snapshot_safe(root)[0]
     assert after["context_attempt"] == fact and "model_activity" not in after  # kept past the call; typed shape
     from ouroboros.physical_attempt_context import ContextAttemptFact
@@ -397,7 +404,7 @@ def test_a_disproven_dispatch_reaches_the_census_with_its_identity_and_one_genui
                             mode_cause="memory", round_id=f"release-exec:round:{round_idx}"))[0] is None
                 fact = gateway_state._chat_activities_snapshot_safe(root)[0]["context_attempt"]
                 assert (fact["ledger_state"], fact["applied"], fact["attempt_id"], fact["observed_at"]) == (
-                    "released", "max", live[-1]["attempt_id"], live[-1]["observed_at"])
+                    "released", "low", live[-1]["attempt_id"], live[-1]["observed_at"])  # task-local Low: Low
                 assert fact.get("previous") == earlier
                 assert not (fact.get("previous") or {}).get("previous")
                 assert fact["llm_call_id"] != (earlier or {}).get("llm_call_id")

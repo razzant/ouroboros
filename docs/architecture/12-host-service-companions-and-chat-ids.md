@@ -2,7 +2,7 @@
 
 Connectors supply facts and identity; the mind judges. Focus voice, owner match, Safety and delivery use the
 event snapshot; other Safety/own wakes use the first valid identity among 50 newest arrivals. Browser status is
-account-scoped (§3); server consumers never dispatch connector routes. Only `kind: user` can match account-scoped owner confirmation.
+account-scoped (§3); server consumers never dispatch connector routes, save one post of a built-in skill's setup-card code and options its owner consented to (`onboarding_connections`). Only `kind: user` can match account-scoped owner confirmation.
 Identity never enters `places.json` (wire, label compatibility: CREATING_SKILLS). Silent can wake.
 
 ### Host Service boundary
@@ -65,9 +65,9 @@ Receipt negotiation: `CREATING_SKILLS.md` “Reporting actual Presence delivery�
 
 ### Companion processes
 
-Reviewed descriptors reconcile on lifecycle/restart, stop on disable/unload/panic. `state/extension_generation.json` publishes the live set; workers adopt once at start, name miss or stale descriptor. Timeout, handler, guards and Safety share one descriptor and its declaration; replaced out-of-process calls refuse. Workers write `state/extension_reconcile/` requests, never own server children; pickup reconciles each skill once (PERSISTENCE.md), naming the answering process.
+Reviewed companions reconcile on lifecycle/restart, stop on disable/unload/Panic. Workers adopt the live set (`state/extension_generation.json`) at start, name miss or stale descriptor. Timeout, handler, guards and Safety use one descriptor and declaration. Stale out-of-process calls fail. Workers queue in `state/extension_reconcile/`. The server owns children and reconciles once per skill per pass. Receipts name the process.
 
-Skills health uses server facts; workers only qualify them, never advance `last_known_good` on failed handoff. Exhaustion ends on successful start. `refresh_companion_process` replaces changed `env_from_settings` after observed death and strict read. Delayed restarts require the current descriptor under lock; stop forgets pending ones. Reviewed payload; snapshot: `state/extension_companions.json`.
+Server reconciles advance `last_known_good` only with no known failed or missing start. Workers report local registration; `list_skills` adds recorded failures. Lists and receipts read `health.json` alike; history: `events.jsonl`. Only server lists show pending exits, by directory. `refresh_companion_process` replaces changed `env_from_settings` after observed exit and strict read. Its claim remembers an intentional stop across retries. That claim or Stop withdraws the monitor’s restart, not its exit history.
 
 ### Chat-id delivery
 
@@ -75,7 +75,7 @@ Each message has one destination, else `None` (§11.1 `chat_id_policy`). `HIDDEN
 
 An exhausted terminal outbox skips chat 0 while retaining incident/message. Only positive same-id/destination evidence suppresses notice (`terminal_delivery`), never bare ids or missing ACKs. Memory/consolidation use the same value/None policy: per-window registry snapshots name Main/Projects by stable ids; missing/ambiguous ids remain explicit, never default Main. Presence labels require transport facts re-deriving the chat id. Labels are read-only attribution, changing neither routing, visibility nor delivery.
 
-`place_intake.py` decides attention; `place_arrivals.py` owns heard/imported facts, deferred sources and room/activity indexes. `presence_history.py` records earlier platform-authored messages (never owner/Ouroboros), starting nothing; arrivals retain send order/time (`source_order`; CREATING_SKILLS). `loop_completion_schema.py` selects completion with legacy registry support; `tool_effects.py`/`place_guard.py` own effects/targets.
+`place_intake.py` decides attention; `place_arrivals.py` owns heard/imported facts, deferred sources and room/activity indexes. `presence_history.py` imports past platform messages, never owner/Ouroboros, without starting work; arrivals keep send order/time (`source_order`; CREATING_SKILLS). `loop_completion_schema.py` selects legacy completions and quiet schedule reports (`presence_finish`); `tool_effects.py`/`place_guard.py` own effects/targets (§13).
 
 Heard-only events make no task/context copy; room rows keep identity/reason. Later On never reconsiders. `/identity.presence_reaction_context: 1`: typed reactions stay context without focus, wait interruption, final reopening or reply anchoring. Focus/heard settlement share the intake lock, preserving custody. Immutable source rows keep `chat_chain.source_row_id`; `dialogue_store` derives deferred pointers from dedup rows.
 

@@ -375,8 +375,10 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
     assert live["task_id"] == "task-links"
     topic, payload = events[-1]
     assert topic == event_bus.CHAT_LINKS
-    # Presentation label and the stored row's invisible reply address ride along for the phone mirror.
-    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "message_origin", "task_id", "row_address"}
+    # The phone mirror also receives the stored row's reply address and author label.
+    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "message_origin", "task_id",
+                            "row_address", "reply_author_label"}
+    assert payload["reply_author_label"] == live["reply_author_label"] == "Ouroboros"
     assert payload["task_id"] == "task-links" and payload["message_origin"] == {}
     assert payload["actions"] == actions
     row = chat_rows(tmp_path)[-1]
@@ -765,10 +767,11 @@ def test_dequeue_reads_the_retained_row_when_a_web_item_carries_no_witness(monke
     )
     [update] = bridge.get_updates(offset=0, timeout=0)
     assert update["message"].get("accepted_source_row", {}) == {}
+    from ouroboros.chat_chain import source_row_id
     assert message_bus.record_inbound_message(
         bridge, update["message"], chat_id=1, user_id=1, client_message_id="bare-1",
         text="no witness", ts="ignored",
-    ) == ref
+    ) == {**ref, "row_sha256": source_row_id(row)}
     forged = dict(update["message"], accepted_source_ref={**ref, "text_sha256": "0" * 64})
     with pytest.raises(ValueError, match="accepted source does not match"):
         message_bus.record_inbound_message(

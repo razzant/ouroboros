@@ -340,6 +340,11 @@ def resolve_dispatch_axes(task: Dict[str, Any]) -> Optional[SubagentDispatch]:
     return dispatch
 
 
+# The dispatched harness contract needs the whole CUSTODY verb set: a child that
+# can start a run but not wait on or cancel it is still broken. `delegate_answer`
+# is deliberately NOT part of this preflight — a nanny without it is degraded
+# (questions benign-decline at the engine timeout), never custody-broken, and
+# failing a dispatch over a missing convenience verb would cost real work.
 _DELEGATE_VERBS = ("delegate_start", "delegate_wait", "delegate_cancel")
 
 
@@ -396,7 +401,10 @@ def preflight_delegate_visibility(
 
     reason = "delegate_tools_invisible"
     try:
-        available = set(tools.available_tools())
+        from ouroboros.tool_policy import BUILTIN_NAMESPACE
+
+        # Callable, not merely shown: a contract can withhold a verb whose schema stays visible (В31=B).
+        available = {row["name"] for row in tools.callable_rows(BUILTIN_NAMESPACE)}
         if all(verb in available for verb in _DELEGATE_VERBS):
             return dispatch, False
     except Exception:

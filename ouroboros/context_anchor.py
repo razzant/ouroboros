@@ -75,7 +75,7 @@ def _anchor_model_key(plan: Any) -> str:
 
 
 def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rewrite_epoch: int = 0,
-                        estimate_tokens: Optional[int]) -> None:
+                        estimate_tokens: Optional[int], candidate: Any = None) -> None:
     """Make the Main request just accepted this conversation's size anchor and raise its accepted floor.
 
     U is the adapter-normalized input of the settled response (``_last_round_cache_usage``), B
@@ -90,8 +90,9 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
 
     if plan is None or usage.get("_model_substitutions"):
         return
-    from ouroboros.context_window import observed_plan
-    plan = observed_plan(plan, usage)
+    from ouroboros.context_window import observed_plan, record_start_answer
+    record_start_answer(usage, candidate, round_idx)  # raw candidate evidence needs no provider usage
+    plan = observed_plan(plan, usage, candidate)
     if plan is None or not getattr(plan, "window_witness_bound", True):
         return
     last = usage.get("_last_round_cache_usage") or {}
@@ -152,22 +153,22 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
 
 
 def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False,
-                         candidate: Any = None) -> None:
+                         candidate: Any = None, round_id: str = "") -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task.
 
-    ``measured`` (the estimate is anchored on an accepted request, or calibrated by a fresh
-    exact-route/model density witness — ``fresh_route_usage``/``fresh_model_usage``) also bounds
-    the refusing account's window when the provider stated no limit; a cold estimate stays
-    task-local. ``candidate``, the refused request, says how that size was known: a local
-    instance's exact count (its ``input_tokens`` with its ``context_window_tokens``) is stored
-    as such, any other as an anchored estimate (``WindowLimit.basis``)."""
+    A measured, numberless text Chat refusal informs only a future start's composition (at its own raw size).
+    Otherwise ``measured`` permits the existing window observation, exact local counts included.
+    Confirmation of a declared total, numeric provider limits and task-local recovery are independent."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
-    from ouroboros.context_window import record_refusal
+    from ouroboros.context_window import observed_plan, planned_chat, record_refusal, record_start_refusal
 
+    record_start_refusal(usage, candidate, round_id)
+    if planned_chat(candidate) and observed_plan(plan, usage, candidate) is None:
+        return  # the failed round can still retry; the old route did not refuse this request
     exact = getattr(candidate, "context_window_tokens", None) and getattr(candidate, "input_tokens", None)
     record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0,
-                   basis="exact_local_count" if exact else "anchored_estimate")
+                   basis="exact_local_count" if exact else "anchored_estimate", candidate=candidate, round_id=round_id)
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))

@@ -313,9 +313,9 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
 
 
 def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
-    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks once, then at
-    each of its next three host forms re-prices that level, misses the window (even its shortest view does not fit) and
-    walks again."""
+    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks (Max prices its ordinary
+    memory and, for the gate's need it prints, its shortest telling); Nano walks once, then at each of its next three
+    host forms re-prices that level, misses the window (even its shortest view does not fit) and walks again."""
     render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
@@ -325,7 +325,7 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('re-price', 'max'), ('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max')] * 2 + [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [
@@ -418,11 +418,19 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
                               task_id='scale-fit')
     assert {**retained, 'predicted': True} == predicted_section(sections[retained['section_id']])
     text = '\n'.join(mf.counterfactual_lines(fit))
-    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
+    # Review round 1 (Astra 11): a lost room names its cause by its own numbers, and the arm keeps the tool schemas and
+    # the need without them beside the need with no memory.
+    room = shown['max_room']
+    said = 'held' if room['cause'] == 'held' else f"lost, cause {mf.lowered_cause(room)}"
+    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {said}: window " in text and 'crowded' not in text
+    assert (f"; with no memory {room['zero_need']:,}; tool schemas {room['schemas']:,}; without them "
+            f"{room['floor_need']:,}; my story ") in text
     assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
     # The start is named by its own cause, never by the mode chosen now: a Low start resumed under the owner's Max stays
-    # Low; a Max start the window took to chapter maps (a cause recorded) is Max with chapter maps (4A).
-    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Max with chapter maps')):
+    # Low; a Max start the window took to Low (a cause recorded) is Low, temporarily, for the window (21.11); a Max start
+    # whose route named no window says so, a held one does not (Astra 6).
+    for start, said in ((('low', ''), 'low'), (('low', 'memory'), 'Low, temporarily, for the window'),
+                        (('max', 'unmeasured'), 'Max, window not measured at the start'), (('max', ''), 'max')):
         frame = mf.counterfactual_starts(dataclasses.replace(plan, start=start, preferred_mode='max'), {'as captured': captured})
         assert f"This task started in {said} (its start projection" in '\n'.join(mf.counterfactual_lines(frame))
     # Without the inputs the frame needs, the fit is named as not measured, never guessed.
@@ -457,6 +465,11 @@ def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, m
     assert held.initial_mode == 'max' and crowded is not None
     assert mode_cause(crowded, 'low') == 'memory' and mode_cause(held, 'max') == ''
     assert mode_cause(held, 'low') == 'after_start' and mode_cause(crowded, 'nano') == 'after_start'
+    # A Max start whose window was not known (``unmeasured``) lowered nothing: it is no cause the usage ledger accepts,
+    # even beside an owner's mode that differs from the start's (a carried plan), and a lower mode after it is after_start.
+    unmeasured = dataclasses.replace(held, start=('max', 'unmeasured'))
+    assert mode_cause(unmeasured, 'max') == '' and mode_cause(unmeasured, 'low') == 'after_start'
+    assert mode_cause(dataclasses.replace(unmeasured, preferred_mode='low'), 'max') == 'after_start'
     disposition = measure_main_fit(crowded, crowded.messages_for('low'), scale.tools(), profile='task_local_low',
                                    rendered_mode='low', round_id='e:round:1')
     physical = cf._physical_context_for_fit(disposition)

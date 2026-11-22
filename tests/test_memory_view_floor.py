@@ -134,6 +134,24 @@ def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_ab
     assert "F7" not in dict(floor["steps"])
 
 
+def test_low_under_my_humans_max_has_no_target_of_its_own_and_the_owners_low_keeps_it():
+    """Owner 21.11.2026: a start the window took from my human's Max runs in Low, temporarily, for the window, and only
+    the window cuts my memory there: Low's own target binds nothing (no ``by_budget``, no mode budget in its note),
+    while the owner's own Low keeps that target. Its cuts are Low's, never named Max's."""
+    snapshot = syn.snapshot(conversations=[syn.conversation(i, notes=1, words=3, word_chars=2_000) for i in range(40)])
+    frame = dict(known_window=True, output_reserve=65_536, ratio=1, non_memory_tokens=180_000)
+    temporary = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=400_000,
+                                        lowered_from="max", **frame)
+    owners = mf.render_view_for_mode(snapshot, mode="low", owner_mode="low", window_tokens=400_000, **frame)
+    assert temporary.level.by_budget == 0 and temporary.facts["floor"]["target_tokens"] is None
+    assert "mode budget" not in temporary.note and "Low, temporarily, for the window" in temporary.note
+    assert owners.level.by_budget > 0 and "the Low mode budget (250000 tokens)" in owners.note
+    tight = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=260_000, lowered_from="max",
+                                    **frame)
+    assert tight.level.by_budget == 0 and "mode budget" not in tight.note
+    assert "Low cuts for the window (260000 tokens)." in tight.note and "Max cuts" not in tight.note
+
+
 def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_last_all_to_one_count():
     from ouroboros import memory_view_conversations as conversations
 

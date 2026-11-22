@@ -227,14 +227,14 @@ def snapshot_labelled(section: str, captured_at: str) -> str:
 
 def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
     """One dated canonical-queue view, frozen with the task's ContextCore."""
-    from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers
+    from ouroboros.config import DATA_DIR, MAX_ACTIVE_SUBAGENTS_HARD_CAP, get_max_active_subagents_per_root, get_max_workers
     from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
 
     root = pathlib.Path(task.get("budget_drive_root") or DATA_DIR)
     snapshot = _load_queue_snapshot(root)
     fact = {**queue_snapshot_observation(snapshot), "source_root": str(root),
             "max_workers": get_max_workers(),  # the owner's cap on acting tasks as configured here; None: no number
-            "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
+            "max_active_subagents_per_root": get_max_active_subagents_per_root()}  # the owner's number; None: none
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
     from ouroboros.project_admission import project_hold_fact
@@ -303,17 +303,18 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         fact["free_worker_slots"] = None
         fact["free_worker_slots_basis"] = "unknown"
     fact["note"] = (
-        "Last recorded queue counts at ts; freshness and age were measured when this context "
-        "was built and do not refresh during the task. Stale or unknown observations do not "
+        "Last recorded queue counts at ts; freshness and age date from this context's build "
+        "and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
-        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so "
-        "explicitly, and other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on its own process "
-        "(a warm sleep, an owner wait or an in-slot wait) and is not counted against the owner's cap, which counts "
-        "acting tasks only (recorded_max_workers; null: no number, the machine's memory is the limit). "
+        "pending_count counts rows, not runnable demand: paused or held rows and cold sleepers (no process) say so; "
+        "other rows record no wait cause here. acting_worker_count holds a task and acts; parked_worker_count waits on "
+        "its own process (warm sleep, owner wait or in-slot wait), uncounted by the owner's cap, which counts acting "
+        "tasks only (recorded_max_workers; null: no number, the machine's memory limits; "
+        f"max_active_subagents_per_root likewise, within {MAX_ACTIVE_SUBAGENTS_HARD_CAP} children per root). "
         "free_worker_slots is assignable idle existing capacity, not headroom; booting and reaping overlap for "
         "fresh slots. memory_admission is the supervisor's last reading of the machine (dated read_at): available, "
-        "reserve, the typical worker size, the processes still starting, how many new processes it admitted and why "
-        "a start waits. Scheduling owns admission; these observations reserve no slots."
+        "reserve, typical worker size, processes still starting, new processes admitted and why a start waits. "
+        "Scheduling owns admission; these observations reserve no slots."
     )
     return fact
 

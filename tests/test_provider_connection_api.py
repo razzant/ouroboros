@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 from typing import Any, Dict
 
 import pytest
@@ -43,14 +44,14 @@ def settings_client(tmp_path, monkeypatch):
 
     gateway = srv._gateway_settings
     defaults = lambda settings: (dict(settings), False, [])  # noqa: E731
+    # gateway.settings reads through settings_read_view; each request's sync copies server's binding.
+    monkeypatch.setattr(srv, "load_settings", load)
     for module in (gateway, srv):
-        monkeypatch.setattr(module, "load_settings", load)
         monkeypatch.setattr(module, "save_settings", save, raising=False)
         monkeypatch.setattr(module, "_apply_settings_to_env", lambda *a, **k: None)
         monkeypatch.setattr(module, "apply_runtime_provider_defaults", defaults)
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", load)
-    monkeypatch.setattr(gateway, "_owner_settings_document", load)
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (load(), load()))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (load(), load()))
     monkeypatch.setattr(gateway, "_owner_write_settings", save)
     app = Starlette(routes=[Route("/api/settings", endpoint=srv.api_settings_get, methods=["GET"]),
                             Route("/api/settings", endpoint=srv.api_settings_post, methods=["POST"])])
@@ -66,7 +67,11 @@ def test_get_masks_row_secrets_and_describes_every_connection(settings_client):
     assert BYOK["api_key"] not in json.dumps(body)
     assert body[CONNECTIONS_KEY] == [{**BYOK, "api_key": "sk-or-v1..."}]
     meta = {row["id"]: row for row in body["_meta"]["connections"]}
-    assert meta["openrouter@byok"] == {
+    byok = dict(meta["openrouter@byok"])
+    # ``connection_revisions`` adds ``<id>#<24 hex>`` per row (``owner_settings.connection_revision``): the row's own id
+    # plus a process-salted digest, never a bare token.
+    assert re.fullmatch(r"openrouter@byok#[0-9a-f]{24}", byok.pop("revision"))
+    assert byok == {
         "kind": "openrouter", "name": "byok", "label": "Claude credits", "builtin": False, "enabled": True,
         "configured": True, "source": "settings", "id": "openrouter@byok", "display": "OpenRouter · Claude credits"}
     assert meta["openrouter"]["display"] == "OpenRouter" and meta["openrouter"]["source"] == "settings"
@@ -410,11 +415,9 @@ def test_an_openai_key_already_read_stays_on_chat_completions(settings_client, m
     if in_document:
         document = copy.deepcopy(view)
     gateway = srv._gateway_settings
-    for module in (gateway, srv):
-        monkeypatch.setattr(module, "load_settings", lambda: copy.deepcopy(view))
+    monkeypatch.setattr(srv, "load_settings", lambda: copy.deepcopy(view))
     monkeypatch.setattr(gateway, "_owner_read_settings_raw", lambda: copy.deepcopy(document))
-    monkeypatch.setattr(gateway, "_owner_settings_document", lambda: copy.deepcopy(document))
-    monkeypatch.setattr(gateway, "settings_read_view", lambda: (copy.deepcopy(view), copy.deepcopy(view)))
+    monkeypatch.setattr(gateway, "settings_read_view", lambda **_: (copy.deepcopy(view), copy.deepcopy(document)))
     response = client.post("/api/settings", json={"OPENAI_API_KEY": "sk-proj-typed-0123456789"})
     assert response.status_code == 200, response.text
     assert saved["OPENAI_API_KEY"] == "sk-proj-typed-0123456789" and saved["OPENAI_API_SURFACE"] == ""

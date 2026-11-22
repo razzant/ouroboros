@@ -24,6 +24,7 @@ import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
+from tests._queue_state import gateway, read_state  # noqa: F401
 from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
@@ -413,8 +414,404 @@ def capture(page, name):
     setup_browser.capture(page, name)
 
 
+@pytest.mark.parametrize("width", [1240, 390])
+def test_first_project_web_echo_with_a_cold_main(subscription_ui, tmp_path, monkeypatch, width):
+    from playwright.sync_api import expect
+    from ouroboros import projects_registry
+    from supervisor import message_bus
+    from tests._room_browser_shared import recording_chat_bridge, serve_chat_history
+    from tests._shared import producer_evidence_dir
+
+    project = projects_registry.create_project(tmp_path, "garden-notes", name="Garden notes")
+    bridge, frames = recording_chat_bridge(tmp_path, monkeypatch)
+    main, writer = subscription_ui["page"], subscription_ui["new_page"]()
+    viewport = {"width": width, "height": 844}
+    viewer = Transport(main)
+
+    def missing_state(route):
+        viewer.state_reads += 1
+        route.fulfill(status=503, json={"error": "state unavailable"})
+
+    main.route("**/api/state*", missing_state)
+    open_app(subscription_ui, viewer, viewport=viewport)
+    nav = main.locator('.nav-project-row[data-project-id="garden-notes"]')
+    assert viewer.state_reads and nav.count() == 0
+
+    sender = Transport(writer, projects=[project])
+    open_app({**subscription_ui, "page": writer}, sender, viewport=viewport)
+    open_project(writer, project)
+    project_text, external_text = "Add sage to the map.", "The library is open today."
+    prefix = "#pchat-garden-notes"
+
+    def accept(raw):
+        frame = json.loads(raw)
+        if frame.get("type") == "chat":
+            assert (frame["chat_id"], frame["project_id"]) == (project["chat_id"], project["id"])
+            bridge.ui_send(frame["content"], chat_id=frame["chat_id"], project_id=frame["project_id"],
+                           client_message_id=frame["client_message_id"], sender_session_id=frame["sender_session_id"])
+            sender.send(frames[-1])
+            viewer.send(frames[-1])
+
+    sender.sockets[-1].on_message(accept)
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(projects_registry, "project_thread_chat_ids", lambda root: frozenset())
+        writer.locator(f"{prefix}-input").fill(project_text)
+        writer.locator(f"{prefix}-send").click()
+        project_rows = writer.locator(f"{prefix}-messages .chat-bubble.user")
+        expect(project_rows.locator('[data-ingress-saved=""], [data-ingress-saved="pending"]')).to_have_count(1)
+    [accepted] = frames
+    assert accepted["chat_id"] == project["chat_id"] and accepted["kind"] == "room_echo"
+    assert "project_thread" not in accepted and 1 not in accepted.get("also_rooms", [])
+
+    message_bus.record_inbound_message(bridge, {"source": "skill:telegram", "text": external_text},
+                                       chat_id=987654, user_id=7, client_message_id="library-note",
+                                       text=external_text, ts=accepted["ts"])
+    external = frames[-1]
+    assert "kind" not in external and external["chat_id"] == 987654
+    viewer.send(external)
+    viewer.send(external)  # A repeated external frame still names the same saved row.
+    sender.send(external)
+    main_rows = main.locator("#chat-messages .chat-bubble.user")
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    expect(project_rows.locator(".message")).to_have_text([project_text])
+    out = producer_evidence_dir(tmp_path, "room-echo", env="OUROBOROS_UI_EVIDENCE_DIR")
+    for page, rows, room in [(main, main_rows, "main"), (writer, project_rows, "project")]:
+        expect(rows).to_be_in_viewport()
+        page.screenshot(path=str(out / f"web-echo-{room}-{width}.png"), animations="disabled")
+
+    serve_chat_history(main, tmp_path)
+    viewer.projects = [project]
+    main.unroute("**/api/state*", missing_state)
+    viewer.refresh()
+    expect(nav).to_have_count(1)
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    subscription_ui["errors"].watch(main)
+    main.reload(wait_until="domcontentloaded")
+    expect(nav).to_have_count(1)
+    expect(main.locator("#chat-messages .chat-bubble.user[data-history-id] .message")).to_have_text([external_text])
+    expect(main_rows.locator(".message")).to_have_text([external_text])
+    open_project(main, project)
+    expect(main.locator(f"{prefix}-messages .chat-bubble.user[data-history-id] .message")).to_have_text([project_text])
+
+
+@pytest.mark.parametrize(("width", "mode"), [(1240, "warm"), (390, "cold")])
+def test_nested_cards_show_their_own_current_work(subscription_ui, tmp_path, monkeypatch, width, mode):
+    from types import SimpleNamespace
+    from playwright.sync_api import expect
+    from tests._shared import producer_evidence_dir
+
+    parent, reader, queued, run = "garden-map", "map-reader", "map-index", "map-proof"
+    lineage = {"parent_task_id": parent, "root_task_id": parent}
+    sleep = {"mode": mode, "runs": [run]}
+    if mode == "warm":
+        member = activity(reader, **lineage)
+        raw = {"running": True, "owner_wait": {"reason": "sleep", "state": "waiting", "task_attempt": 1, "sleep": sleep}}
+    else:
+        member = activity(reader, "budget_paused", pause_cause="sleep", **lineage)
+        raw = {"_budget_pause": {"rail": "model_sleep", "reason": "sleep", "exact_continuation": True, "sleep": sleep}}
+    rows = [activity(parent), member, activity(queued, "queued", **lineage)]
+    history = [progress(parent, "Drawing the garden map.", 1, suggested_name="Garden map")]
+    for child, event, title in [(reader, "running", "Read the map"), (queued, "scheduled", "Index the beds")]:
+        history.append(progress(child, title, 2, **lineage, delegation_role="subagent", subagent_task_id=child,
+                                subagent_event=event, subagent_role=title))
+    page = subscription_ui["page"]
+    transport = Transport(page, activities=rows[:1], history={1: history})
+    body = transport.body()
+    fact = {"task_id": reader, "run_id": run, "run_state": "running", "answered": True, "at": time.monotonic()}
+    observer = SimpleNamespace(observation=lambda rid: fact if rid == run else {})
+    monkeypatch.setattr("ouroboros.delegate_collection.body_runtime", lambda _root: observer)
+    body.update(work_fields(rows, {parent: {"running": True}, reader: raw},
+                            held={parent: [{"task_id": reader, "run_id": run}]}))
+    monkeypatch.setattr(transport, "body", lambda: body)
+    open_app(subscription_ui, transport, viewport={"width": width, "height": 844})
+
+    root = page.locator(f'#chat-messages .chat-live-card[data-task-id="{parent}"]')
+    summary = ":scope > [data-live-summary-button]"
+    sleeper = root.locator(f'.subagent[data-task-id="{reader}"]').locator(summary)
+    sibling = root.locator(f'.subagent[data-task-id="{queued}"]').locator(summary)
+    root.scroll_into_view_if_needed()
+    for head, word in [(root.locator(summary), "Working"), (sleeper, "Waiting"), (sibling, "Queued")]:
+        chip = head.locator("[data-live-phase]")
+        expect(chip).to_have_text(word)
+        expect(chip).to_be_in_viewport()
+    cause = sleeper.locator("[data-live-phase-secondary]")
+    expect(cause).to_have_text("Sleeping until its external run finishes · 1 external run still working")
+    expect(cause).to_be_in_viewport()
+    expect(sibling).not_to_contain_text("external run")
+    out = producer_evidence_dir(tmp_path, "room-work", env="OUROBOROS_UI_EVIDENCE_DIR")
+    page.screenshot(path=str(out / f"nested-members-{width}.png"), animations="disabled")
+
+
+def test_only_the_nested_waiter_shows_that_its_selected_helper_needs_owner_resume(subscription_ui, monkeypatch):
+    from playwright.sync_api import expect
+
+    root, waiter, held, other = "map-root", "map-reader", "map-index", "map-notes"
+    members = [(waiter, root, "running"), (held, waiter, "running"), (other, root, "running")]
+    rows = [activity(root), activity(waiter, parent_task_id=root, root_task_id=root),
+            activity(held, "budget_paused", parent_task_id=waiter, root_task_id=root),
+            activity(other, parent_task_id=root, root_task_id=root)]
+    history = [progress(root, "Drawing the map.", 1)]
+    for child, parent, event in members:
+        history.append(progress(child, "Working on the map", 2, parent_task_id=parent, root_task_id=root,
+                                delegation_role="subagent", subagent_task_id=child, subagent_event=event))
+
+    def sleep(target):
+        return {"running": True, "owner_wait": {"reason": "sleep", "state": "waiting", "task_attempt": 1,
+                "sleep": {"mode": "warm", "tasks": [target]}}}
+
+    raw = {root: {"running": True}, waiter: sleep(held), other: sleep("unknown-target"),
+           held: {"_budget_pause_hold": {"reason": "panic_hold", "release": "owner"}}}
+    page = subscription_ui["page"]
+    transport = Transport(page, activities=rows[:1], history={1: history})
+    body = {**transport.body(), **work_fields(rows, raw)}
+    monkeypatch.setattr(transport, "body", lambda: body)
+    open_app(subscription_ui, transport, viewport={"width": 1240, "height": 844})
+    assert len(body["works"]) == 1 and body["works"][0]["episode"]["task_id"] == root
+
+    def head(task_id):
+        return page.locator(f'.chat-live-card[data-task-id="{task_id}"] > [data-live-summary-button]')
+
+    expect(head(waiter).locator("[data-live-phase]")).to_have_text("Waiting")
+    phrase = "1 subagent it waits for is paused until you resume it"
+    expect(head(waiter)).to_contain_text(phrase)
+    expect(head(root)).not_to_contain_text(phrase)
+    expect(head(other).locator("[data-live-phase]")).to_have_text("Waiting")
+    expect(head(other)).not_to_contain_text(phrase)
+
+
+# ------------------------------------------------------------------------------------------------
+# A queued row says behind which work it stands (owner 21.11.2026, «5A»), at the owner's widths.
+
+_ROW_OVERFLOW = """(id) => {
+    const row = document.querySelector(`#page-chat .rw-row[data-id="${id}"]`);
+    const shade = row.closest('.rw-shade'), list = row.closest('.rw-list');
+    const over = (el) => el.scrollWidth - el.clientWidth;
+    const right = (el) => el.getBoundingClientRect().right;
+    const inside = [...row.querySelectorAll('.rw-secondary, .rw-state, .rw-detail, .rw-detail-line')]
+        .filter((el) => el.getClientRects().length);
+    return { row: over(row), shade: over(shade), list: over(list),
+             parts: Math.max(0, ...inside.map(over)), past: Math.max(...inside.map(right)) - right(row),
+             page: document.documentElement.scrollWidth - window.innerWidth };
+}"""
+
+
+@pytest.mark.parametrize("width", [581, 282])
+def test_a_queued_row_says_behind_which_work_it_stands_and_never_overflows(room_ui, width):
+    """Owner 21.11.2026 («5A»), review round 1 (S5): the line and the details wrap a long unbroken name and folder path
+    inside the row; the list's own scroll width is measured, since an overflow inside it never reaches the page's."""
+    holder = "Rebuild_the_release_candidate_" * 4
+    folder = "/Users/someone/work/" + "a" * 130 + "/a-very-long-folder-name-without-any-space"  # one unbroken part
+    queued_name = "Измерить старт чата и проверить ускорение на старых цитатах"
+    transport = Transport(room_ui["page"], activities=[
+        activity("rw-holder", suggested_name=holder), activity("rw-behind", "queued", suggested_name=queued_name)])
+    transport.raw["rw-holder"] = {"running": True, "suggested_name": holder}
+    transport.raw["rw-behind"] = {"suggested_name": queued_name, "lane_wait": {
+        "lane": "folder", "task_id": "rw-holder", "project_id": "other", "folder": folder}}
+    page = open_app(room_ui, transport, viewport={"width": width, "height": 844})
+    trigger(page).click()
+    opened = wait_facts(page, "main", lambda f: row(f, "rw-behind") and row(f, "rw-behind")["secondary"],
+                        "the queued row's line")
+    queued = row(opened, "rw-behind")
+    assert (queued["word"], queued["secondary"]) == ("Queued", f"behind \u201c{holder}\u201d"), queued
+    assert "rw-holder" not in queued["state"], "the line names the work, never its id"
+    fits = lambda m: m["row"] <= 1 and m["shade"] <= 1 and m["list"] <= 1 and m["parts"] <= 1 and m["past"] <= 1 \
+        and m["page"] <= 0  # noqa: E731
+    overflow = page.evaluate(_ROW_OVERFLOW, "rw-behind")
+    assert fits(overflow), overflow
+    capture(page, f"queued-behind-{width}")
+    row_main(page, "rw-behind").click()
+    detail = wait_facts(page, "main", lambda f: "Behind" in row(f, "rw-behind")["detail"], "the queued row's details")
+    assert f"Behindrw-holder keeps the folder {folder}" in row(detail, "rw-behind")["detail"], row(detail, "rw-behind")
+    overflow = page.evaluate(_ROW_OVERFLOW, "rw-behind")
+    assert fits(overflow), overflow
+    capture(page, f"queued-behind-{width}-details")
+
+
 # ------------------------------------------------------------------------------------------------
 # Main: each census state in its own words, tone and controls.
+
+NATIVE_NAMES = {"atlas": "Index the atlas", "symbols": "Check map symbols", "catalog": "Read the catalog"}
+
+
+def native_main(room_ui, gateway, monkeypatch):  # noqa: F811
+    """Main with three owner actions from the real census: atlas and symbols hold an explicit Resume, catalog
+    waits on a sign-in only. The page is open and every row is a System message in the feed."""
+    from playwright.sync_api import expect
+
+    from ouroboros.model_wait import mutate_wait
+    from ouroboros.task_results import write_task_result
+
+    names = NATIVE_NAMES
+    write_task_result(gateway.root, "maps", "completed", chat_id=1, root_task_id="maps")
+    gateway.pending.extend([
+        {"id": "atlas", "chat_id": 1, "suggested_name": names["atlas"],
+         "_budget_pause": {"status": "paused_before_dispatch", "replay_safe": True, "physical_calls": 0}},
+        {"id": "symbols", "chat_id": 1, "suggested_name": names["symbols"], "delegation_role": "subagent",
+         "parent_task_id": "maps", "root_task_id": "maps",
+         "_budget_pause_hold": {"reason": "root_fence_lifted_pending_selection", "release": "resume"}},
+    ])
+    task = {"id": "catalog", "chat_id": 1, "suggested_name": names["catalog"], "_attempt": 3}
+    write_task_result(gateway.root, "catalog", "running", chat_id=1)
+    wait = {"wait_id": "sign-in", "task_attempt": 3, "revision": 2, "state": "waiting",
+            "requires_owner_action": True, "reason": "auth", "role": "main", "source": "codex",
+            "model": "claudexor::codex=test-model", "credential_harness": "codex", "credential_profile_id": "fixture"}
+    mutate_wait(gateway.root, "catalog", "sign-in", lambda _: wait)
+    gateway.running["catalog"] = {"task": task, "attempt": 3, "started_at": 1.0}
+
+    state = read_state(gateway)
+    assert state["main_attention_complete"] and {a["task_id"] for a in state["main_attention"]} == set(names)
+    assert {a["activity_id"] for a in state["active_chat_activities"]} == {"atlas", "catalog"}
+    resumes = [c for work in state["works"] for c in work["controls"] if c["action"] == "resume"]
+    assert sorted(resumes, key=lambda c: c["target"]) == [
+        {"action": "resume", "target": "atlas"}, {"action": "resume", "target": "symbols", "scope": "single"}]
+
+    page = room_ui["page"]
+    details = {row["task_id"]: {**row, "status": "running" if row["task_id"] == "catalog" else "scheduled"}
+               for row in state["main_attention"]}
+    details["maps"] = {"task_id": "maps", "chat_id": 1, "status": "completed"}
+    transport = Transport(page, history={1: reading(24)}, details=details)
+    monkeypatch.setattr(transport, "body", lambda: {**state, "supervisor_ready": True})
+    open_app(room_ui, transport)
+    expect(page.locator("#chat-messages .chat-bubble.system[data-owner-action]")).to_have_count(3)
+    return page, transport
+
+
+def press_pill_once(page, passage):
+    """The reader is in the middle of Main's history; one press of the pill. Where focus landed: the owner-action
+    row that holds it (``:focus-within``, so a button inside it counts) and what exactly holds it."""
+    from playwright.sync_api import expect
+
+    pill = page.locator("#page-chat .chat-question-nav")
+    passage.evaluate("el => el.scrollIntoView({block:'center'})")
+    settle_frames(page)
+    expect(pill.locator(".chat-question-nav-count")).to_have_text("3")
+    pill.click()
+    row = page.locator("#chat-messages .owner-action:focus-within")
+    task_id = row.get_attribute("data-owner-action")
+    focused = page.evaluate("() => document.activeElement.matches('[data-resume-run]') ? 'resume' : "
+                            "document.activeElement.matches('.owner-action') ? 'row' : 'other'")
+    return task_id, focused, row
+
+
+def test_native_pill_reaches_each_source_without_acting(room_ui, gateway, monkeypatch):  # noqa: F811
+    from playwright.sync_api import expect
+
+    names = NATIVE_NAMES
+    page, transport = native_main(room_ui, gateway, monkeypatch)
+    passage = page.locator('#chat-messages [data-client-message-id="Main-read-3"]')
+    visited = {}
+    for _ in names:
+        task_id, focused, target = press_pill_once(page, passage)
+        assert task_id in names and task_id not in visited
+        visited[task_id] = focused
+        expect(target.locator(".owner-action-body > .model-wait-heading strong")).to_have_text(names[task_id])
+        expect(target.locator('[data-intent="open-project"]')).to_have_count(0)
+        if task_id == "catalog":
+            expect(target.locator('[data-wait-id="sign-in"] [data-wait-login]')).to_be_visible()
+            expect(target.locator("[data-resume-run]")).to_have_count(0)
+            expect(target).to_be_focused()  # no Resume of its own: the System row itself
+        else:
+            expect(target.locator("[data-resume-run]")).to_be_enabled()
+            expect(target.locator("[data-resume-run]")).to_be_focused()  # the existing door, which the pill never presses
+            reason = "spending limit" if task_id == "atlas" else "Waiting for Ouroboros or you to resume it"
+            expect(target.locator(".owner-action-reason")).to_contain_text(reason)
+    assert visited == {"atlas": "resume", "symbols": "resume", "catalog": "row"}
+    assert not transport.posts and not transport.around_reads
+
+    for task_id in ("symbols", "atlas"):
+        path = f"/api/tasks/{task_id}/resume"
+        with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith(path)) as reply:
+            page.locator(f'[data-owner-action="{task_id}"] [data-resume-run]').click()
+        assert reply.value.ok and reply.value.request.post_data is None
+    assert transport.posts == [("/api/tasks/symbols/resume", {}), ("/api/tasks/atlas/resume", {})]
+
+
+def test_native_pill_lands_on_the_row_when_a_press_settles_after_the_connection_dropped(room_ui, gateway, monkeypatch):  # noqa: F811
+    """The owner's own Resume is still out when the socket drops, and its answer lands afterwards. The settled
+    button keeps no authority the disconnect took: the pill leads to the System rows themselves, whether or not
+    the socket has come back, since only a census restores authority. Once one is read, the same pill leads to the
+    existing Resume doors again. Only the owner's press ever sends."""
+    from contextlib import suppress
+
+    from playwright.sync_api import expect
+
+    page, transport = native_main(room_ui, gateway, monkeypatch)
+    held, census, offline = [], [], {"on": False, "hold": False}
+
+    def reconnect(ws):  # the page may be back at any time; no census it asks for may answer while the test looks
+        offline["hold"] = offline["hold"] or offline["on"]
+        transport._connect(ws)
+
+    page.route("**/api/tasks/atlas/resume", lambda route: held.append(route))  # unanswered until the test says
+    page.route("**/api/state*", lambda route: census.append(route) if offline["hold"] else transport._state(route))
+    page.route_web_socket("**/ws", reconnect)
+    door = page.locator('#chat-messages [data-owner-action="atlas"] [data-resume-run]')
+    door.click()
+    expect(door).to_be_disabled()
+    deadline = time.monotonic() + 15
+    while not held and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert len(held) == 1, "the press reached the network"
+    offline["on"] = True
+    count = transport.disconnect()
+    for task_id in NATIVE_NAMES:
+        expect(page.locator(f'#chat-messages [data-owner-action="{task_id}"] .chat-live-phase')).to_contain_text("Activity unconfirmed")
+    reads = transport.state_reads
+    held.pop().fulfill(json={"ok": True, "task_id": "atlas", "state": "resumed"})  # both end at once
+    deadline = time.monotonic() + 15
+    while transport.state_reads == reads and time.monotonic() < deadline:  # the settled press reads the census once
+        page.wait_for_timeout(50)
+    page.wait_for_timeout(100)
+    # Read at once, not awaited: the socket's return repaints the door whatever settling left (the eligibility of the
+    # moment is what the check is for), so a waiting expectation would pass on its own a second later.
+    assert door.is_disabled(), "settling restores the door's current eligibility, not an enabled mark"
+    passage = page.locator('#chat-messages [data-client-message-id="Main-read-3"]')
+    lands = [press_pill_once(page, passage)[:2] for _ in NATIVE_NAMES]
+    assert sorted(task_id for task_id, _ in lands) == sorted(NATIVE_NAMES)
+    assert {focused for _, focused in lands} == {"row"}, lands
+    offline.update(on=False, hold=False)
+    for route in census:
+        with suppress(Exception):  # a read the page gave up on has nothing left to answer
+            transport._state(route)
+    transport.await_reconnect(count)
+    transport.refresh()
+    expect(door).to_be_enabled()
+    lands = dict(press_pill_once(page, passage)[:2] for _ in NATIVE_NAMES)
+    assert lands == {"atlas": "resume", "symbols": "resume", "catalog": "row"}, lands
+    assert transport.posts == [] and not transport.around_reads and not held, "no landing sent anything"
+
+
+def test_native_pill_lands_on_the_row_while_a_confirmed_press_awaits_its_census_read(room_ui, gateway, monkeypatch):  # noqa: F811
+    """The owner's Resume is confirmed and the census read its press then awaits is still out. The press keeps
+    its button disabled, and a browser gives a disabled button no focus: the pill leads to the System row, not to a
+    door that cannot take it. Once the read settles it leads to the door again. Only the owner's press ever sends."""
+    from contextlib import suppress
+
+    from playwright.sync_api import expect
+
+    page, transport = native_main(room_ui, gateway, monkeypatch)
+    page.set_default_timeout(5000)
+    census, hold = [], {"on": True}
+    page.route("**/api/state*", lambda route: census.append(route) if hold["on"] else transport._state(route))
+    door = page.locator('#chat-messages [data-owner-action="atlas"] [data-resume-run]')
+    door.click()
+    deadline = time.monotonic() + 15
+    while not (census and transport.posts) and time.monotonic() < deadline:  # the POST is confirmed; the read after it is held
+        page.wait_for_timeout(50)
+    assert transport.posts == [("/api/tasks/atlas/resume", {})] and census, "the press awaits its census read"
+    assert door.is_disabled()
+    passage = page.locator('#chat-messages [data-client-message-id="Main-read-3"]')
+    lands = dict(press_pill_once(page, passage)[:2] for _ in NATIVE_NAMES)
+    assert lands == {"atlas": "row", "symbols": "resume", "catalog": "row"}, lands
+    hold["on"] = False
+    for route in census:
+        with suppress(Exception):  # a read the page gave up on has nothing left to answer
+            transport._state(route)
+    expect(door).to_be_enabled()
+    lands = dict(press_pill_once(page, passage)[:2] for _ in NATIVE_NAMES)
+    assert lands == {"atlas": "resume", "symbols": "resume", "catalog": "row"}, lands
+    assert transport.posts == [("/api/tasks/atlas/resume", {})] and not transport.around_reads, "no landing sent anything"
+
 
 def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui):
     history = {1: [*reading(10), owner(ASK_TEXT, "cm-ask", 30),
@@ -643,7 +1040,7 @@ def test_controls_follow_the_exact_attempt_partial_census_disconnect_and_finish(
     assert [item["tone"] for item in online["rows"]] == ["live", "live"], online
 
     # Finish while open: names and opened details survive; controls go; outcome only where known.
-    transport.details["rw-live"] = {"task_id": "rw-live", "status": "completed", "suggested_name": "Compare the cited pages"}
+    transport.details["rw-live"] = {"task_id": "rw-live", "status": "completed", "task_attempt": 2, "suggested_name": "Compare the cited pages"}
     transport.details["rw-other"] = {"task_id": "rw-other", "status": "completed", "suggested_name": "Index the archived notes"}
     transport.activities = []
     transport.refresh()

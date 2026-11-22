@@ -12,7 +12,7 @@ import pathlib
 import re
 import sys
 import time
-from typing import Any, Optional, Sequence  # noqa: F401
+from typing import Any, Callable, Optional, Sequence  # noqa: F401
 
 from ouroboros.context_mode_compat import (
     VALID_CONTEXT_MODES, normalize_and_persist_context_mode_compat, normalize_context_mode, owner_declared_low,
@@ -461,12 +461,15 @@ def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool
 
 
 def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str] = (),
-        allow_context_lowering: bool = False, allow_safety_lowering: bool = False) -> dict:
+        allow_context_lowering: bool = False, allow_safety_lowering: bool = False,
+        judge: Optional[Callable[[dict], None]] = None) -> dict:
     """Normalize settings writes under existing ratchets. Only the actual writer names authored_keys; a defaults
     merge preserves absent disk-owned intent, forwarded environment choices (an absent ``SAVED_CHOICE_SETTINGS``
-    key stays absent) and install-time provenance. A deployment policy judges the write first, before any effect."""
-    stored = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
-    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if isinstance(stored, dict) else {})
+    key stays absent) and install-time provenance. An unreadable pre-image refuses, as does deployment policy,
+    before any write or receipt. ``judge``, a writer's last precondition, refuses the prepared document before
+    the rooms' cognition is kept."""
+    stored = _settings_integrity.read_settings_json_strict(SETTINGS_PATH)
+    settings = _deployment_policy.prepare_write(settings, lambda: normalize_settings_raw(stored) if stored is not None else {})
     from ouroboros.review_pool_receipts import persist_write_receipts
     persist_write_receipts(DATA_DIR, settings, SETTINGS_PATH)  # the review-pool receipts THIS write owes, before the pre-image goes
     authored = set(authored_keys or ())
@@ -487,9 +490,12 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
         if key in prepared:
             prepared[key] = normalize_model_role_options(key, prepared[key])[1]
+    prepared = strip_masked_secrets(prepared, known_setting_keys=SETTINGS_DEFAULTS)
+    if judge is not None:  # it refuses before the effects below: rooms' cognition, the upgrades a locked read saves
+        judge(prepared)
     from ouroboros.composer_cognition import preserve_project_cognition
     preserve_project_cognition(prepared, SETTINGS_PATH)
-    return strip_masked_secrets(prepared, known_setting_keys=SETTINGS_DEFAULTS)
+    return prepared
 
 
 def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool = False) -> None:

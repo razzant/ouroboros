@@ -689,16 +689,18 @@ def previous_cache_fact(usage: Mapping[str, Any]) -> str:
     share = (f"{int(read):,}/{int(total):,} tokens ({100 * read / total:.1f}%)"
              if read is not None and total is not None and total > 0 else "unknown")
     cache = f"previous usable input cache {share}"
+    # Only an explicitly stamped tier names a TTL; a bare marker's is unknown.
+    ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
+    stamped = f", cache TTL {ttl}" if cache_ttl_seconds(ttl) is not None else ""
     if previous:
         account, moved = previous.get("served_account"), previous.get("previous_served_account")
         served = (f", served by account {account}" + (f" (moved from {moved})" if moved and moved != account else "")
                   if account else "")
-        # Only an explicitly stamped tier names a horizon; a bare marker's is the provider's business.
-        ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip()
-        stamped = f", cache TTL {ttl}" if cache_ttl_seconds(ttl) is not None else ""
         cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}{stamped}]"
         cache += f"; write {int(written):,} tokens" if written is not None else "; write unknown"
         cache += _previous_call_money(previous) + history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
+    elif stamped:
+        cache += f"; last recorded request cache TTL {ttl}"
     return cache
 
 

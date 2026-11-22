@@ -56,7 +56,7 @@ class MCPAuthRequired(RuntimeError):
         super().__init__(
             f"MCP_AUTH_REQUIRED: server {server_id!r} needs the owner's sign-in ({reason}"
             f"{': ' + detail if detail else ''}). Nothing ran there. The owner can press Sign in on its card in "
-            f"Settings → Tools, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
+            f"Extensions → MCP servers, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
             "a sign-in link to give them.")
 
 
@@ -72,10 +72,20 @@ def _path(server_id: str):
     return config.DATA_DIR / "state" / "mcp" / "oauth" / f"server-{server_id}.json"
 
 
+_FORMAT = 2  # v2: an open sign-in requirement's ``since`` is its start; a v1 writer moved it to every refusal
+
+
 def _load(cfg: Any) -> Dict[str, Any]:
-    """The server's sign-in file; a file written for another address of the same id is not its grant."""
+    """The server's sign-in file; a file written for another address of the same id is not its grant. Every reader
+    and writer comes through here: a v1 file's open requirement reads with its start unknown (``since: None``),
+    its grant, pending sign-in and other fields kept, and the next write stores the current format."""
     doc = read_json_dict(_path(cfg.id)) or {}
-    return doc if doc.get("url") == cfg.url else {}
+    if doc.get("url") != cfg.url:
+        return {}
+    record = doc.get("sign_in") or {}
+    if doc.get("v") != _FORMAT and record.get("state") == SIGN_IN_REQUIRED:
+        doc = {**doc, "sign_in": {**record, "since": None}}
+    return {**doc, "v": _FORMAT}
 
 
 _DRAFT: "contextvars.ContextVar[bool]" = contextvars.ContextVar("mcp_oauth_draft", default=False)
@@ -100,7 +110,7 @@ def _save(cfg: Any, doc: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
-    atomic_write_json(path, {**doc, "v": 1, "url": cfg.url})
+    atomic_write_json(path, {**doc, "v": _FORMAT, "url": cfg.url})
     with contextlib.suppress(OSError):
         os.chmod(path, 0o600)
 
@@ -140,9 +150,17 @@ async def _locked(cfg: Any):
             held.__exit__(None, None, None)
 
 
+def _required_state(doc: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    """The one rule for a required sign-in record: an open requirement keeps its start (an unknown one stays
+    unknown); a requirement after a signed-in state starts now."""
+    prior = doc.get("sign_in") or {}
+    since = prior.get("since") if prior.get("state") == SIGN_IN_REQUIRED else utc_now_iso()
+    return {"state": SIGN_IN_REQUIRED, "reason": reason, "since": since}
+
+
 def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **facts: Any) -> MCPAuthRequired:
     """Record that sign-in is needed (with what the server said) and return the refusal to raise."""
-    doc = {**doc, **facts, "sign_in": {"state": SIGN_IN_REQUIRED, "reason": reason, "since": utc_now_iso()}}
+    doc = {**doc, **facts, "sign_in": _required_state(doc, reason)}
     if reason in ("refresh_rejected", "token_rejected", "expired"):
         doc.pop("tokens", None)  # a grant the provider no longer honours is not kept as if it were
     _save(cfg, doc)
@@ -150,8 +168,9 @@ def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **fa
 
 
 def status(cfg: Any) -> Optional[Dict[str, Any]]:
-    """``{state, reason?, required_scope?, since, issuer, pending?}`` once the server asked for sign-in;
-    else ``None``. A grant that needs a wider scope stays signed in with reason ``insufficient_scope``."""
+    """``{state, reason?, required_scope?, required_scope_since?, since, issuer, pending?}`` once the server asked
+    for sign-in; else ``None``. A grant that needs a wider scope stays signed in with reason ``insufficient_scope``
+    and the start of that gap (``None`` when a file written before kept none)."""
     if not applies(cfg):
         return None
     doc = _load(cfg)
@@ -164,7 +183,8 @@ def status(cfg: Any) -> Optional[Dict[str, Any]]:
     if not signed_in:
         out["reason"] = record.get("reason") or "not_signed_in"
     elif doc.get("required_scope"):
-        out.update(reason="insufficient_scope", required_scope=doc["required_scope"])
+        out.update(reason="insufficient_scope", required_scope=doc["required_scope"],
+                   required_scope_since=doc.get("required_scope_since"))
     if doc.get("pending"):
         out["pending"] = True
     return out
@@ -375,7 +395,8 @@ class StoredBearer(httpx.Auth):
             async with _locked(self.cfg):
                 doc = _load(self.cfg)
                 wanted = _union((doc.get("tokens") or {}).get("scope"), doc.get("required_scope"), challenge.get("scope"))
-                _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted})
+                since = doc.get("required_scope_since") if doc.get("required_scope") else utc_now_iso()  # an open gap keeps it
+                _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted, "required_scope_since": since})
             raise await self._refused(MCPAuthRequired(self.cfg.id, "insufficient_scope", challenge.get("scope") or ""))
 
 
@@ -499,7 +520,7 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str,
         raise MCPAuthRequired(cfg.id, "no_self_registration",
                               f"the provider registers no apps itself: register one there for the return address "
                               f"{redirect}, then enter its client ID (and secret) under Sign in on this server's card "
-                              "in Settings → Tools")
+                              "in Extensions → MCP servers")
     endpoint = _checked(str(metadata.registration_endpoint))
     body = OAuthClientMetadata(client_name="Ouroboros", redirect_uris=[redirect], token_endpoint_auth_method="none",
                                grant_types=["authorization_code", "refresh_token"], response_types=["code"]).model_dump(
@@ -578,12 +599,15 @@ async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] =
         doc = _load(cfg)
         if (doc.get("pending") or {}).get("nonce") != pending.get("nonce"):
             raise MCPAuthRequired(cfg.id, "sign_in_superseded", "a newer sign-in started meanwhile")
-        for key in ("pending", "challenge", "required_scope"):
+        for key in ("pending", "challenge", "required_scope", "required_scope_since"):
             doc.pop(key, None)
         doc.update(issuer=issuer, resource=pending.get("resource"), metadata=metadata, client=client,
                    tokens=_tokens(token, None, pending.get("scope")),
                    sign_in={"state": SIGNED_IN, "since": utc_now_iso()})
         _save(cfg, doc)
+    from ouroboros import mcp_catalog  # after the sign-in lock: the two locks never nest
+
+    mcp_catalog.clear_sign_in_refusal(cfg)  # its calls were refused for the sign-in that just happened
     return {"ok": True, "server": cfg.id, "scope": doc["tokens"]["scope"] or ""}
 
 
@@ -595,7 +619,7 @@ async def sign_out(cfg: Any) -> Dict[str, Any]:
         tokens = doc.pop("tokens", None) or {}
         doc.pop("pending", None)
         if doc:
-            doc["sign_in"] = {"state": SIGN_IN_REQUIRED, "reason": "signed_out", "since": utc_now_iso()}
+            doc["sign_in"] = _required_state(doc, "signed_out")
             _save(cfg, doc)
     endpoint, revoked = (doc.get("metadata") or {}).get("revocation_endpoint"), None
     if endpoint and tokens:

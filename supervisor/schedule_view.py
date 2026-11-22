@@ -109,8 +109,10 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
         if at and at <= now:
             out["time_passed_on"] = at.isoformat()
     last_id = str(row.get("last_task_id") or "")
-    cached = row.get("last_outcome") or {}
+    cached = visible_last_outcome(row)
     observed = bool(last_id and cached.get("task_id") == last_id)
+    if "last_outcome" in out:
+        out["last_outcome"] = cached
     out.pop("outcome", None)
     if last_id:
         out["outcome"] = dict(cached) if observed else {"state": "pending_observation", "task_id": last_id}
@@ -129,6 +131,22 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     return out
 
 
+def visible_last_outcome(row):
+    """An unclassified historical preview waits for its source read; state is still observed."""
+    cached = dict(row.get("last_outcome") or {})
+    if not isinstance(cached.get("report_only"), bool):
+        cached.pop("chat_id", None)
+        if "line" in cached:
+            cached["line"] = ""
+    return cached
+
+
+def _moment(value: Any, row: dict[str, Any]) -> str:
+    """A stored instant with its offset, in the schedule's own zone; the stored text when it does not parse."""
+    at = parse_schedule_time(value, timezone_for_schedule(row))
+    return at.isoformat(timespec="seconds") if at is not None else str(value)[:64]
+
+
 def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     view = decorate(row, now)
     trigger = row.get("trigger") or {}
@@ -136,8 +154,14 @@ def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
              "timezone": view["timezone"] or "local", "next_run_at": row.get("next_run_at") or ""}
     once = trigger.get("type") == "once"
     entry["run_at" if once else "cron"] = trigger.get("run_at" if once else "expr", "")
-    if view.get("outcome"):
+    if row.get("last_run_at"):
+        entry["last_run_at"] = _moment(row["last_run_at"], row)
+    if view.get("outcome"):  # the last run's own outcome only: another run's cached one reads as pending observation
         entry["outcome"] = {key: view["outcome"][key] for key in ("state", "quiet") if key in view["outcome"]}
+    elif not once and not row.get("last_run_at"):
+        entry["outcome"] = {"state": "never_ran"}
+    if isinstance(row.get("occurrence"), dict):  # admitted or claimed, not yet settled: the tool view's three facts
+        entry["occurrence"] = {key: str(row["occurrence"].get(key) or "") for key in ("phase", "task_id", "due_at")}
     waiting = view["waiting_detail"]
     reason = waiting["reason"] or waiting["followup_wait"] or (row.get("followup_hold") or {}).get("reason")
     if reason:
@@ -153,28 +177,49 @@ def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     return entry
 
 
+_OUTSTANDING = ("hold", "followup_hold", "followup_wait", "last_error", "previous_run_open")
+
+
+def _run_in_flight(row: dict[str, Any]) -> bool:
+    """An occurrence not yet settled, or a last run whose outcome is not yet observed: the scheduler's settlement drops
+    ``occurrence`` while that run may still go, and observes every row's last run, switched off or not."""
+    last = str(row.get("last_task_id") or "")
+    cached = row.get("last_outcome") if isinstance(row.get("last_outcome"), dict) else {}
+    return isinstance(row.get("occurrence"), dict) or bool(last and cached.get("task_id") != last)
+
+
 def digest(rows: list[dict[str, Any]], now: datetime.datetime, limit: int = 8) -> dict[str, Any]:
-    """Keep standing promises ahead of exceptions and one-shots within one bound."""
+    """Every enabled standing (cron) row, each with its last run; then, within one bound, rows with an outstanding
+    effect (a switched-off standing row also while a run of it is in flight, ``_run_in_flight``) and one-shots. A
+    switched-off standing row with nothing outstanding is counted beside the reader; nothing to show is no digest."""
     groups: dict[str, list[dict[str, Any]]] = {"standing": [], "attention": [], "one_shots": []}
+    inactive = 0
     for row in rows:
         if not isinstance(row, dict):
             continue
         trigger = row.get("trigger") or {}
-        if trigger.get("type", "cron") == "cron":
+        cron = trigger.get("type", "cron") == "cron"
+        if cron and row.get("enabled", True) and not row.get("delete_requested_at"):
             group = "standing"
-        elif any(row.get(key) for key in ("hold", "followup_hold", "followup_wait", "last_error", "previous_run_open")):
+        elif any(row.get(key) for key in _OUTSTANDING) or (cron and _run_in_flight(row)):
             group = "attention"
+        elif cron:
+            inactive += 1
+            continue
         elif trigger.get("type") == "once" and (not row.get("completed_at") or row.get("delete_requested_at")):
             group = "one_shots"
         else:
             continue
         groups[group].append(row)
+    out: dict[str, Any] = {"standing": [_entry(row, now) for row in groups["standing"]]}
     remaining = max(0, int(limit))
-    out: dict[str, Any] = {}
-    for group, members in groups.items():
-        selected = members[:remaining]
+    for group in ("attention", "one_shots"):
+        selected = groups[group][:remaining]
         out[group] = [_entry(row, now) for row in selected]
         remaining -= len(selected)
     out["omitted_count"] = sum(map(len, groups.values())) - sum(len(out[key]) for key in groups)
+    if not any(out[key] for key in groups) and not out["omitted_count"] and not inactive:
+        return {}
+    out["inactive_standing_count"] = inactive
     out["pointer"] = "manage_schedules(action='list')"
     return out

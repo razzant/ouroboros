@@ -27,16 +27,16 @@ def test_independent_shape_problems_come_back_in_one_refusal_before_any_route(tm
         unrouted.setattr(control_scheduling, "select_subagent_snapshot",
                          lambda *_a, **_k: pytest.fail("a call with shape problems selects no route"))
         refused = _published(ctx, "schedule_subagent", lambda: control._schedule_task(
-            ctx, subagent_id=selected, objective="Examine the change", title="A title", mode="invented",
+            ctx, subagent_id=selected, objective="Examine the change", max_seconds=60, mode="invented",
             deadline_at="2020-01-01T00:00:00Z"))
         alone = control._schedule_task(ctx, subagent_id=selected, objective="Examine the change")
 
     assert refused.code == "TOOL_ARG_ERROR" and refused.text == (
-        "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): title. Use the strict schema: subagent_id, "
-        "objective, expected_output, optional role/context/constraints/memory_mode/workspace_root/effort and (for "
-        "mutative children) write_surface/write_root/protected_paths_grant/external_tool_grants; mode must be ask, "
-        "plan or agent; deadline_at is already in the past (2020-01-01T00:00:00Z); a child bound to it would finalize "
-        "before doing any work; expected_output is required.")
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): max_seconds. Use the strict schema: "
+        "subagent_id, objective, expected_output, optional role/context/constraints/memory_mode/workspace_root/effort "
+        "and (for mutative children) write_surface/write_root/protected_paths_grant/external_tool_grants; mode must be "
+        "ask, plan or agent; deadline_at is already in the past (2020-01-01T00:00:00Z); a child bound to it would "
+        "finalize before doing any work; expected_output is required.")
     assert alone == "⚠️ TOOL_ARG_ERROR (schedule_subagent): expected_output is required."
     assert not ctx.pending_events
     control._schedule_task(ctx, subagent_id=selected, objective="Examine the change", expected_output="An explanation")
@@ -90,7 +90,20 @@ def test_independent_folder_field_problems_join_the_shape_refusal(tmp_path, monk
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place.")
     assert control._schedule_task(ctx, **base, directory_strategy="copy") == (
         "⚠️ TOOL_ARG_ERROR (schedule_subagent): copy requires scope_paths; use ['.'] to select the whole folder.")
+    # workspace='in_place' names what is in the way and the one change that removes the conflict, choosing no form.
+    lead = ("⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace='in_place' needs an acting Git write_surface and no "
+            "directory options; in the way: ")
+    tail = ". Omitting workspace removes this conflict."
+    assert control._schedule_task(ctx, **base, workspace="in_place", write_surface="external_workspace",
+                                  scope_paths=["src"]) == lead + "scope_paths" + tail
+    assert control._schedule_task(ctx, **base, workspace="in_place") == lead + "no write_surface" + tail
     assert not ctx.pending_events
+    # The other direction: the documented defaults are not in the way, and dropping workspace schedules.
+    acting = control._schedule_task(ctx, **base, workspace="in_place", write_surface="self_worktree",
+                                    directory_strategy="direct", scope_paths=[])
+    assert "in the way" not in acting
+    control._schedule_task(ctx, **base)
+    assert [event["type"] for event in ctx.pending_events][-1:] == ["schedule_subagent"]
 
 
 def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path, monkeypatch):
@@ -124,3 +137,31 @@ def test_independent_file_and_origin_problems_join_the_deadline_refusal(tmp_path
     [event] = ctx.pending_events
     assert event["type"] == "schedule_subagent"
     assert event["task_contract"]["resource_policy"]["allowed_origins"] == ["https://studio.example:443"]
+
+
+def test_title_is_one_refusal_naming_the_call_that_works(tmp_path, monkeypatch):
+    """`title` is outside the schema: start_task's card name. Here no field means it (role becomes part of
+    the child's assignment), so it reaches the handler only to be refused once with the call that works,
+    beside the call's other shape problems; nothing is queued, and the same call without title schedules."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    selected = configure_test_subagent(monkeypatch)
+    ctx = _ctx(tmp_path)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path / "data")
+    registry.set_context(ctx)
+    base = {"subagent_id": selected, "objective": "Examine the change", "expected_output": "Findings"}
+
+    for extra in ({}, {"role": "reviewer"}):
+        refused = registry.execute("schedule_subagent", {**base, **extra, "title": "Change review"})
+        assert refused == (
+            "⚠️ TOOL_ARG_ERROR (schedule_subagent): title='Change review' is no schedule_subagent field: objective "
+            "names the work, and the optional role becomes part of the child's assignment; send the call without "
+            "title.")
+    untitled = registry.execute("schedule_subagent", {"subagent_id": selected, "title": "Change review"})
+    assert untitled == (
+        "⚠️ TOOL_ARG_ERROR (schedule_subagent): title='Change review' is no schedule_subagent field: objective "
+        "names the work and is required, and the optional role becomes part of the child's assignment; send the "
+        "call without title; expected_output is required.")
+    assert not ctx.pending_events
+    registry.execute("schedule_subagent", base)
+    assert [(event["type"], event.get("role")) for event in ctx.pending_events] == [("schedule_subagent", "")]

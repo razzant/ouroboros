@@ -6,10 +6,10 @@
  * @property {'dispatched'|'settled'|'unresolved'|'released'} ledger_state
  * @property {string} round_id
  * @property {''|'max'|'low'|'nano'} preferred_at_send  // the task plan's owner mode when it sent
- * @property {'max'|'low'|'nano'} applied  // the mode the send is named in: Max for Max's chapter maps (shown_mode)
+ * @property {'max'|'low'|'nano'} applied  // the mode the send is named in: Low for Low under the owner's Max (shown_mode)
  * @property {'whole'|'maps'} books  // the books' form in this send
  * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
- * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send, or Max's books are maps
+ * @property {''|'memory'|'request'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send
  * @property {boolean} target_missed  // this send exceeded the owner's mode target
  * @property {?number} no_memory_tokens  // Low's missed target: the start's request with no memory, else null
  * @property {string} observed_at
@@ -92,15 +92,16 @@
  * `status`/`is_error` stay its execution outcome; exit, signal and timeout stay process facts.
  * @typedef {Object} ToolVerificationFact
  * @property {"pass"|"fail"} status  // the durable receipt's verdict
- * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric
+ * @property {string} contract_kind  // visible_verifier | explicit_command | explicit_metric | artifact_observation
  * @property {string} expected_match  // substring | exact | exact_line | json_equals | bytes_equal
  * @property {boolean=} matched  // present only where a comparison was evaluated (never on timeout)
+ * @property {boolean=} paths_named  // a failed artifact observation had at least one named path
  * @property {string} check  // the receipt's check rendering, bounded for transport
- * @property {string} check_rendering
+ * @property {string=} check_rendering
  * @property {string=} criterion_id
  * @property {string} criterion_source  // task_stated | agent_defined
  * @property {string} receipt_ts  // the receipt's own timestamp; no separate receipt id exists
- * @property {string=} detail  // the producer's sentence for a timeout or a bytes_equal comparison
+ * @property {string=} detail  // bounded diagnostic from the producer, including missing paths
  */
 /**
  * @typedef {Object} TaskPauseRequest

@@ -95,6 +95,24 @@ test('last-run outcomes keep settled words and use the canonical end time', () =
     assert.doesNotMatch(untimed, /<time/);
 });
 
+test('the one task door opens the settled run in its own room, independent of the template', () => {
+    // A quiet run's whole record (an older schedule's report included, #3687) is read on its card, never on this line.
+    const run = { task_id: 'r<1>', state: 'completed', quiet: true, notice: false, line: '', chat_id: 1 };
+    const door = '<button type="button" class="consciousness-inline-link ui-hit-area" data-open-task="r&lt;1&gt;">Open in Main ↗</button>';
+    assert.ok(scheduleRowHtml({ ...standing, destination: { chat_id: null }, outcome: run })
+        .includes(`last run: ran · no message ${door}</span>`));
+    const refused = { ...run, state: 'failed', quiet: false, notice: true, line: 'Report not confirmed: refused.' };
+    assert.ok(scheduleRowHtml({ ...standing, destination: { chat_id: 1 }, outcome: refused })
+        .includes(`last run: failed · notice: Report not confirmed: refused. ${door}</span>`));
+    assert.ok(scheduleRowHtml({ ...standing, destination: { chat_id: 424242 }, outcome: run }).includes(door));
+    assert.match(scheduleRowHtml({ ...standing, destination: { chat_id: 1 }, outcome: { ...run, chat_id: 4132 } }),
+        /data-open-task="r&lt;1&gt;" data-task-chat="4132">Open run ↗/);
+    assert.doesNotMatch(scheduleRowHtml({ ...standing, destination: { chat_id: 1 }, outcome: { ...run, chat_id: null } }),
+        /data-open-task/, 'unverified room is not inferred from the template');
+    assert.doesNotMatch(scheduleRowHtml({ ...standing, outcome: { state: 'pending_observation', task_id: 'r1' } }),
+        /data-open-task/, 'an unobserved run has no card to open yet');
+});
+
 test('a quiet completion shows the run\'s own sentence after ran · no message; a notice stays the host\'s', () => {
     // The server decides what the line is (a notice, the run's sentence, an answer's end); the row shows it as authored words.
     const quiet = { state: 'completed', quiet: true, notice: false, line: 'Checked: <nothing> changed.' };

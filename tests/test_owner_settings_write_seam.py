@@ -103,6 +103,20 @@ def cyber_settings(isolated_settings, monkeypatch):
     return isolated_settings
 
 
+def test_unrelated_save_leaves_launch_access_inherited(isolated_settings, monkeypatch):
+    from ouroboros import config as cfg
+
+    mode = "OUROBOROS_RUNTIME_MODE"
+    isolated_settings.write_text(json.dumps({"TOTAL_BUDGET": 10}), encoding="utf-8")
+    monkeypatch.setenv(mode, "pro")
+    cfg.initialize_runtime_mode_baseline("pro")
+    response = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": 25})
+    assert response.status_code == 200, response.text
+    saved = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert saved["TOTAL_BUDGET"] == 25 and mode not in saved
+    assert cfg.load_settings()[mode] == "pro" and mode not in response.json()["restart_state"]["restart_keys"]
+
+
 def test_cyber_save_settings_can_configure_supervisor_and_keys(cyber_settings):
     from ouroboros import config as cfg
 
@@ -850,13 +864,11 @@ def test_settings_get_reads_a_legacy_actor_through_the_seam_without_materializin
     monkeypatch, isolated_settings, _clean_subagent_env,
 ):
     """A legacy single-harness document reads as the catalog the migration seeds (its session row first)."""
-    from ouroboros import config as cfg
     from ouroboros.gateway import settings as settings_mod
 
     # Other endpoint tests exercise server.py's legacy compatibility wrapper,
-    # which intentionally rebinds this gateway module in-process. This direct
-    # gateway test pins the real reader it is meant to exercise.
-    monkeypatch.setattr(settings_mod, "load_settings", cfg.load_settings)
+    # which intentionally rebinds this gateway module in-process; the GET reads
+    # through the real settings_read_view, which that wrapper never rebinds.
     original = {
         "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
         "OUROBOROS_SUBAGENT_HARNESS": "codex=gpt-5.6-sol:high",
@@ -882,11 +894,9 @@ def test_settings_get_reads_a_legacy_actor_through_the_seam_without_materializin
 def test_settings_get_reads_the_factory_reviewers_in_place_of_an_unsaved_api_candidate(
     monkeypatch, isolated_settings, _clean_subagent_env,
 ):
-    from ouroboros import config as cfg
     from ouroboros.gateway import settings as settings_mod
     from ouroboros.server_runtime import apply_runtime_provider_defaults
 
-    monkeypatch.setattr(settings_mod, "load_settings", cfg.load_settings)
     monkeypatch.setattr(
         settings_mod, "apply_runtime_provider_defaults", apply_runtime_provider_defaults,
     )
@@ -1028,6 +1038,35 @@ def test_a_present_document_the_seam_cannot_read_is_refused_never_written_as_new
     created = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": "25"})
     assert created.status_code == 200, created.text
     assert json.loads(isolated_settings.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 25.0
+
+
+def test_a_transient_preimage_read_failure_does_not_drop_a_saved_choice(monkeypatch, isolated_settings):
+    from ouroboros.gateway.owner_settings import (
+        SettingsDocumentUnreadable, _owner_update_settings, fields_on_saved_document,
+    )
+
+    original = b'{\n  "OUROBOROS_MAX_WORKERS": 7,\n  "OUROBOROS_TOOL_TIMEOUT_SEC": 90\n}\n'
+    isolated_settings.write_bytes(original)
+    edit = fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77})
+    real_open = pathlib.Path.open
+    reads = 0
+
+    def flaky_open(path, mode="r", *args, **kwargs):
+        nonlocal reads
+        if path == isolated_settings and mode == "rb":
+            reads += 1
+            if reads == 3:  # both the locked read and the transform's spelling check worked
+                raise OSError("injected: temporary settings I/O failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(pathlib.Path, "open", flaky_open)
+        with pytest.raises(SettingsDocumentUnreadable, match="nothing was written"):
+            _owner_update_settings(edit)
+    assert reads == 3 and isolated_settings.read_bytes() == original
+    _owner_update_settings(edit)
+    saved = json.loads(isolated_settings.read_bytes())
+    assert (saved["OUROBOROS_MAX_WORKERS"], saved["OUROBOROS_TOOL_TIMEOUT_SEC"]) == (7, 77)
 
 
 def test_the_capability_ack_is_not_a_settings_writer(monkeypatch, isolated_settings, tmp_path):
@@ -1294,12 +1333,56 @@ def test_owner_only_generic_write_names_its_endpoint_only_outside_cyber(row_clie
     key = "OUROBOROS_RUNTIME_MODE"
     refused = client.post("/api/settings", json={key: "light"})
     assert refused.status_code == 200 and refused.json()["ignored_keys"][key] == "POST /api/owner/runtime-mode"
-    assert json.loads(path.read_text(encoding="utf-8"))[key] != "light"
+    assert key not in json.loads(path.read_text(encoding="utf-8"))
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline("cyber_pro")
     saved = client.post("/api/settings", json={key: "light"})
     assert saved.status_code == 200 and key not in saved.json().get("ignored_keys", {})
     assert json.loads(path.read_text(encoding="utf-8"))[key] == "light"
+
+
+def test_main_ultrafast_checks_the_connection_the_generic_save_would_install(row_client):
+    from ouroboros.gateway.owner_effort import MAIN_BINDING_KEYS
+    from ouroboros.model_slots import MODEL_PROCESSING_PREFERENCES_KEY as roles
+
+    client, path, _ = row_client
+    url = "/api/settings"
+
+    def confirmation(view):
+        meta = view["_meta"]
+        revision = next(row["revision"] for row in meta["connections"] if row["id"] == "openrouter")
+        return {**{key: meta["tokens"][key] for key in MAIN_BINDING_KEYS}, "connection": revision,
+                "ultrafast": json.dumps([view["OUROBOROS_MODEL"], False, "", "", ""])}
+
+    view = client.get(url).json()
+    enable = {roles: {"main": "ultrafast"}, "if_unchanged": confirmation(view)}
+    rotation = {"OPENROUTER_API_KEY": "replacement-fixture-key"}
+    before = path.read_bytes()
+    mixed = client.post(url, json={**enable, **rotation, "TOTAL_BUDGET": 321})
+    assert mixed.status_code == 400 and mixed.json()["code"] == "main_binding_invalid", mixed.text
+    assert mixed.json()["saved"] is False and path.read_bytes() == before
+    assert "replacement-fixture-key" not in mixed.text
+
+    # Resending the displayed mask leaves the selected key intact. A different key can change in the same save.
+    enabled = client.post(url, json={**enable, "OPENROUTER_API_KEY": view["OPENROUTER_API_KEY"],
+                                     "ANTHROPIC_API_KEY": "other-fixture-key"})
+    assert enabled.status_code == 200, enabled.text
+    before = path.read_bytes()
+    for edit in (rotation, {"OUROBOROS_OR_PROVIDER": '{"only":["fixture-provider"]}'}):
+        refused = client.post(url, json=edit)
+        assert refused.status_code == 400 and refused.json()["saved"] is False, refused.text
+        assert path.read_bytes() == before
+
+    rotated = client.post(url, json={**rotation, roles: {"main": "standard"}})
+    assert rotated.status_code == 200, rotated.text
+    renewed = confirmation(client.get(url).json())
+    assert renewed["connection"] != enable["if_unchanged"]["connection"]
+    confirmed = client.post(url, json={**enable, "if_unchanged": renewed})
+    assert confirmed.status_code == 200, confirmed.text
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(saved[roles]) == {"main": "ultrafast"}
+    assert saved["OPENROUTER_API_KEY"] == rotation["OPENROUTER_API_KEY"]
+    assert saved["ANTHROPIC_API_KEY"] == "other-fixture-key" and saved["TOTAL_BUDGET"] == 200
 
 
 def test_unrelated_change_does_not_block_a_key_condition_and_stale_undo_does(row_client):

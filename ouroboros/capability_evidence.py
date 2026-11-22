@@ -1276,7 +1276,11 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         # store is keyed by the requested one, so there is nothing to learn.
         if (normalized.get("claudexor") or {}).get("served_other_model"):
             return
-        real = int(normalized.get("prompt_tokens") or normalized.get("input_tokens") or 0)
+        from ouroboros._usage_response import text_token_counts
+
+        # The ledger's inclusive prompt. An explicit unknown (a native reply whose writes have no total) is no
+        # measurement: its ``input_tokens`` is then only the fresh subtotal, never the window's size or a density.
+        real = text_token_counts(normalized)[0] or 0
         # A cache-inclusive total landing on 2 x cached_tokens (+-1) is a gateway
         # adding the cache read on top of an already inclusive total, not a
         # tokenizer measurement (paid run 2026-09-04: 22 openrouter gemini rows
@@ -1309,6 +1313,8 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         main = bool(getattr(physical, "view_kind", ""))
         route = str(getattr(physical, "route_fp", "") or "")
         bound = provider != "claudexor" and bool(getattr(physical, "window_witness_bound", True))
+        if getattr(physical, "first_contact_plan", None) and not bound:
+            return  # a moved Chat candidate has no bound route density or window witness
         if main and bound and route:
             from ouroboros.context_window import record_observation
             record_observation(drive_root_resolver(request.drive_root),

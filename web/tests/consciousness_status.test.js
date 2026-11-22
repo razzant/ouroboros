@@ -63,7 +63,6 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
         detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05.' }));
     assert.deepEqual([expired.word, shapeOf(expired)], ['', 'dot/owner']);
     assert.equal(expired.said, 'Consciousness: Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check due since 13:05. · waits for you');
-    assert.equal(shapeOf(chipView(answer({ status: 'waiting_for_first_conversation' }))), 'dot/owner');
     // A campaign that waits for the owner is the owner's move too, whatever consciousness does.
     const campaign = answer({ status: 'disabled' }, { bg_consciousness_enabled: false, evolution_enabled: true,
         evolution_state: { status: 'budget_stopped' } });
@@ -74,7 +73,10 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
         assert.deepEqual([shapeOf(view), view.word], ['dot/failed', '14:20'], status);
         assert.equal(chipView(answer({ status, next_wake_at: at(13, 20) })).word, '');
     }
-    for (const status of ['wake_outcome_unknown', 'allowance_unknown']) assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
+    // An owner chat that could not be read is unconfirmed, never the owner's move (a known empty one wakes in Main).
+    for (const status of ['wake_outcome_unknown', 'allowance_unknown', 'owner_chat_unknown']) {
+        assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
+    }
     assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink');
     // A wake held at the allowance it started with, proven by its records, is the owner's move; the chip keeps no time.
     const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import server_liveness, store
+from ouroboros.host_notice import mind_text
 from supervisor import events_chat_delivery as delivery, message_bus, terminal_delivery as td
 from supervisor.event_observation import ObservedEventQueue
 from tests._dialogue import chat_rows, progress_rows
@@ -38,7 +39,7 @@ def dispatch(tmp_path, monkeypatch, sender, isolated_retry):
     def send(chat_id, text, **kwargs):
         did = (kwargs.get("progress_meta") or {}).get("delivery_id")
         if not did:
-            trace.notices.append((chat_id, text))
+            trace.notices.append((chat_id, text + mind_text(kwargs.get("progress_meta") or {})))  # phrase, step, details
             return True, "ok"
         row = next(row for row in td.pending_deliveries(tmp_path) if row["delivery_id"] == did)
         history = progress_rows(tmp_path) if kwargs.get("is_progress") else chat_rows(tmp_path)
@@ -73,6 +74,40 @@ def change_row(root, did, **changes):
     data = json.loads(path.read_text())
     data["pending"][did].update(changes)
     path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("deferred", [True, False])
+def test_old_quiet_final_is_retained_locally_while_ordinary_debt_still_replays(tmp_path, dispatch, monkeypatch, deferred):
+    from ouroboros import task_results
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    report = owe(tmp_path, task_id="older-schedule", text="Retained reference report.", delivery_deferred=deferred)
+    ordinary = owe(tmp_path, task_id="ordinary", text="Ordinary answer.", delivery_deferred=deferred)
+    notice = owe(tmp_path, task_id="older-schedule", text="Host notice.", terminal_origin="host_notice",
+                 delivery_deferred=deferred)
+    task_results.write_task_result(tmp_path, "older-schedule", "completed", result=report["text"],
+                                   metadata=run_metadata(), task_contract={"capability_ceiling": ceiling()})
+    task_results.write_task_result(tmp_path, "ordinary", "completed", result=ordinary["text"])
+    read = task_results.load_task_result
+
+    def unavailable(root, tid, **kwargs):
+        if tid == "older-schedule" and kwargs.get("strict"):
+            raise store.StoreBusy("result read pending")
+        return read(root, tid, **kwargs)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(task_results, "load_task_result", unavailable)
+        _age(tmp_path)
+        assert set(sweep(tmp_path, dispatch)) == {ordinary["delivery_id"], notice["delivery_id"]}
+        drain(dispatch)
+    (pending,) = td.pending_deliveries(tmp_path)
+    assert pending["delivery_id"] == report["delivery_id"] and not pending.get("dispatch_attempts")
+    _age(tmp_path)
+    assert sweep(tmp_path, dispatch) == [] and not td.pending_deliveries(tmp_path)
+    assert {text for _, text, _ in dispatch.calls} == {ordinary["text"], notice["text"]}
+    receipt = td._read_registry(tmp_path)["superseded"][report["delivery_id"]]
+    assert receipt["text"] == report["text"] and receipt["superseded_by"] == "task_result:older-schedule"
+    assert td.already_delivered(tmp_path, notice["delivery_id"])
 
 
 @pytest.mark.parametrize("fmt", ["", "markdown"])

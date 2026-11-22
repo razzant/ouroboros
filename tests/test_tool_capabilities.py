@@ -204,10 +204,104 @@ def test_frozen_registry_includes_pr_integration_tools(tmp_path, monkeypatch):
 
 
 def test_loop_execution_parallel_tools_from_capabilities():
-    """READ_ONLY_PARALLEL_TOOLS in loop_tool_execution is from capabilities."""
-    from ouroboros.loop_tool_execution import READ_ONLY_PARALLEL_TOOLS as loop_set
-    from ouroboros.tool_capabilities import READ_ONLY_PARALLEL_TOOLS as cap_set
-    assert loop_set is cap_set
+    """The executor's name rules come from capabilities: the frozen legacy pool and the segment plan."""
+    from ouroboros import loop_tool_execution as loop, tool_capabilities as cap
+    assert loop.legacy_pool_response is cap.legacy_pool_response and loop.call_segments is cap.call_segments
+
+
+INERT_READS = {  # a name joins only after its handler and its observable effects are checked
+    "read_file", "list_files", "read_archive", "search_code", "query_code", "recent_tasks", "chat_history",
+    "vcs_read", "get_task_result", "list_projects", "memory_read", "search_ui_translations", "inspect_subagent",
+    "knowledge_read", "knowledge_list", "workpad_read", "journal_read", "tree_read", "peek_task", "live_roots",
+    "memory_map", "list_skills", "youtube_transcript", "compare_subagent_patches",
+}
+# Left out, each for a reproduced reason (review of 21.11.2026).
+KEPT_ALONE = {
+    "web_search": "paid: a second search in one group passes the budget admission that stopped it before",
+    "query_data": "save_as publishes a file a neighbour reads, and it reads logs a neighbour writes",
+    "inspect_harness": "it publishes state/harness_programs.json",
+    "review_status": "it writes git objects a neighbouring vcs_read resolves",
+    "list_image_models": "the engine gateway it reads can publish state/harness_programs.json",
+    "schedule_subagent": "a task-state or events-log read in the same group does not see the child yet",
+    "github_read": "a download or a large answer publishes a file a following artifact_store listing sees",
+    "list_available_tools": "registry.schemas() rebuilds the registry's shared capability-omission list",
+    "browse_page": "it changes the current page of the task's one sticky browser",
+    "view_image": "it appends to ctx.messages from the call thread",
+    "extract_video_frames": "a producer", "vlm_query": "a model call that produces", "analyze_screenshot":
+    "it reads the page a neighbouring browser call leaves", "ocr_pdf": "heavy", "extract_pdf_text": "heavy",
+    "codebase_health": "heavy", "skill_search": "it refreshes a source cache", "skill_sources": "it edits sources",
+    "delegate_start": "a later step, with the folder registration it holds",
+    "service_status": "it advances one shared readiness cursor per service: two at once can skip the READY mark",
+    "service_logs": "it publishes the log blob whose reference it returns",
+}
+
+
+def test_consecutive_inert_reads_form_groups_and_every_other_call_runs_alone():
+    from ouroboros.tool_capabilities import call_segments
+
+    assert call_segments(["read_file", "knowledge_read", "run_command", "search_code", "tree_read"]) == [
+        [0, 1], [2], [3, 4]]
+    assert call_segments(["edit_text", "read_file"]) == [[0], [1]], "a read after a write waits for it"
+    for writer in ("write_file", "edit_text", "edit_batch", "apply_patch"):
+        assert call_segments(["read_file", "knowledge_read", writer, "search_code", "tree_read"]) == [
+            [0, 1], [2], [3, 4]], writer
+    assert call_segments(["plan_task", "plan_task"]) == [[0], [1]]
+    assert call_segments([]) == [] and call_segments(["read_file"]) == [[0]]
+    for wait in ("wait_task", "wait_tasks", "await_messages", "delegate_wait", "finish_task", "escalate"):
+        assert call_segments(["read_file", wait, "read_file"]) == [[0], [1], [2]], wait
+    for alone in [*KEPT_ALONE, "ext_7_probe_read", "mcp_probe__lookup"]:
+        assert call_segments(["knowledge_read", alone, "memory_read"]) == [[0], [1], [2]], alone
+    for reproduced in (["query_data", "read_file", "write_file"], ["web_search", "web_search", "write_file"],
+                       ["schedule_subagent", "tree_read", "write_file"], ["review_status", "vcs_read"],
+                       ["service_status", "service_status", "write_file"], ["service_logs", "list_files", "stop_service"]):
+        assert call_segments(reproduced) == [[i] for i in range(len(reproduced))], reproduced
+
+
+def test_the_inert_class_is_its_closed_names_and_the_older_sets_keep_their_members():
+    """The older sets have other readers (cards, the check journal, Presence speech), so they stay as they were; the
+    inert class is its own closed list, pinned name by name, and shares no name with a writing, mutating, delivering
+    or completion set."""
+    from ouroboros import tool_capabilities as cap
+
+    assert cap.INERT_READ_TOOLS == INERT_READS, "a name joins only after its handler and its observable effects are checked"
+    for name, reason in KEPT_ALONE.items():
+        assert name not in cap.INERT_READ_TOOLS, f"{name} runs alone: {reason}"
+    assert not any(name.startswith(("ext_", "mcp_")) for name in cap.INERT_READ_TOOLS), "extension and MCP calls run alone"
+    effects = (cap.OBSERVE_WORLD_MUTATION_TOOLS | cap.FOREGROUND_MUTATIVE_TOOLS | cap.REVIEWED_MUTATIVE_TOOLS
+               | cap.COMPLETION_RECEIPT_TOOLS | cap.OWNER_DELIVERY_TOOL_NAMES | cap.STATEFUL_BROWSER_TOOLS
+               | cap.OWN_FORM_TOOL_NAMES | cap.PARALLEL_SAFE_ENQUEUE_TOOLS)
+    assert not cap.INERT_READ_TOOLS & effects, cap.INERT_READ_TOOLS & effects
+    assert len(cap.READ_ONLY_PARALLEL_TOOLS) == 18 and cap.PARALLEL_SAFE_ENQUEUE_TOOLS == {"schedule_subagent"}
+    assert cap.LEGACY_POOL_TOOLS == {  # history as frozen 21.11.2026, never the live sets above
+        "inspect_harness", "inspect_subagent", "read_file", "list_files", "read_archive", "search_code", "query_code",
+        "query_data", "recent_tasks", "web_search", "chat_history", "vcs_read", "service_status", "service_logs",
+        "get_task_result", "list_projects", "memory_read", "search_ui_translations", "schedule_subagent"}
+    assert cap.PURE_READ_TOOLS - cap.READ_ONLY_PARALLEL_TOOLS == {
+        "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read"}
+
+
+def test_every_inert_read_is_an_unchecked_silent_call_by_its_real_declarations(tmp_path):
+    """A group never asks the Safety model several times at once or holds declared words: every name's effective
+    policy is ``skip`` (TOOL_POLICY, else its own ToolEntry.safety_policy), no action of it is checked, and it
+    declares no speech. ``safety`` is only read here."""
+    from ouroboros import safety
+    from ouroboros.tool_capabilities import INERT_READ_TOOLS
+    from ouroboros.tool_effects import effect_of
+    from ouroboros.tools.registry import ToolRegistry
+
+    entries = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")._entries
+
+    def unchecked_silent(name):
+        entry = entries[name]
+        policy = safety.TOOL_POLICY.get(name) or entry.safety_policy
+        return (policy == safety.POLICY_SKIP and name not in safety.CHECKED_ACTIONS
+                and not safety._declared_speech(name, effect_of(name)))
+
+    for name in sorted(INERT_READ_TOOLS):
+        assert name in entries, f"{name} is not a registered tool"
+        assert unchecked_silent(name), name
+    # The check itself tells such calls apart: a conditionally checked command and a checked action are not.
+    assert not unchecked_silent("run_command") and not unchecked_silent("manage_schedules")
 
 
 def test_extract_video_frames_visible_where_media_siblings_are_visible():
@@ -215,10 +309,14 @@ def test_extract_video_frames_visible_where_media_siblings_are_visible():
         ACTING_SUBAGENT_TOOL_NAMES,
         CORE_TOOL_NAMES,
         LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+        ROUTE_TAIL_TOOL_NAMES,
     )
 
-    for tool_set in (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
+    for tool_set in (LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
         assert {"ocr_pdf", "youtube_transcript", "extract_video_frames"} <= tool_set
+    assert {"ocr_pdf", "extract_pdf_text"} <= CORE_TOOL_NAMES  # the document readers stay always sent
+    # On a route that cannot carry every schema the two one-off media helpers wait together in its tail.
+    assert {"youtube_transcript", "extract_video_frames"} <= ROUTE_TAIL_TOOL_NAMES - CORE_TOOL_NAMES
 
 
 def test_extract_video_frames_visible_to_workspace_tasks(tmp_path):
@@ -680,26 +778,110 @@ def test_escalate_is_available_wherever_planning_runs():
                (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES))
 
 
-def test_enable_tools_answers_a_skill_name_with_its_namespace_tools():
-    """A call asked for screenshots, saw "ext_19_r_unix_computer_use: 24 tools" in the overview and
-    asked enable_tools for "unix_computer_use": the skill's name, not a tool's. The miss now names the
-    namespace and its callable tools by the exact naming rule; an unrelated miss stays a plain miss."""
+def test_enable_tools_loads_a_whole_skill_by_its_name(tmp_path, monkeypatch):
+    """The 27.10 call enabled 7 of 24 desktop tools one name at a time and told the owner the rest did not
+    exist. A skill's name (or its extension namespace) now loads each of its tools exactly as naming it alone
+    would: the request's tools change once, a withheld tool is counted and never named, resident schemas
+    answer "already loaded", and a skill that is not live or a stray name loads nothing. An MCP server with
+    tools, then a tool, then a policy-hidden tool, then the exact namespace keep their answer before a
+    same-named skill; a skill called mcp_<slug> loads when no such server has tools."""
+    from ouroboros import extension_loader
     from ouroboros.extension_surface_names import extension_surface_name
+    from ouroboros.tools import extension_dispatch
     from ouroboros.tools import tool_discovery as td
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-    names = [extension_surface_name("unix_computer_use", short) for short in ("screenshot", "click")]
+    def register(skill, *shorts):
+        made = [extension_surface_name(skill, short) for short in shorts]
+        for name in made:
+            monkeypatch.setitem(extension_loader._tools, name, {
+                "name": name, "handler": lambda ctx, **kwargs: "ok", "description": f"{name} tool",
+                "schema": {"type": "object", "properties": {}}, "timeout_sec": 5, "skill": skill})
+        return made
 
-    class Registry:
-        def callable_rows(self, namespace=""):
-            rows = [{"name": name} for name in [*names, "read_file"]]
-            return [row for row in rows if not namespace or td.tool_namespace(row["name"]) == namespace]
-
+    names = register("unix_computer_use", "screenshot", "click", "key", "type_text", "scroll")
     namespace = td.tool_namespace(names[0])
-    lines = td._named_namespace_guidance(Registry(), ["unix_computer_use"], discovery=True)
-    assert lines[0] == f"unix_computer_use names the namespace {namespace}, not one tool; enable its tools by their names."
-    assert any(names[0] in line for line in lines) and any(names[1] in line for line in lines)
-    assert td._named_namespace_guidance(Registry(), [namespace], discovery=True)[0].startswith(f"{namespace} names")
-    assert td._named_namespace_guidance(Registry(), ["definitely_not_a_tool", "read"], discovery=True) == []
+    dead = register("dead_skill", "probe")
+    mcp_named = register("mcp_probe", "ping")
+    shadow = register(namespace, "other")  # a skill named after another skill's exact namespace
+    hidden_twin = register("write_file", "ghost")  # a skill named after a policy-hidden built-in
+    register("broken_skill", "probe")
+    observed = []
+
+    def is_live(skill, *_a, **_k):
+        observed.append(skill)
+        if skill == "broken_skill":  # an unreadable review record (skill_loader raises on a non-object panel)
+            raise ValueError("panel is not an object")
+        return skill != "dead_skill"
+
+    monkeypatch.setattr(extension_loader, "is_extension_live", is_live)
+    adoptions = []
+    monkeypatch.setattr(extension_dispatch, "_adopt_extension_generation", lambda ctx: adoptions.append(ctx) or {})
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_contract = {"disabled_tools": [names[4], "write_file"]}
+    registry.set_context(ctx)
+    fresh = lambda: [registry.get_schema_by_name("read_file")]  # noqa: E731
+    resident, enabled = fresh(), set()
+
+    out = td.enable_tools(registry, ctx, "unix_computer_use", resident, enabled)
+    loaded = sorted(names[:4])
+    assert [s["function"]["name"] for s in resident[1:]] == loaded and enabled == set(loaded)
+    assert "Call schemas loaded" in out and "unix_computer_use (all 4 tools)" in out and len(adoptions) == 1
+    # One family observation for the skill, then each member's own single-name check (the withheld one stops
+    # at its contract before liveness): 1 + 4, where one observation per family row would make 5 + 4.
+    assert observed.count("unix_computer_use") == 1 + len(loaded), observed
+    assert "unix_computer_use — 1 of its 5 tools are not callable in this task (names withheld)" in out
+    assert names[4] not in out
+    # Every member resolves exactly as when named alone: the withheld one is refused, the others load.
+    assert td._load_set(registry, [names[4]])[0] == {}
+    assert set(td._load_set(registry, names[:4])[0]) == set(loaded)
+
+    again = td.enable_tools(registry, ctx, namespace, resident, enabled)
+    assert "Already loaded: " in again and "Call schemas loaded" not in again and len(resident) == 5
+    assert shadow[0] not in again and len(td._load_set(registry, [namespace])[0]) == 4
+
+    one = fresh()
+    single = td.enable_tools(registry, ctx, names[1], one, set())
+    assert [s["function"]["name"] for s in one] == ["read_file", names[1]] and "(all" not in single
+
+    for missing in ("dead_skill", "windows_computer_use", "definitely_not_a_tool"):
+        untouched = fresh()
+        refusal = td.enable_tools(registry, ctx, missing, untouched, set())
+        assert f"❌ Not found: {missing}." in refusal and "only while that skill is enabled" in refusal
+        assert "Hidden by policy" not in refusal and dead[0] not in refusal and len(untouched) == 1
+
+    by_mcp_name = fresh()
+    assert "mcp_probe (all 1 tools)" in td.enable_tools(registry, ctx, "mcp_probe", by_mcp_name, set())
+    assert [s["function"]["name"] for s in by_mcp_name[1:]] == mcp_named
+
+    twin = fresh()
+    refusal = td.enable_tools(registry, ctx, "write_file", twin, set())
+    assert "write_file — disabled by this task's contract" in refusal and hidden_twin[0] not in refusal
+    assert len(twin) == 1
+
+    # A liveness read that raises makes that skill not live; the other names of the call still load, and the
+    # whole call adopts the published generation once.
+    adoptions.clear()
+    mixed = fresh()
+    answer = td.enable_tools(registry, ctx, f"broken_skill, {names[1]}, no_such_a, no_such_b", mixed, set())
+    assert [s["function"]["name"] for s in mixed[1:]] == [names[1]] and "Not found: broken_skill" in answer
+    assert len(adoptions) == 1
+
+    # A retained Presence ceiling refuses any name outside its grants, tool or not. The same grants load the
+    # granted tools by the skill's name and by a tool's own name; a refused built-in keeps its own refusal.
+    import ouroboros.presence_authority as authority
+
+    grants = {"enable_tools", names[0], names[1]}
+    monkeypatch.setattr(authority, "presence_ceiling_from_context", lambda _ctx: object())
+    monkeypatch.setattr(authority, "presence_ceiling_allows_tool", lambda _ceiling, tool: tool in grants)
+    by_skill, by_tool = [], []
+    family = td.enable_tools(registry, ctx, "unix_computer_use", by_skill, set())
+    assert [s["function"]["name"] for s in by_skill] == sorted(names[:2]) and "unix_computer_use (all 2 tools)" in family
+    td.enable_tools(registry, ctx, names[0], by_tool, set())
+    assert [s["function"]["name"] for s in by_tool] == [names[0]]
+    ceiling = td.enable_tools(registry, ctx, "read_file", [], set())
+    assert "read_file — outside this presence task's positive capability ceiling" in ceiling
 
 
 def test_every_catalog_that_names_extract_pdf_text_names_read_archive():

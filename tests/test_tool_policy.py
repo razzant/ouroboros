@@ -42,7 +42,6 @@ def test_non_core_listing_excludes_core_media_tools():
 def test_loop_bootstraps_from_tool_policy():
     source = inspect.getsource(loop_mod)
     assert "initial_tool_schemas(tools, context_mode=active_context_mode)" in source
-    assert "schemas(core_only=True)" not in source
 
 
 def test_advisory_tools_in_core_tool_names():
@@ -64,18 +63,14 @@ def test_advisory_tools_in_initial_schemas():
 
 
 def test_heal_skill_tools_are_core_visible_in_initial_schemas():
-    """Heal prompts must be able to call skill_review and
-    skill_preflight without enable_tools (enable_tools is blocked in heal
-    mode). Pin both the tool_policy SSOT and registry.core_only fallback."""
+    """Repair prompts must be able to call skill_review and
+    skill_preflight without enable_tools: both are core and in the initial array."""
     assert "skill_review" in CORE_TOOL_NAMES
     assert "skill_preflight" in CORE_TOOL_NAMES
     registry = _build_registry()
     names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
     assert "skill_review" in names
     assert "skill_preflight" in names
-    core_only_names = {schema["function"]["name"] for schema in registry.schemas(core_only=True)}
-    assert "skill_review" in core_only_names
-    assert "skill_preflight" in core_only_names
 
 
 def test_enable_tools_does_not_duplicate_active_tool_schemas():
@@ -167,7 +162,10 @@ def test_live_extension_tools_are_initial_not_non_core(monkeypatch):
 
 
 def test_list_skills_is_core_visible_for_repair(tmp_path):
+    """Repair finds list_skills in the catalog, and as a core tool it keeps its place first when a route's schema
+    ceiling cuts the request (``fit_tool_schemas_to_limit`` ranks core names first)."""
     from ouroboros.tools.registry import ToolRegistry
+    assert "list_skills" in CORE_TOOL_NAMES
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
-    names = {schema.get("name") or schema.get("function", {}).get("name") for schema in registry.schemas(core_only=True)}
+    names = {schema.get("name") or schema.get("function", {}).get("name") for schema in registry.schemas()}
     assert "list_skills" in names

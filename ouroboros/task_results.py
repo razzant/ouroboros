@@ -7,6 +7,7 @@ import json
 import logging
 import pathlib
 import re
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS, normalize_task_result_cost_planes
@@ -210,6 +211,13 @@ def lifecycle_named(axes: Any, status: str) -> Any:
     if not isinstance(lifecycle, dict) or lifecycle.get("status") == status:
         return axes
     return {**axes, "lifecycle": {**lifecycle, "status": status}}
+
+
+def observed_cancel_axes(axes: Any, **observations: str) -> dict:
+    """Add observations to the execution axis, every other axis stays; a cancel stating its own cause passes status and reason_code."""
+    axes = axes if isinstance(axes, dict) else {}
+    execution = axes.get("execution")
+    return {**axes, "execution": {**(execution if isinstance(execution, dict) else {}), **observations}}
 
 
 def is_reconciled_presence_placeholder(row: Dict[str, Any]) -> bool:
@@ -469,6 +477,7 @@ def write_task_result(
     _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
+    _publication: Any = None,
     _terminal_observed: bool = False,
     _cancel_observed: bool = False,
     _terminal_time_source: Optional[Dict[str, Any]] = None,
@@ -506,8 +515,9 @@ def write_task_result(
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
-                              last_word=_judged if _last_word else None)
+        write = partial(_publication, patch_document, wait=True) if _publication else patch_document
+        return write(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
+                     last_word=_judged if _last_word else None)
 
     def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         judged = _last_word(txn, current, document)
@@ -613,7 +623,7 @@ def write_task_result(
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
-        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
+        # (``_cancel_observed``) the supervisor performing a live cancellation. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
             replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))

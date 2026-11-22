@@ -19,6 +19,12 @@ A life is read back from the product's own record of each request (``physical_co
 string, so it cannot see an account), the free room the request left (stated window - reply reserve - input), the
 pre-send refusals (``context_fit_refused``), the queue's refusals, the words the work's feed got and the facts line each
 request carried. The law it is held to, and the gaps, live with the test.
+
+A place may instead read its cache under one of two rules named by what they read, not by vendor
+(``Place.rule``): ``MARKED_LOOKBACK``, "marked prefixes with a bounded lookback" (the longest prefix that a marker of
+an earlier answer ended, found within ``LOOKBACK`` elements before a marker of this request), or ``WHOLE_REQUESTS``,
+"the end of the leading system group or of a whole earlier answered request". Under either, the clock row production
+sends is read like any row. Where re-reading starts after a fold under each is pinned by the life table.
 """
 from __future__ import annotations
 
@@ -44,6 +50,12 @@ START_CLASSES = frozenset({"first_request", "entered_model", "tools_changed", "s
 REPLY_ALLOWANCE = 65_536  # Main's reply ceiling (loop_llm_call.MAIN_LOOP_MAX_TOKENS): what a total-bound place adds
 FAVOURABLE_HEADROOM = 8_192  # context_budget.NANO_MIN_HEADROOM_TOKENS: the most a stated window is read down by
 DENSE = "DENSE-PART"
+# Two cache rules named by what they read, not by vendor: a request reads to the longest prefix that a marker of an
+# earlier answer ended, found within ``LOOKBACK`` elements before one of its own markers; or to the end of the leading
+# system group or of a whole earlier answered request. Either reads the clock row production sends like any row.
+MARKED_LOOKBACK = "marked prefixes with a bounded lookback"
+WHOLE_REQUESTS = "the end of the leading system group or of a whole earlier answered request"
+LOOKBACK = 20
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,6 +72,7 @@ class Place:
     density: float = 1.0
     dense: float = 1.0  # the density of a part marked ``DENSE`` (a script or a table the host cannot tell apart)
     marked: bool = False  # its cache keeps only prefixes the host's markers end (else: any prefix it answered)
+    rule: str = ""  # one of the two named cache rules above ("": ``marked`` decides, the clock row is not read)
 
     @property
     def limit(self) -> int:
@@ -92,13 +105,18 @@ def _marked(value: Any) -> bool:
     return isinstance(value, list) and any(_marked(item) for item in value)
 
 
-def _elements(tools: Any, rows: List[Dict[str, Any]]) -> Tuple[List[Tuple[str, Any]], int, List[bool]]:
-    """``(elements, start, marked)``: the tool array, each system block, each later row; ``start`` counts the first
-    two; ``marked`` says which carry the host's cache marker."""
+def _is_clock(row: Dict[str, Any]) -> bool:
     from ouroboros.send_clock import CLOCK_NOTE_PREFIX
 
+    return str(row.get("content") or "").startswith(CLOCK_NOTE_PREFIX)
+
+
+def _elements(tools: Any, rows: List[Dict[str, Any]], *, clock: bool = False
+              ) -> Tuple[List[Tuple[str, Any]], int, List[bool]]:
+    """``(elements, start, marked)``: the tool array, each system block, each later row (the request's own clock row
+    only with ``clock``); ``start`` counts the first two; ``marked`` says which carry the host's cache marker."""
     rows = list(rows or [])
-    if rows and str(rows[-1].get("content") or "").startswith(CLOCK_NOTE_PREFIX):
+    if not clock and rows and _is_clock(rows[-1]):
         rows = rows[:-1]  # the request-local clock row is replaced every round by design
     raw: List[Tuple[str, Any]] = [("tools", tools or [])]
     for row in rows:
@@ -120,6 +138,7 @@ class Provider:
         self.asked: Dict[str, int] = {}  # a read's call id -> the characters of the part it asked for
         self.cache: Dict[str, Tuple[List[str], List[int]]] = {}
         self.marks: Dict[str, set] = {}  # key -> the prefixes (by digest) that a marked element of an answer ended
+        self.wholes: Dict[str, set] = {}  # key -> the leading system groups and whole requests it answered (by digest)
         self.log: List[Dict[str, Any]] = []
         self.engine_account = "account-a"  # who the engine serves an unpinned request with
         self.before: Dict[int, Any] = {}  # answered count -> a callback run inside that request's send
@@ -134,7 +153,7 @@ class Provider:
     def answer(self, place: Place, tools: Any, rows: List[Dict[str, Any]], reply: int) -> Dict[str, Any]:
         """``{"kind": "refused"|"lost"|"answered", ...}`` for one request at ``place``."""
         with self.lock:
-            items, start, marked = _elements(tools, rows)
+            items, start, marked = _elements(tools, rows, clock=bool(place.rule))
             digests = [_digest(item) for item in items]
             texts = [json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) for item in items]
             sizes = [math.ceil(len(text) * (place.dense if DENSE in text else place.density) / 4) for text in texts]
@@ -144,6 +163,8 @@ class Provider:
             entry = {"n": len(self.log) + 1, "round": answered + 1, "place": place.name, "tokens": total,
                      "known": known, "start_tokens": sum(sizes[:start]), "elements": len(items),
                      "start_elements": start, "digests": digests, "sizes": sizes,
+                     "marks": [k for k, flag in enumerate(marked) if flag],
+                     "clock": bool(items) and items[-1][0] == "row" and _is_clock(items[-1][1]),
                      "facts": next((text for text in reversed(texts) if "[CONTEXT_FACTS]" in text), "")}
             before = next((row for row in reversed(self.log) if row.get("kind") == "answered"), None)
             entry["reads"] = [  # each part that arrives in this request: its size, whether it came as a partial view
@@ -182,7 +203,16 @@ class Provider:
                     if a != b:
                         break
                     common += 1
-            if place.marked:  # an explicit-marker cache reads to the last prefix a marker of this key ended
+            if place.rule == WHOLE_REQUESTS:
+                held = self.wholes.setdefault(key, set())
+                common = max((k for k in range(1, len(digests) + 1) if _digest(digests[:k]) in held), default=0)
+                held.update((_digest(digests[:start]), _digest(digests)))
+            elif place.rule == MARKED_LOOKBACK:
+                held, ends = self.marks.setdefault(key, set()), [k for k, flag in enumerate(marked) if flag]
+                common = max((j + 1 for k in ends for j in range(max(0, k - LOOKBACK + 1), k + 1)
+                              if _digest(digests[:j + 1]) in held), default=0)
+                held.update(_digest(digests[:k + 1]) for k in ends)
+            elif place.marked:  # an explicit-marker cache reads to the last prefix a marker of this key ended
                 held = self.marks.setdefault(key, set())
                 common = max((k for k in range(1, len(digests) + 1) if _digest(digests[:k]) in held), default=0)
                 held.update(_digest(digests[:k + 1]) for k, flag in enumerate(marked) if flag)

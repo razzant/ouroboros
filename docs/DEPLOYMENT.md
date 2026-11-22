@@ -64,7 +64,7 @@ keeps its factory value:
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
-| Consciousness | off ($20 over 24 hours once started); on when a copied settings document carries the setup choice | on unless switched off |
+| Consciousness | off ($15 over 24 hours once started); on when a copied settings document carries the setup choice | on unless switched off |
 
 Reviewers and helpers are proposed from the reachable Main at each read (none while
 the keys present do not settle which provider serves Main) until they are edited on
@@ -88,20 +88,18 @@ coverage.
 
 ## Unknown model role at startup
 
-An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`
-means the code reading that setting does not recognize a role name. Current
-diagnostics name the setting and offending roles, without dumping their values.
-Older packages print `OUROBOROS_MODEL_CONTEXT_WINDOWS must contain only known
-model roles` without identifying the role; the same recovery below applies.
-Check for a misspelling or a version mismatch. The same strict rule applies to account pins
-and processing preferences: unknown entries are not silently ignored or changed
-to Auto, even when a context window is zero.
+**Main Ultrafast.** Confirm a move in Main or Settings → Models. For one waiting task, leave “Also save this role” off.
+Before rollback save Standard or Default. Older readers reject the whole settings file with `"main":"ultrafast"` in `OUROBOROS_MODEL_PROCESSING_PREFERENCES`.
+After an unexpected rollback, back up, restore a compatible reader and change the tier.
 
-The packaged launcher and the managed repository are separate. Updating the
-repository, including a manual `git pull` in a fork, does not replace an older
-executable. Current launchers can hand off to updated source after an import
-probe, but an older executable without that handoff still needs an application
-package update. New source cannot repair its frozen settings parser or logging.
+`OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)` identifies an unfamiliar
+role by name without logging its value. Older packages say `OUROBOROS_MODEL_CONTEXT_WINDOWS
+must contain only known model roles`. Check spelling and reader version. Account pins,
+processing preferences and context windows (including zero) all require known roles.
+
+The packaged launcher and managed checkout have separate readers. Current launchers
+can hand off to updated source after an import probe. A launcher without that handoff
+needs a compatible package even after a manual `git pull`.
 
 To recover without resetting the installation:
 
@@ -303,10 +301,19 @@ marks the container unhealthy.
 
 ## Trusted Docker / Kubernetes Non-Local Binds
 
-By default, saving `OUROBOROS_SERVER_HOST=0.0.0.0` through the Settings UI
-requires `OUROBOROS_NETWORK_PASSWORD` in the same save. This keeps desktop and
-local-network launches from accidentally exposing the full Ouroboros HTTP and
-WebSocket surface without the built-in password gate.
+A Settings save changes `OUROBOROS_SERVER_HOST` and `OUROBOROS_NETWORK_PASSWORD` only
+when it assigns or unsets them. Any other save, such as an API-key update, keeps what
+`settings.json` holds for the two and copies in neither a bind nor a password that
+only the launch environment sets (a container's, for example), so it needs no flag.
+A save that cannot read `settings.json` is refused and leaves the file untouched.
+
+By default, saving a non-loopback `OUROBOROS_SERVER_HOST` such as `0.0.0.0`
+through the Settings UI requires a durable `OUROBOROS_NETWORK_PASSWORD` in the
+same save: one `settings.json` already holds or the save writes. A password that only
+the launch environment sets does not count, because the saved bind outlives that
+environment. Save the password with the bind, or keep the bind on loopback. This
+keeps desktop and local-network launches from accidentally exposing the full
+Ouroboros HTTP and WebSocket surface without the built-in password gate.
 
 Trusted container deployments may opt out with:
 
@@ -322,10 +329,9 @@ infrastructure, for example:
 - private Kubernetes service/network policy
 - an authenticated reverse proxy
 
-With the flag enabled, Ouroboros still warns when saving a non-localhost bind
-without `OUROBOROS_NETWORK_PASSWORD`, but the Settings UI no longer blocks
-ordinary settings saves such as API-key updates. Do not use this flag on an
-open LAN or public port.
+With the flag enabled, the Settings UI no longer requires the password to save a
+non-localhost bind, and Ouroboros warns when it is saved without one. Do not use
+this flag on an open LAN or public port.
 
 ## The Main Interface and a Separately Hosted One
 
@@ -511,8 +517,8 @@ Supervisor route checks.
 - `extensions.when_unmet` is required with any row. `hold` (the sample): queued work stays queued
   while the server's own copy does not run a requirement, and each process that starts work (a
   pool worker or the server) checks the extensions it has loaded itself; a turn it cannot serve
-  ends before any model call with a typed notice (`deployment_requirement_unmet`). Stop, Panic,
-  Settings and Skills stay available. `warn`: work goes on and the gap is shown. Either way each
+  ends before any model call with a typed notice (`deployment_requirement_unmet`); Stop, Panic,
+  Settings and Extensions stay. `warn`: work goes on and the gap is shown. Either way each
   process logs a change of its gap once (`deployment_requirement_unmet`, `deployment_requirement_met`
   in `logs/events.jsonl`); nothing polls, retries or repairs.
 - `settings` fixes custom settings (`A_KEY`, never a built-in or `OUROBOROS_` one) for that

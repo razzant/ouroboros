@@ -25,7 +25,10 @@ from ouroboros.deadline_utils import (
 )
 from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
-from ouroboros.llm_claudexor import ClaudexorModelNotDispatched, daemon_not_delivered, propagate_model_error, presence_refusal_unstarted
+from ouroboros.llm_claudexor import (
+    CODEX_CONTENT_POLICY_DENIED, CODEX_CONTENT_POLICY_DISPLAY, ClaudexorModelNotDispatched,
+    codex_content_policy_denial, daemon_not_delivered, propagate_model_error, presence_refusal_unstarted,
+)
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
@@ -35,9 +38,9 @@ from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_r
 from ouroboros.observability import mark_last_answer, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
-from ouroboros.task_pacing import main_loop_wire_options
+from ouroboros.task_pacing import main_loop_wire_options, task_chat_conversation_id
 from ouroboros.task_custody import canonical_owner_root
-from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
+from ouroboros.transport_custody import ProcessingNotStarted, attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
 from ouroboros._usage_response import (CONTENT_REFUSAL_FINISH_REASONS, INTERMEDIATE_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS,
                                        TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, provider_answer, reply_usability,
                                        response_finish_reason, typed_values, usage_reply_usability)
@@ -282,9 +285,20 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     # A refusal under its body's own status; a typed cause of another kind keeps its kind, as on an exception.
     typed_other = isinstance(body_err, dict) and any(
         _provider_code_kind(str(body_err.get(key) or "")) in ("quota_exhausted", "auth_error") for key in ("type", "code"))
-    if isinstance(body_err, dict) and not typed_other and (
-            (body_err.get("answer") or {}).get("basis") or is_size_refusal(body_err)):
-        return "remote_context_overflow", False, True
+    if isinstance(body_err, dict) and not typed_other:
+        # The stamped answer projection is the one decision: its basis/size, never a re-read of the normalized
+        # negative reason (#3858), whose quoted and history rows are no party of the current answer. A projection
+        # whose only size row is a negative ("excluded") is no recognition; an unprojected body keeps the legacy read.
+        projected = body_err.get("answer")
+        if isinstance(projected, dict):
+            size = projected.get("size")
+            # "excluded" is the negative reason: a size row that states no number this attempt may take.
+            excluded = isinstance(size, dict) and size.get("source") == "excluded"
+            recognized = bool(projected.get("basis")) or (bool(size) and not excluded)
+        else:
+            recognized = is_size_refusal(body_err)
+        if recognized:
+            return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True
     if not body_err and finish in CONTENT_REFUSAL_FINISH_REASONS:
@@ -359,6 +373,10 @@ def _record_and_emit_empty_response(
     stamp_owner_provider_message(accumulated_usage, {"message": words.get("provider_message")} if refused else body_error)  # its own sentence
     failure = accumulated_usage["_last_llm_failure"] = accumulated_usage.get("_last_llm_call_meta", {})
     failure.update(failure_code=kind, error=accumulated_usage["_last_llm_error"])
+    finish = str(finish_reason or "").strip().lower()
+    failure.pop("size_finish", None)
+    if event_type == "remote_context_overflow" and not body_error and finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
+        failure["size_finish"] = finish  # this empty reply's own size finish (``context_window.record_start_refusal``)
     _save_timeout_repeat(accumulated_usage, failed=True)
     return event_type, is_provider_glitch, permanent
 
@@ -531,6 +549,7 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     OUTPUT_OR_BODY_SIZE_MARKERS, SIZE_REFUSAL_STATUSES,
     output_or_body_size_message as _output_or_body_size_message, size_refusal,
 )
+from ouroboros.size_refusal import cited_size_refusal
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
                                      | TOOL_CALL_FINISH_REASONS | INTERMEDIATE_FINISH_REASONS)
 
@@ -678,6 +697,8 @@ def _exception_provider_message(exc: Exception, safe_error: str = "") -> str:
     """The Logs diagnostic of a failure: the innermost party's own sentence (``provider_answer``), sanitized and
     truncated, else the exception's printed form. Two refusals can share a status and code (a content-filter block,
     a rejected field), so the durable event keeps the words; never the owner row or an input to classification."""
+    if codex_content_policy_denial(exc):
+        return CODEX_CONTENT_POLICY_DISPLAY
     engine = getattr(exc, "problem", None)  # an engine-typed problem's own message is its Logs diagnostic
     return sanitize_tool_result_for_log(provider_answer(exc).innermost()[1] or str(
         (engine.get("message") if isinstance(engine, dict) else "") or safe_error or "").strip())[:600]
@@ -701,9 +722,15 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     """Classify provider errors without changing model/request semantics."""
 
     safe = safe_error or sanitize_tool_result_for_log(repr(exc))
+    if getattr(exc, "processing_refusal_conflict", False):
+        return LlmErrorClassification("provider_outcome_unknown", False, _exception_status_code(exc))
+    if isinstance(exc, ProcessingNotStarted):
+        return LlmErrorClassification("provider_error", False, _exception_status_code(exc))
     if getattr(exc, "stream_rejected", False): return LlmErrorClassification("provider_error", False)  # complete wire judged unusable: a local verdict, never a same-model repeat
     if getattr(exc, "code", "") == "model_outcome_unknown":
         return LlmErrorClassification("provider_outcome_unknown", False)
+    if codex_content_policy_denial(exc):
+        return LlmErrorClassification(CODEX_CONTENT_POLICY_DENIED, False, _exception_status_code(exc), exc.code)
     if getattr(exc, "code", "") == "model_substituted": return LlmErrorClassification("model_substituted", False, 0, exc.code)  # a well-formed request the route answered with another model: chain-eligible, never cools the requested one
     if getattr(exc, "code", "") in {"unsupported_parameter", "invalid_continuation", "auth_changed", "model_unavailable", "model_source_unavailable", "model_catalog_identity_mismatch", "model_capability_refused", "model_retry_invalid"}:
         return LlmErrorClassification("bad_request", False, _exception_status_code(exc), exc.code)
@@ -747,8 +774,13 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
         return LlmErrorClassification("provider_transient", True, status_code, provider_code)
     if size := size_refusal(answer, status_code, printed=safe):  # size evidence outranks output words on the same answer
         return LlmErrorClassification("context_overflow", False, status_code, size[1] or provider_code, basis=size[0], said=size[2:])
-    untyped = status_code in SIZE_REFUSAL_STATUSES
-    if size_family and any(_output_or_body_size_message(text) for text in (*(row[1] for row in answer.said), safe)):
+    # A refusal the provider's own code and wording explain is no untyped client refusal, so the secondary
+    # cited-number step (``context_anchor.cited_limit_refusal``, untyped only) and raw exception repr take nothing
+    # from a previous answer it only cites (#3858).
+    cited_param = cited_size_refusal(answer)
+    untyped = status_code in SIZE_REFUSAL_STATUSES and not cited_param
+    output_texts = (*(row[1] for row in answer.said), *(() if cited_param else (safe,)))
+    if size_family and any(_output_or_body_size_message(text) for text in output_texts):
         return LlmErrorClassification("request_too_large", False, status_code, provider_code, untyped=untyped)
     if provider_kind:
         return LlmErrorClassification(provider_kind, False, status_code, provider_code, untyped=untyped)
@@ -857,7 +889,8 @@ def _record_llm_call_error(
     display_message = getattr(error, "display_message", None)
     display_error = sanitize_tool_result_for_log(display_message) if isinstance(display_message, str) and display_message else safe_error
     custody_fields = attempt_custody_event_fields(error)
-    timed_out = bool(ctx.configured_api_child and custody_fields.get("explicit_timeout") and custody_fields.get("model_output_received"))
+    tier_conflict = getattr(error, "processing_refusal_conflict", False)
+    timed_out = bool(not tier_conflict and ctx.configured_api_child and custody_fields.get("explicit_timeout") and custody_fields.get("model_output_received"))
     will_retry = classification.retry_same_request or timed_out  # a typed timeout after output, HTTP-shaped or not (#1886)
     repeats = _transport_death_repeats(ctx.accumulated_usage, ctx.round_id)
     backoff = None
@@ -867,12 +900,13 @@ def _record_llm_call_error(
             "model_role": str(getattr(error, "model_role", "") or ""),
             "route": dict(getattr(error, "route", {}) or {}), "outcome": "unknown",
             "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
+            **({"processing_refusal_conflict": True} if tier_conflict else {}),
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
         # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
-            is_retryable_transport_death(error)
+            not tier_conflict and is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1
         ):
             backoff = _TRANSPORT_DEATH_BACKOFF_SEC[min(repeats + 1, len(_TRANSPORT_DEATH_BACKOFF_SEC)) - 1]
@@ -1036,7 +1070,9 @@ def provider_no_call_source(accumulated_usage: Dict[str, Any], deadline_exhauste
             or accumulated_usage.get("_pending_transport_outcome") or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):
         return "provider_outcome_unknown_no_resend", False
     if accumulated_usage.get("resource_refusal"): return "resource_refusal_no_resend", True  # typed temporary refusal: no route or owner wait recovered it
-    if same_route_refusal(accumulated_usage): return "same_route_refusal_no_resend", False  # a salvage call is the same request on the same route, and the accounts that refused it were just marked
+    if (same_route_refusal(accumulated_usage)
+            or str(accumulated_usage.get("_last_llm_error_kind") or "") == CODEX_CONTENT_POLICY_DENIED):
+        return "same_route_refusal_no_resend", False  # a salvage call is another send of the refused request
     if TIMEOUT_REPEAT_KEY in accumulated_usage: return "timeout_repeat_spent_no_resend", True  # its repeat answered nothing
     if not deadline_exhausted and bool(accumulated_usage.get(RETRY_WALL_EXHAUSTED_KEY)):
         return "retry_wall_exhausted_no_repay", True
@@ -1100,12 +1136,11 @@ def _record_round_cache_facts(
     """Cache facts of this round only (no dollar counterfactuals).
 
     Returns ``(prompt_cache_ttl, cache_hit_rate, gap_since_prev_round_sec, duration_ms)``: the
-    provider's cached share and the gap since the previous successful round, which separates a
-    TTL expiry (long wait) from a prefix rewrite. Also records the APPLIED TTL of this task's
-    latest send — the recorded fact the wait-tool cache-horizon disclosure reads (one place, never
-    re-derived). ``duration_ms`` spans the logical round from its first started frame (retries,
-    fallbacks and waits included) and settles it: a later call on the same round id (a wrap-up)
-    measures only itself. No verdict ("cold restart") is derived from these counters: on a
+    provider's cached share and the gap since the previous successful round, neither a cache
+    prognosis nor proof of expiry. The round facts and supervision wakes read the accepted
+    response's finish time and the TTL stamped on its request. ``duration_ms`` spans the round
+    from its first frame (retries, fallbacks and waits included) and settles it: a later call on
+    the same round id (a wrap-up) measures only itself. No verdict is derived: on a
     Codex route the provider reports no cache writes, so one would never fire there.
     """
     reported = event_token_counts(usage)  # #1578: REPORTED counters; an unreported one makes these null
@@ -1329,6 +1364,7 @@ def call_llm_with_retry(
             })
             kwargs = {
                 "messages": send_messages, "tools": tools, "model": model,
+                "chat_conversation_id": task_chat_conversation_id(task_id),
                 "model_role": model_role, "model_turn_state": model_turn_state,
                 "model_operation_observer": lambda fact, identity=call_identity, prior=prior: _emit_main_llm_call_state(
                     event_queue, identity, "observed", fact.get("model_activity"),
@@ -1418,7 +1454,8 @@ def call_llm_with_retry(
                 writer=persist_call,
             )
             _remember_llm_call(
-                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1]}, model=model,
+                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1],
+                    **({"provider_body_error": True} if usage.get("provider_error") else {})}, model=model,
                 display_model=display_model, provider=provider, request_ref=request_ref,
                 response_ref=response_ref, reported_model=usage.get("resolved_model"), use_local=bool(use_local),
                 requested_profile=(usage.get("claudexor") or {}).get("requested_profile", host_route.get("credential_profile_id", model_account_override)),

@@ -165,7 +165,9 @@ test('nested wait keeps the host cause as text and clears it only on a recovery 
     assert.equal(card.projectHoldDetail, unconfirmed.detail);
     setHistoricalUnavailable(card, false, {});
     assert.equal(card.projectHoldDetail, '');
-    assert.equal(desiredLiveCardPhase(card).text, 'Working');
+    assert.equal(desiredLiveCardPhase(card).text, 'Activity unconfirmed', 'releasing a hold does not show the child working');
+    syncParkedPhase(card, 'working');
+    assert.equal(desiredLiveCardPhase(card).text, 'Working', 'a positive observation of this child shows it working');
 });
 
 test('held children never vote on the room: the server room speaks whatever the cards hold', () => {
@@ -176,7 +178,9 @@ test('held children never vote on the room: the server room speaks whatever the 
     assert.equal(child.projectHold, hold.label, 'its hold stays its own card\'s fact');
 });
 
-test('actual child queue hydration refreshes room status once and reconciles departure without polling reviews', async () => {
+// `unconfirmed`: the work's member view names the child as unknown (its receipt cannot be read), so the recorded hold
+// speaks while connected; the client's own park on a lost connection still outranks it until a fresh queue read.
+async function childQueueHydration({ unconfirmed = false } = {}) {
     const { createChatInstance } = await import('../modules/chat.js');
     const { installDom, restoreDom, walkCard } = await import('./chat_dom_fixture.js');
     const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -213,7 +217,9 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         const members = () => ['same-id', ...[...queue.pending, ...queue.running].map(row => row.id)];
         const snapshot = () => instance.hydrateStateSnapshot({ active_chat_activities: [held],
             active_chat_activities_complete: true, supervisor_ready: true,
-            ...projection(7, [{ ...heldWork(held), members: { ids: members() } }], room('waiting')) });
+            ...projection(7, [{ ...heldWork(held), members: { ids: members(), ...(unconfirmed ? { states: members().includes('child') ? { child: {
+                activity: 'unknown', confirmed: false, transition: 'none', mark: 'ring', because: [], tails: [], turn: [] } } : {} } : {}) } }],
+            room('waiting')) });
         const status = () => globalThis.document.byId.get('chat-status').textContent;
         snapshot(); await settle();
         assert.equal(status(), 'Waiting', 'the room says what the server says');
@@ -235,13 +241,20 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label,
             'a fresh child queue read restores its own hold after reconnect');
         assert.equal(markOf(child.querySelector('[data-live-phase]')), 'still/ink');
+        if (unconfirmed) return;
         queue.pending[0].task.project_admission_hold = {};
         snapshot(); await settle();
-        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Queued');
+        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Activity unconfirmed');
         assert.deepEqual([markOf(child.querySelector('[data-live-phase]')),
-            child.querySelector('[data-live-phase]').dataset.chipTone], ['still/ink', 'neutral']);
+            child.querySelector('[data-live-phase]').dataset.chipTone], ['ring/ink', 'neutral']);
         queue.pending[0].task.project_admission_hold = hold;
         snapshot(); await settle();
+        const heldRow = queue.pending[0];
+        queue.pending = [{ id: 'child' }];
+        snapshot(); await settle();
+        assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label);
+        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 0);
+        queue.pending = [heldRow];
         frame('working-sibling');
         assert.equal(status(), 'Waiting', 'a card the projection does not list never sets the header');
         handlers.get('log')({ chat_id: 7, data: { type: 'task_done', task_id: 'working-sibling', status: 'cancelled' } });
@@ -272,7 +285,12 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         for (let pass = 0; pass < 3; pass++) { snapshot(); await settle(); }
         assert.equal(reads.filter(url => url === '/api/tasks/child').length, 5);
     } finally { instance?.destroy(); restoreDom(prior); }
-});
+}
+
+test('actual child queue hydration refreshes room status once and reconciles departure without polling reviews', () => childQueueHydration());
+
+test('a held child whose member state is unconfirmed shows its hold; a lost connection parks it as unconfirmed until a fresh read',
+    () => childQueueHydration({ unconfirmed: true }));
 
 // A named work with a focus line (owner 12.11, the fifth round): a room's summary carries the line of its work, the
 // work's own name and its focus, and Ouroboros's card says on its second line what Main is doing now (app.js

@@ -62,11 +62,12 @@ def _track_threads(monkeypatch) -> list:
 def quiet_tick(tmp_path, monkeypatch):
     """The 600 s cadence alone: no 20 s sweep, no daemon latch, no live owners."""
     from ouroboros import claudexor_daemon as daemon_mod
-    from ouroboros import post_task_checkpoint, server_maintenance as sm
+    from ouroboros import post_task_checkpoint, server_maintenance as sm, subscription_census
     from supervisor import active_activity, queue, workers
 
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
+    monkeypatch.setitem(subscription_census._PASS, "dispatched", time.time())  # its own cadence: not this fixture's
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
     monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: None)
@@ -79,6 +80,28 @@ def quiet_tick(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "get_owned_daemon", lambda: SimpleNamespace(
         clear_start_failure_latch=lambda *, cleared_by: False))
     return sm
+
+
+@pytest.mark.parametrize("running,pending,started", [(True, False, True), (False, True, False), (False, False, False)])
+def test_the_census_duty_starts_for_running_work_and_never_for_a_pending_only_queue(quiet_tick, monkeypatch, running,
+                                                                                   pending, started):
+    """The subscription census is due on running or direct actors (or a request), not on queued work alone; cold
+    custody keeps its own predicate."""
+    from ouroboros import claudexor_daemon, subscription_census
+    from supervisor import queue
+
+    sm = quiet_tick
+    threads = _track_threads(monkeypatch)
+    monkeypatch.setitem(subscription_census._PASS, "dispatched", 0.0)
+    monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
+    monkeypatch.setattr(subscription_census, "refresh", lambda **_kw: "stubbed")  # the pass itself is not this test's
+    monkeypatch.setattr(sm, "_LAST_COLD_CUSTODY_SWEEP", [time.time()])
+    monkeypatch.setattr(queue, "RUNNING", {"run": {"task": {"id": "run"}}} if running else {})
+    monkeypatch.setattr(queue, "PENDING", [{"id": "queued", "type": "task"}] if pending else [])
+    sm._periodic_supervisor_maintenance([time.time()], [time.time()])
+    for thread in threads:
+        thread.join(5)
+    assert ("subscription-census" in [thread.name for thread in threads]) is started
 
 
 def test_a_slow_custody_block_never_holds_the_loop_tick(quiet_tick, monkeypatch):
@@ -393,7 +416,9 @@ def _quiet_reconcile_steps(monkeypatch, sm, done: list, *, heal=None):
     monkeypatch.setattr(sm, "_tick_maintenance_child", step("maintenance"))
     from ouroboros import maintenance
 
-    monkeypatch.setattr(maintenance.child, "_owed", False)  # this process's first look already happened
+    # This fixture records the reconcile stages, not the independent foreground event tick.
+    monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChildren())
+    monkeypatch.setattr(maintenance.child, "owed", lambda: False)
 
 
 def test_a_slow_reconcile_block_never_holds_the_loop_tick(quiet_tick, monkeypatch):

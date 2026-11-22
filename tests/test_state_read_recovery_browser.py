@@ -172,7 +172,7 @@ def test_the_restart_confirmation_opens_although_its_census_read_never_answers(d
             page.clock.fast_forward(LIFETIME_MS + 1000)
             dialog.wait_for(state="visible", timeout=30_000)
             assert dialog.locator("#confirm-dialog-title").inner_text() == "Restart agent"
-            expect(dialog.locator(".marketplace-modal-body")).to_contain_text("Pause status could not be read")
+            expect(dialog.locator(".ui-modal-body")).to_contain_text("Pause status could not be read")
             stages.append("past the lifetime: the one confirmation opened, its pause status unknown")
             page.screenshot(path=str(evidence / "restart-confirmation-unknown.png"))
 

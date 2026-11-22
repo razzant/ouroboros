@@ -270,7 +270,8 @@ def test_the_list_and_an_agents_page_keep_their_shape(subscription_ui, width, he
         f"All {len(LOOK)}", "Reviewers 5", "Off 2"]
     head = level.locator('[data-entry-id="a02"]')
     assert head.locator(".ui-row-title").inner_text().split() == ["gpt-test/xhigh", "Reviewer"]
-    assert head.locator(".ui-row-meta").inner_text().startswith("Codex · agent · Meticulous reviewer")
+    assert head.locator("[data-subagent-identity]").inner_text().strip() == "Codex · agent"
+    assert head.locator(".agents-head-use").inner_text().strip().startswith("Meticulous reviewer")
     assert not _switch(level, "a08").is_checked() and _switch(level, "a01").is_checked()
     box, toggle = head.bounding_box(), head.locator(".ui-switch").bounding_box()
     assert toggle["x"] + toggle["width"] <= box["x"] + box["width"] and toggle["x"] > box["x"] + box["width"] / 2, (

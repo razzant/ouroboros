@@ -289,7 +289,8 @@ def _merge_objective_warning(objective: Dict[str, Any], code: str) -> None:
 def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
     """Whether nothing examined this result since it last changed: the turn has reviewable effects
     and, after the last of them, no executed check ran (``verify_and_record`` of a run kind, any
-    verdict: its author saw the outcome) and no result review was asked for or bound. A reviewed
+    verdict: its author saw the outcome) and no result review was asked for (a call the ceiling or a
+    continuation refused at $0 asks for nothing) or bound. A reviewed
     commit as the last effect passed its change review. The finish-door notice and the
     ``receipt_absent`` record read this one fact (P7; audit 11.11, item 18). Typed calls only,
     never message content (P5)."""
@@ -307,7 +308,17 @@ def result_unexamined(llm_trace: Dict[str, Any]) -> bool:
         if tool == "verify_and_record" and str(args.get("contract_kind") or "") in _EXAMINING_VERIFY_KINDS:
             return False
         if tool == "review_change" and str(args.get("subject") or "") == "result":
-            return False
+            meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
+            receipt = meta.get("review_delivery") if isinstance(meta.get("review_delivery"), dict) else {}
+            record_id = str(receipt.get("record_id") or "")
+            run = next((row for row in llm_trace.get("review_runs") or [] if isinstance(row, dict)
+                        and str(row.get("record_id") or "") == record_id), None) if record_id else None
+            # A typed $0 refusal, or this call's exact run refused or superseded (#3304), examined nothing: the
+            # bound-run check below decides. A call without typed linkage stays counted as asked for (legacy).
+            if not (isinstance(meta.get("result_review_refusal"), dict)
+                    or (run is not None and (run.get("aggregate") == "NOT_DISPATCHED"
+                                             or run.get("superseded_by_revision")))):
+                return False
     # Only a current bound review speaks for this result: every new delivery candidate supersedes the runs bound
     # so far (``review_result.supersede_result_runs``), a run of an earlier version stands beside the delivered
     # bytes as that version's, and a $0 refusal examined nothing.
@@ -945,7 +956,7 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
     return public
 
 
-# INFRA-failure host-fallback text prefixes: (prefix, failure kind, default reason_code).
+# INFRA-failure host-fallback text prefixes (prefix, failure kind, default reason_code), read only for untyped text.
 _INFRA_TEXT_PREFIXES = (
     ("⚠️ Failed to get a response", "provider", REASON_PROVIDER_FAILURE),
     ("⚠️ All models are down", "provider", REASON_PROVIDER_FAILURE),
@@ -966,6 +977,11 @@ def _apply_actor_first_terminal_projection(
     actor = dict(actor)
     axes = outcome.get("outcome_axes") if isinstance(outcome.get("outcome_axes"), dict) else {}
     execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    if actor.get("reason") == "initial_execution_display_only":
+        # A first-attempt witness does not move any axis of an established outcome.
+        execution["actor_first_terminal"] = actor
+        outcome["actor_first_terminal"] = actor
+        return outcome
     if str(execution.get("status") or "") == EXECUTION_OK:
         actor_status = str(actor.get("status") or "unknown")
         if actor_status not in {"incomplete", "unknown"}:
@@ -1067,6 +1083,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # this one function contradict each other.
         failure = {"kind": "runtime" if reason_code in {
             REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+            REASON_DEEP_SELF_REVIEW_UNAVAILABLE, REASON_DEEP_SELF_REVIEW_ERROR,
         } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.
@@ -1106,9 +1123,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_FAILED
         reason_code = REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
-    elif (_infra := next(
+    elif not usage_status and usage.get("terminal_origin") != "model_final" and (_infra := next(
         (row for row in _INFRA_TEXT_PREFIXES if text.lstrip().startswith(row[0])), None,
-    )) is not None:
+    )) is not None:  # a producer that typed its status, or the model's own final answer, is never read from its words
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or _infra[2]
         failure = {"kind": _infra[1], "reason_code": reason_code}
@@ -1283,7 +1300,7 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
     artifact_axis = axes.get("artifacts") if isinstance(axes.get("artifacts"), dict) else {}
     axis_status = str(artifact_axis.get("status") or "").strip()
     explicit_status = bundle_status or old_status
-    if explicit_status in {
+    accepted_statuses = {
         ARTIFACT_STATUS_PENDING,
         ARTIFACT_STATUS_FINALIZING,
         ARTIFACT_STATUS_READY,
@@ -1292,21 +1309,23 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "ready_no_changes",
         "missing",
         "not_applicable",
-    }:
-        status = explicit_status
-    elif axis_status:
-        status = axis_status
-    elif artifacts:
-        status = ARTIFACT_STATUS_READY
-    else:
-        status = "not_applicable"
+    }
+    status = explicit_status if explicit_status in accepted_statuses else (
+        axis_status or (ARTIFACT_STATUS_READY if artifacts else "not_applicable")
+    )
     records: List[Dict[str, Any]] = []
     for item in artifacts:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "")
         explicit_status = str(item.get("status") or "").strip()
-        if item.get("copy_status") == "failed":
+        if isinstance(item.get("released"), dict):
+            artifact_status = "released"  # the owner released it in Storage (``payload_release``): neither ready nor missing
+        elif item.get("release_pending"):
+            artifact_status = "release_pending"
+        elif item.get("release_unavailable"):
+            artifact_status = "unavailable"
+        elif item.get("copy_status") == "failed":
             artifact_status = "missing"
         elif explicit_status:
             artifact_status = explicit_status
@@ -1328,11 +1347,13 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
             "errors": (list(item.get("errors") or []) if isinstance(item.get("errors"), list) else [])
                       + ([str(item["copy_error"])] if item.get("copy_error") else []),
         }
-        records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {}))
+        records.append(record | ({"relpath": str(item["relpath"])} if item.get("relpath") else {})
+                       | ({"released": item["released"]} if isinstance(item.get("released"), dict) else {}))
     current_records = [item for item in records if item["kind"] != "workspace_capture_history"]
-    if old_status == ARTIFACT_STATUS_FAILED or any(item["status"] == ARTIFACT_STATUS_FAILED for item in current_records):
+    before_release = {(item.get("released") or {}).get("status_before") or item["status"] for item in current_records}
+    if old_status == ARTIFACT_STATUS_FAILED or ARTIFACT_STATUS_FAILED in before_release:
         status = ARTIFACT_STATUS_FAILED
-    elif status != ARTIFACT_STATUS_FAILED and any(item["status"] == "missing" for item in current_records):
+    elif status != ARTIFACT_STATUS_FAILED and "missing" in before_release:
         status = "missing"
     errors = []
     if result.get("artifact_error"):

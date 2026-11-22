@@ -655,6 +655,12 @@ DOORS = """id => { const card = document.querySelector(`#chat-messages > .chat-l
         kid: door(card.querySelector(':scope > .chat-subagents > .chat-live-card.subagent'), '[data-live-disclosure]')}; }"""
 
 
+# A chevron turns by a 0.18s CSS transition; a fixed wait can end mid-turn on a loaded runner (WebKit, run
+# 44786693905). Wait for the turns themselves: getAnimations() flushes style, so a turn not yet started is included.
+CHEVRONS_STILL = """() => Promise.all([...document.querySelectorAll('#chat-messages .chat-live-chevron')]
+    .flatMap(el => el.getAnimations()).map(a => a.finished.catch(() => null))).then(() => true)"""
+
+
 @pytest.mark.parametrize("engine", ["webkit", "chromium"])
 def test_each_door_chevron_says_its_own_door_in_every_state(engine):
     """Reviews and Details open independently, so each chevron turns with its own door's `aria-expanded` alone, whichever
@@ -676,6 +682,7 @@ def test_each_door_chevron_says_its_own_door_in_every_state(engine):
             if door:
                 door.click()
                 _settle(page)
+                page.evaluate(CHEVRONS_STILL)
             facts = page.evaluate(DOORS, "w-root")
             assert facts == {"reviews": [reviews_open] * 2, "details": [details_open] * 2, "kid": [kid_open] * 2}, facts
             if details_open and not reviews_open and not kid_open:

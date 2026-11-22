@@ -107,8 +107,9 @@ test('chat.js hands the card projection to the selector inside hydrateDirectActi
     // The projection is built from the live card map, not from a DOM query.
     assert.match(fn, /Array\.from\(liveCardRecords, \(\[id, r\]\) =>/);
     assert.match(fn, /connected: r\.root\?\.isConnected/);
-    // The scan precedes the retry loop so a freshly observed id is not double-read
-    // (reconcileMissingManagedTask dedupes on managedTaskDetailReads anyway).
+    // The scan precedes the retry loop so a freshly observed id is not double-read (reconcileMissingManagedTask
+    // dedupes anyway: a card's own in-flight read, record.managedDetail, is the one owner; managedTaskDetailReads
+    // holds only the child settlers' reads, which it yields to).
     assert.ok(fn.indexOf('unconfirmedForegroundCardIds(') < fn.indexOf('for (const taskId of missingManagedTaskIds)'));
     // Snapshot hydration owns the one final header sync for both census shapes.
     const snapshot = chatSource.slice(chatSource.indexOf('function hydrateStateSnapshot('),

@@ -609,6 +609,9 @@ def effective_delegation_budget(
             if required_lane:
                 required_lane_applied = required_lane
             if required_lane and required_lane != str(intended_lane or "").strip():
+                cid = str(payload.get("constraint_id") or "").strip()
+                emitter = str(row.get("task_id") or "").strip() if isinstance(row, dict) else ""
+                rationale = str(payload.get("rationale") or "").strip()
                 return DelegationBudgetDecision(
                     False,
                     budget,
@@ -621,19 +624,20 @@ def effective_delegation_budget(
                     # went stale AGAIN in v6.87.26, each time telling the model the
                     # opposite of the truth at the exact moment it is deciding how to
                     # fix a rejected spawn. A copy of a rule you do not own drifts;
-                    # the remedy below holds whatever the default is.
-                    detail=str(
-                        payload.get("rationale")
-                        or (
-                            f"Unresolved delegation constraint requires lane {required_lane!r} "
-                            f"(requested {str(requested_lane or '').strip() or 'auto'!r}, "
-                            f"intended {str(intended_lane or '').strip()!r}). Name "
-                            f"model_lane={required_lane!r} explicitly, or "
-                            "override_delegation_constraint("
-                            f"{str(payload.get('constraint_id') or '').strip()!r}) instead. If this "
-                            "install has no such slot the child will run Main and disclose the "
-                            "reduction in capability_delta."
-                        )
+                    # the remedy below holds whatever the default is. It never names
+                    # model_lane: beside the required subagent_id that selector is refused
+                    # (`subagent_selector_conflict`), and admission compares the lane the
+                    # request inherits, so releasing the constraint is the call that changes
+                    # the outcome. Who may release it is override_delegation_constraint's own
+                    # rule; this pure reducer cannot see the caller's tools, hence the "where".
+                    detail=(
+                        f"Unresolved delegation constraint {cid!r}{f' from task {emitter!r}' if emitter else ''} "
+                        f"requires lane {required_lane!r} (requested {str(requested_lane or '').strip() or 'auto'!r}, "
+                        f"intended {str(intended_lane or '').strip()!r})."
+                        + (f" Its reason: {rationale}{'' if rationale[-1] in '.!?' else '.'}" if rationale else "")
+                        + f" override_delegation_constraint(constraint_id={cid!r}"
+                        + (f", constraint_task_id={emitter!r}" if emitter else "")
+                        + ", reason=…) releases it where your tools include it."
                     ),
                 )
         if directive == "cap_children":

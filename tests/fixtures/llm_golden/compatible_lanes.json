@@ -122,7 +122,7 @@
     },
     {
       "id": "compatible.dispatch.happy_path",
-      "route": "chat -> openai-compatible server, cost estimated",
+      "route": "chat -> openai-compatible server, no reported price: cost unknown, the catalog estimate is never consulted",
       "spec": {
         "env": {
           "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
@@ -179,7 +179,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
-            "cost": 0.0009,
+            "cost": null,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -190,10 +190,10 @@
               "reported": null,
               "report_source": null
             },
+            "provider_reported_cost_only": true,
             "response_finish_reason": "stop",
             "provider": "openai-compatible",
             "resolved_model": "openai-compatible/glm-5",
-            "cost_estimated": true,
             "cost_final": false,
             "request_wire": {
               "requested_effort": "medium",
@@ -244,21 +244,6 @@
               "reasoning_effort": "medium"
             },
             "payload_sha256": "08437b193a466a863c4ec0fcc1955c755d5bcfe337248fbe2247638790db0e37"
-          }
-        ],
-        "pricing_calls": [
-          {
-            "model": "openai-compatible/glm-5",
-            "prompt_tokens": 200,
-            "completion_tokens": 10,
-            "cache_usage": {
-              "cached_tokens": 0,
-              "cache_write_tokens": 0,
-              "prompt_cache_ttl": null,
-              "cache_write_tokens_by_ttl": null
-            },
-            "allow_live_fetch": true,
-            "provider": "openai-compatible"
           }
         ],
         "physical_attempts": [
@@ -456,8 +441,8 @@
             "prompt_tokens": 200,
             "completion_tokens": 10,
             "cache_usage": {
-              "cached_tokens": 0,
-              "cache_write_tokens": 0,
+              "cached_tokens": null,
+              "cache_write_tokens": null,
               "prompt_cache_ttl": null,
               "cache_write_tokens_by_ttl": null
             },
@@ -615,8 +600,8 @@
             "prompt_tokens": 200,
             "completion_tokens": 10,
             "cache_usage": {
-              "cached_tokens": 0,
-              "cache_write_tokens": 0,
+              "cached_tokens": null,
+              "cache_write_tokens": null,
               "prompt_cache_ttl": null,
               "cache_write_tokens_by_ttl": null
             },

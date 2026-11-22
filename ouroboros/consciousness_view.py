@@ -43,6 +43,15 @@ def _clock_of(iso_value: Any) -> str:
     return date + at.strftime("%H:%M")
 
 
+def _zone_of(iso_value: Any) -> str:
+    """`` (UTC+03:00)``: the zone ``_clock_of`` prints that instant in (the server's), so a UTC server's time is not
+    read as the reader's own; "" when there is no instant."""
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_offset_text
+
+    parsed = parse_deadline_ts(str(iso_value or ""))
+    return f" ({utc_offset_text(parsed.astimezone(_DISPLAY_ZONE))})" if parsed is not None else ""
+
+
 def _when(iso_value: Any) -> str:
     """«at HH:MM» for a coming instant, «due since HH:MM» for a passed one: no line names a past time as next."""
     from ouroboros.deadline_utils import parse_deadline_ts
@@ -78,8 +87,9 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
-    elif outcome == "skipped:waiting_for_first_conversation":
-        status, detail = "waiting_for_first_conversation", "No owner chat is bound yet; the first conversation binds it."
+    elif outcome == "skipped:owner_chat_unknown":  # unknown, never empty: a known empty slot wakes in Main
+        why = snapshot.get("last_error") or "unknown error"
+        status, detail = "owner_chat_unknown", f"The owner chat could not be read ({why}); retry {next_at}."
     elif outcome == "skipped:allowance_exhausted":
         spent, daily = snapshot.get("spent_24h_usd"), snapshot.get("daily_usd")
         status = "allowance_exhausted"
@@ -110,7 +120,8 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         since = f" since {_clock_of(snapshot['appointment_at'])}" if snapshot.get("appointment_at") else ""
         status, detail = "due", f"Due{since}; the wake-up has not started yet."
     else:
-        status, detail = "sleeping", f"Sleeping until {_clock_of(snapshot.get('next_wake_at'))}."
+        wake_at = snapshot.get("next_wake_at")
+        status, detail = "sleeping", f"Sleeping until {_clock_of(wake_at)}{_zone_of(wake_at)}."
     return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
             "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {}),
             "position": position_words(requested_enabled, snapshot.get("places_brief")), "gloss": SWITCH_GLOSS}
@@ -364,8 +375,10 @@ def first_run_words(autonomy: str = "act") -> dict:
               else "answers in places you make Active")
     return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
             "on": ON_WITHOUT_PLACES,
-            "meaning": ("Off: it works only when you write to it, and places you connect are heard, not answered. On: it "
-                        f"also wakes between your messages and {places}."),
+            # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
+            "meaning": ("Off: it works when you write to it, and places you connect are heard, not answered. On: it also "
+                        f"keeps waking on its own within its daily allowance, even before your first reply, and {places}. "
+                        "Either way, Start begins your first conversation."),
             "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
             "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
 

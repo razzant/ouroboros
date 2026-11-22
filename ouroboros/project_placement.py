@@ -25,7 +25,7 @@ def move_task_to_project(drive_root: Any, task_id: str, project_id: str, *, name
                          initiated_by: str = "mind") -> dict:
     """The mind and owner button share this binding-first placement transaction."""
     from ouroboros.projects_registry import (
-        bind_task_to_project, create_project, get_project, origin_claim_lock,
+        _validated_origin, bind_task_to_project, create_project, get_project, origin_claim_lock, project_chat_id,
         project_admission_basis, project_admission_guard, project_id_for_task, update_project,
     )
     from ouroboros.project_lease import mark_task_project
@@ -36,6 +36,7 @@ def move_task_to_project(drive_root: Any, task_id: str, project_id: str, *, name
         pid = bound or project_id
         if basis.get("project_id") != pid:
             basis = placement_basis(drive_root, task_id, pid)
+        _validated_origin(origin, (basis.get("project") or {}).get("chat_id", project_chat_id(pid)))
         if bound:
             with project_admission_guard(drive_root, basis):
                 project = get_project(drive_root, bound, strict=True)

@@ -170,31 +170,24 @@ _START_CHOICE_PARAMS = {
 # Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
 # structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
-    # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
-    # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
-    "Start a child on one objective; it reports back and returns task_id. Children may write knowledge "
-    "notes, memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
-    "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. Default "
-    "native READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other local "
-    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. write_surface "
-    "picks a MUTATIVE (acting) child: self_worktree isolates its Git source's current eligible files (uncommitted "
-    "too) for integrate_subagent_patch; native external_workspace writes in the SHARED directory (write_root, else "
-    "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
-    "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
-    "integrate_delegated_patch. "
-    # Where the custom projection sends this tool without parameter prose, this choice must survive in the tool lead.
-    "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
-    "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
-    "never a write_surface. Cyber-effective children inherit "
-    "selected review/skill/runtime tools within explicit task restrictions. Nesting obeys configured "
-    "depth/cap limits. Children scheduled in one round run concurrently; on cache-write-priced routes each "
-    "sibling started before the first responds pays a full prefix write. Native children can address you, "
-    "siblings or any task in their tree; ongoing addressed turns need "
-    "objective/constraints stating what is interim, whom to address and what ends participation. Continue "
-    "settled sessions via delegate_start(subagent_id=id, continue_from=run_id, prompt=''): new run, "
-    "same session if possible, else a new one with retained evidence; work may repeat. "
-    "Retrieve the handoff with get_task_result, "
-    "wait_task or wait_tasks before relying on it."
+    "Start a child on one objective; it returns task_id and reports back. Children may write knowledge notes, "
+    "memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
+    "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. "
+    # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
+    # which is all a custom projection without parameter prose shows of that choice.
+    "Default native READ-ONLY children inspect repo/data/history and web/browser; no other "
+    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. Read-only input_files: "
+    "file/git_range. write_surface makes a child ACTING: self_worktree isolates eligible Git files (uncommitted "
+    "too) for integrate_subagent_patch; external_workspace writes the SHARED directory (write_root, else "
+    "workspace_root, else one new Git tree); genesis gives EACH an empty durable Git repo that IS the "
+    "deliverable; harness work uses a private snapshot and integrate_delegated_patch. Non-acting sessions keep "
+    "configured access in an evidence-only private checking copy; access='readonly' selects read-only "
+    "execution. Runtime data is never a write_surface. Cyber-effective children inherit review/skill/runtime "
+    "tools within task restrictions; nesting is capped. Children scheduled in one round run concurrently; on "
+    "cache-write-priced routes each sibling started before the first responds pays a full prefix write. Native "
+    "children can address you, siblings or any task in their tree: state what is interim, whom to address and "
+    "when to stop. Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work "
+    "may repeat. Read the handoff before relying on it."
 )
 
 
@@ -364,6 +357,11 @@ def get_tools() -> List[ToolEntry]:
                     "model": {"type": "string", "description": "Model for this new work, with owner_words citing your human's words or their pressed choice. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "model_as_typed": {"type": "boolean", "default": False, "description": "Use the exact typed id despite similar catalog suggestions. The route is unverified; this confirms your choice, not availability."},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
+                    "owner_source": {"type": "string", "default": "", "description": (
+                        "A held owner_quote_handle: which of your human's messages the new work answers (its Reply, files and source); "
+                        "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
+                        "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
+                        "Only a root your human started.")},
                 },
                 "required": ["objective", "title"],
             },
@@ -514,14 +512,21 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_consciousness),
         ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup", "description": (
-                "Choose the consciousness wake-up interval: how long after a wake-up ends the next one starts, "
-                "clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A wake-up calling this sets its own next "
-                "one; one already pending keeps its time; with consciousness off it is stored for later. The alarm "
-                "adjusts it: a failed wake-up doubles the interval (up to MAX), a skipped one retries after MIN (an "
-                "exhausted allowance waits for its reset or a changed daily limit), and no wake-up starts sooner "
-                "than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward; the next one "
-                "observes them."),
-            "parameters": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one"}}, "required": ["seconds"]},
+                "Choose the next consciousness wake-up: seconds, how long after a wake-up ends the next one starts, "
+                "and/or at, a named time; the earlier wins, clamped into the owner's OUROBOROS_BG_WAKEUP_MIN/MAX. A "
+                "wake-up calling this sets its own next one; one already pending keeps its time; with consciousness "
+                "off it is stored for later. A failed wake-up doubles the interval (up to MAX), a skipped one retries "
+                "after MIN (an exhausted allowance waits for its reset or a changed daily limit), and none starts "
+                "sooner than MIN after the last wake-up, boot or skip. Events never bring a wake-up forward."),
+            "parameters": {"type": "object", "properties": {
+                "seconds": {"type": "integer", "description": "Seconds from the end of a wake-up to the next one (the interval)"},
+                "at": {"type": "string", "description": (
+                    "A named time: ISO 8601 with an explicit UTC offset or Z, e.g. 2026-11-21T09:00:00+03:00; a time "
+                    "without an offset, or not in the future, is refused, and so is one at or before a wake-up already "
+                    "appointed (that one keeps its time). It stands until a wake-up appointed after it was stored ends "
+                    "at or after it, so a time beyond MAX is reached through intermediate wake-ups and one a wake-up "
+                    "outlives adds none; seconds leaves it standing, a later at replaces it.")},
+            }, "required": []},
         }, _set_next_wakeup),
         ToolEntry("switch_model", {
             "name": "switch_model",
@@ -670,7 +675,6 @@ from ouroboros.tools.control_task_results import (  # noqa: E402, F401 -- intent
     _wait_attention_poll,
     _wait_for_task,
     _wait_for_tasks,
-    cache_horizon_note,
     disclosable_capability_delta,
 )
 

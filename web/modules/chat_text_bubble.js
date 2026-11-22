@@ -5,10 +5,12 @@
 // saved row offers: Copy with the exact words shown, Share's source (an Ouroboros message's own words,
 // message_actions.js), the reply quote and Reply (chat_reply.js), the Project reference of another room's answer
 // (project_answer.js). Its caller decides whether a row is new, places the bubble and enhances its Markdown once it
-// is mounted.
+// is mounted. A host notice says its one line, Copy keeps that line, and its raw details open from Details.
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { linkify, renderChatMarkdown } from './chat_markdown.js';
-import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
+import { hostRowDisplayText, hostSentenceText, noticeLine } from './host_notice_text.js';
+import { tr } from './i18n.js';
+import { rawDetails } from './ui_primitives.js';
 import { attachmentCaption, attachmentViews } from './chat_attachments.js';
 import { renderSkillReviewDisclosure, wireSkillReviewDisclosure } from './skill_review_card.js';
 import { evidenceLinkHtml, formatMsgTime, senderLabel, stampNodeTimestamp } from './chat_activity.js';
@@ -23,28 +25,30 @@ import { markSwarmLabel } from './swarm_presentation.js';
  * read: a host sentence in the install's language, a known host prefix hidden, the owner's literal words without the
  * composer's file-name tail, Ouroboros's (or a Markdown System row's) sanitized Markdown, other System text escaped,
  * a Skill Review's disclosure. `attachments` are the owner's attachment views. Answers `{ rendered, rich, shown,
- * skillReview }`: the `.message` HTML, whether it is rich Markdown (enhanced once mounted), the words Copy keeps and
- * whether the row is a Skill Review.
+ * skillReview, unparsed }`: the `.message` HTML, whether it is rich Markdown (enhanced once mounted), the words Copy
+ * keeps, whether the row is a Skill Review and whether Markdown was left unparsed (no parser: its marks show).
  */
 export function bubbleWords(text, role, { markdown = false, systemType = '', source = '', attachments = [], narration,
-    textPlaceholder = false, skillReview: review = null } = {}) {
+    textPlaceholder = false, skillReview: review = null, notice = null } = {}) {
     const stored = text;
     if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
-    // Render-only: Copy keeps `shown`, the pre-cleanup sentence.
-    const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration }, text);
+    // A notice's line is what it says and what Copy keeps; other rows: render-only, Copy keeps `shown`.
+    text = noticeLine({ role, narration, notice }) || text;
+    const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration, notice }, text);
     const skillReview = role === 'system' && systemType === 'skill_review' && narration !== true;
     const rich = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
     // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
     const shown = attachments.length ? attachmentCaption(text, attachments,
         { placeholder: textPlaceholder === true, composed: source === 'web' }) : text;
+    let unparsed = false;  // Markdown the page could not parse shows its marks: other coordinates than a parsed page's
     const rendered = role === 'user'
         ? linkify(shown)
         : skillReview
             ? renderSkillReviewDisclosure(text, review || null)
             : role === 'system' && markdown !== true
                 ? escapeHtml(painted)
-                : renderChatMarkdown(painted);
-    return { rendered, rich, shown, skillReview };
+                : renderChatMarkdown(painted, { onPlain: () => { unparsed = true; } });
+    return { rendered, rich, shown, skillReview, unparsed };
 }
 
 /**
@@ -69,23 +73,36 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         for (const key of ['clientMessageId', 'systemType', 'senderSessionId', 'taskId', 'deliveryId', 'projectId']) {
             if (meta[key]) bubble.dataset[key] = meta[key];
         }
+        if (role === 'user' && Number.isInteger(meta.ownerChatId)) bubble.dataset.ownerChatId = String(meta.ownerChatId);
+        // A Project's retained copy names its original's room (history's `chat_id`), the room that room's receipts for
+        // it name (chat_history_replay.statedOwnerRoom). A copy from before copies named it states none.
+        if (role === 'user' && opts.originProjected && Number.isInteger(opts.reply?.chat_id)) {
+            bubble.dataset.sourceChatId = String(opts.reply.chat_id);
+            if (opts.reply.source_row_address) bubble.dataset.sourceRowAddress = opts.reply.source_row_address;
+        }
         if (legacyKey) bubble.dataset.messageKey = legacyKey;
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
-        const { rendered, rich: richMarkdown, shown, skillReview } = bubbleWords(text, role, { markdown, systemType, source,
-            attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview });
+        const notice = role === 'system' ? opts.reply?.notice : null;
+        const { rendered, rich: richMarkdown, shown, skillReview, unparsed } = bubbleWords(text, role, { markdown, systemType, source,
+            attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview, notice });
         if (skillReview) bubble.classList.add('chat-skill-review');
+        // A passage's coordinates are the parsed words': an unparsed message offers none, nor lands a saved one.
+        const authored = ['user', 'assistant'].includes(role) && !isProgress && opts.textPlaceholder !== true && Boolean(shown)
+            && !unparsed;
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
         bubble.innerHTML = `
             <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
+            <div class="message${richMarkdown ? ' ui-rich-content' : ''}"${authored ? ' data-reply-body' : ''}>${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
             ${timeHtml}
         `;
+        if (notice?.details && opts.narration !== true) bubble.querySelector('.message')
+            .after(rawDetails(document, notice.details, tr('chat.notice.details', 'Details')));
         decorateContactSource(bubble, opts.presenceContact);
         if (attachments.length) chatMedia.mountAttachments(bubble, attachments, shown);
         if (!isProgress && shown) {

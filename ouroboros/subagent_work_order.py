@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
 # and with it the work-order bytes and fingerprint its recovery and source-range reads check.
 DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
+# An immutable scheduling fact, not a migration: records without it must
+# reconstruct the original canonical bytes for source reads and handoff recovery.
+ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
 
 
 def declared_words_fact(contract: Mapping[str, Any]) -> dict[str, bool]:
@@ -121,11 +124,19 @@ def _selected_input_files(task: Mapping[str, Any]) -> str:
     rows = task.get("prepared_input_files")
     if not isinstance(rows, list) or not rows:
         return ""
-    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
-            "this task. The first start of this work order verifies those copies against these digests and its "
-            "instructions name where this run reads them; a later start copies only what its own request selects.\n"
-            + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
-                        for row in rows if isinstance(row, dict)))
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    if task.get(ORIGINAL_INPUTS_FACT, metadata.get(ORIGINAL_INPUTS_FACT)) is not True:
+        return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+                "this task. The first start of this work order verifies those copies against these digests and its "
+                "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+                + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
+                            for row in rows if isinstance(row, dict)))
+    from ouroboros.delegate_readonly_inputs import selection_label
+
+    return ("Original schedule-time selection (input_files). Follow this start's SELECTED INPUT FILES instructions "
+            "for effective copies. Without them there are no explicit copies for this run. A replacement, including [], "
+            "supersedes these rows.\n"
+            + "\n".join(f"- {selection_label(row)} (sha256 {row['sha256']}, {row['size']} bytes)" for row in rows))
 
 
 def _text(value: Any) -> str:
@@ -178,6 +189,22 @@ def assignment_instructions(ctx: Any) -> str:
     )
 
 
+def work_order_owner_rows(task: Mapping[str, Any]) -> tuple | None:
+    """``(rows, absence marker, current)``: my human's rows a session work order carries, one per identity (the
+    field's, then the bound room's), the same set ``_owner_words_section`` renders and the receipt counts; ``None``
+    for a declared task scheduled before ``DECLARED_WORDS_FACT``, whose order holds none."""
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.owner_words import FIELD, _deduped, task_governing_words
+
+    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+        return None
+    rows, absent = task_governing_words(task)
+    room = work_order_room_words(task)
+    if room is not None:
+        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    return rows, absent, room is not None
+
+
 def work_order_room_words(task: Mapping[str, Any]) -> list | None:
     """The bound room's rows a session task was scheduled with (``owner_words.ROOM_FIELD``, by value, at the top
     level or under ``metadata``); ``None`` for a task scheduled before the key existed, whose work order keeps the
@@ -203,18 +230,14 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
     in its own section; a record without that field renders as it always did.
     """
-    from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import (FIELD, _deduped, render_owner_words, render_schedule_text,
-                                       task_governing_words, task_schedule_items)
+    from ouroboros.owner_words import render_owner_words, render_schedule_text, task_schedule_items
 
-    if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
+    carried = work_order_owner_rows(task)
+    if carried is None:
         return ""
-    rows, absent = task_governing_words(task)
-    room = work_order_room_words(task)
-    if room is not None:
-        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    rows, absent, current = carried
     words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                               current=room is not None)
+                               current=current)
     schedule = render_schedule_text(task_schedule_items(task), audience="session")
     return "\n\n".join(part for part in (words, schedule) if part)
 

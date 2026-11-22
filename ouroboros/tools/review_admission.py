@@ -819,8 +819,8 @@ def commit_gate_paid_seats(prepared, exited) -> list:
     reserved) and is not priced. Each seat carries the exact chars of the send its
     substrate opens with (the packet's message pair; a native episode's first send:
     instructions, its OWN two-part brief and tool schemas — later rounds reserve
-    themselves) and that send's output reservation, so the wave is priced the way
-    ``reserve_attempt`` prices it, the exact route's known response maximum included."""
+    themselves), that send's output reservation (the route's known maximum), locality
+    and tier (``usage_admission.review_seat_envelope``): priced as ``reserve_attempt`` will."""
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_native_episode import native_first_send_chars
     from ouroboros.reviewer_window import reviewer_window_binding
@@ -830,6 +830,7 @@ def commit_gate_paid_seats(prepared, exited) -> list:
     )
     from ouroboros.triad_review import REVIEW_TWO_PART_OBJECT_CONTRACT
     from ouroboros.review_evidence import commit_review_evidence_section
+    from ouroboros.usage_admission import review_seat_envelope
 
     if exited or not prepared:
         return []
@@ -838,7 +839,8 @@ def commit_gate_paid_seats(prepared, exited) -> list:
     routes = list(prepared.get("routes") or row_plan.get("routes") or [])
     slot_ids = list(row_plan.get("slot_ids") or [])
     tasks, policies = list(row_plan.get("session_tasks") or []), list(row_plan.get("session_policies") or [])
-    profiles, local = list(row_plan.get("session_profiles") or []), list(row_plan.get("use_local") or [])
+    profiles, local, tiers = (list(row_plan.get(key) or [])
+                              for key in ("session_profiles", "use_local", "processing_preferences"))
     seats, packet_chars = [], None
     for index, model in enumerate(models):
         route = routes[index] if index < len(routes) else "api_chat"
@@ -865,7 +867,9 @@ def commit_gate_paid_seats(prepared, exited) -> list:
         binding = reviewer_window_binding({"slot_id": slot_id, "session_profile": profiles[index] if index < len(profiles) else "",
                                            "use_local": local[index] if index < len(local) else None})
         seats.append({"surface": "multi_model_review", "slot_id": slot_id, "model": str(model or ""), "prompt_chars": chars,
-                      "max_completion_tokens": review_output_allowance(str(model or ""), **binding)})
+                      "max_completion_tokens": review_output_allowance(str(model or ""), **binding),
+                      **review_seat_envelope(slot_id, str(model or ""), use_local=local[index] if index < len(local) else None,
+                                             processing_preference=tiers[index] if index < len(tiers) else None)})
     return seats
 
 
@@ -894,12 +898,17 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
         max_completion_tokens=[seat["max_completion_tokens"] for seat in seats],
         categories=[review_usage_category(seat["surface"]) for seat in seats],
         slot_ids=[seat["slot_id"] for seat in seats],
+        processing_preferences=[seat.get("processing_preference", "") for seat in seats],
+        use_local=[seat.get("use_local") for seat in seats],
         extra={"seats": [f"{seat['surface']}:{seat['slot_id']}" for seat in seats]},
     )
     if admission is None:
         return None
-    usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
-    from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+    from ouroboros.cost_projection import uncounted_money_text, usd_text
+
+    def usd(value):
+        return "unknown" if value is None else usd_text(float(value), decimals=6)
+
     _beside = lambda facts, prefix="": f" ({text}; not counted)" if (text := uncounted_money_text(facts, decimals=6, prefix=prefix)) else ""  # noqa: E731,E501
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
@@ -930,47 +939,39 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     )
 
 
-def managed_update_wave_estimate(remaining_usd: float) -> dict:
-    """Disclosure of ONE commit-gate wave for the managed-update resolver: the
-    supervisor event to record. Money admission is the known-spend rule the
-    caller checked first (#1487), so this estimate never refuses. The pool is
-    the one wave's paid seats — every api-route row of the panel (packet or
-    native, both parts of the brief ride one seat) — priced at the packs' own
-    worst-case caps (the shared 920K-token input SSOT per API row, the review
-    output reserve) with the shared reservation math; agent-session rows ride
-    subscriptions and are counted, not priced. An estimator error is recorded
-    inside the event, never a zero; this function is called explicitly, so a
-    broken import propagates to the caller."""
-    from ouroboros.review_execution import ReviewRouteKind
+def managed_update_wave_inputs() -> dict:
+    """One resolver commit-review wave, at the packs' worst-case input and output caps."""
+    from ouroboros.review_substrate import review_usage_category
     from ouroboros.reviewer_slot_config import review_pool_slots
     from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
     from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.usage_admission import review_slot_wave_fields
+
+    return {**review_slot_wave_fields(review_pool_slots()), "root_task_id": "managed-update-admission",
+            "categories": review_usage_category("multi_model_review"), "prompt_chars": REVIEW_PROMPT_TOKEN_BUDGET * 4,
+            "max_completion_tokens": _review_output_budget()}
+
+
+def managed_update_wave_estimate(remaining_usd: float) -> dict:
+    """Disclose the priced subtotal and unpriced API seats beside the known room. Only known spend gates Update."""
     from ouroboros.usage_admission import review_wave_admission
 
-    rows = review_pool_slots()
-    # A ReviewSlot's transport is its own ``route`` — the test ``commit_gate_paid_seats`` applies.
-    delegated = [str(getattr(row.route, "value", row.route) or "") == ReviewRouteKind.AGENT_SESSION.value
-                 for row in rows]
-    models = [row.model for row, session in zip(rows, delegated) if not session and row.model]
+    wave = managed_update_wave_inputs()
     event: dict = {"type": "managed_update_wave_estimate", "estimated_wave_usd": None,
                    "exceeds_known_remaining": False, "unpriced_slots": 0,
-                   "session_slots": sum(delegated), "remaining_usd": float(remaining_usd)}
-    if not models:
+                   "session_slots": wave["session_slots"], "remaining_usd": float(remaining_usd)}
+    if not wave["models"]:
         return event
     try:
-        estimate = review_wave_admission(
-            root_task_id="managed-update-admission", models=models,
-            prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4,
-            max_completion_tokens=int(_review_output_budget()),
-            remaining_usd_override=float(remaining_usd))
+        estimate = review_wave_admission(**wave, remaining_usd_override=float(remaining_usd))
     except Exception as exc:
         log.debug("assisted admission wave estimate failed", exc_info=True)
         return {"type": "managed_update_wave_estimate_failed", "remaining_usd": float(remaining_usd),
                 "error": f"{type(exc).__name__}: {exc}"}
     total = estimate.get("estimated_wave_usd")
-    event["unpriced_slots"] = int(estimate.get("unpriced_slots") or 0) + (len(models) if total is None else 0)
+    event["unpriced_slots"] = len(wave["models"]) if total is None else int(estimate.get("unpriced_slots") or 0)
     if total is not None:
-        event["estimated_wave_usd"] = round(float(total), 6)
+        event["estimated_wave_usd"] = total
         event["exceeds_known_remaining"] = float(total) > float(remaining_usd) + 1e-9
     return event
 

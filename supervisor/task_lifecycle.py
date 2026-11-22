@@ -125,13 +125,16 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     """
     if not CANCELLED_ROOT_FENCES:
         return False
+    parent = str(task.get("parent_task_id") or "").strip()
     for candidate in (
         str(root_task_id or "").strip(),
         str(task.get("root_task_id") or "").strip(),
-        str(task.get("parent_task_id") or "").strip(),
+        parent,
     ):
         if candidate and candidate in CANCELLED_ROOT_FENCES:
             return True
+    if not parent:  # a root has no ancestry to walk: never build the live map for it
+        return False
     q = _queue_module()
     live: Dict[str, Dict[str, Any]] = {
         str(item.get("id") or ""): item for item in q.PENDING if isinstance(item, dict)
@@ -140,7 +143,6 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
         str(rid): meta["task"] for rid, meta in q.RUNNING.items()
         if isinstance(meta, dict) and isinstance(meta.get("task"), dict)
     })
-    parent = str(task.get("parent_task_id") or "").strip()
     seen: set[str] = set()
     while parent and parent not in seen and len(seen) < 100:
         if parent in CANCELLED_ROOT_FENCES:
@@ -323,7 +325,7 @@ def cancel_task_by_id(task_id: str) -> bool:
             )
             failed = {tid for tid, state in outcomes.items() if state == q.CANCEL_FAILED}
         # Delegated runs a settled member's end spared wait for this Stop (its verdict); the check below sees the rest.
-        _stop_open_tree_runs(q, task_id)
+        _stop_open_tree_runs(q, task_id, cascade_claim)
         # UNCONDITIONAL postcondition. For a CASCADE the answer is a property of the
         # TREE, not a tally of who did the killing: success means nothing of the
         # subtree is live and nothing refused custody. (A concurrent cascade over

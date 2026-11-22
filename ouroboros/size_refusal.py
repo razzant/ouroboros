@@ -5,7 +5,11 @@ recognition. FORMS only extract numbers after that recognition; an unsupported s
 One object is the refusal: the holder of a typed size code, else the object that said the recognised sentence.
 Its subtree on the current path alone supplies structured counts, the sentence numbers are read from, and the
 causes that exclude numbers: a code of another kind (the classifier's, ``OTHER_CAUSE_CODES``), an output or body
-limit. An earlier upstream attempt, a sibling diagnostic and the exception's printed form supply none of these.
+limit. An earlier upstream attempt, a sibling diagnostic and the exception's printed form supply none of these, and
+recognised through them alone the refusal does not supply whole-request evidence for signed Chat (``own``).
+A refusal the Z.ai 1261 pair typed (``paired_size_refusal``, #3858) reads its numbers from that one object alone
+and sets ``retry_only`` when no token window is stated; Z.ai's 1214 parameter refusal (``cited_size_refusal``)
+is no size refusal when size wording belongs only to what it cites or to an earlier attempt.
 ``meaning`` distinguishes total, input_plus_reply, input and unknown. Units stay explicit; a unitless
 number never becomes a token window. No IO: ``window_learning`` owns recovery and ``context_window`` storage.
 """
@@ -67,16 +71,85 @@ FORMS: Tuple[Form, ...] = (
     Form("lmstudio/loaded-only", rf"loaded with context length of only {_N} tokens", ("window",), "total"),
     # Alibaba Model Studio through OpenRouter (#3518): the bound names no unit; its documentation ties it to input.
     Form("alibaba/input-range", rf"range of input length should be \[1, {_N}\]", ("window",), "input", units="unstated"),
-    # Numberless forms: Ollama llama_server.go:2652 (truncate=false), LM Studio MLX (#2339), Z.ai error code 1261.
+    # Numberless forms: Ollama llama_server.go:2652 (truncate=false), LM Studio MLX (#2339), Z.ai (#3858).
     Form("ollama/prompt-longer", r"the prompt is longer than the context length currently available to the model", (),
          "unknown"),
     Form("lmstudio/mlx-exceeded", r"^context size has been exceeded", (), "unknown"),
-    # Z.ai (docs.z.ai error codes; live refusal 2026-11-20, logs llm_912c35cf3f7c474688b85055e0d4fb0c): HTTP 400,
-    # code "1261", message exactly "Prompt too long" — no token numbers. "Prompt too long" (no "is") is also the
-    # body the OpenAI SDK prints for any zai:: route, so the form and the 1261 code below reach it on both seams.
-    Form("zai/prompt-too-long", r"^prompt too long", (), "unknown"),
+    # Z.ai (#3858): HTTP 400, error code "1261", the whole message "Prompt too long" (live refusal 2026-11-20,
+    # logs llm_912c35cf3f7c474688b85055e0d4fb0c) — no token numbers, so it teaches no window. Anchored to the whole
+    # sentence: a wording that goes on to state a limit ("Prompt too long; maximum context length is 80000
+    # tokens") falls through to the shared vocabulary, whose limit parser keeps the number. Recognition is the
+    # code+message pair on one current, unquoted object (``paired_size_refusal``), never the words alone.
+    Form("zai/prompt-too-long", r"^prompt too long\.?$", (), "unknown"),
 )
 _COMPILED = tuple((form, re.compile(form.pattern, re.I)) for form in FORMS)
+
+#: Z.ai's documented 1261 prompt-length refusal (#3858): code "1261" beside "Prompt too long" (or a continuation
+#: stating a context limit) on one current, non-inline object.
+_ZAI_SHORT_PROMPT = re.compile(r"^prompt too long\.?$", re.I)
+_ZAI_PROMPT_PREFIX = re.compile(r"^prompt too long\b", re.I)
+
+#: Z.ai's documented 1214 parameter refusal (#3858): code "1214" beside ``Parameter <field> is invalid`` or
+#: ``Invalid parameter`` on a current, non-inline object.
+_ZAI_PARAMETER_CODE = "1214"
+_ZAI_PARAMETER_MESSAGE = re.compile(r"^(?:parameter\s+\S+\s+is\s+invalid\b|invalid parameter\b)", re.I)
+
+# A whole prompt's affirmative rejection, not the classifier's substring embedded in an example.
+_WHOLE_REFUSAL = re.compile(
+    r"(?:(?:the |your )?(?:prompt|input|request) (?:is too long|exceeds (?:the )?"
+    r"(?:(?:max|maximum) length|context (?:length|limit|window)(?: of this model)?))|"
+    r"(?:the |this model's )?(?:maximum )?context (?:length|limit|window) (?:(?:was|has been) )?exceeded)\.?", re.I)
+# A closing single quote followed by a word character is internal (e.g. model's or model’s).
+_QUOTED_CLAUSE = re.compile(r"""(?<!\w)(?:'(?:[^'\\]|\\.|'(?=\w))*'(?!\w)|"[^"]*"|"""
+                            r"(?:‘(?:[^’]|’(?=\w))*’(?!\w))|“[^”]*”|«[^»]*»|‹[^›]*›)"
+                            r"|(?<!`)(`+)(?=[^`]*\d)[^`]*\1(?!`)")
+# Generic validation errors can name just one field in their own prose, with no structured param.
+_INVALID_FIELD = re.compile(r"""^\s*invalid\s+(?:(?:field|parameter)\s+)?"""
+                            r"""(?:['"`‘“][\w.\[\]-]+['"`’”]|[\w-]+[.\[][\w.\[\]-]+)\s*:""", re.I)
+
+
+def zai_parameter_refusal(answer) -> bool:
+    """True when a current, non-inline object carries Z.ai's documented 1214 parameter refusal (#3858)."""
+    return any(
+        not obj.history and not obj.inline
+        and str(obj.value.get("code") or "").strip() == _ZAI_PARAMETER_CODE
+        and bool(obj.message and _ZAI_PARAMETER_MESSAGE.match(obj.message))
+        for obj in answer.objects
+    )
+
+
+def own_size_wording(answer) -> bool:
+    """True when any current, non-inline object states a size refusal (1261 pair, typed size code, or frozen wording)."""
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, context_overflow_message
+
+    if paired_size_refusal(answer) is not None:
+        return True
+    return any(
+        not obj.history and not obj.inline
+        and (any(code.lower() in CONTEXT_OVERFLOW_CODES for code in obj.codes)
+             or any(context_overflow_message(text) for text in obj.sentences))
+        for obj in answer.objects
+    )
+
+
+def cited_size_refusal(answer) -> bool:
+    """True when Z.ai's 1214 parameter refusal explains the current answer and no current non-inline object states size."""
+    return zai_parameter_refusal(answer) and not own_size_wording(answer)
+
+
+def paired_size_refusal(answer) -> Optional[Tuple[int, str, str, str]]:
+    """``(object index, speaker, code, sentence)`` for Z.ai's 1261 + ``Prompt too long`` pair on one current object."""
+    from ouroboros.context_budget import context_overflow_message
+
+    for index, obj in enumerate(answer.objects):
+        if obj.history or obj.inline:
+            continue
+        code = str(obj.value.get("code") or "").strip()
+        if code == "1261" and obj.message and (
+                _ZAI_SHORT_PROMPT.fullmatch(obj.message)
+                or (_ZAI_PROMPT_PREFIX.match(obj.message) and context_overflow_message(obj.message))):
+            return index, obj.speaker, code, obj.message
+    return None
 
 
 @dataclass(frozen=True)
@@ -91,6 +164,9 @@ class SizeRefusal:
     gateway: str = ""    # the gateway that carried an upstream provider's refusal (OpenRouter's provider_name)
     upstream: str = ""   # the sentence the numbers were read from where the host's owner message lacks it: a gateway's
                          # nested upstream error (#3518), or an error given as a bare string (LM Studio, Ollama native)
+    retry_only: bool = False  # numberless Z.ai 1261 pair (#3858): retries this round without storing a window
+    # The direct error states this whole-request fact; looser evidence still sizes the round (``_read_numbers``).
+    own: bool = False
 
     @property
     def has_numbers(self) -> bool:
@@ -212,6 +288,42 @@ def _recognized_subtree(answer, basis: str, code: str, speaker: str, sentence: s
     return answer.recognized_subtree(speaker, sentence, code) if sentence else []
 
 
+def _own_whole_request(answer, subtree, sentence: str, fact: SizeRefusal, *, paired: bool) -> bool:
+    """Require a current error carrier for the fact, then independently test whether it describes the whole send."""
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, INPUT_STRING_LENGTH_CODES
+
+    if not answer.walk_complete or not subtree:
+        return False
+    for index in subtree:
+        obj = answer.objects[index]
+        direct = answer.direct_error(index)
+        direct_text = direct and (sentence == obj.message or any(text == sentence and (
+            field == "" or (field == "detail" and (paired or not obj.message))) for field, text in obj.error_text))
+        forward = bool(sentence) and ("raw", sentence) in obj.error_text and answer.direct_error(index, raw_text=True)
+        if obj.history or obj.inline or not (direct_text or forward):
+            continue
+        if fact.source == "structured:llama.cpp" and str(obj.value.get("type") or "").strip().lower() != LLAMA_CPP_TYPE:
+            continue  # a numeric diagnostic child cannot speak for its parent
+        codes = {code.lower() for code in obj.codes}
+        if (codes & INPUT_STRING_LENGTH_CODES or _ZAI_PARAMETER_MESSAGE.match(obj.message)
+                or _INVALID_FIELD.match(sentence)):
+            return False
+        # ``param: messages`` may label a whole Chat refusal, but only when its code or counts say so.
+        fields = [obj.value[k] for k in ("param", "parameter", "field", "loc") if obj.value.get(k)]
+        typed = bool(codes & (CONTEXT_OVERFLOW_CODES | {LLAMA_CPP_TYPE}))
+        if fields and not (fields == ["messages"] and fact.token_window and (typed or (fact.requested and fact.reply))):
+            return False
+        if fact.token_window and fact.source.startswith("text:") and (plain := _QUOTED_CLAUSE.sub(" ", sentence)) != sentence:
+            stated = _from_text(plain)
+            if stated is None or (stated.window, stated.meaning, stated.requested, stated.reply, stated.requested_total) != (
+                    fact.window, fact.meaning, fact.requested, fact.reply, fact.requested_total):
+                return False  # the number belongs to quoted material, though the retry reader may still read it
+        return bool(paired or typed or fact.token_window or _WHOLE_REFUSAL.fullmatch(sentence)
+                    or any(not form.groups and pattern.match(sentence) for form, pattern in _COMPILED
+                           if form.id != "zai/prompt-too-long"))
+    return False
+
+
 def _read_numbers(answer, status, message="", typed=()):
     """``(excluded, fact)`` for one answer: the recognised refusal's numbers, or why it may state none."""
     from dataclasses import replace
@@ -222,7 +334,8 @@ def _read_numbers(answer, status, message="", typed=()):
     if recognized is None:  # excluded only where its own words state numbers the text fallback would read
         stated = any((fact := _from_text(text)) is not None and fact.has_numbers
                      for _who, text, history in answer.said if not history)
-        return stated and excludes_size(status, [obj.value for obj in answer.objects if not obj.history]), None
+        layers = [dict(obj.value, message=obj.message) for obj in answer.objects if not obj.history]
+        return stated and excludes_size(status, layers), None
     basis, code, speaker, sentence = recognized
     if recognized == ("frozen", "", "", ""):
         # Printed-only recognition (e.g. vLLM's output wording): numbers still require
@@ -231,16 +344,30 @@ def _read_numbers(answer, status, message="", typed=()):
         if len(current) == 1:
             speaker, sentence = current[0]
     subtree = _recognized_subtree(answer, basis, code, speaker, sentence)
-    layers = [answer.objects[i].value for i in subtree]
+    pair = paired_size_refusal(answer)
+    paired = basis == "typed" and pair is not None and (code, speaker, sentence) == (pair[2], pair[1], pair[3])
+    if paired:
+        subtree = [pair[0]]  # the pair's own object alone, never a child or inline diagnostic
+        for text in answer.objects[pair[0]].sentences:  # its own message or its own detail states a limit
+            if (fact := _from_text(text)) is not None and (fact.token_window or fact.has_numbers):
+                sentence = text
+                if fact.token_window:
+                    break
+    layers = [dict(answer.objects[i].value, message=answer.objects[i].message) for i in subtree]
     if excludes_size(status, layers):
         return True, None
     found = next((fact for layer in layers if (fact := _structured(layer)) is not None), None)
     # The sentence counts only where the recognised object (or its child) said it.
     said = bool(sentence) and any(sentence in answer.objects[i].sentences for i in subtree)
-    found = found or (_from_text(sentence) if said else None)
+    text_fact = _from_text(sentence) if said else None
+    if found is not None and not found.token_window and text_fact is not None and text_fact.token_window:
+        found = replace(found, window=text_fact.token_window)
+    found = found or text_fact
     if found is None:
         found = SizeRefusal(units="unstated" if basis == "status_413" else "tokens", source=basis)
-    return False, replace(found, gateway=speaker, upstream=sentence)
+    return False, replace(found, gateway=speaker, upstream=sentence,
+                          retry_only=bool(paired and not found.token_window),
+                          own=_own_whole_request(answer, subtree, sentence, found, paired=paired))
 
 
 def from_answer(answer, status, message="", typed=()):

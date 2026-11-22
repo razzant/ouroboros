@@ -24,6 +24,7 @@ from ouroboros.config import EFFORT_SCALE
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.llm import LLMClient
 from ouroboros.review_execution_projection import review_executions_from_actor_usage
+from ouroboros.review_records import reported_review_cost
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.utils import utc_now_iso
 
@@ -141,6 +142,19 @@ def slot_is_session(slot: Any) -> bool:
     from ouroboros.review_execution import ReviewRouteKind
 
     return getattr(slot, "route", None) is ReviewRouteKind.AGENT_SESSION
+
+
+def plan_wave_budget_gate(ctx, slots, prompt_chars, default_chars):
+    """All callable seats consume the work's allowance. Only API seats have an API tariff to project."""
+    from ouroboros.review_substrate import review_usage_category
+    from ouroboros.tools.review_helpers import review_wave_budget_gate
+    from ouroboros.usage_admission import review_slot_wave_fields
+
+    wave = review_slot_wave_fields(slots)
+    return review_wave_budget_gate(
+        ctx, surface="plan_review", **wave, categories=review_usage_category("plan_review"),
+        prompt_chars=[prompt_chars.get(slot_id, default_chars) for slot_id in wave["slot_ids"]],
+        max_completion_tokens=PLAN_REVIEW_MAX_TOKENS)
 
 
 def slot_retrieves(slot: Any) -> bool:
@@ -298,7 +312,7 @@ def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
         "response_ref": actor.get("response_ref") or {},
         "tokens_in": usage.get("prompt_tokens", 0),
         "tokens_out": usage.get("completion_tokens", 0),
-        "cost": float(usage["cost"]) if usage.get("cost") is not None else None,
+        "cost": reported_review_cost(usage),
         # Presentation-only receipt from the actor's RETURNED usage. Requested
         # slot route/model, money, profile and raw telemetry never enter it.
         "executions": review_executions_from_actor_usage([actor]),
@@ -537,6 +551,8 @@ def plan_health_skip_rows(slots: list, evidence: Optional[Dict[str, Dict[str, st
             live.append(slot)
             continue
         code, reset = str(ev.get("failure_code") or ""), str(ev.get("reset_at") or "")
+        from ouroboros.subscription_census import note_limit_failure
+        note_limit_failure(code)  # a seat dropped on a spent route asks the census for a read (the snapshot only reads)
         pin = str(getattr(slot, "session_profile", "") or "")
         scope = (
             f"Evidence is scoped to this slot's pinned credential profile {pin!r}."

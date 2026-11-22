@@ -22,6 +22,7 @@ from ouroboros.tool_access import user_files_path_block_reason
 from ouroboros.tools.core import _code_search, _list_files, _read_file, _write_file
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools import registry_guard_process
+from tests._workspace_git import git_repository
 
 
 def _posix(rendered: str) -> str:
@@ -63,11 +64,7 @@ def user_files_ctx(tmp_path, monkeypatch):
 @pytest.fixture()
 def repo_ctx(tmp_path):
     """ROOT-principal context over a real git repo (restore/append/read pins)."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    repo = git_repository(tmp_path / "repo", unborn=True, identity=True)
     drive = tmp_path / "data"
     drive.mkdir()
     return ToolContext(repo_dir=repo, drive_root=drive, task_id="t-golden")
@@ -124,22 +121,6 @@ def test_root_read_authorization_is_location_only(user_files_ctx, operation, rel
 def test_sudo_named_as_data_passes_the_deterministic_prefilter(tmp_path, cmd):
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
     assert registry_guard_process._run_shell_safety_check(registry, {"cmd": cmd}, "advanced") is None
-
-
-# ---------------------------------------------------------------------------
-# Incident A7 — read-only git modes (stash list, config get, worktree list)
-# pass the merged read allowlist instead of being treated as mutations.
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("cmd", [
-    "git stash list",
-    "git config --get remote.origin.url",
-    "git worktree list",
-])
-def test_git_read_modes_pass_the_read_allowlist(cmd):
-    from ouroboros.tools.registry import _is_pure_read_inspection
-
-    assert _is_pure_read_inspection(cmd) is True
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +278,7 @@ def test_credential_named_ordinary_source_readable_by_children(tmp_path):
     from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    git_repository(repo, unborn=True)
     (repo / "token_service.py").write_text(
         "def issue_token():\n    return 'ordinary auth logic'\n", encoding="utf-8")
     ctx = ToolContext(

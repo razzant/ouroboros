@@ -52,13 +52,13 @@ def _key(task_id: str, provider: str, model: str, processing_mode: str = "") -> 
     default direct-Anthropic install miss its own split on every read, so both
     sides normalize through the identity the fence itself uses -- one leading
     ``~`` probe marker stripped first, exactly as the reservation's own
-    model-family test does. Provider remains a separate key component because
-    direct and OpenRouter caches are not shared.
+    model-family test does. The provider and its named connection scope the cache: direct and OpenRouter caches are not shared, public router slugs keep their exact spelling, and named connections keep their own splits even when two keys use the same model.
     """
-    from ouroboros.provider_models import normalize_model_identity
+    from ouroboros.provider_models import connection_id, normalize_model_identity, parse_model_route
 
-    route = normalize_model_identity(str(model or "").strip().removeprefix("~"))
-    return (str(task_id or "").strip(), str(provider or "").strip().lower(), route, _surface(), str(processing_mode or ""))
+    model = str(model or "").strip().removeprefix("~")
+    connection = connection_id(str(provider or "").strip().lower(), parse_model_route(model).connection)
+    return (str(task_id or "").strip(), connection, normalize_model_identity(model), _surface(), str(processing_mode or ""))
 
 
 def stash_task_cache_split(
@@ -90,6 +90,17 @@ def invalidate_task_cache_splits(task_id: str) -> None:
     task = str(task_id or "").strip()
     for key in [key for key in _SPLITS if key[0] == task]:
         _SPLITS.pop(key, None)
+
+
+def reservation_cache_ttl(request) -> str:
+    """Price the applied TTL; opaque candidates fall back to the owner's setting."""
+    from ouroboros.config import PROMPT_CACHE_TTL_SCALE, resolve_prompt_cache_ttl
+
+    ttl = str(request.prompt_cache_ttl or "").strip().lower()
+    if ttl in PROMPT_CACHE_TTL_SCALE:
+        return ttl
+    # An inspectable marker-free candidate keeps the historical conservative base-tier reservation.
+    return "default" if request.candidate_measurement_kind == "canonical_json_v1" else resolve_prompt_cache_ttl()
 
 
 def reset_task_cache_splits() -> None:

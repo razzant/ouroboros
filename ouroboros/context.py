@@ -3,6 +3,7 @@ from __future__ import annotations
 from ouroboros.config import runtime_setting
 from ouroboros.tool_access_reads import canonical_runtime_reader as _canonical_runtime_reader
 
+import hashlib
 import json
 import logging
 import os
@@ -200,7 +201,7 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
     for entry in entries:
         if injected >= MAX_LIVE_IMAGE_BLOCKS:
             break  # remaining images stay manifest-readable, not amputated
-        if not isinstance(entry, dict) or not entry.get("is_image"):
+        if not isinstance(entry, dict) or not entry.get("is_image") or entry.get("path_only"):
             continue
         relpath = str(entry.get("relpath") or "").strip()
         if not relpath:
@@ -252,7 +253,6 @@ def _scheduled_tasks_digest(env: Any, task: Optional[Dict[str, Any]] = None, *, 
                   datetime.now(timezone.utc), limit=limit)
 
 
-# The owner-surface note is shared by the runtime-section builder.
 _OWNER_CLIENT_NOTE = (
     "owner_client is the client surface that SENT the message that started/steered "
     "this work. Provenance: browser observables are CLIENT-REPORTED (the owner's own "
@@ -265,6 +265,28 @@ _OWNER_CLIENT_NOTE = (
     "assuming a browser. interface_size is the owner's size in percent where that window sets it (Settings → "
     "Appearance; ⌘/Ctrl + − 0 in the desktop app): you can say where to change it, never change it yourself."
 )
+
+
+def _owner_message_facts(metadata: dict) -> dict:
+    """Project the sender's citation and sending surface from ingress metadata for the model."""
+    from ouroboros.client_surface import owner_client_fact
+
+    facts = {}
+    reply = metadata.get("reply_reference")
+    if isinstance(reply, dict) and reply:
+        from ouroboros.chat_references import stored_reply
+        facts["reply_to"] = stored_reply(reply)  # the captured source reaches the model as a bound host row, once
+        if reply.get("excerpt"):
+            facts["reply_excerpt_note"] = (
+                "excerpt is the sender's client-reported rendered selection in the addressed message, supplied as a citation."
+            )
+    # This is also the mailbox's projection. metadata.source can name a scheduler or skill,
+    # so only explicit observations/stamps from the producer identify the sending surface.
+    surface = owner_client_fact(metadata)
+    if surface:
+        facts["owner_client"] = dict(surface)
+        facts["owner_client_note"] = _OWNER_CLIENT_NOTE
+    return facts
 
 
 # The runtime section's fact builders live in ouroboros/context_runtime_facts.py
@@ -526,23 +548,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
     if ctx is not None and _meta.get("delegation_role") != "subagent":  # a helper has no verb that takes a handle
         from ouroboros.owner_relay import held_owner_messages
         runtime_data["owner_quote_handles"] = list(held_owner_messages(ctx))
-    # Owner Surface Fact: the surface that SENT the message this task/turn came
-    # from. A web message carries raw observables (pywebview/ua/viewport/...);
-    # a non-web ingress carries {"channel": <source>} STAMPED AT ITS PRODUCER
-    # (bridge routing, /api/command, /api/tasks admission).
-    # Absence is an honest gap — no key, never a guessed default (BIBLE P1).
-    # ONE shared projection of the producer-assembled fact — the mailbox
-    # surface-note baseline reads the same function, so the two can't disagree.
-    # The renderer never infers a surface from metadata.source (overloaded by
-    # internal producers: scheduler, skill schedules); absence stays honest.
-    from ouroboros.client_surface import owner_client_fact
-
-    if _meta.get("reply_reference"):
-        runtime_data["reply_to"] = _meta["reply_reference"]
-    _owner_client = owner_client_fact(_meta)
-    if _owner_client:
-        runtime_data["owner_client"] = dict(_owner_client)
-        runtime_data["owner_client_note"] = _OWNER_CLIENT_NOTE
+    runtime_data.update(_owner_message_facts(_meta))
     _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
     if not declared:
         from ouroboros.live_works import context_present
@@ -607,6 +613,8 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         log.debug("Failed to inject answer_protocol rule", exc_info=True)
     if not declared:
         runtime_data["official_update"] = official_update_projection(git_sha)
+        from ouroboros.context_first_hour import setup_fact  # how this install began and our first exchange: facts
+        runtime_data["setup"] = setup_fact(canonical_root, env.repo_dir)
         from ouroboros import body_candidate
 
         # Absent when none exists, so an ordinary Runtime block stays byte-identical.
@@ -782,6 +790,29 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
         return text, text
 
 
+_BASE_PROMPT_PATH = "prompts/SYSTEM.md"
+
+
+def _read_base_prompt(env: Any) -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
+    """The base prompt as this capture reads it, and the witness the send seal checks it by.
+
+    The witness is ``(path, file SHA-256, normalized length, normalized SHA-256)``
+    (``model_send_seal._file_trace``). An empty prompt has none; one that cannot be
+    read or decoded has none and the capture uses the fallback text.
+    """
+    try:
+        raw = env.repo_path(_BASE_PROMPT_PATH).read_bytes()
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except (OSError, UnicodeError) as exc:
+        if not isinstance(exc, FileNotFoundError):  # a missing prompt stays quiet, as ``safe_read`` left it
+            log.warning("Base prompt %s could not be read (%s); using fallback", _BASE_PROMPT_PATH, type(exc).__name__)
+        return "You are Ouroboros. Your base prompt could not be loaded.", None
+    if not text:
+        return text, None
+    return text, (_BASE_PROMPT_PATH, hashlib.sha256(raw).hexdigest(), len(text),
+                  hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
 def _capture_context_core(
     env: Any,
     memory: Memory,
@@ -797,10 +828,7 @@ def _capture_context_core(
         _validate_declared_input_task(task)
     captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
     supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt = safe_read(
-        env.repo_path("prompts/SYSTEM.md"),
-        fallback="You are Ouroboros. Your base prompt could not be loaded."
-    )
+    base_prompt, base_prompt_source = _read_base_prompt(env)
     bible_md = safe_read(env.repo_path("BIBLE.md"))
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
@@ -898,8 +926,8 @@ def _capture_context_core(
         semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx))
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
     skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
-    if always_on := always_in_context_section(skills):
-        semi_stable_parts.append(always_on)
+    if always_on := always_in_context_section(skills or []):  # a failure (empty, or None) is no skills here
+        semi_stable_parts.append(HostSection("always_on_skills", always_on))  # skills the request carries (max_room_fact)
     from ouroboros.safety_config import owner_rules_section
     semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
@@ -958,7 +986,11 @@ def _capture_context_core(
     registry = "" if declared else _build_registry_section(context_env)
     if registry:
         dynamic_parts.append(registry)
-    installed_skills = "" if declared else _build_installed_skills_section(context_env, skills=skills)
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+
+    bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
+    installed_skills = "" if declared else _build_installed_skills_section(
+        context_env, skills=skills, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([
@@ -1055,6 +1087,7 @@ def _capture_context_core(
 
     return _ContextCore(
         base_prompt=base_prompt,
+        base_prompt_source=base_prompt_source,
         bible_md=bible_md,
         architecture_md=architecture_md,
         development_md=development_md,

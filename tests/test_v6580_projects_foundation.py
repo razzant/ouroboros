@@ -9,29 +9,20 @@ import subprocess
 
 import pytest
 
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
+
+
+def _lay_git_repo(folder: pathlib.Path) -> None:
+    path = git_repository(folder / "repo", unborn=True)
+    (path / "README.md").write_text("x\n", encoding="utf-8")
+    world_git(path, "add", "-A")
+    world_git(path, "-c", "user.name=t", "-c", "user.email=t@local", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+              "commit", "-qm", "init")
+
 
 def _init_git_repo(path: pathlib.Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
-    (path / "README.md").write_text("x\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@local",
-            "-c",
-            "maintenance.auto=false",
-            "-c",
-            "gc.auto=0",
-            "commit",
-            "-qm",
-            "init",
-        ],
-        cwd=str(path), check=True,
-    )
+    clone_repository(world("v6580-projects-readme", _lay_git_repo) / "repo", path)
 
 
 # --- 2.1 registry-first identity ----------------------------------------------

@@ -20,7 +20,8 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
-from ouroboros.task_finalization import quiet_finish, send_provider_death_notice, work_label
+from ouroboros.host_notice import phrase
+from ouroboros.task_finalization import quiet_finish, schedule_report_fields, send_provider_death_notice, work_label
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -94,8 +95,8 @@ def _finished_with_warnings(
 
 def _completed_lifecycle_display(
     task_done_event: Dict[str, Any], result: Dict[str, Any] | None = None,
-) -> tuple[str, str] | None:
-    """Icon and verb for a `completed` lifecycle whose OUTCOME is not clean.
+) -> str | None:
+    """The verb for a `completed` lifecycle whose OUTCOME is not clean.
 
     #1087: the card and Telegram fold the axes into one phase; the chat line
     must speak the same word. A completed lifecycle can still end `error` (a
@@ -110,11 +111,11 @@ def _completed_lifecycle_display(
     record = result if isinstance(result, dict) else {}
     phase = outcome_phase(record, task_done_event)
     if phase == "error":
-        return "❌", "finished with a failed outcome"
+        return "finished with a failed outcome"
     if phase == "cancelled":
-        return "⏹", "stopped"
+        return "stopped"
     if _finished_with_warnings(task_done_event, record):
-        return "⚠️", "finished with warnings"
+        return "finished with warnings"
     return None
 
 
@@ -463,19 +464,17 @@ def _finish_task_done_dispatch(
                 or STATUS_COMPLETED
             )
             status_display = {
-                STATUS_COMPLETED: ("✅", "completed", "completed"),
-                STATUS_FAILED: ("❌", "failed", "failed"),
-                STATUS_REJECTED_DUPLICATE: ("⚠️", "rejected", "rejected"),
-                STATUS_CANCELLED: ("⏹️", STATUS_CANCELLED, STATUS_CANCELLED),
-                STATUS_INTERRUPTED: ("⏹️", STATUS_INTERRUPTED, STATUS_INTERRUPTED),
-            }.get(status, ("ℹ️", status or "done", status or "finished"))
-            icon, subagent_event, verb = status_display
+                STATUS_COMPLETED: ("completed", "completed"),
+                STATUS_FAILED: ("failed", "failed"),
+                STATUS_REJECTED_DUPLICATE: ("rejected", "rejected"),
+                STATUS_CANCELLED: (STATUS_CANCELLED, STATUS_CANCELLED),
+                STATUS_INTERRUPTED: (STATUS_INTERRUPTED, STATUS_INTERRUPTED),
+            }.get(status, (status or "done", status or "finished"))
+            subagent_event, verb = status_display
             if status == STATUS_COMPLETED:
-                # Icon and verb only: `subagent_event` and progress_meta `status`
-                # stay the lifecycle values every card and Telegram consumer keys on.
-                display = _completed_lifecycle_display(task_done_event, effective_result)
-                if display:
-                    icon, verb = display
+                # The verb only: `subagent_event` and progress_meta `status` stay the
+                # lifecycle values every card and Telegram consumer keys on.
+                verb = _completed_lifecycle_display(task_done_event, effective_result) or verb
             result_text = str(effective_result.get("result") or "")
             trace_text = str(effective_result.get("trace_summary") or "")
             constraint = effective_result.get("task_constraint")
@@ -541,13 +540,22 @@ def _finish_task_done_dispatch(
                 progress_meta["outcome_axes"] = task_done_event["outcome_axes"]
             if task_done_event.get("reason_code"):
                 progress_meta["reason_code"] = str(task_done_event["reason_code"])
+            # The row's CURRENT custody debt, an explicit empty list included: a stored stamp must not read as live debt.
+            for source in (effective_result, task_done_event):
+                if isinstance(source.get("delegated_runs_unreconciled"), list):
+                    progress_meta["delegated_runs_unreconciled"] = list(source["delegated_runs_unreconciled"])
+                    break
             if "review_projection" in task_done_event:
                 progress_meta["review_projection"] = task_done_event["review_projection"]
             if "model_execution" in task_done_event:
                 progress_meta["model_execution"] = task_done_event["model_execution"]
+            # Its id is a detail, never its words; its role is put back as written, never translated.
+            text, said = phrase("subagent_finished", f"Subagent {verb} ({{role}})." if role_suffix else f"Subagent {verb}.",
+                                details=f"task {task_id}", **({"role": role} if role_suffix else {}))
+            progress_meta.update(said)
             ctx.send_with_budget(
                 chat_id,
-                f"{icon} Subagent {task_id} {verb}{role_suffix}.",
+                text,
                 is_progress=True,
                 task_id=str(task_id or ""),
                 progress_meta=progress_meta,
@@ -795,6 +803,7 @@ def _resolve_lifecycle_fault(
     # RUNNING/slot bookkeeping, snapshot — instead of the old private partial
     # copy (RUNNING pop + slot clear only), which resolved nothing owner-visible.
     status = str(stored.get("status") or "failed")
+    report = schedule_report_fields(stored)
     task_type = str(evt.get("task_type") or task_row.get("type") or "")
     task_done_event: Dict[str, Any] = {
         "ts": utc_now_iso(),
@@ -812,13 +821,16 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
+        "wake_silent": stored.get("wake_silent") is True, **report, **work_label(stored, task_row),
+        **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if stored.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint",
-                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin"):
+                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin",
+                "delegated_runs_unreconciled"):
         if key in stored:
             task_done_event[key] = stored[key]
     try:
@@ -1062,6 +1074,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     eff_cost = terminal_cost.get("accounted_upper_bound_usd")
     eff_rounds = terminal_cost.get("total_rounds")
     known_result = final_task_result if isinstance(final_task_result, dict) else {}
+    report = schedule_report_fields(known_result)
     task_done_event = {
         "ts": evt.get("ts", utc_now_iso()),
         "type": "task_done",
@@ -1081,7 +1094,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
+        "wake_silent": known_result.get("wake_silent") is True, **report, **work_label(known_result, task),
+        **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name")
+           if known_result.get(key) and not (report and key == "wake_summary")},
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable
@@ -1104,6 +1119,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             task_done_event[name] = dict(final_task_result[name])
     if final_task_result.get("terminal_origin"):
         task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
+    if isinstance(final_task_result.get("delegated_runs_unreconciled"), list):  # the current debt, an explicit [] included
+        task_done_event["delegated_runs_unreconciled"] = list(final_task_result["delegated_runs_unreconciled"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
     if not isinstance(review_status, dict):
         review_status = evt.get("review_status")

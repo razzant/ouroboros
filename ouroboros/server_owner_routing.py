@@ -23,6 +23,7 @@ from ouroboros.server_routing_context import (
     addressable_roots,
     _project_id_for_registered_chat,
     _reserved_project_for_chat,
+    _root_results_exist,
     _scoped_task_metadata,
 )
 
@@ -86,6 +87,16 @@ def _start_order(row: Dict[str, Any]) -> tuple:
     except (TypeError, ValueError):
         started = 0.0
     return started, str(row.get("task_id") or "")
+
+
+def _carry_project_room_context(drive_root, chat_id, project_id, ingress_chat, client_message_id, roots, routed_to, *, reply=None, source_ref=None):
+    """A numeric chat match is only a candidate; context belongs to the decided Project."""
+    from ouroboros.owner_relay import carry_room_context
+    from ouroboros.projects_registry import project_id_for_task
+
+    members = [root for root in roots.rows(chat_id) if
+               (project_id_for_task(drive_root, root["task_id"]) or root.get("project_id")) == project_id]
+    carry_room_context(drive_root, ingress_chat, client_message_id, members, routed_to, reply=reply, source_ref=source_ref)
 
 
 def _route_project_chat_to_running_task(
@@ -405,6 +416,8 @@ def _deliver_to_reader(
                 # This delivery IS the owner's message; the id is the caller's
                 # parameter, never parsed back out of ``msg_id``.
                 client_message_id=client_message_id,
+                origin_message_ref=task_metadata.get("origin_message_ref") if isinstance(task_metadata, dict) else None,
+                origin_suppressed=isinstance(task_metadata, dict) and task_metadata.get("origin_suppressed") is True,
                 client_surface=(
                     dict(task_metadata["client_surface"])
                     if isinstance(task_metadata, dict) and isinstance(task_metadata.get("client_surface"), dict)
@@ -547,6 +560,11 @@ def _record_routing_receipt(
     attachment_manifest: Optional[list] = None,
     task: Optional[Dict[str, Any]] = None,
     unnamed_label: str = "Task",
+    notice_transport: Optional[Dict[str, Any]] = None,
+    source_ref: Optional[Dict[str, Any]] = None,
+    source_snapshot: Optional[Dict[str, Any]] = None,
+    origin_suppressed: bool = False,
+    ingress_unkept: bool = False,
 ) -> None:
     """Emit a typed bubble-free ack and optionally persist its presentation state.
 
@@ -559,16 +577,44 @@ def _record_routing_receipt(
     from ouroboros.project_dialogue import ROUTING_RECEIPT_FIELDS
     from supervisor.events_project_routing import _routing_receipt_fields
 
+    event = {"chat_id": chat_id, "client_message_id": client_message_id, "relay_target": task,
+             "source_ref": source_ref, "origin_message_snapshot": source_snapshot, "origin_suppressed": origin_suppressed}
     fields = _routing_receipt_fields(
-        ctx, {"relay_target": task}, action=action, target=target, target_label=target_label, status=status,
+        ctx, event, action=action, target=target, target_label=target_label, status=status,
         reason=reason, options=options, attachment_manifest=attachment_manifest, unnamed_label=unnamed_label,
     )
-    if persist:
+    if client_message_id and not origin_suppressed and not ingress_unkept and "source_row_address" not in fields:
+        from ouroboros.chat_chain import format_address, row_address
+        from ouroboros.dialogue_store import annotation_sources
+        from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+        from ouroboros.store import StoreError
+
+        try:
+            if source_ref is None:
+                if source := annotation_sources(ctx.DRIVE_ROOT, [client_message_id]).get((chat_id, client_message_id)):
+                    fields["source_row_address"] = source[1]
+            elif (owner_message_ref_is_valid(source_ref) and not source_ref.get("row_sha256")
+                  and (source_ref["chat_id"], source_ref["client_message_id"]) == (chat_id, client_message_id)):
+                if row := resolve_owner_message_source(ctx.DRIVE_ROOT, source_ref):
+                    fields["source_row_address"] = format_address(row_address(row))
+        except (OSError, StoreError):
+            log.debug("Legacy routing annotation source unavailable", exc_info=True)
+    # Only a resolved source can paint a bubble, or the by-value ref of this very message when its ingress says its
+    # best-effort write kept no row (``ingress_unkept``, ``message_ingress.record_inbound_message``): the bubble its
+    # sender just sent, by client id, no address invented. A ref that only matches room and client id proves neither.
+    # Legacy durable receipts may remain unplaced for history import.
+    by_value = (ingress_unkept and isinstance(source_ref, dict) and not source_ref.get("row_sha256")
+                and (source_ref.get("chat_id"), source_ref.get("client_message_id")) == (chat_id, client_message_id))
+    paired_unplaced = bool(notice_transport) and not fields.get("source_row_address")
+    if paired_unplaced:
+        fields["source_row_address"] = ""  # a transport notice, not a row annotation
+    live_id = client_message_id if fields.get("source_row_address") or (by_value and not paired_unplaced) else ""
+    if persist and not origin_suppressed and not paired_unplaced and (source_ref is None or live_id):
         try:
             from ouroboros.project_dialogue import append_chat_annotation
 
             append_chat_annotation(
-                ctx.DRIVE_ROOT, client_message_id, reason=reason, detail=detail,
+                ctx.DRIVE_ROOT, client_message_id, source_chat_id=chat_id, reason=reason, detail=detail,
                 **{key: value for key, value in fields.items() if key in ROUTING_RECEIPT_FIELDS},
             )
         except Exception:
@@ -579,15 +625,29 @@ def _record_routing_receipt(
             from supervisor.events_project_routing import _routing_notice_ack_fields
 
             # The same carrier fact the supervisor's receipt writer states (#966).
-            notice = _routing_notice_ack_fields(ctx, {"chat_id": chat_id, "client_message_id": client_message_id}, fields)
-            ack(chat_id, client_message_id=client_message_id, **fields, **notice)
+            notice_event = event if notice_transport else {**event, "client_message_id": live_id}
+            notice = _routing_notice_ack_fields(ctx, notice_event, fields, notice_transport=notice_transport)
+            ack(chat_id, client_message_id=live_id, **fields, **notice)
         else:
             broadcast = getattr(bridge, "broadcast", None)
             if callable(broadcast):
                 broadcast({"type": "message_annotation", "annotation_type": "routing_ack", "chat_id": int(chat_id or 0),
-                           "client_message_id": str(client_message_id or ""), **fields, "suppress_bubble": True})
+                           "client_message_id": live_id, **fields, "suppress_bubble": True})
     except Exception:
         log.debug("Routing receipt broadcast failed", exc_info=True)
+
+
+def _settle_refused(ctx: Any, chat_id: int, client_message_id: str, reason: str) -> None:
+    """A refused owner message's named operation ends there, after any restart, as its notice said
+    (``dialogue_store.refuse_dispatch``); best effort: the notice already went."""
+    from ouroboros import dialogue_store
+    from ouroboros.project_dialogue import routing_refusal_cause
+
+    try:
+        dialogue_store.refuse_dispatch(ctx.DRIVE_ROOT, chat_id, client_message_id,
+                                       routing_refusal_cause("project_route", "project_unavailable", reason))
+    except Exception:
+        log.warning("Refused owner message %s could not be recorded as ended", client_message_id, exc_info=True)
 
 
 def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> None:
@@ -596,6 +656,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     text = str(incoming.get("text") or "")
     image_caption = str(incoming.get("image_caption") or "")
     client_message_id = str(incoming.get("client_message_id") or "")
+    origin_ref = incoming.get("origin_message_ref") or None
+    origin_suppressed = origin_ref is None
+    unkept = incoming.get("origin_unkept") is True  # the ingress's own fact: no row was kept for these words
+    source_snapshot = incoming.get("origin_message_snapshot") or {}
     image_data = incoming.get("image_data")
     task_constraint = incoming.get("task_constraint")
     task_metadata = incoming.get("task_metadata")
@@ -608,6 +672,39 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
 
         if not isinstance(realtime_turn, LiveConversationTurn):
             raise ValueError("invalid call authority")
+    # The owner bot's accepted Reply carries the room the host decided once (``chat_references.telegram_reply_room``):
+    # a Project opens this message's own turn there, an unavailable target is refused, never sent to Main.
+    reply_ref = task_metadata.get("reply_reference")
+    telegram_room = (incoming.get("source") == "skill:telegram" and task_metadata.get("_host_operation") is True
+                     and isinstance(reply_ref, dict) and reply_ref.get("telegram_room_chat_id", 0) != 0)
+    ingress_chat = chat_id  # the owner's row, its receipts and refusals stay in the conversation he wrote in
+    from ouroboros.chat_references import TURN_ADDRESS, decided_reply_address, telegram_chat_row
+
+    physical = not telegram_room and telegram_chat_row(incoming.get("source"), chat_id, client_message_id)
+    if not telegram_room:  # only an exact Reply's own turn carries the address its acceptance gave it
+        task_metadata.pop(TURN_ADDRESS, None)
+    decided_project = {}
+    if telegram_room:
+        from ouroboros.project_admission import reserved_project_for_chat
+
+        room = reply_ref["telegram_room_chat_id"]
+        confirmed_transport = decided_reply_address(incoming.get("accepted_source_row") or {})
+        try:
+            if type(room) is int and room > 0:
+                decided_project = reserved_project_for_chat(ctx.DRIVE_ROOT, room)
+        except (OSError, ValueError):
+            pass
+        if decided_project.get("lifecycle") != "active":
+            _record_routing_receipt(bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
+                                    action="project_route", status="project_unavailable",
+                                    reason="reply_target_unavailable",
+                                    notice_transport=confirmed_transport, source_ref=origin_ref,
+                                    source_snapshot=source_snapshot, origin_suppressed=origin_suppressed, ingress_unkept=unkept)
+            _settle_refused(ctx, ingress_chat, client_message_id, "reply_target_unavailable")
+            return
+        if confirmed_transport and not task_metadata.get(TURN_ADDRESS):
+            task_metadata[TURN_ADDRESS] = confirmed_transport
+        chat_id = room
     from ouroboros.contracts.task_constraint import normalize_task_constraint
 
     normalized_constraint = normalize_task_constraint(task_constraint)
@@ -625,7 +722,7 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             "type": "promote_chat_to_task",
             "task_id": task_id,
             "routing_token": uuid.uuid4().hex,
-            "objective": text or image_caption,
+            "objective": text or image_caption or (incoming.get("origin_message_snapshot") or {}).get("placeholder_text", ""),
             "chat_id": chat_id,
             "client_message_id": client_message_id,
             "task_constraint": task_constraint,
@@ -636,6 +733,12 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             "host_initiated": True,
         }
         metadata = task_metadata if isinstance(task_metadata, dict) else {}
+        if telegram_room:
+            from ouroboros.chat_references import reply_transport_from_metadata
+
+            event["project_id"] = decided_project["id"]
+            if transported := reply_transport_from_metadata(ctx.DRIVE_ROOT, metadata):
+                event[TURN_ADDRESS] = transported
         if isinstance(metadata.get("client_surface"), dict):
             event["client_surface"] = dict(metadata["client_surface"])
         if isinstance(metadata.get("ui_control"), dict):
@@ -646,10 +749,13 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         if isinstance(metadata.get("presence"), dict) and metadata["presence"]:
             event["presence"] = dict(metadata["presence"])
             event["task_contract"] = dict(metadata.get("task_contract") or {})
-        origin_ref = incoming.get("origin_message_ref")
         if isinstance(origin_ref, dict) and origin_ref:
             event["source_ref"] = origin_ref
             event["source_text"] = str(incoming.get("log_text") or "")
+            if incoming.get("origin_message_snapshot"):
+                event["origin_message_snapshot"] = incoming["origin_message_snapshot"]
+            if metadata.get("chat_attachment_uploads"):
+                event["attachment_uploads"] = metadata["chat_attachment_uploads"]
         else:
             event["origin_suppressed"] = True
         try:
@@ -666,14 +772,20 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         # the task's own card carry it. A refusal is told by the promote handler's
         # typed System row (host_initiated) plus that receipt.
         return
-    try:
-        reserved_project = _reserved_project_for_chat(ctx, chat_id)
+    try:  # the owner bot's own chat id is a Telegram address, never a room's: only a decided Reply leaves it
+        reserved_project = decided_project if telegram_room else ({} if physical else _reserved_project_for_chat(ctx, chat_id))
     except (OSError, ValueError) as exc:
-        _record_routing_receipt(
-            bridge, ctx, chat_id=chat_id, client_message_id=client_message_id,
-            action="project_route", status="project_unavailable",
-            reason="project_routing_fence_lookup_failed", detail=str(exc))
-        return
+        if incoming.get("bound_external_owner") is not True:
+            _record_routing_receipt(
+                bridge, ctx, chat_id=ingress_chat, client_message_id=client_message_id,
+                action="project_route", status="project_unavailable",
+                source_ref=origin_ref, source_snapshot=source_snapshot,
+                origin_suppressed=origin_suppressed, ingress_unkept=unkept,
+                reason="project_routing_fence_lookup_failed", detail=str(exc))
+            return
+        # The bridge matched the stored owner pair at ingress; an unreadable room registry
+        # cannot take away that Main conversation. A Project Reply was resolved separately above.
+        reserved_project = {}
     project_id = (
         str(reserved_project.get("id") or "")
         if reserved_project.get("lifecycle") == "active"
@@ -683,27 +795,33 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         _record_routing_receipt(
             bridge,
             ctx,
-            chat_id=chat_id,
+            chat_id=ingress_chat,
             client_message_id=client_message_id,
             action="project_route",
             target=str(reserved_project.get("id") or ""),
             status="project_unavailable",
             reason="project_unavailable",
+            source_ref=origin_ref,
+            source_snapshot=source_snapshot,
+            origin_suppressed=origin_suppressed, ingress_unkept=unkept,
         )
         return
     # An owner message never wakes consciousness (owner decision В13): Main answers it itself.
     task_metadata = _scoped_task_metadata(project_id, task_metadata)
     task_metadata = {**(task_metadata or {}), "client_message_id": client_message_id, "work_kind": "owner"}
+    task_metadata.pop("origin_message_snapshot", None)
+    task_metadata.pop("origin_message_ref", None)
+    task_metadata.pop("origin_suppressed", None)
     # The turn's origin identity rides UNCONDITIONALLY (not only when the
     # decision lane runs): a bare direct turn with no projects/roots yet — the
     # first-ever project creation — must still carry it so promote/route/bind
     # receive the ref by value.
-    origin_ref = incoming.get("origin_message_ref")
     if isinstance(origin_ref, dict) and origin_ref:
         task_metadata = {
             **(task_metadata or {}),
             "origin_message_ref": origin_ref,
-            "origin_message_text": str(incoming.get("log_text") or ""),
+            "origin_message_text": "" if source_snapshot.get("placeholder_text") else str(incoming.get("log_text") or ""),
+            **({"origin_message_snapshot": source_snapshot} if source_snapshot else {}),
         }
     else:
         # A suppressed (never-logged) message has a DESIGNED absence of origin;
@@ -738,8 +856,15 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     # manifest and the decision metadata all see the same projection.
     roots = addressable_roots(ctx)
     routed_to_task, unnamed_label = "", "Task"
-    # A live call's admitted turn keeps the room it was opened in; it never re-routes.
-    if realtime_turn is None and ((project_id and not late) or thread_of):
+    # A live call's admitted turn keeps the room it was opened in; it never re-routes. The owner bot's exact
+    # Reply is answered by its own turn: no running work, here or in his chat, reads it as its input. The Project's
+    # other live roots hear it as context, as any word of that room, read from the chat he wrote it in; none of them
+    # is chosen to answer it, and its delivery address stays its own turn's.
+    if telegram_room:
+        if project_id and not press and not origin_suppressed:
+            _carry_project_room_context(ctx.DRIVE_ROOT, chat_id, project_id, ingress_chat, client_message_id, roots, "",
+                                        reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
+    elif realtime_turn is None and ((project_id and not late) or thread_of):
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
             chat_id,
@@ -752,19 +877,20 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         )
         # The room's other live roots hear my human's words as context, whichever return routed them, a late answer
         # included; a press is a typed act on a card, not words: it reaches its author's thread and no other reader.
-        if project_id and not press:
-            from ouroboros.owner_relay import carry_room_context
-
-            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
+        if project_id and not press and not origin_suppressed:
+            _carry_project_room_context(ctx.DRIVE_ROOT, chat_id, project_id, chat_id, client_message_id, roots,
+                                        routed_to_task, reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
     elif realtime_turn is None and not (project_id or late or press or task_constraint):
         # Main: my human's next words reach the one turn already answering them in this chat, else their own turn.
         routed_to_task = _route_main_followup(ctx, chat_id, text or image_caption, client_message_id,
                                               task_metadata=task_metadata, image_data=image_data, roots=roots)
         unnamed_label = ""  # its turn named nothing yet: the receipt says saved, never a placeholder name
     if routed_to_task:
-        from ouroboros.owner_relay import carry_row_at_receipt
+        if not origin_suppressed:
+            from ouroboros.owner_relay import carry_row_at_receipt
 
-        carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id)  # down its tree, now
+            carry_row_at_receipt(ctx.DRIVE_ROOT, routed_to_task, chat_id, client_message_id,
+                                 reply=task_metadata.get("reply_reference"), source_ref=origin_ref)
         _record_routing_receipt(
             bridge,
             ctx,
@@ -787,6 +913,9 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             ),
             task=task_metadata.get("_routing_target") if isinstance(task_metadata, dict) else None,
             unnamed_label=unnamed_label,
+            source_ref=origin_ref,
+            source_snapshot=source_snapshot,
+            origin_suppressed=origin_suppressed, ingress_unkept=unkept,
         )
         return
 
@@ -797,10 +926,13 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     except Exception:
         log.warning("Unable to inspect Projects for owner routing", exc_info=True)
         has_projects = True
-    # Unknown roots, like unknown Projects, go to the decision lane, which is told so.
-    needs_decision_lane = bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
+    # Unknown roots, like unknown Projects, go to the decision lane, which is told so. So does any
+    # root's record: Main without Projects reads a stop and its open Continue as Main with them does.
+    needs_decision_lane = (bool(project_id) or has_projects or bool(roots.rows()) or bool(roots.gap)
+                           or _root_results_exist(ctx))
     if needs_decision_lane:
-        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
+        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots,
+                                                decided_project_id=project_id)
 
     if realtime_turn is not None:
         # A live call keeps a thread of this process (``executor=inline_call``): its host port is process-local.

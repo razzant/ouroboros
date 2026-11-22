@@ -1,4 +1,6 @@
-"""#1347 A: keys the engine animates to the live edge lead to the present."""
+"""#1347 A: keys the engine animates to the live edge lead to the present, even when a relayout lands while they
+still scroll. A key read without a relayout is a recorded feed session (tests/fixtures/feed_sessions/main_keys.json,
+reading_back_and_following.json)."""
 import json
 
 import pytest
@@ -108,13 +110,6 @@ def _read_by_keys(direct_server_with_data, browser_engine, tmp_path, relayout_ms
             browser.close()
 
 
-@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_keys_that_read_to_the_live_edge_follow_new_replies(direct_server_with_data, browser_engine, tmp_path):
-    """#1347 A: End or PageDown that the engine animates to the bottom leads to the present,
-    though WebKit ends every step of an animated page; an upward key stops following."""
-    _read_by_keys(direct_server_with_data, browser_engine, tmp_path)
-
-
 @pytest.mark.parametrize('relayout_ms', [20, 60])
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_a_relayout_while_a_key_still_scrolls_neither_stops_it_nor_ends_its_follow(
@@ -123,3 +118,80 @@ def test_a_relayout_while_a_key_still_scrolls_neither_stops_it_nor_ends_its_foll
     writes the feed under the animation (WebKit stops it at any write, even of the same scrollTop)
     nor ends what the key's own scrolls decide, so the key still reaches the live edge and follows."""
     _read_by_keys(direct_server_with_data, browser_engine, tmp_path, relayout_ms)
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_removing_a_visible_temporary_card_while_end_scrolls_neither_stops_it_nor_ends_its_follow(
+        direct_server_with_data, browser_engine, tmp_path):
+    """While End animates from the middle of a long history, the first visible temporary card
+    receiving its task_summary and leaving the feed (withRemoteActivity -> reading.mutate) must
+    not write scrollTop under the running animation or stop it short of the newest messages."""
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import create_project
+    from tests.ui_chat_viewport_smoke import _emit_ws_frame
+
+    root = direct_server_with_data['data_dir']
+    project = create_project(root, 'keyboard-temp-card-room', name='Keyboard temp card removal')
+    cid = project['chat_id']
+    _append(root, 'chat', [
+        {'direction': 'in', 'chat_id': cid, 'ts': f'2026-09-01T10:{index:02d}:00Z',
+         'client_message_id': f'key-{index}',
+         'text': f'Keyboard context {index:02d}: ' + ('long line of conversation history to scroll past. ' * 4)}
+        for index in range(60)])
+    temp_ts = '2026-09-01T10:19:30Z'
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            _open(page, direct_server_with_data['url'])
+            feed = _open_project(page, project)
+            root_feed = page.locator(feed)
+            remaining = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
+
+            _emit_ws_frame(page, {
+                'type': 'chat', 'role': 'assistant', 'chat_id': cid, 'task_id': 'temp-end-1',
+                'is_progress': True, 'cancelable': True, 'rounds': 1, 'tool_calls': 1,
+                'completion_tool_calls': 1, 'content': '', 'ts': temp_ts,
+            })
+            temp_card = page.locator(f'{feed} .chat-live-card[data-task-id="temp-end-1"]')
+            temp_card.wait_for(state='visible')
+            _bookmark_place(page, temp_card, 40)
+            assert root_feed.evaluate(remaining) > 1000
+            page.locator(f'{feed} [data-client-message-id="key-20"] .message').click()
+
+            # As soon as End starts moving the feed, deliver task_summary so the visible temporary card is removed mid-scroll.
+            page.evaluate("""([feed, cid, ts]) => {
+                const el = document.querySelector(feed);
+                el.addEventListener('scroll', () => {
+                    window.__testSockets[0].dispatchEvent(new MessageEvent('message', {
+                        data: JSON.stringify({
+                            type: 'chat', role: 'system', system_type: 'task_summary',
+                            chat_id: cid, task_id: 'temp-end-1', status: 'completed',
+                            task_terminal_status: 'completed', content: 'Done', ts,
+                        }),
+                    }));
+                }, { once: true });
+            }""", [feed, cid, temp_ts])
+
+            before = root_feed.evaluate('n => n.scrollTop')
+            page.keyboard.press('End')
+            page.wait_for_function('([feed, before]) => document.querySelector(feed).scrollTop !== before',
+                                   arg=[feed, before])
+            page.evaluate(_AT_REST, feed)
+            page.evaluate(_FRAMES)
+
+            assert temp_card.count() == 0, 'temporary card was removed by task_summary'
+            gap = root_feed.evaluate(remaining)
+            assert gap <= 2, f'{browser_engine}: End stopped {gap}px above the newest messages'
+
+            _emit_ws_frame(page, {
+                'type': 'chat', 'role': 'user', 'chat_id': cid, 'content': 'A new reply after End',
+                'ts': '2026-09-01T11:30:00Z', 'client_message_id': 'key-after-temp-end',
+                'sender_session_id': 'other-tab',
+            })
+            page.locator(f'{feed} [data-client-message-id="key-after-temp-end"]').wait_for(state='attached')
+            page.evaluate(_FRAMES)
+            assert root_feed.evaluate(remaining) <= 2, f'{browser_engine}: End to the bottom keeps following new replies'
+        finally:
+            browser.close()

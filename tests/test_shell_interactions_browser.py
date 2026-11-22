@@ -125,7 +125,7 @@ def sync_project_rows(page):
 
 SURFACES = {
     'confirm': {'surface': '.confirm-dialog-backdrop',
-                'control': '.confirm-dialog .marketplace-modal-actions [data-confirm-cancel]'},
+                'control': '.confirm-dialog .ui-modal-actions [data-confirm-cancel]'},
     'reader': {'surface': 'dialog.document-reader', 'control': 'dialog.document-reader [data-reader-action="close"]'},
 }
 OVER_ROOM = """sel => {
@@ -610,6 +610,8 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
             assert 'btn-clear-logs' in band['controls'] and band['firstTabTop'] is None, facts
         elif page_name == 'settings':
             assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
+        elif page_name == 'skills':  # Extensions (#3921): its pages are rail rows below the band, no tab strip in it.
+            assert band['controls'] == ['skills-refresh'] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
             if page_name != 'files':
@@ -635,6 +637,8 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
             row.click()
             assert row.get_attribute('aria-selected') == 'true'
             page.locator('#dashboard-panel-activity.active').wait_for(state='visible')
+        elif page_name == 'skills':  # the band's one control there
+            page.locator('#skills-refresh').click()
         elif page_name != 'widgets':
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()
@@ -662,10 +666,10 @@ SIDEBAR_FACTS = """() => {
     const side = document.getElementById('primary-sidebar');
     const rows = [...side.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden);
     const zone = document.getElementById('nav-projects').getBoundingClientRect();
-    const tools = side.querySelector('.nav-tools').getBoundingClientRect();
+    const tools = side.querySelector('.nav-sections').getBoundingClientRect();
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
             gapToTools: Math.round(tools.top - zone.bottom), toolsTop: Math.round(tools.top),
-            toolsBottom: Math.round(tools.bottom),
+            toolsBottom: Math.round(side.querySelector('.nav-system-rows').getBoundingClientRect().bottom),
             footTop: Math.round(side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top),
             sidebarBottom: Math.round(side.getBoundingClientRect().bottom),
             // The foot: how far the version row's bottom sits above the column's content edge (0 = on the edge), and
@@ -725,8 +729,8 @@ def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell
         assert abs(side['toolsTop'] - facts['open']['toolsTop']) <= 1, (phase, facts)
         assert side['footBelowTools'], (phase, facts)
         if not side['columnScrolls']:
-            # The current desk foot has --space-2 (8px) below its metadata; the drawer has no bottom margin.
-            assert abs(side['footGap'] - (8 if width >= 720 else 0)) <= 1, (phase, facts)
+            # The version row ends inside the system card: its --space-2 (8px) padding, on the desk and in the drawer.
+            assert abs(side['footGap'] - 8) <= 1, (phase, facts)
 
 
 DOT_FACTS = """() => {

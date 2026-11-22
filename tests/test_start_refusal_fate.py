@@ -26,7 +26,7 @@ from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture 
     _owned_gateway_uses_each_test_transport,
     _select_transport_access,
 )
-from tests.test_delegate_accepted_lookup import Engine, _rows, _start, _sweep
+from tests._delegated_transport_shared import Engine, _rows, _start, _sweep
 from tests.test_delegate_continuation import _snapshot_count, _start as _stub_start
 
 _REAL_GATEWAY = cx.ClaudexorGateway  # bound at import, before any test patches the name
@@ -88,7 +88,15 @@ def test_an_accepted_job_bound_from_its_refused_start_settles_once_like_its_late
     registry = _delegating(tmp_path, monkeypatch, engine)
     if timing == "late_202":
         engine.queue_runs = True  # admitted, its 202 names only the job
-    payload = _start(registry)
+        payload = _start(registry)
+    else:  # the early answer still names the one file this start prepared before its first send
+        from ouroboros.tools import delegate
+
+        drive = tmp_path / "task_drives" / registry._ctx.task_id
+        drive.mkdir(parents=True, exist_ok=True)
+        (drive / "one.md").write_bytes(b"known")
+        payload = json.loads(delegate._delegate_start(registry._ctx, "Summarize the layout.", max_seconds=120,
+                                                      input_files=[{"root": "task_drive", "path": "one.md"}]).text)
     (job, command), = engine.commands.items()
     if timing == "late_202":
         command.update(state="failed", failure=dict(WINDOW), spend=None)  # it ends before any run, after the 202
@@ -99,6 +107,7 @@ def test_an_accepted_job_bound_from_its_refused_start_settles_once_like_its_late
         assert payload["lookup"]["start_refusal"] == {"code": "subscription_window_exhausted", "status": 429}
         assert (started["accepted_start_lookup"], started["start_refusal"]["status"]) == ("found", 429)
         assert "the engine answered this start with an error" in payload["note"].lower()
+        assert "inputs: 1 file, 5 bytes, prepared before the first send" in payload["note"], payload["note"]
     assert c.invocation_record(tmp_path, token)["state"] == "started" and c.pending_invocations(tmp_path) == []
     for _ in range(2):  # the body's ordinary collection, repeated: one settlement, one money row
         body.collect_terminal(tmp_path, job, gateway=engine.gateway(), detail=engine.gateway().get_run(job))

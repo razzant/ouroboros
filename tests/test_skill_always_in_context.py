@@ -132,7 +132,9 @@ def test_catalog_marks_the_always_on_skill_from_the_same_discovery(tmp_path):
     assert "Context: always; its text is in the Always-in-context skills section." in entries["kept"]
     assert "Context: always" not in entries["optout"]
     assert "KEPT_SENTINEL" not in section  # the catalog stays metadata
-    assert _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[]) == ""
+    # Nothing installed is said, not silent (п.57): the section keeps its heading and names the empty set.
+    empty = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+    assert empty.full_text.endswith("\nNo skills are installed.") and "\n- " not in empty.full_text
 
 
 # --- delivery into real context builds ------------------------------------
@@ -164,6 +166,9 @@ def test_children_get_it_unless_their_inputs_are_declared(tmp_path, selection, d
         child["task_contract"]["input_sources"] = selection
     core = context._capture_context_core(env, memory, child, None, None)
     assert ("KEPT_SENTINEL" in core.semi_stable_text) is delivered
+    # Its own named section: skills content the request carries, never core (``memory_floor.max_room_fact``)
+    assert [part.section_id for part in core.semi_stable_sections if "KEPT_SENTINEL" in part] == (
+        ["always_on_skills"] if delivered else [])
     assert "KEPT_SENTINEL" not in core.dynamic_text + core.dynamic_head_text
 
 

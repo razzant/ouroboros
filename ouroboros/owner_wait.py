@@ -196,6 +196,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
+    plan = getattr(ctx, "context_fit_plan", None)
+    from ouroboros.context_fit import UNKNOWN_START
     from ouroboros.held_notes import continuation_capture
     from ouroboros.settings_integrity import captured_cognition
     from ouroboros.model_slots import acting_model_role
@@ -207,7 +209,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # an absent legacy dispatch mark can only belong to the original run.
         "retained_work_dispatch_protocol": 1,
         "messages": messages, "trace": trace,
-        **continuation_capture(getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", None)),
+        **continuation_capture(plan, getattr(ctx, "active_context_mode", None)),
         # Live timing cannot retain a monotonic origin across a reboot.
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
@@ -217,13 +219,15 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
         "context_model_role": acting_model_role(ctx),
-        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
-        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
+        # An armed hint has not gone out; its chosen form proves no start (``context_fit.restored_start``).
+        "context_start": list(UNKNOWN_START if getattr(plan, "first_contact_normal", None) is not None
+                              else getattr(plan, "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
         # memory capture, from which mark changes are read again after a new capture (``mark_anchors``).
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
             "_historical_author_inputs", "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS,
+            "_capability_breakage_told",  # what this work was told of broken capabilities: a resume tells the rest
         ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         **({"actor_loaded_tool_names": sorted(ctx._actor_loaded_tool_names)}
@@ -254,7 +258,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "active_model", "active_effort", "active_use_local", "active_context_mode",
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
-            "route_choice",  # following its role, or the task's own (route_choice)
+            "route_choice", "_pending_handover_reason",  # a host switch may still be waiting for its first reply
             "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
             "_owner_model_applied_id",  # only a completed handover survives a checkpoint
             "_owner_processing_applied_id",  # a tier act the mind was already told of
@@ -298,6 +302,35 @@ def store_continuation_source(ctx: Any, state: dict, source_id: str) -> dict:
 
 
 REASON_OWNER_PAUSE_WARM = "owner_pause"
+
+
+def _resume_point(round_idx: int, pending: list[str], *, selected: bool, budget_tail: str,
+                  abandoned: tuple[str, ...] | list[str] = ()) -> dict:
+    return {"round_idx": int(round_idx),
+            "phase": "partial_tool_batch_unknown" if pending else "candidate" if selected else "boundary",
+            "unanswered_tool_call_ids": list(pending), "unanswered_policy": "not_re_executed_execution_unknown",
+            "abandoned_model_attempts": list(abandoned), "budget_tail": budget_tail}
+
+
+def pause_resume_point(limit_ctx: Any, ctx: Any, *, delivery_candidate: bool = False) -> dict:
+    """Capture the phase once, whether the pause keeps its stack or releases it."""
+    from ouroboros.budget_pause import pending_tool_call_ids
+
+    return _resume_point(
+        int(limit_ctx.round_idx), pending_tool_call_ids(limit_ctx.messages),
+        selected=bool(delivery_candidate or getattr(limit_ctx, "resume_candidate", False)),
+        budget_tail=getattr(limit_ctx, "budget_tail", "tool"),
+        abandoned=list(getattr(ctx, "_abandoned_model_attempts", None) or []),
+    )
+
+
+def working_resume_point(state: dict) -> dict:
+    """Derive the same pause program counter from an expanded working-checkpoint state."""
+    working = state["working"]
+    return {**_resume_point(int(state.get("round_idx") or 0), list(working.get("pending_tool_call_ids") or []),
+                            selected=working.get("boundary") == "candidate",
+                            budget_tail=str(working.get("budget_tail") or "tool")),
+            "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
 
 
 def checkpoint_owner_wait(ctx: Any, messages: list, trace: dict, usage: dict,
@@ -650,7 +683,8 @@ def _owner_pause_wake(ctx: Any, checkpoint: dict) -> str:
     return f"control:{control}" if control else ""
 
 
-def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list) -> str:
+def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: list,
+                         delivery_candidate: bool = False) -> str:
     """Park the SAME author stack warm under the owner's Pause (full variant, 2026-10-08).
 
     The member whose launched reviewers the Pause lets finish keeps its worker:
@@ -683,6 +717,7 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
         external = {"runs": [], "custody_read": "failed", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     pause = {"fence_id": str(fence.get("fence_id") or ""), "generation": int(fence.get("generation") or 0),
              "root_task_id": str(fence.get("root_task_id") or ""), "detached_reviews": list(detached),
+             "resume_point": pause_resume_point(limit_ctx, ctx, delivery_candidate=delivery_candidate),
              "external_runs": external, **episode_fields({}, external, starts=True), "parked_at": utc_now_iso()}
     from ouroboros import model_sleep
 
@@ -1173,7 +1208,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         setattr(ctx, key, (state.get("nanny_activity") or {}).get(key, {}))
     for key, value in (state.get("context_observations") or {}).items():
         if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs",
-                   "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS}:
+                   "_pending_owner_dialogue", "_mark_changes_since", "_capability_breakage_told", *_SEND_OBSERVER_KEYS}:
             setattr(ctx, key, value)
     messages[:] = state["messages"]
     # This set is also bound into enable_tools; never replace the closure's object.
@@ -1223,6 +1258,22 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
               if key in {"_acceptance_pending_review_choice", "_left_review_wait", *_RESULT_REVIEW_SHOWN}}
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    from ouroboros.loop_nudges import restore_authoring_handover
+    from ouroboros.task_finalization import schedule_report_ctx
+
+    restore_authoring_handover(ctx, state, trace, usage)
+    schedule_report = schedule_report_ctx(ctx)
+    if schedule_report:
+        # Pre-upgrade rows had no wake_silent/quiet facts. The geometry is enough to keep the report a record.
+        for name in ("_completion_request", "_completion_selected"):
+            request = getattr(ctx, name, None)
+            if isinstance(request, dict) and request.get("source") == "presence_finish":
+                request["wake_silent"] = True
+        completion = getattr(ctx, "_presence_completion", None)
+        if isinstance(completion, dict):
+            completion["quiet"] = True
+            if completion.get("outcome") in {"message", "deferred"}:
+                completion["outcome"] = "silent"
     if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
         ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice
@@ -1237,6 +1288,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
+    if ctx._delivery_candidate is not None and schedule_report:
+        ctx._delivery_candidate.quiet = True  # a pre-upgrade report, selected or not, stays a record on every place state
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
         if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:

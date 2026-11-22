@@ -45,7 +45,7 @@ from typing import Any, Dict, Optional
 from starlette.requests import Request
 from starlette.responses import Response
 
-from ouroboros import dialogue_store as ds
+from ouroboros import dialogue_store as ds, host_notice
 from ouroboros.chat_references import project_answer_text
 from ouroboros.chat_uploads import attachment_views
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
@@ -65,7 +65,7 @@ from ouroboros.gateway.history_paging import (
 )
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import is_conversation_card_content, is_task_card_message, subagent_message_meta
-from ouroboros.utils import strip_markdown
+from ouroboros.utils import json_dumps_utf8, strip_markdown
 
 # The stored chat rows one request reads, at most, and the stored bytes after which it ends (the row crossing
 # them is read whole): the cursor carries the search on, so these bound the request's latency, its decoding
@@ -191,6 +191,7 @@ def _candidate(entry, data_dir, answers=None) -> Dict[str, Any]:
             found[key] = str(entry[key])
     if entry.get("narration") is True:  # authored words outrank a stale host type (host_notice_text.js)
         found["narration"] = True
+    found.update(host_notice.view(entry))  # a notice's line is its visible words (a read: no translation is offered)
     if found["role"] == "user" and isinstance(entry.get("attachments"), list) and entry["attachments"]:
         # History's own views (``attachment_views``, its stat witness too): a card or a player shows the name, an
         # available image only its picture.
@@ -387,7 +388,7 @@ def make_chat_search_endpoint(data_dir: pathlib.Path):
             thread_id = 1
         query, cursor = params.get("q", ""), params.get("cursor") or None
         try:
-            body = await asyncio.to_thread(lambda: json.dumps(
+            body = await asyncio.to_thread(lambda: json_dumps_utf8(
                 search_room(data_dir, thread_id, query, cursor),
                 ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         except (HistoryCursorError, OSError, StoreError) as exc:

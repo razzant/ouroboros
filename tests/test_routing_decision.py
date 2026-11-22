@@ -31,13 +31,13 @@ def _seed_refusal(root, cmid="cm-1", token="tok-1", options=OPTIONS, **extra):
     )
 
 
-def _seed_origin(root, cmid="cm-1", text="original owner words", chat_id=0):
+def _seed_origin(root, cmid="cm-1", text="original owner words", chat_id=0, **fields):
     from ouroboros import dialogue_store as ds
 
     ds.append(root, "chat", {
         "direction": "in", "client_message_id": cmid,
         "text": text, "chat_id": chat_id,
-        "ts": "2026-10-06T12:00:00+00:00",
+        "ts": "2026-10-06T12:00:00+00:00", **fields,
     })
 
 
@@ -103,9 +103,10 @@ def test_missing_origin_text_settles_instead_of_forging_a_message(tmp_path, monk
     assert (status, body["error"]) == (409, "origin_text_unavailable")
 
 
-def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stored_chat,room", [(1, 1), (None, 1), (0, 0)])
+def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monkeypatch, stored_chat, room):
     _seed_refusal(tmp_path, attachment_manifest=[{"path": "/up/a.png", "label": "a.png"}])
-    _seed_origin(tmp_path, text="please fix the CI flake")
+    _seed_origin(tmp_path, text="please fix the CI flake", chat_id=stored_chat)
     dispatch_token, _ = _derived_identity("cm-1", "tok-1", 0)
 
     def _supervisor_delivers(evt):
@@ -126,9 +127,12 @@ def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monke
     (evt,) = queue.events
     assert evt["type"] == "steer_task" and evt["target_task_id"] == "t-live"
     assert evt["routing_token"] == dispatch_token
+    assert evt["chat_id"] == evt["source_ref"]["chat_id"] == room
     # His words travel verbatim as a verified quote of his retained row; the note is his comment.
     [quote] = evt["quotes"]
     assert quote["text"] == quote["owner_row"]["text"] == "please fix the CI flake"
+    assert quote["source"]["chat_id"] == room
+    assert quote["owner_row"]["chat_id"] == stored_chat
     assert quote["source"]["client_message_id"] == "cm-1"
     assert evt["message"] == "[Owner picker comment] prefer a revert"
     assert evt["attachment_uploads"] == [{"path": "/up/a.png", "label": "a.png"}]
@@ -137,6 +141,7 @@ def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monke
     assert evt["source_text"] == "please fix the CI flake"
     # The closing row under the ORIGINAL token is the replay's confirmation.
     closing = chat_annotation_receipt(tmp_path, "cm-1", "tok-1")
+    assert closing["source_row_address"] == quote["source"]["address"]
     assert closing["status"] == "delivered" and closing["detail"] == "request:r1"
     # Same request replays as its own confirmation; a different click loses.
     status, body = handle_routing_decision(
@@ -148,7 +153,55 @@ def test_steer_click_dispatches_the_verbatim_message_and_settles(tmp_path, monke
     assert len(queue.events) == 1  # neither replay nor loser re-dispatched
 
 
-def _manual_picker(tmp_path, monkeypatch, **effort):
+@pytest.mark.parametrize("recarry", [False, True])
+def test_refused_steer_click_anchors_its_ack_to_the_saved_selected_reply(tmp_path, monkeypatch, recarry):
+    from types import SimpleNamespace
+
+    from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, resolve_row, row_address
+    from ouroboros.chat_references import ingress_reply, reference_from_row
+    from supervisor.steering import _handle_steer_task
+
+    chat_id = 7
+    source = {"direction": "out", "chat_id": chat_id, "text": "Follow the moon.",
+              "ts": "2026-10-06T12:00:00+00:00"}
+    dialogue_store.append(tmp_path, "chat", source)
+    selection = ingress_reply(tmp_path, {"reply_to": format_address(row_address(source)),
+                                         "reply_excerpt": {"text": "moon", "start_utf16": 11}})
+    saved = dialogue_store.append(tmp_path, "chat", {
+        "direction": "in", "chat_id": chat_id, "client_message_id": "cm-1", "type": "photo",
+        "text": "Map caption", "caption": "Map caption", "reply_to": selection,
+        "ts": "2026-10-06T12:01:00+00:00",
+    }).row
+    _seed_refusal(tmp_path)
+    acks = []
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, PENDING=[],
+                          bridge=SimpleNamespace(send_routing_ack=lambda chat, **ack: acks.append((chat, ack))))
+    def _steer(evt):
+        if recarry:
+            evt = dict(evt)
+            # An ordinary handoff adds local presentation to the SAME original row.
+            evt["quotes"] = [{**evt["quotes"][0], "owner_row": {
+                **evt["quotes"][0]["owner_row"],
+                "carried": {"from": "other-task", "went_to": "next-task", "at": "2026-10-06T12:02:00+00:00"},
+            }}]
+        return _handle_steer_task(evt, ctx)
+
+    _wire_queue(monkeypatch, _Queue(on_put=_steer))
+
+    status, body = handle_routing_decision(tmp_path, request_id="r1", decision_id="routing:cm-1:tok-1", option_index=0)
+    assert (status, body["reason"]) == (409, "target_unknown")
+    dispatch_token, _ = _derived_identity("cm-1", "tok-1", 0)
+    assert chat_annotation_receipt(tmp_path, "cm-1", dispatch_token)["reason"] == "target_unknown"
+    [(ack_room, ack)] = acks
+    assert ack_room == chat_id and ack["routing_notice_carrier"] == "routing_ack"
+    ref = ack["reply_to"]
+    row, found = resolve_row(tmp_path, ref)
+    assert found["status"] == "ok" and row == saved
+    assert ref == reference_from_row(saved) and ref["snippet"] == "Map caption"
+
+
+def _manual_picker(tmp_path, monkeypatch, *, origin=None, **effort):
     """The real tool/annotation/WS producer, consumed later via the HTTP door."""
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -190,7 +243,7 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
     ctx = _tool_ctx(tmp_path, sup, client_message_id="cm-1",
                     routing_contract={"manual_options": OPTIONS})
     ctx.is_direct_chat, ctx.event_queue = True, queue
-    _seed_origin(tmp_path, chat_id=7)
+    _seed_origin(tmp_path, chat_id=7, **(origin or {}))
     # Historical card fixture: the producer tool is retired; its persisted cards still resolve.
     manual = {"type": "routing_manual_target", "client_message_id": "cm-1", "routing_token": "legacy-token",
               "chat_id": 7, "options": OPTIONS, "reason": "target_unspecified"}
@@ -211,6 +264,23 @@ def _manual_picker(tmp_path, monkeypatch, **effort):
     app = Starlette(routes=[Route("/api/decisions", task_decision.api_decision_answer, methods=["POST"])])
     click = {"request_id": "r1", "decision_id": f"routing:cm-1:{card['routing_token']}"}
     return TestClient(app), click, card, queue, workers, frames
+
+
+def test_picker_starts_with_the_selected_table_file_and_no_caption(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ouroboros.chat_uploads import store_upload
+    from ouroboros.project_dialogue import resolve_owner_message_source
+
+    path, file = store_upload(b"plot,legend\n", "legend.csv", data_dir=tmp_path)
+    client, click, _, _, workers, _ = _manual_picker(tmp_path, monkeypatch, origin={
+        "text": "(file attached)", "source": "web", "text_placeholder": True, "attachments": [file]})
+    response = client.post("/api/decisions", json={**click, "option_index": 1})
+    assert response.status_code == 200, response.text
+    [task] = workers.PENDING
+    assert task["origin_message_text"] == ""
+    assert task["metadata"]["origin_message_snapshot"]["attachments"] == [file]
+    assert resolve_owner_message_source(tmp_path, task["origin_message_ref"])["attachments"] == [file]
+    assert Path(task["attachment_manifest"][0]["abs_path"]).read_bytes() == path.read_bytes()
 
 
 @pytest.mark.parametrize("requested,expected", [("XHigh ", "xhigh"), (None, None)])
@@ -589,8 +659,9 @@ def test_decision_turn_is_shown_the_existing_receipt_for_the_same_message(tmp_pa
     contract the turn already receives; the choice stays with the model."""
     from ouroboros.server_routing_context import _decision_turn_metadata
 
+    _seed_origin(tmp_path, cmid="cm-dup", chat_id=1)
     append_chat_annotation(
-        tmp_path, "cm-dup", action="promote_chat_to_task", target="c405c824",
+        tmp_path, "cm-dup", source_chat_id=1, action="promote_chat_to_task", target="c405c824",
         target_label="MLConf deck", status="scheduled", routing_token="tok-dup",
     )
 
@@ -646,11 +717,13 @@ def test_decision_turn_reads_every_recorded_act_on_the_same_message_as_facts(tmp
     the contract says these are facts, not a ban."""
     from ouroboros.server_routing_context import _decision_turn_metadata
 
-    append_chat_annotation(tmp_path, "cm-fan", action="promote_chat_to_task", target="root-a",
+    _seed_origin(tmp_path, cmid="cm-fan", chat_id=1)
+    _seed_origin(tmp_path, cmid="cm-other", chat_id=1)
+    append_chat_annotation(tmp_path, "cm-fan", source_chat_id=1, action="promote_chat_to_task", target="root-a",
                            target_label="Deck", status="dispatched", routing_token="tok-1")
-    append_chat_annotation(tmp_path, "cm-fan", action="steer_task", target="root-b",
+    append_chat_annotation(tmp_path, "cm-fan", source_chat_id=1, action="steer_task", target="root-b",
                            target_label="Build", status="delivered", routing_token="tok-2")
-    append_chat_annotation(tmp_path, "cm-other", action="steer_task", target="root-c",
+    append_chat_annotation(tmp_path, "cm-other", source_chat_id=1, action="steer_task", target="root-c",
                            target_label="Else", status="delivered", routing_token="tok-3")
 
     contract = _decision_turn_metadata(_decision_ctx(tmp_path), 1, "cm-fan", {})["routing_contract"]
@@ -673,12 +746,12 @@ _STOPPED_AXES = {"execution": {"status": "ok", "reason_code": "final_message", "
     "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
 
 
-def _ended(root, task_id, ts, status="completed", *, stop=False, **fields):
-    """One root result of project ``room`` through the real lifecycle writer, its terminal time observed;
-    ``stop`` is the author's own typed ``finish_task(action="stop")``."""
+def _ended(root, task_id, ts, status="completed", *, stop=False, project_id="room", **fields):
+    """One root result of project ``room`` (``""``: Main's) through the real lifecycle writer, its terminal time
+    observed; ``stop`` is the author's own typed ``finish_task(action="stop")``."""
     from ouroboros.task_results import write_task_result
 
-    write_task_result(root, task_id, status, _terminal_observed=True, project_id="room", root_task_id=task_id,
+    write_task_result(root, task_id, status, _terminal_observed=True, project_id=project_id, root_task_id=task_id,
                       delegation_role="root", objective=f"work {task_id}", ts=ts,
                       **({"outcome_axes": _STOPPED_AXES} if stop else {}),
                       **{"reason_code": "final_message", **fields})
@@ -741,6 +814,68 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
     assert main["r-stop"]["continuation_offer"]["eligible"] is True and main["r-stop"]["stop_reason"] == stopped["stop_reason"]
 
 
+def test_main_without_projects_reads_a_root_as_main_beside_them_does_and_a_new_install_reads_nothing(
+        tmp_path, monkeypatch):
+    """Owner decision of 21.11.2026: Main's routing facts are the same with Projects or without. A Main message of an
+    install with no Project and no live work used to get none, so a stopped root's open Continue reached it only by
+    digging. Any root's record now opens the decision lane through the owner ingress and keeps the manifest, a wake
+    gets the same, and an unreadable store is unknown, never "no ended work"; a new install's store holds no root, so
+    its message stays exactly as it was, and an install beside Projects never reads the root index for its gate."""
+    from ouroboros import server_owner_routing, store, task_store
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import STOP_REASON_LABEL, main_lane_routing_metadata
+    from ouroboros.store import StoreBusy
+
+    turns, gate_reads = [], []
+    ctx = _decision_ctx(tmp_path)
+    ctx.handle_chat_direct = lambda *_a, **kwargs: turns.append(kwargs["task_metadata"])
+    real_gate = server_owner_routing._root_results_exist
+    monkeypatch.setattr(server_owner_routing, "_root_results_exist",
+                        lambda gate_ctx: gate_reads.append(1) or real_gate(gate_ctx))
+
+    def route(message_id):
+        server_owner_routing._route_owner_message(object(), ctx, {
+            "chat_id": 1, "text": "why did it stop?", "client_message_id": message_id, "log_text": "why did it stop?",
+            "origin_message_ref": {"chat_id": 1, "client_message_id": message_id}})
+        return turns[-1]
+
+    fresh = route("m-new")
+    assert not {"main_routing_manifest", "routing_contract", "current_chat"} & set(fresh)
+    assert main_lane_routing_metadata(ctx, 1) == {}
+
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True, project_id="")
+    owner = route("m-why")
+    manifest = owner["main_routing_manifest"]
+    assert (manifest["projects"], manifest["root_tasks"]) == ([], [])
+    [stopped] = manifest["final_results"]
+    assert (stopped["task_id"], stopped["outcome"]) == ("r-stop", "Stopped")
+    assert stopped["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+    assert stopped["stop_reason"] == {"verbatim": STOP_REASON, "label": STOP_REASON_LABEL}
+    assert "continue_task" in owner["routing_contract"]["valid_actions"]
+    assert owner["routing_contract"]["source_lane"] == "main"
+    wake = main_lane_routing_metadata(ctx, 1)
+    assert wake["main_routing_manifest"] == manifest and "client_message_id" not in wake
+
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("index busy", reason="contention")
+
+    monkeypatch.setattr(task_store, "newest_root_ids", busy)
+    unknown = route("m-busy")["main_routing_manifest"]
+    assert unknown["final_results"] == []
+    assert unknown["omissions"]["final_results_error"].startswith("result_store_unreadable")
+    assert main_lane_routing_metadata(ctx, 1)["main_routing_manifest"]["omissions"]["final_results_error"]
+
+    create_project(tmp_path, "racer", name="Racer")
+    before = len(gate_reads)
+    beside = route("m-racer")["main_routing_manifest"]
+    assert [row["project_id"] for row in beside["projects"]] == ["racer"] and len(gate_reads) == before == 3
+
+    # The probe never waits on the store: owner-message intake runs on the supervisor loop.
+    waits = []
+    monkeypatch.setattr(task_store, "newest_root_ids", lambda *_a, **_k: waits.append(store.bounded_wait(10.0)) or [])
+    assert real_gate(ctx) is False and waits == [0.0]
+
+
 def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path, monkeypatch):
     """A row that cannot be read, or whose facts cannot be read from it, stays listed with its reader and an explicit
     unknown, and the window goes on; a failing store is read once: that row and every row not yet read are unknown,
@@ -787,6 +922,43 @@ def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path
         (task, "unknown", "unknown", "StoreBusy") for task in ("r-bad", "r-torn", "r-stop")]
 
 
+def test_an_event_copy_keeps_each_routing_lists_length_and_the_task_keeps_the_lists(tmp_path):
+    """``task_received`` goes to ``events.jsonl``, whose archive is never deleted, and to the live log frame. It
+    repeated the turn's routing lists whole (Main's manifest alone about 70 KB a Main turn and a wake on a long-lived
+    install) while the task document keeps them and the request record a compressed copy. Once the start record holds
+    them, the event copy keeps each list's length and every other fact, a manifest that could not be built included;
+    the task keeps every list."""
+    import copy
+
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import RootSnapshot, _decision_turn_metadata
+    from ouroboros.utils import count_routing_lists, sanitize_task_for_event
+
+    room = create_project(tmp_path, "room", name="Room")
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True)
+    live = {"task_id": "live-1", "status": "running", "project_id": "room"}
+    roots = RootSnapshot(pairs=((live, frozenset({1, int(room["chat_id"])})),))
+    ctx, lists = _decision_ctx(tmp_path), ("main_routing_manifest", "project_routing_manifest", "current_chat")
+    main = _decision_turn_metadata(ctx, 1, "cm-main", {}, roots)
+    project = _decision_turn_metadata(ctx, int(room["chat_id"]), "cm-room", {"project_id": "room"}, roots)
+    assert [row["task_id"] for row in main["main_routing_manifest"]["final_results"]] == ["r-stop"]
+    assert main["current_chat"]["running_tasks"] and project["project_routing_manifest"]["active_roots"]
+    copies = []
+    for metadata in (main, project, {"main_routing_manifest": {"error": "routing_manifest_unavailable"}}):
+        task = {"id": "turn", "text": "Why did it stop?", "metadata": metadata}
+        original = copy.deepcopy(task)
+        event = count_routing_lists(sanitize_task_for_event(task, tmp_path / "logs"))["metadata"]
+        assert task == original, "the task document and the turn's context keep every list whole"
+        for key in set(lists) & set(metadata):
+            facts = metadata[key]
+            assert event[key] == {**{name: value for name, value in facts.items() if not isinstance(value, list)},
+                                  **{f"{name}_len": len(value) for name, value in facts.items() if isinstance(value, list)}}
+        assert {k: v for k, v in event.items() if k not in lists} == {k: v for k, v in metadata.items() if k not in lists}
+        copies.append(event)
+    assert copies[0]["main_routing_manifest"]["final_results_len"] == 1
+    assert copies[0]["main_routing_manifest"]["omissions"] == main["main_routing_manifest"]["omissions"]
+
+
 def _boundary(tmp_path, metadata, messages, *, delivery=None, own=None):
     from types import SimpleNamespace
 
@@ -803,6 +975,8 @@ def test_routing_acts_taken_during_the_turn_reach_its_next_model_boundary_as_app
     from ouroboros.loop_model_call import ROUTING_RECEIPTS_HEADER, _append_routing_receipts
     from ouroboros.server_routing_context import _decision_turn_metadata
 
+    _seed_origin(tmp_path, chat_id=1)
+    _seed_origin(tmp_path, cmid="cm-2", chat_id=7)
     append_chat_annotation(tmp_path, "cm-1", action="promote_chat_to_task", target="root-a",
                            target_label="Deck", status="dispatched", routing_token="tok-1")
     metadata = _decision_turn_metadata(_decision_ctx(tmp_path), 1, "cm-1", {})
@@ -840,6 +1014,45 @@ def test_routing_acts_taken_during_the_turn_reach_its_next_model_boundary_as_app
     assert _append_routing_receipts(relayed) is True and "root-d" in messages[-1]["content"]
     child = _boundary(tmp_path, {**metadata, "delegation_role": "subagent"}, [])
     assert _append_routing_receipts(child) is False
+
+
+@pytest.mark.parametrize("rooms", [[], [1, 7]], ids=["absent", "ambiguous"])
+def test_a_roomless_receipt_requires_one_canonical_source_at_both_model_boundaries(tmp_path, rooms):
+    from ouroboros.loop_model_call import _append_routing_receipts
+    from ouroboros.server_routing_context import _decision_turn_metadata
+
+    for room in rooms:
+        _seed_origin(tmp_path, cmid="shared", chat_id=room)
+    append_chat_annotation(tmp_path, "shared", action="steer_task", status="delivered",
+                           target="legacy-work", routing_token="old")
+    metadata = _decision_turn_metadata(_decision_ctx(tmp_path), 1, "shared", {})
+    assert "message_routing_receipt" not in metadata["routing_contract"]
+    messages = []
+    ctx = _boundary(tmp_path, metadata, messages)
+    assert not _append_routing_receipts(ctx)
+
+    for room in (7, 1):
+        if room not in rooms:
+            _seed_origin(tmp_path, cmid="shared", chat_id=room)
+        append_chat_annotation(tmp_path, "shared", source_chat_id=room, action="steer_task",
+                               status="delivered", target=f"work-{room}", routing_token=f"act-{room}")
+    assert _append_routing_receipts(ctx)
+    assert "work-1" in messages[-1]["content"]
+    assert "work-7" not in messages[-1]["content"] and "legacy-work" not in messages[-1]["content"]
+    assert not _append_routing_receipts(ctx)
+    restart = _decision_turn_metadata(_decision_ctx(tmp_path), 1, "shared", {})
+    assert restart["routing_contract"]["message_routing_receipt"]["target"] == "work-1"
+    assert not _append_routing_receipts(_boundary(tmp_path, restart, []))
+
+
+def test_roomless_picker_with_the_same_client_id_in_two_rooms_stays_open(tmp_path):
+    for room in (1, 7):
+        _seed_origin(tmp_path, chat_id=room)
+    _seed_refusal(tmp_path)
+    status, answer = handle_routing_decision(tmp_path, request_id="click",
+                                             decision_id="routing:cm-1:tok-1", option_index=0)
+    assert (status, answer["error"], answer["state"]) == (409, "origin_text_unavailable", "open")
+    assert chat_annotation_receipt(tmp_path, "cm-1", "tok-1")["status"] == "needs_manual_target"
 
 
 def test_the_turns_own_unconfirmed_acts_report_their_recorded_outcome_once(tmp_path):

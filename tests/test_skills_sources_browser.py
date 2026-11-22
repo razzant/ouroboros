@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from tests._skills_page_harness import (
+    open_view,
     URL,
     capture,
     fixture,
@@ -36,24 +37,108 @@ def _sources(*, confirmed=True, extra=()):
     return sources
 
 
+def _catalog(sources=None, catalog=None):
+    """The catalog as the host derives it from the same rows as the list of sources: its row of a source says whether
+    the owner confirmed its trust, and that row and every entry of the source carry the trust itself."""
+    catalog = copy.deepcopy(catalog or CATALOG)
+    rows = {row["id"]: row for row in (sources or _sources())["sources"]}
+    for status in catalog["sources"]:
+        if status["id"] in rows:
+            status.update(trust=rows[status["id"]]["trust"], confirmed=rows[status["id"]]["confirmed"])
+    for item in catalog["items"]:
+        if item["source_id"] in rows:
+            item["trust"] = rows[item["source_id"]]["trust"]
+    return catalog
+
+
 def _row(name):
     return copy.deepcopy(next(skill for skill in LISTING if skill["name"] == name))
 
 
 def _open(page, *, sources=None, catalog=None, listing=None):
+    sources = sources or _sources()
     skills = open_skills(page, extensions=listing if listing is not None else LISTING,
-                         sources=sources or _sources(), catalog=catalog or CATALOG)
+                         sources=sources, catalog=_catalog(sources, catalog))
     page.goto(URL, wait_until="networkidle")
     page.locator('.skills-card[data-skill="weather"]').wait_for()
     return skills
 
 
 def _tab(page, name):
-    page.locator(f'.skills-tab[data-tab="{name}"]').click()
+    open_view(page, name)
 
 
 def _card(page, item_id):
     return page.locator(f'[data-browse-board] .marketplace-card[data-item="{item_id}"]').first
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_addressed_installed_card_opens_through_search_and_filter(skills_browser, browser_name):
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    page = browser.new_page(viewport={"width": 1280, "height": 900})
+    listing = [_row("telegram"), _row("weather"), {"name": "calendar", "enabled": False}]
+    listing[0]["secret_config"] = {"fields": [{"id": "example", "key": "EXAMPLE", "state": "missing"}]}
+    skills = _open(page, listing=listing)
+    try:
+        off = page.locator('[data-installed-filter="off"]')
+        search = page.locator("#skills-installed-search")
+        off.click()
+        search.fill("other words")
+        _tab(page, "browse")
+        _card(page, "builtin/telegram").locator('[data-browse-action="installed"]').click()
+        expect(page.locator('.skills-card[data-skill="telegram"]')).to_be_in_viewport()
+
+        off.click()
+        search.fill("still filtering")
+        _tab(page, "browse")
+        _tab(page, "installed")
+        expect(off).to_have_attribute("aria-pressed", "true")
+        expect(search).to_have_value("still filtering")
+        _tab(page, "browse")
+        skills.hold.add("/api/extensions")
+        page.evaluate("""() => window.dispatchEvent(new CustomEvent('ouro:open-skills', { detail: { skill: 'notes' } }))""")
+        skills.wait_for_request("/api/extensions")
+        skills.release("/api/extensions", {"skills": [*listing, {"name": "notes", "enabled": True}], "live": {}})
+        expect(page.locator('.skills-card[data-skill="notes"]')).to_be_in_viewport()
+    finally:
+        skills.close(browser)
+
+
+@pytest.mark.parametrize("width", [390, 1280])
+def test_skills_count_follows_the_visible_extensions_list(skills_browser, width):
+    from playwright.sync_api import expect
+
+    browser = skills_browser.chromium.launch(headless=True)
+    page = browser.new_page(viewport={"width": width, "height": 900})
+    skills = open_skills(page, extensions=[{"name": "notes", "enabled": False}])
+    try:
+        skills.answers["/api/ui/contributions"] = {}
+        page.goto(URL + "?host_modules", wait_until="networkidle")
+        _tab(page, "tools")
+        answer = page.locator('[data-extensions-open="installed"] [data-extensions-answer]')
+        rows = [{"name": name, "enabled": False} for name in ("notes", "calendar")]
+        skills.set_skills(rows)
+        reads = skills.requests.count(("GET", "/api/extensions"))
+        page.evaluate("""() => window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', { detail: { action: 'install', name: 'calendar' } }))""")
+        if width == 390:
+            expect(answer).to_be_hidden()
+            page.wait_for_timeout(450)  # beyond the coalesced lifecycle notification
+            assert skills.requests.count(("GET", "/api/extensions")) == reads
+            page.evaluate("() => window.skillsView.pressedAgain()")
+        expect(answer).to_contain_text("2 installed")
+        assert skills.requests.count(("GET", "/api/extensions")) == reads + 1
+        visibility = """hidden => {
+            Object.defineProperty(document, 'hidden', {configurable: true, value: hidden});
+            document.dispatchEvent(new Event('visibilitychange'));
+        }"""
+        page.evaluate(visibility, True)
+        skills.set_skills([*rows, {"name": "index", "enabled": False}])
+        page.evaluate(visibility, False)
+        expect(answer).to_contain_text("3 installed")
+    finally:
+        skills.close(browser)
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 1280), ("webkit", 390)])
@@ -63,7 +148,7 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
         listing = copy.deepcopy(LISTING)
-        skills = open_skills(page, extensions=listing, sources=_sources(), catalog=CATALOG)
+        skills = open_skills(page, extensions=listing, sources=_sources(), catalog=_catalog())
         skills.answers["/api/extensions"] = lambda _request: {"skills": listing, "live": {}}
         page.goto(URL, wait_until="networkidle")
         _tab(page, "browse")
@@ -73,9 +158,9 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         assert shelf.locator(".marketplace-card").count() == 2
         assert page.locator('[data-browse-action="install_all"]').inner_text() == "Install all 2"
         duck = _card(page, "ouroboros/duckduckgo")
-        assert "Installs without review — you trust Ouroboros" in duck.inner_text()
+        assert "Installs without review while you trust Ouroboros" in duck.inner_text()
         scholion = _card(page, "ouroboros-community/scholion")
-        assert "Ouroboros reviews it before it runs" in scholion.inner_text()
+        assert "Reviewed before it runs while that is the setting for Ouroboros Community" in scholion.inner_text()
         capture(page, browser_name, width, "browse-shelf")
 
         # Trusted: Installing…, then the card follows the installed listing.
@@ -142,7 +227,7 @@ def test_browse_install_says_its_consequence_and_follows_the_host(skills_browser
         pdf.locator('[data-browse-action="install"]').click()
         page.locator(".toast", has_text="already installed (My skills)").wait_for()
         assert "Nothing was installed" not in pdf.inner_text()
-        assert "Installs without review — you trust Ouroboros" in pdf.inner_text()
+        assert "Installs without review while you trust Ouroboros" in pdf.inner_text()
         capture(page, browser_name, width, "browse-install-states")
         assert no_overflow(page)
 
@@ -187,6 +272,8 @@ def test_withdrawn_browse_result_uses_the_row_without_an_empty_action(skills_bro
 
 @pytest.mark.parametrize("browser_name", ["webkit"])
 def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_browser, browser_name):
+    from playwright.sync_api import expect
+
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
     try:
@@ -202,8 +289,17 @@ def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_brows
 
         for source_id in ("ouroboros", "ouroboros-community"):
             skills.answers[f"/api/skill-sources/{source_id}"] = change
-        _tab(page, "browse")
+        skills.answers["/api/skill-catalog"] = lambda _request: _catalog(sources)  # the host reads both from one list
         dialog = page.locator(".skills-dialog")
+        skills.hold.add("/api/skill-catalog")
+        _tab(page, "sources")
+        skills.wait_for_request("/api/skill-catalog")
+        _tab(page, "installed")
+        skills.hold.clear()
+        skills.release("/api/skill-catalog")
+        page.locator('[data-source-action="first_start"]').wait_for(state="attached")
+        assert dialog.count() == 0 and skills.posts == []
+        _tab(page, "browse")
         dialog.wait_for()
         assert "How should skills from the Ouroboros hub install?" in dialog.inner_text()
         assert "Suggested choices apply until you choose." in dialog.inner_text()
@@ -213,6 +309,11 @@ def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_brows
         capture(page, browser_name, 1280, "first-start")
         dialog.locator("[data-dialog-cancel]").last.click()
         assert dialog.count() == 0 and skills.posts == [], "Later saves nothing"
+        # Until the owner chooses, a card says the setting the host installs by, as the suggested one.
+        assert ("Installs without review while that is the suggested setting for Ouroboros"
+                in _card(page, "ouroboros/duckduckgo").inner_text())
+        assert ("Reviewed before it runs while that is the suggested setting for Ouroboros Community"
+                in _card(page, "ouroboros-community/scholion").inner_text())
 
         # Asked once per visit: an install after Later uses the rows' suggested trust without asking again.
         _card(page, "ouroboros/duckduckgo").locator('[data-browse-action="install"]').click()
@@ -232,6 +333,57 @@ def test_the_hub_rows_are_confirmed_once_with_their_suggested_trust(skills_brows
         assert skills.posted("/api/skill-sources/ouroboros-community") == [{"trust": "trusted", "confirmed": True}]
         page.wait_for_function("!document.querySelector('.skills-sources-card .skills-trust-value.is-suggested')")
         assert tray.count() == 0
+        # Browse reads its catalog again on arrival: its cards say the confirmed choice.
+        _tab(page, "browse")
+        expect(_card(page, "ouroboros-community/scholion")).to_contain_text(
+            "Installs without review while you trust Ouroboros Community")
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_browse_words_hold_when_the_source_list_answers_late_with_another_setting(skills_browser, browser_name):
+    """A card and an open detail say how their entry installs only while its source's setting holds: the host reads
+    the source again when Install is pressed. A list of sources that answers late, with the same source set
+    otherwise, therefore makes nothing on screen false, and repaints and refocuses nothing."""
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        skills = _open(page)
+        skills.answers["/api/skill-catalog/item/ouroboros-community/scholion"] = fixture("skill_catalog_item.json")
+        # Showing the place reads its sources again; here that answer is still on its way while Browse is used.
+        skills.hold.add("/api/skill-sources")
+        _tab(page, "browse")
+        skills.wait_for_request("/api/skill-sources")
+        card = _card(page, "ouroboros-community/scholion")
+        said = "Reviewed before it runs while that is the setting for Ouroboros Community"
+        expect(card).to_contain_text(said)
+        card.locator(".skills-card-name").click()
+        sheet = page.locator(".skills-detail-sheet")
+        sheet.locator(".skills-sheet-about").wait_for()
+        page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+        detail = ("Ouroboros reviews it on this computer before it runs while that is the setting for"
+                  " the Ouroboros Community source. You can skip the review.")
+        assert detail in sheet.inner_text()
+        install = sheet.locator('[data-sheet-action="install"]')
+        install.focus()
+        # The late list: the same source, now set to install without review, and one source fewer (the rail's count
+        # says the list arrived). An Install pressed now would go without review; no sentence here says otherwise.
+        late = _sources()
+        late["sources"] = [row for row in late["sources"] if row["id"] != "my-folder"]
+        next(row for row in late["sources"] if row["id"] == "ouroboros-community")["trust"] = "trusted"
+        skills.hold.clear()
+        skills.release("/api/skill-sources", late)
+        expect(page.locator('[data-extensions-open="sources"] [data-extensions-answer]')).to_contain_text("4 connected")
+        assert said in card.inner_text(), "the shown entry keeps its own conditional sentence"
+        assert detail in sheet.inner_text()
+        assert install.evaluate("element => element === document.activeElement"), "the open detail keeps the keyboard"
+        page.keyboard.press("Escape")
+        assert sheet.count() == 0
     finally:
         if skills:
             skills.close(browser)
@@ -258,7 +410,8 @@ def test_one_name_two_sources_compare_and_replace_is_one_install(skills_browser,
         dialog = page.locator(".skills-dialog")
         dialog.wait_for()
         assert "Two skills are called “weather”" in dialog.inner_text()
-        assert "replaces yours and keeps a backup of it; the new one is reviewed before it runs" in dialog.inner_text()
+        assert ("replaces yours and keeps a backup of it; its source’s setting in Sources decides whether it is reviewed first"
+                in dialog.inner_text())
         assert dialog.locator("[data-dialog-ok]").inner_text() == "Keep mine"
         capture(page, browser_name, width, "compare")
         dialog.locator("[data-dialog-ok]").click()
@@ -343,7 +496,7 @@ def test_clawhub_chosen_alone_shows_its_popular_page_and_pages_on(skills_browser
         status = page.locator("[data-browse-status]").inner_text()
         assert "2 skills from ClawHub, most downloaded first" in status and "search all of ClawHub" in status
         assert "491.0k downloads" in _card(page, "clawhub/first").inner_text()
-        assert "Ouroboros reviews it before it runs" in _card(page, "clawhub/first").inner_text()
+        assert "Reviewed before it runs while that is the setting for ClawHub" in _card(page, "clawhub/first").inner_text()
         sort = page.locator("[data-browse-sort]")
         assert sort.locator("option").all_inner_texts() == ["Popular", "Recently updated"] and sort.input_value() == "popular"
         assert no_overflow(page)
@@ -509,6 +662,11 @@ def test_show_more_keeps_the_reader_in_place_in_an_overflowing_shell(skills_brow
         assert top >= 0 and bottom <= height, "the focused new card is on screen"
         assert no_overflow(page)
         capture(page, browser_name, width, "clawhub-show-more-long")
+        # Sources is shorter. Returning to Browse restores its place against the tall Browse panel.
+        _tab(page, "sources")
+        page.locator('[data-source-action="add"]').wait_for()
+        _tab(page, "browse")
+        assert page.evaluate(f"{scroller}.scrollTop") >= before - 1
     finally:
         if skills:
             skills.close(browser)
@@ -598,7 +756,7 @@ def test_a_source_change_reads_the_installed_listing_again(skills_browser, brows
         sheet = page.locator(".skills-detail-sheet")
         sheet.locator(".skills-sheet-about", has_text="Weather from the new source.").wait_for()
         text = sheet.inner_text()
-        assert "Installs without review:" in text or "Ouroboros will review it" in text
+        assert "Installs without review while you trust the Ouroboros source." in text
         assert "Installed without review" not in text and "You have v" not in text
         assert "Installed folder" not in text and sheet.locator('[data-sheet-places]:not([hidden])').count() == 0
         assert sheet.locator('[data-sheet-action="compare"]').count() == 1
@@ -629,11 +787,22 @@ def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, brow
         text = sheet.inner_text()
         assert "Local second-opinion layer" in text
         assert "Your keys: OPENROUTER_API_KEY" in text
-        assert "Ouroboros will review it on this computer before it runs. You can skip the review." in text
+        assert ("Ouroboros reviews it on this computer before it runs while that is the setting for"
+                " the Ouroboros Community source. You can skip the review.") in text
         assert "★ 4 stars on CrossRead/scholion" in text
         assert "Discussion (4)" in text
         assert ("GET", "/api/skill-catalog/item/ouroboros-community/scholion") in skills.requests
         capture(page, browser_name, width, "detail-sheet")
+        page.keyboard.press("Escape")
+        assert sheet.count() == 0
+        assert name.evaluate("element => element === document.activeElement")
+
+        # A press that leaves focus on the page's own region, as WebKit on macOS does with a pressed button: the
+        # browser's own close hands focus back to that region, and the sheet still returns it to the pressed name.
+        page.locator("[data-extensions-views]").focus()
+        name.evaluate("element => element.click()")
+        sheet.locator(".skills-sheet-about").wait_for()
+        assert page.evaluate("() => document.activeElement.closest('.skills-detail-sheet') !== null")
         page.keyboard.press("Escape")
         assert sheet.count() == 0
         assert name.evaluate("element => element === document.activeElement")
@@ -646,6 +815,96 @@ def test_the_detail_sheet_reads_the_entry_and_returns_focus(skills_browser, brow
         claw.locator(".skills-card-name").click()
         page.locator(".skills-detail-sheet .skills-sheet-about").wait_for()
         assert not any("/api/skill-catalog/item/clawhub" in path for _, path in skills.requests)
+        assert ("Ouroboros reviews it on this computer before it runs while that is the setting for the ClawHub source."
+                " You can skip the review.") in page.locator(".skills-detail-sheet").inner_text()
+        page.locator("[data-sheet-close]").click()
+    finally:
+        if skills:
+            skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
+def test_the_installed_sheet_takes_access_from_its_own_manifest_never_the_catalog(skills_browser, browser_name):
+    """A source-backed installation, with the catalog cached and its entry fetched, shows what its own loaded manifest
+    and grants say, an id with no friendlier word as declared (card and sheet alike); when that manifest was not read
+    it claims nothing. Browse keeps the catalog's own words and labels and still leaves out an id it gives neither."""
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    skills = None
+    try:
+        page = browser.new_page(viewport={"width": 390, "height": 900})
+        catalog = copy.deepcopy(CATALOG)
+        entry = next(item for item in catalog["items"] if item["id"] == "ouroboros/weather")
+        # Competing, plausible declarations: a known word, and an id that no word or label names.
+        entry.update(permissions=["net", "cached_unlabeled"], needs_keys=["WEATHER_KEY"])
+        installed = {**_row("weather"), "permissions": ["page_module"]}  # all its manifest declares: no friendlier word
+        skills = _open(page, catalog=catalog, listing=[installed])
+        detail_path = "/api/skill-catalog/item/ouroboros/weather"
+        skills.answers[detail_path] = {
+            "about": "Weather from the source.",
+            "uses": [{"id": "net", "kind": "permission"},
+                     {"id": "feed_reader", "kind": "permission", "label": "Reads the weather feed"},
+                     {"id": "fetched_unlabeled", "kind": "permission"},
+                     {"id": "WEATHER_KEY", "kind": "key"}]}
+        _tab(page, "browse")  # the catalog is now cached, so the installed sheet could join it
+        _card(page, "ouroboros/weather").wait_for()
+        _tab(page, "installed")
+        sheet = page.locator(".skills-detail-sheet")
+        card = page.locator('.skills-card[data-skill="weather"]')
+        can_use = card.locator(".skills-detail-row", has_text="Can use").locator(".skills-detail-value")
+
+        def open_installed():
+            page.locator('.skills-card[data-skill="weather"] .skills-card-name').click()
+            sheet.locator(".skills-sheet-about", has_text="Weather from the source.").wait_for()
+            page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+            return sheet.inner_text()
+
+        text = open_installed()  # a parsed manifest: its own access, with the row's grants (no keys requested)
+        assert "What it can use" in text and "Your keys: none" in text and "WEATHER_KEY" not in text
+        assert "page_module" in text and "Nothing beyond its own folder" not in text
+        for claimed in ("Internet", "Reads the weather feed", "cached_unlabeled", "fetched_unlabeled"):
+            assert claimed not in text, f"{claimed} is the catalog's claim, not this manifest's"
+        page.locator("[data-sheet-close]").click()
+        card.locator(".skills-details > summary").click()
+        assert can_use.inner_text() == "page_module"  # the card says the same, not "Nothing beyond its own folder"
+
+        # An id with no friendlier word stands as declared beside the known words: once, in order, and escaped.
+        mixed = {**installed, "permissions": ["net", "page_module", 'odd"<i>x</i>', "page_module"]}
+        skills.set_skills([mixed])
+        page.locator("#skills-refresh").click()
+        page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
+        shown = 'Internet · page_module · odd"<i>x</i>'
+        assert can_use.inner_text() == shown and card.locator(".skills-detail-value i").count() == 0
+        assert shown in open_installed() and sheet.locator(".skills-sheet-section i").count() == 0
+        page.locator("[data-sheet-close]").click()
+
+        unread = {**installed, "manifest_file": "", "type": "instruction",
+                  "load_error": "manifest parse error: bad", "grants": {}}  # its placeholder permissions declare nothing
+        skills.set_skills([unread])
+        page.locator("#skills-refresh").click()
+        page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
+        assert "Can use" not in card.inner_text() and "page_module" not in card.inner_text()
+        text = open_installed()
+        assert "What it can use" not in text and "WEATHER_KEY" not in text and "Your keys" not in text
+        assert "Nothing beyond its own folder" not in text and "page_module" not in text
+        sheet.locator(".skills-sheet-details > summary").click()
+        assert unread["payload_root"] in sheet.locator(".skills-sheet-facts").inner_text()  # the exact folder remains
+        page.locator("[data-sheet-close]").click()
+
+        # Browse keeps the catalog's own words: the known one and the source's label, and neither unlabeled id.
+        _tab(page, "browse")
+        skills.hold = {detail_path}
+        _card(page, "ouroboros/weather").locator(".skills-card-name").click()
+        skills.wait_for_request(detail_path)
+        reading = sheet.inner_text()  # before the entry is read: the cached claim
+        assert "Internet" in reading and "cached_unlabeled" not in reading and "page_module" not in reading
+        skills.release(detail_path)
+        skills.hold.clear()
+        sheet.locator(".skills-sheet-about", has_text="Weather from the source.").wait_for()
+        page.wait_for_function("!document.querySelector('.skills-detail-sheet .skills-sheet-status')")
+        text = sheet.inner_text()
+        assert "Internet · Reads the weather feed" in text and "Your keys: WEATHER_KEY" in text
+        for hidden in ("cached_unlabeled", "fetched_unlabeled", "page_module"):
+            assert hidden not in text, hidden
         page.locator("[data-sheet-close]").click()
     finally:
         if skills:

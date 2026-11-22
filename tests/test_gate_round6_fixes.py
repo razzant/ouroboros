@@ -327,9 +327,11 @@ def test_gr6_5a_failed_outcome_still_discloses_open_runs(tmp_path):
         event_queue=queue, unreconciled_runs=["run-z"],
     ) is True
     (event,) = [e for e in queue.events if e.get("type") == "send_message"]
-    assert "1 delegated run(s) may still be live: run-z" in event["text"], (
+    assert "may still be live" in event["text"] and "run-z" not in event["text"], (
         "GR6-5a: a failed outcome must not swallow the open-run fact"
     )
+    # The open runs themselves are the notice's details, beside the words (DESIGN principle 7).
+    assert "1 delegated run(s) may still be live: run-z" in event["progress_meta"]["notice"]["details"]
 
     # And with NOTHING open, a failed outcome still delivers nothing here
     # (its own path owns the failure message).

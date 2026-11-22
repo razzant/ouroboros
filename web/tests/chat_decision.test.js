@@ -4,6 +4,10 @@ import { NodeStub, countPropertyWrites, fixture, frameBubble, turn, WS_MSG } fro
 import { questionPresentation } from '../modules/question_presentation.js';
 // The head's shared status mark (web/modules/status_mark.js): [shape, hue, hidden].
 const markOf = (card) => { const mark = card.querySelector('.chat-quiz-mark'); return [mark.dataset.shape, mark.dataset.hue, mark.hidden]; };
+// Settled options: the recorded choice stays inert yet focusable (aria-disabled, out of the tab order) so a Reply
+// can land on it (DESIGN "Replies"); every other option is disabled.
+const settled = (buttons) => buttons.every((btn) => (btn.classList.contains('chosen')
+    ? !btn.disabled && btn.getAttribute('aria-disabled') === 'true' && btn.tabIndex === -1 : btn.disabled));
 test('targeted detail preserves normalized option details, single-flight, and the existing answer form', async () => {
     let calls = 0;
     const block = { ...WS_MSG, options: ['Yes', 'No'], option_details: ['Immediate release', 'Wait for CI'], asked_at: WS_MSG.ts };
@@ -144,7 +148,7 @@ test('required waiting copy ends when the answer settles, including history repl
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(card.dataset.state, 'answered');
         assert.equal(card.querySelector('.chat-quiz-assumption'), null);
-        assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled));
+        assert.ok(settled(card.querySelectorAll('.chat-quiz-option')));
         assert.deepEqual(markOf(card), ['dot', 'ok', false]);
         // Still unanswered after its task ended, Main's pill counts it: amber, like every question it counts.
         const hues = { answered: 'ok', expired_terminal: 'owner', superseded: 'ink' };
@@ -211,7 +215,7 @@ test('a finished task leaves its card answerable; only a settled one is a record
         // Answered IS settled: the draft field goes and the buttons close.
         assert.equal(card.dataset.state, 'answered');
         assert.equal(card.querySelector('.chat-quiz-comment'), null);
-        assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled));
+        assert.ok(settled(card.querySelectorAll('.chat-quiz-option')));
 
         const superseded = fx.decision.buildQuizCard({
             ...replayMsg, quiz: { ...replayMsg.quiz, quiz_id: 'qz-3', state: 'superseded' },
@@ -250,7 +254,7 @@ test('an accepted answer marks the chosen option; degenerate cards refuse to ren
         assert.equal(card.dataset.state, 'answered');
         const buttons = card.querySelectorAll('.chat-quiz-option');
         assert.ok(buttons[1].classList.contains('chosen'));
-        assert.ok(buttons.every((btn) => btn.disabled));
+        assert.ok(settled(buttons));
 
         assert.equal(fx.decision.buildQuizCard({ ...WS_MSG, quiz_id: 'one', options: [{ label: 'only' }] })
             .querySelectorAll('.chat-quiz-option').length, 1);
@@ -462,7 +466,7 @@ test('applyQuizStateFrame settles an existing card and ignores unknown ids', asy
         assert.equal(quizCard.dataset.state, 'answered');
         const buttons = quizCard.querySelectorAll('chat-quiz-option');
         assert.ok(buttons.length >= 2);
-        assert.ok(buttons.every((btn) => btn.disabled));
+        assert.ok(settled(buttons));
         assert.ok(buttons[0].classList.contains('chosen'));
         const stateWrites = countPropertyWrites(quizCard.dataset, 'state');
         const disabledWrites = buttons.map((btn) => countPropertyWrites(btn, 'disabled'));
@@ -1287,5 +1291,71 @@ test('a question card says its work is paused from the instance\'s works and ret
         card.querySelector('.chat-quiz-status-text').textContent = 'Sending…';
         fx.decision.syncWorks(works('working'));
         assert.equal(status(), 'Sending…');
+    } finally { fx.restore(); }
+});
+
+// DESIGN "Replies": an owner's answer to a card has no row of its own in the feed. History names its row
+// (`answer_row_address`); the home card puts that address on the one visible answer, so a Reply lands there.
+const ANSWER_ROW = 'row:23@2024-04-09T10:14:00+00:00#0123456789ab';
+const legendFrame = { ...WS_MSG, question: 'Use blue and gold in the table legend?', ts: '2024-04-09T10:05:00+00:00',
+    stake: 'Table readability', assumption: 'Keep the current colors', options: [{ label: 'Yes' }, { label: 'No' }] };
+const answeredRow = (quiz) => ({ msg_type: 'quiz', role: 'assistant', task_id: 't-1', text: legendFrame.question, ts: legendFrame.ts,
+    quiz: { stake: '', assumption: '', options: legendFrame.options, state: 'answered', ...quiz } });
+
+test('the answer row\'s address marks the recorded choice, else the owner\'s words, on its own card', () => {
+    const fx = fixture();
+    try {
+        // A choice with words beside it is one answer: the choice carries the address.
+        const both = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-both', answered_index: 1, comment: 'and soon',
+            answer_row_address: ANSWER_ROW }));
+        const [yes, no] = both.querySelectorAll('.chat-quiz-option');
+        assert.deepEqual([yes.dataset.rowAddress, no.dataset.rowAddress, both.querySelector('.chat-quiz-answer').dataset.rowAddress],
+            [undefined, ANSWER_ROW, undefined]);
+        assert.deepEqual([no.disabled, no.getAttribute('aria-disabled'), no.tabIndex, yes.disabled], [false, 'true', -1, true],
+            'the recorded choice is inert yet focusable; the other option is disabled');
+        assert.equal(no.dataset.historyId, undefined, 'an address alone: the card is not a row of the feed');
+        // Free words without a choice: the answer line carries it and can take focus.
+        const words = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-words', comment: 'neither', answer_row_address: ANSWER_ROW }));
+        const line = words.querySelector('.chat-quiz-answer');
+        assert.deepEqual([line.dataset.rowAddress, line.tabIndex], [ANSWER_ROW, -1]);
+        assert.ok(words.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled && !btn.dataset.rowAddress));
+        // Without an address (an older row) nothing is marked; the choice still records the answer.
+        const old = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-old', answered_index: 0 }));
+        assert.ok(old.querySelectorAll('.chat-quiz-option').every((btn) => !btn.dataset.rowAddress));
+        assert.ok(settled(old.querySelectorAll('.chat-quiz-option')));
+    } finally { fx.restore(); }
+});
+
+test('a narrower live frame keeps the answer row\'s address and a card answered live receives it from history', () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard(answeredRow({ quiz_id: 'qz-kept', answered_index: 1, answer_row_address: ANSWER_ROW }));
+        const chosen = card.querySelectorAll('.chat-quiz-option')[1];
+        fx.decision.applyQuizStateFrame({}, { quiz_id: 'qz-kept', task_id: 't-1', state: 'answered', answered_index: 1 });
+        assert.equal(chosen.dataset.rowAddress, ANSWER_ROW, 'the live quiz_state frame names no row and erases none');
+        const live = fx.decision.buildQuizCard({ ...legendFrame, quiz_id: 'qz-live' });
+        fx.decision.applyQuizStateFrame({}, { quiz_id: 'qz-live', task_id: 't-1', state: 'answered', answered_index: 0 });
+        const first = live.querySelectorAll('.chat-quiz-option')[0];
+        assert.equal(first.dataset.rowAddress, undefined, 'answered live: no row is known yet');
+        assert.equal(fx.decision.buildQuizCard({ task_id: 't-1', text: legendFrame.question, ts: legendFrame.ts,
+            quiz: { ...legendFrame, quiz_id: 'qz-live', state: 'answered', answered_index: 0, answer_row_address: ANSWER_ROW } }), null);
+        assert.equal(first.dataset.rowAddress, ANSWER_ROW, 'the next history row names it on the same card');
+    } finally { fx.restore(); }
+});
+
+test('the owner\'s own press still hands focus to the question; a landing on the recorded choice keeps it', async () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard({ ...legendFrame, quiz_id: 'qz-focus' });
+        const first = card.querySelectorAll('.chat-quiz-option')[0];
+        first.focus();
+        first.click();
+        await turn();
+        assert.equal(card.dataset.state, 'answered');
+        assert.equal(globalThis.document.activeElement, card.querySelector('.chat-quiz-question'),
+            'settling made the pressed option inert: focus stays in the card, on its question');
+        first.focus();  // a Reply's landing (chat_reply.markTarget)
+        fx.decision.applyQuizStateFrame({}, { quiz_id: 'qz-focus', task_id: 't-1', state: 'answered', answered_index: 0 });
+        assert.equal(globalThis.document.activeElement, first, 'a repeated settlement does not move a landing');
     } finally { fx.restore(); }
 });

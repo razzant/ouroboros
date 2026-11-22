@@ -468,6 +468,21 @@ def _pinned_chromium(*, allow_install: bool) -> str:
                                  install, " engine='webkit' is available where it is installed.")
 
 
+# The pinned build's launch arguments, one list for every caller that starts it (the ui_look skill's stand too).
+CHROMIUM_LAUNCH_ARGS = (
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--window-size=1920,1080",
+    # J (v6.39): software-GL via ANGLE+SwiftShader so WebGL/canvas/3D actually
+    # RENDER in headless (the headless shell has no GPU) instead of a black
+    # frame; ignore the GPU blocklist so SwiftShader is used.
+    "--use-gl=angle",
+    "--use-angle=swiftshader",
+    "--enable-unsafe-swiftshader",
+    "--ignore-gpu-blocklist",
+)
+
+
 async def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium",
                                         executable_path: Any = None, sandbox: Any = None) -> Any:
     """Launch the engine with no fallback: Chromium only as the pinned executable, inside its
@@ -488,18 +503,7 @@ async def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chro
             headless=True,
             executable_path=str(executable_path),
             chromium_sandbox=sandbox,  # without it Playwright itself adds --no-sandbox
-            args=[
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1920,1080",
-                # J (v6.39): software-GL via ANGLE+SwiftShader so WebGL/canvas/3D actually
-                # RENDER in headless (the headless shell has no GPU) instead of a black
-                # frame; ignore the GPU blocklist so SwiftShader is used.
-                "--use-gl=angle",
-                "--use-angle=swiftshader",
-                "--enable-unsafe-swiftshader",
-                "--ignore-gpu-blocklist",
-            ],
+            args=list(CHROMIUM_LAUNCH_ARGS),
         )
     except Exception as exc:
         refusal = chromium_runtime.sandbox_refusal(exc) if sandbox else None

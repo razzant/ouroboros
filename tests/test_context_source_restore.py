@@ -117,12 +117,11 @@ def test_restore_only_keeps_current_on_source_or_whole_candidate_refusal(
     after = _run(tmp_path, monkeypatch, ctx, messages, [], fit)
     assert after[:len(messages)] == messages and not _sources(after)
     if failure == "final_fit":
-        # The restored candidate alone, then with its receipt listing the notes kept, then once more with that list
-        # counted instead (the notes stay in the view): the only optional detail this receipt holds. Then refused.
-        assert after is messages and len(fits) == 3 and _sources(fits[0]) and _sources(fits[-1])
-        receipts = [json.loads(str(rows[-1]["content"]).split("\n", 1)[1]) for rows in fits[1:]]
-        assert receipts[0].get("notes_kept") and "notes_kept_omitted" not in receipts[0]
-        assert receipts[1].get("notes_kept_omitted") == len(receipts[0]["notes_kept"]) and "notes_kept" not in receipts[1]
+        # The restored candidate alone, then with its receipt, which already counts the notes kept (their list is
+        # at the receipt's address): nothing optional is left to drop, so the view is refused.
+        assert after is messages and len(fits) == 2 and _sources(fits[0]) and _sources(fits[-1])
+        receipt = json.loads(str(fits[1][-1]["content"]).split("\n", 1)[1])
+        assert receipt["at_source"] == {"notes_kept": 1} and "notes_kept" not in receipt
     assert ctx._context_view_receipt["status"] == ("source_unavailable" if failure == "source" else "fit_rejected")
 
 

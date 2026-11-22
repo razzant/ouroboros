@@ -85,7 +85,7 @@ class TestGlobalBudgetGuard:
             result = _check_budget_limits(**args)
         assert result is not None
         text, _, _ = result
-        assert "budget exhausted" in text.lower()
+        assert "total budget is spent" in text.lower()
         model_call.assert_not_called()
 
     @pytest.mark.parametrize("model, local, stops", [

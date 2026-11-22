@@ -150,12 +150,12 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
     """
     from types import SimpleNamespace
 
+    resume_point = state.get("resume_point") or {}
     _write(tools._ctx, SimpleNamespace(
         tools=tools, messages=messages, llm_trace=trace, accumulated_usage=usage, owner_msg_seen=seen,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
-        budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
-        context_model_role=str(state.get("context_model_role") or ""),
-        context_start=state.get("context_start")), RESUMED)
+        budget_tail=str(resume_point.get("budget_tail") or "tool")),
+        "candidate" if resume_point.get("phase") == "candidate" else RESUMED, resumed_from=state)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -232,7 +232,8 @@ def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
     return data, sum(map(len, tokenized.segments())), written
 
 
-def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -> None:
+def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
+           resumed_from: Optional[Dict[str, Any]] = None) -> None:
     from ouroboros.budget_pause import pending_tool_call_ids
     from ouroboros.owner_wait import continuation_state
     from ouroboros.utils import utc_now_iso, write_bytes_atomic
@@ -254,11 +255,11 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
                               active_context_mode=model_call.active_context_mode, active_role_override=model_call.model_role,
                               route_choice=after_fallback(ctx, not str(model_call.model_role or "").startswith("fallback:")))
         state["context_model_role"] = model_call.model_role or state["context_model_role"]
-    if boundary == RESUMED:  # written before the rebind: the plan is still the new worker's
-        state["context_model_role"] = limit_ctx.context_model_role
+    if resumed_from is not None:  # before rebind on either Resume boundary; the plan is still the new worker's
         from ouroboros.context_fit import carried_start
 
-        state["context_start"] = list(carried_start(limit_ctx.context_start))  # the source's start, or unknown
+        state["context_model_role"] = str(resumed_from.get("context_model_role") or "")
+        state["context_start"] = list(carried_start(resumed_from.get("context_start")))  # source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}
@@ -389,7 +390,10 @@ def save_terminal(limit_ctx: Any) -> None:
     if not getattr(ctx, "_pending_content_acks", None) or sys.exc_info()[0] is not None:
         return
     try:
-        save_ready(limit_ctx)
+        if not getattr(ctx, "_selected_answer_context", None):
+            save_ready(limit_ctx)
+        elif save_or_log(limit_ctx, "candidate"):  # a held answer keeps its own boundary; only this save ACKs
+            flush_content_acks(ctx)
     except Exception:
         log.warning("Final working state of %s unsaved; its drained mail stays unread",
                     getattr(ctx, "task_id", ""), exc_info=True)
@@ -532,7 +536,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         rows = [row for row in (receipts.get(basis) or []) if isinstance(row, dict)]
         if rows:
             row = max(rows, key=lambda item: str(item.get("registered_at") or ""))
-            return {"basis": basis, "text": str(row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
+            return {"basis": basis, "text": str(row.get("terminal_record") or row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
                     "terminal_origin": str(row.get("terminal_origin") or ""), **carried(row),
                     **({"preserved_path": str(row["preserved_path"])} if row.get("preserved_path") else {})}
     delivered = [row for row in (receipts.get("delivered") or []) if isinstance(row, dict)]
@@ -544,7 +548,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
 
             record = json.loads(read_actor_source_bytes(root, task_id, receipt.get("source_ref")).decode("utf-8"))
             if isinstance(record, dict):
-                text, origin = str(record.get("text") or ""), str(record.get("terminal_origin") or "")
+                text, origin = str(record.get("terminal_record") or record.get("text") or ""), str(record.get("terminal_origin") or "")
         except Exception:
             log.debug("Retained terminal answer of %s could not be re-read", task_id, exc_info=True)
         return {"basis": "delivered", "text": text, "delivery_id": str(receipt.get("delivery_id") or ""),
@@ -733,17 +737,12 @@ def complete_pause_from_working(root: Any, task_id: str, row: Dict[str, Any], at
         episode_fields, observe_task_runs, set_budget_pause, task_owned_runs_open,
     )
     from ouroboros.model_wait import budget_paused_seconds
+    from ouroboros.owner_wait import working_resume_point
 
     _data, state = read_working(root, task_id, attempt)
     if not state or row.get("state") != STATE_PAUSING or row.get("source_ref"):
         return {}
-    working = state["working"]
-    pending = list(working.get("pending_tool_call_ids") or [])
-    point = {"round_idx": int(state.get("round_idx") or 0),
-             "phase": "partial_tool_batch_unknown" if pending else "boundary",
-             "unanswered_tool_call_ids": pending, "unanswered_policy": "not_re_executed_execution_unknown",
-             "abandoned_model_attempts": [], "budget_tail": str(working.get("budget_tail") or "tool"),
-             "recovered_from_working": {"boundary": working.get("boundary"), "seq": working.get("seq")}}
+    point = working_resume_point(state)
     reason = str(row.get("reason") or "budget")
     policy = (STOP_POLICY_TASK_OWNED if reason == "owner" else STOP_POLICY_ALL if reason == "budget"
               else STOP_POLICY_OBSERVE)
@@ -941,7 +940,8 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             if isinstance(run, dict) and run.get("authority") == "host_root":
                 run.update(superseded_by_revision=True, superseded_reason="working_recovery_new_execution")
         # ``acceptance_decision`` is written no more; a pre-fold checkpoint's own does not carry over.
-        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion"):
+        for key in ("acceptance_decision", "review_decision", "root_phase_checkpoint", "task_completion",
+                    "authoring_handover_incomplete"):
             trace.pop(key, None)
     from ouroboros.task_pacing import restore_cost_ceiling
 

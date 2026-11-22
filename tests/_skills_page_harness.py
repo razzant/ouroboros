@@ -34,10 +34,17 @@ def _document() -> str:
         'const [{initSkills},{startHostModules},{getContributions}]=await Promise.all(['
         'import("/static/modules/skills.js"),import("/static/modules/host_modules.js"),import("/static/modules/contributions.js")]);'
         'if(new URL(location.href).searchParams.has("host_modules")){const contributions=getContributions();contributions.attach();window.hostRuntime=startHostModules({store:contributions});}'
-        'window.skillsView=initSkills({showPage:(page)=>{window.shownPage=page;},'
+        'const events=new EventTarget();window.skillSocketEvent=(type)=>events.dispatchEvent(new Event(type));'
+        'const ws={on(type,fn){events.addEventListener(type,fn);return()=>events.removeEventListener(type,fn);}};'
+        # Extensions is the place (extensions.js): the app's state and showPage, as app.js gives them, then Skills opened
+        # as an explicit request does, at every width (the list alone would stand first in one column).
+        'const state={activePage:""};'
+        'const showPage=async(page,options={})=>{window.shownPage=page;if(state.activePage!==page){state.activePage=page;'
+        'document.querySelectorAll(".page").forEach((el)=>el.classList.toggle("active",el.id===`page-${page}`));'
+        'window.dispatchEvent(new CustomEvent("ouro:page-shown",{detail:{page}}));}options.enter?.();return true;};'
+        'window.skillsView=initSkills({ws,state,showPage,'
         'openSettings:(path,options)=>{window.settingsOpened=[path,options];return true;}});'
-        'document.querySelector("#page-skills").classList.add("active");'
-        'window.dispatchEvent(new CustomEvent("ouro:page-shown",{detail:{page:"skills"}}));'
+        'await window.skillsView.open("installed");'
         '</script></body></html>'
     )
 
@@ -168,6 +175,11 @@ class SkillsPage:
 
 def open_skills(page, **facts) -> SkillsPage:
     return SkillsPage(page, **facts)
+
+
+def open_view(page, name: str):
+    """Open a page of Extensions (`installed`, `browse`, `sources`, `tools`) as its list's row does, at any width."""
+    assert page.evaluate("(name) => window.skillsView.open(name)", name) is not False
 
 
 def refresh(page):

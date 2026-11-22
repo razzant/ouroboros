@@ -77,7 +77,7 @@ def test_sealed_presence_keeps_exact_selected_commit_name_and_binding(registry, 
     assert set(registry.available_tools()) == {spelling} | automatic
     assert registry.get_schema_by_name(spelling) is not None
     assert registry.get_schema_by_name(other) is None
-    visible = {s["function"]["name"] for s in registry.schemas(core_only=True)}
+    visible = {s["function"]["name"] for s in registry.schemas()}
     assert spelling in visible and other not in visible
     assert visible <= {spelling} | automatic
     args, error = _presence_bound_args(registry._ctx, spelling, {"scope": "model-scope"})

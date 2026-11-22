@@ -70,7 +70,7 @@ from ouroboros.tool_access_user_files import (  # noqa: F401 — re-exported mov
 )
 
 
-def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = "") -> str:
+def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = "", receipt: bool = False) -> str:
     """Compact, human-readable summary of a subagent's EFFECTIVE tool profile
     (v6.57.0, 1.6): shell yes/no, writable roots, and model lane — derived from the
     _POLICY matrix (the same SSOT active_tool_profile resolves), so the parent sees
@@ -78,7 +78,9 @@ def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = ""
     CAN and CANNOT do. Prevents the wasted rounds where a prober child hit
     workspace_blocked on run_script because neither side knew shell was off.
     The second line names shared readable roots; the context supplies their
-    physical bindings, including the parent's inherited folders and runtime."""
+    physical bindings, including the parent's inherited folders and runtime.
+    ``receipt``: one line for the delegating mind's receipt (``helper_receipt``), the
+    readable roots named by their complement, which is shorter and says the same."""
     matrix = _POLICY.get(_effective_policy_profile(profile), {})
     shell_roots = sorted(root for root, ops in matrix.items() if "shell" in ops)
     write_roots = sorted(root for root, ops in matrix.items() if ops & {"write", "edit"})
@@ -93,10 +95,13 @@ def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = ""
     if lane:
         bits.append(f"model_lane={lane}")
     lineage = " (including inherited parent folders and runtime data)"
+    unreadable = ', '.join(sorted(_ALL_ROOTS - set(read_roots))) or 'none'
+    if receipt:
+        return " · ".join([*bits, f"unreadable={unreadable}"])
     return (
         "child capabilities — " + " · ".join(bits)
         + f"\nreadable={', '.join(read_roots) or 'none'}{lineage}"
-        + f" · unreadable={', '.join(sorted(_ALL_ROOTS - set(read_roots))) or 'none'}"
+        + f" · unreadable={unreadable}"
     )
 
 
@@ -658,6 +663,7 @@ def _resolve_target_in_selected_base(
     path: str,
     operation: Operation,
     alias: bool = True,
+    literal: bool = False,
 ) -> pathlib.Path:
     """Resolve one target inside an already-selected physical base; ``alias=False`` returns the address a READ
     asked for, without the re-anchors that open a capture or source where its writer kept it."""
@@ -673,7 +679,12 @@ def _resolve_target_in_selected_base(
 
     resolved_base = settle(base_path)
     path_text = str(path or ".")
-    if root == "runtime_data":
+    if literal:  # An exact Git operand, not a file tool's convenient display spelling.
+        entry = pathlib.Path(path_text)
+        if ".." in entry.parts:
+            raise ValueError("literal repository path must not contain '..'")
+        path_text = str(resolved_base / entry)
+    elif root == "runtime_data":
         path_text = normalize_runtime_data_path(resolved_base, path_text)
     elif root in {"active_workspace", "system_repo"}:
         path_text = normalize_root_relative(resolved_base, path_text)
@@ -693,6 +704,8 @@ def _resolve_target_in_selected_base(
             candidate = settle(resolved_base / candidate)
             try:
                 path_text = candidate.relative_to(resolved_base).as_posix()
+                if literal:
+                    return candidate  # no basename, whitespace or separator rewriting
             except ValueError:
                 if operation in _READ_OPS:
                     # READ aliases preserve inherited physical roots and orphan custody.
@@ -753,8 +766,13 @@ def build_resolved_resource_binding(
     bucket: str = "",
     skill_name: str = "",
     process_cwd: str | None = None,
+    literal: bool = False,
 ) -> ResolvedResourceBinding:
-    """Resolve policy, physical base, and target exactly once for one call."""
+    """Resolve policy, base and target. ``literal`` is for host-bound Git operands, not public tool args."""
+
+    if literal and (process_cwd is not None or root not in {"active_workspace", "system_repo"}
+                    or operation not in {"read", "vcs"}):
+        raise ValueError("literal binding needs a repository read root")
 
     if process_cwd is not None:
         selected_root, base, target, source, selected_name, _allowed = _select_process_target(
@@ -885,6 +903,7 @@ def build_resolved_resource_binding(
         base_path=base,
         path=path,
         operation=operation,
+        literal=literal,
     )
     asked = (_resolve_target_in_selected_base(ctx, root=normalized, base_path=base, path=path, operation=operation,
                                               alias=False)

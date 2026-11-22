@@ -243,7 +243,20 @@ def test_a_run_only_this_process_holds_is_read_at_once_unless_a_selected_durable
             for rid, owner in (("run-local", _NANNY), ("run-sibling", "t-b"))}
     custody._CUSTODY.update(held)
     try:
-        assert _armed(ds.run_wait(ctx, "run-nobody"))["reason"] == "run_ownership_unknown"
+        nobody = _armed(ds.run_wait(ctx, "run-nobody"))
+        assert nobody["reason"] == "run_ownership_unknown" and "hint" not in nobody
+        # A task id given as a run id: the public wait names the read that answers it.
+        from ouroboros.task_results import write_task_result
+        from ouroboros.tools.control_task_results import _status_root
+
+        write_task_result(_status_root(ctx), "kidtask09", "completed", result="done")
+        task = _armed(ds.run_wait(ctx, "kidtask09"))
+        assert task["reason"] == "run_ownership_unknown" and task["hint"] == (
+            "That id names a task, not a delegated run: get_task_result(task_id='kidtask09') reads it.")
+        # An id this task's custody OWNS is never called a task, even when a task record shares it.
+        write_task_result(_status_root(ctx), "run-local", "completed", result="done")
+        mixed = _armed(ds.run_wait(ctx, ["run-local", "run-nobody"]))
+        assert mixed["reason"] == "run_ownership_unknown" and "hint" not in mixed
         assert _armed(ds.run_wait(ctx, "run-sibling"))["reason"] == "run_not_owned" and reads == []
         for durable, ready, status, woke_by in (("run-quiet", None, "no_progress", None),
                                                 ("run-done", _ended, "terminal", "run:run-done"),
@@ -863,3 +876,123 @@ def test_review_wait_plan_offers_free_plan_read_without_an_ask(tmp_path, no_revi
     action = response["review_runs"][0]["collection"]
     assert action == {"status": "read_existing", "surface": "intention", "ask_id": "ask-1",
                       "tool": "plan_task", "arguments": {}}
+
+
+@pytest.mark.parametrize("differs", [True, False, None], ids=["differs", "ordinary", "undisclosed"])
+def test_a_terminal_wake_repeats_the_receipt_in_one_line(tmp_path, monkeypatch, differs):
+    """c50-4: the finished run's terminal ``delegate_wait`` payload repeats what still differs from the request,
+    from that run's custody rows: the applied access when the engine applied another, and my human's later words
+    whose last outcome is not ``delivered`` (``accepted`` is not read). In the ordinary case nothing on record
+    differs, and the line stops there. The spilled envelope keeps it."""
+    from ouroboros import delegate_message_store, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    effective = {True: "workspace_write", False: "readonly", None: ""}[differs]
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": effective, "verified": True}}))
+    frames = [{"frame": {"owner_words": {"address": "chat 1 / a"}, "ts": "1"}, "outcome": "delivered"},
+              {"frame": {"owner_words": {"address": "chat 1 / b"}, "ts": "2"}, "outcome": "accepted" if differs else "delivered"}]
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, run_id: frames if run_id == "run-1" else [])
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    assert wake["status"] == "terminal"
+    if differs:
+        assert wake["receipt"] == ("access applied workspace_write, requested readonly [observed]; my human's later "
+                                   "words: 1 accepted (taken by the engine, not read) [observed]")
+    elif differs is None:  # the engine finished without disclosing the profile: unknown is said, never "as asked"
+        assert wake["receipt"] == "access applied: not disclosed by the engine (requested readonly) [observed]"
+    else:
+        assert "receipt" not in wake, "nothing observed to differ: no line, no assurance"
+    spilled = ds._render_wake_payload(ctx, {**wake, "wake_events": [{"type": "x", "text": "y" * 400_000}]})
+    assert _armed(spilled).get("receipt") == wake.get("receipt"), "the shortened envelope keeps the line, or none"
+
+
+@pytest.mark.parametrize("lookup", ["raised", "answered_empty"])
+def test_a_failed_custody_lookup_is_no_proof_the_record_is_absent(tmp_path, monkeypatch, lookup):
+    """The wake's own read of the run's custody (``delegate_supervision._held_run``): a lookup that raised says the
+    record was unavailable at this read; only a lookup that answered and found no row says there is none. The
+    wait's admission keeps its ordinary lookup: only the read inside that seam is made to fail."""
+    from ouroboros import delegate_custody as custody, delegate_supervision as ds
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-1")
+    _ended(tmp_path, "run-1")
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, rid, seq, gateway=None: json.dumps({
+        "status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 9,
+        "access_evidence": {"requested": "readonly", "effective": "readonly", "verified": True}}))
+
+    def failing(*_a, **_k):
+        if lookup == "raised":
+            raise OSError("store busy")
+        return custody.UNKNOWN, None
+
+    real_seam = ds._held_run
+
+    def seam(ctx_, run_id):  # only this module's name for custody, only for this read: no other reader sees it
+        ds.custody = SimpleNamespace(lookup=failing, custody_root=custody.custody_root)
+        try:
+            return real_seam(ctx_, run_id)
+        finally:
+            ds.custody = custody
+
+    monkeypatch.setattr(ds, "_held_run", seam)
+    wake = _armed(ds.run_wait(ctx, "run-1"))
+    if lookup == "raised":
+        assert wake["receipt"] == "this run's custody record was unavailable at this read [observed]"
+    else:
+        assert wake["receipt"] == "no custody record of this run [observed]"
+
+
+def test_a_runs_applied_access_is_compared_with_its_own_recorded_request(monkeypatch):
+    """A run is judged against what IT recorded: its START_REQUESTED body, else its own STARTED access. An older
+    record holds neither, and the evidence's ``requested`` is then today's derivation from the live context
+    (``delegate._read_run``): nobody asked it of this run, so the line names the applied access and the gap."""
+    from types import SimpleNamespace
+
+    from ouroboros import delegate_message_store
+    from ouroboros.helper_receipt import run_result_line
+
+    monkeypatch.setattr(delegate_message_store, "placed_words", lambda _ctx, _run: [])
+    ctx = SimpleNamespace(drive_root="/nonexistent", task_id="nanny")
+    derived = {"requested": "workspace_write", "effective": "readonly"}  # the live derivation beside what ran
+    body_only = SimpleNamespace(run_id="run-2", access="", request_event={"request": {"access": "readonly"}})
+    assert run_result_line(ctx, body_only, derived) == "", "its own body asked readonly: nothing differs"
+    started_only = SimpleNamespace(run_id="run-2", access="readonly", request_event={})
+    assert run_result_line(ctx, started_only, derived) == ""
+    assert run_result_line(ctx, started_only, {"requested": "readonly", "effective": "workspace_write"}) == (
+        "access applied workspace_write, requested readonly [observed]")
+    both = SimpleNamespace(run_id="run-2", access="readonly", request_event={"request": {"access": "workspace_write"}})
+    assert run_result_line(ctx, both, {"effective": "workspace_write"}) == "", "the body is read before STARTED"
+    assert run_result_line(ctx, both, {"effective": "readonly"}) == (
+        "access applied readonly, requested workspace_write [observed]")
+    old = SimpleNamespace(run_id="run-2", access="", request_event={})
+    assert run_result_line(ctx, old, derived) == (
+        "access applied readonly; this run's original request is not on record [observed]")
+    assert run_result_line(ctx, old, {"requested": "workspace_write"}) == (
+        "access applied: not disclosed by the engine (requested not on record) [observed]")
+
+
+def test_an_old_record_without_its_request_is_not_compared_with_todays_derivation(tmp_path, monkeypatch):
+    """The real chain: a STARTED row without access and without a request body, read by today's nanny whose live
+    context derives workspace_write; the engine applied readonly. The wake names that and the missing request."""
+    from ouroboros import delegate_supervision as ds
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import Engine
+    from tests._run_wait_shared import held_run
+
+    ctx, _ = _nanny(tmp_path)
+    engine = Engine(tmp_path)
+    job = engine.accept("first", {"access": "readonly"}, state="succeeded")
+    rid = engine.commands[job]["run"]
+    entry = held_run(tmp_path, rid, ctx.task_id, access="")
+    assert not entry.access and not entry.request_event
+    assert delegate._derive_authority(ctx).access == "workspace_write", "today's derivation differs from what ran"
+    gateway = engine.gateway()
+    read = delegate._read_run
+    monkeypatch.setattr(delegate, "_read_run", lambda ctx_, rid_, seq=None, **_: read(ctx_, rid_, seq, gateway=gateway))
+    assert json.loads(delegate._read_run(ctx, rid)).get("status") == "terminal"  # the body collects the terminal
+    wake = _armed(ds.run_wait(ctx, rid))
+    assert wake.get("status") == "terminal", wake
+    assert wake["receipt"] == "access applied readonly; this run's original request is not on record [observed]"

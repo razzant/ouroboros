@@ -771,6 +771,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
         _iso,
         panic_blocks_wake,
     )
+    from ouroboros.consciousness_clock import WAKE_TARGET_STATE_KEY
     from supervisor.state import control_value
     from supervisor.state_initialization import authority_reason
 
@@ -795,7 +796,8 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
     facts = {"source": str(path), "observed_at": utc_now_iso()}
     fields = (("enabled", "bg_consciousness_enabled"), ("stopped_by", STOP_SOURCE_KEY),  # owner, panic or agent_tool
               ("stored_next_wake_at", NEXT_WAKE_STATE_KEY), ("last_wake_ended_at", LAST_WAKE_STATE_KEY),
-              ("chosen_interval_sec", INTERVAL_STATE_KEY), ("last_skip", LAST_SKIP_STATE_KEY))
+              ("chosen_interval_sec", INTERVAL_STATE_KEY), ("last_skip", LAST_SKIP_STATE_KEY),
+              ("named_wake_time", WAKE_TARGET_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -825,46 +827,60 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
         "an allowance_exhausted last_skip MIN after that skip and after boot instead of at its reset.",
         "last_skip is the newest skipped wake with the allowance window it met (null is unknown). Not in this "
         "read (held in the supervisor's memory): other wake outcomes and errors, failure backoff, the current "
-        "allowance window and a live wake task."]
+        "allowance window and a live wake task.",
+        "named_wake_time is the time set_next_wakeup(at) stored, with when and the appointment standing then: it "
+        "shortens a delay only while ahead, and the settlement of a wake-up appointed after it was stored removes it "
+        "once that wake-up ends at or after it."]
     return json.dumps(facts, ensure_ascii=False, indent=2)
 
 
-def _set_next_wakeup(ctx: ToolContext, seconds: int) -> str:
-    """Choose the interval before the next consciousness wake-up.
+def _set_next_wakeup(ctx: ToolContext, seconds: int | None = None, at: str | None = None) -> str:
+    """Set the consciousness clock's two facts: ``seconds``, the interval from a wake-up's end to the next (clamped
+    into the owner's ``OUROBOROS_BG_WAKEUP_MIN``/``MAX`` and persisted as ``consciousness_next_interval_sec``), and
+    ``at``, a named time (``consciousness_clock``): at least one, stored in one state write or not at all.
 
-    The requested seconds are clamped into the owner's configured bounds
-    (``OUROBOROS_BG_WAKEUP_MIN``/``MAX``) and persisted on the runtime state as
-    ``consciousness_next_interval_sec``, where the alarm clock reads the choice
-    when it schedules the next wake. Any turn may call it (a wake-up picks its
-    own rhythm; a Main turn may adjust it); with consciousness off the choice is
-    stored, not refused, and applies once it is enabled. The alarm clock
-    (``consciousness.py``) reads the value when the wake-up ends.
+    Any turn may call it (a wake-up picks its own rhythm; a Main turn may adjust it); with consciousness off both are
+    stored, not refused. The alarm clock (``consciousness.py``) reads them when a wake-up ends, so a wake-up already
+    pending keeps its time: with consciousness on, a named time at or before it is refused. The receipt names only
+    what the write set, so a Main turn is not promised a wake it did not move (astra scope, round 7), and a backup
+    copy that failed beside a written primary, where the choice stands.
     """
-    from ouroboros.config import get_bg_wakeup_max_sec, get_bg_wakeup_min_sec
-    from supervisor.state import StateUnavailable, update_state
+    import time
 
-    try:
-        requested = int(seconds)
-    except (TypeError, ValueError):
-        return f"⚠️ TOOL_ARG_ERROR (set_next_wakeup): invalid seconds={seconds!r}"
+    from ouroboros import consciousness_clock
+    from ouroboros.config import get_bg_wakeup_max_sec, get_bg_wakeup_min_sec
+    from supervisor.state import StateUnavailable
+
+    def refused(text: str) -> str:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
+
+    at = None if isinstance(at, str) and not at.strip() else at  # an empty optional string names no time
+    if seconds is None and at is None:
+        return refused("⚠️ TOOL_ARG_ERROR (set_next_wakeup): give seconds (the interval), at (a named time) or both; "
+                       "nothing was stored.")
+    requested = target = None
+    if seconds is not None:
+        try:
+            requested = int(seconds)
+        except (TypeError, ValueError):
+            return f"⚠️ TOOL_ARG_ERROR (set_next_wakeup): invalid seconds={seconds!r}"
+    now = time.time()
+    if at is not None:
+        target, why = consciousness_clock.named_time(at, now=now)
+        if target is None:
+            return refused(f"⚠️ TOOL_ARG_ERROR (set_next_wakeup): {why}. Nothing was stored.")
     low, high = get_bg_wakeup_min_sec(), get_bg_wakeup_max_sec()
-    interval = max(low, min(high, requested))
+    interval = None if requested is None else max(low, min(high, requested))
     try:
-        state = update_state(lambda st: st.__setitem__("consciousness_next_interval_sec", interval))
+        seen = consciousness_clock.store_choice(interval=interval, at=str(at or "").strip(), target=target, now=now)
+    except consciousness_clock.PendingWakeKeepsItsTime as held:
+        return refused(consciousness_clock.pending_refusal(str(at).strip(), held.appointment_at, held.next_attempt))
     except StateUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=(
-            f"⚠️ CAPABILITY_UNAVAILABLE: the interval was not stored: runtime state is unavailable ({exc.reason}).")))
+            f"⚠️ CAPABILITY_UNAVAILABLE: nothing was stored: runtime state is unavailable ({exc.reason}).")))
     clamp_note = f" (requested {requested} s, clamped into {low}-{high} s)" if interval != requested else ""
-    from supervisor.state import control_value
-
-    known, enabled = control_value(state, "bg_consciousness_enabled")
-    if not (known and enabled):
-        return (f"OK: consciousness is {'off' if known else 'unknown (runtime state is recovering)'}; the next "
-                f"wake-up interval of {interval} s{clamp_note} is stored for when it is enabled.")
-    # The interval is finish-relative: the alarm reads it when a wake-up ends. Said plainly,
-    # so a Main turn is not promised a wake it did not move (astra scope, round 7).
-    return (f"OK: the wake-up interval is now {interval} s{clamp_note}; it applies from the end of the "
-            "next wake-up (a wake-up already pending keeps its time; a wake-up calling this sets its own next one).")
+    return consciousness_clock.choice_receipt(seen, interval=interval, clamp_note=clamp_note, at=str(at or "").strip(),
+                                              target=target, low=low, high=high, now=now) + seen.get("unsaved", "")
 
 
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",
@@ -960,6 +976,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         return (f"Current available models: {', '.join(available)}. Pass model and/or effort to switch, "
                 "or primary='return'/'wait' to go back to this turn's primary route.")
 
+    if (requested_primary or model) and ctx.active_model_override != getattr(ctx, "active_model", None):
+        ctx._pending_handover_reason = "mind_switch"
     return f"OK: switching to {', '.join(changes)} on next round." + (f" {effort_note}" if effort_note else "")
 
 
@@ -1088,6 +1106,16 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
         "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
     }, allow_empty=bool(silent))
+
+
+def staged_request_identity(ctx: ToolContext | None, tool: object, arguments: object) -> tuple:
+    """What staging compares (``_stage_checked_completion``), read for one recorded completion call.
+
+    A ``finish_task`` call is the normalized request it stages, so two spellings of one choice (an omitted or an
+    empty unused field, a named default) are one identity, as they were to the staging that admitted both. Another
+    command, or arguments this contract refuses, has no reader here: it is identical only to the same call."""
+    request = completion_request(ctx, arguments)[0] if tool == "finish_task" else None
+    return (tool, None, arguments) if request is None else (tool, request, None)
 
 
 def stage_completion_request(ctx: ToolContext, request: dict, *, source: str = "finish_task",

@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readdirSync, readFileSync } from 'node:fs';
-import { buildTimelineItemHtml } from '../modules/chat_activity.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { buildTimelineItemHtml, cardMetaKeys } from '../modules/chat_activity.js';
+import { createChatInstance } from '../modules/chat.js';
+import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 import {
-    reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskReasonPhrase, taskTerminalPhase,
+    childCauseFacts, childLineCause, reasonCodesNote, taskDoneIsTerminal, taskOutcomeSeverity, taskPresentation, taskReasonCodes, taskReasonDetail, taskReasonPhrase, taskTerminalPhase,
     summarizeChatLiveEvent,
 } from '../modules/log_events.js';
+import { timelineReadFields } from '../modules/chat_history_replay.js';
+import { updateLiveTimelineItem } from '../modules/chat_render_batch.js';
 import { TASK_CAUSE_PHRASES } from '../modules/task_reason_words.js';
+import { noteHandoverAttempt, terminalChildFrame } from '../modules/settled_card.js';
 
 const UNDESCRIBED = 'The recorded reason has no description yet.';
 // The author's stop sentence as a clause (the table's words are review's; the place is pinned here).
@@ -604,4 +608,326 @@ test('an owner stop over a held plan objective keeps the open-plan sentence besi
         outcome_axes: { objective: { status: 'fail', source: 'plan_review_cycles_exhausted', reason: 'plan_review_cycles_exhausted' },
             execution: { status: 'ok', plan_review: 'objections_open' } } };
     assert.ok(taskReasonDetail(record).includes('Objections to the plan were still open'), taskReasonDetail(record));
+});
+
+test('a settled child frame states its first coding attempt, its neighbours and no live debt the stored list denies', () => {
+    const fact = { status: 'incomplete', reason: 'initial_execution_unresolved', initial_execution: { state: 'failed', run_id: 'run-1' } };
+    const axes = { execution: { status: 'best_effort', reason_code: 'round_limit', actor_first_terminal: fact },
+        objective: { status: 'degraded', warning: 'tool_failure' }, review: { status: 'skipped' } };
+    // The adapter's own copy of the settled record (cardMetaKeys), as live task_done, replay and detail recovery hand it over.
+    const frame = (subagent_event, debt) => summarizeChatLiveEvent({ type: 'send_message', is_progress: true,
+        delegation_role: 'subagent', subagent_task_id: 'child', parent_task_id: 'root', subagent_event, status: 'completed',
+        reason_code: 'round_limit', result: 'Answer.',
+        ...cardMetaKeys({ outcome_axes: axes, ...(debt ? { delegated_runs_unreconciled: debt } : {}) }) });
+    const cause = [TASK_CAUSE_PHRASES.round_limit.replace(/\.$/, ''), TASK_CAUSE_PHRASES.configured_actor_first_failed.replace(/\.$/, ''),
+        TASK_CAUSE_PHRASES.tool_failure.replace(/\.$/, '')];
+    for (const event of ['completed', 'completed_warn']) {  // the normal progress frame and the warn fallback read alike
+        const live = frame(event, ['run-2']).fullBody, healed = frame(event, []).fullBody, unlisted = frame(event).fullBody;
+        assert.ok(live.includes(`${cause.join(' · ')} · ${TASK_CAUSE_PHRASES.delegated_custody_unreconciled}`), `${event}: ${live}`);
+        for (const body of [healed, unlisted]) {  // an explicit [] and an unlisted debt: neither is live debt
+            assert.ok(body.endsWith(cause.join(' · ')), `${event}: ${body}`);
+            assert.ok(!body.includes(TASK_CAUSE_PHRASES.delegated_custody_unreconciled), body);
+        }
+        assert.ok(live.includes('Answer.'));
+    }
+});
+
+test('the legacy child custody stamp is not current debt when the stored list is empty, even without axes', () => {
+    const legacy = { type: 'send_message', is_progress: true, delegation_role: 'subagent',
+        subagent_task_id: 'child', parent_task_id: 'root', subagent_event: 'completed', status: 'completed',
+        reason_code: 'delegated_custody_unreconciled', result: 'Answer.' };
+    const warning = TASK_CAUSE_PHRASES.delegated_custody_unreconciled;
+    assert.ok(summarizeChatLiveEvent(legacy).fullBody.includes(warning), 'a missing list has not reconciled the old stamp');
+    const settled = summarizeChatLiveEvent({ ...legacy, delegated_runs_unreconciled: [] }).fullBody;
+    assert.equal(settled, '## Report to parent\nAnswer.');
+});
+
+test('a settled child frame names the codes its cause leaves undescribed once in Details, and a described cause none', () => {
+    const settled = (reason_code, execution = {}, extra = {}) => summarizeChatLiveEvent({ type: 'send_message', is_progress: true,
+        delegation_role: 'subagent', subagent_task_id: 'child', parent_task_id: 'root', subagent_event: 'failed', status: 'failed',
+        reason_code, result: 'Answer.', outcome_axes: { execution: { status: 'failed', reason_code, ...execution } }, ...extra }).fullBody;
+    const occurrences = (text, part) => text.split(part).length - 1;
+    const code = 'task_done_lifecycle_fault', note = reasonCodesNote([code]);
+    const unknown = settled(code);  // a code with no sentence yet: the neutral sentence, then the exact code
+    assert.ok(unknown.endsWith(`${UNDESCRIBED}\n\n${note}`), unknown);
+    assert.equal(occurrences(unknown, note), 1, unknown);
+    const described = settled('worker_crash_signal');  // a described cause reveals no code
+    assert.ok(described.endsWith('The worker process running the task crashed'), described);
+    assert.ok(!described.includes('Recorded reason'), described);
+    // An author's stop states its cause through its own branch: the code is still named once, never twice.
+    const stopped = settled(code, { status: 'ok', task_completion: { action: 'stop', rationale: 'The export still fails.' } },
+        { subagent_event: 'completed', status: 'completed' });
+    assert.ok(stopped.includes('The recorded reason has no description yet'), stopped);
+    assert.equal(occurrences(stopped, note), 1, stopped);
+});
+
+// chat.js fetchFullLineOutput: past the wire's 4000 characters Show full reads the task and composes its line again, so the
+// full result and trace come with what the capped Details stated (the first coding attempt, an undescribed code), once each.
+const FULL_RESULT = 'REPORT_HEAD\n' + 'The retained answer has a complete paragraph.\n'.repeat(120) + 'REPORT_TAIL';
+const FULL_TRACE = 'TRACE_HEAD\n' + 'Read the recorded evidence.\n'.repeat(160) + 'TRACE_TAIL';
+const FIRST_ATTEMPT = { status: 'incomplete', reason: 'initial_execution_unresolved', initial_execution: { state: 'failed', run_id: 'run-1' } };
+const DEBT = TASK_CAUSE_PHRASES.delegated_custody_unreconciled.replace(/\.$/, '');
+const OPEN_PLAN = TASK_CAUSE_PHRASES.terminal_plan_review_open;
+for (const [name, fields, stated, detailOnly = {}] of [
+    ['a first coding attempt beside another primary cause', { status: 'completed', reason_code: 'round_limit', outcome_axes: {
+        execution: { status: 'best_effort', reason_code: 'round_limit', actor_first_terminal: FIRST_ATTEMPT },
+        objective: { status: 'degraded' }, review: { status: 'skipped' } }, delegated_runs_unreconciled: ['run-2'] },
+    [TASK_CAUSE_PHRASES.configured_actor_first_failed.replace(/\.$/, '')], { terminal_plan_review_open: true }],
+    ['a cause with no description yet', { status: 'failed', reason_code: 'task_done_lifecycle_fault', outcome_axes: {
+        execution: { status: 'failed', reason_code: 'task_done_lifecycle_fault' } } },
+    [UNDESCRIBED, 'Recorded reason: task_done_lifecycle_fault']],
+]) {
+    test(`Show full keeps what the capped Details stated, once, beside the full result and trace: ${name}`, async () => {
+        const detail = { type: 'send_message', is_progress: true, chat_id: 2, task_id: 'child-1', delegation_role: 'subagent',
+            parent_task_id: 'root-1', root_task_id: 'root-1', subagent_task_id: 'child-1', subagent_role: '',
+            subagent_event: fields.status, model: 'x-ai/grok-4.7', ts: '2026-10-25T14:12:58Z', ...fields,
+            result: FULL_RESULT, trace_summary: FULL_TRACE };
+        const frame = { ...detail, history_id: 'child-terminal', role: 'system', content: '', text: '', result: FULL_RESULT.slice(0, 4000), result_truncated: true,
+            trace_summary: FULL_TRACE.slice(0, 4000), trace_summary_truncated: true };
+        const rows = [{ chat_id: 2, role: 'system', is_progress: true, content: 'Reading the brief.', narration: true,
+            ts: '2026-10-25T13:35:40Z', task_id: 'root-1' }, frame];
+        const reads = [];  // the line's full-output reads (chat.js fetchFullLineOutput), answered below
+        const { prior, mount } = installDom(async (url, init = {}) => {
+            if (String(url) === '/api/tasks/child-1' && init.cache === 'no-store') return new Promise((resolve) => reads.push(resolve));
+            return { ok: true, json: async () => {
+                if (String(url).startsWith('/api/chat/history')) return { messages: rows, page_cursor: 'recent', has_more: false,
+                    next_cursor: null, window: { complete: true } };
+                if (String(url) === '/api/tasks/child-1') return detail;  // the card's own detail read
+                return { active_direct_turns: [] };
+            } };
+        });
+        // This stub keeps parsed nodes flat: observe the real renderer's markup of the line.
+        let rendered = '';
+        const html = Object.getOwnPropertyDescriptor(ElementStub.prototype, 'innerHTML');
+        Object.defineProperty(ElementStub.prototype, 'innerHTML', { ...html, set(value) {
+            if (/^\s*<div\s+class="chat-live-line\s/.test(String(value)) && /REPORT_HEAD|Show full/.test(String(value))) rendered = String(value);
+            html.set.call(this, value);
+        } });
+        const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
+        let generation = 0;
+        const stateSnapshots = { begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+            gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} };
+        const instance = createChatInstance({ ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount, asPanel: true });
+        try {
+            await instance.refreshHistory({ revision: 1 });
+            const card = walkCard(globalThis.document.byId.get('chat-messages'), 'child-1');
+            assert.ok(card);
+            card.querySelector('[data-live-disclosure]').click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const timeline = card.querySelector('[data-live-timeline]');
+            const toggle = () => {
+                const line = timeline.querySelector('.chat-live-line.expandable');
+                // The fixture has no general closest/bubbling: dispatch the real listener.
+                const target = { closest: (selector) => (selector === '.chat-live-line.expandable' ? line : null) };
+                for (const fn of timeline.listeners.get('click') || []) fn({ target, stopPropagation() {} });
+            };
+            toggle();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const capped = rendered;  // opened, the full read still pending
+            assert.match(capped, /Loading full output/);
+            assert.doesNotMatch(capped, /REPORT_TAIL/);
+            assert.equal(reads.length, 1, 'Show full reads the task once');
+            reads.shift()({ ok: true, json: async () => ({ ...detail, ...detailOnly }) });
+            for (let tick = 0; tick < 30 && !rendered.includes('REPORT_TAIL'); tick++) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            const occurrences = (text, part) => text.split(part).length - 1;
+            assert.match(rendered, /TRACE_TAIL/);
+            assert.equal(occurrences(rendered, 'The retained answer has a complete paragraph.'), 120, 'the full result, undistorted');
+            assert.equal(occurrences(rendered, 'Read the recorded evidence.'), 160, 'the full trace, undistorted');
+            for (const sentence of stated) {
+                assert.equal(occurrences(capped, sentence), 1, `the capped Details state: ${sentence}`);
+                assert.equal(occurrences(rendered, sentence), 1, `Show full keeps it, once: ${sentence}`);
+            }
+            if (detailOnly.terminal_plan_review_open) {
+                assert.equal(occurrences(capped, OPEN_PLAN), 0, 'the frame does not carry the detail-only flag');
+                assert.equal(occurrences(rendered, OPEN_PLAN), 1);
+                assert.equal(occurrences(capped, DEBT), 1);
+                assert.equal(occurrences(rendered, DEBT), 1);
+                rows[rows.length - 1] = { ...frame, delegated_runs_unreconciled: [] };
+                await instance.refreshHistory({ revision: 2 });
+                assert.equal(walkCard(globalThis.document.byId.get('chat-messages'), 'child-1'), card);
+                assert.match(rendered, /data-expanded="1"/, 'the same disclosure stays open');
+                assert.match(rendered, /REPORT_TAIL/);
+                assert.match(rendered, /TRACE_TAIL/);
+                assert.equal(occurrences(rendered, OPEN_PLAN), 1, 'a missing frame flag does not erase the detail fact');
+                assert.equal(occurrences(rendered, stated[0]), 1);
+                assert.equal(occurrences(rendered, DEBT), 0);
+                const healed = rendered;
+                toggle();
+                toggle();
+                assert.equal(rendered, healed);
+                assert.equal(reads.length, 0, 'neither reconciliation nor reopening reads the full detail again');
+            }
+        } finally {
+            instance.destroy();
+            restoreDom(prior);
+            Object.defineProperty(ElementStub.prototype, 'innerHTML', html);
+        }
+    });
+}
+
+// R6: the child's ending arrives in several frames. The cause line and the timeline fold are its two real
+// writers; each is exercised as its own function, not through a stub DOM that cannot see the closed line.
+test('an origin-less cancellation folds its explicit custody debt into its cause, and an emptied list clears it', () => {
+    const debt = { subagent_event: 'cancelled', status: 'cancelled', reason_code: 'owner_requested_cancel',
+        delegated_runs_unreconciled: ['run-1'] };
+    const line = childLineCause(debt);
+    assert.match(line.detail, /never reconciled/, 'the separate custody warning survives a cancellation recorded without an origin');
+    assert.match(line.detail, /owner_requested_cancel/, 'beside its exact code');
+    assert.doesNotMatch(line.detail, /Stopped (from|by|with)|Requested by/, 'and no actor is invented');
+    assert.doesNotMatch(line.lead, /never reconciled/);
+    assert.doesNotMatch(childLineCause({ ...debt, delegated_runs_unreconciled: [] }).detail, /never reconciled/,
+        'an explicit empty list answers the debt without a stale warning');
+    assert.doesNotMatch(childLineCause({ ...debt, reason_code: 'delegated_custody_unreconciled',
+        delegated_runs_unreconciled: [] }).detail, /never reconciled/, 'the stamp whose known list is empty reads healed');
+    assert.doesNotMatch(childLineCause({ subagent_event: 'cancelled', status: 'cancelled',
+        reason_code: 'owner_requested_cancel' }).detail, /never reconciled/, 'a missing list proves nothing');
+});
+
+test('a frame of the outcome alone keeps the report and trace, retains an unstated debt, and an explicit [] clears it', () => {
+    // R6: three real frames through the child summarizer and the live fold — the terminal notice with
+    // report, trace and open debt, then a status-only outcome rewording the reason, then the healed list.
+    const key = 'subagent-lifecycle:kid-a';
+    const record = { items: [] };
+    const frame = (extra) => summarizeChatLiveEvent({ type: 'send_message', is_progress: true,
+        delegation_role: 'subagent', subagent_task_id: 'kid-a', parent_task_id: 'root', subagent_event: 'completed',
+        status: 'completed', ...extra });
+    const live = (summary, second) => updateLiveTimelineItem(record, summary, {
+        ts: `12:00:0${second}`, rawTs: `2026-11-21T12:00:0${second}Z`, syntheticKey: key,
+        headline: summary.headline, inPlaceByKey: true });
+    live(frame({ reason_code: 'round_limit', delegated_runs_unreconciled: ['run-1'],
+        result: 'Report head the answer Report tail', trace_summary: 'Trace head Trace tail' }), 1);
+    assert.equal(record.items.length, 1);
+    const item = record.items[0];
+    assert.equal(item.fullRef, 'kid-a');
+    assert.match(item.fullOutput, /Report head the answer Report tail/);
+    assert.match(item.fullOutput, /Trace head Trace tail/);
+    assert.equal(item.childCause._result_text_present, true);
+    assert.deepEqual(item.childCause.delegated_runs_unreconciled, ['run-1']);
+    assert.equal(item.childCause.reason_code, 'round_limit');
+    assert.match(item.fullBody, /never reconciled/, 'the notice states the open debt');
+
+    // The outcome alone (task_done, a late review's current outcome): no report, no debt stated, a new reason.
+    const outcome = { reason_code: 'final_message',
+        outcome_axes: { execution: { status: 'ok', reason_code: 'final_message' } } };
+    assert.equal(live(frame(outcome), 2).timelineUpdate, 'patch-at');
+    assert.equal(item.childCause.reason_code, 'final_message', 'the new authoritative reason replaces the old one');
+    assert.deepEqual(item.childCause.delegated_runs_unreconciled, ['run-1'], 'an absent current debt keeps the known open warning');
+    assert.equal(item.childCause._result_text_present, true, 'the answer\'s presence stays stated until a frame states it again');
+    assert.match(item.fullOutput, /Report head the answer Report tail/, 'the report an outcome-only frame never carried stays');
+    assert.match(item.fullOutput, /Trace head Trace tail/, 'and so does the trace');
+    assert.equal(item.fullRef, 'kid-a', 'no further detail read is demanded');
+    assert.match(item.fullBody, /never reconciled/, 'the reworded line keeps the warning beside the kept report');
+
+    // The explicit empty list is a statement: it clears the debt with the same report and trace.
+    assert.equal(live(frame({ ...outcome, delegated_runs_unreconciled: [] }), 3).timelineUpdate, 'patch-at');
+    assert.deepEqual(item.childCause.delegated_runs_unreconciled, [], 'and the newest cause words the line');
+    assert.match(item.fullOutput, /Report head the answer Report tail/);
+    assert.match(item.fullOutput, /Trace head Trace tail/);
+    assert.doesNotMatch(item.fullBody, /never reconciled/, 'an explicit empty list clears the warning');
+
+    // An identical cause reuses the stored object.
+    assert.equal(timelineReadFields({ fullRef: 'kid-a', truncated: false, childCause: item.childCause },
+        { fullRef: 'kid-a', childCause: item.childCause }).childCause, item.childCause);
+});
+
+// R7 web-only: each cause keeps its own scope; explicit absence and [] stay distinct.
+test('an origin-less cancel whose debt list is known empty still warns about missing result files', () => {
+    const evt = { subagent_event: 'cancelled', status: 'cancelled', reason_code: 'owner_requested_cancel',
+        delegated_runs_unreconciled: [], artifact_bundle: { status: 'missing' } };
+    const line = childLineCause(evt);
+    assert.ok(line.detail.includes(TASK_CAUSE_PHRASES.artifacts_unavailable), line.detail);
+    assert.doesNotMatch(line.detail, /never reconciled/, 'the known empty list answers the custody stamp');
+    assert.doesNotMatch(line.detail, /Stopped (from|by|with)|Requested by/, 'no actor is invented');
+});
+
+test('an author Stop still states the display-only first attempt beside its own rationale', () => {
+    const fact = { status: 'incomplete', reason: 'initial_execution_display_only',
+        initial_execution: { state: 'interrupted', run_id: 'run-9' } };
+    const evt = { type: 'send_message', is_progress: true, delegation_role: 'subagent', subagent_task_id: 'kid-b',
+        parent_task_id: 'root', subagent_event: 'completed', status: 'completed', reason_code: 'final_message',
+        result: 'Answer.',
+        outcome_axes: { execution: { status: 'ok', reason_code: 'final_message',
+            task_completion: { action: 'stop', rationale: 'The export still fails.' }, actor_first_terminal: fact } } };
+    const body = summarizeChatLiveEvent(evt).fullBody;
+    assert.ok(body.includes(STOPPED), body);
+    assert.ok(body.includes(TASK_CAUSE_PHRASES.configured_actor_first_interrupted.replace(/\.$/, '')), body);
+    assert.ok(body.includes('The export still fails.'), body);
+});
+
+test('a typed terminal notice is recorded fact: a later status frame keeps the report and trace, never the old headline', () => {
+    const notice = 'Done with warnings. Child (child kid-c of root). Some cause words.';
+    const evt = { type: 'send_message', is_progress: true, delegation_role: 'subagent', subagent_task_id: 'kid-c',
+        parent_task_id: 'root', subagent_event: 'completed', status: 'completed', reason_code: 'final_message',
+        system_type: 'subagent_terminal_notice', text: notice, result: 'The answer.', trace_summary: 'The trace.',
+        outcome_axes: { execution: { status: 'ok', reason_code: 'final_message' } } };
+    const view = summarizeChatLiveEvent(evt);
+    assert.doesNotMatch(view.fullBody, /Done with warnings/, 'the supervisor\'s generated headline is not a current warning');
+    assert.match(view.fullOutput, /The answer\./, 'the report stays as it was');
+    assert.match(view.fullOutput, /The trace\./, 'and so does the trace');
+});
+
+test('a canonical review PASS without a decision does not resurrect the legacy pending review_status', () => {
+    const stale = { review_status: { status: 'pending', acceptance_decision: { status: 'pending', reason: 'plan_review_advisory' } } };
+    const canonical = { status: 'completed', reason_code: 'final_message',
+        outcome_axes: { execution: { status: 'ok', reason_code: 'final_message' }, review: { status: 'pass' } }, ...stale };
+    assert.doesNotMatch(taskReasonDetail(canonical), /plan review/i);
+    assert.match(taskReasonDetail({ status: 'completed', reason_code: 'final_message', ...stale }), /plan review/i,
+        'a truly old record without the canonical axis keeps reading its legacy carrier');
+});
+
+// The live route, evaluated against the REAL frame builder (settled_card.js). Only the chat instance's own
+// furniture is stubbed: the route's body, the frame it hands over and the attempt reconciliation it owns are the
+// shipped ones, so a helper that drops a fact fails here rather than in a re-implementation of it.
+function liveSubagentTerminalRoute({ records = new Map(), onFrame = () => true, onHydrate = () => {} } = {}) {
+    const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+    // Slice by the function's own name: its phase default comes from the real selector, so the
+    // harness injects `taskTerminalPhase` instead of pinning a signature that travels with it.
+    const start = chatSource.indexOf('    function routeSubagentTerminalToCard(');
+    const end = chatSource.indexOf('\n    function updateLiveCardFromLogEvent(evt) {', start);
+    assert.ok(start > 0 && end > start, 'the live route moved — update this test');
+    const parents = new Map([['kid-r', { parentId: 'root', role: 'scout' }], ['kid-s', { parentId: 'root', role: 'scout' }]]);
+    return Function('subagentChildParents', 'liveCardRecords', 'terminalChildFrame', 'updateSubagentCardFromEvent',
+        'noteHandoverAttempt', 'withStableViewport', 'hydrateOpenSettledChild', 'hydrateCardReviews', 'taskDoneIsTerminal', 'taskTerminalPhase',
+        `${chatSource.slice(start, end)}\nreturn routeSubagentTerminalToCard;`)(
+        parents, records, terminalChildFrame, onFrame, noteHandoverAttempt,
+        () => {},  // the viewport writer: the stored read's own paint, not this witness's business
+        onHydrate, () => {}, taskDoneIsTerminal, taskTerminalPhase);
+}
+
+test('the real routeSubagentTerminalToCard forwards cause facts and only the carried text', () => {
+    let received = null;
+    const route = liveSubagentTerminalRoute({ onFrame: (evt) => { received = evt; return true; } });
+    assert.equal(route('kid-r', { type: 'task_done', task_id: 'kid-r', status: 'failed',
+        reason_code: 'delegated_custody_unreconciled', reason_detail: 'the daemon stopped answering',
+        artifact_status: 'missing', delegated_runs_unreconciled: ['run-9'],
+        result: 'partial report', error: 'daemon unreachable', result_truncated: true,
+        ts: '2026-11-21T10:00:00Z' }), true);
+    assert.equal(received.subagent_event, 'failed');
+    assert.equal(received.delegation_role, 'subagent');
+    assert.equal(received.reason_code, 'delegated_custody_unreconciled');
+    assert.deepEqual(received.delegated_runs_unreconciled, ['run-9']);
+    // The cause facts the source stated and the card's own meta carry list does not: they travel only because the
+    // frame builder spreads the shared cause facts, not because a key survived by accident.
+    assert.equal(received.reason_detail, 'the daemon stopped answering');
+    assert.equal(received.artifact_status, 'missing');
+    assert.equal(received.result, 'partial report');
+    assert.equal('trace_summary' in received, false, 'a text key the frame does not carry is not invented');
+    assert.equal(received.error, 'daemon unreachable');
+    assert.equal(received.result_truncated, true, 'the truncation flag travels beside the text it truncates');
+    assert.equal(received.trace_summary_truncated, undefined, 'and no flag is invented for a text the frame does not carry');
+    assert.equal(received._result_text_present, true, 'the source stated a report, and the frame says so');
+});
+
+test('the real route keeps the stored attempt and handover reconciliation of its own card', () => {
+    const record = { finished: false };
+    const route = liveSubagentTerminalRoute({ records: new Map([['kid-s', record]]) });
+    const detail = { type: 'task_done', task_id: 'kid-s', status: 'completed', task_attempt: 2,
+        authoring_handovers: [{ from_model: 'm-one', to_model: 'm-two', status: 'selected' }],
+        result: 'the stored report', ts: '2026-11-21T10:00:00Z' };
+    assert.equal(route('kid-s', detail, true), true);
+    assert.equal(record.handoverAttempt, 2, 'the stored attempt is the card\'s own');
+    assert.deepEqual(record.handoverRows, detail.authoring_handovers, 'the stored handover history is the card\'s own');
 });

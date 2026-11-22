@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.agent_task_pipeline as pipeline
+from tests._workspace_git import git_repository
 
 
 def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path, monkeypatch):
@@ -25,6 +26,33 @@ def test_direct_project_completion_writes_the_real_last_result_pointer(tmp_path,
     assert get_project(tmp_path, project["id"])["last_task_result_id"] == task["id"]
     assert pipeline.load_task_result(tmp_path, task["id"])["result"] == "Room evidence retained."
     assert not any(event["type"] == "project_digest" for event in pending)
+
+
+def test_quiet_salvage_keeps_the_original_record_separate_from_its_notice(tmp_path, monkeypatch):
+    from tests.test_schedule_report_door import ceiling, run_metadata
+
+    tid = "reference-schedule"
+    text = "The retained reference report.\nOne record remains to be checked."
+    task = {"id": tid, "type": "task", "chat_id": 1, "text": "Check the references.", "metadata": run_metadata(tid),
+            "task_contract": {"capability_ceiling": ceiling()}}
+    pending, kept = [], []
+
+    def preserve(root, task_id, original):
+        kept.append((root, task_id, original))
+        return "saved-report.txt"
+
+    monkeypatch.setattr("ouroboros.observability.preserve_salvaged_output", preserve)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_k: None)
+    pipeline.emit_task_results(
+        SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, pending, task, text,
+        {"terminal_origin": "host_salvage", "execution_status": "failed", "reason_code": "tool_failure"},
+        {"tool_calls": [], "reasoning_notes": []}, 0.0, tmp_path / "logs",
+    )
+    assert kept == [(tmp_path, tid, text)]
+    result = pipeline.load_task_result(tmp_path, tid)
+    assert result["result"] == text and result["terminal_salvage_path"] == "saved-report.txt"
+    assert result["terminal_host_notice"] and text not in result["terminal_host_notice"]
+    assert not any(text in str(event.get("text", "")) for event in pending)
 
 
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
@@ -675,12 +703,10 @@ def test_requested_file_result_completes_without_committing_the_worktree(tmp_pat
     """
     import subprocess
 
-    repo = tmp_path / "workspace"
-    repo.mkdir()
+    repo = git_repository(tmp_path / "workspace", unborn=True)
     def git(*args):
         return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
 
-    git("init", "-q")
     (repo / "answer.txt").write_text("old\n", encoding="utf-8")
     git("add", "answer.txt")
     git("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "base")

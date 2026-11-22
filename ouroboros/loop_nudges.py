@@ -7,20 +7,27 @@ Every-round facts ride the facts line (``loop_messages``)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
 import queue
 
+from itertools import groupby, takewhile
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros import task_pacing
 from ouroboros.nanny_pacing import nanny_burn_fact, nanny_metered_since_delegate_activity
 from ouroboros._outcome_receipts import red_check_fact
-from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
+from ouroboros.outcomes import (
+    _OK_TOOL_STATUSES, _ROOT_WRITE_TOOLS, extract_final_answer, result_unexamined,
+    reviewable_effect_projection, turn_has_reviewable_effects,
+)
 # D18b: the trace-touched skill-name scan lives with the readiness predicate that
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
 from ouroboros.skill_readiness import skill_names_touched_by_trace as _skill_names_touched_by_trace  # noqa: F401 -- historical name
 from ouroboros.tool_error_words import check_cause, red_check_phrase
+from ouroboros.tool_policy import BUILTIN_NAMESPACE
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 from ouroboros.tools.registry import ToolRegistry
 
 
@@ -388,14 +395,6 @@ def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
         return False
 
 
-def _callable_tools(tools: Any) -> Optional[frozenset]:
-    """The tools this actor may call now; None when unreadable, and then the notice withholds no path."""
-    try:
-        return frozenset(tools.available_tools())
-    except Exception:
-        return None
-
-
 RED_CHECK_NOTICE = "red_check_notice"  # the hold cause of the red check stated alone; beside the other facts the hold is theirs
 
 
@@ -415,7 +414,10 @@ def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_
     lines: List[str] = []
     red = red_check_fact(receipt_rows)
     red_due = bool(red) and not red["passed_after"] and not red_told
-    callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+    try:  # a path this actor cannot call is never offered (a level's withheld name stays shown, В31=B); unreadable: none
+        callable_tools = frozenset(row["name"] for row in tools.callable_rows(BUILTIN_NAMESPACE))
+    except Exception:
+        callable_tools = None
     can_check = callable_tools is None or "verify_and_record" in callable_tools
     # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
     # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
@@ -506,10 +508,403 @@ def _claim_pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: st
     return notice
 
 
+def _end_authoring_handover(ctx: Any, llm_trace: Dict[str, Any], handover: Dict[str, Any], status: str,
+                            **facts: Any) -> None:
+    """Record the successor's act on its own row. Earlier switches keep their history."""
+    handover.update(status=status, **facts)
+    llm_trace.pop("authoring_handover_incomplete", None)
+    ctx._authoring_handover = None
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict) and usage.get("reason_code") == "authoring_handover_incomplete":
+        if usage.get("execution_status") == "degraded":
+            usage.pop("execution_status")
+        usage.pop("reason_code", None)
+
+
+def _working_calls(calls: Any) -> list:
+    """The calls that show a successor working: successful, neither a completion request nor schema discovery."""
+    from ouroboros.tool_capabilities import SCHEMA_DISCOVERY_TOOLS, substantive_tool_calls
+
+    return [call for call in substantive_tool_calls(calls) if call.get("is_error") is False
+            and call.get("status") in _OK_TOOL_STATUSES and call.get("tool") not in SCHEMA_DISCOVERY_TOOLS]
+
+
+def observe_handover_work(ctx: Any, trace: dict, calls: list) -> None:
+    """The completed batch belongs to this author, even if the next round switches or ends."""
+    handover = getattr(ctx, "_authoring_handover", None)
+    if handover and _working_calls(calls):
+        _end_authoring_handover(ctx, trace, handover, "recovered", work_observed=True)
+
+
+def _worked_handover(ctx: Any, trace: dict, request: dict) -> Optional[dict]:
+    """The row this request's own response ended by its work, for the choice the same response made.
+
+    A batch ends the handover (``observe_handover_work``) before the delivery gates accept that response's
+    completion request. The request names its response by the tool count it was staged under; the row is that
+    response's only when the first successful work since the handover lies in the response's own round. A request
+    held and then selected again, a later reply, another round's work and a forced reply (which stages nothing)
+    name no such row, and an execution that holds the row only as another one's history has none to name."""
+    rows = (getattr(ctx, "_accumulated_usage", None) or {}).get("authoring_handovers")
+    routes, calls = trace.get("route_handovers"), trace.get("tool_calls") or []
+    row = rows[-1] if isinstance(rows, list) and rows and isinstance(routes, list) and routes else None
+    start = (request.get("observation") or {}).get("tool_count")
+    if (not isinstance(row, dict) or row is not routes[-1] or row.get("status") != "recovered"
+            or row.get("work_observed") is not True or type(start) is not int
+            or type(baseline := row.get("tool_calls_at_handover")) is not int
+            or not baseline <= start < len(calls) or not isinstance(calls[start], dict)):
+        return None
+    round_id = calls[start].get("round_id")
+    own = [call for call in calls[start:] if isinstance(call, dict) and call.get("round_id") == round_id]
+    return row if _working_calls(own) and not _working_calls(calls[baseline:start]) else None
+
+
+def _solve_round(call: Any, execution: str, through: int) -> int:
+    """Logical round of a usable solve, not a provider attempt or a forced reply."""
+    if not isinstance(call, dict):
+        return 0
+    number = call.get("round")
+    return number if (
+        type(number) is int and 0 < number <= through and call.get("execution_id") == execution
+        and call.get("round_id") == f"{execution}:round:{number}" and call.get("usable_solve_response") is True
+        and isinstance(call.get("llm_call_id"), str) and call["llm_call_id"]
+        and isinstance(call.get("model"), str) and call["model"].strip()
+    ) else 0
+
+
+def _runs(names: Any) -> list:
+    """The order in which the name changed: consecutive repeats are one."""
+    return [name for name, _ in groupby(names)]
+
+
+def _receipt_authorship(state: dict, calls: list, handover: dict) -> tuple:
+    """``(last usable reply, the handover's successor rounds)`` as the saved execution's own call receipts say.
+
+    One source answers at every saved boundary: each usable solve keeps its receipt (execution, logical round,
+    model) and each tool result names the round that asked for it. The rounds are the target's last series of
+    replies, entered from the row's predecessor, read round after round from the predecessor's last tool round
+    (the anchor); a round between two solves counts only when every attempt it recorded failed (a provider's
+    refusal, an exhausted reply), or when it recorded none (a view refused before sending leaves no receipt) and
+    the accepted routes, kept apart from the receipts, name the same authors in the same order. ``set()``: the
+    target has not answered yet. ``None``: the receipts cannot say: a round neither record accounts for, a solve
+    out of order, a predecessor the row does not name, or another author since. Returning to the same name
+    reopens no row: where the target answered in an earlier series too, the last series is this row's only when
+    the rows written at this same tool count name the receipts' last changes of author one for one and no
+    earlier change is the same pair (each host switch after tools writes its own row; a switch the mind made
+    writes none). Counts bound the slice, not its authorship. Old call rows stamp the execution and logical
+    round, not the task attempt (``attempt`` is the provider retry): the verified checkpoint owns the task
+    identity, so its usage's attempt must be its envelope's.
+    """
+    usage = state["usage"]
+    attempt, through = state.get("task_attempt"), state.get("round_idx")
+    execution, refs = usage.get("execution_id"), usage.get("llm_call_refs")
+    if (type(attempt) is not int or attempt < 1 or type(usage.get("_task_attempt")) is not int
+            or usage["_task_attempt"] != attempt or type(through) is not int
+            or not isinstance(refs, list) or not isinstance(execution, str) or not execution):
+        return {}, None
+    refs = [ref for ref in refs if isinstance(ref, dict)]
+    solves = [ref for ref in refs if ref.get("usable_solve_response") is True]
+    if not solves or not all(_solve_round(ref, execution, through) for ref in solves):
+        return {}, None
+    reply, baseline = solves[-1], handover.get("tool_calls_at_handover")
+    if type(baseline) is not int or not 0 < baseline <= len(calls) or not isinstance(calls[baseline - 1], dict):
+        return reply, None
+    failed: Dict[Any, bool] = {}  # a round whose every recorded attempt failed, none naming another execution
+    for ref in refs:
+        failed[ref.get("round")] = (failed.get(ref.get("round"), True) and bool(ref.get("failure_code"))
+                                    and ref.get("execution_id") in (None, execution))
+    accepted = usage.get("accepted_routes")  # written at each accepted reply whose route differs from the last one's
+    routes = [row["to_binding"][0] for row in (accepted if isinstance(accepted, list) else ())
+              if isinstance(row, dict) and isinstance(row.get("to_binding"), (list, tuple)) and row["to_binding"]]
+    unsent = _runs(routes) == _runs(ref["model"] for ref in solves)  # no reply is missing from the receipts
+    pair, anchor = (handover.get("from_model"), handover.get("to_model")), calls[baseline - 1].get("round_id")
+    span, last, previous, met, turns = set(), 0, None, False, []  # turns: each change of author from the anchor on
+    for ref in solves:
+        if not last:
+            if not anchor or ref["round_id"] != anchor:
+                continue
+        elif ref["round"] <= last or not all(failed.get(gap, unsent) for gap in range(last + 1, ref["round"])):
+            return reply, None
+        elif ref["model"] != previous:
+            turns.append((previous, ref["model"]))
+            span = set()
+        if last and ref["model"] == pair[1]:  # the anchor itself is a tool round from before the handover
+            met = True
+            span.add(ref["round_id"])
+        last, previous = ref["round"], ref["model"]
+    if not last or turns[-1:] != [pair]:
+        return reply, None if met or not last else set()
+    if sum(turn[1] == pair[1] for turn in turns) > 1:  # several series: which departure the last row names
+        rows = usage.get("authoring_handovers")
+        if not isinstance(rows, list) or not rows or rows[-1] != handover:
+            return reply, None
+        named = [(row.get("from_model"), row.get("to_model")) for row in takewhile(
+            lambda row: isinstance(row, dict) and row.get("tool_calls_at_handover") == baseline, reversed(rows))][::-1]
+        if turns[-len(named):] != named or pair in turns[:-len(named)]:
+            return reply, None
+    return reply, span
+
+
+_NO_DECLARATION = object()  # this spelling proves nothing of the call's arguments; keep its recorded copy.
+
+
+def _declared_arguments(spelling: Any) -> Any:
+    """The one object a declared ``arguments`` spelling holds, or ``_NO_DECLARATION``.
+
+    One decoder for both readers of a saved batch. Text that does not parse, a JSON value that is not an
+    object, and a save that wrote the object itself where its JSON text belongs are the same gap: they name
+    no request. Shape is checked before it is parsed because ``json.loads`` answers a spelling that is not
+    text with ``TypeError``, which a ``ValueError`` reader would not catch, and a resume is not the place to
+    learn a save's shape from an exception."""
+    if not isinstance(spelling, (str, bytes, bytearray)):
+        return _NO_DECLARATION
+    try:
+        arguments = json.loads(spelling)
+    except ValueError:
+        return _NO_DECLARATION
+    return arguments if isinstance(arguments, dict) else _NO_DECLARATION
+
+
+def _recorded_call_arguments(call: Any, messages: Any) -> Any:
+    """One recorded call's arguments as the transcript's one unambiguous naming of its ID and tool holds them.
+
+    The fallback for saves written before the executor stamped the result record. Providers reuse a call ID
+    between responses (tool_call_log), and those saves carry no axis saying which round spelled a naming: the
+    first match could hand an earlier round's complete choice to this batch, and no compatibility rule ever
+    required that pick. So a second naming of one ID, or one that cannot be decoded, ends the search with the
+    call's own recorded copy — what those restores were proven to settle on before any transcript was read
+    for it. ``_transcript_arguments`` binds the record era to the call's own batch instead. Nothing absent is
+    inferred and no disk is read; the trace's rendered ``args`` stay the last resort."""
+    call_id, tool = call.get("tool_call_id"), call.get("tool")
+    if not isinstance(call_id, str) or not call_id:
+        return call.get("args")  # a command that names no ID matches nothing anywhere in the transcript
+    found = _NO_DECLARATION
+    for message in messages if isinstance(messages, list) else ():
+        for recorded in (message.get("tool_calls") or ()) if isinstance(message, dict) else ():
+            function = recorded.get("function") if isinstance(recorded, dict) else None
+            if (isinstance(function, dict) and recorded.get("id") == call_id
+                    and function.get("name") == tool):
+                if found is not _NO_DECLARATION:
+                    return call.get("args")  # two namings: the save cannot say which round spelled them
+                spelling = _declared_arguments(function.get("arguments"))
+                if spelling is _NO_DECLARATION:
+                    return call.get("args")  # this naming cannot be resolved: it proves nothing either
+                found = spelling
+    return call.get("args") if found is _NO_DECLARATION else found
+
+
+def _batch_declaration(row: Any, tool_call_id: Any, tool: Any) -> Any:
+    """The complete arguments one assistant batch declares under one call ID: a lone naming of this tool.
+
+    Named twice in its own response, named by another command, unreadable or absent is no proof: ``_NO_DECLARATION``."""
+    found = _NO_DECLARATION
+    declarations = row.get("tool_calls") if isinstance(row, dict) else None
+    for declared in declarations if isinstance(declarations, list) else ():
+        function = declared.get("function") if isinstance(declared, dict) else None
+        if not (isinstance(declared, dict) and declared.get("id") == tool_call_id and isinstance(function, dict)):
+            continue
+        if found is not _NO_DECLARATION or function.get("name") != tool:
+            return _NO_DECLARATION
+        found = _declared_arguments(function.get("arguments"))
+        if found is _NO_DECLARATION:
+            return _NO_DECLARATION
+    return found
+
+
+def _transcript_arguments(controls: list, messages: Any) -> list:
+    """For each recorded command of one round (the caller checked their ``round_id``): the arguments as its own
+    batch declares them in the transcript, or the call's recorded copy — never another round's spelling.
+
+    The executor stamps each result row with the round it ran that call in (``tool_result_record``); the batch
+    whose result records name this round is the batch to read, so a provider ID reused in an earlier valid
+    response never lends its words. The walk starts at the transcript's end and stops once that batch closes:
+    only the needed suffix is read. A call the records do not prove — a result naming another round, a record
+    whose own invocation names another call or none (the gap ``read_tool_result_record`` reports as a
+    mismatch), a record disagreeing with its row, a doubled or unreadable declaration — keeps its recorded
+    ``args``: a broken link grants no authorship and breaks no restore. A save whose rows carry no record at
+    all (the format before the stamp) keeps the unambiguous name match above. The trace renders ``args`` with
+    truncation markers, so two spellings of one long choice can differ there; the transcript keeps the
+    complete JSON the provider sent, which is what the live staging compared."""
+    round_id = controls[0].get("round_id") if controls else None
+    if not isinstance(messages, list) or not isinstance(round_id, str) or not round_id:
+        return [_recorded_call_arguments(call, messages) for call in controls]
+    wanted: Dict[Any, list] = {}
+    for position, call in enumerate(controls):
+        call_id = call.get("tool_call_id")
+        if isinstance(call_id, str) and call_id:
+            wanted.setdefault(call_id, []).append(position)
+    decided, episode, stamped = {}, [], False
+    for index in range(len(messages) - 1, -1, -1):
+        row = messages[index]
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "").lower()
+        if role == "tool":
+            record = row.get(TOOL_RESULT_RECORD_KEY)
+            if not isinstance(record, dict):
+                continue
+            stamped = True
+            invocation = record.get("invocation")
+            call_id = row.get("tool_call_id")
+            if (isinstance(invocation, dict) and invocation.get("round_id") == round_id
+                    and invocation.get("tool_call_id") == call_id and call_id in wanted):
+                episode.append(call_id)
+            continue
+        if role == "assistant" and episode:
+            for call_id in dict.fromkeys(episode):  # one batch, however its rows repeat
+                for position in wanted[call_id]:
+                    arguments = _batch_declaration(row, call_id, controls[position].get("tool"))
+                    decided[position] = controls[position].get("args") if arguments is _NO_DECLARATION else arguments
+            break  # this was the round's own batch: whatever remains unproven keeps its copy, nobody else's.
+    if not stamped:
+        return [_recorded_call_arguments(call, messages) for call in controls]
+    return [decided[position] if position in decided else call.get("args")
+            for position, call in enumerate(controls)]
+
+
+def _restore_completion_author(ctx: Any, observation: dict, calls: list, reply: dict, messages: Any) -> None:
+    """The producer copies the round observation into a request; repair only its own completed batch's copy."""
+    from ouroboros.tools.control_runtime import staged_request_identity
+
+    index = observation.get("tool_count")
+    if type(index) is not int or not 0 <= index < len(calls):
+        return
+    batch = calls[index:]
+    if any(not isinstance(call, dict) or call.get("round_id") != reply["round_id"] for call in batch):
+        return
+    controls = [call for call in batch if call.get("completion_control") is True]
+    said = [staged_request_identity(ctx, call.get("tool"), arguments)
+            for call, arguments in zip(controls, _transcript_arguments(controls, messages))]
+    # A response may repeat its one accepted command under several call IDs: staging admits the request it already
+    # holds, however the repeat spells it. A refused or conflicting sibling, another command or another request:
+    # the batch does not say one thing.
+    if not controls or any(call.get("is_error") is not False or call.get("status") not in _OK_TOOL_STATUSES
+                           or identity != said[0] for call, identity in zip(controls, said)):
+        return
+    for key in ("_completion_request", "_completion_selected"):
+        request = getattr(ctx, key, None)
+        snapshot = request.get("observation") if isinstance(request, dict) else None
+        if (isinstance(snapshot, dict) and not snapshot.get("model") and request.get("reply_later") is False
+                and request.get("source") == controls[0].get("tool")
+                and {**snapshot, "model": None} == {**observation, "model": None}):
+            setattr(ctx, key, {**request, "observation": {**snapshot, "model": reply["model"]}})
+
+
+def restore_authoring_handover(ctx: Any, state: dict, trace: dict, usage: dict) -> None:
+    """Relink only this task's final history row and settle what its saved facts establish, once on restore.
+
+    A row this body wrote says itself that its target replied, beside the saved author. An older row says neither:
+    the execution's own receipts answer for it (``_receipt_authorship``), and what they leave open stays open.
+    Where no receipt can say anything, a saved author naming the target is still this body's record of its reply."""
+    if not state.get("task_id") or state["task_id"] != ctx.task_id:
+        return
+    routes, rows = trace.get("route_handovers"), usage.get("authoring_handovers")
+    if (not isinstance(routes, list) or not routes or not isinstance(row := routes[-1], dict)
+            or not isinstance(rows, list) or not rows or rows[-1] != row):
+        return
+    rows[-1] = row  # JSON broke the live alias; earlier rows remain history.
+    incomplete = row.get("status") == "incomplete" and trace.get("authoring_handover_incomplete") == row
+    if incomplete:
+        trace["authoring_handover_incomplete"] = row
+    if row.get("status") != "pending" and not incomplete:
+        return
+    observation = state["delivery"].get("_completion_observation") or {}
+    target, author, calls = row.get("to_model"), observation.get("model"), trace.get("tool_calls") or []
+    reply, span = {}, None
+    if row.get("reply_observed") is not True or not author:
+        reply, span = _receipt_authorship(state, calls, row)
+        if reply and not author:
+            ctx._completion_observation = {**observation, "model": (author := reply["model"])}
+    if not target or author not in (None, target) or not (
+            row.get("reply_observed") is True or span or not reply and author == target):
+        return  # A route pair alone proves no reply; its target's next one may still attach it.
+    ctx._authoring_handover = row
+    if span:
+        row["reply_observed"] = True
+        _restore_completion_author(ctx, observation, calls, reply, state.get("messages"))
+        observe_handover_work(ctx, trace, [call for call in calls[row["tool_calls_at_handover"]:]
+                                          if isinstance(call, dict) and call.get("round_id") in span])
+
+
+def accept_handover_selection(ctx: Any, trace: dict, request: dict | None = None, *, forced_model: str = "") -> None:
+    """An accepting exit records the choice of the model that made it, also on the row that the work of the same
+    response already ended (``_worked_handover``): acceptance, never staging, puts a choice on a row."""
+    if request is None:
+        request = getattr(ctx, "_completion_selected", None) or {}
+    handover = getattr(ctx, "_authoring_handover", None) or _worked_handover(ctx, trace, request)
+    author = forced_model or (request.get("observation") or {}).get("model")
+    if not handover or not author or author != handover.get("to_model"):
+        return
+    if request.get("action") == "stop":
+        kind = "stop"
+    elif request.get("wake_silent"):
+        kind = "silent"
+    elif request.get("action") == "finish" and (forced_model or handover.get("recovery_prompted")):
+        kind = "answer_sha256" if request.get("answer_sha256") else "answer"
+    else:
+        return
+    _end_authoring_handover(ctx, trace, handover, "selected", selection=kind)
+
+
+def accept_preserved_handover_stop(ctx: Any, trace: dict) -> None:
+    """A rail retaining the current candidate keeps its validated author stop, not its outcome."""
+    request = getattr(ctx, "_completion_selected", None) or {}
+    if request.get("action") == "stop":
+        accept_handover_selection(ctx, trace, request)
+
+
+def _note_incomplete_handover(ctx: Any, llm_trace: Dict[str, Any], handover: Dict[str, Any]) -> None:
+    """Text after the one reminder is no choice. The mark names no author; another failure keeps its own code."""
+    handover.update(status="incomplete", incomplete_observed=True)
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if isinstance(usage, dict) and not any(usage.get(key) for key in ("execution_status", "result_status", "reason_code")):
+        usage.update(execution_status="degraded", reason_code="authoring_handover_incomplete")
+    llm_trace["authoring_handover_incomplete"] = handover
+
+
+def _authoring_handover_step(ctx: Any, llm_trace: Dict[str, Any], content: Optional[str], restored: bool) -> str:
+    """Offer one reminder before an ordinary finish. A selection can still be held downstream."""
+    handover = getattr(ctx, "_authoring_handover", None)
+    selected = getattr(ctx, "_completion_selected", None) or {}
+    if not isinstance(handover, dict):
+        # Restore links matching usage/trace rows only for this task. A pending legacy row
+        # may leave the draft's author unknown; asking for a choice names no successor act.
+        rows = (getattr(ctx, "_accumulated_usage", None) or {}).get("authoring_handovers") or []
+        routes = llm_trace.get("route_handovers") or []
+        row = rows[-1] if rows and routes and rows[-1] is routes[-1] else None
+        if selected or not isinstance(row, dict) or row.get("status") != "pending" or row.get("reply_observed") is True:
+            return ""
+        if row.get("recovery_prompted"):
+            # Asked once already, here or by the body that saved it. The row stays unbound: its author is unproven.
+            if content and str(content).strip():
+                _note_incomplete_handover(ctx, llm_trace, row)
+        elif restored:
+            row["recovery_prompted"] = True
+            return ("This answer was retained around a model handover; the saved record does not confirm its author. "
+                    "Continue the work, or explicitly select the complete answer to deliver, by text or answer_sha256.")
+        return ""
+    # Inherited quiet delivery is not a completion request. A saved choice by an unknown or
+    # different author can still deliver, but does not answer this handover's question.
+    if selected and (selected.get("wake_silent") or handover.get("recovery_prompted")
+                     or (selected.get("observation") or {}).get("model") != handover.get("to_model")):
+        return ""
+    if content and str(content).strip():
+        if not handover.get("recovery_prompted"):
+            handover["recovery_prompted"] = True
+            from_model = str(handover.get("from_model") or "the previous model")
+            to_model = str(handover.get("to_model") or "the current model")
+            return (f"A host-driven model handover occurred ({from_model} → {to_model}). The previous model's "
+                    "tool results remain in the transcript. Your response above is retained and interim prose "
+                    "stays held. Continue the work, or select the answer to deliver using its complete text "
+                    "or an answer_sha256 offered below.")
+        _note_incomplete_handover(ctx, llm_trace, handover)
+    return ""
+
+
 def _maybe_inject_finalization_nudges(
     tools: ToolRegistry, drive_root: Optional[pathlib.Path], task_id: str,
     llm_trace: Dict[str, Any], content: Optional[str], messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
+    *, restored: bool = False,
 ) -> bool:
     """One-shot pre-finalization injections that each re-loop (return True): the authoring
     handover fact, the skill finalization reminder, the pre-delivery notice (``_claim_pre_delivery_notice``: each
@@ -545,52 +940,11 @@ def _maybe_inject_finalization_nudges(
         tools._ctx._completion_hold_cause = cause
         return True
 
-    # A host-driven route change hands an already-active authoring turn to a
-    # new model.  The successor sees the canonical transcript, but without this
-    # typed reminder its first short status response can look like an ordinary
-    # final.  One recovery round is bounded by the existing loop/deadline/budget
-    # rails; a second tool-less response is retained with a degraded execution
-    # fact rather than silently painting a clean Done.
-    handover = (getattr(tools._ctx, "_authoring_handover", None)
-                or llm_trace.get("authoring_handover_incomplete"))
-    if isinstance(handover, dict):
-        baseline = int(handover.get("tool_calls_at_handover") or 0)
-        from ouroboros.tool_capabilities import substantive_tool_calls
-        if substantive_tool_calls((llm_trace.get("tool_calls") or [])[baseline:]):
-            handover["status"] = "recovered"
-            incomplete = llm_trace.pop("authoring_handover_incomplete", None)
-            if isinstance(incomplete, dict):
-                incomplete["status"] = "recovered"
-            tools._ctx._authoring_handover = None
-            usage = getattr(tools._ctx, "_accumulated_usage", {})
-            if usage.get("reason_code") == "authoring_handover_incomplete":
-                usage.pop("execution_status", None)
-                usage.pop("reason_code", None)
-        elif baseline > 0 and content and str(content).strip():
-            if not bool(handover.get("recovery_prompted")):
-                handover["recovery_prompted"] = True
-                from_model = str(handover.get("from_model") or "the previous model")
-                to_model = str(handover.get("to_model") or "the current model")
-                return _inject(
-                    f"A host-driven model handover occurred ({from_model} → {to_model}) "
-                    "after the previous model had already used tools on this open task; the "
-                    "plan and tool results above are that earlier work. No substantive tool "
-                    "call has run since the handover. If the turn ends without one, the host "
-                    "records this handover as incomplete (execution degraded); later tool "
-                    "work clears that record.",
-                    "Authoring handover recovery nudge injected before final response.", "authoring_handover",
-                )
-            tools._ctx._authoring_handover = None
-            handover["status"] = "incomplete"
-            handover["incomplete_observed"] = True
-            usage = getattr(tools._ctx, "_accumulated_usage", None)
-            if isinstance(usage, dict):
-                usage["execution_status"] = "degraded"
-                usage["reason_code"] = "authoring_handover_incomplete"
-            llm_trace["authoring_handover_incomplete"] = handover
-            # Existing one-shot readiness/verification nudges and acceptance
-            # can still continue the task. Later tool work heals only this
-            # warning; the history row retains the handover and its recovery.
+    reminder = _authoring_handover_step(tools._ctx, llm_trace, content, restored)
+    if reminder:
+        return _inject(reminder, "Authoring handover recovery nudge injected before final response.",
+                       "authoring_handover")
+    # The other one-shot facts below still reach a successor: settling the handover settles only its own question.
 
     from ouroboros.tool_access import canonical_data_root
 

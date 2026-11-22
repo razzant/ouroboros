@@ -14,6 +14,7 @@ a dict this process happens to still hold.
 from __future__ import annotations
 
 from ouroboros.owner_pause import run_operation, OwnerPauseRefused
+from ouroboros.delegate_resume import BUSY as START_BUSY, UNREADABLE as START_UNREADABLE, checked_start, close_unsent_start, StartHeld
 
 import datetime as _dt
 import functools
@@ -41,6 +42,7 @@ from ouroboros.delegate_source_coverage import (
     record_started_custody,
 )
 from ouroboros.delegate_reply import REPLY_TO_SCHEMA
+from ouroboros.subscription_census import note_limit_failure
 from ouroboros.delegate_supervision import delegate_wait_entry as _delegate_wait_entry
 from ouroboros.delegate_start_instructions import (
     HOST_FACTS_INSTRUCTION as _HOST_FACTS_INSTRUCTION,
@@ -104,7 +106,8 @@ from ouroboros.delegate_directory import (
     prepare_directory_execution, snapshot_checkout, started_receipt)
 from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
-from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
+from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, replayed_lineage, start_inputs
+from ouroboros.helper_receipt import build as build_receipt, render as render_receipt, start_facts
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -163,8 +166,28 @@ _CLAUDEXOR_MAX_SECONDS = 604_800
 # The process-local memo of the durable custody rows (the authority lives in the module
 # above); re-bound here because sibling code and tests name it on this surface.
 _CUSTODY = custody._CUSTODY
-_RETRY_HINT = ("to retry THIS start call use delegate_start(retry_of=pending_invocation_id, prompt=''), "
-               "which replays its recorded request; a plain call starts a NEW run")
+_RETRY_HINT = ("Use delegate_start(retry_of=pending_invocation_id, prompt='') for this request. "
+               "After a Resume risk decision it can only look up the start. A plain call starts a new run.")
+
+
+def _unclaimed_start_facts(refusal, recovering):
+    facts = dict(refusal or {
+        "reason": "start_request_row_unwritable",
+        "detail": "The durable start-request row could not be written. Fix the drive/event log before retrying.",
+        **({} if recovering else {"definitely_unrun": True}),
+    })
+    reason = str(facts.pop("reason", "") or "replacement_custody_unknown")
+    detail = str(facts.pop("detail", "") or "Actor start claim unavailable.")
+    return reason, detail, facts
+
+
+def _held_start(code, invocation_id):
+    """Custody held the handoff: busy or unreadable sent nothing; a changed record is read, not replayed."""
+    if code in {START_BUSY, START_UNREADABLE}:
+        return _fail("delegate_start", code, "Nothing was sent; the request stays pending.",
+                     pending_invocation_id=invocation_id, retry_hint=_RETRY_HINT)
+    return _fail("delegate_start", code, "Start custody changed before submission. Read the recorded invocation.",
+                 pending_invocation_id=invocation_id)
 
 
 def _host_instructions(authority: "DelegatedRunShape", assignment: str = "",
@@ -473,6 +496,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             authority, assignment, payload_skill=payload_skill, coordination_context="" if continuation_token else _coordination_context,
         )
     start_attempted = recovering  # Recovery may already own a physical run.
+    requested = False
     try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
         engine, gateway = start_engine(drive, retry_token, continuation_token)
     except ClaudexorUnavailable as exc:
@@ -494,6 +518,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         )
         if resolution.blocked:
             record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), resolution.reason)
+            note_limit_failure(resolution.reason)  # a start refused on a spent route asks the census for a read
             return _fail(
                 "delegate_start", resolution.reason,
                 "The delegated route cannot run now. This is a typed blocker: do NOT "
@@ -520,7 +545,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness=override_plan_readiness, plan_answers=_plan_answers)
                 if refusal:
                     return refusal
-            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs, thread_folder=continuation.folder)
+            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs, continuation.folder, configured_order=bool(actor.get("compiled_work_order")))
             if refusal:
                 return refusal
             readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction
@@ -610,16 +635,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
             prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody, **({"held_heads": held} if held else {}),
         )
-        if not requested and not claim_refusal:
-            claim_refusal = {"reason": "start_request_row_unwritable", "detail":
-                "The durable start-request row could not be written, so the run was NOT started. "
-                "Fix the drive/event log and retry; a run without custody would be unfindable.",
-                **({"definitely_unrun": True} if not recovering else {})}
-        if claim_refusal:
-            reason = str(claim_refusal.get("reason") or "replacement_custody_unknown")
-            detail = str(claim_refusal.get("detail") or "Actor start claim unavailable.")
-            facts = {key: value for key, value in claim_refusal.items()
-                     if key not in {"reason", "detail"}}
+        if not requested or claim_refusal:
+            reason, detail, facts = _unclaimed_start_facts(claim_refusal, recovering)
             return _fail(
                 "delegate_start", reason, detail, **facts,
                 **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
@@ -631,7 +648,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             nonlocal start_attempted
             start_attempted = True  # The durable request is not physical submission.
             return gateway.start_run(request_body, idempotency_key=invocation_id)
-        handle = run_operation(ctx, submit)
+        handle = run_operation(ctx, checked_start(drive, str(ctx.task_id), invocation_id, submit))
         run_id = str(handle.get("runId") or handle.get("jobId") or "")
         if not run_id:
             return _fail("delegate_start", "queued_without_run_id",
@@ -639,14 +656,19 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                          pending_invocation_id=invocation_id, retry_hint=_RETRY_HINT,
                          **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
                              definite_refusal=False, reason="queued_without_run_id", invocation_id=invocation_id))
+    except StartHeld as exc:
+        return _held_start(str(exc), invocation_id)
     except BaseException as exc:
         typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
         code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
         # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
         # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
         definite = not start_attempted
+        if definite and requested:
+            definite = close_unsent_start(drive, str(ctx.task_id), invocation_id, code)
         if (start_attempted and isinstance(exc, ClaudexorUnavailable)
-                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body)) is not None):
+                and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body, inputs.selected,
+                                                   _start_lineage(request_body, invocation_id, authority, inputs, recovering))) is not None):
             return accepted
         try:
             cleanup = _retire_orphaned_registration(
@@ -664,7 +686,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         pending = ({} if definite or not invocation_id else
                    {"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT})
         return _fail("delegate_start", code, str(exc), executor="blocked",
-                     **({"definitely_unrun": True} if not start_attempted else {}),
+                     **({"definitely_unrun": True} if definite else {}),
                      reset_at=getattr(exc, "reset_at", ""), **pending, **cleanup)
     finally:
         gateway.close()
@@ -674,6 +696,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         drive, run_id, ctx, route, authority,
         key=key, access=authority.access, root=root, seconds=seconds,
         invocation_id=invocation_id, project_id=project_id, daemon_store_id=custody.admitted_store_id(handle),
+        observed_state=str(handle.get("state") or ""),
         project_owned=bool(owned_project_id), project_persistent=project_persistent,
         **actor_facts, **{k: v for k, v in snapshot_facts.items() if k not in plan_facts(snapshot_facts)},
         plan_facts=plan_facts(snapshot_facts), processing=processing_info, prompt_cache_ttl=ttl_info,
@@ -692,7 +715,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")))
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering)))
+
+
+def _start_lineage(request: Any, invocation_id: str, authority: "DelegatedRunShape", inputs: Any, recovering: bool) -> Any:
+    """The automatic lineage fact this start may state: its copies' count, else, for a replay, ``NO_RECORD`` only
+    where its own recorded request was prepared for copies (``replayed_lineage``)."""
+    return inputs.lineage or (replayed_lineage(request, invocation_id, authority.investigation, inputs.selected)
+                              if recovering else None)
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
@@ -700,36 +730,38 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
                      baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None,
                      prompt_cache_ttl=None, continuation=None, max_seconds: int = 0, max_seconds_basis: str = "",
-                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None) -> ToolResult:
+                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None,
+                     receipt=None) -> ToolResult:
     """The one author of delegate_start's started result (note + payload).
 
-    The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
-    start, so both are said. An undurable custody row is the louder one and goes first:
-    a nanny that walks away from an uncustodied MUTATING run leaves a live shell in its
-    own worktree that nothing outside this process can name.
+    An undurable custody row is the loudest fact and goes first: a nanny that walks away from an
+    uncustodied MUTATING run leaves a live shell in its own worktree that nothing outside this process
+    can name. The rest of the note is the receipt of what reached the run (``helper_receipt``), from the
+    same facts the payload keys carry plus ``receipt`` (what this start measured: the text sent, the
+    automatic lineage copies, my human's rows the host carried). Applied access is not known until
+    ``delegate_wait`` reads the run's own artifacts.
     """
     note = "" if durable else (
         "CUSTODY IS NOT DURABLE: the run started, but its custody row could not be written, "
         "so nothing outside this worker can wait on, cancel or settle it. Do not walk away "
-        "from it — finish it or delegate_cancel it in this session. ")
-    note += (
-        "You are the nanny and the host. Poll with delegate_wait; the run's own "
-        "claims are evidence to check, not a verified result."
-        + (
-            (" This run is an evidence-only investigation in a PRIVATE COPY: its changes are kept as evidence, "
-             "never applied (integrate_delegated_patch refuses); never let it commit." if authority.investigation else
-             " This run edits a PRIVATE SNAPSHOT of your write root, not the shared "
-             "tree: at terminal its diff is captured for you, and NOTHING lands in "
-             "the shared tree until you explicitly integrate_delegated_patch(run_id="
-             "...) to apply or reject it — read the captured diff before you claim "
-             "it, and never let the run commit.") + " The requested native access profile "
-            f"is {authority.access}; scoped HOME selects native state and credentials, "
-            "not filesystem confinement. Actual access is read from the run's own "
-            "artifacts by delegate_wait."
-            if authority.isolation == "live" else
-            " This run cannot write anything: it reads and answers."
-        )
-    )
+        "from it — finish it or delegate_cancel it in this session.\n")
+    facts = dict(receipt or {})
+    facts["access"] = [("access", authority.access + (
+        " (scoped HOME selects native state and credentials, not filesystem confinement)"
+        if authority.isolation == "live" else ""), None)]
+    if snapshot_id and authority.investigation:  # nothing from its copy can land: no write root, this fact instead
+        facts["access"].append(("investigation", "evidence-only investigation in a private copy (execution_root) of "
+                                "authority_target_root: its captured changes are kept as evidence and never applied "
+                                "(integrate_delegated_patch refuses), and the host's instructions forbid commits", False))
+    elif snapshot_id and access != "readonly":  # a plan turn keeps its snapshot for its continuation, writes nothing
+        facts["write_root"] = ("private snapshot (execution_root) of authority_target_root: only a diff captured at "
+                               "terminal can land there, through integrate_delegated_patch, and the host's instructions "
+                               "forbid commits")
+    if input_files is not None:
+        facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
+            1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
+    rendered = render_receipt(build_receipt(facts))
+    note += rendered
     payload = {
         "status": "started" if durable else "started_uncustodied",
         "run_id": run_id,
@@ -779,7 +811,8 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
             payload["baseline_manifest_read"] = {"root": "artifact_store", "path": f"delegated_runs/{snapshot_id}/baseline_manifest.json"}
     if isinstance(resource_ref, dict) and (resource_ref.get("workspace_kind") == "directory"
                                            or is_in_place_run({"resource_ref": resource_ref})):
-        started_receipt(payload, resource_ref, target_root, durable=durable, investigation=authority.investigation)
+        started_receipt(payload, resource_ref, target_root, durable=durable, investigation=authority.investigation,
+                        receipt=rendered)
     return delegate_result(payload)
 
 
@@ -1008,17 +1041,9 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
     (``delegate_supervision._publish``): its retained or newly collected terminal, a new
     question set whole, else its present state past the wake's cursor ``since_seq``.
 
-    ``gateway`` is a transport BORROWED from its caller: it replaces the per-call
-    ``ClaudexorGateway()``, is handshaken here only when it has not been yet
-    (``engine_version`` is the handshake receipt), and is never closed here; the
-    owner closes it. Absent, the call builds, handshakes and closes its own.
-
-    ONE detail read under the transport's read bound, narrowed by the real deadline: no journal
-    read and no speech (the body follows each run's speech), and the rights floor of a run whose
-    start row recorded its grant is the body's (``delegate_containment.hold_to_grant``); a row with
-    no recorded grant is held here to the live derivation. A transport failure that delivered no
-    daemon answer (``observation_read_timeout``, ``daemon_unreachable``, the engine's own
-    ``DAEMON_BUSY_CODES``) is an ``observation_pending`` fact, never a refusal.
+    Borrow an already-open gateway or close our own. One deadline-bounded detail read;
+    the body follows speech and enforces recorded grants. Rows without a grant use the live
+    derivation here. An unanswered observation remains pending.
     """
     from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
     from ouroboros.execution_domain import run_gateway
@@ -1060,6 +1085,17 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
         detail = progress.bounded_poll(gateway, rid, bound())
         summary = custody.summary_of(detail)
         state = str(summary.get("state") or "")
+        if getattr(entry, "resume_start_state", None) is not None:
+            from ouroboros.delegate_resume import observe_bound_state, recovered_cancel_detail
+            # A recovered start's first state is kept only from an answer proved to be its run in
+            # its own store (``recovered_cancel_detail``): an unnamed answer, or one served by
+            # another store, is not recognized, keeps ``unknown`` for a genuine later answer and
+            # never becomes a completion. No extra read: the answer is already in hand.
+            if not recovered_cancel_detail(gateway, entry, detail):
+                return _fail("delegate_wait", "run_identity_mismatch",
+                             "The answer does not prove this run in its own store.", run_id=rid).text
+            if observe_bound_state(custody.custody_root(ctx), entry, state) is False:
+                return _fail("delegate_wait", "custody_unavailable", "The observation could not be saved.", run_id=rid).text
         breach = None if entry.access else _containment_breach(detail, authority)
         if breach:
             return _halt_breached_run(ctx, gateway, entry, breach)
@@ -1198,13 +1234,13 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("delegate_start", {
             "name": "delegate_start",
             "description": (
-                "Start a run on the owner's configured agent-session (subscription) harness and supervise it as its "
-                "NANNY; API actors are scheduled with schedule_subagent instead. "
-                "Subscription is requested, not guaranteed free: expired auth, paid routes or auth fallback "
-                "may bill. Read delegate_wait's terminal cost (zero, billed, estimated or undisclosed); "
+                "Supervise a configured agent-session (subscription) run as its "
+                "NANNY; use schedule_subagent for API actors. "
+                "Subscription is requested, not guaranteed free: expired auth, paid routes or fallback "
+                "may bill. Read delegate_wait's terminal cost (zero, billed, estimated, undisclosed); "
                 "time, quota and a worker slot are also spent. Root, route and access inherit your authority and cannot widen; "
                 "access only lowers native rights. A run lives in engine-scoped native state: it may not see the owner's own sessions "
-                "and is no courier to them. Read-only runs only read and answer. Mutating Git runs edit a PRIVATE SNAPSHOT (or, with workspace='in_place', your own write root), never commit. Ordinary folders use "
+                "and is no courier to them. Read-only runs only read and answer; input_files can pin a git_range. Mutating Git runs edit a PRIVATE SNAPSHOT (or, with workspace='in_place', your own write root), never commit. Ordinary folders use "
                 "directory_strategy=direct (default) or copy with scope_paths. Direct edits are already "
                 "on site, without full rollback. Snapshot/copied results reach your tree only through "
                 "integrate_delegated_patch(run_id=..., decision='apply'|'reject'); first inspect the captured "
@@ -1215,13 +1251,13 @@ def get_tools() -> List[ToolEntry]:
                 "skill_preflight and skill_review. Create a new skill's manifest first. Seeded native is "
                 "system-repo territory; markerless native is logical external. "
                 "Returns run_id for delegate_wait/delegate_cancel. Output is a claim to verify; host "
-                "verification receipts remain yours. Missing/unavailable routes refuse typed: explicitly "
+                "verification receipts remain yours. Unavailable routes refuse: "
                 "select a configured alternative, wait, narrow or report blocked. Direct starts require "
                 "subagent_id. Fresh configured work starts its leaf before the first round; restored work follows "
-                "its continuation receipt. Replay an unresolved (unknown-outcome) start with retry_of, without a new "
+                "its continuation receipt. Replay an unknown-outcome start with retry_of, no new "
                 "selector; a new prompt is a new run. Replacement with prompt='' requires "
                 "verified cancellation/terminal settlement or a typed refusal proving no run exists. "
-                "Continue finished work with continue_from (see arguments). This call requests no extra Claudexor review panel; "
+                "Continue via continue_from. This call requests no extra Claudexor review panel; "
                 "new ordinary runs on engine 3.9.8+ default to none. The receipt names engine_version; "
                 "older engines or a recovered historical run may retain earlier review behavior. Engine review, execution, "
                 "integration and Ouroboros review gates remain separate."
@@ -1303,11 +1339,11 @@ def get_tools() -> List[ToolEntry]:
                 **input_files_parameter("continue_from retains its own new selection; nothing is inherited. Omit with retry_of: its result returns the original receipt."),
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
-                    "Replays that invocation's recorded request byte-identically under its original key to retrieve "
-                    "an accepted run without duplicating it; prompt may be omitted. Omit subagent_id or receive a "
-                    "typed conflict; omit the other arguments too: the recorded ones replay, and a new value is a "
-                    "typed conflict. Never use for intended new work: a plain call creates a new invocation even "
-                    "with identical prompt."},
+                    "Looks up the accepted run. A Resume risk decision makes it lookup-only. Otherwise it may replay "
+                    "the original request byte-identically under the same key. Omit subagent_id or receive a typed "
+                    "conflict: a retry keeps the actor it recorded. Prompt is optional. Other arguments keep their "
+                    "recorded values; a conflicting value is refused. Use a plain call for intended new work. "
+                    "It creates a new invocation even with identical prompt."},
                 },
             },
         }, _published_entry(_delegate_start_entry),

@@ -608,6 +608,23 @@ def test_terminals_no_chat_row_announced_reach_the_next_wake_once(tmp_path):
     assert _wake(tmp_path, second.boundary, T0 + 1200).events == ()
 
 
+def test_the_wake_line_of_a_helper_whose_first_coding_attempt_failed_states_only_that(tmp_path):
+    """The wake reads the stored typed fact through the shared verdict: no claim about later runs, the answer or the whole work."""
+    _write(tmp_path, "root1", status="running", ts=_iso(T0 - 900), updated_at=_iso(T0 - 900))
+    _write(tmp_path, "kid1", status="running", ts=_iso(T0 - 800), updated_at=_iso(T0 - 800),
+           parent_task_id="root1", delegation_role="subagent", description="child work")
+    first = _wake(tmp_path, None, T0)
+    fact = {"status": "incomplete", "reason": "initial_execution_unresolved",
+            "initial_execution": {"state": "failed", "run_id": "run-1", "invocation_id": "inv-1"}}
+    _write(tmp_path, "kid1", status="completed", updated_at=_iso(T0 + 100), reason_code="configured_actor_incomplete",
+           outcome_axes={"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete",
+                                       "actor_first_terminal": fact}})
+    line = _lines(_wake(tmp_path, first.boundary, T0 + 600))[0]
+    assert line.startswith("- child task kid1 of root1 Done with warnings")
+    assert "(First coding attempt failed.)" in line
+    assert "no such run" not in line and "came without" not in line
+
+
 def test_a_task_first_recorded_after_the_scan_is_new_and_a_proven_terminal_keeps_its_own_stamp(tmp_path):
     _write(tmp_path, "seed", status="running", ts=_iso(T0 - 10), updated_at=_iso(T0 - 10))
     first = _wake(tmp_path, None, T0)
@@ -937,15 +954,21 @@ def test_projection_names_every_honest_status(describe):
     assert describe(BASE, enabled=False)["status"] == "disabled"
     assert describe(BASE, enabled=False)["enabled"] is False  # the caller's flag, not the snapshot's
     sleeping = describe(BASE)
-    assert sleeping["status"] == "sleeping" and sleeping["detail"] == f"Sleeping until {server._clock_of(BASE['next_wake_at'])}."
+    # The time is the server's, and the sentence names that zone (a UTC server is not the reader's morning).
+    from datetime import datetime
+
+    zone = datetime.fromisoformat(BASE["next_wake_at"]).astimezone().strftime("%z")
+    assert sleeping["status"] == "sleeping" and sleeping["detail"] == (
+        f"Sleeping until {server._clock_of(BASE['next_wake_at'])} (UTC{zone[:3]}:{zone[3:]}).")
     assert sleeping["next_wake_at"] == BASE["next_wake_at"] and sleeping["enabled"] is True
     # #1603: no early wake exists, so even a stale snapshot key is never rendered as one.
     stale = describe({**BASE, "pending_reason": "task_finished:a:completed"})
     assert "Early wake" not in stale["detail"] and stale["detail"] == sleeping["detail"]
     thinking = describe({**BASE, "live_wake_task_id": "wake0001"})
     assert thinking["status"] == "thinking" and "wake0001" in thinking["detail"]
-    first = describe({**BASE, "last_wake_outcome": "skipped:waiting_for_first_conversation"})
-    assert first["status"] == "waiting_for_first_conversation"
+    unread = describe({**BASE, "last_wake_outcome": "skipped:owner_chat_unknown", "last_error": "runtime state unavailable"})
+    assert unread["status"] == "owner_chat_unknown"  # unknown, never "no chat yet": a known empty slot wakes in Main
+    assert unread["detail"].startswith("The owner chat could not be read (runtime state unavailable); retry ")
     exhausted = describe({**BASE, "last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": 21.5,
                           "allowance_resets_at": "2027-01-15T18:00:00+00:00",
                           "next_wake_at": "2027-01-15T18:00:00+00:00"})  # a real skip waits no sooner than its reset

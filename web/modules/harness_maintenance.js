@@ -6,6 +6,7 @@ import { apiClient } from './api_client.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 import { errorWords } from './ui_primitives.js';
 import { routeExternalLink } from './skill_presentation.js';
+import { restoreFocusWithoutReveal } from './scroll_fade.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
@@ -144,7 +145,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
 /** View controller. reads/presses coalesce; dispose releases only the view. */
 export function createHarnessMaintenanceController({
     api = apiClient, host = () => null, onInventory = () => {}, onInspectionProblem = () => {}, onSettled = () => {}, onChange = () => {},
-    visible = () => true, intents = sessionIntents,
+    visible = () => true, intents = sessionIntents, preservePlace = paint => paint(),
     newKey = () => globalThis.crypto?.randomUUID?.()
         || `maintenance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 } = {}) {
@@ -188,12 +189,17 @@ export function createHarnessMaintenanceController({
 
     function render() {
         if (disposed) return;
+        preservePlace(paintPrograms);
+        for (const changed of listeners) changed();
+    }
+
+    function paintPrograms() {
         const problem = inspectionProblem();
         const whole = record(WHOLE_INVENTORY);
         host()?.querySelectorAll('[data-family-maintenance]').forEach((element) => {
             const harness = element.dataset.familyMaintenance;
             const state = record(harness);
-            // A rebuild keeps the focused control: the same action or Details toggle takes the focus back.
+            // A rebuild keeps the focused control without scrolling to it: the same action or Details toggle takes it back.
             const active = element.ownerDocument?.activeElement;
             const focused = active && element.contains?.(active)
                 ? (active.dataset?.maintenanceAction ? `[data-maintenance-action="${active.dataset.maintenanceAction}"]`
@@ -203,7 +209,7 @@ export function createHarnessMaintenanceController({
                 inspectionError: state.inspectionError || whole.inspectionError || problem?.message || '',
                 inspectionPending: inspectionPending(harness),
             });
-            if (focused) element.querySelector(focused)?.focus?.();
+            if (focused) restoreFocusWithoutReveal(element.querySelector(focused));
             element.querySelector('[data-maintenance-details]')?.addEventListener('click', (event) => {
                 state.expanded = !state.expanded;
                 event.currentTarget.setAttribute('aria-expanded', String(state.expanded));
@@ -215,7 +221,6 @@ export function createHarnessMaintenanceController({
             });
             element.querySelectorAll('[data-skill-external]').forEach((control) => control.addEventListener('click', routeExternalLink));
         });
-        for (const changed of listeners) changed();
     }
 
     function accept(harness, operation, fromInventory = false, settled = onSettled) {

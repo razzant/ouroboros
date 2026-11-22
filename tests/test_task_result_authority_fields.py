@@ -127,6 +127,76 @@ def test_projection_digest_changes_with_current_plan_but_result_hash_does_not(tm
     assert "authority" not in mismatch and "authority_source" not in mismatch
 
 
+def test_posix_name_bytes_survive_task_result_hash_and_verified_authority_read(tmp_path):
+    from ouroboros.agent_startup_checks import _automatic_predecessor_authority_projection
+
+    ctx = _ctx(tmp_path)
+    raw = b"fixture-\xff.txt"
+    name = raw.decode("utf-8", "surrogateescape")
+    literal = r"fixture-\udcff.txt"
+    artifacts = [{"kind": "task_artifact", "name": item} for item in (name, literal, "файл🪶.txt")]
+    _write(ctx, artifacts=artifacts)
+    stored = load_effective_task_result(ctx.drive_root, "child", materialize_artifacts=False)
+    assert stored["artifacts"] == artifacts
+
+    _, first = _read(ctx, view="answer")
+    _, selection = _read(ctx, authority_fields=["artifacts"])
+    assert selection["authority"]["artifacts"] == artifacts
+    _, meta = _read(ctx, authority_fields=["artifacts"], source_only=True)
+    source = meta["authority_source"]
+    expected = (r'{"artifacts": [{"kind": "task_artifact", "name": "fixture-\udcff.txt"}, '
+                r'{"kind": "task_artifact", "name": "fixture-\\udcff.txt"}, '
+                '{"kind": "task_artifact", "name": "файл🪶.txt"}]}')
+    assert source["complete_chars"] == len(expected)
+    assert source["complete_sha256"] == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    split = expected.index(r"\udcff") + 3
+    pages = []
+    for start, end in ((0, split), (split, len(expected))):
+        _, page = _read(ctx, authority_fields=["artifacts"], source_only=True,
+                        authority_projection_sha256=meta["authority_projection_sha256"],
+                        source_start_char=start, source_end_char=end)
+        assert page["authority_source"]["complete_sha256"] == source["complete_sha256"]
+        pages.append(page["authority_source"]["text"])
+    assert "".join(pages) == expected
+    restored = json.loads("".join(pages))["artifacts"]
+    assert restored == artifacts
+    assert restored[0]["name"].encode("utf-8", "surrogateescape") == raw
+
+    # The two named digests use the same encoding, without conflating their subjects (see the plan case below).
+    brief = _automatic_predecessor_authority_projection(stored, {}, drive_root=ctx.drive_root)
+    expected_authority = _json(task_result_authority_projection(stored, drive_root=ctx.drive_root)).replace("\udcff", r"\udcff")
+    assert brief["artifacts"] == artifacts
+    assert brief["authority_chars"] == len(expected_authority)
+    assert brief["authority_sha256"] == hashlib.sha256(expected_authority.encode("utf-8")).hexdigest()
+
+    # Replacing the name by its literal spelling must not preserve a parent's previous acknowledgement.
+    _write(ctx, artifacts=[artifacts[1], *artifacts[1:]])
+    _, current = _read(ctx, view="answer")
+    assert current["child_result_sha256"] != first["child_result_sha256"]
+    row = load_effective_task_result(ctx.drive_root, "child", materialize_artifacts=False)
+    ordinary = _json(task_result_authority_projection(row, drive_root=ctx.drive_root))
+    new_brief = _automatic_predecessor_authority_projection(row, {}, drive_root=ctx.drive_root)
+    assert new_brief["authority_sha256"] == hashlib.sha256(ordinary.encode("utf-8")).hexdigest()
+    assert new_brief["authority_sha256"] != brief["authority_sha256"]
+
+
+def test_continuation_bound_counts_byte_name_escapes():
+    from ouroboros.contracts.task_contract import bounded_continuation_envelope
+    from ouroboros.tool_capabilities import DEFAULT_TOOL_RESULT_LIMIT
+    from ouroboros.utils import json_dumps_utf8
+
+    value = "\udcff" * (DEFAULT_TOOL_RESULT_LIMIT // 3)
+    envelope = bounded_continuation_envelope({"output_directory": value}, digest_semantics="observed_at_binding",
+                                             source_ref={"task_id": "child"})
+    preview = envelope["output_directory"]
+    assert preview["kind"] == "bounded_field_preview"
+    assert preview["full_chars"] == 6 * len(value)  # JSON escape occupies six characters, not one
+    wire = json_dumps_utf8(preview["preview"], ensure_ascii=False)
+    wire.encode("utf-8")
+    assert len(wire) - 2 <= DEFAULT_TOOL_RESULT_LIMIT
+    assert preview["source_ref"] == {"task_id": "child", "field": "authority.output_directory"}
+
+
 @pytest.mark.parametrize("fields", [[], ["task_contract"]])
 def test_field_pointer_never_qualifies_as_full_authority_even_with_old_flag(tmp_path, fields):
     ctx = _ctx(tmp_path)

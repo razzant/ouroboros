@@ -488,7 +488,7 @@ def _search_settings(monkeypatch, backend, **keys):
 def _withheld(registry):
     from ouroboros.tool_policy import format_capability_omissions
 
-    names = {schema['function']['name'] for schema in registry.schemas(core_only=True)}
+    names = {schema['function']['name'] for schema in registry.schemas()}
     rows = [row for row in registry.capability_omissions() if 'web_search' in row.get('tools', [])]
     return 'web_search' not in names, rows, format_capability_omissions(rows, header='')
 

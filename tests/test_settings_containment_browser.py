@@ -1,6 +1,7 @@
 """Settings contains its controls (docs/DESIGN.md "Settings"): the home and every page fit their column on a phone,
 and fit a narrow column inside a wide window too, where no viewport rule could rescue a track: the layout reads the
-Settings box, never the window."""
+Settings box, never the window. The pages that moved to Extensions (MCP servers, a server's page, a skill's form, the
+skill sources) are walked by their old addresses and measured in Extensions' box, under the same rule."""
 from __future__ import annotations
 
 import json
@@ -15,9 +16,9 @@ subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 
 OVERFLOW = """() => {
-    const column = [...document.querySelectorAll('#page-settings .settings-home, #page-settings .settings-page')]
-        .filter((box) => box.getClientRects().length);
-    return Math.max(...column.map((box) => box.scrollWidth - box.clientWidth));
+    const column = [...document.querySelectorAll('#page-settings .settings-home, #page-settings .settings-page, '
+        + '#page-skills .section-rail, #page-skills .settings-page')].filter((box) => box.getClientRects().length);
+    return column.length ? Math.max(...column.map((box) => box.scrollWidth - box.clientWidth)) : NaN;
 }"""
 FORM = {"skills": [dict(name="gate_skill", enabled=True, loaded=True, type="extension")],
         "live": {"settings_sections": [dict(skill="gate_skill", section_id="config", key="gate_skill:config", title="Gate skill settings",
@@ -68,9 +69,11 @@ def test_a_narrow_column_in_a_wide_window_is_laid_out_as_a_phone(subscription_ui
     page.locator(HOME).wait_for(state="visible")
     # The window is wide; the Settings box is not. One column, the page's Back in the header, nothing wider than its
     # column.
-    page.add_style_tag(content="#page-settings { max-width: 250px; }")
+    page.add_style_tag(content="#page-settings, #page-skills { max-width: 250px; }")
     results = _walk(page)
     assert all(extra <= 1 for extra in results.values()), json.dumps(results, indent=2)
+    # Skill sources is a page of Extensions: one column there too, its Back in the header, its list not beside it.
     level = open_settings(page, "skill-sources")
     assert level.is_visible() and header_back(page).is_visible() and not page.locator(HOME).is_visible()
+    assert not page.locator("#page-skills [data-extensions-rail]").is_visible()
     page.close()

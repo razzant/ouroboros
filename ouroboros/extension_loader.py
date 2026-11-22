@@ -37,8 +37,6 @@ from ouroboros.extension_ui_validation import (
     validate_settings_schema as _validate_settings_schema,  # noqa: F401
     validate_ui_render as _validate_ui_render,  # noqa: F401
 )
-from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME  # noqa: F401
-from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS  # noqa: F401
 from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, invalidate_import_caches, isolated_site_dirs_scope, is_skill_cache_path  # noqa: F401
 from ouroboros.extension_child_catalog import (
     _out_of_process_handler_proxy,  # noqa: F401
@@ -65,6 +63,8 @@ from ouroboros.extension_liveness import (
     _apply_durable_extension_health,  # noqa: F401
     _deps_block_reason,
     _extension_runtime_state,
+    _observe_retained_companions,
+    _publication_facts,
     _revert_enabled_after_load_error,
     is_extension_live,  # noqa: F401
     runtime_state_for_loaded_skill,  # noqa: F401
@@ -89,6 +89,7 @@ from ouroboros.extension_registry_state import (
     # gateway/extensions.py, extension_process_runner.py, skill_lifecycle_actions.py, tests);
     # their bodies belong to the module that owns ``_ui_tabs``/``_extensions`` and the surface maps.
     list_companion_names,  # noqa: F401 — facade re-export (extraction contract)
+    companion_process_names,
     list_routes,  # noqa: F401 — facade re-export (extraction contract)
     list_ws_handlers,  # noqa: F401 — facade re-export (extraction contract)
     live_module_sources,  # noqa: F401 — facade re-export (extraction contract)
@@ -132,9 +133,6 @@ from ouroboros.extension_surface_names import (
 )
 from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, _sanitize_skill_name, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, discover_selected_skill_candidates, discover_skill_identity, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_conflict_status, skill_review_gate, skill_state_dir, skill_state_dir_path  # noqa: F401
 from ouroboros.skill_loader import _skill_location_inventory
-from ouroboros.skill_token import SkillToken  # noqa: F401
-from ouroboros.tools.skill_exec import _scrub_env  # noqa: F401
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -271,7 +269,7 @@ def _run_unload_callback(skill_name: str, callback: Callable[[], Any], timeout_s
 def _finalize_extension_reconcile(
     state: Dict[str, Any],
     drive_root: pathlib.Path | None,
-    skill_name: str,
+    skill: LoadedSkill | None,
     *,
     reason: str,
     health_stamp: tuple[str, str] | None = None,
@@ -286,9 +284,10 @@ def _finalize_extension_reconcile(
     so there is no marker to report. The handoff stays asynchronous and
     fail-soft either way. The durable health vector is then recorded from the
     finished state, so live->broken attribution covers every reconcile exit and
-    not only the ``reload_all`` sweep; ``health_stamp`` lets a sweep read the
-    version/sha once for the whole batch.
+    not only the ``reload_all`` sweep (none while the server holds a publication this reconcile cannot place in its
+    folder: another folder's, or any under a shared name or none); a sweep's ``health_stamp`` reads version/sha once.
     """
+    skill_name = state["skill"]
     announced = _announce_extension_state_change(drive_root, skill_name, reason=reason)
     state["process"] = "server" if is_server_process() else "worker"
     state["server_reconcile"] = (
@@ -298,10 +297,14 @@ def _finalize_extension_reconcile(
         return
     from ouroboros.extension_health import record_health_for_runtime_state
 
-    if health_stamp is None:
-        record_health_for_runtime_state(drive_root, skill_name, state)
-    else:
-        record_health_for_runtime_state(drive_root, skill_name, state, stamp=health_stamp)
+    companions, directory, foreign = _publication_facts(skill_name, skill, settled=True)  # foreign: nothing written
+    record_health_for_runtime_state(drive_root, skill_name, state, stamp=health_stamp, companions=companions,
+                                    skill_dir=directory, foreign=foreign,
+                                    observe_retained=lambda: _observe_retained_companions(state, skill))
+    if reason == "loaded" and state["process"] == "server":  # a setup card waiting for this skill to serve posts now
+        from ouroboros.onboarding_connections import settle_later
+
+        settle_later(drive_root)
 
 
 def reconcile_extension(
@@ -366,7 +369,7 @@ def reconcile_extension(
         elif state.get("reason") == "load_error" and not loaded_present:
             state["action"] = "extension_load_error"
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason="reconcile_load_error", health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason="reconcile_load_error", health_stamp=health_stamp)
             return state
         if was_live and subject is not None:
             with _lock:
@@ -380,7 +383,7 @@ def reconcile_extension(
                 and (refusal := realtime_load_refusal(skill_name))):
             # Keep the old publication; reconcile retries after the call (not a load failure).
             state.update(reason=refusal, action="extension_reload_pending")
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason=refusal, health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason=refusal, health_stamp=health_stamp)
             return state
         if state.get("reason") == "missing" or state.get("reason") == "not_extension":
             if loaded_present:
@@ -388,7 +391,7 @@ def reconcile_extension(
             state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
             state["live_loaded"] = False
             state["loaded_present"] = False
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason=str(state.get("reason") or "inactive"), health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason=str(state.get("reason") or "inactive"), health_stamp=health_stamp)
             return state
 
         if not state.get("desired_live"):
@@ -397,27 +400,28 @@ def reconcile_extension(
             state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
             state["live_loaded"] = False
             state["loaded_present"] = False
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason="desired_disabled", health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason="desired_disabled", health_stamp=health_stamp)
             return state
 
         if was_live:
             state["action"] = "extension_already_live"
             if is_server_process():
-                state["companions"] = ensure_companions_running(
-                    skill_name,
-                    drive_root,
-                    settings_reader,
-                    repo_path=repo_path,
-                    selected_skill=selected_skill,
+                companions = ensure_companions_running(
+                    skill_name, drive_root, settings_reader, repo_path=repo_path, selected_skill=selected_skill,
+                    return_disposed_state=True,
                 )
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason="already_live", health_stamp=health_stamp)
+                if (companions or {}).get("action") == "extension_load_error":
+                    _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, companions)
+                    return companions  # the failed publication was finalized once at the recovery boundary
+                state["companions"] = companions
+            _finalize_extension_reconcile(state, drive_root, subject, reason="already_live", health_stamp=health_stamp)
             return state
 
         loaded = subject
         if loaded is None:
             state["reason"] = "missing"
             state["action"] = "extension_inactive"
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason="missing", health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason="missing", health_stamp=health_stamp)
             return state
         if loaded_present:
             unload_extension(skill_name)
@@ -437,8 +441,12 @@ def reconcile_extension(
             state["reason"] = "load_error"
             state["load_error"] = err
             state["action"] = "extension_load_error"
+            state["live_loaded"] = False  # the old publication was unloaded above; a failed load publishes none
+            state["loaded_present"] = False
+            state["loaded_matches_current"] = False
+            state.pop("companion_failed", None)  # these words are the load error's, not the read's companion failure
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
-            _finalize_extension_reconcile(state, drive_root, skill_name, reason="load_error", health_stamp=health_stamp)
+            _finalize_extension_reconcile(state, drive_root, subject, reason="load_error", health_stamp=health_stamp)
             return state
         refreshed = runtime_state_for_skill_name(
             skill_name,
@@ -447,7 +455,7 @@ def reconcile_extension(
             skills=skills if skills is not None else None,
         )
         refreshed["action"] = "extension_loaded"
-        _finalize_extension_reconcile(refreshed, drive_root, skill_name, reason="loaded", health_stamp=health_stamp)
+        _finalize_extension_reconcile(refreshed, drive_root, subject, reason="loaded", health_stamp=health_stamp)
         return refreshed
 
 
@@ -458,13 +466,12 @@ def ensure_companions_running(
     *,
     repo_path: str | None = None,
     selected_skill: LoadedSkill | None = None,
+    return_disposed_state: bool = False,
 ) -> Dict[str, Any]:
-    """Ensure the server supervisor matches a live extension's registered companions.
-
-    ``reconcile_extension`` returns early when server-side surfaces are already live;
-    this helper deliberately bypasses that ``was_live`` short-circuit for companions
-    only. It starts missing companions that the plugin has already registered in the
-    server bundle, and stops companions when the persisted desired state is disabled.
+    """Reconcile companions already registered by a live bundle, including in the loader's ``was_live`` path.
+    The server starts missing companions and stops those disabled in saved state. A failed start raises its
+    original error unless the caller requests the finalized load-error state of a disposed publication;
+    the health write may still have failed.
     """
     if not is_server_process():
         return {"action": "not_server", "started": [], "missing": []}
@@ -484,29 +491,20 @@ def ensure_companions_running(
 
     with _lock:
         bundle = _extensions.get(skill_name)
-        raw_names = list(bundle.companion_names if bundle is not None else [])
+        names = companion_process_names(bundle)
         observed_generation = str(bundle.generation_digest or "") if bundle is not None else ""
-    names: List[str] = []
-    for raw in raw_names:
-        name = str(raw or "").strip()
-        if not name or name.startswith("task:"):
-            continue
-        if name.startswith("worker-skip:"):
-            name = name.split(":", 1)[1].strip()
-        if name and name not in names:
-            names.append(name)
     if not names:
         return {"action": "no_registered_companions", "started": [], "missing": []}
 
-    runtimes = supervisor.snapshot() or {}
-    missing = [name for name in names if f"{skill_name}:{name}" not in runtimes]
     # A retained failed start / unconfirmed stop is owned but not running: never
     # report it as already running, and publish nothing until its death settles it.
-    retained = {
-        name: str(runtime.get("retiring"))
-        for name in names
-        if (runtime := runtimes.get(f"{skill_name}:{name}")) and runtime.get("retiring")
-    }
+    missing, retained = supervisor.companion_ownership(skill_name, names)
+    from ouroboros.extension_health import recorded_failed_companions
+
+    # A passive read can already see the later start even if its recovery never reached the file.
+    recorded = recorded_failed_companions(drive_root, skill_name)
+    if to_close := [n for n in names if n in recorded and n not in missing and n not in retained]:
+        supervisor.close_recovered_failures(skill_name, to_close)
     if retained:
         return {"action": "retained_unresolved", "started": [], "missing": missing, "retained": retained}
     if not missing:
@@ -571,6 +569,24 @@ def ensure_companions_running(
                 "missing": missing,
                 "reason": str(exc),
             }
+        except Exception as exc:
+            # An earlier companion in this attach may already have recorded recovery. If the failed attach
+            # disposed its publication, report the load failure to passive readers as well as to this caller.
+            with _lock:
+                disposed = skill_name not in _extensions
+            if disposed:
+                try:
+                    record_load_failure(skill_name, skill,
+                                        f"skill {skill_name!r} companion recovery failure: {failure_words(skill_name, exc)}")
+                    after = runtime_state_for_skill_name(skill_name, drive_root, repo_path=resolved_repo_path)
+                    after.update(action="extension_load_error", companions={"action": "recovery_failed"})
+                    _finalize_extension_reconcile(after, drive_root, skill, reason="companion_recovery_failed")
+                    if return_disposed_state:
+                        return after
+                except Exception:
+                    log.warning("Could not record companion recovery failure for %s", skill_name,
+                                exc_info=discloses_failure(skill_name))
+            raise
     return {"action": "started_missing", "started": missing, "missing": missing}
 
 
@@ -683,7 +699,7 @@ def _load_extension_locked(skill, settings_reader, *, drive_root, skills, repo_p
             missing_bits.append(f"permissions={grant_status.get('missing_permissions')}")
         return (
             f"skill {skill.name!r} is missing owner grants for "
-            f"{', '.join(missing_bits)}. Grant access from the Skills tab."
+            f"{', '.join(missing_bits)}. Grant access on its card in Extensions → Skills."
         )
     granted_core = list(grant_status.get("granted_keys") or [])
     if not _force_in_process:
@@ -953,10 +969,13 @@ def reload_all(
             record_load_failure(skill.name, skill, error)
             results[skill.name] = error
             try:
-                record_health_for_runtime_state(drive_root, skill.name, {
-                    "desired_live": True, "reason": "load_error", "load_error": error,
-                    "process": "server" if is_server_process() else "worker",
-                }, stamp=health_stamp)
+                failure_state = {"desired_live": True, "reason": "load_error", "load_error": error,
+                                 "process": "server" if is_server_process() else "worker"}
+                record_health_for_runtime_state(
+                    drive_root, skill.name, failure_state, stamp=health_stamp,
+                    foreign=_publication_facts(skill.name, skill, settled=True)[2],
+                    observe_retained=lambda s=failure_state, k=skill: _observe_retained_companions(s, k),
+                )
             except Exception:
                 log.debug("extension health record failed for %s", skill.name, exc_info=True)
     # Whole-set announcement: the per-skill reconciles above miss the pool the

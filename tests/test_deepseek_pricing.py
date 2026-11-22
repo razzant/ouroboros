@@ -512,6 +512,7 @@ def test_reported_cash_wins_and_invalid_cash_is_not_estimated(ledger, tariff, mo
     assert "tariff_pricing" not in row["cost_evidence"]
     _, row = _settled_row(ledger, _pinned(tariff), {**REPLY, "cost": "free"})
     assert (row["cost_usd"], row["cost_estimated"], row.get("cost_invalid")) == (None, False, True)
+    assert not row["cost_final"] and "tariff_pricing" not in row["cost_evidence"]
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "cache_write_tokens",
@@ -535,8 +536,8 @@ def test_raw_token_counts_are_not_repaired_into_a_tariff(field, bad, body_error,
     assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (None, False, False)
     assert row["cost_evidence"]["tariff_pricing"]["unpriced"] == "usage_malformed"
     if field in {"prompt_tokens", "completion_tokens", "cache_write_tokens"}:
-        expected = None if isinstance(bad, bool) else max(0, int(bad))
-        assert row[field] == expected, "the historical ledger counter projection is unchanged"
+        expected = int(bad) if isinstance(bad, str) else None
+        assert row[field] == expected, "a malformed count is unknown on the row; an integer's digits are a count"
 
 
 @pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens"])
@@ -561,8 +562,14 @@ def test_raw_malformed_counts_do_not_discard_provider_cash(cash, body_error, led
     _, row = _settled_row(ledger, _pinned(tariff), {"prompt_tokens": -1, "completion_tokens": 0.9,
                                                         "prompt_cache_hit_tokens": "0", "cost": cash},
                           body_error=body_error)
-    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (cash, False, True)
-    assert "tariff_pricing" not in row["cost_evidence"]
+    # A positive charge stands as reported, and so does a zero on a reply that is no error. A zero on an error body
+    # beside counts nobody can read is not a proved free call (they leave open whether work occurred): that amount
+    # alone stays unknown and non-final, and the pinned tariff cannot price unreadable counts either.
+    unproved_zero = body_error and cash == 0
+    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (
+        (None, False, False) if unproved_zero else (cash, False, True))
+    assert (row["cost_evidence"].get("tariff_pricing") or {}).get("unpriced") == ("usage_malformed" if unproved_zero else None)
+    assert ("tariff_pricing" in row["cost_evidence"]) is unproved_zero
 
 
 @pytest.mark.parametrize("body_error", [False, True])

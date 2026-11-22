@@ -613,7 +613,7 @@ def _skill_tool_preflight(
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
-        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Skills → "
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Extensions → "
         "Sources, or install skills into the data plane."
     )
 
@@ -622,8 +622,8 @@ def _skill_tool_preflight(
 def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
                         snapshot: str = "") -> str:
     try:
-        payload = list_skills_payload(summarize_skills(canonical_data_root(ctx)),
-                                      name=name, offset=offset, snapshot=snapshot)
+        root = canonical_data_root(ctx)
+        payload = list_skills_payload(summarize_skills(root), name=name, offset=offset, snapshot=snapshot, drive_root=root)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (list_skills): {exc}"
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -965,11 +965,7 @@ def _non_text_script_refusal(script_path: pathlib.Path, script_rel: str) -> str:
 
 
 def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> str:
-    """Explain why an extension does not execute, with its typed live state.
-
-    The prior wording asserted unconditionally that ``register(api)`` had already
-    run, which is false for an extension that failed to load.
-    """
+    """Name this process's registration, not an unobserved server start."""
     try:
         from ouroboros.extension_loader import runtime_state_for_loaded_skill
 
@@ -977,20 +973,22 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
     except Exception:
         log.debug("skill_exec extension liveness lookup failed", exc_info=True)
         live = {}
+    process = str(live.get("process") or "unknown")
     facts = (
         f"live_loaded={bool(live.get('live_loaded'))}, "
         f"desired_live={bool(live.get('desired_live'))}, "
         f"reason={str(live.get('reason') or 'unknown')!r}, "
-        f"process={str(live.get('process') or 'unknown')!r}"
-    )
+        f"process={process!r}"
+    ) if live else "unavailable"
     if live.get("load_error"):
         facts += f", load_error={str(live.get('load_error'))!r}"
+    server_note = ("This worker does not observe the server's background companion state; ``list_skills`` "
+                   "shows the companion failures the server last recorded. " if process == "worker" else "")
     return (
         f"⚠️ SKILL_EXEC_EXTENSION: skill {loaded.name!r} is a "
         "type=extension plugin and does not execute through the "
-        f"subprocess substrate. Its current live state is {facts} "
-        "(inspect the registered surfaces via the snapshot produced by "
-        "``ouroboros.extension_loader.snapshot()``). Use its "
+        f"subprocess substrate. Runtime state in this process: {facts}. {server_note}"
+        "Inspect local registrations via ``ouroboros.extension_loader.snapshot()``. Use its "
         "provider-safe ``ext_<len>_<token>_*`` tools, "
         "``/api/extensions/<skill>/...`` routes, or provider-safe "
         "extension WebSocket handlers instead."
@@ -1014,7 +1012,7 @@ def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
     return (
         "⚠️ SKILL_EXEC_GRANT_REQUIRED: skill "
         f"{skill_name!r} requests {' and '.join(requested)}. "
-        "Its review gate already permits these bytes; grant them from the Skills UI before execution."
+        "Its review gate already permits these bytes; grant them on its card in Extensions → Skills before execution."
         + (f" {cause}" if cause else "")
     )
 
@@ -1057,7 +1055,7 @@ def _handle_skill_exec(
     if not loaded.enabled:
         return (
             f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} is disabled. "
-            "Enable it after review in the Skills UI (Phase 5) or via "
+            "Enable it after review in Extensions → Skills or via "
             "the dedicated enable tool."
         )
     conflict = skill_conflict_status(loaded, discover_skills(drive_root))

@@ -318,10 +318,11 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
     scroll_to = lambda at: sidebar.evaluate("(el, at) => { el.scrollTop = at; return el.scrollTop; }", at)
     # Three zones (DESIGN "Shell", "Navigation"): a window this short cannot hold them, so the column itself is the
-    # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
-    # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
-    # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
-    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # ONE scroller and the Projects list shows every row in flow (no inner scroller). Where the card, one Project row
+    # and the sections still fit between the two bars, Main is pinned at the top and the sections on the bottom edge
+    # (400 px); a column shorter still lets both bars go with the list, the card one scroll up and the sections at its
+    # end, since two pinned bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489;
+    # the sections joined the card there in #3972, DESIGN "Navigation": "at its two ends"). Each step waits for
     # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it; a page
     # that draws no frame for 5 s fails there, by a timer.
     frames = lambda: page.evaluate("""() => new Promise((resolve, reject) => {
@@ -337,7 +338,13 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
         assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
         scroll_to(0)
         frames()
-        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        crowd = sidebar.evaluate("el => el.hasAttribute('data-bars-crowd')")
+        foot = sidebar.evaluate("el => getComputedStyle(el.querySelector('.sidebar-foot')).position")
+        assert crowd is (not pinned), ("two pinned bars fit only where a Project row fits between them", height)
+        if pinned:
+            assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        else:
+            assert foot == "static", ("the sections go with the list where the bars crowd", height, foot)
         top_before = main_top()
         scrolled = scroll_to(10 ** 6)
         frames()
@@ -391,8 +398,9 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
-    """A tool server's page (Settings › Tools › a server): every field is the shared control under its own label, an
-    edit changes that field alone, and the environment's JSON is judged by the form before any Save."""
+    """A tool server's page (Extensions › MCP servers › a server, opened by its old Settings address): every field is
+    the shared control under its own label, an edit changes that field alone, and the environment's JSON is judged by
+    the form before any Save. A second server's page replaces the first; it never lies over it."""
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
                     auth_token='***', auth_header='Authorization', custom_option='retained'),
                dict(id='local', name='Local server', transport='stdio', command='npx', args=['-y','server'],
@@ -424,6 +432,7 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
     refused = f'async () => {module}.validateMcpSettings().map(e=>e.input.dataset.mcpField)'
     assert page.evaluate(refused) == []
     level = server_page('local')
+    assert page.locator('#page-skills [data-settings-page^="tools/"]').count() == 1, 'one server page at a time'
     cards = level.locator('[data-mcp-card]')
     field = level.get_by_label('Environment (JSON)', exact=True)
     for invalid in ['{unfinished', '[]', '5', '{"PORT":8080}', '{"":"value"}']:
@@ -1047,9 +1056,9 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            const c = dialog.querySelector('.ui-modal-actions [data-confirm-cancel]').getBoundingClientRect();
             return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
-                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                headClose: dialog.querySelectorAll('.ui-modal-head button').length,
                 centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
                 cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")

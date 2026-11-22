@@ -271,6 +271,7 @@ def test_starter_skills_for_onboarding(env):
     assert items["builtin/telegram"]["recommended"] and not items["builtin/unix_computer_use"]["recommended"]
     assert items["ouroboros/weather"]["recommended"] and items["ouroboros/weather"]["official"]
     assert "ouroboros-community/notes" not in items  # the offer is built-in and Official skills
+    assert answer.json()["catalog_more"] == 1, "the read catalog's skills the step does not offer: notes"
     assert any(item["builtin"] for item in groups[0]["items"])
     assert {row["id"] for row in answer.json()["hub_rows"]} == {"ouroboros", "ouroboros-community"}
 

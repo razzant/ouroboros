@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { resultsHtml, searchEntries, searchSettings } from '../modules/settings_home.js';
+import { extensionsPageOf } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS } from '../modules/settings_rows.js';
 
 const ids = (query, ...rest) => searchSettings(query, ...rest).map((entry) => entry.id);
@@ -17,7 +18,9 @@ test('every row is found by its name, an old name and its key; every home row by
             assert.ok(ids(String(words).toUpperCase(), entries).includes(row.id), `${row.id} by "${words}" in capitals`);
         }
         const hit = searchSettings(row.keys?.[0] || row.id, entries).find((entry) => entry.id === row.id);
-        assert.deepEqual([hit.to, hit.row], [row.page, row.id], 'a result opens the row\'s page at the row');
+        // A row of a page of Extensions (MCP servers, Skill sources) is a door there (settings.js opens it in Extensions).
+        const to = extensionsPageOf(row.page) ? `skills:${row.page}` : row.page;
+        assert.deepEqual([hit.to, hit.row], [to, row.id], 'a result opens the row\'s page at the row');
     }
     for (const row of HOME_ROWS) {
         for (const words of [row.name, ...row.aliases]) assert.ok(ids(words, entries).includes(row.id), `${row.id} by "${words}"`);
@@ -38,6 +41,11 @@ test('the tabs Settings had are aliases, and a row is found by its page\'s title
     const costs = searchSettings('costs', entries);
     assert.ok(costs.some((entry) => entry.id === 'TOTAL_BUDGET' && entry.where === 'Costs'));
     assert.ok(costs.some((entry) => entry.id === 'home:costs'));
+    assert.match(resultsHtml('costs', costs), /aria-label="Costs, Dashboard"/);
+    for (const [query, label] of [['Extensions', 'Extensions'], ['Skill settings', 'Skill settings, Extensions']]) {
+        const html = resultsHtml(query, searchSettings(query, entries));
+        assert.ok(html.includes(`aria-label="${label}"`));
+    }
 });
 
 test('a translated install finds a row by the words on its screen, and still by the English', () => {
@@ -57,7 +65,8 @@ test('a form a skill registered is found by its title and its skill, and opens t
     const forms = [{ skill: 'live_conversation', name: 'Calls', sections: [{ section_id: 'config', title: 'Calls (beta)' }] }];
     const entries = searchEntries({ forms });
     const [hit] = searchSettings('calls (beta)', entries);
-    assert.deepEqual([hit.id, hit.to, hit.where], ['skill:live_conversation:config', 'skill/live_conversation', 'Calls']);
+    // A skill's form is a page of Extensions: the result is a door there and says so.
+    assert.deepEqual([hit.id, hit.to, hit.where], ['skill:live_conversation:config', 'skills:skill/live_conversation', 'Extensions › Calls']);
     assert.ok(ids('live_conversation', entries).includes('skill:live_conversation:config'));
     assert.ok(!ids('calls (beta)', searchEntries({ forms: [] })).length, 'only a registered form is listed');
 });

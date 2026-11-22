@@ -275,7 +275,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "ouroboros/delegate_custody_reconcile.py": ("ouroboros/delegate_custody.py", "_custody", frozenset({
         "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one", "admitted_store_id",
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
-        "is_terminal", "output_disposition", "pending_invocations",
+        "is_terminal", "names_another_run", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread",
         "retire_settled_registrations", "review_owned_source",
         "settle_run", "summary_of",
@@ -381,6 +381,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         '_server_web_allowed_by_task', '_service_finalization_evidence',
         'call_llm_with_retry',
         '_rebind_context_fit_plan',  # fit the forced candidate's acting route before pricing or sending
+        'last_physical_attempt_capture',  # a usable wrap-up answers its own send's start hint (#3896)
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_record_owner_directive",
@@ -401,6 +402,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_routes.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_apply_runtime_overrides", "_rebind_context_fit_plan",
+        "_measure_round_main_fit",  # a start hint's rebound resend (#3896)
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",

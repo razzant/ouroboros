@@ -442,8 +442,14 @@ def test_onboarding_steps_and_stylesheet_keep_their_owner_facing_shape():
 
     assert {"Connect your accounts", "Choose models", "Choose access", "Review limits"} <= titles
     assert {"Subscriptions + API", "model slots"} <= rails
-    assert "@media (max-width: 720px)" in css
-    assert "scroll-snap-type: x proximity;" in css
+    # The rail names each step by one short word, so seven fit one line; the step heads keep their titles.
+    assert [step["railTitle"] for step in contract["steps"]] == [
+        "Accounts", "Models", "Access", "Consciousness", "Skills", "Limits", "Review"]
+    assert all(" " not in step["railTitle"] for step in contract["steps"])
+    # A phone's rail shows the current pill alone with «N of M» (no sideways rail of clipped pills).
+    phone = css.split("@media (max-width: 720px)", 1)[1].split("\n}\n", 1)[0]
+    assert ".wizard-step {\n    display: none;" in phone and ".wizard-step.active {" in phone and ".wizard-step-of {" in phone
+    assert "scroll-snap-type" not in phone
 
 
 def test_setup_contract_exports_active_model_slots_only():
@@ -461,13 +467,17 @@ def test_setup_contract_exports_active_model_slots_only():
 # --------------------------------------------------------------------------
 
 
-def test_agents_share_accounts_in_the_six_step_onboarding():
-    """Subscriptions and API access share the first step, then the same role editors; Consciousness is its own step
-    between access and limits (owner decision 2026-11-20)."""
+def test_agents_share_accounts_in_the_seven_step_onboarding():
+    """Subscriptions and API access share the first step, then the same role editors; Consciousness (owner decision
+    2026-11-20) and Skills (owner 2026-11-21) are their own steps between access and limits, each only where setup
+    offers it."""
     contract = build_setup_contract("web")
     ids = [step["id"] for step in contract["steps"]]
-    assert ids == ["accounts", "models", "review_mode", "consciousness", "budget", "summary"]
+    assert ids == ["accounts", "models", "review_mode", "consciousness", "skills", "budget", "summary"]
     assert build_setup_bootstrap({}, "web")["stepOrder"] == ids
+    assert build_setup_bootstrap({}, "web", starter_choice=False)["stepOrder"] == [i for i in ids if i != "skills"]
+    assert build_setup_bootstrap({}, "web", starter_choice=False, consciousness_first_state=False)["stepOrder"] == [
+        "accounts", "models", "review_mode", "budget", "summary"]
     assert "coding agent" not in repr(contract).lower()
     assert contract["steps"][0]["title"] == "Connect your accounts"
 
@@ -718,18 +728,13 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
     import ouroboros.gateway.settings as gw_settings
 
     secret = "sk-or-v1-super-secret-token"
-    # `server.api_settings_get` COPIES its own (patched) `load_settings` into
-    # `ouroboros.gateway.settings` so legacy `server.*` monkeypatch tests keep
-    # working. That copy is irreversible, so patching only the `server` module
-    # left a MagicMock parked on the gateway module for the rest of the pytest
-    # PROCESS — the next test to call any gateway settings route read it and
-    # saw a fabricated install (it made `GET /api/onboarding` answer 204 in
-    # `test_onboarding_complete_endpoint`). Patching BOTH namespaces makes the
-    # restore symmetric with the copy.
+    # `server.api_settings_get` copies the server module's current bindings
+    # onto `ouroboros.gateway.settings` before delegating, so the provider-defaults
+    # fake is patched in both namespaces. The gateway module binds no settings
+    # reader of its own: the route reads `settings_read_view` (patched below),
+    # and a copied loader lands on a name nothing reads.
     patches = [
-        patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
-        patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),

@@ -1,5 +1,5 @@
-"""Generation startup and periodic upkeep: custody, delegated runs, cancel latches,
-owed deliveries, orphaned results, held Continues and post-task synthesis. History-sized work runs
+"""Generation startup and periodic upkeep: custody, delegated runs, cancel latches, owed deliveries,
+orphaned results, held Continues, post-task synthesis and the subscription census. History-sized work runs
 off-loop; delegated-snapshot GC fails closed on an unreadable log."""
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ _LAST_COLD_CUSTODY_SWEEP = [0.0]
 _CUSTODY_SWEEP_LOCK = threading.Lock()
 _RECONCILE_SWEEP_LOCK = threading.Lock()
 _SCHEDULE_SWEEP_LOCK = threading.Lock()
+_CENSUS_SWEEP_LOCK = threading.Lock()  # the subscription census duty (``subscription_census.dispatch``)
 CUSTODY_SWEEP_SEC = 600  # the custody block's cadence (stamped at dispatch)
 RECONCILE_SWEEP_SEC = 300  # the reconcile block's cadence (stamped when its pass ends, issue #1230)
 
@@ -118,6 +119,12 @@ def _run_cold_custody(stop_event: Any, latch: Any) -> None:
         log.warning("Cold custody pass unavailable; existing ownership retained", exc_info=True)
     finally:
         latch.release()
+
+
+def _run_census_duty(stop_event: Any, latch: Any) -> None:
+    """One subscription census pass on this module's root (``subscription_census.duty_pass``; never raises)."""
+    from ouroboros.subscription_census import duty_pass
+    duty_pass(lambda: _stop_requested(stop_event), latch, root=DATA_DIR)
 
 
 @contextmanager
@@ -398,6 +405,10 @@ def _periodic_supervisor_maintenance(
         _LAST_COLD_CUSTODY_SWEEP[0] = now
         _start_maintenance_thread(_COLD_CUSTODY_SWEEP_LOCK, "cold-custody", _run_cold_custody,
                                   (stop_event, _COLD_CUSTODY_SWEEP_LOCK))
+    from ouroboros.subscription_census import dispatch  # its own clock; running or direct actors, never a pending-only queue
+    dispatch(now, bool(queue.RUNNING or get_direct_activity_registry().actors()), _CENSUS_SWEEP_LOCK, DATA_DIR,
+             lambda: _start_maintenance_thread(_CENSUS_SWEEP_LOCK, "subscription-census", _run_census_duty,
+                                               (stop_event, _CENSUS_SWEEP_LOCK)), _duty_busy)
     # A cheap scheduling hint. The off-loop owner re-reads the exact fences and reads
     # nothing for a tree at rest; a network stop must never run on the assignment tick.
     from supervisor.owner_pause_control import settlement_look_owed
@@ -422,7 +433,7 @@ def _periodic_supervisor_maintenance(
                                            (last_review_reconcile, stop_event, latch)):
             last_review_reconcile[0] = time.time()  # a start that failed still waits out a cadence
     from ouroboros.maintenance import child as maintenance_child
-    if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the slot only
+    if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the owed lanes only
         _tick_maintenance_child()
     # When a pass has something new to decide (a due instant, a table write, rows waiting on other
     # facts: ``schedule_time.pass_due``), never merely per tick; a pass still running skips this one.
@@ -1128,7 +1139,9 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
         except Exception as exc:  # the drive retirer's own fact; the sweep step still records its failure
             _retirer_threw("drive_settlement", "Drive custody pass failed", exc)
             raise
-        if not _stop_requested(stop_event):  # history-sized named jobs: the one maintenance child, never here
+        if not _stop_requested(stop_event):  # history-sized named jobs: the maintenance children, never here
+            from ouroboros.maintenance import child
+            child.request(retry=True)  # both lanes owe a look; trash retries unchanged entries atomically
             _tick_maintenance_child()
         _step_recovered("reconcile_sweep")
     except Exception:
@@ -1139,12 +1152,13 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
 
 
 def _tick_maintenance_child() -> None:
-    """The maintenance dispatcher: reserve the one child slot (``ouroboros/maintenance.py``); its
-    thread reads the job facts and spawns the child only when one is due."""
+    """The maintenance dispatcher: reserve each owed lane's child slot (``ouroboros/maintenance.py``); a lane's
+    thread reads the job facts and spawns its child only when one is due. No argument: the supervisor's patched
+    stand-ins and the cost contract call it bare, and a lane no producer asked for reserves no look."""
     from ouroboros.config import REPO_DIR
     from ouroboros.maintenance import child
 
-    child.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR))
+    child.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR), owed_only=True)
 
 
 class HostDuty(NamedTuple):
@@ -1180,6 +1194,7 @@ HOST_DUTIES: Tuple[HostDuty, ...] = (
     HostDuty("reconcile-maintenance", _RECONCILE_SWEEP_LOCK, _run_periodic_reconcile_sweep),
     HostDuty("maintenance-child", None, _tick_maintenance_child),
     HostDuty("schedule-admission", _SCHEDULE_SWEEP_LOCK, _run_schedule_duty),
+    HostDuty("subscription-census", _CENSUS_SWEEP_LOCK, _run_census_duty),
 )
 TWENTY_SECOND_DUTIES = HOST_DUTIES[:6]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
 

@@ -31,9 +31,10 @@ The ordinary action works on exact objects: the *pool* (``storage_free_view``) i
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
 lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
-``manual`` is a third, separate form: exact finished copies whose work no capture holds, and session scratch its
-run marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds), each named with
-what it would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, session scratch its run
+marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds) and the heavy files of
+a finished task the mind proposed (``stored_payloads``, ``payload_release``), each named with what it would lose
+(``view=manual``) and sent with ``accept_loss``; nothing else reaches them
 (``copy_capture_proof.discard_offer``, ``copy_capture_proof.discard_unsaved_copy``).
 
 Five more groups hold what no background retirer removes, so only the owner's press frees them
@@ -59,7 +60,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 
 from ouroboros.storage_free_view import (  # noqa: F401 -- public re-exports
     StorageFreeEntry, StorageFreeItemsResponse, StorageFreeKept, StorageFreeManual, StorageFreePool, UNSAVED_LISTED, VIEWS, manual_ids,
@@ -81,8 +82,9 @@ GROUP_REVIEW_CHECKOUTS = "review_checkouts"
 GROUP_LOST_COPIES = "lost_copies"
 GROUP_SERVICE_FOLDERS = "service_folders"
 GROUP_RESULT_PINS = "result_pins"
+GROUP_STORED_PAYLOADS = "stored_payloads"  # heavy files of finished work the mind proposed; the owner's choice alone
 GROUPS = (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES, GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS,
-          GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS)
+          GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS, GROUP_STORED_PAYLOADS)
 LARGEST_ITEMS = 20
 # A retirer's typed reason -> the owner's reason (the client's sentences): results or messages
 # still being saved (late mail and call records that moved under the pass included: the next pass
@@ -90,15 +92,21 @@ LARGEST_ITEMS = 20
 _KEPT_REASONS = {
     "results_pending": ("child_result_unadopted", "child_refs_pending", "call_inventory_pending", "call_inventory_changed",
                         "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
-                        "raw_evidence_uncustodied", "artifact_source_missing", "canonical_changed", "drive_occupant_changed",
-                        "canonical_not_settled", "post_work_open", "artifacts_not_terminal", "child_drive_mismatch"),
+                        "raw_evidence_uncustodied", "service_logs_uncustodied", "artifact_source_missing",
+                        "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
+                        "artifacts_not_terminal", "child_drive_mismatch"),
     "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
-               "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held"),
-    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
+               "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held",
+               "task_not_proven_over", "tree_live", "tree_unsettled", "review_open", "custody_open", "continuable"),  # a work's closure
+    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy", "release_pending"),
+    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable",
+                          "tree_unreadable", "tree_unresolved", "census_unknown", "custody_unreadable", "continuation_unverified",
+                          "proposal_unreadable", "released_source_unproven"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained"),
-    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained", "release_unexplained"),
+    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected", "payload_changed", "payload_missing",
+                "payload_shared", "payload_linked", "payload_not_regular", "payload_protected", "payload_unreadable",
+                "retained_changed", "retained_by_other_offer", "retained_is_released", "release_partial"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
@@ -333,10 +341,22 @@ def _reason(raw: str) -> str:
     raw = str(raw or "")
     if raw.startswith("custody_error"):
         return "unreadable_record" if "ValueError" in raw else "other"
+    raw = raw.removeprefix("continued_")  # a Continue successor's closure holds as the work's own (``tree_hold``)
     for reason, codes in _KEPT_REASONS.items():
         if raw in codes:
             return reason
     return "other"
+
+
+def generation_closed() -> bool:
+    """The server's supervisor generation is closing or closed (lifespan teardown, a restart; a fresh lifespan opens
+    the next): no count, listing or run starts, and a running one stops between items. False outside a server."""
+    try:
+        from ouroboros.server_maintenance import _stop_requested
+
+        return bool(_stop_requested())
+    except Exception:
+        return False
 
 
 class FreeSpace:
@@ -351,6 +371,7 @@ class FreeSpace:
         self._cancel = threading.Event()
         self._live, self._guard, self._offered = live, guard, tuple(offered)
         self._thread: Optional[threading.Thread] = None
+        self._admitting: Optional[threading.Thread] = None  # the thread inside an admission (``_admission``)
         self._process = None
         self._state: str = "idle"
         self._plan: Optional[Dict[str, Any]] = None
@@ -377,14 +398,19 @@ class FreeSpace:
 
     def _closed(self) -> bool:
         """The owner's Stop, the server's stop, or a closed supervisor generation."""
-        if self._cancel.is_set() or self._stopped.is_set():
-            return True
-        try:
-            from ouroboros.server_maintenance import _stop_requested
+        return self._cancel.is_set() or self._stopped.is_set() or generation_closed()
 
-            return bool(_stop_requested())
-        except Exception:
-            return False
+    @contextlib.contextmanager
+    def _admission(self) -> Iterator[bool]:
+        """The lock for one listing or run admission, refused after the server's stop or in a closed generation.
+        While it decides (the selection checked, the thread started) the exit census names the deciding thread, so a
+        restart never reads an admission in progress as idle (``live_children``)."""
+        with self._lock:
+            self._admitting = None if self._stopped.is_set() or generation_closed() else threading.current_thread()
+            try:
+                yield self._admitting is not None
+            finally:
+                self._admitting = None
 
     # ---- the projection ---------------------------------------------------------------------
 
@@ -437,20 +463,52 @@ class FreeSpace:
         return {"error": "view_changed"} if version and str(version) != answer["version"] else answer
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-        """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal, or stayed held
-        because its producer marked it again (a moved drive or seat home is named by its task, a discarded scratch
-        handoff by its own entry)."""
-        from ouroboros.task_custody import custody_trash_entries
+        """Credit removal only after a whole enumeration proves absence. A moved entry still listed
+        without a readable identity, or unseen in an incomplete listing, remains deleting. A matching
+        recorded hold or failed removal counts as stuck. Drives and seat homes are named by task;
+        a discarded scratch handoff keeps its own name."""
+        from ouroboros.task_custody import custody_trash_scan
         from ouroboros.workspace_preflight import _RELEASE_MARK
 
-        entries = custody_trash_entries(root) if run["moved"] else []
+        try:
+            entries, complete = custody_trash_scan(root) if run["moved"] else ([], True)
+        except OSError:
+            entries, complete = [], False
+        from ouroboros.payload_release_state import operation_outcome
+
+        for item in run["items"]:
+            if item.layout != "payload" or not item.row.get("operation"):
+                continue
+            with self._lock:
+                if not any(item.key in run[name] for name in ("kept_items", "moved", "removed", "failed")):
+                    continue  # the worker has not reported this choice yet
+            try:
+                fact = operation_outcome(root, item.row)
+            except Exception:
+                fact = {"state": "pending", "bytes": 0, "cause": "record_unreadable"}
+            if not fact:
+                continue
+            # Reconcile the same reported choice; concurrent readers must not duplicate its classification.
+            with self._lock:
+                category = run["kept_items"].pop(item.key, None)
+                if category:
+                    run["kept"][category] = max(0, run["kept"].get(category, 1) - 1)
+                for name in ("moved", "removed", "failed"):
+                    run[name][:] = [key for key in run[name] if key != item.key]
+                item.cause = fact["cause"] or None
+                if fact["state"] == "moved":
+                    item.bytes = run["sizes"][item.key] = fact["bytes"]
+                    run["moved"].append(item.key)
+                else:
+                    self._keep(run, item, fact["cause"])
         survived = self._survived_trash(root) if entries else {}
         named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
-        waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
-        blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
+        waiting = {named[name] for name, identity in entries if identity is None or survived.get(name) != identity}
+        blocked = {named[name] for name, identity in entries if identity is not None and survived.get(name) == identity}
         deleting = [key for key in run["moved"] if key.split(":", 1)[-1] in waiting]
         stuck = [key for key in run["moved"] if key not in deleting and key.split(":", 1)[-1] in blocked]
+        if not complete:
+            return list(run["removed"]), [key for key in run["moved"] if key not in stuck], stuck
         removed = [key for key in run["moved"] if key not in deleting and key not in stuck] + run["removed"]
         return removed, deleting, stuck
 
@@ -511,8 +569,8 @@ class FreeSpace:
 
     def preview(self, data_root: Any, repo_dir: Any) -> bool:
         """Start one preview unless one lists or a run runs; False means the caller joined it."""
-        with self._lock:
-            if self._stopped.is_set() or self._busy():
+        with self._admission() as admitted:
+            if not admitted or self._busy():
                 return False
             self._cancel.clear()
             self._state, self._plan, self._run, self._error = "listing", None, None, None
@@ -530,8 +588,8 @@ class FreeSpace:
         if sum(form is not None for form in (items, groups, manual)) > 1:
             return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
-        with self._lock:
-            if self._stopped.is_set() or self._busy_elsewhere():
+        with self._admission() as admitted:
+            if not admitted or self._busy_elsewhere():
                 return {"started": False, "reason": "busy"}
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
@@ -541,13 +599,7 @@ class FreeSpace:
                 refusal, discards = self._exact_manual(self._plan, manual, accept_loss)
                 if refusal:
                     return {"started": False, "reason": refusal}
-                self._cancel.clear()
-                self._state, self._error = "running", None
-                self._progress = {"done": 0, "total": len(discards)}
-                self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, [], None, discards),
-                                                name="storage-free-run", daemon=True)
-                self._thread.start()
-                return {"started": True, "reason": ""}
+                return self._launch(len(discards), pathlib.Path(data_root), self._plan, [], None, discards)
             if items is not None:
                 refusal, selected = self._exact(self._plan, items)
                 if refusal:
@@ -556,13 +608,20 @@ class FreeSpace:
                           if any(item.key in selected for item in group["candidates"])]
             elif not chosen or any(group not in known for group in chosen):
                 return {"started": False, "reason": "unknown_group" if chosen else "nothing_selected"}
-            self._cancel.clear()
-            self._state, self._error = "running", None
-            self._progress = {"done": 0, "total": sum(sum(1 for item in group["candidates"] if selected is None or item.key in selected)
-                                                     for group in self._plan["groups"] if group["id"] in chosen)}
-            self._thread = threading.Thread(target=self._free, args=(pathlib.Path(data_root), self._plan, chosen, selected),
-                                            name="storage-free-run", daemon=True)
-            self._thread.start()
+            return self._launch(sum(sum(1 for item in group["candidates"] if selected is None or item.key in selected)
+                                    for group in self._plan["groups"] if group["id"] in chosen),
+                                pathlib.Path(data_root), self._plan, chosen, selected)
+
+    def _launch(self, total: int, *run: Any) -> Dict[str, Any]:
+        """Start the run under the admission lock, unless the server stopped or the generation closed while the
+        selection was checked: the census named the admission meanwhile, and nothing starts after Stop."""
+        if self._stopped.is_set() or generation_closed():
+            return {"started": False, "reason": "busy"}
+        self._cancel.clear()
+        self._state, self._error = "running", None
+        self._progress = {"done": 0, "total": total}
+        self._thread = threading.Thread(target=self._free, args=run, name="storage-free-run", daemon=True)
+        self._thread.start()
         return {"started": True, "reason": ""}
 
     @staticmethod
@@ -670,20 +729,27 @@ class FreeSpace:
                 return False
             self._cancel.set()
             process = self._process
-        if process is not None:
-            with contextlib.suppress(OSError):
-                process.kill()
+        self._signal(process)
         return True
 
     def stop(self) -> None:
-        self._stopped.set()
-        self.cancel()
+        self._stopped.set()  # never under the lock a page request holds: Panic must not wait
+        self._signal(self._process)  # the sizing thread publishes its child, then rechecks Stop
 
     def live_children(self) -> list:
-        process, thread = self._process, self._thread
+        """Exit census after Stop: the sizing child, else the listing or run thread, else a thread inside an admission."""
+        process, thread, admitting = self._process, self._thread, self._admitting
         if process is not None and process.poll() is None:
             return [process]
-        return [thread] if thread is not None and thread.is_alive() else []
+        if thread is not None and thread.is_alive():
+            return [thread]
+        return [admitting] if admitting is not None else []
+
+    @staticmethod
+    def _signal(process) -> None:
+        if process is not None:  # not published yet, or already reaped
+            with contextlib.suppress(OSError):
+                process.kill()
 
     # ---- the preview ------------------------------------------------------------------------
 
@@ -886,6 +952,10 @@ class FreeSpace:
                 _sorted_into(root, group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
                     str(row.get("path") or "")), "pins", task=str(row.get("task_id") or ""), row=row))
             groups.append(group)
+        if GROUP_STORED_PAYLOADS in self._offered:  # each proposal one manual object (``payload_release.free_group``)
+            from ouroboros.payload_release import free_group
+            groups.append(free_group(root, live, new_group(GROUP_STORED_PAYLOADS), lambda key, path, task: _Candidate(
+                GROUP_STORED_PAYLOADS, key, path, "payload", task=task)))
         return groups
 
     def _size(self, root: pathlib.Path, repo_dir: pathlib.Path, candidates: List[_Candidate]) -> None:
@@ -916,8 +986,7 @@ class FreeSpace:
         if not by_path:
             return
         process = spawn_maintenance_job(root, repo_dir, PURPOSE, args=("--size-paths",), stdin=subprocess.PIPE)
-        with self._lock:
-            self._process = process
+        self._process = process  # no lock: Stop and Cancel set their flag, then read this; the check below reads theirs
         try:
             if self._closed():
                 process.kill()
@@ -966,7 +1035,8 @@ class FreeSpace:
             with self._lock:
                 self._plan = plan  # the counts appear at once; the sizes fill in while the state stays listing
             candidates = [item for group in groups for item in group["candidates"]]
-            self._size(root, repo_dir, candidates + [item for group in groups for item in group["excluded"] if item.manual])
+            self._size(root, repo_dir, candidates + [item for group in groups for item in group["excluded"]
+                                                     if item.manual and item.layout != "payload"])  # sized by its identities
             _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
@@ -1170,6 +1240,7 @@ class FreeSpace:
 
     def _free_manual(self, root: pathlib.Path, candidates: List[_Candidate], run: Dict[str, Any]) -> None:
         """The owner's exact discards, one retirer call per copy: a copy that stays says the retirer's reason."""
+        from ouroboros import payload_release
         from ouroboros.copy_capture_proof import discard_unsaved_copy
         from ouroboros.subagent_worktrees import SubagentWorktreeRegistryCorrupt, WorktreeOpsLockBusy
 
@@ -1179,6 +1250,13 @@ class FreeSpace:
                 raise _Stopped()
             if item.layout == "producer_retained":
                 self._settle(run, item, self._free_producer_retained(root, item), moved=True)
+                continue
+            if item.layout == "payload":  # the owner's exact choice (``payload_release``): only what moved counts
+                reason, moved = payload_release.settle(root, item, live, self._interlock(self._closed), owner=self._request is None)
+                if moved:
+                    item.bytes = run["sizes"][item.key] = moved
+                    item.cause = reason or None  # a partial batch says so beside its outcome
+                self._settle(run, item, "" if moved else reason, moved=True)
                 continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:

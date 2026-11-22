@@ -39,10 +39,11 @@ import logging
 import pathlib
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from ouroboros import delegate_custody as custody
-from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
+from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code, task_id_read_hint
 from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.owner_mailbox import (
     KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries,
@@ -641,7 +642,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
         key: (str(value)[:600] if isinstance(value, str) else value)
         for key in ("replay_of", "status", "ok", "host_code", "run_id", "state", "last_seq", "reason",
                     "waiting_on_user", "async_questions_only", "continuation", "continuation_note",
-                    "sleep", "cache_horizon_note", "leaf_live_input")
+                    "sleep", "previous_model_response", "cache_horizon_note", "leaf_live_input",
+                    "receipt")
         if (value := payload.get(key)) not in (None, "")
     }
     envelope["supervision_wake_id"] = wake_id
@@ -687,7 +689,8 @@ def _render_wake_payload(ctx: Any, payload: dict[str, Any], replay_of: Optional[
                if payload.get("ok") is False else {}),
             "run_id": str(payload.get("run_id") or "")[:200],
             **{key: payload[key] for key in ("waiting_on_user", "async_questions_only", "continuation",
-                                             "continuation_note", "sleep", "leaf_live_input") if key in payload},
+                                             "continuation_note", "sleep", "previous_model_response",
+                                             "leaf_live_input", "receipt") if key in payload},
             "supervision_wake_id": wake_id,
             "coordination_context": {"state": "available_in_full_wake_source"},
             "wake_delivery": envelope["wake_delivery"],
@@ -1048,28 +1051,33 @@ def _leaf_live_input(entry: Any, gateway: Any) -> str:
     return "unknown" if value is None else value
 
 
-def _since_last_model_response_sec(ctx: Any) -> Optional[float]:
-    """Seconds since this task's latest model response was recorded
-    (``_last_llm_call_meta.ts``). A LOWER bound on prompt-cache age: the provider
-    read/wrote the cached prefix before that response finished, so the horizon note
-    built on it can only fire late, never early. Unknown (silent) after a worker
-    loss, whose successor has no recorded send yet."""
-    usage = getattr(ctx, "_accumulated_usage", None)
-    meta = usage.get("_last_llm_call_meta") if isinstance(usage, dict) else None
-    try:
-        import datetime as _dt
+def _previous_model_response(ctx: Any) -> dict[str, Any]:
+    """Snapshot the accepted response's clock and explicit request TTL for replay without the worker."""
+    from ouroboros.llm_attempt import cache_ttl_seconds
 
-        stamp = _dt.datetime.fromisoformat(str((meta or {}).get("ts") or ""))
-        return max(0.0, (_dt.datetime.now(tz=_dt.timezone.utc) - stamp).total_seconds())
-    except (TypeError, ValueError):
-        return None
+    usage = getattr(ctx, "_accumulated_usage", None)
+    if not isinstance(usage, dict):
+        return {}
+    previous = usage.get("_last_round_cache_usage")
+    finished = previous.get("finished_at") if isinstance(previous, dict) else None
+    facts = {}
+    if type(finished) in (int, float):
+        try:
+            facts["finished_at"] = datetime.fromtimestamp(finished, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass  # an unusable timestamp proves no response age
+    ttl = str(usage.get("_last_prompt_cache_ttl") or "").strip().lower()
+    if cache_ttl_seconds(ttl) is not None:
+        facts["request_cache_ttl"] = ttl
+    return facts
 
 
 def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payload: dict[str, Any],
                         live_input: str) -> None:
     """Whole-sleep facts at the ONE durable publication point, every status (terminal
     included), before ``pending_wake`` is stored, so a replay repeats the recorded facts
-    exactly: when the wait was armed, how long it slept, in which mode, and what woke it.
+    exactly: when the wait was armed, the time since arming, the mode and what woke it.
+    The previous response's timestamp and request TTL are separate, not cache state.
     A quiet status drops the read's own ``waited_sec``/``quiet_for_sec`` and its generic
     keep-watching/cancel note; a run paused on its question keeps the PAUSED note."""
     armed = descriptor.get("armed_epoch")
@@ -1089,11 +1097,9 @@ def _publish_wake_facts(ctx: Any, descriptor: dict[str, Any], woke_by: str, payl
         else:
             payload.pop("note", None)
     payload.pop("cache_horizon_note", None)
-    from ouroboros.tools.control import cache_horizon_note
-
-    horizon = cache_horizon_note(ctx, _since_last_model_response_sec(ctx))
-    if horizon:
-        payload["cache_horizon_note"] = horizon
+    payload.pop("previous_model_response", None)
+    if previous := _previous_model_response(ctx):
+        payload["previous_model_response"] = previous
     payload["leaf_live_input"] = live_input
 
 
@@ -1158,6 +1164,15 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
     return None, states
 
 
+def _held_run(ctx: Any, run_id: str) -> tuple[Any, bool]:
+    """``(custody entry or None, whether the lookup answered)``: a lookup that raised is no proof the record is
+    absent, so the receipt line says the record was unavailable at this read (``helper_receipt.run_result_line``)."""
+    try:
+        return custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1], True
+    except Exception:
+        return None, False
+
+
 def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questions: Any = None) -> ToolResult:
     """Publish one wake of the runs a wait selected and render it: the ONE wake record (``pending_wake``:
     its loop-control, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
@@ -1175,10 +1190,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
     state = states[target]
     since = descriptor.get("since_seq")
     cursor = max(int(state.get("journal_cursor") or 0), int(since) if since is not None else 0)
-    try:
-        _ownership, held = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), target)
-    except Exception:
-        held = None
+    held, looked_up = _held_run(ctx, target)
     from ouroboros.tools.delegate import _read_run
     from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
 
@@ -1233,6 +1245,11 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
             payload["questions"] = questions
     if wakes:
         payload["wake_events"] = wakes
+    if payload.get("status") == "terminal":  # where the starter judges the result: what still differs, by run
+        from ouroboros.helper_receipt import run_result_line
+
+        if receipt := run_result_line(ctx, held, payload.get("access_evidence"), looked_up=looked_up):  # observed only
+            payload["receipt"] = receipt
     payload["coordination_context"] = coordination_live_context(ctx)
     _publish_wake_facts(ctx, descriptor, woke_by, payload, live_input)
     if descriptor.get("ignored_arguments"):
@@ -1349,9 +1366,10 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
             "(0 with an empty reason also means none).",
         )
     run_ids = list(dict.fromkeys(run_id if isinstance(run_id, list) else [str(run_id)]))
-    root, in_process, review_runs = custody.custody_root(ctx), [], []
+    root, in_process, review_runs, unknown = custody.custody_root(ctx), [], [], []
     for selected in run_ids:
         ownership, entry = custody.lookup(root, str(ctx.task_id), selected)
+        unknown += [selected] * (ownership == custody.UNKNOWN)
         if ownership == custody.FOREIGN:
             from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
 
@@ -1390,8 +1408,9 @@ def run_wait(ctx: Any, run_id: str | list[str], *, since_seq: Optional[int] = No
     try:  # the sleep's selection is durable custody; an unknown run is still refused here
         chosen = model_sleep.selectors(ctx, runs=[rid for rid in run_ids if rid not in in_process],
                                        wake_after_sec=delay)
-    except ValueError as exc:
-        return _fail("delegate_wait", "run_ownership_unknown", str(exc))
+    except ValueError as exc:  # an id with no run custody that is a task gets its exact read
+        hints = " ".join(hint for rid in unknown if (hint := task_id_read_hint(ctx, rid)))
+        return _fail("delegate_wait", "run_ownership_unknown", str(exc), **({"hint": hints} if hints else {}))
     descriptor["wake_at"] = chosen["wake_at"]
     chosen.update(_choice(descriptor))
 

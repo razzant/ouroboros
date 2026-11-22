@@ -80,7 +80,7 @@ FAKES = """(() => {
 })();"""
 
 
-def open_app(ui, *, width, scheme):
+def open_app(ui, *, width, scheme, history=HISTORY):
     page = ui["page"]
     origin = urlparse(ui["url"]).netloc
     outside: list[str] = []
@@ -95,7 +95,7 @@ def open_app(ui, *, width, scheme):
             route.abort()
     page.add_init_script(FAKES)
     page.route("**/*", only_this_origin)
-    page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(HISTORY)))
+    page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(history)))
     page.set_viewport_size({"width": width, "height": 750 if width > 620 else 844})
     page.emulate_media(color_scheme=scheme)
     page.goto(ui["url"] + "/")
@@ -142,6 +142,55 @@ def save_card(page, name):
         Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / f"{name}.png").write_bytes(raw)
     return data, raw
+
+
+def test_share_card_draws_inline_code_with_each_space_the_message_wrote(subscription_ui):
+    """Markdown → Share → Card in a real engine, read from the card's own drawing calls, never its pixels: inline code
+    keeps each space, left to right and in a right-to-left paragraph. The PNG is kept as evidence to look at."""
+    answer = {**HISTORY["messages"][1], "text": "Run `X  X` now\n\nהרץ `X  X` עכשיו"}
+    page, _ = open_app(subscription_ui, width=1100, scheme="light", history={"messages": [answer], "progress": []})
+    page.evaluate("""() => {
+        window.__cardText = [];
+        const fill = CanvasRenderingContext2D.prototype.fillText;
+        CanvasRenderingContext2D.prototype.fillText = function (text, x, ...rest) {
+            window.__cardText.push({ text: String(text), x, width: this.measureText(String(text)).width });
+            return fill.call(this, text, x, ...rest);
+        };
+    }""")
+    page.locator(".chat-bubble.assistant [data-message-action='share']").click()
+    page.locator("[data-share-format='card']").click()
+    save_card(page, "share-inline-spaces")
+    calls = page.evaluate("window.__cardText")
+    texts = [call["text"] for call in calls]
+    # Each piece is drawn at its own place: the two spaces of the code are one piece, and the X after them starts
+    # where the first X and those two spaces end.
+    at = next((i for i in range(len(texts) - 2) if texts[i:i + 3] == ["X", "  ", "X"]), None)
+    assert at is not None, texts
+    first, gap, second = calls[at:at + 3]
+    assert abs(second["x"] - (first["x"] + first["width"] + gap["width"])) < 0.01, (first, gap, second)
+    assert "הרץ X  X עכשיו" in texts, texts
+
+
+def test_share_card_checks_the_words_selected_from_a_formula_paragraph(subscription_ui):
+    answer = {**HISTORY["messages"][1], "text": "The distance is given by $$x^2$$."}
+    page, _ = open_app(subscription_ui, width=1100, scheme="light", history={"messages": [answer], "progress": []})
+    page.locator(".chat-bubble.assistant [data-message-action='share']").click()
+    sheet = page.locator(".message-share[open]")
+    sheet.locator("[data-share-format='card']").click()
+    sheet.locator(".document-reader-status.is-error", has_text="a formula").wait_for()
+    sheet.locator("[data-share-action='choose']").click()
+    sheet.locator(".message-share-part [data-share-run]").first.evaluate("""span => {
+        const range = document.createRange();
+        range.setStart(span.firstChild, 0);
+        range.setEnd(span.firstChild, 'The distance'.length);
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+    }""")
+    page.wait_for_function("document.querySelector('.message-share-count').textContent.startsWith('2 of ')")
+    sheet.locator("[data-share-action='use']").click()
+    save_card(page, "share-words-before-formula")
+    sheet.locator("[data-share-format='text']").click()
+    assert sheet_text(page) == "The distance"
 
 
 @pytest.mark.parametrize("width,scheme", [(1100, "light"), (390, "dark")])

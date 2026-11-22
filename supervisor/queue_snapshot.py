@@ -160,7 +160,7 @@ _PENDING_FIELDS = (
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause', '_park_confirmation',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by', '_folder_wait', '_placement_folder',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by', '_placement_folder',
     '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
@@ -172,6 +172,7 @@ def _saved_pending_task(row: dict) -> dict:
     this restore's clock.
     """
     task = dict(row["task"])
+    task.pop("_folder_wait", None)  # an older build's display note: a wait is computed now, never restored
     value = row["queued_at"] if "queued_at" in row else task.get("queued_at")
     known = (isinstance(value, str) and value.strip()) or (
         isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0)
@@ -285,9 +286,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
                                               hold_stopped_queue, never_started, park_saved_pause, pause_ids,
-                                              continues_saved_step, recover_saved_running, returned_before_body,
-                                              retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
-    from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
+                                              recover_saved_running, returned_before_body, retained_pending,
+                                              saved_step_refusal, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
+    from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict, schedule_refusal_basis
     from supervisor.task_admission import SEED_RETURN
 
     from ouroboros.work_stop import clear_refusal, continuation_refusal, current_stop, writer_wait
@@ -478,6 +479,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             saved_or_accepted = (never_started(task) or isinstance(task.get("_working_recovery"), dict)
                                  or isinstance(task.get(SEED_RETURN), dict) or returned and not project_hold)
             kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
+            saved_refusal = ""
             if panicked and not current_stop(task) or not certified and writer_wait(task):
                 # This also covers a planned delegate return under Project custody:
                 # its current stop must survive consumption of the installation input.
@@ -486,7 +488,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             elif kept:
                 row = task
             elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and (schedule_replay or (
-                    verdict == "possible" and continues_saved_step(task, _queue().DRIVE_ROOT))) or recheck):
+                    verdict == "possible" and not (saved_refusal := saved_step_refusal(task, _queue().DRIVE_ROOT))))
+                    or recheck):
                 row = task  # the fresh Restart returns it, or its own saved step past a schedule's ``possible`` (#3192)
             elif owner_restart and (returned or returned is None):
                 row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
@@ -496,8 +499,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             elif (owner_restart and (not schedule_replay or not never_started(task))
                   or (dispatch == "possible" or verdict == "possible") and not project_hold):
                 row = dict(task)  # a committed mark under a stale snapshot is held as visibly as its own
+                basis = saved_refusal or (schedule_refusal_basis(verdict) if not schedule_replay else "dispatch_unconfirmed")
                 hold_budget_row(row, reason="dispatch_outcome_unknown",
-                                detail="an assignment may have reached a worker; reconcile its receipt before resuming",
+                                extra={"refusal_basis": basis},
                                 result_root=_queue().DRIVE_ROOT)
             elif not project_hold and not schedule_replay:
                 continue  # settled, contended or unprovable: the occurrence reconcile owns it
@@ -865,7 +869,15 @@ def restore_pending_from_snapshot(
     key = str(pathlib.Path(_queue().QUEUE_SNAPSHOT_PATH).absolute())
     _RESTORING[key] = threading.get_ident()
     try:
-        return _restore_pending(key, max_age_sec, terminalized)
+        restored = _restore_pending(key, max_age_sec, terminalized)
+        from ouroboros.delegate_resume import restore_recovered_writer_hints
+        try:
+            restore_recovered_writer_hints(_queue().DRIVE_ROOT)
+        except Exception:
+            from supervisor.owner_pause_control import defer_failed_recovery_discovery
+            defer_failed_recovery_discovery(_queue().DRIVE_ROOT)
+            log.warning("Recovered writer fences unavailable during queue restore", exc_info=True)
+        return restored
     finally:
         _RESTORING.pop(key, None)
 

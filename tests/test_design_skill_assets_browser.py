@@ -1,8 +1,8 @@
 """The design skills' browser-side files in real engines: the comparison page, measure.js, freeze.js.
 
 Each behaviour is checked in both directions where it can be: the page swaps variants in place and
-keeps the compared element still; measure.js reports each planted defect on `defects.html` and stays
-quiet on `clean.html`; a frozen page renders alone from an empty folder with nothing fetched, and keeps
+keeps the compared element still; measure.js reports each planted defect on `defects.html`, stays
+quiet on `clean.html` and judges both sides of a target's reach by its pointer on `touch.html`; a frozen page renders alone from an empty folder with nothing fetched, and keeps
 a var() shorthand CSSOM cannot serialize by copying its sheet's text, yet names it in `missing` whether
 copied or lost, since equal serialized rules do not prove that text still holds the live value.
 WebKit is the engine of the desktop app's window, Chromium the bundled one; a missing engine skips
@@ -157,6 +157,78 @@ def test_compare_page_swaps_in_place_with_the_subject_anchored(engine, tmp_path)
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_compare_keeps_the_latest_variant_and_scroll_after_a_late_frame(engine, tmp_path):
+    with browser(engine) as instance:
+        page = open_page(instance, sample_page(tmp_path).as_uri())
+        wait_shown(page, "now", "draft")
+        page.locator(".q .opt").first.click()
+        history_length = page.evaluate("history.length")
+        anchor = page.evaluate("""() => {
+            const late = document.querySelector('iframe[data-key="a/draft"]');
+            const ready = late.ready;
+            let release;
+            late.ready = new Promise(resolve => { release = resolve; });
+            const pending = compare.show({variant: 'a', clean: true});
+            window.finishLate = () => { late.ready = ready; release(); return pending; };
+            const doc = document.querySelector('iframe:not([data-off])').contentDocument;
+            doc.querySelector('#list').scrollTop = 165;
+            return doc.querySelector('.subject').getBoundingClientRect().top;
+        }""")
+        page.keyboard.press("3")
+        wait_shown(page, "b", "draft")
+        latest = page.locator('iframe[data-key="b/draft"]')
+        top = latest.evaluate("f => f.contentDocument.querySelector('.subject').getBoundingClientRect().top")
+        assert top == pytest.approx(anchor, abs=1)
+        latest.evaluate("f => { f.contentDocument.querySelector('#list').scrollTop = 370; }")
+        page.evaluate("window.finishLate()")
+        assert page.locator("#stage iframe:not([data-off])").get_attribute("data-key") == "b/draft"
+        assert latest.evaluate("f => f.contentDocument.querySelector('#list').scrollTop") == 370
+        assert page.locator('[data-variant="b"]').get_attribute("aria-pressed") == "true"
+        assert page.evaluate("location.hash") == "#scene=draft&v=3&clean=1"
+        assert page.evaluate("history.length") == history_length
+        assert page.locator(".q .opt").first.get_attribute("aria-pressed") == "true"
+        assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("next_side", [False, True], ids=["single", "side"])
+def test_compare_side_by_side_settle_cannot_repaint_a_newer_choice(engine, tmp_path, next_side):
+    with browser(engine) as instance:
+        page = open_page(instance, sample_page(tmp_path).as_uri())
+        wait_shown(page, "now", "draft")
+        during_load = page.evaluate("""async nextSide => {
+            const stage = document.getElementById('stage');
+            const visible = new Promise(resolve => {
+                const observer = new MutationObserver(() => {
+                    if (stage.classList.contains('side')) { observer.disconnect(); resolve(); }
+                });
+                observer.observe(stage, {attributes: true, attributeFilter: ['class']});
+            });
+            const side = compare.show({side: true, clean: true});
+            await visible;  // frames are on screen, their second paint is still pending
+            const next = stage.querySelector('iframe[data-key="a/draft"]');
+            const ready = next.ready;
+            let release;
+            next.ready = new Promise(resolve => { release = resolve; });
+            const latest = compare.show({variant: 'a', side: nextSide});
+            window.dispatchEvent(new Event('resize'));
+            await side;
+            const captions = [...stage.querySelectorAll('.cap')].map(el => el.textContent);
+            const hash = location.hash;
+            next.ready = ready;
+            release();
+            await latest;
+            return {captions, hash};
+        }""", next_side)
+        assert during_load == {"captions": ["1", "2", "3"], "hash": "#scene=draft&v=1&side=1&clean=1"}
+        shown = page.locator("#stage iframe:not([data-off])").evaluate_all("frames => frames.map(f => f.dataset.key)")
+        assert shown == (["now/draft", "a/draft", "b/draft"] if next_side else ["a/draft"])
+        assert page.locator("#stage .cap").count() == (3 if next_side else 0)
+        assert page.locator("#side").get_attribute("aria-pressed") == str(next_side).lower()
+        assert page.evaluate("location.hash") == "#scene=draft&v=a" + ("&side=1" if next_side else "")
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_compare_page_questions_offer_none_and_compose_the_answer(engine, tmp_path):
     path = sample_page(tmp_path)
     with browser(engine) as instance:
@@ -204,6 +276,24 @@ def test_measure_reports_planted_defects_and_stays_quiet_on_the_clean_page(engin
         assert all(set(item) == {"kind", "message", "where", "value"} for item in found)
         assert reports["defects"]["facts"]["leftEdges"] and reports["defects"]["facts"]["counts"]
         assert reports["clean"]["findings"] == [], reports["clean"]["findings"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_measure_judges_each_side_of_a_target_reach_by_its_pointer(engine):
+    script = MEASURE.read_text(encoding="utf-8")
+    with browser(engine) as instance:
+        page = open_page(instance, (FIXTURES / "touch.html").as_uri(), width=600, height=700)
+        page.screenshot()
+        small = {coarse: {item["where"] for item in page.evaluate(script, {"coarse": coarse, "limit": 20})["findings"]
+                          if item["kind"] == "target-small"} for coarse in (False, True)}
+        assert_nothing_fetched(page)
+    # A mouse: 24 px each way, so a wide control too short fails, and so does one a wrapper cuts to 22 px for good (a
+    # scroller showing part of a control does not shorten it, nor does a clipping shell around that scroller); a link
+    # in a sentence is exempt, one alone in a list not.
+    assert small[False] == {"button#short", "button#masked", "a#listed"}, small
+    # A finger: 44 px each way through the reach the recipe adds, unless a scrolling strip clips it; no link is exempt.
+    assert small[True] == {"button#bare", "button#short", "button#clipped", "button#clipped-2", "button#masked",
+                           "a#inline", "a#listed"}, small
 
 
 @pytest.mark.parametrize("engine", ENGINES)

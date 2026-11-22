@@ -104,7 +104,7 @@ EXPECTED_TOOLS = [
     "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
-    "inspect_harness", "maintain_harness", "free_storage", "inspect_subagent",
+    "inspect_harness", "maintain_harness", "free_storage", "propose_payload_release", "inspect_subagent",
     "promote_to_stable", "schedule_subagent", "schedule_followup", "manage_schedules",
     "configure_presence",
     "integrate_subagent_patch", "compare_subagent_patches",
@@ -476,22 +476,39 @@ def test_size_ratchet_transition_against_explicit_base():
     )
 
 
-def test_js_module_gate_buckets_and_grandfathering():
-    """The JS size gate leaves test modules (web/tests) and vendored code out and exempts debt by exact rel-path only."""
+def test_js_module_gate_buckets_and_grandfathering(tmp_path):
+    """The JS size gate leaves test modules (web/tests) and vendored code out and exempts debt by exact rel-path only;
+    a vendored file kept under its release's own name is out by its exact path, so a first-party namesake is not."""
     from ouroboros.review import compute_complexity_metrics, module_is_grandfathered
 
     sections = [
         ("repo/web/app.js", "x\n" * 2000),                   # gated, over hard gate, not grandfathered
         ("repo/web/modules/chat.js", "x\n" * 4000),          # gated, grandfathered by rel-path
         ("repo/web/vendor/chart.umd.min.js", "x\n" * 9000),  # vendored/minified — excluded
+        ("repo/web/vendor/qrcodegen/qrcodegen.js", "x\n" * 2000),  # vendored under its release's own name — excluded
+        ("repo/web/vendor/qrcodegen/qr_wrapper.js", "x\n" * 2000),  # first-party code beside it — still gated
+        ("repo/web/modules/qrcodegen.js", "x\n" * 2000),  # a first-party namesake elsewhere — still gated
         ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — a test module, out of the band
         ("repo/ouroboros/small.py", "x\n" * 10),
     ]
     metrics = compute_complexity_metrics(sections)
 
-    assert metrics["js_files"] == 2  # app.js + chat.js; web/tests and vendored excluded
+    assert metrics["js_files"] == 4  # app.js + chat.js + the wrapper + the namesake; web/tests and vendored excluded
     oversized = {p for p, _n in metrics["oversized_modules"]}
     grandfathered = {p for p, _n in metrics["grandfathered_modules"]}
+    assert "web/vendor/qrcodegen/qr_wrapper.js" in oversized
+    assert "web/vendor/qrcodegen/qrcodegen.js" not in oversized | grandfathered
+    assert "web/modules/qrcodegen.js" in oversized
+    # The full-repository review pack reads the same way: the vendored copy is omitted, its namesake is reviewed.
+    from ouroboros.tools.review_file_pack import iter_repo_pack_entries
+
+    pair = ["web/vendor/qrcodegen/qrcodegen.js", "web/modules/qrcodegen.js"]
+    for rel in pair:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("export const qr = 1;\n", encoding="utf-8")
+    entries, omitted = iter_repo_pack_entries(tmp_path, tracked_paths=pair)
+    assert [entry[0] for entry in entries] == ["web/modules/qrcodegen.js"]
+    assert omitted == ["web/vendor/qrcodegen/qrcodegen.js (vendored/minified)"]
     assert "web/app.js" in oversized
     assert "web/modules/chat.js" in grandfathered
     assert "web/modules/chat.js" not in oversized

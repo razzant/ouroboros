@@ -115,8 +115,9 @@ def in_place_block(entry):
                      "through git, which also reverts any uncommitted edit of your own there.")}
 
 
-def started_receipt(payload, resource_ref, target_root, *, durable, investigation):
-    """Receipt facts and note of a folder or in-place start (delegate_start's started result)."""
+def started_receipt(payload, resource_ref, target_root, *, durable, investigation, receipt=""):
+    """Receipt facts and note of a folder or in-place start (delegate_start's started result); ``receipt``, what
+    reached the run (``helper_receipt``), follows the folder's own statement."""
     lead = "CUSTODY IS NOT DURABLE. " if not durable else ""
     if is_in_place_run({"resource_ref": resource_ref}):
         payload.update(workspace=IN_PLACE, authority_target_root=target_root, execution_root=target_root)
@@ -125,7 +126,7 @@ def started_receipt(payload, resource_ref, target_root, *, durable, investigatio
                            "or reject (integrate_delegated_patch refuses); undo through git. Do not edit the same files "
                            "meanwhile and do not start a second in-place writer in this folder: their edits would mix. "
                            "When this folder is the Ouroboros body, its protected paths are not checked for this writer "
-                           "(the commit gate still checks them). Use delegate_wait for its result.")
+                           "(the commit gate still checks them). Use delegate_wait for its result.\n" + receipt)
         return
     direct = resource_ref.get("strategy") == "direct"
     payload.update(authority_target_root=target_root,
@@ -139,6 +140,7 @@ def started_receipt(payload, resource_ref, target_root, *, durable, investigatio
         + ("This evidence-only investigation's results are kept as evidence, never applied "
            "(integrate_delegated_patch refuses); never let it commit." if investigation
            else "Copy results use integrate_delegated_patch for apply or reject.")
+        + "\n" + receipt
     )
 
 
@@ -160,7 +162,10 @@ def git_directory_options_refusal(target_root, strategy, scope_paths, *, git_wor
     from ouroboros import work_domain
 
     if (git_workspace or work_domain.exists(Path(target_root) / ".git")) and not default_shaped_directory_options(strategy, scope_paths):
-        return "Directory options apply to ordinary folders; Git workspaces keep their snapshot contract."
+        named = " and ".join(name for name, off in (("directory_strategy", strategy not in (None, "direct")),
+                                                     ("scope_paths", bool(scope_paths))) if off)
+        return ("Directory options apply to ordinary folders; Git workspaces keep their snapshot contract. "
+                f"Omit {named} for this Git workspace.")
     return ""
 
 

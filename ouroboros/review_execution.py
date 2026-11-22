@@ -37,10 +37,10 @@ from ouroboros.review_slot_cancel import (  # noqa: F401 — re-exported seam su
     _natural_success_terminal,
     _slot_cancel_outcome,
 )
-from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp
+from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp, review_operation_binding
 from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, BillingAuthorityUnavailable
 from ouroboros.delegate_custody_usage import (
-    model_identity_delta, observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
+    ReviewAttemptCosts, model_identity_delta, observe_failed_review_send, observe_session_usage, run_names,
 )
 from ouroboros.delegate_start_instructions import READONLY_SOURCE_SCOPE
 from ouroboros.triad_review import (
@@ -59,7 +59,7 @@ from ouroboros.review_session_custody import (
     owned_started_review_custody,
     recorded_review_shape,
     review_recovery_facts, continuation_send_admitted, rejoin_recorded_review,
-    join_recorded_review_continuation, stopped_review_failure,
+    join_recorded_review_continuation, stopped_review_failure, full_session_text as _full_session_text,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
 from ouroboros.review_session_usage import (review_event_identity, session_custody_attribution,
@@ -335,11 +335,12 @@ class ReviewSlotExecutor:
     def __init__(self, assignment: ReviewAssignment, *, llm: Any = None):
         self.assignment = assignment
         self.llm = llm
+        self.attempt_costs = ReviewAttemptCosts()
         self.usage_observer: Optional[Callable[[Dict[str, Any]], None]] = None
         self.answer_observer: Optional[Callable[[], None]] = None
 
     def _observe_usage(self, usage: Optional[Dict[str, Any]]) -> None:
-        observe_review_usage(self.usage_observer, usage)
+        self.attempt_costs.observe(usage, self.usage_observer)
 
     def _output_contract(self) -> str:
         contract = str((self.assignment.request.policy or {}).get("output_contract") or "")
@@ -400,6 +401,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
             self._chat_kwargs = {
                 "messages": self.messages,
                 "model": slot.model,
+                "chat_conversation_id": self.assignment.call_id,
                 "model_role": f"reviewer:{slot.slot_id}",
                 "model_account_override": slot.session_profile,
                 "reasoning_effort": slot.effort,
@@ -450,7 +452,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
                 capture = getattr(exc, "physical_attempt_capture", None)
                 if str(getattr(capture, "state", "") or "") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
                     invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
-                observe_failed_review_send(self.usage_observer, exc)
+                self.attempt_costs.failed(observe_failed_review_send(self.usage_observer, exc))
                 raise
         # Null/non-object provider messages follow the caller's empty-response rail.
         raw_text = str(msg.get("content") or "") if isinstance(msg, dict) else ""
@@ -662,6 +664,7 @@ class SessionInvocation:
     # #1609: the seat's configured technical access ('' = historical read-only) and its wave's frozen checking source.
     access: str = ""
     checking_source: Optional[Dict[str, Any]] = None
+    answer_binding: Optional[Dict[str, Any]] = None
 
 def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                                  invocation: SessionInvocation) -> Dict[str, Any]:
@@ -896,7 +899,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             state.pop("pending_invocation_id", None)
             state.pop("delegated_run_id", None)
             raise stopped_review_failure(gateway, run_id, detail, summary)
-        text = _full_session_text(gateway, run_id, detail)
+        text = _full_session_text(gateway, run_id, detail, checkpoint=(custody_drive, entry, invocation.answer_binding if custody_durable else None))
         spend, estimated, combined_summary = _combined_session_usage(custody, stopped_details, detail)
         thread_receipt: Dict[str, Any] = {}
         if use_thread:
@@ -972,6 +975,8 @@ def _require_route_headroom(gateway: Any, route: Any, shape: Any) -> None:
     unavailable, reset_at = route_health(gateway, route.route_id, shape, route_model=route.model,
                                          pinned_profile=str(getattr(route, "profile_id", "") or ""))
     if unavailable in WINDOW_EXHAUSTED_CODES or reset_at:
+        from ouroboros.subscription_census import note_limit_failure
+        note_limit_failure(unavailable or "subscription_window_exhausted")  # a seat refused on a spent window: read again
         raise ClaudexorSubscriptionWindowExhausted(
             "delegated review route subscription window is exhausted"
             + (f" (resets {reset_at})" if reset_at else "")
@@ -1150,30 +1155,6 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
         if unobserved is None and token is not None:
             seen = token  # acknowledged only once the rows it stands for were fetched
     return detail
-def _full_session_text(gateway: Any, run_id: str, detail: Dict[str, Any]) -> str:
-    """The session's final answer from the verified FULL primary output (D7).
-
-    The resolver fetches and verifies the full artifact when the engine reports
-    truncation; an unresolvable full text refuses rather than judging a
-    head-cut transcript."""
-    from ouroboros.delegate_output import _resolve_full_primary_output
-
-    primary = detail.get("primaryOutput")
-    primary, full_ok, disclosure = _resolve_full_primary_output(gateway, run_id, primary)
-    if not full_ok:
-        raise RuntimeError(
-            f"delegated review session {run_id} produced a truncated primary "
-            f"output whose full artifact could not be matched to the size or the "
-            f"preview the run reported ({(disclosure or {}).get('reason')}); a "
-            "verdict is never read from a preview"
-        )
-    text = str(primary.get("text") or "") if isinstance(primary, dict) else "" if primary is None else str(primary)
-    if not text.strip():
-        final_summary = detail.get("finalSummary")
-        text = final_summary if isinstance(final_summary, str) else ""
-    return text
-
-
 def session_identity_deltas(slot: Any, facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Disclose final-attempt identity versus the frozen request, also during pure collection."""
     deltas = []
@@ -1381,6 +1362,8 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 owner_deadline_at=str(getattr(request, "deadline_at", "") or ""),
                 access=str(getattr(slot, "session_access", "") or ""),
                 checking_source=getattr(request, "checking_source", None) or None,
+                answer_binding=(review_operation_binding(request, slot, self.assignment.call_id)
+                                if request.surface == "multi_model_review" else None),
             )
         except BaseException as exc:
             if not self._retry_state and not request.reconcile_only:

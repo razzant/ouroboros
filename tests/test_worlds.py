@@ -1,5 +1,5 @@
-"""Shared worlds (tests/_worlds.py): built once per run, cloned private, refused when they know their own path. Beside
-them, the whole-tree scans' parse (tests/_source_scan.py).
+"""Shared worlds (tests/_worlds.py, the Git ones in tests/_workspace_git.py): built once per run, cloned private,
+refused when they know their own path. Beside them, the whole-tree scans' parse (tests/_source_scan.py).
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from tests import _contributor_packet_shared as shared
 from tests import _worlds
 from tests._live_world import _own_installation, installation_template
 from tests._source_scan import parse
+from tests._workspace_git import git_repository, world_git
 from tests._worlds import clone, run_folder, world
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -215,6 +216,86 @@ def test_a_cloned_checkout_is_stat_clean_and_its_own_repository(run_root, tmp_pa
     assert shared.git(template, "rev-parse", "HEAD") == shared.git(sibling, "rev-parse", "HEAD") == fixture["base_sha"]
     assert shared.git(template, "branch", "--list", "only-here") == shared.git(sibling, "branch", "--list", "only-here") == ""
     assert shared.git(sibling, "status", "--porcelain") == ""
+
+
+def test_a_git_world_is_a_private_repository_whatever_git_state_its_first_test_set_and_never_an_empty_folder(
+        run_root, tmp_path, monkeypatch):
+    def unset(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True).returncode != 0
+
+    template = run_folder("worlds") / "git-base"
+    with monkeypatch.context() as stand_in:  # the first consumer's own stub of git, in place before it builds the world
+        stand_in.setattr(subprocess, "run", lambda args, **_options: subprocess.CompletedProcess(args, 0, b"", b""))
+        with pytest.raises(RuntimeError, match="no repository was laid"):
+            git_repository(tmp_path / "stood-in")
+    assert not template.exists() and not (tmp_path / "stood-in").exists()
+
+    elsewhere = tmp_path / "elsewhere.git"
+    monkeypatch.setenv("GIT_DIR", str(elsewhere))  # the first consumer's own Git, set before it builds the world
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "this test's own author")
+    first = git_repository(tmp_path / "first")
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_AUTHOR_NAME")
+    second = git_repository(tmp_path / "second")
+    assert not elsewhere.exists()
+    for repo in (first, second, template):  # the template is only read: a status could refresh its index
+        assert shared.git(repo, "symbolic-ref", "HEAD") == "refs/heads/master"
+        assert shared.git(repo, "log", "--format=%an <%ae> %s") == "Fixture <fixture@example.invalid> base"
+        assert unset(repo, "config", "--local", "--get", "user.name") and not (repo / ".git" / "hooks").exists()
+    for repo in (first, second):
+        shared.git(repo, "diff-files", "--quiet")
+        shared.git(repo, "diff-index", "--quiet", "HEAD")
+        assert shared.git(repo, "status", "--porcelain") == ""
+
+    base = shared.git(template, "rev-parse", "HEAD")
+    (first / "only-here.txt").write_text("one copy's own\n", encoding="utf-8")
+    shared.git(first, "add", "-A")
+    shared.git(first, "commit", "-q", "-m", "only here")
+    head = shared.git(first, "rev-parse", "HEAD")
+    assert shared.git(first, "rev-parse", "HEAD^") == base == shared.git(second, "rev-parse", "HEAD")
+    assert unset(second, "cat-file", "-e", head) and unset(template, "cat-file", "-e", head)
+    assert shared.git(second, "status", "--porcelain") == ""
+    assert shared.git(template, "rev-list", "--count", "HEAD") == "1"
+
+    for unborn in (False, True):  # every kind in one run, and none stands in for another
+        for identity in (False, True):
+            repo = git_repository(tmp_path / f"unborn-{unborn}-identity-{identity}", unborn=unborn, identity=identity)
+            assert shared.git(repo, "symbolic-ref", "HEAD") == "refs/heads/master"
+            assert unset(repo, "rev-parse", "-q", "--verify", "HEAD") == unborn
+            if identity:
+                assert shared.git(repo, "config", "--local", "user.email") == "fixture@example.invalid"
+            else:
+                assert unset(repo, "config", "--local", "--get", "user.email")
+
+    os.replace(template, tmp_path / "gone")  # a template that is gone is built again
+    rebuilt = git_repository(tmp_path / "rebuilt")
+    assert template.is_dir() and shared.git(rebuilt, "log", "--format=%an %s") == "Fixture base"
+    with pytest.raises(FileExistsError):
+        git_repository(tmp_path / "first")
+
+
+def test_a_fixed_tree_world_whose_commit_did_not_land_fails_its_build_and_publishes_nothing(
+        run_root, tmp_path, monkeypatch):
+    def lay(folder):
+        repo = git_repository(folder / "repo", unborn=True)
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        world_git(repo, "add", "a.txt")
+        world_git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "seed")
+
+    warm = git_repository(tmp_path / "warm", unborn=True)  # the unborn world a fixed tree starts from is already built
+    assert world_git(warm, "check-ref-format", "--branch", "commit") == b"commit\n"  # a word "commit" is no commit
+    real = subprocess.run
+
+    def stood_in(args, **options):  # the first consumer's own stub of git, in place before it builds the world
+        return subprocess.CompletedProcess(args, 0, b"", b"") if args[0] == "git" else real(args, **options)
+
+    with monkeypatch.context() as stand_in:
+        stand_in.setattr(subprocess, "run", stood_in)
+        with pytest.raises(RuntimeError, match="no commit was laid"):
+            world("fixed-tree", lay)
+    assert not (run_folder("worlds") / "fixed-tree").exists()
+    copy = _worlds.clone_repository(world("fixed-tree", lay) / "repo", tmp_path / "copy")
+    assert shared.git(copy, "log", "--format=%an %s") == "T seed" and shared.git(copy, "status", "--porcelain") == ""
 
 
 def test_the_installation_a_host_starts_from_is_a_private_copy(run_root, tmp_path):

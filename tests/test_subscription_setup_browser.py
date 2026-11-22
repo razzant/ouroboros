@@ -18,7 +18,7 @@ from tests.test_onboarding_complete_endpoint import (
 )
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
-from tests._wizard_walk import past_consciousness, rail_shows_its_steps, step_order, walk
+from tests._wizard_walk import past_quick_steps, rail_shows_its_steps, step_order, walk
 
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -100,7 +100,13 @@ def subscription_ui():
         "OUROBOROS_SUBAGENTS": fixture["preview"]["available_subagents"],
         "OUROBOROS_RUNTIME_MODE": "advanced",
         "OUROBOROS_CONTEXT_MODE": "max",
-        "_meta": {"setup_contract": bootstrap["contract"]},
+        # Main's binding as the real document carries it (defaults for the keys the preview leaves out), each with
+        # the token a write of Main stands on: a Main write is refused without all four (model_roles.js, model_catalog_store.js).
+        "USE_LOCAL_MAIN": False,
+        "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {},
+        "_meta": {"setup_contract": bootstrap["contract"],
+                  "tokens": {key: f"fixture-{key.lower()}" for key in (
+                      "OUROBOROS_MODEL", "USE_LOCAL_MAIN", "OUROBOROS_MODEL_ACCOUNTS", "OUROBOROS_MODEL_PROCESSING_PREFERENCES")}},
     }
 
     class Handler(SimpleHTTPRequestHandler):
@@ -363,7 +369,7 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     assert rail_shows_its_steps(page)
     capture(page, "accounts-connected")
     page.click('#quick-start-btn')
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
     assert "gpt-test" in page.locator('.summary-card').inner_text()
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
@@ -491,6 +497,9 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     if "consciousness" in step_order(page):
         page.wait_for_selector('[data-consciousness-step]')
         capture(page, "consciousness-subscription")
+        page.click('#next-btn')
+    if "skills" in step_order(page):
+        page.wait_for_selector('[data-starter-skills="step"]')
         page.click('#next-btn')
     page.wait_for_selector('[data-collapse="api-budget"]')
     assert not page.locator('[data-collapse="api-budget"]').evaluate('(el) => el.open')
@@ -980,7 +989,7 @@ def test_review_shortcut_reconciles_local_vision_before_preview(
     page.locator('[data-local-mode="all"]').click()
     capture(page, f'shortcut-local-accounts-{choice}')
     page.click('#quick-start-btn')
-    past_consciousness(page)  # Review & start lands on Consciousness where offered; its Continue goes to Summary
+    past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
     summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
     capture(page, f'shortcut-summary-{choice}')

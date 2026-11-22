@@ -18,7 +18,8 @@ import server
 from ouroboros import config
 from ouroboros.gateway.routing_decision import _derived_identity
 from ouroboros.llm import LLMClient
-from ouroboros.project_dialogue import build_owner_message_ref
+from ouroboros.chat_uploads import store_upload
+from ouroboros.owner_relay import origin_snapshot, owner_row_source
 from ouroboros.projects_registry import create_project, project_binding_for_task
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.utils import append_jsonl
@@ -33,7 +34,7 @@ SURFACE = {"channel": "web", "viewport": {"width": 1280, "height": 800}}
 CONSTRAINT = {"mode": "normal"}
 REFUSALS = {
     "update": "🔒 An update is using the repository. Try this message again when it finishes.",
-    "budget": "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.",
+    "budget": "The total budget is spent, so this turn did not start.",
     "ledger": "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.",
 }
 
@@ -134,7 +135,8 @@ def host(tmp_path, monkeypatch, request):
     monkeypatch.setattr(LLMClient, "chat_async", forbidden_model_async)
     monkeypatch.setattr(lane, "admit_owner_turn", forbidden_lane)
     monkeypatch.setattr(workers, "_get_chat_agent", forbidden_actor)
-    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata", lambda _ctx, _chat, _id, meta, _roots=None: meta)
+    monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata",
+                        lambda _ctx, _chat, _id, meta, _roots=None, **_kw: meta)
     # Later asyncio/TestClient loops also need their Windows self-pipe, not provider access.
     block_network_except_socketpair(monkeypatch, forbidden_model)
     ctx = SimpleNamespace(
@@ -168,18 +170,17 @@ def incoming_case(host, room, *, caption_only=False, wordless=False):
     client_message_id = f"swarm-probe-{room}-{kind}"
     # A wordless send's canonical row holds the host placeholder, not owner words.
     logged = WORDLESS if wordless else EXACT_OWNER
-    ref = build_owner_message_ref(chat_id=chat_id, client_message_id=client_message_id,
-                                  ts="2026-09-12T12:00:00Z", text=logged)
-    append_jsonl(host.root / "logs/chat.jsonl", {"ts": ref["ts"], "role": "user", "chat_id": chat_id,
-                 "client_message_id": client_message_id, "text": logged,
-                 **({"text_placeholder": True} if wordless else {})})
-    source = host.root / "input.txt"
-    source.write_bytes(b"exact-owner-attachment\n")
+    from ouroboros import dialogue_store as ds
+    source, file = store_upload(b"exact-owner-attachment\n", "input.txt", data_dir=host.root)
+    row = ds.append(host.root, "chat", {"ts": "2026-09-12T12:00:00Z", "direction": "in", "chat_id": chat_id,
+                    "client_message_id": client_message_id, "text": logged, "source": "web", "attachments": [file],
+                    **({"text_placeholder": True} if wordless else {})}).row
+    ref, _ = owner_row_source(row)
     incoming = {
         "chat_id": chat_id, "text": "" if caption_only or wordless else EXACT_OWNER,
         "image_caption": EXACT_OWNER if caption_only else "", "log_text": logged,
         "client_message_id": client_message_id, "origin_message_ref": ref,
-        "source": "web", "task_constraint": CONSTRAINT,
+        "source": "web", "task_constraint": CONSTRAINT, "origin_message_snapshot": origin_snapshot(row, host.root),
         "task_metadata": {"force_plan": True, "force_plan_source": "swarm",
                           "project_id": "untrusted-other-project", "client_surface": SURFACE,
                           "chat_attachment_uploads": [{"path": str(source), "label": "Owner input"}]},
@@ -196,6 +197,7 @@ def promotion_event(case):
         "objective": case.incoming["text"] or case.incoming["image_caption"] or case.incoming["log_text"],
         "chat_id": case.chat_id, "project_id": case.project_id, "client_message_id": case.client_message_id,
         "task_constraint": CONSTRAINT, "source_ref": case.ref, "source_text": case.incoming["log_text"],
+        "origin_message_snapshot": case.incoming["origin_message_snapshot"],
         "client_surface": SURFACE, "attachment_uploads": case.incoming["task_metadata"]["chat_attachment_uploads"],
         "force_plan": True, "force_plan_source": "swarm", "workspace": "none",
     }
@@ -231,10 +233,20 @@ def test_legacy_swarm_flag_uses_ordinary_owner_turn(host, room, caption_only):
 @pytest.mark.parametrize("room", ["main", "project"])
 def test_ordinary_promotion_preserves_a_wordless_attachment_message(host, room):
     case = incoming_case(host, room, wordless=True)
+    calls = []
+    host.ctx.handle_chat_direct = lambda *args, **kwargs: calls.append(kwargs["task_metadata"])
+    server._route_owner_message(host.bridge, host.ctx, case.incoming)
+    [direct] = calls
+    from ouroboros.loop_messages import _initialize_owner_directives
+    turn = SimpleNamespace(task_metadata=direct)
+    _initialize_owner_directives(turn, [{"role": "user", "content": WORDLESS}])
+    [directive] = turn._owner_directives
+    assert directive["source"] == "initial_user" and directive["content"] == ""
+    assert directive["attachments"] == case.incoming["origin_message_snapshot"]["attachments"]
     outcome = _handle_promote_chat_to_task(promotion_event(case), host.ctx)
     assert outcome["status"] == "scheduled" and len(host.pending) == 1
     task = host.pending[0]
-    assert task["objective"] == task["origin_message_text"] == WORDLESS
+    assert task["objective"] == WORDLESS and task["origin_message_text"] == ""
     assert task["origin_message_ref"] == case.ref
     assert Path(task["attachment_manifest"][0]["abs_path"]).read_bytes() == case.source.read_bytes()
     assert not host.attempts

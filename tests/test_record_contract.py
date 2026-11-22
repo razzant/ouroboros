@@ -59,10 +59,11 @@ def test_round_and_error_rows_keep_only_known_scope_lineage(tmp_path, monkeypatc
         assert [event for event in live if event.get("type") == kind] == [row]
 
 
-def test_error_lineage_fields_are_optional():
-    lineage = {"root_task_id", "parent_task_id"}
-    assert lineage <= rc.ANCHOR_BY_TYPE["llm_api_error"].optional
-    assert not lineage.intersection(rc.ANCHOR_BY_TYPE["llm_api_error"].guaranteed)
+@pytest.mark.parametrize("kind,fields", [("llm_api_error", {"root_task_id", "parent_task_id"}),
+                                       ("task_metrics_event", {"task_attempt"})])
+def test_recorded_lineage_fields_are_optional(kind, fields):
+    row = rc.ANCHOR_BY_TYPE[kind]
+    assert fields <= row.optional and fields.isdisjoint(row.guaranteed)
 
 # Where each anchor row is written. Kept here, not in the protected contract, so moving a
 # writer never needs a contract edit; the parity tests below fail if a writer leaves.

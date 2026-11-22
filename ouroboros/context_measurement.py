@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 if TYPE_CHECKING:
     from ouroboros.context_anchor import InputAnchor
     from ouroboros.context_fit import ContextFitPlan
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
 ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
@@ -261,9 +262,11 @@ def _no_memory_tokens(plan: Any, rendered_mode: str) -> Optional[int]:
 def mode_cause(plan: Any, rendered_mode: str) -> str:
     """Why a candidate renders below the plan's owner mode, from the plan's own facts: ``""`` when it does not; the
     start's own mode carries the start's cause (``ContextFitPlan.start``, ``memory_floor.start_cause``: ``memory``,
-    ``route`` or ``window``), which no reprojection or route rebind replaces; any other lower mode, or a start
-    lowered by no mode switch, is ``after_start`` (taken by the task after its start). A restored task whose start
+    ``request``, ``route`` or ``window``), which no reprojection or route rebind replaces. A first-send preference
+    or an unmeasured Max is not a physical reason. Any other lower mode, or a start lowered by no mode switch,
+    is ``after_start`` (taken by the task after its start). A restored task whose start
     was not carried (``context_fit.UNKNOWN_START``) names no cause: ``""`` beside a lower mode is unknown."""
+    from ouroboros.context_fit import FIRST_CONTACT_START
     from ouroboros.memory_floor import start_cause
 
     if rendered_mode == str(getattr(plan, "preferred_mode", "") or "") or not hasattr(plan, "projection"):
@@ -274,4 +277,35 @@ def mode_cause(plan: Any, rendered_mode: str) -> str:
     if not started:  # a plan no start fit built: its current selection and that projection's facts
         started = str(getattr(plan, "initial_mode", "") or "")
         cause = start_cause(plan.projection(started).memory_facts) if started else ""
+    if rendered_mode == started and cause in FIRST_CONTACT_START.values():
+        return ""
+    cause = "" if cause == "unmeasured" else cause
     return cause if rendered_mode == started and cause else "after_start"
+
+
+def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None) -> PhysicalAttemptContext:
+    """Carry the measured candidate's facts to the physical attempt; dispatch still binds the actual scope."""
+    from ouroboros.usage_accounting import PhysicalAttemptContext
+
+    measurement = disposition.measurement
+    return PhysicalAttemptContext(
+        view_kind=measurement.view_kind,
+        profile=measurement.profile,
+        rendered_mode=measurement.rendered_mode,
+        measurement_basis=measurement.measurement_basis,
+        route_fp=measurement.route_fp,
+        round_id=measurement.round_id,
+        target_total_tokens=measurement.target_total_tokens,
+        capacity_total_tokens=measurement.capacity_total_tokens,
+        context_target_miss=disposition.action == "send_target_miss",
+        automatic_pass_used=disposition.automatic_pass_used,
+        measurement_density=measurement.measurement_density,
+        response_reserve_tokens=measurement.response_reserve_tokens,
+        window_witness_bound=getattr(measurement, "window_witness_bound", False),
+        window_observation_fp=measurement.window_observation_fp,
+        required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
+        mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
+        base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
+        first_contact_plan=((plan.first_contact, plan.first_contact_normal is not None)
+                            if getattr(plan, "first_contact", "") else None),
+    )

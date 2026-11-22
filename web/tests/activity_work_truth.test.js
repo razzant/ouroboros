@@ -7,7 +7,7 @@ import test from 'node:test';
 // the controls that work lists. The browser suite tests/test_owner_pause_ended_members_browser.py renders the same rule
 // over a backend-generated projection.
 globalThis.document = globalThis.document || { createElement: () => ({}) };
-const { liveActivityRowHtml } = await import('../modules/activity.js');
+const { initActivity, liveActivityRowHtml } = await import('../modules/activity.js');
 
 const census = (phase, extra = {}) => ({ activity_id: 'root-1', kind: 'managed_task', phase, pause_cause: 'owner',
     status: 'completed', cancelable: true, can_resume: false, started_at: 0, ...extra });
@@ -23,6 +23,17 @@ const running = { code: 'delegated_running', text: '1 external run still working
 const STOP = [{ action: 'stop', target: 'root-1', scope: 'cascade' }];
 // The caller's outcome slot, made legible: the chip's word and its quieter second fact.
 const slot = (view) => `<chip>${view.text}|${view.secondary || ''}</chip>`;
+
+test('an ended work requires no census row and keeps only its exact projected control', () => {
+    const snapshot = { ...work('unknown', 'none', unconfirmed('inv-1'), STOP), because: [], outcome: 'completed',
+        name: 'Delivered report', work_id: 'series', episode: { task_id: 'root-1', live: false } };
+    const row = liveActivityRowHtml(null, 0, slot, false, snapshot);
+    assert.match(row, /Delivered report/);
+    assert.match(row, /<chip>Done\|Activity unconfirmed<\/chip>.*1 external run may still be running/);
+    assert.match(row, /data-id="root-1" data-root="1" data-tail-work="series"/);
+    assert.doesNotMatch(row, /data-resume|data-budget-paused/);
+    assert.doesNotMatch(liveActivityRowHtml(null, 0, slot, false, { ...snapshot, controls: [] }), /data-act=/);
+});
 
 test('a parked census row says its confirmed work, the outcome leading, never the census guess', () => {
     const row = liveActivityRowHtml(census('budget_paused'), 0, slot, false,
@@ -59,5 +70,46 @@ test('a late row takes its state and line from the work; rows that are not parke
     // A working direct turn is no parked guess: its census words stand, its work beside it unchanged.
     const turn = liveActivityRowHtml({ activity_id: 'turn', kind: 'direct_chat', phase: 'working', started_at: 0 }, 0,
         null, false, { ...work('working', 'none', running, STOP), episode: { task_id: 'turn', live: true } });
+    assert.match(turn, /data-act="task-control" data-id="turn" data-root="1"/);
+    assert.doesNotMatch(turn, /data-tail-work/);
     assert.match(turn, /<span class="ui-row-meta activity-sub"><span class="status-mark activity-mark"[^>]*>(?:<i><\/i>){3}<\/span><span data-i18n-skip>Working<\/span><\/span>/);
+});
+
+test('a work the server marks with an unbound start arms its Stop trigger with the truthful confirmation (#3428)', () => {
+    const ended = { ...work('unknown', 'none', unconfirmed('inv-1'), STOP), because: [], outcome: 'completed',
+        name: 'Delivered report', work_id: 'series', episode: { task_id: 'root-1', live: false } };
+    assert.doesNotMatch(liveActivityRowHtml(null, 0, slot, false, ended), /data-unbound-start/,
+        'without the server fact the ordinary bound-run confirmation stays');
+    const row = liveActivityRowHtml(null, 0, slot, false, { ...ended, unbound_start: true });
+    assert.match(row, /data-act="task-control"[^>]* data-unbound-start="1"/);
+});
+
+test('an incomplete work projection never proves the Activity list empty (#3428)', async (t) => {
+    const { setup } = await import('./dashboard_dom_fixture.js');
+    const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+    const { mount, routes, ws } = setup(t);
+    routes.set('/api/tasks?queue_only=1', response({ queue: { running: [], pending: [] } }));
+    routes.set('/api/schedules', response({ tasks: [] }));
+    routes.set('/api/services/kept', response({ services: [], complete: true }));
+    const state = (extra) => response({ bg_consciousness_enabled: false, active_chat_activities: [],
+        active_chat_activities_complete: true, works: [], ...extra });
+    const queue = () => mount.querySelector('[data-activity-section="queue"]');
+    const activity = initActivity({ mount, ws });
+
+    routes.set('/api/state', state({ works_complete: true }));
+    await activity.refresh();
+    assert.match(queue().textContent, /Nothing running or queued/, 'both sources complete: the list proves empty');
+
+    // The census is complete while the work projection is not (an unreadable delegated custody): an ended
+    // task's unconfirmed helper may be missing from the empty works list, so "nothing" is not proven.
+    routes.set('/api/state', state({ works_complete: false, works_gaps: [{ reason: 'delegated_custody_unavailable' }] }));
+    await activity.refresh();
+    assert.doesNotMatch(queue().textContent, /Nothing running or queued/);
+    assert.match(queue().textContent, /Queue empty; work status unknown/);
+
+    // An incomplete census keeps its own words, whatever the projection says.
+    routes.set('/api/state', state({ active_chat_activities_complete: false, works_complete: true }));
+    await activity.refresh();
+    assert.match(queue().textContent, /Queue empty; live turns unknown/);
+    activity.destroy();
 });

@@ -300,9 +300,11 @@ def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -
                                    metadata.get("presence") if isinstance(metadata, Mapping) else None)
     except Exception:
         sent = "unknown (receipts unreadable)"
-    if reply_carrier(metadata or {}):
+    door = "presence_finish" if getattr(ctx, "_schedule_door", None) else ""  # an older schedule's run: a record
+    if door or reply_carrier(metadata or {}):
         return ("[FINISH_NOT_ACCEPTED] The completion has not passed finalization. "
-                f"Confirmed sends so far: {sent}. Finish again with finish_task when ready; silence is valid.")
+                f"Confirmed sends so far: {sent}. Finish again with {door or 'finish_task'} when ready; "
+                + ("its report stays this run's record and nothing is sent." if door else "silence is valid."))
     return (
         f"[PRESENCE_FINISH_NOT_ACCEPTED]\npresence_finish({completion.get('outcome')}) was not accepted: "
         "finalization asked for the work above first, so it no longer decides what the conversation "
@@ -680,6 +682,19 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
         if row.get("type") == "presence_delivery" and (transport.get("origin") or {}).get("kind") == "tool":
             latest[(str(delivery.get("delivery_id")), str(delivery.get("part_id")))] = delivery.get("state")
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
+
+
+def keep_first_receipts(rows: list) -> None:
+    """A send confirmed while several calls of one group ran, so inside each of their windows, rides only the first
+    of their rows by request index, as one confirmation rides one row when calls run one at a time; no store read."""
+    seen: set = set()
+    for meta in (row.get("result_meta") or {} for row in rows):
+        kept = [identity for identity in meta.get("presence_delivery_confirmed", ()) if identity not in seen]
+        seen.update(kept)
+        if kept:
+            meta["presence_delivery_confirmed"] = kept
+        else:
+            meta.pop("presence_delivery_confirmed", None)
 
 
 PLACEHOLDERS = ("who", "act", "place", "when", "facts_line", "what", "event", "speak_line", "place_state", "notes",

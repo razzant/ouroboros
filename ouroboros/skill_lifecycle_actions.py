@@ -119,7 +119,12 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
             progress: Any = None) -> dict:
     """Enable or disable one skill. Enabling establishes the declared packages itself (the
     seam is idempotent, so Enable on an enabled skill repairs it and Enable again retries a
-    failure); ``progress`` receives the job's message while packages install."""
+    failure); ``progress`` receives the job's message while packages install. A first Enable is
+    atomic: a failed load saves Off again. Enable on a skill whose saved switch was already On
+    is a repair: its failure is answered and the owner's choice stays On. ``enabled`` answers
+    the saved switch either way. A repair the live publication could not finish (a companion still failed,
+    another awaiting exit, a reload deferred) answers ``ok`` with the reconcile's typed reason, its
+    ``load_error`` words and ``retained_companions``, as the reconcile receipt does."""
     facts = _review_facts(skill, drive_root)
     collision = skill.load_error.lower().startswith("skill name collision:")
     from ouroboros.deployment_extensions import TRUST_SENTENCES, change_refusal, trust_gap
@@ -130,7 +135,7 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         if skill.load_error:
             return _refusal("Its files could not be loaded.", 400, code="load_error", detail=skill.load_error, **facts)
         if skill.manifest.is_extension() and (gap := trust_gap(skill.name, skill.skill_dir, skill.content_hash)):
-            return _refusal("Only extensions your organization delivers run here.", 403, code="managed_by_deployment",
+            return _refusal("Only extension skills your organization delivers run here.", 403, code="managed_by_deployment",
                             detail=TRUST_SENTENCES[gap], **facts)
         conflict = skill_conflict_status(skill, discover_skills(drive_root, repo_path=repo_path))
         if conflict:
@@ -156,19 +161,22 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         return _refusal("cannot persist disable while the skill identity collides; rename one directory first", 400,
                         extension_action="extension_unloaded", extension_reason="name_collision", **facts)
     from ouroboros.extension_registry_state import _lifecycle_lock_for
+    from ouroboros.skill_loader import load_enabled
 
     # Under the lock a companion refresh holds from its final admission through its spawn (never its stop):
     # the refresh reads this choice, or the reconcile below finds its new process and stops it.
     with _lifecycle_lock_for(skill.name):
+        was_on = load_enabled(drive_root, skill.name)  # the saved intent before this attempt, not what is live
         save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
     skill.enabled = enabled
-    state = _reconcile(skill, drive_root, repo_path, enabling=enabled)
+    state = _reconcile(skill, drive_root, repo_path, enabling=enabled and not was_on)
     failed = enabled and state.get("action") == "extension_load_error"
     return {
-        "ok": not failed, **facts, "enabled": enabled and not failed,
+        "ok": not failed, **facts, "enabled": enabled and not state.get("reverted_enabled"),
         "extension_action": state.get("action"), "extension_reason": state.get("reason"),
         "process": str(state.get("process") or ""), "server_reconcile": str(state.get("server_reconcile") or ""),
         "load_error": state.get("load_error"),
+        **({"retained_companions": state["retained_companions"]} if state.get("retained_companions") else {}),
         **({"error": "It could not start.", "code": "load_error", "status_code": 409,
             "detail": str(state.get("load_error") or "extension failed to load")} if failed else {}),
     }
@@ -260,6 +268,20 @@ def prepare_skill_grant(skill: Any, drive_root: Path, items: list[str]) -> dict:
             "allowed_keys": allowed_keys, "allowed_permissions": allowed_permissions}
 
 
+def _saved_switch(drive_root: Path, name: str) -> bool | None:
+    """The saved switch, read strictly from ``enabled.json``: False if never saved (Off), None while it cannot be read
+    or holds no boolean (``load_enabled`` reads both as Off). Never the effective switch: a package a deployment
+    requires reads On over a saved Off."""
+    from ouroboros.utils import json_snapshot
+
+    try:
+        saved = json_snapshot(skill_state_dir_path(drive_root, name) / "enabled.json", strict=True)
+    except (OSError, ValueError):
+        return None
+    value = False if saved is None else saved.get("enabled")
+    return value if isinstance(value, bool) else None
+
+
 def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, progress: Any = None,
            enable_after_grant: bool = False) -> dict:
     request = prepare_skill_grant(skill, drive_root, items)
@@ -275,6 +297,15 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
             state = _toggle(skill, drive_root, repo_path, True, "owner_ui", "enable with confirmed grants", progress=progress)
         except Exception as exc:
             state = {"error": f"Setup failed: {type(exc).__name__}: {exc}"}
+        if "enabled" not in state:
+            # No answer of the toggle's own: a precheck refused before any write or reconcile, or the attempt failed.
+            # The saved switch as it reads now (unknown, not Off, while its file cannot be read) and this folder's own
+            # pending exits (server memory only) still stand.
+            from ouroboros.extension_liveness import retained_companions_for_directory
+
+            retained = retained_companions_for_directory(skill.name, str(skill.skill_dir.resolve()))
+            state = {**state, "enabled": _saved_switch(drive_root, skill.name),
+                     **({"retained_companions": retained, "process": "server"} if retained else {})}
         turn_on = {"action": "enabled" if state.get("ok") else "not_ready",
                    "enabled": bool(state.get("enabled")), "error": str(state.get("error") or "")}
     else:
@@ -285,7 +316,7 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
         turn_on = reconcile_turn_on_when_ready(drive_root, skill.name, repo_path=repo_path, reason="grants approved", progress=progress)
     return {
         "turn_on_when_ready": turn_on["action"],
-        **({"enabled": turn_on["enabled"]} if enable_after_grant else {}),
+        **({"enabled": turn_on["enabled"]} if enable_after_grant and state.get("enabled", False) is not None else {}),
         **({"setup_error": turn_on["error"]} if turn_on.get("error") else {}),
         "ok": True, "skill": skill.name, "content_hash": skill.content_hash,
         "granted_keys": keys, "granted_permissions": granted_permissions,
@@ -294,6 +325,7 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
         "load_error": state.get("load_error"), "grants": grant_status_for_skill(drive_root, skill),
         "process": str(state.get("process") or ""), "server_reconcile": str(state.get("server_reconcile") or ""),
         "live_loaded": state.get("live_loaded"),
+        **({"retained_companions": state["retained_companions"]} if state.get("retained_companions") else {}),
     }
 
 
