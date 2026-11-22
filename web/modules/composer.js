@@ -268,7 +268,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     }
 
     // Text height is capped by chat_input_sizing.js.
-    const inputSizing = attachChatInputSizing(input);
+    const inputSizing = attachChatInputSizing(input, { followCaret: true });
     function resizeChatInput() {
         inputSizing.sync();
         onLayout();
@@ -510,6 +510,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
+        remeasureInput: inputSizing.remeasureViewport,
         seedInputHistory,
         // The room's Model, Subagents, Context and Effort readback, from Main's state or the named Project.
         syncState(data) {

@@ -188,15 +188,14 @@ def coarse(page):
 
 
 def long_press(page, target):
-    """A finger held still on ``target`` past the long press (row_menu_gesture.js), then lifted; the lifting finger's
-    click guard has run out when this returns."""
+    """A finger held still on ``target`` past the long press (row_menu_gesture.js), then lifted. The next press acts at
+    once (gesture_tail.js): nothing waits for the lift."""
     box = target.bounding_box()
     finger = {"pointerType": "touch", "isPrimary": True, "pointerId": 41,
               "clientX": box["x"] + box["width"] / 2, "clientY": box["y"] + box["height"] / 2}
     target.dispatch_event("pointerdown", finger)
     page.clock.run_for(500)
     target.dispatch_event("pointerup", finger)
-    page.clock.run_for(500)
 
 
 def open_menu(page, pid):
