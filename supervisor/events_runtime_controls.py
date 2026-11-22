@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from ouroboros.host_notice import fields
 from ouroboros.utils import utc_now_iso
 
@@ -243,16 +243,17 @@ def _enable_evolution_controls(live: Dict[str, Any]) -> None:
     live.pop("evolution_stop_source", None)
 
 
-def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin: Any = None) -> str:
+def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin: Any = None) -> Dict[str, Any]:
     """The owner's authorized start: clears the owner stop (GR4-6: BEFORE the campaign
     is minted), starts the campaign (which alone clears a recorded stop intent), then
-    enables the projection. Returns "" on success or the owner-visible refusal."""
+    enables the projection. Returns ``{}`` on success, else the refusal: its ``text`` and, when it has raw facts
+    (a state lock's reason), its host ``notice`` (DESIGN principle 7), which the command and the switch both send."""
     from supervisor.evolution_lifecycle import evolution_block_reason, start_evolution_campaign
     from supervisor.state import StateUnavailable, control_value, mark_unconfirmed, update_state
 
     block = evolution_block_reason()
     if block:
-        return block
+        return {"text": block}
     prior: Dict[str, Any] = {}
 
     def _clear_owner_stop(live: Dict[str, Any]) -> None:
@@ -269,7 +270,8 @@ def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin:
     try:
         update_state(_clear_owner_stop, confirm=("evolution_owner_stopped", "evolution_stop_source"))
     except StateUnavailable as exc:
-        return f"🧬 Evolution stayed OFF: runtime state is unavailable ({exc.reason}); no campaign was started."
+        return {"text": "Evolution stayed off: the runtime state could not be read, so no campaign was started.",
+                **fields("evolution_start_refused", details=exc.reason)}
     try:
         started = start_evolution_campaign(objective, source=source, **({"origin": origin} if origin else {}))
     except Exception:
@@ -278,12 +280,13 @@ def owner_evolution_start(objective: str, *, source: str = "owner_chat", origin:
     try:
         if not started:
             update_state(_restore)
-            return "🧬 Evolution stayed OFF: campaign state could not be created."
+            return {"text": "🧬 Evolution stayed OFF: campaign state could not be created."}
         update_state(_enable_evolution_controls, confirm=EVOLUTION_CONTROL_KEYS)
     except StateUnavailable as exc:
         owner_evolution_stop_controls("owner Start could not persist activation")
-        return f"🧬 Evolution did not turn on: runtime state became unavailable ({exc.reason})."
-    return ""
+        return {"text": "Evolution did not turn on: the runtime state could not be saved.",
+                **fields("evolution_start_unsaved", details=exc.reason)}
+    return {}
 
 
 def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
@@ -304,9 +307,10 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat = int(st.get("owner_chat_id") or 0)  # a notice route (display), not an authority
 
-    def _notify(text: str) -> None:
+    def _notify(text: str, said: Optional[Dict[str, Any]] = None) -> None:  # said: a host notice's fields
         if owner_chat:
-            ctx.send_with_budget(owner_chat, text, role="system", system_type="evolution_notice")
+            ctx.send_with_budget(owner_chat, text, **({"progress_meta": said} if said else {}), role="system",
+                                 system_type="evolution_notice")
 
     if enabled:
         from supervisor.evolution_lifecycle import evolution_block_reason, evolution_stop_reason, start_evolution_campaign
@@ -316,7 +320,7 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         if owner_sourced:
             refusal = owner_evolution_start(str(evt.get("objective") or ""), origin=origin)
             if refusal:
-                _notify(refusal)
+                _notify(refusal["text"], {key: refusal[key] for key in ("notice",) if key in refusal})
                 return
         else:
             stopped_known, stopped = control_value(st, "evolution_owner_stopped")
@@ -493,9 +497,16 @@ def _handle_rollback_request(evt: Dict[str, Any], ctx: Any) -> None:
         except Exception as exc:  # the door raised past its own typed answers
             status, payload = 500, {"error": str(exc)}
         if status == 200:  # the target commit and the door's own message are the notice's details
-            text = ("Ouroboros rolled its code back at its own request; "
-                    f"{'the switch completes as it restarts' if payload.get('switch_deferred') else 'it is restarting'}.")
-            notice = fields("rollback_done", details=f"to {target[:12]}: {payload.get('message') or 'done'}")
+            # The door's facts say what happened: a deferred switch only recorded the intent, and a restart that could
+            # not be requested leaves the rollback (or its switch) waiting for the owner's Restart.
+            deferred, restarting = bool(payload.get("switch_deferred")), payload.get("restarting") is True
+            text = {(False, True): "Ouroboros rolled its code back at its own request, and it is restarting.",
+                    (False, False): "Ouroboros rolled its code back at its own request, but its restart could not be requested.",
+                    (True, True): "Ouroboros recorded a rollback at its own request; the code switches as it restarts.",
+                    (True, False): "Ouroboros recorded a rollback at its own request; the code switches at the next restart, "
+                                   "which could not be requested."}[(deferred, restarting)]
+            notice = fields("rollback_recorded" if deferred else "rollback_done", step="" if restarting else "restart",
+                            details=f"to {target[:12]}: {payload.get('message') or 'done'}")
         else:
             blockers = payload.get("blockers")
             text = "Ouroboros asked to roll its code back, and the rollback was refused."

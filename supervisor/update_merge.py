@@ -1399,13 +1399,21 @@ def _recover_replace_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dict
 
 
 def boot_outcome_notice(result: Dict[str, Any]) -> Dict[str, Any]:
-    """The owner's row for a boot finalization that left a note (Q1=C: the exact recovery command reaches the owner,
-    not only the log): one phrase, and the note itself, Git's facts and the command, as the notice's details."""
+    """The owner's row for a boot finalization that left a note: one phrase chosen from the finalization's outcome and
+    its stash restore's, and the note itself (Git's facts, with the exact recovery command when Git needs the owner's
+    help: Q1=C) as the notice's details."""
     from ouroboros.host_notice import fields
 
-    lead = "The last update was rolled back" if result.get("rolled_back") is True else "The last update did not finish cleanly"
-    return {"text": f"{lead}; what Git kept and how to restore it are in Details.",
-            "progress_meta": fields("managed_update_outcome", details=str(result.get("stash_note") or ""))}
+    if result.get("rolled_back") is True:
+        lead, code = "The last update was rolled back", "managed_update_rolled_back"
+    elif result.get("finalized") is True:
+        lead, code = "The update is in place", "managed_update_finalized"
+    else:
+        lead, code = "The last update did not finish cleanly", "managed_update_unfinished"
+    status = str(result.get("stash_restore_status") or "")
+    tail = (", and your local changes were put back." if status == "restored" else "." if status in ("", "not_needed")
+            else "; Git kept your local changes aside, so they are not lost.")
+    return {"text": lead + tail, "progress_meta": fields(code, details=str(result.get("stash_note") or ""))}
 
 
 def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, Any]:

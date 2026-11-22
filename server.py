@@ -37,7 +37,7 @@ from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
                                          shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
+from ouroboros import body_adoption, host_notice, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
 from ouroboros.config import resolve_port_file
 from ouroboros.process_logging import configure_process_logging
@@ -372,8 +372,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             if msg.get("accepted_source_ref"):
                 task_metadata["_host_operation"] = True
         reply_source = origin_message_ref if msg.get("accepted_source_ref") else None
-        def reply(body: str, status: str = "completed") -> None:
-            ctx.send_with_budget(chat_id, body, **host_operation_reply_kwargs(reply_source, status, client_message_id), role="system", system_type="command_reply")
+        def reply(body: str, status: str = "completed", said=None) -> None:  # said: a host notice's fields (principle 7)
+            ctx.send_with_budget(chat_id, body, **host_notice.carried(host_operation_reply_kwargs(reply_source, status, client_message_id), said), role="system", system_type="command_reply")
         def _stamp_owner_activity(live: dict) -> None:
             # Global owner = primary chat for outbound notices (web on desktop, the first
             # transport on headless Colab), bound once — only into a slot KNOWN to be empty.
@@ -426,7 +426,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             reply("♻️ Restarting." + restart_gate_line(REPO_DIR, DATA_DIR), "")
             ok, restart_msg = _perform_owner_restart(ctx, reply)
             if not ok:
-                reply(f"⚠️ Restart cancelled: {restart_msg}", "failed")
+                reply("The restart was cancelled.", "failed", host_notice.fields("restart_cancelled", details=restart_msg))
                 continue
             _preserve_unprocessed_updates(bridge, updates, cursor[0])  # best effort; this generation handles nothing more
             return offset  # Remaining accepted rows stay durable; no replay is promised.
@@ -449,7 +449,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 from supervisor.events_runtime_controls import owner_evolution_start
 
                 refusal = owner_evolution_start(objective, source="owner_chat")
-                reply(refusal or "🧬 Evolution campaign: ON", "failed" if refusal else "completed")
+                reply(refusal.get("text") or "🧬 Evolution campaign: ON", "failed" if refusal else "completed", refusal)
             else:
                 reply(f"🧬 Evolution campaign: {_owner_evolution_stop(ctx, chat_id)}")
         elif lowered.startswith("/bg"):
@@ -1041,7 +1041,7 @@ def _startup_owner_command(command: str, *, send_kwargs=None, source="web", user
         if not ok:
             log.error("Startup owner restart cancelled: %s", message)
             if reply is not None:
-                reply(f"⚠️ Restart cancelled: {message}", "failed")
+                reply("The restart was cancelled.", "failed", host_notice.fields("restart_cancelled", details=message))
         return True
 
     return execute
