@@ -362,13 +362,17 @@ def test_main_hears_at_its_next_turn_that_what_it_was_told_broke_recovered_and_a
     manager = _manager(monkeypatch, ("demo", True))
     _call(manager, "demo", TimeoutError("slow"))
 
-    def turn(task, chat_id=1, depth=0):
+    def turn(task, chat_id=1, depth=0, omissions=()):
         work = SimpleNamespace(drive_root=tmp_path, task_metadata={}, current_chat_id=chat_id, task_id=task,
                                is_direct_chat=True, task_depth=depth)
-        return work, breakage.start_notice_rows(work, [])
+        return work, breakage.start_notice_rows(work, list(omissions))
 
     _first, notice = turn("main-1")
     assert "calls not answered since" in notice[0]["error"]
+    blocked, notice = turn("main-offline", omissions=[{"surface": "mcp", "reason": "resource_blocked"}])
+    assert notice == [{"surface": "mcp", "reason": "resource_blocked"}] and _round(blocked) is None  # unread: unknown
+    assert "mcp:demo" in json.loads((tmp_path / "state" / "capability_breakage_main.json").read_text(encoding="utf-8"))[
+        "facts"]  # and still told: the next turn that reads it settles it
     _call(manager, "demo", ToolResult(status="ok", code="OK", text="pong"))  # repaired while Main was idle
     for other in (turn("room-1", chat_id=7)[0], turn("child-1", depth=1)[0]):
         assert _round(other) is None  # a room's work, or Main's child, was never told the break (and keeps Main's)

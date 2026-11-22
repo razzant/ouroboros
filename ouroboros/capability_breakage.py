@@ -235,10 +235,12 @@ def _switch_state(root: pathlib.Path, name: str) -> str:
 
 
 def read_facts(root: pathlib.Path, *, mcp: bool = True, skills: bool = True) -> Observed:
-    """One reading of every reached surface; a surface whose reader fails is unknown as a whole."""
+    """One reading of every reached surface; a surface this work cannot reach (``network=false``) or whose reader
+    fails is unknown as a whole: what it was told stays told, never repaired or removed."""
     seen = Observed()
     for wanted, surface, reader in ((mcp, "mcp", _mcp_facts), (skills, "skills", lambda: _skill_facts(root))):
         if not wanted:
+            seen.unknown.add(surface)
             continue
         try:
             part = reader()
