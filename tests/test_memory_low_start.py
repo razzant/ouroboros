@@ -86,8 +86,8 @@ def test_a_measured_crowded_start_gets_its_line(monkeypatch):
 
 def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
     """Low, Low: one line; Max closes the episode silently; Low again: a new line. While it is open, a route or tool
-    schemas that tip a start alone add nothing; a delegated child or nanny, the owner's Low or Nano and an unknown
-    window send nothing and leave the episode as it is, open or closed."""
+    schemas that tip a start alone add nothing; a delegated child or nanny, the owner's Low or Nano, an unknown window
+    and a held room in a lower mode send nothing and leave the episode as it is, open or closed."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
     bit = tmp_path.resolve() / "state" / "low_start_episode.json"
@@ -105,7 +105,8 @@ def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
     assert opened["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("nan", _room("held"), "max", {"role": "nanny"}),
                                    ("ownerlow", None, "low", {}), ("route", _room("route"), "low", {}),
-                                   ("schemas", _room(zero_need=1_100_000), "low", {})):
+                                   ("schemas", _room(zero_need=1_100_000), "low", {}),
+                                   ("voice", _room("held"), "low", {})):  # a held room whose envelope fit lower (Astra 8)
         assert start(task, room, mode, **plan) == opened and len(sent) == 1  # untouched, open
     assert start("rootC", _room("held"), "max") == {} and len(sent) == 1  # Max held: closed, no return line
     for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("ownerlow", None, "low", {})):

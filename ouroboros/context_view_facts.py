@@ -165,12 +165,13 @@ def low_start_episode(root, plan, mode, task_id, send):
     more is sent; only a start of the opener's kind that holds Max closes the episode silently: the same room
     (``room_id``) and the same work room (a root keeps two eighths, a chat turn or wake one), so roots and turns of
     different rooms never alternate lines; a later Low opens a new one. An episode whose room never starts again stays
-    silent. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window) leaves it as it
-    is. The episode is one small object, ``state/low_start_episode.json``, rewritten under its lock in the terminal
-    outbox's failure domain; ``send`` runs inside that lock and opens the episode only when it queued the line."""
+    silent. Every other start (a delegated child or nanny, the owner's Low or Nano, an unknown window, a held room in a
+    lower mode, as a voice envelope fitted below Max) leaves it as it is. The episode is one small object,
+    ``state/low_start_episode.json``, rewritten under its lock in the terminal outbox's failure domain; ``send`` runs
+    inside that lock and opens the episode only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room") or {}
-    held = room.get("cause") == "held" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
+    held = room.get("cause") == "held" and mode == "max" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
     levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
     place = room.get("room_id")
     line = low_start_line(plan, mode, task_id)
