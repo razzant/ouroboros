@@ -460,6 +460,7 @@
  * @property {Object=} place_origin
  * @property {boolean=} wake_silent
  * @property {boolean=} quiet_effective
+ * @property {boolean=} schedule_report_only
  */
 
 /** Additive task-ending fields of a history row.
@@ -525,6 +526,7 @@
  * @property {ChatHistoryQuiz=} quiz
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
+ * @property {boolean=} schedule_report_only  // terminal card links to a saved report, not a transcript message
  * @property {string=} status
  * @property {string=} task_terminal_status
  * @property {string=} task_phase

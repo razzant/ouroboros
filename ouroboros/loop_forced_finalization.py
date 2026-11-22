@@ -19,7 +19,6 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import pathlib
 import queue
@@ -35,13 +34,14 @@ from ouroboros.loop_nudges import accept_handover_selection, accept_preserved_ha
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.task_finalization import (
-    TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice,
-    set_terminal_plan_review_open,
+    TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, schedule_report_ctx,
+    set_terminal_host_notice, set_terminal_plan_review_open,
 )
 from ouroboros.tools.join_ledger import _child_disposition_state, _load_direct_child_results  # noqa: F401 -- loop re-exports both
 from ouroboros.tools.join_ledger import _child_result_sha256
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
+from ouroboros.utils import json_dumps_utf8
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
@@ -139,12 +139,14 @@ def _record_forced_finalization(
     # Every rail returns this candidate's bytes. A wake's quiet selection stays
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
+    tools = getattr(ctx, "tools", None)  # the task's facts live on its tool context, never on the round limits
     if getattr(candidate, "quiet", False):
         ctx.accumulated_usage.update(wake_silent=True, terminal_origin=TERMINAL_ORIGIN_MODEL_FINAL)
+    elif schedule_report_ctx(getattr(tools, "_ctx", None)):
+        ctx.accumulated_usage["wake_silent"] = True  # an older schedule's report is a record before selection too
     else:
         ctx.accumulated_usage.pop("wake_silent", None)
     binding = dict(candidate.acceptance_binding or {}) if candidate is not None else {}
-    tools = getattr(ctx, "tools", None)
     current_fingerprint = str(
         getattr(getattr(tools, "_ctx", None), "_delivery_evidence_fingerprint", "")
         or ""
@@ -576,6 +578,8 @@ def _deliver_forced_late_results(ctx: _RoundLimitContext, llm_trace: Dict[str, A
 def _presence_forced_armed(tools_ctx: Any) -> bool:  # the host ceiling AND the Presence metadata
     contract = getattr(tools_ctx, "task_contract", None)
     metadata = getattr(tools_ctx, "task_metadata", None)
+    if schedule_report_ctx(tools_ctx):
+        return False  # a legacy schedule's report is a record, not a new forced Presence declaration
     return (isinstance(contract, dict) and isinstance(contract.get("capability_ceiling"), dict)
             and isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict))
 
@@ -744,7 +748,7 @@ def _service_finalization_projection(
 
 def _service_finalization_text(llm_trace: Dict[str, Any], *, drive_root: Any = None, task_id: str = "") -> str:
     shown = _service_finalization_projection(llm_trace, drive_root=drive_root, task_id=task_id)
-    return json.dumps(shown, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if shown else ""
+    return json_dumps_utf8(shown, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if shown else ""
 
 
 def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> None:
@@ -757,7 +761,7 @@ def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str,
     projection = _loop()._service_finalization_evidence(llm_trace)
     if not projection:
         return
-    payload = json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json_dumps_utf8(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     if ctx.forced_service_evidence_fingerprint == fingerprint:
         return

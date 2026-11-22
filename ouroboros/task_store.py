@@ -559,7 +559,8 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
 DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
-    "artifact_bundle": ("status",), "task_contract": ("deadline_at",),
+    "artifact_bundle": ("status",), "task_contract": ("deadline_at", "capability_ceiling"),
+    "task_contract.capability_ceiling": ("schema_version",),  # history classifies legacy schedule reports by shape, not grants
     "loop_outcome": ("usage",), "loop_outcome.usage": ("total_rounds",),  # history's accepted solve responses
     # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
     "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),

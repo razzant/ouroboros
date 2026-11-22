@@ -90,8 +90,9 @@ LARGEST_ITEMS = 20
 _KEPT_REASONS = {
     "results_pending": ("child_result_unadopted", "child_refs_pending", "call_inventory_pending", "call_inventory_changed",
                         "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
-                        "raw_evidence_uncustodied", "artifact_source_missing", "canonical_changed", "drive_occupant_changed",
-                        "canonical_not_settled", "post_work_open", "artifacts_not_terminal", "child_drive_mismatch"),
+                        "raw_evidence_uncustodied", "service_logs_uncustodied", "artifact_source_missing",
+                        "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
+                        "artifacts_not_terminal", "child_drive_mismatch"),
     "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
                "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held"),
     "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),

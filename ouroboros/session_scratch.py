@@ -477,15 +477,12 @@ def release_trash_entry(data_root: Any, entry: pathlib.Path, *, owed: Any = None
     child’s deletion is accepted through ``_accept_child_release`` before bytes go. READS, LIVE and
     MEMBERS share the pass’s queue snapshot and preliminary parent proofs; final checks are fresh.
     This runs in the maintenance child, without the supervisor’s maps."""
-    from ouroboros.task_reads import TaskReads
     from ouroboros.tools.kept_service_outputs import owed_declarations
     from ouroboros.workspace_preflight import _RELEASE_MARK, _retire_record
 
     selection = owed_declarations(data_root) if owed is None else owed
 
-    reads = reads if reads is not None else TaskReads(data_root)
-    live = live if live is not None else snapshot_probe(data_root, reads=reads)
-    members = members if members is not None else {}
+    reads, members, live = _trash_read_view(data_root, reads=reads, live=live, members=members)
     task_id, retained = entry_task_id(entry.name), []
 
     def accept(task: str, record: pathlib.Path) -> str:
@@ -603,6 +600,16 @@ def snapshot_probe(data_root: Any, *, reads: Any) -> Callable[[str], Optional[bo
     except Exception:
         return lambda _task: None
     return lambda task: None if _snapshot_is_stale(snapshot) else task in members
+
+
+def _trash_read_view(data_root: Any, *, reads: Any = None, live: Any = None,
+                     members: Any = None) -> Tuple[Any, Any, Callable[[str], Optional[bool]]]:
+    """A trash pass's one shared read view ``(reads, members, live)``; supplied parts stay as given."""
+    from ouroboros.task_reads import TaskReads
+
+    reads = reads if reads is not None else TaskReads(data_root)
+    members = members if members is not None else {}
+    return reads, members, live if live is not None else snapshot_probe(data_root, reads=reads)
 
 
 def _line_member_open(root: pathlib.Path, member: str, live: Any, *, reads: Any = None,

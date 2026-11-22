@@ -122,7 +122,7 @@ _PROGRESS_META_FIELDS = (
     # stay what it was, or a reload would hand the card title back to a line live refused it.
     "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
-    "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
+    "checkpoint_kind", "episode_id", "phase", "elapsed_sec", "service_stop",
 )
 
 _SKILL_REVIEW_STRING_FIELDS = (
@@ -434,12 +434,8 @@ def _annotate_terminal_task_truth(
                 legacy_child_meta_by_task[task_id] = child_meta
             status = str(result.get("status") or "")
             checkpoint = result.get("root_phase_checkpoint")
-            synthesis = (
-                str(checkpoint.get("post_task_synthesis") or "")
-                if isinstance(checkpoint, dict) else ""
-            )
-            # An open post-task checkpoint is still finalizing, even with a stored final answer:
-            # plain roots may already say completed; split-drive roots stay scheduled/running until copy-back.
+            synthesis = checkpoint.get("post_task_synthesis") if isinstance(checkpoint, dict) else None
+            # An open post-task checkpoint still finalizes: plain roots may say completed; split-drive roots wait for copy-back.
             # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
             if checkpoint_open and (status in {"completed", "failed"} or status not in FINAL_STATUSES):

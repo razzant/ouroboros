@@ -33,9 +33,10 @@ from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.loop_nudges import accept_handover_selection
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
-from ouroboros.task_finalization import set_terminal_host_notice, set_terminal_plan_review_open
+from ouroboros.task_finalization import schedule_report_ctx, set_terminal_host_notice, set_terminal_plan_review_open
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.task_carrier import execution_kind
+from ouroboros.utils import json_dumps_utf8
 
 
 from typing import TYPE_CHECKING
@@ -315,13 +316,11 @@ def delivery_evidence_fingerprint(
         "verification_receipts": read_context_verification_receipts(
             tool_ctx, task_id, fallback_root=receipt_root,
         ),
-        # Task-scoped service teardown can register declared outputs or
-        # surface an output-finalization failure. Those facts arise outside an
-        # ordinary tool call, so bind their stable projection explicitly; else
-        # a result review could judge the pre-teardown state.
+        # Bind teardown's outputs and failures, which can arise outside a tool call,
+        # so result review cannot judge the pre-teardown state.
         "service_finalization": _loop()._service_finalization_evidence(llm_trace),
     }
-    return hashlib.sha256(json.dumps(
+    return hashlib.sha256(json_dumps_utf8(
         evidence,
         ensure_ascii=False,
         sort_keys=True,
@@ -759,33 +758,35 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed, owner_source_sha256
     tool_ctx = tools._ctx
     request = getattr(tool_ctx, "_completion_request", None)
-    if not isinstance(request, dict):
+    if not isinstance(request, dict) or (request.get("reply_later") and content is None):
         return False
     if request.get("reply_later"):
-        if content is None:
-            return False
         request = {**request, "answer": _loop()._extract_plain_text_from_content(content), "reply_later": False}
     observation = request.get("observation") or {}
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
+    calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
+    from ouroboros.loop_completion_schema import legacy_selection_error
+    error = legacy_selection_error(tool_ctx, request, text, calls) or error
     from ouroboros.place_reply import records_only_now, riding_sends
     if (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
-        error = OWNER_REPLY_OWED_REFUSAL
-    calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
+        if not (getattr(tool_ctx, "_schedule_door", None) and request.get("source") == "presence_finish"
+                and tools.get_schema_by_name("send_user_message") is None):
+            error = OWNER_REPLY_OWED_REFUSAL
     conflict = getattr(tool_ctx, "_completion_conflict", False)
     if conflict:
         error = "contradictory_completion_requests: select again after reading the completed batch"
-    elif conflict is None and any(call.get("tool") == "finish_task" and call.get("is_error") for call in calls):
-        # Restored from a source that never recorded the fact: a failed sibling request may have contradicted
-        # this one or failed on its own arguments. A batch with none failed had one valid request.
+    legacy_batch = conflict is None and schedule_report_ctx(tool_ctx)
+    if conflict is None and any(call.get("tool") == "finish_task" or (legacy_batch and call.get("tool") == "presence_finish")
+                                for call in calls if call.get("is_error")):
+        # A legacy failed sibling may have contradicted the request or failed argument validation.
         error = ("completion_conflict_unknown: whether a failed completion request of this batch contradicted "
                  "this one is UNKNOWN (not recorded); select again after reading the completed batch")
     if observation.get("owner_source_sha256") != owner_source_sha256(tool_ctx):
         error = "owner_input_changed: consider the new owner input before selecting completion"
     unseen = completion_observation_calls(calls)
     riding = riding_sends(tool_ctx, calls)  # a queued send into the turn's own conversation rides with its finish
-    tool_ctx._completion_riding_send = bool(riding)  # ``prepare_focus_reply`` reads it: a record that sent nothing returns once
-    unseen = [call for call in unseen if call not in riding]
+    tool_ctx._completion_riding_send, unseen = bool(riding), [call for call in unseen if call not in riding]
     subject, applied = request.get("acceptance_subject"), None
     if not error and subject is not None:
         previous = getattr(tool_ctx, "_acceptance_observation", {})
@@ -1201,9 +1202,8 @@ def resume_delivery_candidate(tools: ToolRegistry, working: dict, schemas: list)
 def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: Any, llm_trace: dict,
                                 *, explicit: bool, resumed: bool) -> tuple[bool, Any]:
     """Select/save prose before gates; recovery retains its old evidence binding."""
-    if resumed or explicit:
-        control, content = ("retained" if resumed else "fresh"), content
-    else:
+    control = "retained" if resumed else "fresh"
+    if not (resumed or explicit):
         control, content = _loop()._resolve_delivery_control(content, tools, limit_ctx, llm_trace)
     if control == "retry":
         return False, content
@@ -1220,7 +1220,7 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
         if fresh:
             candidate.finalization_control = "candidate"
         selected = getattr(tools._ctx, "_completion_selected", None) or {}
-        candidate.quiet = keep_quiet or explicit and bool(selected.get("wake_silent"))
+        candidate.quiet = schedule_report_ctx(tools._ctx) or keep_quiet or (explicit and bool(selected.get("wake_silent")))
         content = candidate.full_text
     if fresh or resumed:
         working_checkpoint.save_or_log(limit_ctx, "candidate")  # this attempt survives another interruption

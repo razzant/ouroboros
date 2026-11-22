@@ -28,6 +28,7 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
 from ouroboros.anthropic_native_custody import custody_private_key
 from ouroboros.model_wait import ModelWaitInterrupted
+from ouroboros.loop_completion_schema import refused_door_end, resolve_completion_selection
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros import loop_output_exhaustion as output_recovery, working_checkpoint
 from ouroboros.context import build_user_content  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -97,7 +98,7 @@ log = logging.getLogger(__name__)
 def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_tools=False, assistant_message=None,
                              resume_candidate=False):
     """One completion request owner, with ordinary first/direct prose compatibility."""
-    from ouroboros.loop_delivery import consume_completion_request, hold_completion_response, observe_completion_hold
+    from ouroboros.loop_delivery import hold_completion_response, observe_completion_hold
     if assistant_message is not None and (unfinished := output_recovery.unfinished_reply(limit_ctx, assistant_message)) is not False:
         return unfinished  # a typed cut or tool-call finish: never selected, consumed or parked as an answer
     ctx = tools._ctx
@@ -110,12 +111,12 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
             _arm_delivery_control(tools, limit_ctx, limit_ctx.llm_trace, control="owner_revision_required")
         observe_completion_hold(tools, limit_ctx, "resume", "owner_input_changed")
         return None
-    selected = bool(getattr(ctx, "_completion_selected", None)) or consume_completion_request(
-        tools, limit_ctx, limit_ctx.llm_trace, content, emit_progress=emit_progress)
-    origin = "resume" if resume_candidate else "selection" if selected else "prose"
-    # A park records its own hold; after tools nothing was offered (ordinary work, or a refusal already observed).
-    if not selected and (after_tools or park_for_left_review(tools, limit_ctx, content, emit_progress, origin)):
+    if (selected := resolve_completion_selection(tools, limit_ctx, content, emit_progress=emit_progress)) is None:
         return None
+    origin = "resume" if resume_candidate else "selection" if selected else "prose"
+    # A park records its hold; after tools, no selection ends only at a final schedule refusal.
+    if not selected and (after_tools or park_for_left_review(tools, limit_ctx, content, emit_progress, origin)):
+        return refused_door_end(tools, limit_ctx, after_tools=True) if after_tools else None
     if selected:
         from ouroboros.loop_messages import owner_source_sha256
         observation = ctx._completion_selected.get("observation") or {}
@@ -669,16 +670,16 @@ def run_llm_loop(
 
             if pending_no_tool_budget:
                 pending_no_tool_budget = False
-                budget_result = _finish_no_tool_round_budget(limit_ctx, budget_remaining_usd, cost_ceiling)
-                if budget_result is not None:
+                if (budget_result := _finish_no_tool_round_budget(limit_ctx, budget_remaining_usd, cost_ceiling)) is not None:
                     return budget_result
 
             if pending_candidate:
                 pending_candidate, pending_no_tool_budget = False, True
-                final_result = _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, resume_candidate=True)
-                if final_result is not None:
+                if (final_result := _finalize_loop_candidate(None, limit_ctx, tools, emit_progress, resume_candidate=True)) is not None:
                     return final_result
                 continue
+            if (refused := refused_door_end(tools, limit_ctx)) is not None:
+                return refused
             model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
                 from ouroboros.loop_llm_call import timeout_repeat_blocked

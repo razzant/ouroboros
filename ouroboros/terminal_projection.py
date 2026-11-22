@@ -358,8 +358,9 @@ def completion_event_view(root: Any, event: dict, record: dict, *, receipts=None
 def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dict | None = None) -> dict:
     from ouroboros import project_dialogue as dialogue
     from ouroboros.project_facts import resolve_project_id
-    from ouroboros.task_finalization import quiet_finish, work_label
+    from ouroboros.task_finalization import quiet_finish, schedule_report_fields, work_label
 
+    report = schedule_report_fields(row)
     quiet = quiet_finish(row)
     lineage = _lineage(tid, row)
     is_root = lineage["is_root_task"]
@@ -400,13 +401,16 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "terminal_time": ready.get("terminal_time") or terminal_time_fact(row),
         "direction": "system", "type": "task_summary",
         **presence_provenance_fields(row),  # a presence room labels its terminal row like every other row
+        **report,
         "summary_id": f"task-terminal:{tid}",
         "summary_kind": "terminal_root_projection" if is_root else "terminal_result_projection",
         "task_id": tid, "parent_task_id": parent, "root_task_id": lineage["root_task_id"],
         "project_id": resolve_project_id(row), "chat_id": chat_id,
         "delegation_role": str(row.get("delegation_role") or ""), "role": role,
         "status": row["status"], "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
-        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet, **{key: row[key] for key in ("suggested_name", "wake_summary", "fold_read", "schedule_name") if row.get(key)},
+        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet,
+        **{key: row[key] for key in ("suggested_name", "wake_summary", "fold_read", "schedule_name")
+           if row.get(key) and not (report and key == "wake_summary")},
         "outcome_authority": "canonical_task_result_after_finalization",
         # Memory stamps copy the recorded objective; readers interpret it using answer provenance.
         "outcome_axes": row.get("outcome_axes") or {}, "reason_code": str(row.get("reason_code") or ""),

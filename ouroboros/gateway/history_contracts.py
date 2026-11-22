@@ -138,6 +138,7 @@ class HistoricalTerminal(TypedDict, total=False):
     place_origin: Dict[str, Any]
     wake_silent: bool
     quiet_effective: bool
+    schedule_report_only: bool
 
 
 class ChatHistoryMessage(TypedDict, total=False):
@@ -196,6 +197,7 @@ class ChatHistoryMessage(TypedDict, total=False):
     quiz: ChatHistoryQuiz
     card: ChatHistoryCard
     summary_kind: str
+    schedule_report_only: bool  # terminal card links to a saved report, not a transcript message
     status: str
     task_terminal_status: str
     task_phase: str

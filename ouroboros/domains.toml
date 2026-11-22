@@ -938,6 +938,7 @@ D20 = "Presence"
 "ouroboros/tools/scope_review_contract.py" = "D06"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
+"ouroboros/tools/service_stop.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
 "ouroboros/tools/kept_service_outputs.py" = "D05"  # a kept service's declared outputs for a stop that is not its task's
 "ouroboros/tools/shell.py" = "D05"
@@ -1192,6 +1193,7 @@ allowed = [
   "D03->D17",
   "D03->D18",
   "D03->D19",
+  "D04->D01",
   "D04->D05",
   "D04->D13",
   "D04->D17",
@@ -1376,7 +1378,6 @@ lazy_only = [
   "D03->D14",
   "D03->D16",
   "D03->D20",
-  "D04->D01",
   "D04->D02",
   "D04->D03",
   "D04->D06",

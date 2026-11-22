@@ -69,7 +69,9 @@ export function timelineReadFields(summary, previous = {}) {
     const cause = stated ? mergeChildCause(stated, before) : stated;
     const read = {
         fullRef: summary.fullRef || previous.fullRef || '',
+        fullField: summary.fullField || previous.fullField,
         truncated: summary.truncated || previous.truncated || false,
+        ...(summary.serviceStop ? { serviceStop: summary.serviceStop } : {}),
         childCause: cause && before && JSON.stringify(cause) === JSON.stringify(before) ? before : cause,
     };
     if (!stated) return previous.fullOutput ? { ...read, fullOutput: '', outputPreview: '' } : read;
@@ -135,7 +137,7 @@ export function mergeHistoricalTimelineItem(record, summary, row, ts) {
             // An older row still brings the report a newer frame of the outcome alone never carried: the line takes
             // the report and keeps its newer cause (without a report its body and fullBody are that cause's words).
             if (!(summary.childCause && summary.fullOutput && item.childCause && !item.fullOutput)) return adoptedSource;
-            Object.assign(item, timelineReadFields({ ...item, fullRef: summary.fullRef, truncated: summary.truncated },
+            Object.assign(item, timelineReadFields({ ...item, fullRef: summary.fullRef, fullField: summary.fullField, truncated: summary.truncated },
                 { ...item, childCause: summary.childCause, fullOutput: summary.fullOutput, outputPreview: summary.outputPreview }));
             return true;
         }
