@@ -481,3 +481,22 @@ def test_every_unreadable_source_of_the_room_rule_is_one_gap_and_an_undecidable_
     assert not any("rooms_unreadable" in note for note in shaky["notes"])
     status, body = _refused(tmp_path, *_run(row["reopen"]))
     assert (status, body["code"]) == (503, "recall_source_unreadable")
+
+
+def test_the_door_tells_an_import_still_running_from_an_observed_edit(tmp_path, monkeypatch):
+    for minute in range(3):
+        _say(tmp_path, f"2026-11-01T10:0{minute}:00Z", f"archive {minute}")
+    token = _search(tmp_path, "archive", count=1)["snapshot"]
+    assert recall.IMPORT_INCOMPLETE == ("History import is incomplete. Start again without snapshot or offset after "
+                                        "it completes.")
+    real = ds.range_coverage
+    monkeypatch.setattr(ds, "range_coverage", lambda *a, **kw: {**real(*a, **kw), "imported": False, "pending": 1})
+    importing = _search(tmp_path, "archive", count=1)
+    assert importing["snapshot"] is None and importing["notes"] == [recall.IMPORT_INCOMPLETE]
+    assert _refused(tmp_path, ("words", "archive"), ("snapshot", token), ("offset", "1")) == (409, {
+        "code": "recall_snapshot_changed", "error": recall.IMPORT_INCOMPLETE})
+    monkeypatch.setattr(ds, "range_coverage", real)
+    revisions = iter([1, 2])
+    monkeypatch.setattr(dialogue_recall, "_text_revision", lambda _root: next(revisions, 2))
+    edited = _search(tmp_path, "archive", count=1)
+    assert edited["snapshot"] is None and edited["notes"] == [recall.UNSTABLE_READ]

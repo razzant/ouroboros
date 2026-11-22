@@ -406,6 +406,8 @@ UNSTABLE_GAP = ("capture_unstable: the conversation changed during this read (an
 _REFUSALS = {
     "malformed": "CHAT_HISTORY_SNAPSHOT_INVALID: this snapshot was not issued by a words read; start again with "
                  "offset=0 and no snapshot.",
+    "importing": "CHAT_HISTORY_SNAPSHOT_CHANGED: history import is incomplete; no mixed page was returned; "
+                 "restart with offset=0 and no snapshot after it completes.",
     "unstable": "CHAT_HISTORY_SNAPSHOT_CHANGED: the conversation changed during this read; no mixed page was "
                 "returned; restart with offset=0 and no snapshot.",
     "changed": "CHAT_HISTORY_SNAPSHOT_CHANGED: the query, the archive/live generations or an edited row changed; "
@@ -414,8 +416,8 @@ _REFUSALS = {
 
 
 def _refusal(kind: str) -> Dict[str, Any]:
-    """A continuation this read cannot serve: ``malformed`` (no read issued it), ``unstable`` (the capture moved
-    under it) or ``changed`` (another capture or query)."""
+    """A continuation this read cannot serve: ``malformed`` (no read issued it), ``unstable`` (an edit moved the
+    capture under it), ``importing`` (history is still importing) or ``changed`` (another capture or query)."""
     return {"refused": _REFUSALS[kind], "refused_kind": kind}
 
 
@@ -429,7 +431,8 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
     ``author``, ``api_door``, ``reply_to``, ``reply_unresolved``, ``matched``, ``fields`` (each ``name``,
     ``text``, ``speaker`` (``author|asker|owner|closer|host``), ``label``), ``seals`` (``[(room, page)]``));
     ``total`` (exact, else ``None``) and ``observed``; ``offset``, ``more``; ``gaps``, ``notes``, ``seal_gap``;
-    ``snapshot`` (this page's token, ``None`` when the capture did not stabilize); ``path``.
+    ``snapshot`` (this page's token, ``None`` when the capture did not stabilize) and ``unstable`` (why not:
+    ``edit`` or ``import``, else ``None``); ``path``.
     ``visible_only`` (the neighbour door) keeps only rows a visible room shows now (a positive room id: Main, a
     Project, a place), resolved by the room rule before counting and paging; the mind's reads keep every row."""
     from ouroboros.chat_chain import format_address, row_address, source_row_id
@@ -493,8 +496,9 @@ def search(memory: Any, query: WordQuery, *, room: Optional[int], voice: str = "
                   **({"visible_only": True} if visible_only else {})}
     current = _snapshot(coverage, normalized)
     if requested and (not stable or requested != current):
-        return _refusal("unstable" if not stable else "changed")
-    result: Dict[str, Any] = {"refused": None, "refused_kind": None, "path": read["path"]}
+        return _refusal("changed" if stable else "unstable" if moved else "importing")
+    result: Dict[str, Any] = {"refused": None, "refused_kind": None, "path": read["path"],
+                              "unstable": "edit" if moved else None if stable else "import"}
     gaps = [f"{gap.get('kind') or 'unknown'}" + (f" ({gap['detail']})" if gap.get("detail") else "")
             for gap in coverage.get("gaps") or []] + gaps_extra
     if showing.gap:

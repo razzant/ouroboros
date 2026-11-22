@@ -43,6 +43,7 @@ _NOT_FOUND = "no dialogue row the door reads has this address"
 
 
 UNSTABLE_READ = "The conversation changed during this read. Start again without snapshot or offset."
+IMPORT_INCOMPLETE = "History import is incomplete. Start again without snapshot or offset after it completes."
 INVALID_SNAPSHOT = "Invalid snapshot. Use the snapshot from a search response or start again without it."
 
 
@@ -148,8 +149,9 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
                                    visible_only=True)
     if found["refused_kind"] == "malformed":
         raise Refusal(400, "recall_bad_snapshot", INVALID_SNAPSHOT)
-    if found["refused_kind"] == "unstable":
-        raise Refusal(409, "recall_snapshot_changed", UNSTABLE_READ)
+    if found["refused_kind"] in ("unstable", "importing"):
+        raise Refusal(409, "recall_snapshot_changed",
+                      IMPORT_INCOMPLETE if found["refused_kind"] == "importing" else UNSTABLE_READ)
     if found["refused"]:
         raise Refusal(409, "recall_snapshot_changed", "the conversation or the query changed since this snapshot; "
                       "no mixed page was returned: start again without snapshot and offset")
@@ -162,7 +164,7 @@ def search(root: pathlib.Path, words: List[str], values: Mapping[str, str]) -> D
         following = [*same, ("count", str(count)), ("offset", str(offset + len(hits))), ("snapshot", current)]
     notes = [_outward(note) for note in found["notes"]]
     if current is None:  # no continuation of a capture that moved or is still importing
-        notes.append(UNSTABLE_READ)
+        notes.append(IMPORT_INCOMPLETE if found.get("unstable") == "import" else UNSTABLE_READ)
     labels = RoomLabelResolver(root)
     return {"mode": "search", "words": list(words), "room_id": room_text, "voice": voice, "order": order or "newest",
             "total": found["total"], "observed": found["observed"], "offset": found["offset"], "more": more,
