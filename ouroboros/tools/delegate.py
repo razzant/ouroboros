@@ -425,8 +425,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _coordination_context: str = "", _initial_bootstrap: bool = False, mode: Optional[str] = None,
                     override_plan_readiness: Optional[bool] = None, _plan_answers: Any = None,
                     attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False,
-                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None,
-                    knowledge_notes: Optional[list] = None, _named_note_feedback: Optional[list] = None) -> ToolResult:
+                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None, knowledge_notes: Optional[list] = None) -> ToolResult:
     from ouroboros.execution_domain import start_engine
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -469,9 +468,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         (request_body, route, authority, root, key, project_id, owned_project_id,
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint,
-         seconds_basis, continuation, ttl_info, retained_inputs, row_processing) = binding
+         seconds_basis, continuation, ttl_info, retained_inputs, row_processing, named) = binding
         invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
-        named = (custody.invocation_record(drive, retry_token) or {}).get("named_notes")  # its envelope holds the text
     else:
         route, row_processing = actor["route"], actor.get("row_processing")  # the row's own tier: custody, never the request
         if selector_root := ("skill_payload" if prior else selector_root):
@@ -633,8 +631,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
             processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
-            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody,
-            **{key: value for key, value in (("held_heads", held), ("named_notes", named)) if value},
+            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody, **({"held_heads": held} if held else {}), **({"named_notes": named} if named else {}),
         )
         if not requested or claim_refusal:
             reason, detail, facts = _unclaimed_start_facts(claim_refusal, recovering)
@@ -716,8 +713,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
                             snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
-                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt={**start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering), named),
-                                     "argument_notes": _named_note_feedback})
+                            effort_fact=({} if recovering else actor.get("effort_fact")), receipt=start_facts(request_body, _start_lineage(request_body, invocation_id, authority, inputs, recovering), named))
 
 
 def _start_lineage(request: Any, invocation_id: str, authority: "DelegatedRunShape", inputs: Any, recovering: bool) -> Any:
@@ -762,7 +758,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     if input_files is not None:
         facts.update(inputs=input_files, inputs_when="prepared before sending", inputs_outside=sum(
             1 for row in input_files if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
-    rendered = render_receipt(build_receipt(facts)) + "".join(f"\n{line}" for line in facts.get("argument_notes") or ())
+    rendered = render_receipt(build_receipt(facts))
     note += rendered
     payload = {
         "status": "started" if durable else "started_uncustodied",

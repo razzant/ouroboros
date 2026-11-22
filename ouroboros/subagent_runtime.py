@@ -1333,8 +1333,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         from ouroboros.subagent_work_order import NamedNoteError, resolve_named_notes
 
         try:  # the named notes resolve as the caller's knowledge_read resolves them, before the daemon
-            options["knowledge_notes"], options["_named_note_feedback"] = resolve_named_notes(
-                ctx, options.get("knowledge_notes"))
+            options["knowledge_notes"], named_feedback = resolve_named_notes(ctx, options.get("knowledge_notes"))
         except NamedNoteError as exc:
             raise SubagentSelectionError(exc.code, exc.detail, {"knowledge_notes": "unresolved"}) from exc
     except SubagentSelectionError as exc:
@@ -1369,8 +1368,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             **{key: options.pop(key) for key in (
                 "directory_strategy", "scope_paths", "continue_from", "continue_carrier", "mode",
                 "override_plan_readiness", "_plan_answers", "workspace", "attachment_paths", "_document_intent",
-                "_document_first_start", "input_files", "_prepared_inputs", "knowledge_notes", "_named_note_feedback")
-                if key in options},
+                "_document_first_start", "input_files", "_prepared_inputs", "knowledge_notes") if key in options},
         )
         # Every configured-session start lands here — the host's pre-start
         # (charter, owner 2026-08-28/29) and any model-issued retry/replacement
@@ -1391,6 +1389,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             payload["work_order_source_request"] = dict(work_order_source_request)
         if retry_token and coordination_context:
             payload["coordination_text"] = "not sent: retry_of replays the recorded request unchanged"
+        if named_feedback:  # spellings of knowledge_notes that meant the same, said the house way (arg_feedback)
+            payload["note"] = "\n".join([*filter(None, [payload.get("note")]), *named_feedback])
         return _replace_tool_result(
             result, text=json.dumps(payload, ensure_ascii=False, indent=2))
     except SubagentSelectionError as exc:
