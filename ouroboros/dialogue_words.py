@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, List, Mapping, NamedTuple, Sequence, Tuple
+from typing import Any, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 _WORD: Any = None  # built on first use: the mark classes come from this Python's Unicode data, never a stored table
 
@@ -123,6 +123,47 @@ def match_text(query: WordQuery, text: str) -> bool:
     """True when one alternative of ``query`` is satisfied inside this one text."""
     found = tokens(text)
     return any(_satisfied(alternative, found) for alternative in query.alternatives)
+
+
+def _runs(text: str) -> List[Tuple[str, int, int]]:
+    """``(token, start, end)`` over the ORIGINAL text: each run the token rule finds there, normalized; a run
+    that normalizing splits gives each of its tokens the run's span."""
+    return [(token, run.start(), run.end()) for run in _word().finditer(str(text or ""))
+            for token in tokens(run.group())]
+
+
+def locate(query: WordQuery, text: str) -> Optional[Tuple[int, int]]:
+    """``(start, end)`` in the original ``text`` of the first token run a satisfied alternative asks for (a
+    phrase: from its first token to its last), or ``None`` when no alternative is satisfied here. Found by
+    walking the token rule over the original text, so a word inside another word, a normalization that
+    changes the length, or punctuation between a phrase's words cannot move it."""
+    runs = _runs(text)
+    found = [token for token, _start, _end in runs]
+    best: Optional[Tuple[int, int]] = None
+    for alternative in query.alternatives:
+        if not _satisfied(alternative, found):
+            continue
+        spans = [next((runs[at][1], runs[at][2]) for at, token in enumerate(found) if token.startswith(prefix))
+                 for prefix in alternative.prefixes]
+        for phrase in alternative.phrases:
+            width = len(phrase)
+            at = next(at for at in range(len(found) - width + 1) if tuple(found[at:at + width]) == phrase)
+            spans.append((runs[at][1], runs[at + width - 1][2]))
+        first = min(spans)
+        best = first if best is None or first < best else best
+    return best
+
+
+def excerpt(query: WordQuery, text: str, width: int = 240) -> str:
+    """At most ``width`` characters of ``text`` around its first located match (``locate``), whitespace runs
+    shown as one space; a cut says so and names the field's original length (``[N chars in full]``)."""
+    text = str(text or "")
+    if len(" ".join(text.split())) <= width:
+        return " ".join(text.split())
+    span = locate(query, text)
+    start = max(0, span[0] - width // 4) if span else 0
+    cut = " ".join(text[start:start + width].split())
+    return ("…" if start else "") + cut + ("…" if start + width < len(text) else "") + f" [{len(text)} chars in full]"
 
 
 def match_fields(query: WordQuery, fields: Sequence[Sequence[Any]]) -> List[str]:

@@ -24,7 +24,7 @@ import json
 import pathlib
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ouroboros.dialogue_words import Field, WordQuery, fields_of, match_fields, normalize, parse
+from ouroboros.dialogue_words import Field, WordQuery, excerpt, fields_of, match_fields, parse
 
 # Candidate rows one call re-checks at most: a bound on one read's time, never a choice of which rows matter.
 # Measured on a generated 100k-row store (C06/P2 report): about 35 µs a candidate on either path, so 50,000 keep
@@ -168,20 +168,8 @@ def _snapshot(coverage: Mapping[str, Any], query: Mapping[str, Any]) -> str:
 
 
 def _excerpt(text: str, query: WordQuery) -> str:
-    """The field's words around its first matching token, cut at ``EXCERPT_CHARS`` and saying so."""
-    text = " ".join(str(text).split())
-    if len(text) <= EXCERPT_CHARS:
-        return text
-    start = 0
-    folded = normalize(text)
-    if len(folded) == len(text):  # offsets carry over only when normalizing kept the length
-        firsts = [folded.find(part) for alternative in query.alternatives
-                  for part in (*alternative.prefixes, *(" ".join(phrase) for phrase in alternative.phrases))]
-        found = [position for position in firsts if position >= 0]
-        start = max(0, min(found) - EXCERPT_CHARS // 4) if found else 0
-    cut = text[start:start + EXCERPT_CHARS]
-    return ("…" if start else "") + cut + ("…" if start + EXCERPT_CHARS < len(text) else "") + \
-        f" [{len(text)} chars in full]"
+    """The field's words around its first match (``dialogue_words.excerpt``, the one locator)."""
+    return excerpt(query, text, EXCERPT_CHARS)
 
 
 def _speaker(field: Field, row: Mapping[str, Any], author: Mapping[str, Any]) -> str:

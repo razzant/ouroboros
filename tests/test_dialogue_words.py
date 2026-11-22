@@ -6,7 +6,7 @@ import unicodedata
 
 import pytest
 
-from ouroboros.dialogue_words import Field, fields_of, match_fields, match_text, normalize, parse, tokens
+from ouroboros.dialogue_words import Field, excerpt, fields_of, locate, match_fields, match_text, normalize, parse, tokens
 
 
 def test_normalize_is_nfc_casefold_and_yo_as_ye():
@@ -202,3 +202,27 @@ def test_fields_of_runs_on_every_row_kind_with_no_store_importable(blocked, tmp_
     assert done.returncode == 0, done.stderr
     assert [[tuple(f) for f in kind] for kind in json.loads(done.stdout)] == [
         [tuple(f) for f in fields_of(row)] for row in _EVERY_KIND]
+
+
+_FILLER = "Filler sentence goes here. " * 20
+
+
+@pytest.mark.parametrize("words, text, found", [
+    (["art"], "A smart start. " + _FILLER + "Then the art of it.", "art"),  # inside another word earlier
+    (["needle"], "Straße. " + _FILLER + "Here is the needle.", "needle"),  # normalizing changes the length
+    (["plan zebra", "needle"], "The plan is first. " + _FILLER + "Here is the needle.", "needle"),  # not satisfied
+    (['"socket timeout"'], "Words. " + _FILLER + "the socket,  timeout came.", "socket,  timeout"),  # parted
+    (["needle"], "Plain. " + _FILLER + "a needle here", "needle"),  # the control
+])
+def test_the_one_locator_finds_the_matched_run_in_the_original_text(words, text, found):
+    query = parse(words)
+    start, end = locate(query, text)
+    assert text[start:end] == found
+    shown = excerpt(query, text, 240)
+    assert " ".join(found.split()) in shown and f"[{len(text)} chars in full]" in shown
+
+
+def test_the_locator_says_none_where_nothing_matches_and_a_short_field_is_whole():
+    assert locate(parse(["zebra"]), "no such animal") is None
+    assert excerpt(parse(["zebra"]), "no such   animal") == "no such animal"
+    assert excerpt(parse(["x"]), "x" * 300).startswith("x" * 240) and "[300 chars in full]" in excerpt(parse(["x"]), "x" * 300)
