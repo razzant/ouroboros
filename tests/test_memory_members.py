@@ -521,3 +521,13 @@ def test_a_room_with_incomplete_appearances_observes_no_untold_rows_without_clai
     monkeypatch.setattr(memory_inventory, "open_room_rows", none_observed)
     head = members(ctx, room_id="1").split("\n")[0]
     assert head.endswith("; untold rows: none observed") and "incomplete: " in head
+
+
+def test_an_excerpt_comes_from_the_shared_locator_on_the_original_text(tmp_path):
+    """A word far into a long record, and a word inside an identifier (the shared tokenizer splits ``_``), are found
+    on the original text; a cut names the field's length."""
+    ctx, _rows, _page, _note = install(tmp_path)
+    long = write(ctx, kind="note", text="Opening sentence. " + "filler " * 80 + "the chat_history reader answered.")["node_id"]
+    line = next(line for line in listed(members(ctx, room_id="1", words=["history"])) if long in line)
+    assert "; excerpt: «…" in line and "chat_history reader answered." in line
+    assert f"[{len('Opening sentence. ' + 'filler ' * 80 + 'the chat_history reader answered.')} chars in full]" in line

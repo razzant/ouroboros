@@ -131,7 +131,7 @@ def _filtered(entries: List["_Entry"], words: List[str]) -> List["_Entry"]:
     field on its own (never its id, facts or readers), with an excerpt naming the field when the match is not in its
     printed opening; each room's runs of rows, whose words this listing never reads, become one search line; any
     other line stays."""
-    from ouroboros.dialogue_words import match_text, parse
+    from ouroboros.dialogue_words import excerpt, match_text, parse
 
     query, kept, runs = parse(words), [], {}
     for entry in entries:
@@ -144,7 +144,7 @@ def _filtered(entries: List["_Entry"], words: List[str]) -> List["_Entry"]:
             kept.append(entry)
         elif hit := next(((name, text) for name, text in entry.fields if match_text(query, text)), None):
             opening = first_sentence(" ".join(str(entry.record.get("text") or "").split()))
-            near = "" if hit[0] == "text" and match_text(query, opening) else excerpt(query, hit[1])
+            near = "" if hit[0] == "text" and match_text(query, opening) else excerpt(query, hit[1], 200)
             label = "excerpt" if hit[0] == "text" else f"excerpt ({hit[0]})"
             kept.append(_Entry(entry.line + (f"; {label}: «{near}»" if near else ""), entry.record, entry.fields))
     return [item if isinstance(item, _Entry) else _Entry(_search_line(words, *item)) for item in kept]
@@ -161,24 +161,6 @@ def _search_line(words: List[str], what: str, room: str, runs: List[List[memory_
             f"returns told rows of that period: chat_history(words={words!r}, room_id='{room}'{dates})"
             + (f"; {undated} of them carry no time" if undated else "") + "; the unfiltered listing prints each run's "
             "exact readers")
-
-
-def excerpt(query: Any, text: str) -> str:
-    """About 200 characters around the first word of ``text`` that a satisfied alternative of ``query`` asks for,
-    found with the shared tokenizer (``dialogue_words.tokens``) chunk by chunk of the original text."""
-    import re
-
-    from ouroboros.dialogue_words import match_text, tokens
-
-    satisfied = [alt for alt in query.alternatives if match_text(query._replace(alternatives=(alt,)), text)]
-    wanted = [(prefix, False) for alt in satisfied for prefix in alt.prefixes] + [
-        (phrase[0], True) for alt in satisfied for phrase in alt.phrases]
-    for chunk in re.finditer(r"\S+", text):
-        if any(token == word if exact else token.startswith(word) for token in tokens(chunk.group())
-               for word, exact in wanted):
-            start, end = max(chunk.start() - 100, 0), min(chunk.start() + 100, len(text))
-            return ("…" if start else "") + " ".join(text[start:end].split()) + ("…" if end < len(text) else "")
-    return ""
 
 
 class _Entry:
