@@ -143,6 +143,14 @@ class Candidates(NamedTuple):
     plan: str  # what the snapshot binds: the generation, its marks and its dirty set
 
 
+# The rows no posting covers yet: each chat unit from the ledger, then its rows at or above its mark through the
+# (segment, ordinal) index. Never a walk of the chat history: with every row posted it reads one index probe a unit.
+_UNCOVERED = ("SELECT d.seq FROM import_ledger l CROSS JOIN dialogue d INDEXED BY dialogue_ordinal "
+              "WHERE l.stream='chat' AND d.segment=l.id "
+              "AND d.ordinal >= coalesce((SELECT next_ord FROM dw_mark WHERE segment=l.id), 0) "
+              "AND d.stream='chat' AND d.seq < ?")
+
+
 def candidates(conn: sqlite3.Connection, query: Any, *, upper: int) -> Optional[Candidates]:
     """The candidate coordinates on this read connection, or ``None`` when the reader must scan (no FTS5, no
     sound generation, an expression the table refuses)."""
@@ -155,10 +163,7 @@ def candidates(conn: sqlite3.Connection, query: Any, *, upper: int) -> Optional[
         posted = {seq for (seq,) in conn.execute("SELECT rowid FROM dw_post WHERE dw_post MATCH ? AND rowid < ?",
                                                  (match_expression(query), int(upper)))}
         dirty = {seq for (seq,) in conn.execute("SELECT seq FROM dw_dirty WHERE seq < ?", (int(upper),))}
-        uncovered = {seq for (seq,) in conn.execute(
-            "SELECT d.seq FROM import_ledger l JOIN dialogue d ON d.segment=l.id AND d.stream='chat' "
-            "WHERE l.stream='chat' AND d.seq < ? AND d.ordinal >= "
-            "coalesce((SELECT next_ord FROM dw_mark WHERE segment=l.id), 0)", (int(upper),))}
+        uncovered = {seq for (seq,) in conn.execute(_UNCOVERED, (int(upper),))}
         marks = conn.execute("SELECT coalesce(group_concat(segment || ':' || next_ord, ','), '') FROM "
                              "(SELECT * FROM dw_mark ORDER BY segment)").fetchone()[0]
     except sqlite3.Error:
@@ -179,7 +184,7 @@ def _segments(conn: sqlite3.Connection) -> List[Tuple[int, int, int]]:
         if live is not None and segment == live[0]:
             upper = int(live[1])
         else:
-            upper = int(conn.execute("SELECT coalesce(max(ordinal)+1, 0) FROM dialogue WHERE segment=?",
+            upper = int(conn.execute("SELECT coalesce(max(ordinal)+1, 0) FROM dialogue INDEXED BY dialogue_ordinal WHERE segment=?",
                                      (segment,)).fetchone()[0])
         mark = conn.execute("SELECT next_ord FROM dw_mark WHERE segment=?", (segment,)).fetchone()
         units.append((int(segment), int(mark[0]) if mark else 0, upper))
@@ -255,7 +260,8 @@ def _post_segment(root: pathlib.Path, name: str, segment: int, mark: int, upper:
     while mark < upper:
         with ds.transaction(root, write=False) as conn:  # copied, then closed before any decoding
             page = conn.execute("SELECT json_group_array(json_array(seq, ordinal, body)) FROM (SELECT seq, ordinal, "
-                                "body FROM dialogue WHERE segment=? AND stream='chat' AND ordinal>=? AND ordinal<? "
+                                "body FROM dialogue INDEXED BY dialogue_ordinal WHERE segment=? AND stream='chat' AND ordinal>=? "
+                                "AND ordinal<? "
                                 "ORDER BY ordinal LIMIT ?)", (segment, mark, upper, CHUNK_ROWS)).fetchone()[0]
         records = json.loads(page or "[]")
         reach = records[-1][1] + 1 if len(records) == CHUNK_ROWS else upper

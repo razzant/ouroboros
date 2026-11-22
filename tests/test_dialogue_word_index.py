@@ -11,6 +11,7 @@ import pytest
 from ouroboros import dialogue_import as di, dialogue_recall, dialogue_store as ds, dialogue_word_index as dwi
 from ouroboros import maintenance
 from ouroboros.tools.control_runtime import _chat_history
+from tests import _dialogue as dialogue_test
 from tests._dialogue import chat_rows, seed
 
 pytestmark = pytest.mark.skipif(not dwi.fts5_available(), reason="this SQLite has no FTS5")
@@ -329,3 +330,28 @@ def test_postings_built_under_other_unicode_data_are_bypassed(tmp_path, monkeypa
     with ds.transaction(tmp_path, write=False) as conn:
         assert dwi.generation(conn)["reason"].startswith("unicode data")
     assert "Read by scan" in _read(tmp_path, words=["plum"]) and dwi.due(tmp_path, {}, {}, False)
+
+
+def test_the_uncovered_rows_are_found_by_the_ordinal_index_whatever_the_history(tmp_path):
+    """With every row posted, finding the rows no posting covers costs one index probe a unit, never a walk of
+    the chat history: the plan names ``dialogue_ordinal`` and the work does not grow with the rows."""
+    from ouroboros.dialogue_words import parse
+
+    small, large = tmp_path / "small", tmp_path / "large"
+    for root, rows in ((small, 50), (large, 1500)):
+        dialogue_test.seed(root, live={"chat": [{"ts": "2026-11-01T00:00:00Z", "direction": "in", "chat_id": 1,
+                                                  "text": f"row {n}"} for n in range(rows)]})
+        dialogue_test.import_all(root)
+        dwi.run(root, lambda: False)
+    steps = {}
+    for root in (small, large):
+        with ds.transaction(root, write=False) as conn:
+            plan = " ".join(str(tuple(row)) for row in conn.execute("EXPLAIN QUERY PLAN " + dwi._UNCOVERED, (1 << 62,)))
+            assert "dialogue_ordinal" in plan and "PRIMARY KEY (stream=? AND seq<?)" not in plan, plan
+            assert dwi.candidates(conn, parse(["zzzz"]), upper=1 << 62).uncovered == 0
+            counted = [0]
+            conn.set_progress_handler(lambda: counted.__setitem__(0, counted[0] + 1) or 0, 1)
+            assert conn.execute(dwi._UNCOVERED, (1 << 62,)).fetchall() == []
+            conn.set_progress_handler(None, 0)
+            steps[root.name] = counted[0]
+    assert steps["large"] == steps["small"], steps  # thirty times the rows, the same work
