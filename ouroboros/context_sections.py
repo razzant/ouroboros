@@ -234,7 +234,7 @@ def _build_registry_section(env: Any) -> str:
                        "named below:\n" + outline, "read_file(root='runtime_data', path='memory/registry.md')")
 
 
-_NOT_PASSED: Any = object()  # ``skills`` omitted: the section discovers them itself; ``None`` is a failed discovery
+_NOT_PASSED: Any = object()  # ``skills`` omitted: the section discovers them itself, never when it is given one
 
 
 @timed_section("installed_skills")
@@ -257,7 +257,9 @@ def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, sele
         return _installed_skills_section(env, skills, selected_skill)
     except Exception as exc:
         log.debug("Failed to build installed skills section", exc_info=True)
-        words = " ".join(str(exc).split())[:160]
+        from ouroboros.utils import truncate_within_limit
+
+        words = truncate_within_limit(" ".join(str(exc).split()), 300).replace("\n", " ")  # a cut says so
         gap = "\n".join([*_INSTALLED_SKILLS_HEADING, f"The skill list could not be read ({type(exc).__name__}"
                                                      f"{': ' + words if words else ''}); list_skills() reads it."])
         return HostSection("installed_skills", gap, gap, "list_skills")
@@ -275,7 +277,7 @@ def _installed_skills_section(env: Any, skills: Any, selected_skill: str = "") -
     skills = discover_context_skills(env.drive_root) if skills is _NOT_PASSED else skills
     if isinstance(skills, SkillDiscoveryFailure):
         raise skills.error  # the failure line with its cause, never "No skills are installed."
-    if skills is None:
+    if skills is None:  # a discovery that answers None (an injected or older one): the same failure line
         raise OSError("skill discovery failed")
     summary = summarize_skills(pathlib.Path(env.drive_root), skills)
     always_on = {skill.name for skill in always_in_context_skills(skills)}

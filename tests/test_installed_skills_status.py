@@ -596,3 +596,17 @@ def test_a_walk_that_met_an_unreadable_folder_is_not_kept_so_the_next_read_walks
     assert first.gaps == (f"{hidden} (OSError)",) and "inside" not in [skill.name for skill in first]
     second = discover_skills(tmp_path)
     assert second.gaps == () and sorted(skill.name for skill in second) == ["inside", "kept"]
+
+
+def test_a_long_failure_cause_is_cut_with_a_mark(tmp_path, monkeypatch):
+    """The cause's tail (often the path) may be cut, never silently (RV3 N3)."""
+    path = "/" + "/".join(["deep"] * 80) + "/SKILL.md"
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", unreadable)
+    line = _context_shape(tmp_path).full_text.splitlines()[-1]
+    assert line.startswith("The skill list could not be read (PermissionError: [Errno 13] Permission denied: ")
+    assert "OMISSION NOTE: truncated at 300 chars; original length " in line and path not in line
+
