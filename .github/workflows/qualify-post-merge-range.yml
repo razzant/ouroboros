@@ -1,0 +1,1811 @@
+# One-shot verification of the CI reader and producer. Only the testing branch carries this file.
+name: Qualify post-merge range tracking (pinned selection, real receipts)
+
+on:
+  push:
+    branches: [qualification/post-merge-range-r16]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify-post-merge-range-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PATCH_BASE: 495190dfa81a7d677eed2e67cd2cb5d38283e328
+  REVIEWED_PARENT: 495190dfa81a7d677eed2e67cd2cb5d38283e328
+  SUBJECT_COMMIT: 706dd8a0e95a6b19f1572dc18a150f3bbf724585
+  SUBJECT_TREE: 42311ec53dff5035d6ba638090ba543bf7b37a3b
+  HISTORIC_BASE: f888570639882e9059dc532a6bb67fb837c4d46d
+  HISTORIC_TIP: 95a00d89e10e686932b46568d32dec9df0156e19
+
+jobs:
+  window:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      window: ${{ steps.base.outputs.window }}
+      cases: ${{ steps.cases.outputs.cases }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - id: base
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD~1)" = "$SUBJECT_COMMIT"
+          test "$(git rev-parse 'HEAD~1^{tree}')" = "$SUBJECT_TREE"
+          test "$(git rev-parse HEAD~2)" = "$REVIEWED_PARENT"
+          test "$PATCH_BASE" = "$REVIEWED_PARENT"
+          test "$(git diff --diff-filter=A --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-post-merge-range.yml"
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-post-merge-range.yml"
+          echo "base=$PATCH_BASE" >> "$GITHUB_OUTPUT"
+          echo "replay={\"awaiting_handoff\": {}, \"history_gaps\": [], \"history_read\": false}" >> "$GITHUB_OUTPUT"
+          echo "window={\"format\": 1, \"base\": \"$PATCH_BASE\", \"head\": \"$GITHUB_SHA\", \"why\": \"qualification pin\", \"continuous\": true, \"replay\": {\"awaiting_handoff\": {}, \"history_gaps\": [], \"history_read\": false}}" >> "$GITHUB_OUTPUT"
+      - name: The window producer starts on the runner's bare interpreter
+        run: python3 -I -S scripts/post_merge_check.py base --help
+      - id: cases
+        name: Synthetic hand-over records for the two legs (fixtures, no issue is written)
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, os.getcwd())
+          from scripts.post_merge_check import _compact_json
+          from scripts.post_merge_window import records
+
+          source = {'head': os.environ['GITHUB_SHA'], 'run': int(os.environ['GITHUB_RUN_ID']),
+                    'attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'base': os.environ['PATCH_BASE']}
+          stem = 'tests/qualification_fixture.py::test_synthetic_'
+
+          def chars(ids):
+              return len(_compact_json([{**source, 'ids': ids}]))
+
+          # Linux carries the longest id list that still fits the product's inline ceiling of 800 characters, its last id
+          # padded to exactly that length; Windows carries a few kilobytes, which the product moves into an artifact.
+          near, over = [], []
+          while chars(near + [f'{stem}near_{len(near):04d}']) <= 800:
+              near.append(f'{stem}near_{len(near):04d}')
+          near[-1] += 'x' * (800 - chars(near))
+          while chars(over) <= 4000:
+              over.append(f'{stem}over_{len(over):04d}')
+          cases = {'linux': records([{**source, 'ids': near}]), 'windows': records([{**source, 'ids': over}])}
+          if cases['linux'] != [{**source, 'ids': near}] or cases['windows'] != [{**source, 'ids': over}]:
+              sys.exit('the product normalization changed the synthetic records')
+          sizes = {leg: len(_compact_json(rows)) for leg, rows in cases.items()}
+          if sizes['linux'] != 800 or sizes['windows'] <= 800:
+              sys.exit(f'unexpected compact receipt sizes {sizes}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('cases=' + _compact_json(cases) + chr(10))
+          print('synthetic receipts, compact characters:', sizes)
+      - name: Post-merge replay input ${{ steps.base.outputs.replay }}
+        run: |
+          echo "Pinned qualification checkpoint: no outstanding hand-overs, history not scanned."
+      - name: Post-merge ${{ fromJSON(steps.base.outputs.window).continuous && 'confirmed' || 'provisional' }} base ${{ steps.base.outputs.base }}
+        run: echo "Recorded the shared starting point before either leg runs."
+      - id: red
+        continue-on-error: true
+        run: |
+          echo "window_scope=chain" >> "$GITHUB_OUTPUT"
+          exit 1
+      - name: Output of a failed step reached a later condition
+        if: ${{ !cancelled() && steps.red.outcome == 'failure' && steps.red.conclusion == 'success' && steps.red.outputs.window_scope == 'chain' }}
+        run: echo "Observed a failed producer (continued deliberately) and read its output."
+
+  range:
+    needs: window
+    name: post-merge (${{ matrix.leg }}) from ${{ fromJSON(needs.window.outputs.window).base }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL, scope: chain}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST, scope: push}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 165
+    defaults:
+      run:
+        shell: bash
+    env:
+      BASE: ${{ fromJSON(needs.window.outputs.window).base }}
+      QUALIFY_LEG: ${{ matrix.leg }}
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: "1"
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: "1"
+      OUROBOROS_PREFLIGHT_TEST_WORKERS: ${{ matrix.os == 'windows-latest' && '4' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the run to the exact reviewed tree (this commit adds only this workflow)
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~1)" = "$SUBJECT_COMMIT"
+          test "$(git rev-parse 'HEAD~1^{tree}')" = "$SUBJECT_TREE"
+          test "$(git rev-parse HEAD~2)" = "$REVIEWED_PARENT"
+          git merge-base --is-ancestor "$PATCH_BASE" "$SUBJECT_COMMIT"
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-post-merge-range.yml"
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: The stores run ${{ matrix.journal }} here
+        id: journal_mode
+        run: python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
+        with:
+          node-version: '22'
+      - name: Set up Windows POSIX test utilities
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: posix_tools
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        id: select_posix_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
+        shell: pwsh
+        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Home tests of the changed producers and readers (exact pinned selection)
+        id: home
+        if: >-
+          ${{ !cancelled() && steps.setup_python.outcome == 'success'
+          && steps.journal_mode.outcome == 'success' && steps.setup_node.outcome == 'success'
+          && (runner.os != 'Windows' || steps.select_posix_tools.outcome == 'success') }}
+        timeout-minutes: 100
+        run: >-
+          python scripts/run_tests.py --evidence-dir "$RUNNER_TEMP/qualify/home" -q -ra
+          tests/test_post_merge_check.py tests/test_post_merge_window.py tests/test_post_merge_routing.py tests/test_post_merge_workflow.py
+          tests/test_run_tests_script.py tests/test_selected_test_cli.py tests/test_test_selection.py
+          tests/test_ci_evidence.py tests/test_ci_retry.py tests/test_update_qualification.py
+          tests/test_update_letter.py tests/test_update_letter_merge_range.py tests/test_update_letter_refresh.py
+          tests/test_update_letter_runtime.py tests/test_update_description.py tests/test_preflight_selection.py
+          tests/test_context_nano_producers.py tests/test_query_data.py
+          tests/test_reference_book_validation.py tests/test_update_status_index.py tests/test_update_status_cache.py
+      - name: Compare the whole docs-sync module on the pinned parent and subject (raw pytest exits retained)
+        id: docs_pair
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: python
+        run: |
+          import json
+          import os
+          import platform
+          import subprocess
+          import sys
+          import tempfile
+          from collections import defaultdict
+          from pathlib import Path
+
+          sys.path.insert(0, os.getcwd())
+          from tests.ci_verdicts import final
+
+          parent, subject = os.environ['REVIEWED_PARENT'], os.environ['SUBJECT_COMMIT']
+          module = 'tests/test_docs_sync.py'
+          subprocess.run(['git', 'diff', '--quiet', parent, subject, '--', module, 'uv.lock', 'pyproject.toml'], check=True)
+          out = Path(os.environ['RUNNER_TEMP'], 'qualify')
+          out.mkdir(parents=True, exist_ok=True)
+          root = Path(tempfile.mkdtemp(prefix='docs-', dir=out))
+          github = {key: os.environ['GITHUB_' + key.upper()] for key in ('sha', 'run_id', 'run_attempt')}
+          raw = {}
+          nodes = {}
+          expected_phases = {'setup', 'call', 'teardown'}
+          # The map assertion names the live modules that have no owner. Each revision's own traceback line carries that
+          # list: the pinned parent's list is the baseline, and nothing here pins a literal one.
+          import hashlib
+
+          maps = {}
+
+          def mapped_modules(log):
+              prefix = 'AssertionError: docs/ARCHITECTURE.md names no owner for these live modules: '
+              found = {line.split(prefix, 1)[1].strip() for line in log.splitlines()
+                       if line.startswith('E ') and prefix in line}
+              if len(found) != 1:
+                  return None
+              listed, quote = found.pop(), chr(39)
+              if not (listed.startswith('[' + quote) and listed.endswith(quote + ']')):
+                  return None
+              names = listed[2:-2].split(quote + ', ' + quote)
+              clean = all(name and all(char.isalnum() or char in '_./-' for char in name) for name in names)
+              return names if clean and names == sorted(set(names)) else None
+
+          # Inventory witness. Neither exporter is trusted to say which tests the module has: selected_nodeids, collection_skips
+          # and a session id are not known to exist in the pinned parent's release shape. One bounded `pytest --collect-only -q`
+          # session in each exact tree lists the node IDs it selects, and the module's own source (ast) names the tests it
+          # defines, so a subset that both revisions share cannot stand for the whole module.
+          import ast
+          import re
+
+          diagnostics, inventories = [], {}
+
+          def fingerprint(items):
+              return hashlib.sha256(chr(10).join(items).encode()).hexdigest()
+
+          def state(done, name):
+              return name + ' ' + ' '.join(phase + '=' + done.get(name, {}).get(phase, '-') for phase in ('setup', 'call', 'teardown'))
+
+          def inventory_witness(tree):
+              command = [sys.executable, '-m', 'pytest', '-o', 'addopts=', '-q', '--color=no', '--collect-only', module]
+              try:
+                  done = subprocess.run(command, cwd=tree, capture_output=True, timeout=120)
+              except (OSError, subprocess.SubprocessError) as error:
+                  return None, ['collection witness did not run: ' + type(error).__name__]
+              lines = done.stdout[:400000].decode('utf-8', 'replace').splitlines()
+              cut = lines.index('') if '' in lines else len(lines)
+              names, tail = lines[:cut], [line.strip() for line in lines[cut:] if line.strip()]
+              summary = tail and re.fullmatch(r'([0-9]+) tests? collected(?:, [0-9]+ warnings?)? in [0-9.]+s(?: [(][0-9:]+[)])?', tail[-1])
+              problems = []
+              if done.returncode != 0:
+                  problems.append('collection witness exit status ' + str(done.returncode))
+              if not names or not all(name.startswith(module + '::') and name == name.strip() for name in names):
+                  problems.append('collection witness listed no node IDs, or lines that are not tests of the module')
+              if len(set(names)) != len(names):
+                  problems.append('collection witness listed a node ID twice')
+              if not summary or int(summary[1]) != len(names):
+                  problems.append('collection witness summary is missing, differs from its list, or reports an error or a deselection')
+              return (None if problems else names), problems
+
+          def defined_tests(tree):
+              try:
+                  body = ast.parse((tree / module).read_text(encoding='utf-8')).body
+              except (OSError, SyntaxError, ValueError):
+                  return None
+              return {node.name for node in body
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('test')}
+
+          known = (module + '::test_architecture_component_map_covers_every_live_runtime_module', 'call', 'AssertionError')
+          for label, commit in (('parent', parent), ('subject', subject)):
+              tree = root / label
+              subprocess.run(['git', 'worktree', 'add', '--detach', '--quiet', str(tree), commit], check=True)
+              checked = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tree, text=True).strip()
+              results, owner_root = root / (label + '-results'), root / (label + '-owner')
+              with (root / (label + '.log')).open('wb') as log:
+                  code = subprocess.run([
+                      sys.executable, '-I', '-S', 'scripts/safe_test.py', '--timeout', '240',
+                      '--evidence-dir', str(owner_root), '--', sys.executable, '-m', 'pytest',
+                      '-o', 'addopts=', '-q', '--tb=short', '--color=no', '--ci-evidence-dir', str(results), module,
+                  ], cwd=tree, stdout=log, stderr=subprocess.STDOUT).returncode
+              data, error = final(results)
+              owner_files = list(owner_root.glob('*/result.json'))
+              try:
+                  owner = json.loads(owner_files[0].read_text(encoding='utf-8')) if len(owner_files) == 1 else {}
+              except (OSError, ValueError):
+                  owner = {}
+              owner_ok = (isinstance(owner, dict) and owner.get('returncode') == code
+                          and isinstance(owner.get('cleanup'), dict)
+                          and not any(owner.get(k) for k in ('stopped', 'launch_error', 'containment_error', 'evidence_error', 'retention_reason')))
+              phases, failures, unexpected = defaultdict(dict), [], False
+              for row in data.get('reports', []):
+                  node, phase, outcome = row['nodeid'], row['phase'], row['outcome']
+                  if (row.get('is_subtest') or not node.startswith(module + '::') or phase not in expected_phases
+                          or phase in phases[node] or outcome not in ('passed', 'failed') or row.get('wasxfail')):
+                      unexpected = True
+                      continue
+                  phases[node][phase] = outcome
+                  if outcome == 'failed':
+                      failures.append((node, phase, row.get('error_type') or 'unknown'))
+              # Read this revision's actual pytest diagnostic (its raw stream is not published) and keep the list it names.
+              listed = mapped_modules((root / (label + '.log')).read_bytes().decode('utf-8', 'replace'))
+              maps[label] = listed
+              exact_failure = not failures or (failures == [known] and bool(listed))
+              collected = data.get('tests_collected')
+              # Whole-module agreement of this exact revision: the witness list, the module's own definitions, the exporter's
+              # count and every raw per-node phase report must name the same tests, each reported once per phase as passed or
+              # failed. A subset that both revisions share, a missing report and an absent or partial inventory are all red.
+              inventory, problems = inventory_witness(tree)
+              defined, selected = defined_tests(tree), data.get('selected_nodeids')
+              if inventory is not None:
+                  if defined is None or {name.split('::', 1)[1].split('[', 1)[0] for name in inventory} != defined:
+                      problems.append('the collected tests differ from the tests the module defines')
+                  if known[0] not in inventory:
+                      problems.append('the known map test is not among the collected tests')
+                  if set(phases) != set(inventory) or any(set(seen) != expected_phases for seen in phases.values()):
+                      problems.append('the reported nodes differ from the inventory, or one lacks a setup, call or teardown report')
+                  if collected != len(inventory):
+                      problems.append('the exporter counts ' + str(collected) + ' collected tests, the inventory lists ' + str(len(inventory)))
+              if selected is not None and (not isinstance(selected, list) or sorted(map(str, selected)) != sorted(inventory or ())):
+                  problems.append('the exporter lists selected tests that differ from the inventory (corroboration only)')
+              inventory_ok = inventory is not None and not problems
+              inventories[label] = sorted(inventory) if inventory_ok else None
+              if failures and not (failures == [known] and listed):
+                  problems.append('the red is not exactly the known map case with one parsed missing-module list')
+              if unexpected:
+                  problems.append('an unexpected report row: a subtest, another module, an unknown or repeated phase, a skip or an xfail')
+              if data.get('session_exit_code') != code or code != int(bool(failures)):
+                  problems.append('exit statuses disagree: runner ' + str(code) + ', pytest ' + str(data.get('session_exit_code'))
+                                  + ', failures ' + str(len(failures)))
+              rows = sorted('|'.join(str(row.get(key)) for key in ('nodeid', 'phase', 'outcome')) for row in data.get('reports') or [])
+              states = sorted(state(phases, name) for name in inventory or ())
+              diagnostics.extend(label + ': ' + text for text in problems)
+              complete = (exact_failure and checked == commit and owner_ok and not error and not unexpected
+                          and data.get('github') == github
+                          and (data.get('environment') or {}).get('platform') == platform.system()
+                          and data.get('collection_failures') == data.get('collection_skips') == []
+                          and (label == 'parent' or (isinstance(data.get('session'), str) and bool(data['session'])))
+                          and inventory_ok
+                          and all(set(seen) == expected_phases for seen in phases.values())
+                          and data.get('session_exit_code') == code == int(bool(failures)))
+              nodes[label] = set(phases)
+              raw[label] = {'commit': checked, 'runner_exit': code, 'pytest_exit': data.get('session_exit_code'),
+                            'collected': collected, 'complete': complete, 'owner_ok': owner_ok,
+                            'failure_signatures_observed': sorted(failures), 'exact_map_diagnostic': exact_failure if failures else None,
+                            'map_modules': {'count': len(listed or ()), 'names': (listed or [])[:12],
+                                            'sha256': hashlib.sha256(chr(10).join(listed or ()).encode()).hexdigest()},
+                            'platform': platform.system(), 'exporter_platform': (data.get('environment') or {}).get('platform'),
+                            'exporter_names_this_run': data.get('github') == github,
+                            'exporter_fields': {key: key in data for key in ('selected_nodeids', 'collection_failures', 'collection_skips',
+                                                                            'session', 'environment', 'github', 'tests_collected',
+                                                                            'session_exit_code')},
+                            'inventory': {'witness': 'pytest --collect-only -q in this exact tree, after the real session',
+                                          'count': len(inventory or ()), 'sha256': fingerprint(sorted(inventory or ())),
+                                          'names': sorted(inventory or ())[:24], 'defined_by_the_module': len(defined or ()),
+                                          'exporter_selected_nodeids': 'absent' if selected is None else 'listed'},
+                            'phases': {'raw_rows': len(rows), 'raw_rows_sha256': fingerprint(rows),
+                                       'states_sha256': fingerprint(states), 'unexpected_rows': unexpected,
+                                       'nodes_not_passed': [line for line in states if line.count('=passed') != 3][:12]},
+                            'diagnostics': [text[:300] for text in problems[:12]],
+                            'result_error': error or None}
+
+          before, after = (raw[k]['failure_signatures_observed'] for k in ('parent', 'subject'))
+          same_nodes = (nodes['parent'] == nodes['subject'] and bool(inventories['parent'])
+                        and inventories['parent'] == inventories['subject'])
+          # Exact comparison. The candidate keeps the parent's red only with the very same nonempty missing-module list; any
+          # other list is red, as no documented cause is assumed. Green on both revisions and a complete green candidate over
+          # the parent's known red stay distinct outcomes. An absent, partial or unparsed result is already incomplete above.
+          parent_names, subject_names = (set(maps[k] or ()) for k in ('parent', 'subject'))
+          removed, added = sorted(parent_names - subject_names), sorted(subject_names - parent_names)
+          same_list = bool(parent_names) and maps['parent'] == maps['subject']
+          ok = (all(row['complete'] for row in raw.values()) and same_nodes
+                and before in ([], [known]) and all(failure in before for failure in after) and (not after or same_list))
+          comparison = ('known_failure_preserved' if ok and after
+                        else 'known_failure_fixed' if ok and before
+                        else 'both_passed' if ok else 'unqualified')
+          if not same_nodes:
+              diagnostics.append('the parent and the subject do not list the same tests')
+          if after and not same_list:
+              diagnostics.append('the missing-module lists differ: only on the parent ' + str(removed[:12])
+                                 + ', only on the subject ' + str(added[:12]))
+          if before not in ([], [known]) or not all(failure in before for failure in after):
+              diagnostics.append('the observed failure signatures are not the known map case: parent ' + str(before[:4])
+                                 + ', subject ' + str(after[:4]))
+          evidence = {'github': github, 'leg': os.environ['QUALIFY_LEG'], 'comparison': comparison,
+                      'same_nodes': same_nodes, 'comparison_passed': ok, 'os': platform.system(),
+                      'scope': 'whole module once per revision in this attempt plus one collection-only witness; no retry, no rerun of failed jobs, no historical run',
+                      'diagnostics': [text[:300] for text in diagnostics[:24]],
+                      'map_modules_removed': {'count': len(removed), 'names': removed[:12]},
+                      'map_modules_added': {'count': len(added), 'names': added[:12]}, **raw}
+          (out / f"docs-sync-evidence-{evidence['leg']}.json").write_text(json.dumps(evidence, indent=2), encoding='utf-8')
+          print(json.dumps(evidence))
+          sys.exit(0 if ok else 'Docs sync: missing or incomplete evidence, unexpected baseline red, or new failure. '
+                   + '; '.join(text[:300] for text in diagnostics[:12]))
+      - name: Size lane against PATCH_BASE, books measured strictly
+        id: size
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.PATCH_BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: >-
+          env -u GITHUB_EVENT_NAME -u GITHUB_REF
+          python scripts/run_tests.py --evidence-dir "$RUNNER_TEMP/qualify/size"
+          -o addopts= -q -ra -m size_ratchet tests/
+      - name: Release lint gate (ruff F)
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.setup_python.outcome == 'success' }}
+        run: python -m ruff check --select F --output-format concise .
+      - name: Witnesses — real receipts, observed step outcomes, derived facts
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          HOME_OUTCOME: ${{ steps.home.outcome }}
+          SIZE_OUTCOME: ${{ steps.size.outcome }}
+          DOCS_OUTCOME: ${{ steps.docs_pair.outcome }}
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          sys.path.insert(0, os.getcwd())
+          from tests.ci_verdicts import final
+
+          leg = os.environ["QUALIFY_LEG"]
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          problems = []
+
+          # Scenario pins: the parametrization IS the scenario, so the exact suffix set is pinned
+          # (frozen-head facts). Everything else is a presence witness: ran whole at least once,
+          # observed parameter count recorded, not pinned.
+          EXACT = {
+              # Both workers counts on each system: the 14 passes and the real red/flake pair are separate witnesses.
+              "tests/test_run_tests_script.py::test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker": {"[1]", "[2]"},
+              "tests/test_run_tests_script.py::test_the_selected_xdist_retry_distinguishes_persistent_and_flaky_ids": {"[1]", "[2]"},
+              # Test the issue boundary through summary, the next base and its selection, not a missing leg.
+              "tests/test_post_merge_check.py::test_docs_only_push_selects_the_red_module_until_its_os_has_an_issue":
+                  {"[tracked]", "[refused extension]", "[interrupted retry]"},
+              # The two range examples: a qualified descendant closes the walk behind it; a cancelled one that only
+              # chose its base leaves the late rerun's base and its unfiled red, with their source, to the next check.
+              "tests/test_post_merge_window.py::test_only_a_qualified_descendant_closes_the_walk_behind_it":
+                  {"[qualified]", "[cancelled]"},
+              # A lost receipt is a labelled gap beside the known records; one unreadable for now confirms no range.
+              "tests/test_post_merge_window.py::test_a_lost_receipt_is_a_labelled_gap_and_an_unreadable_one_confirms_nothing":
+                  {"[expired-True-True]", "[left no record-True-True]", "[cannot say-True-True]",
+                   "[not a receipt-True-True]", "[never ran-False-True]", "[unavailable-False-False]"},
+              # a failed-jobs rerun replays its first attempt's base and certifies nothing, both outcomes
+              "tests/test_post_merge_check.py::test_a_rerun_of_failed_jobs_replays_the_base_its_first_attempt_chose_and_certifies_nothing": {"[failure]", "[success]"},
+              # contiguous provisional greens settle the older red, with and without a checkpoint
+              "tests/test_post_merge_check.py::test_contiguous_provisional_greens_settle_the_older_red_without_certifying_earlier_history": {"[False]", "[True]"},
+              # a budget-cut read stays partial on both cut points
+              "tests/test_update_qualification.py::test_a_read_the_request_budget_cut_short_is_partial_never_observed_or_unavailable": {"[attempt]", "[sha query]"},
+              # coverage needs reading through the range: exhausted listing, budget, outage
+              "tests/test_update_qualification.py::test_coverage_requires_reading_through_the_range": {"[exhausted]", "[budget]", "[unavailable]"},
+          }
+          EXACT.update({
+              'tests/test_post_merge_routing.py::test_a_newer_recorded_failure_survives_a_batch_that_files_another':
+                  {'[False]', '[True]'},
+              # Move both, lock results only, lock both results and journal: never read stale output as current.
+              'tests/test_ci_evidence.py::test_a_reused_directory_sets_the_earlier_export_aside_before_any_test_runs':
+                  {'[blocked0]', '[blocked1]', '[blocked2]'},
+              # Current identity, wrong SHA, wrong run with the same attempt number, wrong attempt in the same run, missing identity.
+              'tests/test_post_merge_check.py::test_cost_evidence_must_name_the_current_actions_run_and_attempt':
+                  {'[foreign0]', '[foreign1]', '[foreign2]', '[foreign3]', '[None]'},
+              'tests/test_post_merge_check.py::test_cost_outcome_reaches_the_real_summary_command': {
+                  '[failure-failed-True]', '[failure-passed-True]', '[failure-unfinished-True]', '[skipped-missing-True]',
+                  '[success-missing-True]', '[success-failed-True]', '[success-skipped-True]', '[success-passed-False]',
+                  '[-missing-True]',
+              },
+              'tests/test_post_merge_check.py::test_workflow_stage_outcome_reaches_summary_without_a_new_retry': {
+                  f'[{outcome}-{stage}]' for outcome in ('failure', 'skipped', '', 'success')
+                  for stage in ('classify', 'attribute', 'route')
+              },
+              'tests/test_update_qualification.py::test_a_fresh_rerun_read_keeps_exact_historical_results_and_reports_unread_attempts':
+                  {'[complete]', '[budget]', '[wrong head]'},
+              'tests/test_update_qualification.py::test_a_later_run_at_the_same_commit_never_hides_its_earlier_direct_red': {
+                  '[False-red push-observed-2]', '[False-offline-unavailable-2]', '[False-budget-partial-10]',
+                  '[True-red push-observed-3]', '[True-short-unavailable-2]', '[True-only cancelled-observed-3]',
+                  '[True-unread attempt-partial-4]', '[True-red attempt-observed-4]',
+              },
+          })
+          PRESENT = [
+              'tests/test_post_merge_window.py::test_one_legs_rerun_is_no_joint_measurement_and_only_its_whole_receipt_replaces_the_earlier_one',
+              'tests/test_post_merge_window.py::test_a_record_a_newer_window_already_carried_is_that_attempts_to_report',
+              'tests/test_post_merge_window.py::test_jobs_that_are_gone_are_a_gap_and_the_range_starts_at_an_established_bound_or_an_explicit_seed',
+              'tests/test_post_merge_window.py::test_history_that_could_not_be_read_now_seeds_no_confirmed_range',
+              'tests/test_post_merge_window.py::test_route_takes_over_its_own_systems_records_with_their_source_and_reads_its_size_gate_strictly',
+              'tests/test_post_merge_window.py::test_a_leg_that_could_not_take_over_the_carried_records_says_so_in_its_receipt',
+              'tests/test_post_merge_check.py::test_retry_does_not_confirm_a_different_phase_or_collector',
+              'tests/test_post_merge_check.py::test_size_wrapper_mismatch_keeps_fresh_red_without_certifying_measurement',
+              'tests/test_selected_test_cli.py::test_selected_cli_reuse_keeps_raw_inventory_and_projections_by_attempt',
+              'tests/test_update_qualification.py::test_successful_late_dispatch_does_not_finish_the_history_of_its_sha',
+              'tests/test_update_qualification.py::test_terminal_attempt_one_survives_zero_budget_below_attempt_twelve',
+              'tests/test_update_qualification.py::test_only_an_actual_interrupted_cover_survives_a_short_read',
+              'tests/test_post_merge_check.py::test_an_oversized_handover_reaches_the_next_window_by_its_exact_receipt',
+              'tests/test_post_merge_check.py::test_route_collects_unselected_owed_ids_without_retiring_a_reported_skip',
+              'tests/test_post_merge_routing.py::test_a_carried_untracked_red_shares_the_tracking_recheck_batch',
+              'tests/test_run_tests_script.py::test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_pytest',
+              'tests/test_post_merge_routing.py::test_one_size_red_recorded_against_two_bases_is_owed_once_per_base',
+              'tests/test_post_merge_routing.py::test_a_recorded_node_lane_red_is_retired_by_a_whole_pass_never_by_a_passed_retry',
+              'tests/test_post_merge_routing.py::test_current_and_prior_observations_do_not_retry_an_unconfirmed_issue_write',
+              'tests/test_ci_evidence.py::test_passing_cases_do_not_overwrite_failed_session_exit',
+              'tests/test_post_merge_check.py::test_a_partial_classification_keeps_the_selected_step_disagreement',
+              'tests/test_update_qualification.py::test_later_unmeasured_dispatch_does_not_hide_same_head_measured_push',
+              # Synthetic inventory/receipt faults exercise separate reporting branches, not real retry execution.
+              "tests/test_post_merge_check.py::test_selected_inventory_and_an_independent_test_retry_reach_the_workflow_result",
+              # a module that does not collect again leaves the retry complete (missing output)
+              "tests/test_post_merge_check.py::test_a_module_that_does_not_collect_again_leaves_the_retry_complete_and_the_other_outcomes_kept",
+              # an older surviving journal never stands in for the current result (stale output)
+              "tests/test_post_merge_check.py::test_selection_rejects_an_older_result_even_if_its_journal_also_survived",
+              # held base when a red leg left no hand-over receipt
+              "tests/test_post_merge_check.py::test_first_dispatch_keeps_its_base_without_certifying_a_missing_leg",
+              "tests/test_post_merge_check.py::test_a_rerun_inherits_the_failed_attempt_and_only_the_branch_tip_retires_issues",
+              # window-state summary marks, incl. missing/partial cost reports (18 cases at the frozen head)
+              "tests/test_post_merge_check.py::test_summary_marks_only_a_recoverable_window_independently_of_green",
+              "tests/test_post_merge_check.py::test_each_commit_reaches_the_selection_and_needs_selected",
+              "tests/test_post_merge_check.py::test_a_green_provisional_check_settles_the_window_it_measured",
+              "tests/test_post_merge_check.py::test_push_runs_from_before_range_receipts_end_the_search",
+              # joint-attempt range coverage, 12 cases at the frozen head (green, measured red, push only, ...)
+              "tests/test_update_qualification.py::test_update_keeps_direct_results_and_covers_only_the_joint_attempt_range",
+              # an old red survives a later green run at the same commit ...
+              # ... an exact SHA lookup finds an older direct red before covering a gap ...
+              "tests/test_update_qualification.py::test_an_exact_sha_lookup_finds_an_older_direct_red_before_covering_a_gap",
+              # ... and a new attempt never reuses the previous attempt's measured base.
+              "tests/test_update_qualification.py::test_a_new_attempt_cannot_reuse_the_previous_attempts_measured_base",
+              "tests/test_update_qualification.py::test_a_red_read_before_stays_by_its_run_and_attempt_after_a_rerun_and_a_complete_listing_without_it",
+              "tests/test_update_qualification.py::test_the_context_form_counts_a_measured_run_and_keeps_only_an_unknown_field_whole",
+              # the panel/query_data legacy-coverage reader
+              "tests/test_update_letter_runtime.py::test_query_data_reads_saved_legacy_coverage_as_the_updates_panel_does",
+          ]
+          SIZE = [
+              "tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree",
+              "tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base",
+              "tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book",
+              "tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts",
+          ]
+
+          def witness(directory, selection, observed_outcome, expected_outcome, exact, present):
+              """One session's real receipt: observed step outcome first, then the projection."""
+              record = {"selection": selection, "observed_step_outcome": observed_outcome,
+                        "expected_step_outcome": expected_outcome}
+              if observed_outcome != expected_outcome:
+                  problems.append(f"{selection}: observed step outcome {observed_outcome!r}, expected "
+                                  f"{expected_outcome!r} — a clean pytest projection cannot excuse a "
+                                  f"failed or unfinished step")
+              data, error = final(Path(os.environ["RUNNER_TEMP"], "qualify", directory, "focused"))
+              if error or data.get("session_exit_code") != 0:
+                  problems.append(f"{selection} session: {error or 'exit ' + str(data.get('session_exit_code'))}")
+              record["session_error"] = error or None
+              record["session_exit_code"] = data.get("session_exit_code")
+              identity = {key: os.environ['GITHUB_' + key.upper()] for key in ('sha', 'run_id', 'run_attempt')}
+              phases, duplicate, xfail = defaultdict(dict), False, set()
+              for row in data.get('reports') or []:
+                  if row.get('is_subtest'):
+                      continue
+                  node, phase = row['nodeid'], row['phase']
+                  duplicate |= phase in phases[node]
+                  phases[node][phase] = row['outcome']
+                  if row.get('wasxfail'):
+                      xfail.add(node)
+              all_pass = dict.fromkeys(('setup', 'call', 'teardown'), 'passed')
+              whole = {node for node, seen in phases.items() if seen == all_pass and node not in xfail}
+              selected = data.get('selected_nodeids')
+              complete = (not duplicate and type(data.get('tests_collected')) is int
+                          and data['tests_collected'] == len(phases) > 0
+                          and isinstance(selected, list) and all(isinstance(node, str) for node in selected)
+                          and len(selected) == len(phases) and set(selected) == set(phases)
+                          and data.get('collection_failures') == data.get('collection_skips') == []
+                          and all(set(seen) == set(all_pass) or
+                                  (selection != 'size' and seen == {'setup': 'skipped', 'teardown': 'passed'})
+                                  for seen in phases.values()))
+              same_run = (data.get('github') == identity and (data.get('environment') or {}).get('platform')
+                          == ('Linux' if leg == 'linux' else 'Windows'))
+              session_ok = (observed_outcome == expected_outcome and not error and data.get('session_exit_code') == 0
+                            and same_run and complete)
+              record.update(current_run_and_host=same_run, complete_phase_inventory=complete, session_ok=session_ok)
+              if not same_run or not complete:
+                  problems.append(f'{selection}: wrong run/attempt/head/OS or incomplete phase inventory')
+              record["tests_ran_whole"] = len(whole)
+              skipped = sorted({row["nodeid"] for row in data.get("reports") or [] if row["outcome"] == "skipped"}
+                               | {str(node) for node in data.get("collection_skips") or []})
+              if skipped and (selection == "size" or any(
+                      node.split("[", 1)[0] in set(exact) | set(present) for node in skipped)):
+                  problems.append(f"{selection} skipped a required case: {skipped}")
+              record["skipped_observed"] = skipped
+              checked = {}
+              for function, expected in exact.items():
+                  ran = {node[len(function):] for node in whole
+                         if node == function or node.startswith(function + "[")}
+                  ok = session_ok and ran == expected
+                  checked[function] = {"expected": sorted(expected), "ran_whole": sorted(ran), "ok": ok}
+                  if not ok:
+                      problems.append(f"{function}: ran whole {sorted(ran)}, expected {sorted(expected)}")
+              for function in present:
+                  ran = sorted({node[len(function):] for node in whole
+                                if node == function or node.startswith(function + "[")})
+                  ok = session_ok and bool(ran)
+                  checked[function] = {"expected": "ran whole (count observed, not pinned)",
+                                       "ran_whole": ran, "ok": ok}
+                  if not ok:
+                      problems.append(f"{function}: did not run whole")
+              record["witnesses"] = checked
+              return record
+
+          home = witness("home", "home", os.environ["HOME_OUTCOME"], "success", EXACT, PRESENT)
+
+          def ok_of(record, name):
+              return next((value["ok"] for key, value in record["witnesses"].items()
+                           if key.endswith("::" + name)), False)
+
+          # Derived facts: each is exactly the AND of its witnesses' ok flags — a failing session
+          # publishes false facts, never a hardcoded True.
+          home["facts"] = {
+              "xdist_1_and_2_ran_whole_on_this_system":
+                  ok_of(home, "test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker"),
+              "real_selected_xdist_retry_separates_persistent_and_flaky_ids_and_reports_red":
+                  ok_of(home, "test_the_selected_xdist_retry_distinguishes_persistent_and_flaky_ids"),
+              "synthetic_retry_and_inventory_faults_reach_the_workflow_result":
+                  ok_of(home, "test_selected_inventory_and_an_independent_test_retry_reach_the_workflow_result"),
+              "missing_and_stale_output_never_pass_as_complete":
+                  ok_of(home, "test_a_module_that_does_not_collect_again_leaves_the_retry_complete_and_the_other_outcomes_kept")
+                  and ok_of(home, "test_selection_rejects_an_older_result_even_if_its_journal_also_survived"),
+              "confirmed_open_and_refused_issue_handoffs_are_distinguished_through_the_next_base":
+                  ok_of(home, "test_docs_only_push_selects_the_red_module_until_its_os_has_an_issue"),
+              "a_qualified_descendant_closes_the_walk_and_a_cancelled_one_leaves_the_late_reruns_base_and_red":
+                  ok_of(home, "test_only_a_qualified_descendant_closes_the_walk_behind_it"),
+              "a_lost_receipt_is_a_labelled_gap_and_one_unreadable_for_now_confirms_no_range":
+                  ok_of(home, "test_a_lost_receipt_is_a_labelled_gap_and_an_unreadable_one_confirms_nothing"),
+              "missing_leg_does_not_certify_the_range":
+                  ok_of(home, "test_first_dispatch_keeps_its_base_without_certifying_a_missing_leg"),
+              "old_red_survives_green_attempt_and_earlier_measured_push":
+                  ok_of(home, "test_a_later_run_at_the_same_commit_never_hides_its_earlier_direct_red")
+                  and ok_of(home, "test_an_exact_sha_lookup_finds_an_older_direct_red_before_covering_a_gap")
+                  and ok_of(home, "test_a_new_attempt_cannot_reuse_the_previous_attempts_measured_base"),
+              "bounded_or_incomplete_listing_leaves_gaps_unproven":
+                  ok_of(home, "test_coverage_requires_reading_through_the_range")
+                  and ok_of(home, "test_a_read_the_request_budget_cut_short_is_partial_never_observed_or_unavailable"),
+              'all_reused_directory_cases_reject_stale_current_evidence':
+                  ok_of(home, 'test_a_reused_directory_sets_the_earlier_export_aside_before_any_test_runs')
+                  and ok_of(home, 'test_runner_evidence_stays_with_its_controller_across_nested_and_sequential_pytest'),
+              'cost_report_requires_current_sha_run_and_attempt_even_when_the_step_is_green':
+                  ok_of(home, 'test_cost_evidence_must_name_the_current_actions_run_and_attempt'),
+              'step_outcome_and_evidence_are_checked_independently':
+                  ok_of(home, 'test_cost_outcome_reaches_the_real_summary_command')
+                  and ok_of(home, 'test_workflow_stage_outcome_reaches_summary_without_a_new_retry')
+                  and ok_of(home, 'test_passing_cases_do_not_overwrite_failed_session_exit')
+                  and ok_of(home, 'test_a_partial_classification_keeps_the_selected_step_disagreement'),
+              'earlier_attempts_and_distinct_run_ids_keep_their_own_results_under_bounded_reads':
+                  ok_of(home, 'test_a_fresh_rerun_read_keeps_exact_historical_results_and_reports_unread_attempts')
+                  and ok_of(home, 'test_later_unmeasured_dispatch_does_not_hide_same_head_measured_push')
+                  and ok_of(home, 'test_a_later_run_at_the_same_commit_never_hides_its_earlier_direct_red'),
+              "panel_reads_legacy_coverage_through_the_real_reader":
+                  ok_of(home, "test_query_data_reads_saved_legacy_coverage_as_the_updates_panel_does"),
+          }
+          records = {"leg": leg, "run": os.environ["GITHUB_RUN_ID"], "run_attempt": attempt,
+                     "original_qualification": attempt == 1, "home": home}
+          if leg == "linux":
+              records["size"] = witness("size", "size", os.environ["SIZE_OUTCOME"], "success", {}, SIZE)
+          else:
+              records["size"] = {"selection": "size", "observed_step_outcome": os.environ["SIZE_OUTCOME"],
+                                 "expected_step_outcome": "skipped (Linux-only lane)",
+                                 "note": "the size lane is Linux-only in post-merge.yml's own shape"}
+              if os.environ["SIZE_OUTCOME"] != "skipped":
+                  problems.append(f"size: observed step outcome {os.environ['SIZE_OUTCOME']!r} on Windows; "
+                                  "expected the Linux-only lane to be skipped")
+          out = Path(os.environ['RUNNER_TEMP'], 'qualify')
+          out.mkdir(parents=True, exist_ok=True)
+          try:
+              docs = json.loads((out / f'docs-sync-evidence-{leg}.json').read_text(encoding='utf-8'))
+          except (OSError, ValueError):
+              docs = {}
+          docs_ok = (os.environ['DOCS_OUTCOME'] == 'success' and isinstance(docs, dict)
+                     and docs.get('comparison_passed') is True and docs.get('leg') == leg
+                     and docs.get('github') == {key: os.environ['GITHUB_' + key.upper()]
+                                                for key in ('sha', 'run_id', 'run_attempt')})
+          if not docs_ok:
+              problems.append('docs sync: exact parent/subject comparison missing, failed, or from another run')
+          records['problems'] = problems
+          (out / f"home-evidence-{leg}.json").write_text(
+              json.dumps({**records["home"], "leg": leg, "run": records["run"],
+                          'docs_comparison_ok': docs_ok, 'docs_step_outcome': os.environ['DOCS_OUTCOME'],
+                          'fixture_scope': 'facts about issue hand-over, walks, listings and attempts come from fake-GitHub unit fixtures: no issue was written, no GitHub failed-jobs rerun was made and no historical tests were executed',
+                          "run_attempt": attempt, "original_qualification": attempt == 1,
+                          "facts": records["home"]["facts"], "problems": problems}, indent=2), encoding="utf-8")
+          if leg == "linux":
+              (out / f"size-evidence-{leg}.json").write_text(
+                  json.dumps({**records["size"], "leg": leg, "run": records["run"],
+                              "run_attempt": attempt, "original_qualification": attempt == 1,
+                              "problems": problems}, indent=2), encoding="utf-8")
+          print(f"leg {leg}: home ran {records['home']['tests_ran_whole']} tests whole; "
+                f"problems: {len(problems)}")
+          for problem in problems:
+              print(problem)
+          sys.exit("\n".join(problems) or None)
+      - name: Write the synthetic hand-over evidence for the product summary (a fixture, no route step ran)
+        id: handoff_fixture
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          CASES: ${{ needs.window.outputs.cases }}
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          leg, head, base = os.environ['QUALIFY_LEG'], os.environ['GITHUB_SHA'], os.environ['PATCH_BASE']
+          rows = json.loads(os.environ['CASES'])[leg]
+          folder = Path(os.environ['RUNNER_TEMP'], 'qualify', 'handoff')
+          folder.mkdir(parents=True, exist_ok=True)
+          ids = sorted({node for row in rows for node in row['ids']})
+          fixture = {
+              'base.json': {'format': 1, 'base': base, 'head': head, 'why': 'qualification fixture', 'continuous': True,
+                            'replay': {'awaiting_handoff': {}, 'history_gaps': [], 'history_read': False}},
+              'classification.json': {'base': base, 'head': head, 'selection_executed': True, 'failed': []},
+              'routing.json': {'os': leg, 'untracked': ids, 'awaiting_handoff': rows},
+          }
+          for name, value in fixture.items():
+              (folder / name).write_text(json.dumps(value), encoding='utf-8')
+          print(f'{leg}: {len(rows)} fixture record(s) naming {len(ids)} synthetic id(s); nothing was routed')
+      - name: Publish the result (the product summary command on that fixture, red by design)
+        id: publish
+        if: ${{ !cancelled() && steps.handoff_fixture.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          folder = Path(os.environ['RUNNER_TEMP'], 'qualify', 'handoff')
+          # The product appends its job summary to GITHUB_STEP_SUMMARY; send that to a file, off the run page.
+          env = {**os.environ, 'GITHUB_STEP_SUMMARY': str(folder / 'step-summary.md')}
+          command = [sys.executable, 'scripts/post_merge_check.py', 'summary', '--evidence-dir', str(folder),
+                     '--attempt', os.environ['GITHUB_RUN_ATTEMPT'], '--os', os.environ['QUALIFY_LEG']]
+          with (folder / 'summary.txt').open('wb') as stream:
+              code = subprocess.run(command, env=env, stdout=stream).returncode
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'producer_exit={code}' + chr(10))
+          lines = (folder / 'summary.txt').read_text(encoding='utf-8', errors='replace').splitlines()
+          print('product summary:', len(lines), 'line(s); first line ends with RED:', bool(lines) and lines[0].endswith('RED'))
+          sys.exit(code)
+      - name: Upload the full hand-over result
+        if: ${{ !cancelled() && steps.publish.outputs.handoff_file == 'yes' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: post-merge-handoff-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualify/handoff/handoff.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Post-merge untracked ${{ steps.publish.outputs.untracked }}
+        if: ${{ !cancelled() && steps.publish.outputs.untracked != '' }}
+        run: echo 'Recorded the remaining hand-over obligations of this fixture; no issue was written.'
+      - name: Post-merge range measured
+        if: ${{ matrix.scope == 'push' }}
+        run: echo "Synthetic push-only marker for the reader; not a historical test run."
+      - name: Post-merge continuous range measured
+        if: ${{ matrix.scope == 'chain' }}
+        run: echo "Synthetic continuous marker for the reader; not a historical test run."
+      - name: Witness - the producer's own exit status and the receipt it published (fixture records)
+        id: handoff_witness
+        if: ${{ !cancelled() }}
+        env:
+          CASES: ${{ needs.window.outputs.cases }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          PUBLISH_CONCLUSION: ${{ steps.publish.conclusion }}
+          PRODUCER_EXIT: ${{ steps.publish.outputs.producer_exit }}
+          UNTRACKED: ${{ steps.publish.outputs.untracked }}
+          HANDOFF_FILE: ${{ steps.publish.outputs.handoff_file }}
+          WINDOW_SCOPE: ${{ steps.publish.outputs.window_scope }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          def parsed(data):
+              try:
+                  return json.loads(data)
+              except ValueError:
+                  return None
+
+          leg = os.environ['QUALIFY_LEG']
+          run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+          expected = json.loads(os.environ['CASES'])[leg]
+          compact = json.dumps(expected, ensure_ascii=True, separators=(',', ':'))
+          shown = os.environ['UNTRACKED']
+          folder = Path(os.environ['RUNNER_TEMP'], 'qualify', 'handoff')
+          written = folder / 'handoff.json'
+          problems = []
+          producer = (os.environ['PUBLISH_OUTCOME'], os.environ['PUBLISH_CONCLUSION'], os.environ['PRODUCER_EXIT'])
+          # The product summary exits 1 for a leg that still owes records, and publishes the receipt first. The step
+          # continues on error, so its outcome, conclusion and exit status are bound here beside the output it gave.
+          if producer != ('failure', 'success', '1'):
+              problems.append(f'the product summary ended as {producer!r}; a leg that owes records exits 1 with its receipt published')
+          if os.environ['WINDOW_SCOPE'] == 'chain':
+              problems.append('a leg that still owes records must not declare the continuous range')
+          record = {'leg': leg, 'run': run_id, 'run_attempt': attempt,
+                    'producer': dict(zip(('outcome', 'conclusion', 'exit'), producer)),
+                    'window_scope': os.environ['WINDOW_SCOPE'], 'handoff_file': os.environ['HANDOFF_FILE'],
+                    'record_count': len(expected), 'id_count': sum(len(row['ids']) for row in expected),
+                    'compact_chars': len(compact), 'published_chars': len(shown)}
+          if len(compact) <= 800:
+              record['case'] = 'inline'
+              if shown != compact or len(compact) != 800 or os.environ['HANDOFF_FILE'] != 'no' or written.exists():
+                  problems.append('the near-limit receipt must be published inline at exactly 800 characters with no hand-over file')
+          else:
+              record['case'] = 'artifact'
+              data = written.read_bytes() if written.is_file() else b''
+              digest = hashlib.sha256(data).hexdigest()
+              record.update(sha256=digest, file_bytes=len(data))
+              reference = {'artifact': {'run': run_id, 'attempt': attempt, 'sha256': digest}}
+              if (parsed(shown) != reference or shown != json.dumps(reference, separators=(',', ':'))
+                      or os.environ['HANDOFF_FILE'] != 'yes' or not data or parsed(data) != expected):
+                  problems.append('the oversized receipt must be the exact artifact reference of the file the product wrote')
+          record['problems'] = problems
+          Path(os.environ['RUNNER_TEMP'], 'qualify', 'handoff-evidence-' + leg + '.json').write_text(
+              json.dumps(record, indent=2), encoding='utf-8')
+          print(json.dumps(record))
+          sys.exit(chr(10).join(problems) or None)
+      - name: Upload the curated leg evidence (predefined public fields only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-post-merge-range-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qualify/home-evidence-${{ matrix.leg }}.json
+            ${{ runner.temp }}/qualify/size-evidence-${{ matrix.leg }}.json
+            ${{ runner.temp }}/qualify/docs-sync-evidence-${{ matrix.leg }}.json
+            ${{ runner.temp }}/qualify/handoff-evidence-${{ matrix.leg }}.json
+          retention-days: 14
+          if-no-files-found: error
+
+  historic-paths:
+    name: Select changes from the seven historical merges (path coverage only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+      - name: Compare the current producer with the union of seven actual first-parent diffs
+        shell: python
+        run: |
+          import hashlib, json, os, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, os.getcwd())
+          from ouroboros.test_selection import changed_paths
+
+          base = 'f888570639882e9059dc532a6bb67fb837c4d46d'
+          tip = '95a00d89e10e686932b46568d32dec9df0156e19'
+          chain = subprocess.check_output(['git','rev-list','--first-parent','--reverse',f'{base}..{tip}']).decode().splitlines()
+          assert len(chain) == 7 and chain[-1] == tip and subprocess.check_output(['git','rev-parse',chain[0]+'^1']).decode().strip() == base
+          folder = Path(os.environ['RUNNER_TEMP']) / 'historic-source'
+          subprocess.run(['git','worktree','add','--detach',str(folder),tip], check=True)
+          oracle = set()
+          for commit in chain:
+              names = subprocess.check_output(['git','diff','--no-renames','--name-only','-z',commit+'^1',commit]).split(b'\0')
+              oracle.update(os.fsdecode(n) for n in names if n)
+          oid, selected = changed_paths(folder, base, each_commit=True)
+          assert oid == base and set(selected) == oracle
+          print(json.dumps({'base':oid,'first_parents':chain,'unique_paths':len(oracle),
+                            'paths_sha256':hashlib.sha256('\0'.join(sorted(oracle)).encode()).hexdigest(),
+                            'method':'verified paths; not a historical test run'}))
+
+  updates-ui:
+    name: real Updates panel renderer on synthetic evidence — Chromium, screenshots published
+    runs-on: ubuntu-22.04
+    # Installer (30), Node (10), browser test (30), plus 20 minutes for setup and evidence.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the run to the exact reviewed tree (this commit adds only this workflow)
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~1)" = "$SUBJECT_COMMIT"
+          test "$(git rev-parse 'HEAD~1^{tree}')" = "$SUBJECT_TREE"
+          test "$(git rev-parse HEAD~2)" = "$REVIEWED_PARENT"
+          git merge-base --is-ancestor "$PATCH_BASE" "$SUBJECT_COMMIT"
+          test "$(git diff --name-only HEAD~1 HEAD)" = ".github/workflows/qualify-post-merge-range.yml"
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
+        with:
+          node-version: '22'
+      - name: Install UI smoke Chromium (product installer, pinned Node)
+        id: install_browsers
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        # Three download stages, two attempts each: at most 18 minutes of attempt time plus stop grace;
+        # one non-retried dpkg run still has the Actions step ceiling. The fixture launches Playwright's
+        # own Chromium, not the browser tools' separate Chrome for Testing. Keep the pinned driver Node.
+        run: python -I -S scripts/ci_browser_install.py --attempt-seconds 180 --pinned-node chromium
+      - name: Support evidence (Node) — the Update-report renderer
+        id: node_renderer
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' }}
+        timeout-minutes: 10
+        run: python -I -S scripts/safe_test.py -- node --test web/tests/update_evidence.test.js
+      - name: Real Updates panel on synthetic evidence (Apply confirmation, Chromium)
+        id: ui
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: >-
+          xvfb-run -a python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/qualify/ui-raw"
+          -- python -m pytest
+          "tests/test_update_description_browser.py::test_check_and_describe_then_apply_read_the_description_as_prose[chromium-1044-653]"
+          -m ui_browser -q --tb=short -rs
+          --ci-evidence-dir "$RUNNER_TEMP/qualify/ui/focused"
+      - name: Witness — the UI case ran whole, screenshots collected through the product's own selector
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          UI_OUTCOME: ${{ steps.ui.outcome }}
+          NODE_OUTCOME: ${{ steps.node_renderer.outcome }}
+        shell: python
+        run: |
+          import json
+          import os
+          import shutil
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+
+          sys.path.insert(0, os.getcwd())
+          from tests.ci_verdicts import final
+          from ouroboros.test_evidence import run_diagnostics
+
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          problems = []
+          observed = {"ui": os.environ["UI_OUTCOME"], "node_renderer": os.environ["NODE_OUTCOME"]}
+          if observed["ui"] != "success":
+              problems.append(f"ui: observed step outcome {observed['ui']!r}, expected 'success' — a clean "
+                              "pytest projection cannot excuse a failed or unfinished step")
+          if observed["node_renderer"] != "success":
+              problems.append(f"node renderer: observed step outcome {observed['node_renderer']!r}, "
+                              "expected 'success' (support evidence must run, not skip)")
+          data, error = final(Path(os.environ["RUNNER_TEMP"], "qualify", "ui", "focused"))
+          if error or data.get("session_exit_code") != 0:
+              problems.append(f"ui session: {error or 'exit ' + str(data.get('session_exit_code'))}")
+          phases = defaultdict(dict)
+          for row in data.get("reports") or []:
+              if not row.get("is_subtest"):
+                  phases[row["nodeid"]].setdefault(row["phase"], set()).add(row["outcome"])
+          whole = {node for node, seen in phases.items()
+                   if all(seen.get(phase) == {"passed"} for phase in ("setup", "call", "teardown"))}
+          skipped = sorted({row["nodeid"] for row in data.get("reports") or [] if row["outcome"] == "skipped"}
+                           | {str(node) for node in data.get("collection_skips") or []})
+          if skipped:
+              problems.append(f"the UI session skipped (a skip is not coverage): {skipped}")
+          # MECHANICAL ADAPTER PIN: exact node id + Chromium parameter suffix (see the run step).
+          function = ("tests/test_update_description_browser.py::"
+                      "test_check_and_describe_then_apply_read_the_description_as_prose")
+          ran = sorted({node[len(function):] for node in whole
+                        if node == function or node.startswith(function + "[")})
+          identity = {key: os.environ['GITHUB_' + key.upper()] for key in ('sha', 'run_id', 'run_attempt')}
+          node = function + '[chromium-1044-653]'
+          ui_ok = (not error and data.get('session_exit_code') == 0 and observed['ui'] == 'success'
+                   and data.get('github') == identity and data.get('tests_collected') == 1
+                   and data.get('selected_nodeids') == [node]
+                   and data.get('collection_failures') == data.get('collection_skips') == []
+                   and len(data['reports']) == 3 and whole == {node} and not skipped)
+          if not ui_ok:
+              problems.append(f"{function}: ran whole {ran}, expected ['[chromium-1044-653]']")
+          # Screenshots: the test published them through its own diagnostic_directory(publish=True)
+          # contract; collect ONLY *.png through the product's own run_diagnostics selector, bounded
+          # to this job's evidence parent, renamed sequentially (no evidence-tree internals published).
+          raw_root = Path(os.environ["RUNNER_TEMP"], "qualify", "ui-raw")
+          staging = Path(os.environ["RUNNER_TEMP"], "qualify", "ui-screens")
+          staging.mkdir(parents=True, exist_ok=True)
+          shots, attempt_shots, non_png, gap_count, run_count = [], [], 0, 0, 0
+          attempt_shot = "06-attempt-rows-chromium-1044.png"
+          split_shots = {f"06-attempt-rows-{n}-chromium-1044.png" for n in (2, 1, "unknown")}
+          seen_attempt_files = []
+          if raw_root.is_dir():
+              for run in sorted(p for p in raw_root.iterdir() if p.is_dir()):
+                  run_count += 1
+                  files, _left, gaps = run_diagnostics(run)
+                  gap_count += len(gaps)
+                  for file in files:
+                      if file.suffix.lower() == ".png":
+                          target = staging / f"{len(shots) + 1:02d}-{file.name}"
+                          shutil.copy2(file, target)
+                          shots.append(target.name)
+                          if file.name in split_shots | {attempt_shot}:
+                              attempt_shots.append(target.name)
+                              seen_attempt_files.append(file.name)
+                      else:
+                          non_png += 1
+          if observed["ui"] == "success" and not shots:
+              problems.append("the UI case ran green but produced no screenshot of the synthetic page; "
+                              "the visual evidence is missing")
+          attempt_shot_ok = (seen_attempt_files == [attempt_shot] or sorted(seen_attempt_files) == sorted(split_shots)) and gap_count == 0
+          if not attempt_shot_ok:
+              problems.append(f"expected the complete joint or split attempt view; found {len(attempt_shots)} "
+                              f"with {gap_count} selector gap(s)")
+          facts = {
+              "real_panel_renderer_ran_on_synthetic_evidence": ui_ok and observed["ui"] == "success",
+              "synthetic_page_screenshots_collected": bool(shots),
+              "attempt_rows_viewport_collected": ui_ok and attempt_shot_ok,
+          }
+          evidence = {"selection": "updates-ui", "run": os.environ["GITHUB_RUN_ID"], "run_attempt": attempt,
+                      "original_qualification": attempt == 1,
+                      "observed_step_outcomes": observed,
+                      "session_error": error or None, "session_exit_code": data.get("session_exit_code"),
+                      "tests_ran_whole": len(whole),
+                      "witnesses": {function: {"expected": ["[chromium-1044-653]"], "ran_whole": ran, "ok": ui_ok}},
+                      "screenshots": {"count": len(shots), "names": shots,
+                                      "attempt_rows": attempt_shots,
+                                      "evidence_runs_walked": run_count, "published_non_png": non_png,
+                                      "selector_gaps": gap_count},
+                      "facts": facts, "skipped_observed": skipped, "problems": problems}
+          out = Path(os.environ["RUNNER_TEMP"], "qualify", "updates-ui-evidence.json")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Real Updates panel renderer on synthetic evidence\n"
+                            f"- Chromium case ran whole: {ui_ok}; screenshots published: {len(shots)}\n"
+                            "- synthetic page only: run links/numbers, a partial GitHub read and the\n"
+                            "  7-of-17 receipt-coverage row come from the product's own fixture;\n"
+                            "  the dialog is cancelled and no update is applied\n"
+                            + "".join(f"- **{problem}**\n" for problem in problems))
+          print(f"UI case ran whole: {ui_ok}; screenshots: {len(shots)}; problems: {len(problems)}")
+          sys.exit("\n".join(problems) or None)
+      - name: Upload the curated UI evidence and the synthetic-page screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-updates-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qualify/updates-ui-evidence.json
+            ${{ runner.temp }}/qualify/ui-screens/
+          retention-days: 14
+          if-no-files-found: error
+
+  historic-selected:
+    name: historic selected (${{ matrix.leg }}) from f888570639
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL, defer: ''}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST, defer: '--defer-full'}
+    runs-on: ${{ matrix.os }}
+    # The 145-minute battery step plus about 30 minutes for checkout, Python, Node, the MSYS2 update, the witness and the uploads.
+    timeout-minutes: 175
+    defaults:
+      run:
+        shell: bash
+    env:
+      QUALIFY_LEG: ${{ matrix.leg }}
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: '1'
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: '1'
+      OUROBOROS_PREFLIGHT_TEST_WORKERS: ${{ matrix.os == 'windows-latest' && '4' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: The stores run ${{ matrix.journal }} here
+        id: journal_mode
+        run: python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
+        with:
+          node-version: '22'
+      - name: Set up Windows POSIX test utilities
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: posix_tools
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        id: select_posix_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
+        shell: pwsh
+        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Bind to the reviewed product, check the seven merges and pre-compute the selector's path set
+        id: plan
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        shell: python
+        run: |
+          import json, os, re, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, os.getcwd())
+          from ouroboros.test_selection import changed_paths
+          e = os.environ
+          base, tip, subject = e['HISTORIC_BASE'], e['HISTORIC_TIP'], e['SUBJECT_COMMIT']
+          root, tree = Path(e['RUNNER_TEMP'], 'historic'), Path(e['RUNNER_TEMP'], 'historic-subject')
+          root.mkdir(parents=True, exist_ok=True)
+          def run(*a, cwd=None):
+              return subprocess.check_output(['git', *a], cwd=cwd)
+          def git(*a, cwd=None):
+              return run(*a, cwd=cwd).decode().strip()
+          def names(*a):
+              return {os.fsdecode(n) for n in run(*a, cwd=tree).split(b'\0') if n}
+          bad = []
+          if (git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD~1'), git('rev-parse', 'HEAD~1^{tree}'), git('rev-parse', 'HEAD~2'), git('diff', '--name-only', 'HEAD~1', 'HEAD')) != (
+                  e['GITHUB_SHA'], subject, e['SUBJECT_TREE'], e['REVIEWED_PARENT'], '.github/workflows/qualify-post-merge-range.yml'):
+              sys.exit('this run is not the reviewed subject plus only this workflow')
+          subprocess.run(['git', 'worktree', 'add', '--detach', '--quiet', str(tree), subject], check=True)
+          chain = git('rev-list', '--first-parent', '--reverse', base + '..' + tip, cwd=tree).split()
+          whole = git('rev-list', '--first-parent', '--reverse', base + '..HEAD', cwd=tree).split()
+          if git('rev-parse', 'HEAD', cwd=tree) != subject or git('rev-parse', 'HEAD^{tree}', cwd=tree) != e['SUBJECT_TREE'] or git('status', '--porcelain', '--untracked-files=all', cwd=tree):
+              bad.append('the worktree is not the exact clean reviewed commit and tree')
+          if not (len(chain) == 7 and chain[-1] == tip and git('rev-parse', chain[0] + '^1', cwd=tree) == base and whole[:7] == chain):
+              bad.append('the seven merges are not the first seven first-parent commits after the base')
+          net, each = set(changed_paths(tree, base)[1]), set(changed_paths(tree, base, each_commit=True)[1])
+          merges = []
+          for commit in chain:
+              own = names('diff', '--no-renames', '--name-only', '-z', commit + '^1', commit)
+              pr = re.fullmatch(r'Merge pull request #([0-9]+) from [^ ]+', git('log', '-1', '--format=%s', commit, cwd=tree))
+              merges.append({'commit': commit, 'pr': pr[1] if pr else None, 'paths': len(own), 'in_selection': own <= each, 'hidden_from_net_diff': len(own - net)})
+          numbers = [row['pr'] for row in merges]
+          if not all(row['in_selection'] for row in merges) or numbers != ['3442', '3445', '3433', '3440', '3459', '3444', '3449']:
+              bad.append('a merge is outside the each-commit selection, or the seven are not the named pull requests')
+          (root / 'expected-changed.json').write_text(json.dumps(sorted(each)), encoding='utf-8')
+          plan = {'base': base, 'subject': subject, 'tree': e['SUBJECT_TREE'], 'first_parent_commits': len(whole), 'merges': merges,
+                  'selection_paths': len(each), 'net_diff_paths': len(net), 'added_only_by_each_commit': len(each - net)}
+          (root / 'plan.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
+          print(json.dumps(plan))
+          sys.exit('; '.join(bad) or None)
+      - name: The real selected run on the exact product tree (the post-merge command, pinned base, each commit)
+        id: selected
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.journal_mode.outcome == 'success' && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || steps.select_posix_tools.outcome == 'success') }}
+        timeout-minutes: 145
+        continue-on-error: true
+        env:
+          DEFER_FULL: ${{ matrix.defer }}
+        run: |
+          cd "$RUNNER_TEMP/historic-subject"
+          # The runner's deferral note names paths and reasons: keep it off the job summary.
+          unset GITHUB_STEP_SUMMARY
+          started=$(date +%s)
+          set +e
+          # The battery's whole stdout and stderr stay in this unuploaded runner file, never printed or copied; only the outer exit status and the duration leave the step.
+          python scripts/run_tests.py --selected --base "$HISTORIC_BASE" --each-commit --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/historic/evidence" > "$RUNNER_TEMP/historic/battery-stdio.txt" 2>&1
+          code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          echo "seconds=$(( $(date +%s) - started ))" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Witness - one state per leg (green, red_measured or incomplete); no test run is never a pass
+        id: witness
+        if: ${{ !cancelled() }}
+        env:
+          OUT_PLAN: ${{ steps.plan.outcome }}
+          OUT_PY: ${{ steps.setup_python.outcome }}
+          OUT_JOURNAL: ${{ steps.journal_mode.outcome }}
+          OUT_NODE: ${{ steps.setup_node.outcome }}
+          OUT_POSIX: ${{ steps.select_posix_tools.outcome }}
+          OUT_RUN: ${{ steps.selected.outcome }}
+          RUN_EXIT: ${{ steps.selected.outputs.exit }}
+          RUN_SECONDS: ${{ steps.selected.outputs.seconds }}
+        shell: python
+        run: |
+          import hashlib, json, os, platform, re, sys
+          from collections import Counter
+          from pathlib import Path
+          sys.path.insert(0, os.getcwd())
+          from scripts.post_merge_check import _failure_phases, _selected_pass, pass_counts, read_session
+          from tests.ci_verdicts import platform_name
+          e = os.environ
+          root, leg = Path(e['RUNNER_TEMP'], 'historic'), e['QUALIFY_LEG']
+          ev, out = root / 'evidence', root / 'out'
+          out.mkdir(parents=True, exist_ok=True)
+          def load(path):
+              try:
+                  return json.loads(path.read_text(encoding='utf-8'))
+              except (OSError, ValueError):
+                  return None
+          plan, sel, want = load(root / 'plan.json') or {}, load(ev / 'selection.json'), load(root / 'expected-changed.json')
+          sel = sel if isinstance(sel, dict) else {}
+          why, red, passes = [], [], {}
+          steps = {'plan': e['OUT_PLAN'], 'python': e['OUT_PY'], 'journal': e['OUT_JOURNAL'], 'node setup': e['OUT_NODE']}
+          if leg == 'windows':
+              steps['POSIX tools'] = e['OUT_POSIX']
+          why += [name + ' step ended ' + repr(value) for name, value in steps.items() if value != 'success']
+          code = int(e['RUN_EXIT']) if e['RUN_EXIT'].isdigit() else None
+          if code is None:
+              why.append('no exit status: the selected run did not start, timed out or was killed (step ' + repr(e['OUT_RUN']) + ')')
+          elif code not in (0, 1):
+              # A normal green ends exactly 0 and a normal red exactly 1; a kill (137), a timeout or a runner fault is never a measurement, whatever its export shows.
+              why.append('abnormal exit status ' + str(code) + ': only exactly 0 (green) or exactly 1 (a measured red) is a normal end of the selected run')
+          outcomes = sel.get('outcomes') if isinstance(sel.get('outcomes'), dict) else {}
+          if sel.get('outcome') not in ('success', 'failure'):
+              why.append('selection.json is missing or never reached its final outcome')
+          if not want or sel.get('base') != e['HISTORIC_BASE'] or sel.get('changed') != want:
+              why.append('the selection names another base, or a path set other than base..HEAD plus each first-parent commit')
+          if code is not None and ((code == 0) != (e['OUT_RUN'] == 'success') or (code == 0) != (sel.get('outcome') == 'success')):
+              why.append('the outer exit status, the step outcome and the selection outcome disagree')
+          if set(outcomes) != {'parallel', 'serial'} or (sel.get('outcome') == 'success') != (sel.get('node') == 'success' and set(outcomes.values()) == {'success'} and not sel.get('floor_problem')):
+              why.append('the battery outcome disagrees with its lanes')
+          if platform_name(platform.system()) != leg:
+              why.append('this runner is not the matrix system')
+          if sel.get('floor_problem') or (leg == 'linux' and sel.get('deferred_full')):
+              # The runner's floor text lists modules: only its fixed meaning is kept.
+              why.append('floor or deferral problem: ' + ('a contract floor module collected no tests' if sel.get('floor_problem') else 'Linux deferred'))
+          if sel.get('node_problem') or sel.get('node') not in ('success', 'failure'):
+              why.append('the Node lane did not run to completion')
+          elif sel['node'] == 'failure':
+              red.append('node')
+          identity = {key: e['GITHUB_' + key.upper()] for key in ('sha', 'run_id', 'run_attempt')}
+          if sel.get('selection_problem'):
+              why.append('selection problem: the deferral selected nothing beyond the contract floor, the Node lane and the extra tests')
+          if sel.get('github') != identity or sel.get('system') != leg:
+              why.append('selection.json does not name this commit, run, attempt and system')
+          def brief(row):
+              seen = row.get('observed') or {}
+              r, c = seen.get('reports') or {}, seen.get('collectors') or {}
+              num = lambda value: 'unknown' if value is None else str(value)
+              failed = r.get('failed') or {}
+              return ('failed reports setup/call/teardown ' + '/'.join(num(failed.get(p)) for p in ('setup', 'call', 'teardown'))
+                      + ', subtests ' + num(r.get('failed_subtests')) + ', reported crashes ' + num(r.get('crashed')) + ', unfinished starts ' + num(r.get('unfinished_starts'))
+                      + ' [' + str(r.get('source')) + ('' if r.get('complete') else ', not complete') + ']; collectors failed ' + num(c.get('failed')) + ' skipped ' + num(c.get('skipped'))
+                      + ' [' + str(c.get('source')) + ('' if c.get('complete') else ', not complete') + ']; any red ' + num(seen.get('any_red')))
+          def lane(label):
+              inventory = (sel.get('inventory') or {}).get(label)
+              inventory = inventory if isinstance(inventory, dict) else {}
+              expected, executed = inventory.get('expected', []), inventory.get('executed', [])
+              if not all(isinstance(ids, list) and all(isinstance(item, str) for item in ids) for ids in (expected, executed)):
+                  inventory, expected, executed = {'problem': 'invalid test ids'}, [], []
+              session = read_session(ev / label, session_id=inventory.get('session'))
+              found = _failure_phases(session)
+              calls, problem = _selected_pass(outcomes.get(label), inventory, session, found)
+              problem = re.sub('(test inventory unavailable): .*', lambda match: match[1], problem, flags=re.S)  # fixed text: the exception text goes, over any number of lines
+              if not problem and not (isinstance(inventory.get('session'), str) and inventory['session'] and session['github'] == identity and session['system'] == leg):
+                  problem = 'is not bound to this run, session and system'
+              setups = Counter(row['nodeid'] for row in session['rows'] if row['phase'] == 'setup' and not row.get('is_subtest'))
+              return {'outcome': outcomes.get(label), 'problem': problem, 'pytest_exit': inventory.get('exitcode'), 'results_final': session['final'],
+                      'collected': session['collected'], 'expected': len(expected), 'executed': len(executed), 'skipped': len(inventory.get('skipped') or ()),
+                      'failed': len(inventory.get('failed') or ()), 'calls': calls, 'colliding_public_ids': sum(count > 1 for count in setups.values()),
+                      'observed': pass_counts(ev, label, sel, identity=identity, system=leg, whole=not problem)}
+          for label in ('parallel', 'serial'):
+              try:
+                  passes[label] = lane(label)
+              except Exception as error:  # noqa: BLE001 -- the type only: no raw text reaches the log or the artifact
+                  passes[label] = {'problem': 'could not be read (' + type(error).__name__ + ')', 'observed': pass_counts(ev, label, sel, identity=identity, system=leg)}
+              if passes[label]['problem']:
+                  why.append(label + ' pass ' + passes[label]['problem'])
+              # A pass's observed red is kept apart from why: a positive failed report, reported crash, failed subtest or failed collector still names its lane, and the
+              # incomplete state (not this list) says it is no measurement. Unknown (None) and an incomplete zero list nothing, so a pre-plan leg lists nothing.
+              if passes[label]['observed']['any_red'] is True:
+                  red.append(label)
+          if not why and not all(row['observed']['reports']['complete'] and row['observed']['collectors']['complete'] for row in passes.values()):
+              why.append('a pass reported counts that are not complete (a start never ended, or no public journal ties its session)')
+          if not why and not any(row.get('calls') for row in passes.values()):
+              why.append('both selected passes ran zero tests')
+          # Exact exits, never truthiness: no red ends exactly 0 and a measured red exactly 1 (other codes were already reported above).
+          if not why and code != (1 if red else 0):
+              why.append('the outer exit status and the measured lanes disagree')
+          state = 'incomplete' if why else 'red_measured' if red else 'green'
+          changed = [name for name in sel.get('changed') or [] if isinstance(name, str)]
+          reasons = Counter(str(row[1]).split(':')[0] for row in sel.get('reasons') or [] if isinstance(row, list) and len(row) == 2)
+          evidence = {'schema': 1, 'leg': leg, 'os': platform_name(platform.system()), 'state': state, 'github': identity,
+                      'product': {'commit': e['SUBJECT_COMMIT'], 'tree': e['SUBJECT_TREE']}, 'base': e['HISTORIC_BASE'], 'plan': plan,
+                      'command': 'scripts/run_tests.py --selected --each-commit --keep-going' + (' --defer-full' if leg == 'windows' else ''),
+                      'selection': {'tier': sel.get('tier'), 'modules': sel.get('file_count'), 'available': sel.get('available'),
+                                    'deferred_full': bool(sel.get('deferred_full')), 'selection_problem': bool(sel.get('selection_problem')), 'changed_paths': len(changed),
+                                    'changed_sha256': hashlib.sha256(chr(10).join(changed).encode()).hexdigest(), 'reasons': dict(reasons)},
+                      'run': {'exit': code, 'step': e['OUT_RUN'], 'seconds': int(e['RUN_SECONDS']) if e['RUN_SECONDS'].isdigit() else None},
+                      'node': sel.get('node'), 'passes': passes, 'red': red, 'incomplete': [text[:200] for text in why[:20]],
+                      'full_battery_passed': state == 'green' and sel.get('tier') == 'full',
+                      'scope': 'typed counts only: report rows are counted, never distinct tests; a deferral never means the Windows full battery passed'}
+          data = json.dumps(evidence, indent=2).encode('utf-8')
+          (out / ('historic-selected-evidence-' + leg + '.json')).write_bytes(data)
+          with open(e['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('proof=' + state + ' ' + leg + ' ' + hashlib.sha256(data).hexdigest() + chr(10))
+          with open(e['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
+              stream.write('Historical selected run (' + leg + '): **' + state + '**, tier ' + str(sel.get('tier')) + ', ' + str(sel.get('file_count')) + ' module(s), ' + e['RUN_SECONDS'] + ' s, '
+                           + ('observed red (leg incomplete, not a measurement) ' if state == 'incomplete' else 'red ') + str(red) + chr(10)
+                           + ''.join('- ' + name + ': ' + brief(row) + chr(10) for name, row in passes.items()))
+          print(json.dumps(evidence))
+          sys.exit(chr(10).join(text[:200] for text in why[:20]) if state == 'incomplete' else None)
+      - name: Historical result ${{ steps.witness.outputs.proof }}
+        if: ${{ !cancelled() && steps.witness.outputs.proof != '' }}
+        run: echo 'Measured state of this leg. red_measured is a measured red, not a pass; incomplete fails the job.'
+      - name: Upload the bounded public evidence (no raw log, no host data)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-historic-selected-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/historic/out/historic-selected-evidence-${{ matrix.leg }}.json
+          retention-days: 14
+          if-no-files-found: error
+
+  receipt:
+    needs: [window, range, historic-paths, updates-ui, historic-selected]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: GitHub records this attempt as the product's readers expect (actual vs fixture; every job listed, this one as running)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CASES: ${{ needs.window.outputs.cases }}
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+          import sys
+          import contextlib
+          import copy
+          import hashlib
+          import io
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+
+          sys.path.insert(0, os.getcwd())
+          from ouroboros.update_qualification import (RANGE_TITLE, _LEG, actions_pages, attempt_job_pages,
+                                                      measured_window, range_candidate)
+          from scripts.post_merge_check import _project_handoff
+          from scripts.post_merge_routing import GitHub
+          from scripts.post_merge_window import LOST, UNREAD, prior_window, read_handoff
+
+          responses = {}
+
+          def get(path):
+              if path in responses:
+                  return responses[path]
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/{path}",
+                  headers={"Accept": "application/vnd.github+json",
+                           "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                           "X-GitHub-Api-Version": "2022-11-28",
+                           "User-Agent": "post-merge-range-qualification"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  responses[path] = json.load(response)
+              return responses[path]
+
+          # ACTUAL: this attempt's own run object, read from the service. Its id, attempt and head
+          # are real producer data and travel into the fixture unchanged.
+          run_id = int(os.environ["GITHUB_RUN_ID"])
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          base, sha = os.environ['PATCH_BASE'], os.environ['GITHUB_SHA']
+          own_job = os.environ.get('GITHUB_JOB', 'receipt')
+          problems = []
+
+          def exact_run(row, number):
+              return (isinstance(row, dict) and type(row.get('id')) is int and type(row.get('run_attempt')) is int
+                      and (row['id'], row['run_attempt'], row.get('head_sha'), row.get('head_branch'), row.get('event'))
+                      == (run_id, number, sha, 'qualification/post-merge-range-r16', 'push'))
+
+          try:
+              actual = get(f'actions/runs/{run_id}/attempts/{attempt}')
+          except (OSError, ValueError) as error:
+              problems.append(f'current attempt metadata unavailable: {type(error).__name__}')
+              actual = {}
+          actual_ok = exact_run(actual, attempt)
+          if not actual_ok:
+              problems.append('current run response does not bind this run, attempt, head, branch and event')
+              actual = {}
+
+          earlier_rows = []
+          if attempt != 1:
+              problems.append('a rerun is diagnostic only; it cannot qualify the original attempt')
+              for number in sorted({1, *range(max(1, attempt - 4), attempt)}):
+                  prior = {'attempt': number, 'read': 'unavailable'}
+                  try:
+                      row = get(f'actions/runs/{run_id}/attempts/{number}')
+                      if (not exact_run(row, number) or row.get('status') != 'completed'
+                              or not isinstance(row.get('conclusion'), str) or not row['conclusion']):
+                          raise ValueError('not the requested terminal attempt')
+                      prior.update(read='observed', status=row['status'], conclusion=row['conclusion'])
+                  except (OSError, ValueError) as error:
+                      prior['reason'] = type(error).__name__
+                  earlier_rows.append(prior)
+
+          # Read every current-attempt job, not the run-wide endpoint. Preserve positive rows but
+          # do not interpret any absence or feed a shortened snapshot to the receipt adapter.
+          raw_jobs, listing = [], 'unavailable'
+          try:
+              for page, (rows, left) in enumerate(actions_pages(
+                      get, f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs'), 1):
+                  matched = [job for job in rows if (job.get('run_id'), job.get('run_attempt', attempt), job.get('head_sha'))
+                             == (run_id, attempt, sha)]
+                  raw_jobs.extend(matched)
+                  listing = 'incomplete'
+                  if len(matched) != len(rows) or left is None or (page >= 5 and left):
+                      raise ValueError('wrong identity, incomplete page, or page ceiling')
+                  if left == 0:
+                      listing = 'complete'
+          except (OSError, ValueError, TypeError, KeyError) as error:
+              problems.append(f'current jobs listing {listing}: {type(error).__name__}')
+
+          # FIXTURE: the synthetic official-range-run contract the product readers require
+          # (ouroboros/update_qualification.py::range_candidate). Every field that differs from the
+          # actual run is listed beside the actual value it replaces; nothing dummy is passed off
+          # as producer data. The negative/positive pair below is the control.
+          overrides_wanted = {"head_branch": "ouroboros", "event": "push", "status": "completed",
+                              "conclusion": "success", "display_title": RANGE_TITLE}
+          fixture = {key: actual.get(key) for key in ("id", "run_attempt", "head_sha")}
+          fixture.update(overrides_wanted)
+          overrides = {key: {"actual": actual.get(key), "fixture": value}
+                       for key, value in overrides_wanted.items() if actual.get(key) != value}
+
+          github = GitHub(os.environ['GITHUB_REPOSITORY'], os.environ['GH_TOKEN'])
+          cases = json.loads(os.environ['CASES']) if os.environ.get('CASES') else {}
+          if set(cases) != {'linux', 'windows'}:
+              problems.append('the window job published no synthetic hand-over records for both legs')
+          jobs, receipt, chosen, searched, owed = [], None, None, None, None
+          adapter_ran = actual_ok and listing == 'complete' and attempt == 1 and set(cases) == {'linux', 'windows'}
+          if adapter_ran:
+              jobs = [job for page in attempt_job_pages(fixture, get) for job in page]
+              receipt = measured_window(fixture, get)
+              prior = prior_window(fixture, get, github.handoff_json)
+              chosen, searched, owed = prior.chosen, prior.searched, prior.awaiting
+          window = next((job for job in jobs if job.get("name") == "window"), {})
+          steps = window.get("steps") or []
+          carried = any(step.get("name") == "Output of a failed step reached a later condition"
+                        and step.get("conclusion") == "success" for step in steps)
+          replay_seen = any((step.get("name") or "").startswith("Post-merge replay input ")
+                            and step.get("conclusion") == "success" for step in steps)
+          legs_seen = {}
+          for job in raw_jobs:
+              if match := _LEG.fullmatch(job.get("name") or ""):
+                  legs_seen[match.group(1)] = match.group(2)
+          facts = {"run": {"id": run_id, "attempt": attempt, "original_qualification": attempt == 1},
+                   "actual_run": {key: actual.get(key) for key in
+                                  ("id", "run_attempt", "run_number", "head_sha", "head_branch", "event",
+                                   "status", "conclusion", "display_title", "name")},
+                   'earlier_actual_attempts': {'rows': earlier_rows, 'not_requested': attempt - 1 - len(earlier_rows)},
+                   'current_attempt_job_listing': listing,
+                   'fixture_adapter_ran': adapter_ran,
+                   'scope': 'Actions metadata, artifacts and API reads are real; the run contract, range markers and hand-over records are synthetic fixtures: no route step ran, no issue was written, no GitHub failed-jobs rerun was made and the focused jobs ran no historical tests (the historic selected jobs are read by the separate historical receipt step). Terminal qualification still requires reading this attempt after the receipt job completes.',
+                   "fixture_overrides": overrides if actual_ok else None,
+                   "range_candidate": {"actual": range_candidate(actual) if actual_ok else None,
+                                       "fixture": range_candidate(fixture) if actual_ok else None},
+                   "measured_window": list(receipt) if receipt else receipt,
+                   "prior_window": {"chosen": list(chosen) if chosen else chosen,
+                                    "searched": searched,
+                                    'owed': {leg: {'records': len(rows), 'ids': sum(len(row['ids']) for row in rows)}
+                                             for leg, rows in (owed or {}).items()}},
+                   "carried": carried, "replay_step_seen": replay_seen,
+                   "legs_in_this_attempt": legs_seen,
+                   "jobs": [{"name": job.get("name"), "status": job.get("status"),
+                             "conclusion": job.get("conclusion"),
+                             **({"note": "this job; still running while the receipt reads — never "
+                                         "self-certified"} if job.get("name") == own_job else {})}
+                            for job in raw_jobs],
+                   "completed_jobs_steps": [{"name": job.get("name"), "conclusion": job.get("conclusion"),
+                                             'steps': [[(step.get('name') or '')[:110], step.get('conclusion')]
+                                                       for step in job.get("steps") or []]}
+                                            for job in jobs]}
+          if adapter_ran and not range_candidate(fixture):
+              problems.append("the synthetic run contract no longer satisfies range_candidate; the readers were not exercised")
+          if range_candidate(actual):
+              problems.append("the ACTUAL qualification run satisfies range_candidate; the fixture would be "
+                              "indistinguishable from a real range receipt — re-examine before trusting this run")
+          if adapter_ran:
+              if receipt != (base, False):
+                  problems.append(f'measured_window read {receipt!r}; expected one base on both legs, Windows push only')
+              if chosen != (base, True, attempt) or searched is not False or owed != cases:
+                  problems.append(f'unexpected synthetic base/replay: {chosen!r}, {searched!r}, owed legs {sorted(owed)!r} '
+                                  f'with {[len(rows) for rows in owed.values()]!r} record(s)')
+              if prior.gaps or prior.unread:
+                  problems.append(f'unexpected synthetic history gap: {prior.gaps!r}, unread {prior.unread!r}')
+              if not replay_seen or not carried:
+                  problems.append('missing replay marker or the conditional consumption of a failed step output')
+              expected = [own_job, 'window', f'post-merge (linux) from {base}', f'post-merge (windows) from {base}',
+                          'Select changes from the seven historical merges (path coverage only)',
+                          'real Updates panel renderer on synthetic evidence — Chromium, screenshots published',
+                          'historic selected (linux) from ' + os.environ['HISTORIC_BASE'][:10],
+                          'historic selected (windows) from ' + os.environ['HISTORIC_BASE'][:10]]
+              if sorted(str(job.get('name')) for job in raw_jobs) != sorted(expected):
+                  problems.append('the complete current attempt does not contain exactly one of each required job')
+          # HAND-OVER RECEIPTS ON REAL METADATA. The legs ran the product's own summary command, so each receipt below is
+          # product output as GitHub recorded it: a job step name, an uploaded artifact, an artifact listing and a
+          # download. The records are fixtures: no route step ran, no issue was written, no GitHub failed-jobs rerun was made and no
+          # historical tests were executed.
+          def prove_handoffs():
+              marker, uploads = 'Post-merge untracked ', 'Upload the full hand-over result'
+              compact = lambda value: json.dumps(value, ensure_ascii=True, separators=(',', ':'))
+              leg_jobs = {leg: next((job for job in raw_jobs if job.get('name') == f'post-merge ({leg}) from {base}'), {})
+                          for leg in ('linux', 'windows')}
+
+              def named(leg, prefix):
+                  return [step for step in leg_jobs[leg].get('steps') or [] if (step.get('name') or '').startswith(prefix)]
+
+              def state(steps):
+                  return [[step.get('status'), step.get('conclusion')] for step in steps]
+
+              proof = {'cases': {}, 'controls': {}, 'window_replay': {'carried': prior.carried, 'searched': prior.searched}}
+              if prior.carried != {'linux': [], 'windows': []}:
+                  problems.append('the window replay no longer carries empty record lists for both legs')
+              # Linux: the near-limit receipt, exactly 800 characters, whole in one successful step name; nothing uploaded.
+              linux = named('linux', marker)
+              shown = linux[0]['name'][len(marker):] if len(linux) == 1 else ''
+              proof['cases']['linux'] = inline = {
+                  'receipt_steps': state(linux), 'upload_steps': state(named('linux', uploads)),
+                  'receipt_chars': len(shown), 'exact': shown == compact(cases['linux'])}
+              if (inline['receipt_steps'] != [['completed', 'success']] or inline['upload_steps'] != [['completed', 'skipped']]
+                      or not inline['exact'] or inline['receipt_chars'] != 800):
+                  problems.append('linux: the 800-character receipt is not exactly in one successful step name, or an artifact was uploaded')
+              # Windows: the oversized receipt is the exact reference of this run and attempt, to an artifact that the
+              # product reader finds through the listing, downloads and verifies by digest.
+              windows = named('windows', marker)
+              shown = windows[0]['name'][len(marker):] if len(windows) == 1 else ''
+              try:
+                  reference = json.loads(shown)
+              except ValueError:
+                  reference = None
+              inner = reference.get('artifact') if isinstance(reference, dict) and set(reference) == {'artifact'} else None
+              digest = inner.get('sha256') if isinstance(inner, dict) and set(inner) == {'run', 'attempt', 'sha256'} else None
+              genuine = (isinstance(digest, str) and inner['run'] == run_id and inner['attempt'] == attempt
+                         and shown == compact(reference))
+              # The product writes handoff.json through Path.write_text (LF on Linux, CRLF on Windows). The digest must name
+              # exactly one canonical form of the expected records, which also fixes the size of the file.
+              lf = (json.dumps(cases['windows'], indent=2, ensure_ascii=False) + chr(10)).encode('utf-8')
+              crlf = lf.replace(chr(10).encode(), (chr(13) + chr(10)).encode())
+              forms = {hashlib.sha256(lf).hexdigest(): ['lf', len(lf)], hashlib.sha256(crlf).hexdigest(): ['crlf', len(crlf)]}
+              form = forms.get(digest) if genuine else None
+              name = f'post-merge-handoff-windows-{run_id}-{attempt}'
+              artifact, failure = {}, None
+              try:
+                  found = github.get(f'actions/runs/{run_id}/artifacts?name={name}')
+                  artifact = found['artifacts'][0] if found['total_count'] == 1 == len(found['artifacts']) else {}
+              except (OSError, ValueError, KeyError, TypeError) as error:
+                  failure = f'artifact listing: {type(error).__name__}'
+              try:
+                  content = github.handoff_json(run_id, attempt, 'windows', digest if genuine else '')
+              except Exception as error:  # noqa: BLE001 -- recorded below, never absorbed
+                  content, failure = None, failure or f'reader: {type(error).__name__}'
+              size, origin = artifact.get('size_in_bytes'), artifact.get('workflow_run')
+              bound = (artifact.get('name') == name and artifact.get('expired') is False
+                       and type(size) is int and 0 < size <= 16 * 1024 * 1024
+                       and (origin is None or (isinstance(origin, dict) and origin.get('id') == run_id
+                                               and origin.get('head_sha') == sha)))
+              proof['cases']['windows'] = over = {
+                  'receipt_steps': state(windows), 'upload_steps': state(named('windows', uploads)),
+                  'receipt_chars': len(shown), 'reference_names_this_run_and_attempt': genuine,
+                  'digest': digest if genuine else None, 'canonical_form': form[0] if form else None,
+                  'file_bytes': form[1] if form else None, 'artifact_name': name, 'artifact_size_in_bytes': size,
+                  'artifact_bound_to_the_run': bound, 'reader_content_exact': content == cases['windows'], 'failure': failure}
+              if (over['receipt_steps'] != [['completed', 'success']] or over['upload_steps'] != [['completed', 'success']]
+                      or not genuine or form is None or not bound or not over['reader_content_exact']):
+                  problems.append('windows: the oversized receipt, its artifact, size, digest and content are not bound to this run and attempt')
+              # Negative controls: real reads of a wrong or missing artifact, a boundary one character past the ceiling, and
+              # mutated copies of the real job rows read by the product's own reader.
+              if genuine and form is not None:
+                  flipped = ('1' if digest[0] == '0' else '0') + digest[1:]
+
+                  def reaction(part, token):
+                      try:
+                          github.handoff_json(run_id, attempt, part, token)
+                      except Exception as error:  # noqa: BLE001
+                          return type(error).__name__ + (' digest' if 'recorded digest' in str(error) else '')
+                      return 'accepted'
+
+                  def label(value, part):
+                      with contextlib.redirect_stdout(io.StringIO()):
+                          got = read_handoff(value, github.handoff_json, part, run_id, attempt=attempt)
+                      return 'LOST' if got is LOST else 'UNREAD' if got is UNREAD else 'content'
+
+                  def reread(change):
+                      rows = copy.deepcopy(raw_jobs)
+                      change(next(candidate for job in rows if job.get('name') == f'post-merge (linux) from {base}'
+                                  for candidate in job['steps'] if candidate['name'].startswith(marker)))
+                      with contextlib.redirect_stdout(io.StringIO()):
+                          return prior_window(fixture, lambda path: {'total_count': len(rows), 'jobs': rows}, github.handoff_json)
+
+                  def cut(step):
+                      step['name'] = step['name'][:-1]
+
+                  def fail(step):
+                      step['conclusion'] = 'failure'
+
+                  scratch, versions = Path(tempfile.mkdtemp()), {'GITHUB_RUN_ID': str(run_id), 'GITHUB_RUN_ATTEMPT': str(attempt)}
+                  at_limit = _project_handoff(cases['linux'], scratch, versions)
+                  left_alone = not (scratch / 'handoff.json').exists()
+                  one_more = [{**cases['linux'][0], 'ids': [*cases['linux'][0]['ids'][:-1], cases['linux'][0]['ids'][-1] + 'x']}]
+                  past, stored = _project_handoff(one_more, scratch, versions)
+                  written = (scratch / 'handoff.json').read_bytes() if (scratch / 'handoff.json').is_file() else b''
+                  boundary = (at_limit == (cases['linux'], False) and left_alone and len(compact(one_more)) == 801 and stored is True
+                              and past == {'artifact': {'run': run_id, 'attempt': attempt, 'sha256': hashlib.sha256(written).hexdigest()}})
+                  first, second = reread(cut), reread(fail)
+                  controls = {
+                      'a mutated digest is refused by the reader': (reaction('windows', flipped), 'ValueError digest'),
+                      'a part that uploaded nothing is not found': (reaction('linux', digest), 'FileNotFoundError'),
+                      'a reference to another run is lost': (label({'artifact': {**inner, 'run': run_id + 1}}, 'windows'), 'LOST'),
+                      'a reference to another attempt is lost': (label({'artifact': {**inner, 'attempt': attempt + 1}}, 'windows'), 'LOST'),
+                      'a short digest is lost': (label({'artifact': {**inner, 'sha256': digest[:-1]}}, 'windows'), 'LOST'),
+                      'the genuine reference reads content': (label({'artifact': inner}, 'windows'), 'content'),
+                      '800 characters stay inline and 801 become a file reference': (boundary, True),
+                      'a receipt cut by one character is a labelled gap, never an owed list': (
+                          [first.gaps, sorted(first.awaiting)],
+                          [[{'run': run_id, 'attempt': attempt, 'part': 'linux', 'base': base}], ['windows']]),
+                      'a receipt written by a step that did not succeed confirms nothing': (
+                          [second.gaps, sorted(second.awaiting)], [[], ['windows']]),
+                  }
+                  for control, (observed, wanted) in controls.items():
+                      proof['controls'][control] = {'observed': observed, 'expected': wanted}
+                      if observed != wanted:
+                          problems.append(f'negative control failed: {control}')
+              else:
+                  problems.append('no genuine artifact reference was published, so no negative control could run')
+              return proof
+
+          handoff = prove_handoffs() if adapter_ran else {}
+          # Every job of this attempt except this receipt itself must have completed successfully;
+          # the receipt's own row stays visibly running — an unfinished attempt never looks green.
+          if listing == 'complete':
+              own = [job for job in raw_jobs if job.get('name') == own_job]
+              if len(own) != 1 or own[0].get('status') != 'in_progress' or own[0].get('conclusion') is not None:
+                  problems.append('this attempt must contain exactly one still-running receipt job')
+          for job in raw_jobs:
+              if job.get("name") == own_job or (job.get('name') or '').startswith('historic selected ('):
+                  continue
+              if job.get("status") != "completed" or job.get("conclusion") != "success":
+                  problems.append(f"job {job.get('name')!r} of this attempt is {job.get('status')!r}/"
+                                  f"{job.get('conclusion')!r} (exposed, not absorbed)")
+          facts['handoff'] = handoff
+          facts["problems"] = problems
+          facts['focused_checks_passed'] = adapter_ran and not problems  # focused checks only; the historical legs are read by their own receipt
+          text = json.dumps(facts, indent=2)
+          Path(os.environ["RUNNER_TEMP"], "receipt.json").write_text(text, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              header = ("## Post-merge receipt as GitHub recorded it (actual vs fixture)\n\n"
+                        if attempt == 1 else
+                        f"## RERUN — attempt {attempt} of run {run_id}; diagnostic only, never qualification\n\n")
+              summary.write(header + "```json\n" + text + "\n```\n"
+                            + "".join(f"\n- **{problem}**" for problem in problems) + "\n")
+          print(text)
+          sys.exit("\n".join(problems) or None)
+      - name: Upload the receipt facts (predefined public fields only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-post-merge-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/receipt.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Historical receipt - one successful job, one marker and one evidence artifact per system (apart from the focused receipt)
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python3 {0}
+        run: |
+          import hashlib, io, json, os, re, sys, urllib.request, zipfile
+          from pathlib import Path
+          sys.path.insert(0, os.getcwd())
+          from ouroboros.update_qualification import actions_pages
+          from scripts.post_merge_check import valid_pass_counts
+          from scripts.post_merge_routing import GitHub
+          e = os.environ
+          run_id, attempt, sha, base = int(e['GITHUB_RUN_ID']), int(e['GITHUB_RUN_ATTEMPT']), e['GITHUB_SHA'], e['HISTORIC_BASE']
+          github, limit = GitHub(e['GITHUB_REPOSITORY'], e['GH_TOKEN']), 16 * 1024 * 1024
+          jobs, listing = [], 'complete'
+          try:
+              for rows, left in actions_pages(github.get, 'actions/runs/' + str(run_id) + '/attempts/' + str(attempt) + '/jobs', 'jobs'):
+                  jobs += [job for job in rows if (job.get('run_id'), job.get('run_attempt', attempt), job.get('head_sha')) == (run_id, attempt, sha)]
+          except (OSError, ValueError, KeyError, TypeError) as error:
+              listing = 'incomplete (' + type(error).__name__ + ')'
+          def read(leg, digest):
+              name = 'qualify-historic-selected-' + leg + '-' + str(run_id) + '-' + str(attempt)
+              found = github.get('actions/runs/' + str(run_id) + '/artifacts?name=' + name)
+              rows = found['artifacts']
+              if found['total_count'] != 1 or len(rows) != 1 or rows[0].get('name') != name:
+                  raise ValueError(str(found['total_count']) + ' artifacts carry the expected name')
+              artifact, origin = rows[0], rows[0].get('workflow_run')
+              if (artifact.get('expired') is not False or type(artifact.get('id')) is not int or type(artifact.get('size_in_bytes')) is not int
+                      or not 0 < artifact['size_in_bytes'] <= limit
+                      or (origin is not None and (not isinstance(origin, dict) or (origin.get('id'), origin.get('head_sha')) != (run_id, sha)))):
+                  raise ValueError('the artifact is expired, unbounded or bound to another run')
+              request = urllib.request.Request(github._url('actions/artifacts/' + str(artifact['id']) + '/zip'))
+              request.add_unredirected_header('Authorization', 'Bearer ' + github.token)
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  archive = response.read(limit + 1)
+              if len(archive) > limit:
+                  raise ValueError('the archive exceeds the reader limit')
+              with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+                  members = bundle.infolist()
+                  if len(members) != 1 or members[0].filename != 'historic-selected-evidence-' + leg + '.json' or members[0].file_size > limit:
+                      raise ValueError('the archive is not the one leg evidence file')
+                  data = bundle.read(members[0])
+              if hashlib.sha256(data).hexdigest() != digest:
+                  raise ValueError('the evidence does not match the digest in its marker')
+              result = json.loads(data)
+              if not isinstance(result, dict):
+                  raise ValueError('the evidence is not an object')
+              return result
+          counted = lambda row: valid_pass_counts(row.get('observed') if isinstance(row, dict) else None)
+          pulls = ['3442', '3445', '3433', '3440', '3459', '3444', '3449']
+          legs = {}
+          for leg in ('linux', 'windows'):
+              found = [job for job in jobs if job.get('name') == 'historic selected (' + leg + ') from ' + base[:10]]
+              job = found[0] if len(found) == 1 else {}
+              marks = [step for step in job.get('steps') or [] if (step.get('name') or '').startswith('Historical result ')]
+              mark = re.fullmatch('Historical result (green|red_measured|incomplete) ' + leg + ' ([0-9a-f]{64})', (marks[0].get('name') or '').strip()) if len(marks) == 1 else None
+              state, bad, evidence = mark[1] if mark else None, [], {}
+              if listing != 'complete':
+                  bad.append('the attempt job listing is ' + listing)
+              if len(found) != 1:
+                  bad.append(str(len(found)) + ' jobs carry the expected name')
+              elif (job.get('status'), job.get('conclusion')) != ('completed', 'failure' if state == 'incomplete' else 'success'):
+                  bad.append('the job ended ' + str(job.get('status')) + '/' + str(job.get('conclusion')))
+              if not mark or (marks[0].get('status'), marks[0].get('conclusion')) != ('completed', 'success'):
+                  bad.append(str(len(marks)) + ' result marker step(s): missing, malformed or unsuccessful')
+              if not bad:
+                  try:
+                      evidence = read(leg, mark[2])
+                  except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
+                      bad.append('artifact: ' + (str(error)[:100] if isinstance(error, ValueError) else type(error).__name__))
+              plan = evidence.get('plan') if isinstance(evidence.get('plan'), dict) else {}
+              selection = evidence.get('selection') if isinstance(evidence.get('selection'), dict) else {}
+              run = evidence.get('run') if isinstance(evidence.get('run'), dict) else {}
+              lanes = evidence.get('passes') if isinstance(evidence.get('passes'), dict) else {}
+              counts_ok = False
+              if evidence or not bad:
+                  merges = [row for row in plan.get('merges') or [] if isinstance(row, dict)]
+                  # Setup can fail before plan.json exists and still leave an exact, digest-bound incomplete witness. For an incomplete only,
+                  # an empty plan beside GitHub's own failed or skipped record of the plan step stands in for the seven-merge plan; every
+                  # measured outcome, and any plan that is present, must still bind it.
+                  planner = [step for step in job.get('steps') or [] if (step.get('name') or '').startswith('Bind to the reviewed product')]
+                  unplanned = (state == 'incomplete' and evidence.get('plan') == {} and len(planner) == 1
+                               and planner[0].get('conclusion') in ('failure', 'skipped'))
+                  checks = {'schema': evidence.get('schema') == 1, 'leg': evidence.get('leg') == leg == evidence.get('os'), 'state': evidence.get('state') == state,
+                            'run': evidence.get('github') == {'sha': sha, 'run_id': str(run_id), 'run_attempt': str(attempt)},
+                            'product': evidence.get('product') == {'commit': e['SUBJECT_COMMIT'], 'tree': e['SUBJECT_TREE']},
+                            'base': evidence.get('base') == base and (unplanned or plan.get('base') == base),
+                            'merges': unplanned or ([row.get('pr') for row in merges] == pulls and all(row.get('in_selection') is True for row in merges)),
+                            'reasons': bool(evidence.get('incomplete')) == (state == 'incomplete')}
+                  # Exact exits and typed red counts. A measured leg ends exactly 0 (green) or exactly 1 (red), never merely non-zero, and its red
+                  # lanes are exactly the passes whose own pytest exit is 1. Counts are unknown (None) or counted per phase; in a measured leg they agree with its red lanes.
+                  measured_leg = state in ('green', 'red_measured')
+                  reds = evidence.get('red') if isinstance(evidence.get('red'), list) else None
+                  counts_ok = set(lanes) == {'parallel', 'serial'} and all(counted(row) for row in lanes.values())
+                  # Every leg, measured or not: the lanes it lists as red are exactly the passes whose own observed counts are positive (Node is listed beside them).
+                  counts_ok = (counts_ok and reds is not None and all(isinstance(name, str) for name in reds)
+                               and {name for name in reds if name != 'node'} == {label for label, row in lanes.items() if row['observed']['any_red'] is True})
+                  if counts_ok and measured_leg:
+                      counts_ok = (reds is not None and all(isinstance(name, str) for name in reds) and len(set(reds)) == len(reds)
+                                   and set(reds) <= {'node', 'parallel', 'serial'} and (state == 'red_measured') == bool(reds)
+                                   and ('node' in reds) == (evidence.get('node') == 'failure')
+                                   and all(lanes[label]['observed']['any_red'] is not None and (label in reds) == lanes[label]['observed']['any_red']
+                                           and lanes[label]['observed']['reports']['complete'] is True and lanes[label]['observed']['collectors']['complete'] is True
+                                           and (label in reds) == (lanes[label].get('pytest_exit') == 1) for label in lanes))
+                  checks['exit'] = not measured_leg or (type(run.get('exit')) is int and (run['exit'], run.get('step')) == ((0, 'success') if state == 'green' else (1, 'failure')))
+                  checks['counts'] = counts_ok
+                  bad += ['the evidence does not bind its ' + key for key, ok in checks.items() if not ok]
+              legs[leg] = {'status': 'unproven' if bad else state, 'problems': bad, 'jobs': len(found), 'job': [job.get('status'), job.get('conclusion')],
+                           'marker': mark[0] if mark else None, 'tier': selection.get('tier'), 'modules': selection.get('modules'),
+                           'seconds': run.get('seconds'), 'exit': run.get('exit') if type(run.get('exit')) is int else None,
+                           'red': evidence.get('red'), 'incomplete': evidence.get('incomplete'),
+                           'observed_counts': ({label: row['observed'] for label, row in lanes.items()}
+                                               if counts_ok and not bad else None)}
+          states = [row['status'] for row in legs.values()]
+          status = 'unproven' if 'unproven' in states else 'incomplete' if 'incomplete' in states else 'red_measured' if 'red_measured' in states else 'green'
+          # Measured: both bound leg receipts were complete, whatever the tests did. Green and red_measured are separate facts of a measured run.
+          measured = all(value in ('green', 'red_measured') for value in states)
+          text = json.dumps({'run': run_id, 'attempt': attempt, 'base': base, 'product_tree': e['SUBJECT_TREE'], 'status': status,
+                             'historical_measured': measured, 'historical_green': measured and all(value == 'green' for value in states),
+                             'historical_red_measured': measured and 'red_measured' in states, 'legs': legs,
+                             'scope': 'Real selected runs, read apart from the focused receipt. Each system needs one successful job, one marker and one evidence artifact bound to this run, attempt, tree and base. A deferral never means the Windows full battery passed.'}, indent=2)
+          Path(e['RUNNER_TEMP'], 'historic-receipt.json').write_text(text, encoding='utf-8')
+          with open(e['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## Historical selected run, as GitHub recorded it' + chr(10) * 2 + '```json' + chr(10) + text + chr(10) + '```' + chr(10))
+          print(text)
+          sys.exit(None if status in ('green', 'red_measured') else 'historical status ' + status + ' (' + ', '.join(name + '=' + row['status'] for name, row in legs.items()) + ')')
+      - name: Upload the historical receipt (typed facts only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qualify-historic-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/historic-receipt.json
+          retention-days: 14
+          if-no-files-found: error
