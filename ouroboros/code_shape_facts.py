@@ -17,7 +17,8 @@ binds that module). Counted per file and side:
   its source and the name it binds (``x as x`` is ``x``);
 - in a test source (under a ``tests`` directory): each patch of a name in a product module's
   namespace (``monkeypatch.setattr``/``delattr`` or ``mock.patch`` with a dotted string, or with
-  an object that resolves to such a name, a module or a class, and ``patch.object``), and each
+  an object that resolves to such a name, a module or a class, and ``patch.object``; resolved from
+  the source alone, so a patch through a helper's return value or a parameter is not counted), and each
   call site that runs ``git init``: a command runner (a ``subprocess`` call, ``os.system``, or a
   function the module defines that hands its first parameter to one) given
   ``["git", ..., "init"]`` (as its first argument or ``args=``) or a ``git init`` command string;
