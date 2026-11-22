@@ -1013,9 +1013,12 @@ def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypa
 
 
 def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, monkeypatch):
-    """Audit 08.11 item 1: after the payload changed, the execution refusal and the toggle refusal say the
-    owner's grant belongs to an earlier version of the files; the toggle keeps its one sentence and carries
-    the fact in ``detail``."""
+    """Audit 08.11 item 1: when a grant of earlier files does not cover the current ones, the execution refusal and
+    the toggle refusal say the owner's grant belongs to an earlier version of the files; the toggle keeps its one
+    sentence and carries the fact in ``detail``. Owner 1A (21.11, kept 22.11): after a local edit a permission the
+    host checks at each use waits instead and refuses nothing here; it does not follow while an update is
+    retained."""
+    from ouroboros.skill_install_record import update_backup_path
     from ouroboros.skill_loader import save_skill_grants
 
     skills_root = tmp_path / "skills"
@@ -1039,6 +1042,8 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
     _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
     save_skill_grants(ctx.drive_root, "alpha", [], content_hash="earlier-bytes", requested_keys=[],
                       granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
+    assert "SKILL_EXEC_GRANT_REQUIRED" not in skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+    update_backup_path(ctx.drive_root, "alpha").write_text("{}", encoding="utf-8")  # an update is retained
 
     ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
     assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
