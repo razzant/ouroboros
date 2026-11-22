@@ -186,6 +186,9 @@ class Player:
                     cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart' if i == 0 else 'touchMove',
                                                           'touchPoints': [{'x': x, 'y': y0 - dy * i / 18, 'id': 1}]})
                     self.page.wait_for_timeout(12)
+                # The finger rests before it lifts, so the drag ends where it stops, as the page-event swipe does: a
+                # fling would add a length set by the timing of the moves under load (144-496 px seen), not the gesture.
+                self.page.wait_for_timeout(150)
                 cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
             finally:
                 cdp.detach()
