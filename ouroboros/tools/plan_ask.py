@@ -1,10 +1,8 @@
 """The paid act of ``plan_task``: one ask to the council over the plan record.
 
-Composition (DESIGN §3): the default council is the review pool, which already
-falls back to Main for a valid empty pool; a body plan's first ask outside Cyber Pro
-requires a counted seat and a reason to narrow; a mind-named enabled catalog row outside the pool is a participant whose
-objections are answered but never hold; children the mind schedules are not
-catalog rows and cannot be named. Each participant receives its own host-built
+Composition (DESIGN §3): the council uses the review pool (Main for a valid empty pool). Outside Cyber Pro a
+body plan's first ask needs a counted seat and a reason to narrow. Named enabled non-pool rows advise; their
+objections never hold. Scheduled children are not catalog rows. Each participant receives its own host-built
 delivery (``plan_packet``; what it is told is selected by ``plan_delivery``): the
 stable part, the objective with its author, the owner's verbatim words and room
 snapshot, the plan whole or as the delta since the revision it last answered about
@@ -52,6 +50,7 @@ from ouroboros.tools.plan_review_runtime import (
     plan_payload_roots,
     plan_review_slots,
     plan_row_typed_facts,
+    plan_wave_budget_gate,
     run_plan_review_slots,
     slot_is_session,
     slot_retrieves,
@@ -391,7 +390,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     from ouroboros import body_candidate
     from ouroboros.owner_words import objective_author_text
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_slot_inputs, render_dialogue, session_input_limits
-    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
+    from ouroboros.tools.review_helpers import review_wave_binding_fence
 
     system_root, active_root = planning_roots(ctx)
     body = (bool(revision.get("body")) if revision is not None
@@ -474,16 +473,15 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
                              + "; ".join(f"{sid}: {why}" for sid, why in not_sendable.items()) + ". Nobody was called.",
                              attempt={"kind": "no_route", "ask": copy.deepcopy(ask), "participants": [p.seat_id for p in participants],
                                       "not_sendable": dict(not_sendable)})
-    admission = review_wave_budget_gate(
-        ctx, surface="plan_review", models=[str(s.model) for s in callable_slots],
-        prompt_chars=[int(merged["slot_prompt_chars"].get(str(s.slot_id), len(system_prompt))) for s in callable_slots],
-        max_completion_tokens=PLAN_REVIEW_MAX_TOKENS)
+    admission = plan_wave_budget_gate(ctx, callable_slots, merged["slot_prompt_chars"], len(system_prompt))
     if admission is not None:
         fence, remedy = review_wave_binding_fence(admission)
+        estimate = admission.get("estimated_wave_usd")
         raise PlanAskRefused("CAPABILITY_UNAVAILABLE",
                              f"ERROR: PLAN_ASK_SKIPPED_BUDGET: the ask was declined before dispatch — known spend has reached "
-                             f"the {fence} (remaining ${admission.get('remaining_usd')}; the ask was estimated at "
-                             f"~${admission.get('estimated_wave_usd')}). To continue, {remedy}. Nothing was written.")
+                             f"the {fence} (remaining ${admission.get('remaining_usd')}"
+                             + (f"; estimated API cost ~${estimate}" if estimate is not None else "")
+                             + f"). To continue, {remedy}. Nothing was written.")
     return PreparedAsk(
         ask_id=ask_id, retry_key=retry_key, participants=participants, callable=callable_slots, not_sendable=not_sendable,
         system_prompt=system_prompt, session_prompt=session_prompt, contents=contents, session_tasks=session_tasks,

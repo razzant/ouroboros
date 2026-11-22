@@ -165,7 +165,9 @@ test('nested wait keeps the host cause as text and clears it only on a recovery 
     assert.equal(card.projectHoldDetail, unconfirmed.detail);
     setHistoricalUnavailable(card, false, {});
     assert.equal(card.projectHoldDetail, '');
-    assert.equal(desiredLiveCardPhase(card).text, 'Working');
+    assert.equal(desiredLiveCardPhase(card).text, 'Activity unconfirmed', 'releasing a hold does not show the child working');
+    syncParkedPhase(card, 'working');
+    assert.equal(desiredLiveCardPhase(card).text, 'Working', 'a positive observation of this child shows it working');
 });
 
 test('held children never vote on the room: the server room speaks whatever the cards hold', () => {
@@ -237,11 +239,17 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         assert.equal(markOf(child.querySelector('[data-live-phase]')), 'still/ink');
         queue.pending[0].task.project_admission_hold = {};
         snapshot(); await settle();
-        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Queued');
+        assert.equal(child.querySelector('[data-live-phase]').textContent, 'Activity unconfirmed');
         assert.deepEqual([markOf(child.querySelector('[data-live-phase]')),
-            child.querySelector('[data-live-phase]').dataset.chipTone], ['still/ink', 'neutral']);
+            child.querySelector('[data-live-phase]').dataset.chipTone], ['ring/ink', 'neutral']);
         queue.pending[0].task.project_admission_hold = hold;
         snapshot(); await settle();
+        const heldRow = queue.pending[0];
+        queue.pending = [{ id: 'child' }];
+        snapshot(); await settle();
+        assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label);
+        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 0);
+        queue.pending = [heldRow];
         frame('working-sibling');
         assert.equal(status(), 'Waiting', 'a card the projection does not list never sets the header');
         handlers.get('log')({ chat_id: 7, data: { type: 'task_done', task_id: 'working-sibling', status: 'cancelled' } });

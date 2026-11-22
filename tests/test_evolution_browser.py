@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._queue_state import assignment_with_an_evolution_row, gateway, read_state  # noqa: F401
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -82,6 +83,43 @@ def open_evolution(ui, answer, *, width=1100, height=750, scheme="dark", state=S
     page.locator('[data-dashboard-tab="evolution"]').click()
     page.locator("#evo-campaign-chip").wait_for(state="visible")
     return page
+
+
+def test_parked_cycle_shows_budget_until_its_explicit_resume(subscription_ui, gateway, monkeypatch):  # noqa: F811
+    from playwright.sync_api import expect
+
+    from supervisor import state
+    from tests.worker_pool_support import fixed_pool
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.2")
+    fixed_pool(monkeypatch)
+    state.save_state({"owner_chat_id": 1, "evolution_mode_enabled": True})
+    workers, pending, _ = assignment_with_an_evolution_row(gateway.root, monkeypatch, settle_at=5.0)
+    pending[0]["admitted_dispatch"] = "none"
+    workers.assign_tasks()
+    assert pending[0]["_budget_pause"]["status"] == "paused_before_dispatch"
+
+    stopped = read_state(gateway)["evolution_state"]
+    assert (stopped["queued_task_id"], stopped["status"], stopped["budget_remaining_usd"]) == (
+        "evo-1", "budget_stopped", 0.0)
+    state.set_budget_limit(20.0)
+    workers.assign_tasks()
+    replenished = read_state(gateway)
+    evolution = replenished["evolution_state"]
+    assert (evolution["queued_task_id"], evolution["status"], evolution["budget_remaining_usd"]) == (
+        "evo-1", "budget_stopped", 15.0)
+    page = open_evolution(subscription_ui, history(), state=replenished)
+    chip = page.locator("#evo-campaign-chip")
+    expect(chip).to_have_text("Budget")
+    expect(chip).to_have_attribute("data-tone", "warn")
+    note = page.locator("#evo-campaign-note")
+    expect(note).to_contain_text("spending limit")
+    expect(note).to_contain_text("Resume the task in Activity")
+
+    answer = gateway.client.post("/api/tasks/evo-1/resume")
+    assert answer.status_code == 200 and answer.json()["ok"], answer.text
+    ready = read_state(gateway)["evolution_state"]
+    assert (ready["queued_task_id"], ready["status"]) == ("evo-1", "queued")
 
 
 def overflow(page):

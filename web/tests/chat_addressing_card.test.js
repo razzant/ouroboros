@@ -134,6 +134,123 @@ for (const [room, chatId, destination, visible] of [
     });
 }
 
+test('routing receipts address one physical owner row even when Main shows two equal client ids', async () => {
+    const foreign = { ...ownerRow, chat_id: 8, row_address: 'row:8@a#114477aa' };
+    const local = { ...ownerRow, chat_id: 1, row_address: 'row:1@b#225588bb' };
+    const f = fixture([{ ...foreign, chat_annotation: annotation }, { ...local, chat_annotation: null }]);
+    try {
+        f.emit('chat', foreign);
+        f.emit('chat', local);
+        const [first, second] = f.messages.children.filter(node => node.dataset.clientMessageId === 'owner-message');
+        assert.ok(first && second);
+        f.emit('message_annotation', { ...annotation, chat_id: undefined });
+        assert.ok(second.querySelector('.msg-routing-annotation'));
+        assert.equal(first.querySelector('.msg-routing-annotation'), null);
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.ok(first.querySelector('.msg-routing-annotation'));
+        assert.equal(second.querySelector('.msg-routing-annotation'), null);
+    } finally { f.close(); }
+});
+
+test('a routing receipt for one of two equal client ids in a room paints its exact row live and on reload', async () => {
+    const rows = ['aaaabbbb1111', 'aaaabbbb2222'].map((hash, index) => ({
+        ...ownerRow, role: 'user', text: 'Count the seeds', chat_id: 1, ts: TS,
+        history_id: 'chat:' + index, row_address: 'row:1@' + TS + '#' + hash,
+    }));
+    const receipt = { ...annotation, chat_id: 1, source_row_address: rows[1].row_address };
+    const f = fixture(rows);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const marks = () => rows.map(row => Boolean(f.messages.children.find(node =>
+            node.dataset.rowAddress === row.row_address).querySelector('.msg-routing-annotation')));
+        f.emit('message_annotation', { ...receipt, source_row_address: undefined });
+        assert.deepEqual(marks(), [false, false]);
+        f.emit('message_annotation', receipt);
+        assert.deepEqual(marks(), [false, true]);
+        rows[1].chat_annotation = receipt;
+        await f.instance.refreshHistory({ revision: 2 });
+        assert.deepEqual(marks(), [false, true]);
+    } finally { f.close(); }
+});
+
+test('a relay read requires the seed row address even with only one matching bubble on screen', async () => {
+    const row = { ...ownerRow, client_message_id: 'garden', role: 'user', text: 'Count the peas', chat_id: 1,
+        history_id: 'chat:1', row_address: 'row:1@' + TS + '#aabbcc112233' };
+    const receipt = { ...annotation, client_message_id: 'garden', chat_id: 1, action: 'steer_task', status: 'read' };
+    const f = fixture([row]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const bubble = f.messages.children.find(node => node.dataset.rowAddress === row.row_address);
+        for (const address of [undefined, 'row:1@' + TS + '#aabbcc445566']) {
+            f.emit('message_annotation', { ...receipt, source_row_address: address });
+            assert.equal(bubble.querySelector('.msg-routing-annotation'), null);
+        }
+        f.emit('message_annotation', { ...receipt, source_row_address: row.row_address });
+        assert.ok(bubble.querySelector('.msg-routing-annotation'));
+    } finally { f.close(); }
+});
+
+test('a receipt the host placed on no row wears no mounted bubble; an older frame naming no address keeps its client-id reading', async () => {
+    const row = { ...ownerRow, client_message_id: 'seeds', role: 'user', text: 'Count the seeds', chat_id: 1,
+        history_id: 'chat:1', row_address: 'row:1@' + TS + '#aabbcc112233' };
+    const receipt = { ...annotation, client_message_id: 'seeds', chat_id: 1 };
+    const f = fixture([row]);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const bubble = f.messages.children.find(node => node.dataset.rowAddress === row.row_address);
+        const note = () => bubble.querySelector('.msg-routing-annotation');
+        f.emit('message_annotation', { ...receipt, source_row_address: '' });
+        assert.equal(note(), null, 'an empty address is the host\'s "no row wears this", never a missing one');
+        f.emit('message_annotation', { ...receipt, source_row_address: undefined });
+        assert.ok(note(), 'an older frame that names no address is still read by its client id in its own room');
+    } finally { f.close(); }
+});
+
+test('an open Project paints another room\'s receipt only on the bubble the host showed as exactly that message', async () => {
+    // This Project shows a Main message (a work's origin) by its physical address, one of its own with the same client
+    // id, the retained copy of another Main message that names its original's room and address, and an older copy that
+    // names none. Another room's receipt wears a bubble only through the address the host stated.
+    const origin = { role: 'user', text: 'Keep the old feed address', client_message_id: 'shared-id', ts: TS,
+        row_address: 'row:1@then#origin' };
+    const neighbour = { ...origin, text: 'Words written in this room', row_address: 'row:42@later#neighbour' };
+    const copy = { role: 'user', text: 'Retained words', client_message_id: 'copy-id', ts: TS,
+        origin_projected: true, origin_id: 'named-origin', chat_id: 1, source_row_address: 'row:1@then#copy' };
+    const older = { role: 'user', text: 'Older retained words', client_message_id: 'older-copy-id', ts: TS,
+        origin_projected: true, origin_id: 'unnamed-origin' };
+    const f = fixture([origin, neighbour, copy, older], 42);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const bubbles = () => f.messages.children.filter((node) => node.classList?.contains('chat-bubble'));
+        const find = (pred) => bubbles().find(pred);
+        const shown = find((node) => node.dataset.rowAddress === origin.row_address);
+        const own = find((node) => node.dataset.rowAddress === neighbour.row_address);
+        const named = find((node) => node.dataset.originId === 'named-origin');
+        const unnamed = find((node) => node.dataset.originId === 'unnamed-origin');
+        assert.ok(shown && own && named && unnamed);
+        const before = bubbles().length;
+        const note = (node) => node.querySelector('.msg-routing-annotation');
+        f.emit('message_annotation', { ...annotation, client_message_id: 'shared-id', chat_id: undefined });
+        assert.equal(note(shown), null, 'an older frame naming no room is no other room\'s, and not Main\'s by default');
+        for (const address of [undefined, '']) {
+            f.emit('message_annotation', { ...annotation, client_message_id: 'shared-id', chat_id: 1, source_row_address: address });
+            assert.equal(note(shown), null, 'a mounted client id is no placement: another room\'s receipt needs the host\'s exact address');
+        }
+        f.emit('message_annotation', { ...annotation, client_message_id: 'shared-id', chat_id: 1, source_row_address: origin.row_address });
+        assert.ok(note(shown), 'the Main message this Project shows reads its receipt live');
+        assert.equal(note(own), null, 'this room\'s bubble with the same client id is another message');
+        f.emit('message_annotation', { ...annotation, client_message_id: 'copy-id', chat_id: 1 });
+        assert.equal(note(named), null, 'a retained copy needs its exact address too');
+        f.emit('message_annotation', { ...annotation, client_message_id: 'copy-id', chat_id: 1, source_row_address: 'row:1@then#other' });
+        assert.equal(note(named), null, 'another row\'s address is not this copy\'s');
+        f.emit('message_annotation', { ...annotation, client_message_id: 'copy-id', chat_id: 1, source_row_address: copy.source_row_address });
+        assert.ok(note(named), 'a copy naming its original\'s room and address is that message here');
+        for (const room of [1, 42]) f.emit('message_annotation', { ...annotation, client_message_id: 'older-copy-id', chat_id: room });
+        assert.equal(note(unnamed), null, 'a copy whose room the host never named gains nothing, here or from its room');
+        f.emit('message_annotation', { ...annotation, client_message_id: 'never-shown', chat_id: 1 });
+        assert.equal(bubbles().length, before, 'another room\'s receipt makes no bubble');
+    } finally { f.close(); }
+});
+
 for (const tool of VERBS) {
     test(`${tool} alone is a receipt: no block live, the annotation on the owner message, the answer intact`, () => {
         const f = fixture();
@@ -272,6 +389,23 @@ test('a window without the summary row keeps the annotation and the answer and m
         await f.instance.refreshHistory({ revision: 2 });
         assert.equal(Boolean(f.card()), false);
         assert.equal(f.messages.children.filter((node) => node.dataset.clientMessageId === 'owner-message').length, 1);
+    } finally { f.close(); }
+});
+
+// A pruned result's frozen ending rides every row of its task (gateway/history: `_history_result_absent`), the
+// answer bubble included: it settles a card other rows made and makes none of its own.
+test('an answer carrying its task\'s frozen ending still mints no block in an addressing-only window', async () => {
+    const frozen = { status: 'completed', phase: 'done', ts: TS, provenance: 'canonical_task_result_after_finalization' };
+    const history = [{ ...ownerRow, chat_annotation: annotation },
+        { ...final, ts: TS, chat_id: 1, historical_terminal: frozen }];
+    const f = fixture(history);
+    try {
+        for (const revision of [1, 2]) {
+            await f.instance.refreshHistory({ revision });
+            assert.equal(Boolean(f.card()), false, `revision ${revision}: no block from the answer alone`);
+            assert.ok(f.answerVisible());
+            assert.ok(f.owner()?.querySelector('.msg-routing-annotation'));
+        }
     } finally { f.close(); }
 });
 

@@ -37,7 +37,7 @@ def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch)
 
 def test_send_path_never_invokes_readback(tmp_path, monkeypatch):
     from ouroboros import model_send_seal
-    from tests.test_model_send_seal import _dispatch
+    from tests._context_reports import _dispatch
     monkeypatch.setattr(model_send_seal, "verify_sealed_candidate", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("send readback")))
     assert _dispatch(tmp_path, "task")["state"] == "settled"
 
@@ -45,7 +45,7 @@ def test_send_path_never_invokes_readback(tmp_path, monkeypatch):
 def test_system_scope_seals_are_readable_and_not_false_unlogged(tmp_path, monkeypatch):
     from ouroboros import model_send_seal, observability
     from ouroboros.usage_accounting import UsageScope
-    from tests import test_model_send_seal as fixture
+    from tests import _context_reports as fixture
     # System calls carry the production non-task scope, outside task Pause fences.
     monkeypatch.setattr(fixture, "_scope", lambda root, task_id: UsageScope(
         drive_root=root, task_id=task_id, root_task_id=task_id, non_task_operation=True,

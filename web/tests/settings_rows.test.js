@@ -261,13 +261,13 @@ test('the model concurrency row refuses a fraction and accepts zero, negative an
         assert.deepEqual(server.posts.at(-1), { [row.id]: value });
         assert.match(view.line(row), /^Saved/);
     }
-    // Not set is a value of this row (no limit for API models, 3 for a local one): a blank is sent, never refused,
+    // Not set is a value of this row (no limit for API models, 1 for the built-in server): a blank is sent, never refused,
     // and the field says so where it is empty. Money beside it still refuses a blank.
     await view.type(row, '');
     assert.deepEqual(server.posts.at(-1), { [row.id]: '' });
     assert.match(view.line(row), /^Saved.*was 7/);
     assert.equal(view.field(row).getAttribute('placeholder'), 'Not set');
-    assert.match(view.meta(row), /Not set: no limit for API models, 3 for the built-in local model\. 0 or less: no limit for either\./);
+    assert.match(view.meta(row), /Not set: no limit for API models, 1 for the built-in local model\. 0 or less: no limit for either\./);
     // Room for its own word goes to this row alone: a row with a "No limit" button keeps its fixed width.
     assert.match(settingsRow(row, {}), / size="8"/);
     assert.doesNotMatch(settingsRow(rowById('OUROBOROS_MAX_WORKERS'), {}), / size="/);

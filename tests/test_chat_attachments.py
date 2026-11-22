@@ -545,6 +545,8 @@ def test_transport_inline_photo_is_parked_once_and_still_reaches_vision(tmp_path
     assert frame["type"] == "chat" and frame["image_base64"] == "" and frame["attachments"][0]["kind"] == "image"
     (row,) = _rows(tmp_path)
     assert row["attachments"][0]["upload"] == ref["upload"]
+    assert (row["text"], row.get("text_placeholder"), frame.get("text_placeholder")) == ("кадр", None, None), \
+        "a sender's caption is the sender's words, unlike the web gateway's own label"
     assert _history(tmp_path, 42)[0]["attachments"] == frame["attachments"]
 
 

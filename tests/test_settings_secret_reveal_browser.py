@@ -166,7 +166,13 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             mcp.locator('[data-mcp-field="name"]').fill("Reveal proof")
             assert "Saved" in press_editor_save(page)
             assert saves[-1]["MCP_SERVERS"][0]["auth_token"] == MCP[:8] + "..."
+            # The server's page stands in Extensions; leaving Extensions puts its revealed credential away, as leaving
+            # Settings does for Settings' own pages (extensions.js setBeforePageLeave).
+            if not mcp.locator(".settings-secret-value").is_visible():
+                mcp.locator("[data-mcp-header-toggle]").click()
+            expect(mcp.locator(".settings-secret-value")).to_have_text(MCP)
             open_settings(page, "accounts")
+            assert MCP not in page.locator("#page-skills").evaluate("el => el.textContent"), "a hidden Extensions keeps no revealed secret"
             assert "Saved" in commit_row(page, "GITHUB_REPO", "owner/reveal-proof")
             assert saves[-1] == {"GITHUB_REPO": "owner/reveal-proof"}
             assert all(value not in json.dumps(saves) for value in (ANTHROPIC, CUSTOM, OWN, MCP, ADDED))

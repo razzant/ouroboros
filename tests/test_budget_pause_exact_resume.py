@@ -252,6 +252,28 @@ def test_resume_refuses_while_money_is_still_exhausted(tmp_path, monkeypatch):
     assert "_budget_pause" in workers.PENDING[0] and "_budget_pause_resume" not in workers.PENDING[0]
 
 
+def test_global_checkpoint_requires_tree_budget_before_accepting_a_lost_start(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.task_store import patch_document
+    from tests._owner_pause_ended_helpers import _pending, _resume
+
+    _, state, _ = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 5.0)
+    task, _ = _parked(tmp_path, monkeypatch, task_id="global-root", scope="global")
+    tid = task["id"]
+    _pending(tmp_path, tid, "lost", tree=tid)
+    choice, = _resume("mind", selected=tid)["acceptable_unknown"]
+    patch_document(tmp_path, tid, lambda r: {**r, "billing_group": {
+        "billing_group_id": tid, "billing_group_limit_usd": 0.0}})
+    refusal = _resume("mind", [choice], selected=tid)
+    assert refusal["error"] == "root_hard_cap_exhausted"
+    assert not custody.invocation_record(tmp_path, "lost").get("resume_decisions")
+    assert "_budget_pause_resume" not in task
+    patch_document(tmp_path, tid, lambda r: {**r, "billing_group": {
+        "billing_group_id": tid, "billing_group_limit_usd": None}})
+    assert _resume("mind", [choice], selected=tid)["ok"]
+
+
 def test_resume_refuses_cancel_intent_and_paused_root(tmp_path, monkeypatch):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
@@ -993,3 +1015,33 @@ def test_unplanned_stop_restore_keeps_a_paused_child_of_a_fenced_root_and_marks_
     rows = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()]
     restored = [row for row in rows if row["type"] == "queue_restored_from_snapshot"][-1]
     assert restored["pending_parent_interrupted"] == ["child-fresh"]
+
+
+def test_exact_resume_observes_a_known_sleep_and_decides_on_the_same_facts(tmp_path, monkeypatch):
+    """Every saved reason is observed at Resume, a known sleep included. Whether the observation also
+    asks unconfirmed runs to stop (``request_stop``) changes none of the facts the grant decides on:
+    the fence it was read under, the money refusal of an ordinary start and the start's own row."""
+    from ouroboros import budget_pause, owner_pause
+    from supervisor import budget_resume, continuation_admission
+
+    start = {"run_id": "", "state": "requested", "stop_outcome": "pending_invocation_unbound",
+             "ordinary_start": {"choice_id": "delegate_start:root/child/inv"}}
+    observed = []
+
+    def observe(root, task_id, **kwargs):
+        observed.append((task_id, kwargs.pop("request_stop")))
+        return {"custody_read": "ok", "runs": [dict(start)]}
+
+    monkeypatch.setattr(budget_pause, "observe_task_runs", observe)
+    monkeypatch.setattr(owner_pause, "read_fence", lambda *_a, **_kw: {})
+    monkeypatch.setattr(continuation_admission, "action_writers", lambda *_a, **_kw: [])
+    monkeypatch.setattr(budget_resume, "_root_money_refusal", lambda *_a: {"ok": False, "error": "root_budget"})
+    facts = {}
+    for reason in ("budget", "sleep"):
+        task = {"id": "child", "root_task_id": "root", "_budget_pause": {"reason": reason}}
+        facts[reason], refusal = budget_resume.observe_exact_resume(None, task, "child", tmp_path, gaps=[])
+        assert refusal is None
+    assert [task_id for task_id, _stop in observed] == ["child", "child"], "a known sleep is still observed"
+    assert facts["sleep"] == facts["budget"] == {
+        "custody_read": "ok", "runs": [start], "resume_fence_id": "",
+        "start_money_refusal": {"ok": False, "error": "root_budget"}}

@@ -148,7 +148,8 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             # A page with a value being typed: leaving asks nothing, and the same page with the same field comes back.
             page.locator('#page-settings [data-settings-open="computer"]').scroll_into_view_if_needed()
             assert page.evaluate("() => window.__ouroSettings.open('skill-sources')") is not False
-            level = page.locator('#page-settings [data-settings-page="skill-sources"]')
+            # Skill sources is a page of Extensions (its old Settings address leads there).
+            level = page.locator('#page-skills [data-settings-page="skill-sources"]')
             field = level.locator("#setting-OUROBOROS_CLAWHUB_REGISTRY_URL")
             expect(field).to_be_visible()
             stored = field.input_value()
@@ -157,7 +158,7 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             _nav(page, "dashboard")
             assert page.get_by_role("button", name="Stay", exact=True).count() == 0, "leaving asks nothing"
             _nav(page, "chat")
-            _nav(page, "settings")
+            _nav(page, "skills")
             expect(level).to_be_visible()
             expect(field).to_have_value("https://clawhub.ai/api/kept-while-away")
             assert field.evaluate("input => input === window.__typedNode"), "the same field"

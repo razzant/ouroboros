@@ -478,7 +478,8 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
         if reason not in ACCEPTABLE_UNKNOWN:
             refused.append({"id": op, "task_id": task_id, "reason": reason or "unreadable"})
         return reason in ACCEPTABLE_UNKNOWN
-    for holder in sorted({str(task_id) for task_id in members if task_id}):
+    members = {str(task_id) for task_id in members if task_id}
+    for holder in sorted(members):
         try:  # the reasons are probed before the write: no process probe holds the store
             record = load_task_result(pathlib.Path(root), holder, strict=True) or {}
         except Exception:
@@ -521,7 +522,7 @@ def accept_unknown_custody(root: Any, members: Iterable[str], ids: Iterable[str]
                                for receipt_id in sorted(receipts))
     try:
         attempts = [row for row in tree_model_requests(pathlib.Path(root), root_task_id)  # the census's own read
-                    if str(row.get("attempt_id") or "") in wanted]
+                    if str(row.get("task_id") or "") in members and str(row.get("attempt_id") or "") in wanted]
     except Exception:  # what already landed is still reported; the receivers stay held
         log.warning("Open model requests of %s unreadable; named receivers stay held", root_task_id, exc_info=True)
         attempts = []

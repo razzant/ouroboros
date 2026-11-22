@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.shell_parse import canonical_command_text
-from ouroboros.utils import truncate_review_artifact
+from ouroboros.utils import json_dumps_utf8, truncate_review_artifact
 
 # How many observed paths one reviewer projection carries inline. The bound stays;
 # what may never happen is bounding SILENTLY — `receipt_identity_projection` always
@@ -297,8 +297,10 @@ class ReceiptIdentity:
         hash. JSON rather than ``paths_text``: a path may legally contain a newline,
         and a line-joined rendering would hash ``["a\\nb"]`` and ``["a", "b"]``
         identically — a hash that cannot separate two different sets is not an
-        identity."""
-        return json.dumps(list(self.paths), ensure_ascii=False) if self.paths else ""
+        identity. Escape POSIX byte names in the JSON so the same source is safe to
+        hash as UTF-8. The wire bytes of Unicode path sets are unchanged, and a
+        literal backslash in a path remains distinct from an escaped byte."""
+        return json_dumps_utf8(list(self.paths), ensure_ascii=False) if self.paths else ""
 
 
 # THE closed set of reconciliation identity KINDS, in precedence order (most specific
@@ -680,6 +682,9 @@ def verification_receipt_ledger_row(receipt: Dict[str, Any]) -> Dict[str, Any]:
         **({"duration_ms": receipt.get("duration_ms")} if receipt.get("duration_ms") is not None else {}),
         **({"signal": str(receipt.get("signal") or "")} if receipt.get("signal") else {}),
         **({"resolved_runtime": truncate_review_artifact(receipt.get("resolved_runtime"), limit=300)} if receipt.get("resolved_runtime") else {}),
+        # `memory_oom`: the kernel's OOM counts for the check's memory group (typed booleans/integers from
+        # `command_memory.outcome`), carried as recorded; absent = nothing happened or no memory group.
+        **({"memory_oom": receipt.get("memory_oom")} if isinstance(receipt.get("memory_oom"), dict) else {}),
         "summary": truncate_review_artifact(receipt.get("summary"), limit=300),
         # C: after-only artifact-lifecycle flag (a check that built then deleted a
         # declared deliverable). Bounded through the SHARED disclosed-list projection —

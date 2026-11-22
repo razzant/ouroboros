@@ -300,9 +300,11 @@ def presence_finish_not_accepted_note(ctx: Any, completion: Mapping[str, Any]) -
                                    metadata.get("presence") if isinstance(metadata, Mapping) else None)
     except Exception:
         sent = "unknown (receipts unreadable)"
-    if reply_carrier(metadata or {}):
+    door = "presence_finish" if getattr(ctx, "_schedule_door", None) else ""  # an older schedule's run: a record
+    if door or reply_carrier(metadata or {}):
         return ("[FINISH_NOT_ACCEPTED] The completion has not passed finalization. "
-                f"Confirmed sends so far: {sent}. Finish again with finish_task when ready; silence is valid.")
+                f"Confirmed sends so far: {sent}. Finish again with {door or 'finish_task'} when ready; "
+                + ("its report stays this run's record and nothing is sent." if door else "silence is valid."))
     return (
         f"[PRESENCE_FINISH_NOT_ACCEPTED]\npresence_finish({completion.get('outcome')}) was not accepted: "
         "finalization asked for the work above first, so it no longer decides what the conversation "

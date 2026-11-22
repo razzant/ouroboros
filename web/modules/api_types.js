@@ -269,6 +269,7 @@
  * @property {boolean=} ingress_pending This live host process accepted the row and has entered or refused neither yet: a later echo or history read says which.
  * @property {Array<NonNullable<UploadResponse['view']>>=} attachments The owner message's ChatAttachmentView list: the same views history replays.
  * @property {boolean=} text_placeholder The owner row's text is the host's placeholder (no words were sent): no caption is shown.
+ * @property {boolean=} reply_excerpt_disabled The displayed card input is not one authored passage.
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id
@@ -300,7 +301,7 @@
  * @property {string=} subagent_role
  * @property {boolean=} accepted
  * @property {number=} active_subagent_count
- * @property {number=} max_active_subagents
+ * @property {number=} max_active_subagents  // the owner's number per root; absent: no number
  * @property {boolean=} queued_behind_active_cap
  * @property {string[]=} required_capabilities
  * @property {string=} write_surface
@@ -430,46 +431,29 @@
  * @property {string[]=} delegated_runs_unreconciled The row's current custody debt beside its cause (#1583).
  * @property {Object=} review_status
  * @property {Object=} review_projection
- *   Ledger additions: gaps[] ({record_id, review_gap}) names unavailable records;
- *   review_records_omitted is 0|"1+"|"unknown" (archive uncertainty alone proves no review).
- *   panels[] retains subject, goal, revision, review_wave_id and record_state.
- *   actors[] separates requested_model from observed_model (empty means unobserved),
- *   keeps failure_details as an object, and names current sources[] by
- *   {role, part, status, sha256, size, chars}. Pending/displaced sources remain
- *   historical in the record; existing exact selections remain readable.
- *   panels[].wave_failures (absent when none) is a wave Ouroboros itself stopped:
- *   [{block_reason, reported_cause (masked, bounded), source}], source naming the
- *   panel's failure note by {seat_id: "panel", role, part, status, sha256, size, chars}.
- *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
- *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
- *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").
- *   Additive bounded-findings keys: actors[].findings (disclosed rows
- *   {id?, severity?, verdict?, item?, summary?, evidence?, reason?,
- *   recommendation?} — redacted, each string
- *   bounded with an explicit omission marker, at most 8 rows per actor) and
- *   actors[].findings_omitted (exact count, 0 included). Both are emitted only
- *   when that reviewer produced a parsed response; their absence is a
- *   transport/parse hole, never "zero findings". panels[].late_settlement
- *   ({note, settled_after_terminal, settled_at, reviewed_subject, reviewed_superseded,
- *   reviewed_revision: "delivered"|"different"|"unknown", reviewed_is_emitted: true|false|null,
- *   reviewer_outputs, emitted_answer}) binds original critique and subject to emitted bytes.
- *   reviewer_outputs[].response_ref and emitted receipts' source_ref retain full sources;
- *   emitted_answer.state is "delivered"|"owed"|"unknown", with delivered receipts,
- *   unverified ids and owed ids. Receipt basis "send_handler_returned" proves producer
- *   return, not human receipt. The Reviews group prints the note verbatim. `acceptance_incident`
- *   ({incident_id, status: "failed"|"resolved", stage, attempts, source_known,
- *   feedback_delivered, failure_kind?, failure_detail?, retry?, prior_incidents?})
- *   is the host's own LOCAL acceptance-preparation failure — published even when
- *   there is no panel at all, keyed by its stable incident id, with the REAL host
- *   attempt count; absent when no preparation ever failed. The Reviews group is
- *   its only carrier (no card row, no toast); a `resolved` status clears the
- *   active warning and keeps the row as history. A ledger panel's `commit_landings`
- *   ({commit_sha, tree_sha, parent_sha, author_subject, author_disposition, author_reason, recorded_at,
- *   reviewed_subject: "same"|"different"|"unknown"}, oldest first) names each commit that landed under that
- *   record, whether its tree is the one the record reviewed, and the author decision that governed it (its
- *   subject_hash, disposition and reason, as written when it landed), "" for none; the panel keeps the newest
- *   16 and `commit_landings_omitted` counts the older ones its record (`source_ref`) keeps. Absent means no
- *   landing was recorded, never that nothing landed or nobody reviewed.
+ *   Ledger additions: gaps[] ({record_id, review_gap}) names unavailable records; review_records_omitted is 0|"1+"|"unknown" (archive uncertainty alone
+ *   proves no review). panels[] retains subject, goal, revision, review_wave_id and record_state. actors[] separates requested_model from observed_model
+ *   (empty means unobserved), keeps failure_details as an object, and names current sources[] by {role, part, status, sha256, size, chars}.
+ *   Pending/displaced sources remain historical in the record; existing exact selections remain readable. panels[].wave_failures (absent when none) is a
+ *   wave Ouroboros itself stopped: [{block_reason, reported_cause (masked, bounded), source}], source naming the panel's failure note by {seat_id: "panel",
+ *   role, part, status, sha256, size, chars}. v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored dialogue-status reduction),
+ *   panels[].single_reviewer_no_diversity (boolean label), and actors[].dialogue_status
+ *   ("continue_actionable"|"unreachable_here"|"stable_disagreement"|""). Additive bounded-findings keys: actors[].findings (disclosed rows {id?, severity?,
+ *   verdict?, item?, summary?, evidence?, reason?, recommendation?} — redacted, each string bounded with an explicit omission marker, at most 8 rows per
+ *   actor) and actors[].findings_omitted (exact count, 0 included). Both are emitted only when that reviewer produced a parsed response; their absence is a
+ *   transport/parse hole, never "zero findings". panels[].late_settlement ({note, settled_after_terminal, settled_at, reviewed_subject,
+ *   reviewed_superseded, reviewed_revision: "delivered"|"different"|"unknown", reviewed_is_emitted: true|false|null, reviewer_outputs, emitted_answer})
+ *   binds original critique and subject to emitted bytes. reviewer_outputs[].response_ref and emitted receipts' source_ref retain full sources;
+ *   emitted_answer.state is "delivered"|"owed"|"unknown", with delivered receipts, unverified ids and owed ids. Receipt basis "send_handler_returned"
+ *   proves producer return, not human receipt. The Reviews group prints the note verbatim. `acceptance_incident` ({incident_id, status:
+ *   "failed"|"resolved", stage, attempts, source_known, feedback_delivered, failure_kind?, failure_detail?, retry?, prior_incidents?}) is the host's own
+ *   LOCAL acceptance-preparation failure — published even when there is no panel at all, keyed by its stable incident id, with the REAL host attempt count;
+ *   absent when no preparation ever failed. The Reviews group is its only carrier (no card row, no toast); a `resolved` status clears the active warning
+ *   and keeps the row as history. A ledger panel's `commit_landings` ({commit_sha, tree_sha, parent_sha, author_subject, author_disposition, author_reason,
+ *   recorded_at, reviewed_subject: "same"|"different"|"unknown"}, oldest first) names each commit that landed under that record, whether its tree is the
+ *   one the record reviewed, and the author decision that governed it (its subject_hash, disposition and reason, as written when it landed), "" for none;
+ *   the panel keeps the newest 16 and `commit_landings_omitted` counts the older ones its record (`source_ref`) keeps. Absent means no landing was
+ *   recorded, never that nothing landed or nobody reviewed.
  * @property {Object[]=} body_adoptions The task's settled adoptions (TaskDetailResponse), on its summary rows.
  * @property {Object=} review_overrides The work's review-gate field (TaskDetailResponse), on its summary rows.
  * @property {boolean=} worker_saturation_warning
@@ -505,10 +489,11 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name (a relay's); client_message_id here names the owner's submission
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
- * @property {string=} kind
+ * @property {string=} kind On an accepted web user echo, "room_echo" limits display to chat_id and also_rooms.
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
  * @property {number[]=} also_rooms  // the other Projects that show this row: the frame is theirs too, one message
  */
@@ -543,6 +528,7 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -569,6 +555,7 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -591,6 +578,7 @@
  * @property {Object=} transport
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -626,6 +614,7 @@
  * @property {string} ts
  * @property {number=} answered_index
  * @property {string=} comment
+ * @property {string=} answer_row_address  // replay: the answer row its card shows (DESIGN "Replies"); never quiz_state
  * @property {string=} host_facts
  * @property {number=} chat_id
  * @property {string=} task_id
@@ -633,6 +622,7 @@
  * @property {Object=} transport
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -659,10 +649,8 @@
  * @property {string} state
  * @property {string} ts
  * @property {number=} answered_index
- * @property {string=} comment
- *   The owner's recorded free-text answer, when one was recorded.
- * @property {boolean=} wait_for_answer
- *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
+ * @property {string=} comment  The owner's recorded free-text answer, when one was recorded.
+ * @property {boolean=} wait_for_answer  False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
  * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
  */
@@ -693,6 +681,7 @@
  * @property {boolean=} project_thread  // server-stamped: chat_id is a reserved Project thread; Main never adopts it even before projectChatIds learns the project
  * @property {string=} row_address
  * @property {string=} row_client_message_id  // the saved row's own name, when it has one
+ * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {import('./client_contract_types.js').ChatReplyReference=} reply_to
  * @property {Object=} relay
  * @property {string=} reply_to_relay
@@ -723,6 +712,7 @@
  * @property {"routing_ack"} annotation_type
  * @property {number=} chat_id
  * @property {string} client_message_id
+ * @property {string=} source_row_address
  * @property {string} action
  * @property {string=} target
  * @property {string=} target_label
@@ -745,14 +735,7 @@
 
 /** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
 
-/** Additive /api/chat/history terminality projection.
- * @typedef {Object} TaskOutcomeHistoryFields
- * @property {"working"|"done"|"warn"|"error"|"cancelled"=} outcome_phase  // canonical display phase; "working" is not terminal
- * @property {boolean=} outcome_final  // true only after the canonical task outcome settles; false marks a pre-finalization narrative
- * @property {{status: string, phase: string, ts: string, provenance: string, model_execution?: Object}=} historical_terminal
- * @property {Object=} model_execution
- * @property {{v: 1, occurred_at: ?string, source: "executor_terminal"|"supervisor_cancel"|"unknown", attempt: Object}=} terminal_time  // a task_summary row's host end fact; `ts` stays its publication time
- */
+/** @typedef {import('./client_contract_types.js').TaskOutcomeHistoryFields} TaskOutcomeHistoryFields */
 
 /**
  * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
@@ -1232,6 +1215,7 @@
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
  * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}, skills?:{count:number, latest:{skill:string, reason:string, door:string, at:string, task_id:string}, seen:string[]}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
+ * @property {Array<{from_model:string, to_model:string, status:'selected'|'recovered'|'incomplete'|'pending'|string, selection?:'answer'|'answer_sha256'|'silent'|'stop'|string, work_observed?:boolean, reply_observed?:boolean}>=} authoring_handovers
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1256,7 +1240,6 @@
  * @typedef {"ok"|"not_read"|"failed"} ClaudexorReadState
  */
 /**
- * Independent facets: ok=authoritative, not_read=never asked or discarded, failed=no usable answer. Empty without ok proves nothing.
  * @typedef {Object} ClaudexorStatusReads
  * @property {ClaudexorReadState} catalog
  * @property {ClaudexorReadState} accounts
@@ -1476,8 +1459,8 @@
  * @property {string} reason
  * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `saved_states:<folder>` while it holds a saved state, `review_thread:<id>` no recorded release let go
  * @property {string[]} retired  // gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
- * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
- * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
+ * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them, including canonical_payloads
+ * @property {Object<string, string>} releases  // canonical path -> held | queued | moved (seen before accounting) | staged | deleting (awaiting removal) | deleted | missing | unknown. Only deleted reports completed deletion. `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
  */
 /**
  * @typedef {Object} LogTailResponse
@@ -1578,7 +1561,7 @@ export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
 // truncates; cards must offer only comments the ingress can deliver verbatim.
 export const MAX_DECISION_COMMENT = 2000;
-export const GATEWAY_CONTRACT_VERSION = '7.11.1-alpha.0';
+export const GATEWAY_CONTRACT_VERSION = '7.12.0';
 /** @typedef {import('./client_contract_types.js').ChatHistoryPosition} ChatHistoryPosition */
 /** @typedef {import('./client_contract_types.js').ChatHistoryResponse} ChatHistoryResponse */
 

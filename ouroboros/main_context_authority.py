@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
 from ouroboros.store import StoreError
+from ouroboros.utils import json_dumps_utf8
 
 # The typed kinds of the notes rows (``_host_context_kind``): plain host prose rows
 # the mind folds like any dialogue unit; the key never reaches the wire.
@@ -74,7 +75,7 @@ def project_helper_predecessor_authority(
         omitted = {key: None for key in prior if isinstance(key, str)}
     for key, value in envelope.items():
         if key not in keep and key != "omitted_fields":
-            omitted[key] = len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)) - (
+            omitted[key] = len(json_dumps_utf8(value, ensure_ascii=False, sort_keys=True, default=str)) - (
                 2 if isinstance(value, str) else 0)
     return {
         **{key: copy.deepcopy(value) for key, value in envelope.items() if key in keep},
@@ -132,6 +133,47 @@ def _assignment_reference(objective: str, task: Mapping[str, Any]) -> Dict[str, 
             "source": {key: copy.deepcopy(source[key]) for key in ("read", "sha256", "lines") if key in source}}
 
 
+def _carried_beside_origin(corpus: Any, origin_ref: Any, origin_text: Any, *, typed_opening: Any = None) -> list:
+    """The rows of my human's a drafter carried (``metadata.owner_corpus``), minus the one this same projection
+    already shows as ``task_authority_origin``: the opening, and only where the record itself tells it is that row.
+    A row that names an identity is the opening by the corpus's own identity (``owner_words._same_corpus_source``
+    against the origin ref, as its producer ``carried_owner_corpus`` picks it): equal row keys, and where either
+    side names a key the other lacks, never; without keys on both, the room, client id and time the older stamp
+    names. A row naming no identity is the opening only as the one its record kept before identities
+    (``owner_words._opening``). It is folded when its words are the ones shown there, or it has none (a file-only
+    opening). Every other row stays whole under its own source, time and identity: a different message of equal
+    words, a row whose relation to the origin the record cannot tell, and a neighbour that carries only files.
+    The fold reads what this request renders and decides words alone: which files a work was given stays with
+    ``mark_context_files`` and staging, whose older id fallback is not an identity here."""
+    from ouroboros.owner_words import _card_input_row, _opening, _same_corpus_source  # D03->D17 is lazy-only
+    from ouroboros.answer_facts import OWNER_CARD_INPUT
+
+    origin = origin_ref if isinstance(origin_ref, Mapping) else {}
+    shown = origin_text if isinstance(origin_text, str) and origin_text else None
+    kept = []
+    for index, row in enumerate(corpus if isinstance(corpus, list) else []):
+        if not isinstance(row, Mapping):
+            continue
+        words = str(row.get("content") or "").strip()
+        if not (words or row.get("attachments")):
+            continue
+        named = any(row.get(key) for key in ("row_sha256", "client_message_id", "msg_id"))
+        opening = bool(origin) and (_same_corpus_source(row, origin) if named
+                                    else _opening(row, origin, first=index == 0))
+        if opening and _card_input_row(row):
+            if (typed_opening and row.get("row_sha256") and row["row_sha256"] == origin.get("row_sha256")
+                    and row["source"] == OWNER_CARD_INPUT and typed_opening["source"] != OWNER_CARD_INPUT):
+                continue
+            kept.append(copy.deepcopy(dict(row)))  # equal words do not cover a card's typed evidence
+            continue
+        if opening and typed_opening:
+            continue  # the shown typed opening supersedes its own display-only corpus copy
+        if opening and (not words or (shown is not None and row.get("content") == shown)):
+            continue
+        kept.append(copy.deepcopy(dict(row)))
+    return kept
+
+
 def project_main_task_authority(task: Mapping[str, Any]) -> Dict[str, Any]:
     """Build the provider-only authority section without mutating ``task``.
 
@@ -169,17 +211,28 @@ def project_main_task_authority(task: Mapping[str, Any]) -> Dict[str, Any]:
         projection["task_contract"] = projected_contract
     origin_ref = task.get("origin_message_ref")
     origin_text = task.get("origin_message_text")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    snapshot = metadata.get("origin_message_snapshot")
+    opening = {}
     if isinstance(origin_ref, Mapping) and origin_ref:
+        from ouroboros.project_dialogue import opening_input, opening_words
+
+        if typed := opening_input(None, None, retained=snapshot.get("input") if isinstance(snapshot, Mapping) else None):
+            opening = opening_words({"ref": dict(origin_ref), "text": origin_text, "source_input": typed})
         projection["task_authority_origin"] = {
             "ref": copy.deepcopy(dict(origin_ref)),
-            **({"text": str(origin_text)} if isinstance(origin_text, str) and origin_text else {}),
+            **({"display_text": origin_text, "input": opening} if opening else
+               {"text": origin_text} if isinstance(origin_text, str) and origin_text else {}),
         }
     # A drafted objective (a start, a follow-up) shows the words of my human its drafter carried, beside it.
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), Mapping) else {}
-    carried = [copy.deepcopy(dict(row)) for row in metadata.get("owner_corpus") or [] if isinstance(row, Mapping)
-               and str(row.get("content") or "").strip() and row.get("content") != origin_text]
+    carried = _carried_beside_origin(metadata.get("owner_corpus"), origin_ref, origin_text, typed_opening=opening)
     if author.get("kind") == "task" and carried:
+        from ouroboros.owner_relay import mark_context_files  # D03->D01 is lazy-only
+
+        # A message carried beside the one this work answers keeps its files named, not given.
+        mark_context_files([(row, row) for row in carried if row.get("attachments")],
+                           origin_ref if isinstance(origin_ref, Mapping) else {})
         projection["task_owner_words"] = {"carried_by": str(author.get("task_id") or ""), "rows": carried}
     if isinstance(task.get("authority_historical_gaps"), list):
         projection["authority_historical_gaps"] = copy.deepcopy(task["authority_historical_gaps"])

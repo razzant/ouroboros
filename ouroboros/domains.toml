@@ -230,6 +230,7 @@ D20 = "Presence"
 "ouroboros/consciousness_authority.py" = "D15"
 "ouroboros/consciousness_wake.py" = "D15"
 "ouroboros/consciousness_transitions.py" = "D15"
+"ouroboros/chat_annotations.py" = "D17"
 "ouroboros/chat_chain.py" = "D15"
 "ouroboros/chronicle_store.py" = "D15"
 "ouroboros/chronicle_quotes.py" = "D15"
@@ -315,6 +316,7 @@ D20 = "Presence"
 "ouroboros/delegate_reply.py" = "D07"
 "ouroboros/delegate_output.py" = "D07"
 "ouroboros/delegate_accepted.py" = "D07"
+"ouroboros/delegate_resume.py" = "D07"
 "ouroboros/delegate_pending.py" = "D07"
 "ouroboros/delegate_progress.py" = "D07"
 "ouroboros/delegate_recovery.py" = "D07"
@@ -534,6 +536,7 @@ D20 = "Presence"
 "ouroboros/memory_sealing.py" = "D15"  # separately attributed terminal links
 "ouroboros/memory_nomination_receipts.py" = "D15"
 "ouroboros/model_concurrency.py" = "D02"
+"ouroboros/context_attempt_reader.py" = "D16"
 "ouroboros/model_send_seal.py" = "D16"
 "ouroboros/mutation_attribution.py" = "D01"
 "ouroboros/nanny_pacing.py" = "D07"
@@ -549,6 +552,7 @@ D20 = "Presence"
 "ouroboros/openai_chat_custom.py" = "D02"
 "ouroboros/openai_chat_dispatch.py" = "D02"
 "ouroboros/openai_responses.py" = "D02"
+"ouroboros/opencode_go.py" = "D02"
 "ouroboros/openai_responses_custody.py" = "D02"
 "ouroboros/openrouter_attribution.py" = "D02"
 "ouroboros/outcome_receipt_store.py" = "D01"
@@ -604,6 +608,7 @@ D20 = "Presence"
 "ouroboros/presence_carrier.py" = "D20"  # a Host turn's body in a conversation-lane carrier
 "ouroboros/presence_executions.py" = "D20"  # the Host's live Presence turns and their frame waiters
 "ouroboros/pricing.py" = "D02"
+"ouroboros/command_memory.py" = "D09"
 "ouroboros/process_census.py" = "D09"
 "ouroboros/process_containment.py" = "D09"
 "ouroboros/process_lifeline.py" = "D09"  # POSIX owner-death guardian of a test run's process tree
@@ -809,6 +814,7 @@ D20 = "Presence"
 "ouroboros/task_store.py" = "D17"
 "ouroboros/task_reads.py" = "D17"
 "ouroboros/pause_notices.py" = "D17"
+"ouroboros/payload_release_state.py" = "D17"  # task artifact identities and receipts after an owner release
 "ouroboros/task_status.py" = "D17"
 "ouroboros/task_custody.py" = "D17"
 "ouroboros/terminal_projection.py" = "D17"
@@ -935,6 +941,7 @@ D20 = "Presence"
 "ouroboros/tools/scope_review_contract.py" = "D06"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
+"ouroboros/tools/service_stop.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
 "ouroboros/tools/kept_service_outputs.py" = "D05"  # a kept service's declared outputs for a stop that is not its task's
 "ouroboros/tools/shell.py" = "D05"
@@ -975,6 +982,7 @@ D20 = "Presence"
 "ouroboros/usage_store.py" = "D16"
 "ouroboros/storage.py" = "D16"  # Dashboard Storage: the complete count of every owned place behind gateway/storage.py
 "ouroboros/storage_deleted.py" = "D16"  # Dashboard Storage: the folders deleted Projects left behind, as one count saw them
+"ouroboros/payload_release.py" = "D16"  # Dashboard Storage: the mind's proposals of a finished task's heavy files, released only by the owner's exact choice
 "ouroboros/storage_free_view.py" = "D16"  # Temporary space pool and paged item views over the held plan
 "ouroboros/storage_free.py" = "D16"  # Dashboard Storage: the owner's free-space preview and run over the existing retirers
 "ouroboros/storage_removers.py" = "D16"  # Dashboard Storage: each place's removers and how their last pass ended
@@ -1010,6 +1018,7 @@ D20 = "Presence"
 "ouroboros/record_compression.py" = "D11"  # the maintenance child's job compressing finished records in place
 "ouroboros/terminal_cost_reconciliation.py" = "D11"
 "ouroboros/server_owner_routing.py" = "D11"
+"ouroboros/recovery_turn_facts.py" = "D11"  # the Fault boot recovery turn's facts and words
 "ouroboros/server_process.py" = "D11"
 "ouroboros/server_restart.py" = "D11"
 "ouroboros/server_routing_context.py" = "D11"
@@ -1188,6 +1197,7 @@ allowed = [
   "D03->D17",
   "D03->D18",
   "D03->D19",
+  "D04->D01",
   "D04->D05",
   "D04->D13",
   "D04->D17",
@@ -1330,6 +1340,7 @@ allowed = [
   "D17->D06",
   "D17->D07",
   "D17->D08",
+  "D17->D09",
   "D17->D11",
   "D17->D12",
   "D17->D15",
@@ -1372,7 +1383,6 @@ lazy_only = [
   "D03->D14",
   "D03->D16",
   "D03->D20",
-  "D04->D01",
   "D04->D02",
   "D04->D03",
   "D04->D06",
@@ -1462,7 +1472,6 @@ lazy_only = [
   "D16->D11",
   "D16->D15",
   "D17->D02",
-  "D17->D09",
   "D17->D13",
   "D17->D14",
   "D17->D20",
