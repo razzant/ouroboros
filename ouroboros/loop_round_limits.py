@@ -547,7 +547,12 @@ def _retire_superseded_host_state(messages, ctx):
 
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
-    """Apply one source/schema view together at the existing completed boundary."""
+    """Apply one source/schema view together at the existing completed boundary.
+
+    Two ``at_source`` counts point at the candidate receipt's address (``receipt_source``): the ``context_view`` event
+    counts each structure equal to the retained receipt's (keys or elements) instead of repeating it; the receipt row
+    of an applied fold counts ``bodies_removed`` and ``notes_kept``, whose lists (and ``restore_checkpoint``) only
+    the stored receipt carries."""
     from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas

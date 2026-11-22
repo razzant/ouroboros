@@ -738,25 +738,43 @@ def test_the_own_calls_pointer_leaves_native_replay_and_keeps_a_complete_unit(tm
     assert any(unit.start == at and unit.end == at + 1 for unit in context_units(folded, scope="dialogue"))
 
 
-def test_an_untyped_start_row_takes_the_first_anchor_but_not_the_typed_start(tmp_path, monkeypatch):
-    """A host notice written untyped at the start (as the capability omission notice is) is ordinary prose: the first
-    full fold writes its note in its place, before the typed start rows, so that fold's own call does not follow the
-    note and leaves no anchor (a disclosed gap). Both directions: the typed start rows still stand through the next
-    full fold (a note is no answer that would end the start), and that fold's call points at its note and stands."""
+def test_the_start_stands_typed_or_not_and_its_review_bodies_stay_foldable(tmp_path, monkeypatch):
+    """Every row between the assignment and the first answer stands, typed or not, except review-history sources (the
+    captured dispute bodies an ordinary fold takes). Both directions: an untyped host notice stands, the first full
+    fold folds the review body beside it and that fold's own call follows its note, so it leaves an anchor; an
+    explicit keep_unit_ids list that omits the notice takes it. Where the body comes before the other start rows (as
+    capture places it), the note lands at the body, that fold leaves no anchor, and the next full fold leaves one."""
+    from ouroboros.context_compaction import _capsule_metadata
+    from ouroboros.review_history_view import _body_message
     from ouroboros.tools.compact_context import NOTE_POINTER, standing_rows
 
-    ctx = SimpleNamespace(active_context_mode="low")
+    ctx = SimpleNamespace(active_context_mode="low", drive_root=tmp_path, task_id="view-task")  # a fold over a review body
     notice = {"role": "user", "content": "[SYSTEM NOTICE]\n[CAPABILITY_OMISSION_MANIFEST]\n- tools: missing credentials"}
-    start = [*_source()[:2], notice, _facts("round 1")]
+    body = _body_message({"binding": {"kind": "review_history_body", "field": "findings", "content_sha256": "b" * 64,
+                                      "source_ref": {"path": "reviews/wave-1.json", "size": 10, "sha256": "a" * 64}},
+                          "value": "Reviewer finding: the plan skips the migration."}, "view-task")
+    start = [*_source()[:2], notice, _facts("round 1"), body]
     first = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-1", keep_unit_ids=[])
-    assert _notes(first) == [2] and first[3] == start[3]
-    assert "Note written by fold-1." in first[4]["tool_calls"][0]["function"]["arguments"]  # no pointer
+    assert first[:4] == start[:4] and _notes(first) == [4] and body not in first
+    assert json.loads(first[5]["tool_calls"][0]["function"]["arguments"])["working_note"] == NOTE_POINTER.format(
+        unit_id=_capsule_metadata(first[4])[1]["unit_id"])
     request = [*first, _facts("round 3")]
-    assert sorted(standing_rows(request)) == [3]
+    assert sorted(standing_rows(request)) == [2, 3, *range(5, len(request))]
     second = _fold(tmp_path, monkeypatch, ctx, [*request, *_read("two")], "fold-2", keep_unit_ids=[])
-    assert second[:4] == request[:4] and _notes(second) == [2, 4]
-    assert NOTE_POINTER.split("{")[0] in second[5]["tool_calls"][0]["function"]["arguments"]
-    assert sorted(standing_rows([*second, _facts("round 5")])) == [3, *range(5, len(second) + 1)]
+    assert second[:len(request)] == request and _notes(second) == [4, len(request)]
+    omitted = _fold(tmp_path, monkeypatch, ctx, [*start, *_read("one")], "fold-3",
+                    keep_unit_ids=[_unit_at(start, 3).unit_id])
+    assert notice not in omitted and start[3] in omitted
+
+    captured = [*_source()[:2], body, notice, _facts("round 1")]  # capture writes the bodies right after the assignment
+    early = _fold(tmp_path, monkeypatch, ctx, [*captured, *_read("one")], "early-1", keep_unit_ids=[])
+    assert _notes(early) == [2] and early[3:5] == captured[3:5]  # the note at the body, before the other start rows
+    assert "Note written by early-1." in early[5]["tool_calls"][0]["function"]["arguments"]  # no pointer, no anchor
+    after = [*early, _facts("round 3")]
+    assert sorted(standing_rows(after)) == [3, 4]
+    later = _fold(tmp_path, monkeypatch, ctx, [*after, *_read("two")], "early-2", keep_unit_ids=[])
+    assert later[:5] == after[:5] and _notes(later) == [2, 5]
+    assert sorted(standing_rows([*later, _facts("round 5")])) == [3, 4, *range(6, len(later) + 1)]
 
 
 def test_a_host_source_view_ends_the_standing_rows_and_the_next_full_fold_takes_what_follows_it(tmp_path, monkeypatch):

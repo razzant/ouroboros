@@ -19,6 +19,12 @@ A life is read back from the product's own record of each request (``physical_co
 string, so it cannot see an account), the free room the request left (stated window - reply reserve - input), the
 pre-send refusals (``context_fit_refused``), the queue's refusals, the words the work's feed got and the facts line each
 request carried. The law it is held to, and the gaps, live with the test.
+
+A place may instead read its cache under one of two rules named by what they read, not by vendor
+(``Place.rule``): ``MARKED_LOOKBACK``, "marked prefixes with a bounded lookback" (the longest prefix that a marker of
+an earlier answer ended, found within ``LOOKBACK`` elements before a marker of this request), or ``WHOLE_REQUESTS``,
+"the end of the leading system group or of a whole earlier answered request". Under either, the clock row production
+sends is read like any row. Where re-reading starts after a fold under each is pinned by the life table.
 """
 from __future__ import annotations
 

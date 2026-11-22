@@ -77,21 +77,22 @@ def standing_rows(messages: list, released=()) -> dict:
     """Positions that stand through an ordinary fold, each with the position of the note whose rows they are (None
     for the start). One walk over the rows; nothing is hashed (it runs whenever a round's facts row is written).
 
-    The start: host-typed rows between the assignment and the first assistant answer (a note is none; untyped rows
-    there, such as captured review bodies the mind folds, stay ordinary). Then,
-    in order, a note (a capsule that is not a host source view) or a row no fold selects (owner words, a row that is no
+    The start: every row between the assignment and the first assistant answer (a note is none), typed or not, except
+    review-history sources (``_review_source_ref``): captured dispute bodies the mind folds by an ordinary fold, which
+    records its selected review view (``review_history_view.capture_review_history_messages``). Then, in order, a note (a capsule that is not a host source view) or a row no fold selects (owner words, a row that is no
     unit) continues the walk; a note directly followed by its own pointing call (``NOTE_POINTER``) stands with every
     row from that call to the next assistant row, the whole input of the request sent after that fold, unless its
     position is in ``released``; anything a full fold would take (a tool unit, prose, a host source view) ends it."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS
-    from ouroboros.context_compaction import _is_dialogue_prose_row
+    from ouroboros.context_compaction import REVIEW_HISTORY_MESSAGE_KEY, _is_dialogue_prose_row, _review_source_ref
 
     first = next((i for i, row in enumerate(messages) if row.get("role") == "user"), None)
     if first is None:
         return {}
     end = next((i for i in range(first + 1, len(messages)) if messages[i].get("role") == "assistant"
                 and _note_meta(messages[i]) is None), len(messages))
-    standing = {i: None for i in range(first + 1, end) if messages[i].get(HOST_CONTEXT_KIND_KEY)}
+    standing = {i: None for i in range(first + 1, end) if _note_meta(messages[i]) is None
+                and not (REVIEW_HISTORY_MESSAGE_KEY in messages[i] and _review_source_ref(messages[i]))}
     i = first + 1
     while i < len(messages):
         row, meta = messages[i], _note_meta(messages[i])
@@ -245,7 +246,8 @@ def fold_receipt_facts(observed: list, candidate: list, receipt: dict) -> dict:
     (``notes_kept``, ``view_notes``) and each unit of the observed view whose body left it (``bodies_removed``:
     ``{source, address}``), restorable from ``restore_checkpoint`` by the address. Notes the author replaced stay
     named by ``replaced_notes``; a body whose unit no longer matches its id and hash is not named. An unapplied
-    receipt changed nothing and has none."""
+    receipt changed nothing and has none. The stored receipt keeps these lists; the receipt row in view carries only
+    their counts (``at_source``) beside its address (``loop_round_limits._run_authored_context_view``)."""
     from ouroboros.context_compaction import _unit_from_slice
 
     if receipt.get("status") != "applied":
