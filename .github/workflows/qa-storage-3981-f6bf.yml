@@ -1,0 +1,119 @@
+# Verification ref only. This file never enters the product branch or PR.
+name: QA bounded storage receipts
+
+on:
+  push:
+    branches: [qa/storage-3981-f6bf]
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_SHA: 'f6bfcc3180e52318681099d89d0f94646db8f174'
+  PRODUCT_TREE: '6a8492fcfa1458bffd153433108a035c5420f5cc'
+  BASE_SHA: '99d157cb438d5d66deb2e91921184de7bc45f2df'
+  MSYS_NO_PATHCONV: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  storage:
+    name: Bounded storage receipts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify and check out exact product parent
+        run: |
+          set -euo pipefail
+          qa_file=.github/workflows/qa-storage-3981-f6bf.yml
+          [[ "$(git rev-list --parents -n 1 HEAD)" == "$GITHUB_SHA $PRODUCT_SHA" ]]
+          [[ "$(git diff --name-status --no-renames "$PRODUCT_SHA" HEAD --)" == $(printf 'A\t%s' "$qa_file") ]]
+          git checkout --detach "$PRODUCT_SHA"
+          [[ "$(git rev-parse HEAD^)" == "$BASE_SHA" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          printf 'QA_SUBJECT %s %s %s\n' "$PRODUCT_SHA" "$PRODUCT_TREE" "$BASE_SHA"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          install-project: 'false'
+          interpreter: shipped
+      - name: Exercise Keep and download receipts with ordinary synthetic files
+        env:
+          LEG: ${{ matrix.os }}
+          HOST_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          cases=(
+            'tests/test_payload_release_custody.py::test_keep_saves_fact_when_payload_read_fails'
+            'tests/test_payload_release_custody.py::test_keep_endpoint_keeps_last_canonical_material_after_drive_retirement'
+            'tests/test_payload_release_custody.py::test_keep_endpoint_distinguishes_decision_move_accounting_and_trash'
+            'tests/test_payload_release_custody.py::test_real_keep_and_free_in_both_orders'
+            'tests/test_worked_copy_retirement.py::test_keep_after_a_pass_took_the_saved_states_says_so_never_kept'
+            'tests/test_worked_copy_retirement.py::test_keep_on_a_work_whose_only_material_left_is_its_saved_states_is_saved'
+            'tests/test_plan_explicit_continuation.py::test_a_keep_before_any_pass_names_a_stopped_seat_thread_and_wins'
+            'tests/test_plan_explicit_continuation.py::test_a_stopped_seat_thread_from_before_activation_stays_in_the_engine_and_keep_names_it'
+            'tests/test_review_thread_child_pass.py::test_a_typed_export_answer_survives_the_maintenance_caller_and_reaches_keep'
+            'tests/test_review_thread_retention.py::test_s12_a_keep_saved_after_binding_is_release_unconfirmed_and_a_delivered_retire_can_win'
+            'tests/test_review_thread_retention.py::test_s12_a_keep_the_engine_has_not_decided_yet_stops_the_release_on_the_next_pass'
+            'tests/test_review_thread_retention.py::test_a_keep_beside_a_bound_release_saves_and_names_every_other_material'
+            'tests/test_payload_release.py::test_readers_say_where_the_bytes_are_staged_deleting_or_deleted'
+            'tests/test_payload_release.py::test_the_archive_never_serves_a_released_member_and_counts_it_apart'
+            'tests/test_hot_facts.py::test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_decode'
+            'tests/test_native_tool_round_executor.py::test_last_read_view_has_exactly_three_writers'
+            'tests/test_tool_classification_differential.py::test_single_classifier_matches_the_retired_pair_except_approved_deltas'
+            'tests/test_tool_classification_differential.py::test_golden_covers_every_harvested_producer'
+            'tests/test_persistence_inventory.py::test_scan_is_populated_and_pinned'
+          )
+          if [[ "$HOST_OS" == Linux ]]; then
+            cases+=('tests/test_task_file_serving.py::test_directory_archive_keeps_relative_paths_one_member_per_relpath_canonical_first')
+          fi
+          printf '%s\n' "${cases[@]}" > "$RUNNER_TEMP/storage-nodes.txt"
+          python -m pytest -o addopts='' -q --tb=short --junitxml="$RUNNER_TEMP/storage-native.xml" "${cases[@]}"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          specs = [s.rsplit('::', 1) for s in (root / 'storage-nodes.txt').read_text().splitlines()]
+          expected = {(path[:-3].replace('/', '.'), name) for path, name in specs}
+          cases = list(ET.parse(root / 'storage-native.xml').iter('testcase'))
+          identities = {(c.get('classname'), c.get('name')) for c in cases}
+          found = {(module, name.split('[', 1)[0]) for module, name in identities}
+          bad = [(c.get('name'), child.tag) for c in cases for child in c if child.tag in {'failure', 'error', 'skipped'}]
+          if found != expected or len(identities) != len(cases) or bad:
+              raise SystemExit(f'incomplete: {len(cases)=} {expected - found=} {found - expected=} {bad=}')
+          print(f"QA_BOUNDED_STORAGE_RECEIPTS {os.environ['LEG']}: {len(cases)} passed, none skipped")
+          PY
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+      - name: Check document and source-size contracts
+        if: runner.os == 'Linux'
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: '99d157cb438d5d66deb2e91921184de7bc45f2df'
+        run: |
+          set -euo pipefail
+          python -m pytest -o addopts='' -q tests/test_docs_sync.py tests/test_domain_manifest.py tests/test_architecture_facts.py tests/test_generated_inventories.py
+          python -m pytest -o addopts='' -q -m size_ratchet tests/test_reference_book_budgets.py tests/test_repo_health_smoke.py tests/test_smoke.py
+          [[ -z "$(git status --porcelain --untracked-files=no)" ]]
+          [[ "$(git rev-parse 'HEAD^{tree}')" == "$PRODUCT_TREE" ]]
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: storage-receipts-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/storage-native.xml
+            ${{ runner.temp }}/storage-nodes.txt
+          if-no-files-found: warn
+          retention-days: 7
