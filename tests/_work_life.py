@@ -105,14 +105,18 @@ def _marked(value: Any) -> bool:
     return isinstance(value, list) and any(_marked(item) for item in value)
 
 
+def _is_clock(row: Dict[str, Any]) -> bool:
+    from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+
+    return str(row.get("content") or "").startswith(CLOCK_NOTE_PREFIX)
+
+
 def _elements(tools: Any, rows: List[Dict[str, Any]], *, clock: bool = False
               ) -> Tuple[List[Tuple[str, Any]], int, List[bool]]:
     """``(elements, start, marked)``: the tool array, each system block, each later row (the request's own clock row
     only with ``clock``); ``start`` counts the first two; ``marked`` says which carry the host's cache marker."""
-    from ouroboros.send_clock import CLOCK_NOTE_PREFIX
-
     rows = list(rows or [])
-    if not clock and rows and str(rows[-1].get("content") or "").startswith(CLOCK_NOTE_PREFIX):
+    if not clock and rows and _is_clock(rows[-1]):
         rows = rows[:-1]  # the request-local clock row is replaced every round by design
     raw: List[Tuple[str, Any]] = [("tools", tools or [])]
     for row in rows:
@@ -160,6 +164,7 @@ class Provider:
                      "known": known, "start_tokens": sum(sizes[:start]), "elements": len(items),
                      "start_elements": start, "digests": digests, "sizes": sizes,
                      "marks": [k for k, flag in enumerate(marked) if flag],
+                     "clock": bool(items) and items[-1][0] == "row" and _is_clock(items[-1][1]),
                      "facts": next((text for text in reversed(texts) if "[CONTEXT_FACTS]" in text), "")}
             before = next((row for row in reversed(self.log) if row.get("kind") == "answered"), None)
             entry["reads"] = [  # each part that arrives in this request: its size, whether it came as a partial view

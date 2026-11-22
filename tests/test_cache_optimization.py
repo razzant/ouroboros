@@ -822,6 +822,9 @@ def test_consecutive_full_folds_and_a_restore_read_what_their_cache_rule_holds(r
         held, reading)
     if rule == WHOLE_REQUESTS:  # each whole earlier answered request, its clock row included
         assert [entry["read"] for entry in after] == [answered[0]["tokens"], after[0]["tokens"], held["tokens"]]
-    restore = answered[11]
-    assert restore["read"] == (restore["start_tokens"] if rule == WHOLE_REQUESTS else restore["read"])
-    assert 0 < restore["read"] <= restore["start_tokens"]
+    restore, before = answered[11], answered[10]
+    # The marked stable part: the longest marked prefix of the start the request before it also ended a mark at.
+    stable = max((sum(restore["sizes"][:k + 1]) for k in restore["marks"] if k < restore["start_elements"]
+                  and k in before["marks"] and restore["digests"][:k + 1] == before["digests"][:k + 1]), default=0)
+    assert restore["read"] == (restore["start_tokens"] if rule == WHOLE_REQUESTS else stable) > 0, (restore, stable)
+    assert all(entry["clock"] for entry in [*after, restore])  # the clock row production sends is counted
