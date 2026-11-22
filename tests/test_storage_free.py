@@ -834,6 +834,58 @@ def test_a_stop_or_cancel_reaches_a_sizing_child_spawned_moments_before(tmp_path
     assert (view["state"], view["plan"], view["groups"]) == ("idle", None, [])
 
 
+@pytest.mark.parametrize("closing", ["stop", "generation"])
+def test_a_run_still_being_admitted_is_in_the_census_and_never_starts_once_closed(tmp_path, monkeypatch, closing):
+    """Restart reads ``live_children`` after Stop to decide whether the generation is quiet. A Free press still
+    checking its selection under the lock (a large plan) is named there by its thread; Stop or a closed generation
+    landing meanwhile leaves the run unstarted and the folder in place, while the same press otherwise frees it."""
+    from ouroboros import server_process, storage_free
+
+    root = tmp_path / "data"
+    probes = _drives(root, [("done", "direct", "completed", OLD)])
+    _fake_sizer(monkeypatch)
+    real_ids = storage_free.ordinary_ids
+    inside, release, admitting = threading.Event(), threading.Event(), []
+
+    def checking(plan):  # the selection check of a large plan, under the admission lock
+        admitting.append(threading.current_thread())
+        inside.set()
+        assert release.wait(30)
+        return real_ids(plan)
+
+    monkeypatch.setattr(storage_free, "ordinary_ids", checking)
+
+    def press(close: bool):
+        owner = _owner(probes)
+        view = _preview(owner, root, tmp_path)
+        items = [item["id"] for item in _group(view, "work_folders")["items"]]
+        inside.clear()
+        release.clear()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            answer = pool.submit(owner.start, root, tmp_path, view["plan"], None, items=items)
+            assert inside.wait(10) and owner._lock.locked()
+            census = owner.live_children()
+            if close and closing == "stop":
+                owner.stop()  # returns at once: the press still holds the lock
+            elif close:
+                server_process._supervisor_stop.set()  # the lifespan teardown's first step
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+            server_process._supervisor_stop.clear()
+        _join(owner)
+        return owner, census, answer.result()
+
+    owner, census, answer = press(close=True)  # blocked direction
+    assert census == [admitting[-1]], "the thread inside the admission is named"
+    assert answer == {"started": False, "reason": "busy"} and owner.projection(root)["state"] == "ready"
+    assert (root / "task_drives" / "done").is_dir() and owner.live_children() == []
+    owner, census, answer = press(close=False)  # still-working direction: the same press frees the folder
+    assert census == [admitting[-1]] and answer == {"started": True, "reason": ""}
+    assert owner.projection(root)["state"] == "done" and not (root / "task_drives" / "done").is_dir()
+
+
 # ------------------------------------------------------------------- B12
 
 

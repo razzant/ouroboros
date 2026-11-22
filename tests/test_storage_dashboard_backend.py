@@ -728,6 +728,48 @@ def test_stop_never_waits_for_a_page_read_holding_the_lock(tmp_path, monkeypatch
     assert counter.start(data, tmp_path) is False, "after Stop nothing starts"
 
 
+def test_a_count_still_being_admitted_is_in_the_census_and_spawns_nothing_after_stop(tmp_path, monkeypatch):
+    """Restart reads ``live_children`` after Stop to decide whether the generation is quiet. A count still inside its
+    admission (its thread assigned, not started) is named there; a Stop landing meanwhile leaves its run spawning
+    nothing, while the same admission without Stop spawns its child."""
+    data = tmp_path / "data"
+    spawned = _fake_spawn(monkeypatch, [])
+    real_now = storage.utc_now_iso
+    inside, release = threading.Event(), threading.Event()
+
+    def admission_clock():  # the admission's first clock read, under the owner's lock, waits for the test
+        if not inside.is_set():
+            inside.set()
+            assert release.wait(30)
+        return real_now()
+
+    monkeypatch.setattr(storage, "utc_now_iso", admission_clock)
+
+    def admit(stop: bool):
+        counter = StorageCounter()
+        inside.clear()
+        release.clear()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            started = pool.submit(counter.start, data, tmp_path)
+            assert inside.wait(10) and counter._lock.locked()
+            census = counter.live_children()
+            if stop:
+                counter.stop()  # returns at once: the admission still holds the lock
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+        assert started.result() is True, "the admission had passed the Stop check"
+        _join(counter)
+        return counter, census
+
+    counter, census = admit(stop=False)  # still-working direction: the admission spawns its child
+    assert census == [counter._thread] and len(spawned) == 1
+    counter, census = admit(stop=True)  # blocked direction: named while admitted, and nothing spawns after Stop
+    assert census == [counter._thread] and len(spawned) == 1, "the run checks Stop before its spawn"
+    assert counter.live_children() == [] and counter.projection(data)["error"]["stopped"] is True
+
+
 def test_the_two_stop_sites_and_the_census_name_the_storage_count_and_the_free_owner():
     server = (REPO / "server.py").read_text(encoding="utf-8")
     control = (REPO / "ouroboros" / "server_control.py").read_text(encoding="utf-8")
@@ -1006,6 +1048,61 @@ def test_a_storage_press_waits_for_its_owner_off_the_event_loop(tmp_path, monkey
         settle()
         answered(client.post(path, json=body))  # still-working direction: unheld, the press answers as before
         settle()
+
+
+@pytest.mark.parametrize("path, owner_name, method", [
+    ("/api/storage/measure", "count", "start"),
+    ("/api/storage/free/preview", "free", "preview"),
+])
+def test_a_press_waiting_when_the_generation_closes_starts_nothing(tmp_path, monkeypatch, path, owner_name, method):
+    """Lifespan teardown closes the generation (``_supervisor_stop``) while a Count or Free press still waits in the
+    threadpool behind its owner's lock: once the lock lets go it starts nothing. A fresh generation admits again."""
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from ouroboros import server_process
+    from ouroboros.storage_free import FreeSpace
+
+    data = tmp_path / "data"
+    spawned = _fake_spawn(monkeypatch, [])
+    counter, tray = StorageCounter(), FreeSpace(live=lambda _task: False, offered=())
+    owner = counter if owner_name == "count" else tray
+    reached, holding, let_go = threading.Event(), threading.Event(), threading.Event()
+    real_call = getattr(owner, method)
+
+    def call(*args, **kwargs):
+        reached.set()  # the press is at its owner's call, in the threadpool
+        return real_call(*args, **kwargs)
+
+    def request_holding_the_lock():
+        with owner._lock:
+            holding.set()
+            assert let_go.wait(30)
+
+    monkeypatch.setattr(owner, method, call)
+    app = Starlette(routes=storage_routes(data, repo_dir=tmp_path, owner=counter, free_owner=tray))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    with TestClient(app) as client:
+        try:
+            held = pool.submit(request_holding_the_lock)
+            assert holding.wait(10)
+            press = pool.submit(client.post, path)
+            assert reached.wait(10)
+            server_process._supervisor_stop.set()  # the lifespan teardown's first step
+            let_go.set()
+            refused = press.result(timeout=10)
+        finally:
+            let_go.set()
+            server_process._supervisor_stop.clear()  # a fresh lifespan opens the next generation
+            pool.shutdown(wait=True)
+        held.result()
+        # blocked direction: the waiting press admitted nothing in the closed generation
+        assert refused.status_code == 202 and refused.json()["started"] is False
+        assert owner._thread is None and spawned == []
+        admitted = client.post(path)  # still-working direction: the next generation admits the same press
+        assert admitted.status_code == 202 and admitted.json()["started"] is True
+        owner._thread.join(timeout=30)
+        assert not owner._thread.is_alive()
 
 
 # ------------------------------------------------------------- contract
