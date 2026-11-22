@@ -330,9 +330,9 @@ def bind_task_to_project(
     return dict(row)
 
 
-def project_task_bindings(drive_root: Any) -> Dict[str, Dict[str, Any]]:
-    """Copy of the immutable task-to-Project bindings for read models (the shared parse)."""
-    return {str(task_id): dict(row) for task_id, row in _load_bindings(drive_root)["bindings"].items()
+def project_task_bindings(drive_root: Any, *, strict: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Copy of the immutable task-to-Project bindings (the shared parse); ``strict`` raises on an unreadable store."""
+    return {str(task_id): dict(row) for task_id, row in _load_bindings(drive_root, strict=strict)["bindings"].items()
             if isinstance(row, dict)}
 
 

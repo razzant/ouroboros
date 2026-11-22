@@ -14,7 +14,8 @@ or closing the project takes it off the list; nothing ages it out. Presence's ow
 for a binding, a carrier that lost its id) neither stand nor retire; the owner's work related to a binding does both.
 Not covered: works with no project, and a root that fails while a later-started root of its project exists. Cost per
 wake: one index probe per open project, one primary-key read of the roots bound to open projects and the bodies of
-the candidates, all in the same snapshot; nothing is stored.
+the candidates, all in the same snapshot; nothing is stored. An unreadable binding store, or an empty registry the
+strict reader cannot vouch for (one lost beside its commit witness), is the section's named gap, never an empty list.
 
 Own clock (``_clock_section``): ``consciousness_clock.own_clock_lines`` over the state the alarm read when it admitted
 the wake, while a named time or my human's reported zone stands; the appointment and the bounds alone make none.
@@ -243,18 +244,19 @@ def fallen_line(row: Dict[str, Any], *, project: str, now: float) -> str:
 def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]) -> List[FallenWork]:
     """The works that stand, newest-started first: in each open project its newest-started work root when it ended
     failed or cancelled and ``ended_without_success`` holds. A root's project is its binding when it has one (owner
-    B4=A, ``projects_registry.project_id_for_task``): the stored ``project_id`` the partial index
-    ``tasks_project_root_ts`` walks is a copy a mid-run "Turn into project" never reaches, so a root bound elsewhere
-    is skipped there and the roots bound to an open project are read beside it by primary key. Rows Presence's
-    authority governs (``presence_authority_recorded``) are skipped by that typed column. Bodies are read only for the
-    candidates, by primary key in the probes' snapshot, and decoded after it closes."""
+    B4=A, ``projects_registry.project_id_for_task``; read strictly, so an unreadable store raises): the stored
+    ``project_id`` the partial index ``tasks_project_root_ts`` walks is a copy a mid-run "Turn into project" never
+    reaches, so a root bound elsewhere is skipped there and the roots bound to an open project are read beside it by
+    primary key. Rows Presence's authority governs (``presence_authority_recorded``) are skipped by that typed column.
+    Bodies are read only for the candidates, by primary key in the probes' snapshot, and decoded after it closes."""
     from ouroboros import task_store
     from ouroboros.projects_registry import project_task_bindings
 
     names = open_projects(projects)
     if not names:
         return []
-    bound = {task_id: str(row.get("project_id") or "") for task_id, row in project_task_bindings(root).items()}
+    bindings = project_task_bindings(root, strict=True)
+    bound = {task_id: str(row.get("project_id") or "") for task_id, row in bindings.items()}
     moved = sorted(task_id for task_id, project_id in bound.items() if project_id in names)
     own = f"{task_store.ROOT_RESULT_WHERE} AND presence_authority_recorded=0"
     newest = (f"SELECT task_id, status, ts FROM tasks INDEXED BY tasks_project_root_ts WHERE project_id=? AND {own} "
@@ -290,8 +292,12 @@ def fallen_works(root: Any, *, now: float, projects: Iterable[Mapping[str, Any]]
 
 
 def _fallen_section(facts: StandingFacts) -> Optional[StandingSection]:
+    from ouroboros.projects_registry import reserved_project_chat_ids
+
     if facts.registry is None:
         raise LookupError("project registry unreadable")
+    if not facts.registry:  # empty is "no projects" only where the strict reader agrees (``readable_rooms``' rule)
+        reserved_project_chat_ids(facts.root, strict=True)
     works = fallen_works(facts.root, now=facts.now, projects=facts.registry)
     return StandingSection(FALLEN_KIND, FALLEN_TITLE, FALLEN_WORDS, tuple(work.line for work in works)) if works else None
 

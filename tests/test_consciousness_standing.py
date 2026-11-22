@@ -292,6 +292,35 @@ def test_a_root_bound_to_the_project_later_retires_its_earlier_failure(tmp_path)
     assert _listed(tmp_path) == ["fell"]
 
 
+@pytest.mark.parametrize("damage", ["malformed", "unreadable"])
+def test_an_unreadable_binding_store_is_the_sections_gap_never_the_copy_a_root_started_with(tmp_path, damage):
+    """The binding names a converted root's project, so the store is read strictly: one that cannot be read is the
+    section's named gap, as an unreadable registry is, never "no bindings" with the root back in its old project. A
+    readable store places it by its binding, and an absent one (nothing converted yet) by its copy, with no gap."""
+    projects = [*PROJECTS, {"id": "other", "name": "Other", "lifecycle": "active"}]
+    _registry(tmp_path, *projects)
+    _root(tmp_path, "earlier", ts=T0 - 9000, project="other", ended=T0 - 8000)
+    _root(tmp_path, "converted", ts=T0 - 1800, project="other", ended=T0 - 600)
+    _bind(tmp_path, converted="p1")
+    placed = _observe(tmp_path)
+    assert [line.split(",")[0] for line in placed.standing[0].lines] == [
+        "- task converted Failed in project Audit", "- task earlier Failed in project Other"]
+    assert not [gap for gap in placed.gaps if gap.startswith("fallen_work")]
+    store = tmp_path / "state" / "project_task_bindings.json"
+    if damage == "malformed":
+        store.write_text("{ not json", encoding="utf-8")
+    else:  # a directory where the store is: opening it fails with the platform's OSError
+        store.unlink()
+        store.mkdir()
+    unread = _observe(tmp_path)
+    [gap] = [gap for gap in unread.gaps if gap.startswith("fallen_work unreadable: ")]
+    assert unread.standing == () and (damage == "unreadable" or gap == "fallen_work unreadable: ValueError")
+    store.rmdir() if damage == "unreadable" else store.unlink()
+    absent = _observe(tmp_path)
+    assert [line.split(",")[0] for line in absent.standing[0].lines] == ["- task converted Failed in project Other"]
+    assert not [gap for gap in absent.gaps if gap.startswith("fallen_work")]
+
+
 def test_bodies_are_read_only_for_candidates_and_the_line_stays_compact(tmp_path, monkeypatch):
     from ouroboros import task_store
 
@@ -348,6 +377,27 @@ def test_an_unreadable_source_is_a_named_gap_never_a_missing_wake(tmp_path, monk
     monkeypatch.setattr(task_store, "_fetch", busy)
     observation = _observe(tmp_path)
     assert "fallen_work unreadable: StoreBusy" in observation.gaps and observation.standing == ()
+
+
+def test_a_registry_lost_beside_its_commit_witness_is_the_sections_gap_never_no_projects(tmp_path):
+    """An empty registry means no projects only where the strict reader agrees (``projects_registry.readable_rooms``'
+    rule): one lost beside its commit witness is the section's named gap; one committed empty, or never committed (a
+    fresh install), stays quiet."""
+    _registry(tmp_path, *PROJECTS)
+    witness = tmp_path / "state" / "projects.json.committed"
+    witness.touch()  # what every registry save leaves beside it
+    _root(tmp_path, "fell", ts=T0 - 1800, ended=T0 - 600)
+    assert _observe(tmp_path).counts()["fallen_work"] == 1
+    (tmp_path / "state" / "projects.json").unlink()
+    lost = _observe(tmp_path)
+    assert lost.standing == () and "fallen_work unreadable: FileNotFoundError" in lost.gaps
+    _registry(tmp_path)
+    empty = _observe(tmp_path)
+    witness.unlink()
+    (tmp_path / "state" / "projects.json").unlink()
+    fresh = _observe(tmp_path)
+    for observation in (empty, fresh):
+        assert observation.standing == () and not [gap for gap in observation.gaps if gap.startswith("fallen_work")]
 
 
 def test_every_form_of_the_wake_keeps_the_section_and_the_bare_pointer_folds_it(tmp_path):
