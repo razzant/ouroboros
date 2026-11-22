@@ -8,7 +8,6 @@ branch here is controlled: the platform flags are set, the processes are this ho
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from ouroboros import (
     headless,
     maintenance,
     maintenance_jobs,
+    platform_layer,
     process_custody,
     session_scratch,
     task_custody,
@@ -325,10 +325,18 @@ def test_a_local_launch_is_one_row_under_its_declaration_id_on_the_windows_branc
     pid = int(started["backend_pid"])
     monkeypatch.setattr(workspace_executor, "IS_WINDOWS", True)
     monkeypatch.setattr(process_custody, "IS_WINDOWS", True)
-    reaper_stop = threading.Event()  # POSIX keeps an unreaped child as a zombie; Windows has none to reap
-    reaper = threading.Thread(target=lambda: [record.local_proc.poll() or reaper_stop.wait(0.02)
-                                              for _ in iter(lambda: reaper_stop.is_set(), True)], daemon=True)
-    reaper.start()
+    # Windows keeps no zombie: a terminated process reads as exited at once, without anyone reaping it. POSIX keeps
+    # this unreaped child as one, which the stop counts as ended while the Windows branch's fresh read after it
+    # (``launch_custody.unsettled_selection``: ``pid_is_alive``) still sees it. A reaper thread racing that read loses
+    # on a busy host (#3495), so every presence read of this child reaps it first: a live child is untouched.
+    real_gone = platform_layer.pid_provably_gone
+
+    def gone_as_on_windows(candidate):
+        if int(candidate) == pid:
+            record.local_proc.poll()
+        return real_gone(candidate)
+
+    monkeypatch.setattr(platform_layer, "pid_provably_gone", gone_as_on_windows)
     try:
         assert not workspace_executor._recorded_launch(workspace_executor._load_process_record(record.durable_record_path))
         view = _kept_view(drive)
@@ -343,8 +351,7 @@ def test_a_local_launch_is_one_row_under_its_declaration_id_on_the_windows_branc
 
         assert not pid_is_alive(pid), "its process ended"
     finally:
-        reaper_stop.set()
-        reaper.join()
+        monkeypatch.setattr(platform_layer, "pid_provably_gone", real_gone)
         monkeypatch.setattr(workspace_executor, "IS_WINDOWS", False)
         monkeypatch.setattr(process_custody, "IS_WINDOWS", False)
         services._stop_service(ctx, name="windowsy")
