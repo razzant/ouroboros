@@ -418,6 +418,33 @@ def test_a_records_only_note_lets_the_model_send_the_answer_it_wrote_once(record
     assert [RECORD_NOTE in json.dumps(rows, ensure_ascii=False) for rows in room.h.inputs] == [False, False, True]
 
 
+def test_a_peer_message_at_the_final_drain_leaves_the_answer_once_before_the_record_note(records_room, monkeypatch):
+    """Review round 3 (Astra 4): an independent task's message reaches the finish's final drain after the answer's
+    provisional row, so that row stays in the transcript; the record note's request then holds the answer once, before
+    the peer's message and the note, never a second copy of it."""
+    from ouroboros import loop
+    from ouroboros.owner_mailbox import write_task_message
+    room = records_room
+    peer, drain, injected = "The peer archive is available.", loop._drain_incoming_messages, []
+
+    def peer_at_close(messages, incoming, root, task_id, *args, **kwargs):
+        if not injected and messages[-1].get("role") == "assistant" and messages[-1].get("content") == FINAL:
+            assert write_task_message(root, peer, task_id, source_task_id="synthetic-peer", provenance="independent_task")
+            injected.append(True)
+        return drain(messages, incoming, root, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "_drain_incoming_messages", peer_at_close)
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    view, stored = settle(room, turn(room))
+    rows = room.h.inputs[-1]
+    answers = [index for index, row in enumerate(rows) if row.get("role") == "assistant" and row.get("content") == FINAL]
+    notes = [index for index, row in enumerate(rows) if RECORD_NOTE in str(row.get("content"))]
+    peers = [index for index, row in enumerate(rows) if peer in str(row.get("content"))]
+    assert injected and len(answers) == len(peers) == len(notes) == 1 and answers[0] < peers[0] < notes[0], (
+        answers, peers, notes)
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
+
+
 def test_a_prose_final_into_a_records_only_turn_keeps_the_owed_reply(records_room):
     """R3 on the prose path too: my human's Main message, already in the transcript, owes a reply; a tool-less
     records-only final is refused at the common exit like a silent finish would be, instead of ending the turn quietly

@@ -1249,7 +1249,7 @@ def _no_tool_final_answer(
     """Run the no-tool finalization gates; ``None`` requests another model round."""
     messages = limit_ctx.messages
     from ouroboros.loop_messages import transcript_growth_signature
-    before = transcript_growth_signature(messages)
+    before, response_start = transcript_growth_signature(messages), len(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
     # A tool-less response carries nothing that rides. A restored answer whose checkpoint predates its saved send fact
     # reads it again from its restored trace: a recorded send still rides once; otherwise a records-only place returns
@@ -1501,8 +1501,11 @@ def _no_tool_final_answer(
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
     if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
         note = getattr(tools._ctx, "_records_only_noted", False) and not noted_before
-        if note and str(content or "").strip() and not explicit_candidate:  # the words the note asks it to send
-            messages.append({"role": "assistant", "content": content})  # (a selection is already its own row)
+        # The words the note asks it to send, once: a selection is already its own row, and a drain's provisional row
+        # stays when mail arrived after it (``owner_input``).
+        kept = next((row for row in reversed(messages[response_start:]) if row.get("role") == "assistant"), {})
+        if note and str(content or "").strip() and not explicit_candidate and kept.get("content") != content:
+            messages.append({"role": "assistant", "content": content})
         messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
         if note:
             _note_delivery_facts(tools, limit_ctx, llm_trace, line="")  # the record note is one-shot: the next answer stands
