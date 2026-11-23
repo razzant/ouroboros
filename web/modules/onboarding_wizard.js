@@ -123,6 +123,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     let footerObserver = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
+    // The built-in compatible key's consent is a field of the draft beside its address (the setup contract's `providerFields`).
+    const consentState = PROVIDER_FIELDS.find((entry) => entry.settingKey === compatibleCard.consent?.settingKey)?.stateKey;
     const starterSkills = createStarterSkillsStep({ offered: STEP_ORDER.includes('skills'), open: () => navigateStep('skills', { restorePosition: true }),
         keyLabels: Object.fromEntries(PROVIDER_FIELDS.map((field) => [field.settingKey, field.label])) }); // the Skills step and its Summary row keep their ticks across renders
     const QUICK = STEP_ORDER.filter((id) => ['consciousness', 'skills', 'summary'].includes(id));  // Review & start's own steps, in order
@@ -1150,6 +1152,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         const panel = root.querySelector('[data-settings-panel="providers"]');
         if (panel) {
             const mountedConnections = JSON.stringify(state.connections || []);
+            const mountedConsent = consentState ? state[consentState] || '' : '';
             const changed = () => {
                 const rows = connectionsEditor?.collect().OUROBOROS_CONNECTIONS;
                 // collect() is a mount-relative patch; undo must restore that baseline too.
@@ -1159,6 +1162,8 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     const stateKey = PROVIDER_FIELDS.find((entry) => entry.settingKey === field.settingKey)?.stateKey;
                     if (input && stateKey) state[stateKey] = input.value;
                 }
+                // A consent edit names the address shown; none leaves the draft as it was mounted (like the rows above).
+                if (consentState) state[consentState] = connectionsEditor?.consent(compatibleCard.kind) ?? mountedConsent;
                 compatibleCatalogs = {};
                 markStepEdited();
             };
@@ -1172,7 +1177,10 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             // The card's own fields first, as Settings does: load() binds each row it mounts.
             bindSecretInputs(panel);
             connectionsEditor.load({ ...draftSettings(), _meta: { policy_state: { deployment: bootstrap.deployment } } }, { modelSlots: MODEL_SLOTS });
-            // Back remounts the draft, not a saved document. Show and Test must still
+            // Back remounts the draft, not what is saved: a consent box SHOWS the draft, a Test adds only what differs from what is
+            // stored. The editor reads settings keys and INITIAL_STATE has state keys, so the saved state goes through the draft's projection.
+            connectionsEditor.rebaseConsent(onboardingSettingsDraft({ state: INITIAL_STATE, providerFields: PROVIDER_FIELDS, trim }));
+            // Show and Test must still
             // use edited values locally rather than look up an unsaved row's key.
             panel.querySelectorAll('[data-connection-row][data-uid]').forEach((row) => {
                 const saved = (INITIAL_STATE.connections || []).find((entry) => entry.kind === row.dataset.kind && entry.name === row.dataset.name);

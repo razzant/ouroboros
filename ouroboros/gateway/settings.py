@@ -48,7 +48,7 @@ from ouroboros.gateway.owner_settings import (
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import (
-    connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
+    canonical_builtin_consent, connection_references, connections_meta, normalize_connections, seed_new_api_surfaces,
 )
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
@@ -265,6 +265,7 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         if key in SECRET_SETTING_KEYS and looks_masked_settings_secret(key, body[key]):
             continue
         merged[key] = body[key]
+    canonical_builtin_consent(merged, body)
     if "OUROBOROS_CONTEXT_MODE" in body and "OUROBOROS_CONTEXT_MODE" not in skipped:
         from ouroboros.config import normalize_context_mode
         merged["OUROBOROS_CONTEXT_MODE"] = normalize_context_mode(body["OUROBOROS_CONTEXT_MODE"])

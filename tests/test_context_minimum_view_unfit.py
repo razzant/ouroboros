@@ -62,6 +62,7 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
         build_minimum_view(tmp_path, monkeypatch, shape)
     error = raised.value
     text, usage, _trace = _context_capacity_terminal(error)
+    assert "Ollama" not in text and "OLLAMA_CONTEXT_LENGTH" not in text
     threshold = error.estimated_input_tokens + error.response_reserve_tokens
     assert threshold > error.window_tokens, "the refusal's own comparison"
     needs = math.ceil(threshold / 1000) * 1000
@@ -91,20 +92,14 @@ def test_a_work_room_only_shortfall_starts_with_the_existing_notice(tmp_path, mo
     assert 'Start room is smaller than requested' in shown.system_content_json
 
 
-def test_a_child_whose_start_cannot_fit_ends_as_context_capacity_and_its_parent_is_told(tmp_path, monkeypatch):
-    """A child whose window cannot hold its start (its held heads included) ends with the named outcome
-    ``context_capacity``, never ``task_exception``, and the parent's ``[SUBTASK_OUTCOME]`` carries it. A nanny takes
-    the same branch of ``_handle_task_scoped`` (every pooled start); its leaf, started before its own context, keeps
-    its custody, so it is not driven here (that path reaches an engine)."""
+def _drive_refused_child_start(tmp_path, monkeypatch, refusal):
+    """A pooled helper whose start is refused where its context is built: the result it stores. No model round may run."""
     from ouroboros import agent as agent_module
     from ouroboros.agent import Env, OuroborosAgent
     from ouroboros.subagent_runtime import select_subagent_snapshot
     from ouroboros.task_results import load_task_result
-    from ouroboros.tools.control_task_results import _subtask_outcome_summary
     from tests.test_available_subagents_runtime import _api_row, _settings
 
-    with pytest.raises(fit.MinimumViewUnfit) as raised:
-        build_minimum_view(tmp_path, monkeypatch, "fixed")
     repo, drive = tmp_path / "repo", tmp_path / "drive"
     repo.mkdir()
     drive.mkdir()
@@ -114,17 +109,42 @@ def test_a_child_whose_start_cannot_fit_ends_as_context_capacity_and_its_parent_
     monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
     monkeypatch.setattr(OuroborosAgent, "_run_delegate_preflight", lambda self, _logs, _task, dispatch: (dispatch, False))
 
-    def unfit(**_kwargs):
-        raise raised.value
+    def refused(**_kwargs):
+        raise refusal
 
-    monkeypatch.setattr(agent_module, "build_llm_messages", unfit)
+    monkeypatch.setattr(agent_module, "build_llm_messages", refused)
     monkeypatch.setattr(agent_module, "run_llm_loop", lambda **_kw: pytest.fail("no model round may run"))
     agent = OuroborosAgent(Env(repo_dir=repo, drive_root=drive))
     agent._handle_task_scoped({"id": "helper", "type": "task", "chat_id": 1, "text": "Collect the figures",
                                "delegation_role": "subagent", "configured_subagent": snapshot, "task_constraint": {},
                                "parent_task_id": "root", "root_task_id": "root", "drive_root": str(drive),
                                "budget_drive_root": str(drive)})
-    result = load_task_result(drive, "helper")
+    return load_task_result(drive, "helper")
+
+
+def test_a_child_whose_start_cannot_fit_ends_as_context_capacity_and_its_parent_is_told(tmp_path, monkeypatch):
+    """A child whose window cannot hold its start (its held heads included) ends with the named outcome
+    ``context_capacity``, never ``task_exception``, and the parent's ``[SUBTASK_OUTCOME]`` carries it. A nanny takes
+    the same branch of ``_handle_task_scoped`` (every pooled start); its leaf, started before its own context, keeps
+    its custody, so it is not driven here (that path reaches an engine)."""
+    from ouroboros.tools.control_task_results import _subtask_outcome_summary
+
+    with pytest.raises(fit.MinimumViewUnfit) as raised:
+        build_minimum_view(tmp_path, monkeypatch, "fixed")
+    result = _drive_refused_child_start(tmp_path, monkeypatch, raised.value)
     assert result["reason_code"] == "context_capacity" != "task_exception"
     outcome = json.loads(_subtask_outcome_summary(result, task_id="helper"))
     assert "context_capacity" in json.dumps(outcome["outcome_axes"])
+
+
+def test_a_child_on_an_ollama_that_cannot_keep_history_ends_with_its_own_upgrade_sentence(tmp_path, monkeypatch):
+    """The same branch ends a start on a server that would silently truncate: the named outcome keeps the server's own
+    sentence and no loop evidence, never ``task_exception``."""
+    from ouroboros.llm_ollama import OllamaUpgradeRequired
+
+    sentence = "Ollama 0.12.5 can silently truncate history. Upgrade to 0.12.6 or later."
+    result = _drive_refused_child_start(tmp_path, monkeypatch, OllamaUpgradeRequired(sentence))
+    assert result["reason_code"] == "ollama_guard_unavailable" != "task_exception"
+    assert result["result"] == sentence
+    assert result["outcome_axes"]["execution"]["status"] == "infra_failed"
+    assert result["loop_outcome"]["usage"]["total_rounds"] is None  # no loop ran: its evidence is absent, never a zero

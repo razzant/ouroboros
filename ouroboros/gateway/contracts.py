@@ -1072,6 +1072,8 @@ class ProviderTestRequest(TypedDict):
 class ProviderTestResponse(TypedDict):
     ok: bool
     error: NotRequired[str]
+    caution: NotRequired[str]  # the request went to a server that named no program, whatever the outcome
+    code: NotRequired[Literal["ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable"]]  # a failed Test's withheld send: consent needed, an address hold, an Ollama to upgrade
 
 
 class ExecutorRef(TypedDict, total=False):

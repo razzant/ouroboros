@@ -251,6 +251,10 @@ class ModelStub:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(handler):  # noqa: N802, N805 - stdlib callback
+                if handler.path == "/props":  # names its program as llama.cpp does: an unnamed server needs consent
+                    stub._send(handler, json.dumps({"default_generation_settings": {"n_ctx": 2_000_000}, "total_slots": 1}),
+                               "application/json")
+                    return
                 if handler.path.rstrip("/") != "/v1/models":
                     handler.send_error(404)
                     return

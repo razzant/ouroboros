@@ -609,6 +609,10 @@ class LoopbackModelServer:
                         {"id": model_id, "max_model_len": outer.window_tokens}
                         for model_id in outer._model_ids()
                     ]})
+                if self.path == "/props":
+                    # Names its program, as llama.cpp's own document does (``server_window.PROGRAM_DOCUMENTS``): a
+                    # private compatible server that names none sends only with its connection's consent.
+                    return self._send({"default_generation_settings": {"n_ctx": outer.window_tokens}, "total_slots": 1})
                 self.send_error(404)
 
             def do_POST(self):  # noqa: N802 - stdlib callback name
@@ -1247,6 +1251,11 @@ def keyless_review_rows(*, distinct_models: bool = False) -> list:
     return items
 
 
+# The stub's own connection: its address, its placeholder key, and the consent a scenario gives for a server that
+# names no program (``ouroboros/llm_ollama_guard.py``). None of them is a provider credential.
+STUB_CONNECTION_KEYS = frozenset(flat for _field, flat, _secret in PROVIDER_KINDS["openai-compatible"].fields)
+
+
 def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
     """The isolated settings.json for a keyless scenario server.
 
@@ -1261,8 +1270,7 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
     route. Overrides carrying a real provider credential are a scenario bug and are
     refused loudly.
     """
-    stub_pair = {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
-    forbidden = (set(ALL_PROVIDER_CREDENTIAL_KEYS) - stub_pair) & set(overrides)
+    forbidden = (set(ALL_PROVIDER_CREDENTIAL_KEYS) - STUB_CONNECTION_KEYS) & set(overrides)
     if forbidden:
         raise ValueError(
             f"keyless lane: overrides must not carry provider credentials: {sorted(forbidden)}"
@@ -1294,10 +1302,9 @@ def keyless_settings(stub: ScriptedStubModel, **overrides) -> dict:
 
 def assert_settings_keyless(settings: dict) -> None:
     """Fail loudly if a scenario's settings smuggle a provider credential."""
-    stub_pair = {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
     offending = sorted(
         key for key in settings
-        if key in ALL_PROVIDER_CREDENTIAL_KEYS and key not in stub_pair and str(settings[key] or "").strip()
+        if key in ALL_PROVIDER_CREDENTIAL_KEYS and key not in STUB_CONNECTION_KEYS and str(settings[key] or "").strip()
     )
     assert not offending, f"keyless settings carry provider credentials: {offending}"
     base = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")

@@ -28,6 +28,7 @@ from ouroboros.transport_custody import (  # noqa: F401 -- the names this module
 )
 from ouroboros.provider_connections import connection_rows, connection_values
 from ouroboros.provider_models import (
+    ACTIVE_MODEL_SETTING_KEYS,
     CONNECTIONS_KEY,
     DEEPSEEK_BASE_URL,
     RouteParts,
@@ -270,6 +271,8 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
             "verify_ssl_certs": verify_raw not in ("0", "false", "no", "off"), "default_headers": {}, **_DIRECT_LANE,
         }
     if provider == "openai-compatible":
+        from ouroboros.llm_ollama_guard import consent_token
+        consent = consent_token(get("continue_unconfirmed", ""))  # the id of the address it covers, never its text
         if connection:
             api_key, base_url = str(get("api_key", "") or "").strip(), str(get("base_url", "") or "").strip()
             keyless = not api_key
@@ -283,11 +286,15 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
             keyless = not api_key and compatible_endpoint_configured(setting)
         # A pair configured without a key is the endpoint's no-auth setting; its
         # transport sends no credential (net_transport.openai_client_class).
-        # OpenRouter's own endpoint hears the app identity; a redirect is then an error, never a carrier elsewhere.
+        # OpenRouter's own endpoint hears the app identity, and a private server is admitted as its own address
+        # (``llm_ollama.limit_compatible_send``): a redirect is then an error, never a carrier of either elsewhere.
+        from ouroboros.server_window import private_host
         attributed = is_openrouter_endpoint(base_url)
         return {"api_key": api_key, "base_url": base_url, "keyless": keyless,
+                **({"continue_unconfirmed": consent} if consent else {}),
                 "default_headers": dict(OPENROUTER_APP_HEADERS) if attributed else {},
-                **({"follow_redirects": False} if attributed or is_go_chat_route(provider, base_url) else {}),
+                **({"follow_redirects": False}
+                   if attributed or private_host(base_url) or is_go_chat_route(provider, base_url) else {}),
                 **_DIRECT_LANE}
     return {
         "api_key": get("api_key", "") if connection or api_key_override is None else api_key_override,
@@ -296,6 +303,59 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
         "supports_openrouter_extensions": True, "supports_generation_cost": True,
         "provider_routing": get("provider_routing", None) if connection else None,
     }
+
+
+def configured_window(target, settings=None):
+    """Largest role window for this Ollama model on this connection and server."""
+    from ouroboros.server_window import server_root
+    from ouroboros.config import runtime_settings
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY, MODEL_ROLE_SETTINGS, normalize_model_role_options
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+    from ouroboros.route_choice import following_route, box_checked
+
+    if settings is None:
+        from ouroboros.context_window import bound_target_scope
+        from ouroboros.usage_accounting import current_physical_attempt_context
+        if target.get("bound_load_window") is not None:
+            return target["bound_load_window"]
+        physical = current_physical_attempt_context()
+        bound = getattr(physical, "requested_load_window", None)
+        if bound is not None and physical.window_observation_fp == bound_target_scope(
+                target, target.get("requested_model") or target["resolved_model"]):
+            return bound
+        settings = runtime_settings()
+    options, _ = normalize_model_role_options(MODEL_CONTEXT_WINDOWS_KEY, settings.get(MODEL_CONTEXT_WINDOWS_KEY))
+    windows = []
+    for role, value in options.items():
+        key = MODEL_ROLE_SETTINGS[role]
+        if key not in ACTIVE_MODEL_SETTING_KEYS or role == "websearch":
+            continue  # retired slots and search adapters do not share the chat runner
+        read = lambda key: settings.get(key, SETTINGS_DEFAULTS.get(key, ""))
+        if role == "fallback":
+            if box_checked(read("USE_LOCAL_FALLBACK")):
+                continue
+            models = [m.strip() for m in str(read(key) or "").split(",") if m.strip()]
+            pairs = zip(models, value)
+        else:
+            model, local = following_route(role, read=read)
+            if local:
+                continue
+            pairs = [(model, value)]
+        for model, window in pairs:
+            if not model or not window:
+                continue
+            try:
+                other = resolve_target(model, settings=settings)
+            except ConnectionUnavailable:
+                continue  # another role's missing/disabled connection is that role's refusal, not this runner's
+            if (other.get("provider") == target.get("provider")
+                    and other["connection"] == target.get("connection", "")
+                    and server_root(other.get("base_url")) == server_root(target.get("base_url"))
+                    and str(other.get("resolved_model", "")).removesuffix(":latest")
+                    == str(target.get("resolved_model", "")).removesuffix(":latest")):
+                windows.append(window)
+    return max(windows, default=0)
 
 
 class _ProviderRoutingMixin:
@@ -382,6 +442,15 @@ class _ProviderRoutingMixin:
                 timeout=timeout,
             )
 
+        from ouroboros.llm_ollama import OllamaProgramChanged, chat_ollama, is_ollama, route_notices
+        if is_ollama(target, no_proxy=no_proxy, before_send=True):
+            try:
+                return chat_ollama(target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+                                   no_proxy=no_proxy, timeout=timeout, stream=stream,
+                                   response_format=response_format, model_role=model_role, window=configured_window(target))
+            except OllamaProgramChanged:
+                pass  # the confirmed replacement serves this request on /v1 below
+
         if no_proxy:
             _oa_client, _http_client = self._make_no_proxy_client(target, timeout=timeout)
             try:
@@ -403,13 +472,15 @@ class _ProviderRoutingMixin:
                     target,
                 )
                 # Skip cost fetch here; it would re-enter OS proxy lookup.
-                return self._normalize_remote_response(
+                result = self._normalize_remote_response(
                     _reply_dict(resp, target),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                     wire_completion=resp,
                 )
+                result[1].update(route_notices(target))  # as the send's own last check left them
+                return result
             finally:
                 try:
                     from ouroboros._usage_wait import close_after_model_send
@@ -438,12 +509,14 @@ class _ProviderRoutingMixin:
             kwargs,
             target,
         )
-        return self._normalize_remote_response(
+        result = self._normalize_remote_response(
             _reply_dict(resp, target),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
             wire_completion=resp,
         )
+        result[1].update(route_notices(target))
+        return result
 
     @staticmethod
     def _prompt_cache_identity(model_id: str, messages: List[Dict[str, Any]]) -> str:
@@ -563,6 +636,7 @@ class _ProviderRoutingMixin:
 
     # Non-chat provider facets share the same route, credential and header owner.
     resolve_remote_target = _resolve_remote_target
+    configured_window = staticmethod(configured_window)  # the Ollama load a probe asks, read like its target
 
     def _get_client(self):
         target = self._resolve_remote_target("openrouter::")

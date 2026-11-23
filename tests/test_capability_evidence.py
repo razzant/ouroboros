@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import ouroboros.capability_evidence as ce
+from tests._ollama import install_http as install_http
 
 
 def test_route_fingerprint_stable_and_route_sensitive():
@@ -209,18 +210,24 @@ def test_provider_metadata_window_routes_openai_compatible(monkeypatch):
     assert ce._provider_metadata_window("gigachat", "GigaChat", "", allow_fetch=True) == (0, "")
 
 
-def test_probe_threads_api_key_through_metadata(tmp_path, monkeypatch):
-    """Onboarding's unsaved API key reaches metadata discovery."""
+def test_probe_threads_api_key_through_metadata(tmp_path, monkeypatch, install_http):
+    """Onboarding's unsaved API key reaches metadata discovery: the private server's program check (a synthetic
+    gateway that names none) and then its listing."""
+    from tests._ollama import GatewayHTTP
+
     seen = {}
 
     def metadata(model, base_url, allow_fetch, api_key=None, provider=""):
         seen["key"] = api_key
         return 0
 
+    gateway = install_http(GatewayHTTP())
     monkeypatch.setattr(ce, "_openai_compatible_metadata_window", metadata)
     ce.probe(tmp_path, provider="openai-compatible", model="m", base_url="http://x/v1",
              allow_fetch=True, force=True, api_key="THEKEY")
     assert seen["key"] == "THEKEY"
+    assert gateway.requests and {request.headers.get("authorization") for request in gateway.requests} == {
+        "Bearer THEKEY"} and gateway.chats == []
 
 
 def test_active_main_route_sets_cloudru_base_url():
