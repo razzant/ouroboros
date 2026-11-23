@@ -374,7 +374,7 @@ def test_native_completion_receipt_keeps_work_and_errors_visible(
 def test_unfinished_project_parent_preserves_running_child_and_full_output(
     wait_clone, tmp_path, monkeypatch, request, engine, width,
 ):
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     marker = "COMPLETION_PARENT_" + uuid.uuid4().hex
     child_marker = "COMPLETION_CHILD_" + uuid.uuid4().hex
@@ -453,18 +453,18 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                             card.wait_for(state="attached", timeout=30000)
                             if card.get_attribute("data-expanded") != "1":
                                 card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
-                        # The authored result precedes its lifecycle notification;
-                        # the latter may repeat an explicitly shortened [RESULT].
-                        line = child_card.locator(":scope > [data-live-timeline] > .chat-live-line.expandable").filter(has_text="CHILD_OUTPUT_HEAD").first
+                        # Replay can insert a lifecycle preview before the selected
+                        # report. Follow the row we open, not its changing rank.
+                        timeline = child_card.locator(":scope > [data-live-timeline]")
+                        matching = timeline.locator(":scope > .chat-live-line.expandable").filter(has_text="CHILD_OUTPUT_HEAD")
+                        line_key = matching.first.get_attribute("data-live-line-key")
+                        line = timeline.locator(f':scope > [data-live-line-key="{line_key}"]')
                         if line.get_attribute("data-expanded") != "1":
                             line.locator("[data-live-line-toggle]").click()
-                        # Inline complete bodies and fetched full bodies share this
-                        # node; the -full class only denotes the fetched variant.
+                        # The tail can appear in a preview that omits the middle.
                         full = line.locator(":scope > .chat-live-line-body")
-                        full.get_by_text("CHILD_OUTPUT_TAIL", exact=False).wait_for(timeout=30000)
-                        rendered = full.inner_text()
-                        selected = rendered[rendered.index("CHILD_OUTPUT_HEAD"):rendered.index("CHILD_OUTPUT_TAIL") + len("CHILD_OUTPUT_TAIL")]
-                        assert selected.split() == child_answer.split(), "the visible full output lost content"
+                        full.wait_for(state="visible")
+                        expect(full).to_contain_text(child_answer, use_inner_text=True, timeout=30000)
                         full.evaluate("node => { const range = document.createRange(); range.selectNodeContents(node);"
                                       " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }")
                         assert "CHILD_OUTPUT_TAIL" in page.evaluate("window.getSelection().toString()")

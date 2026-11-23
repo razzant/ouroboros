@@ -157,7 +157,6 @@ def _seed_saved_files(root):
     """The synthetic server owns this result store. Register exact bytes as a finished task would."""
     import hashlib
 
-    from ouroboros.payload_release import propose
     from tests._store_shared import as_install, seed_result
 
     task = "sample-count"
@@ -178,11 +177,29 @@ def _seed_saved_files(root):
     with as_install(root):
         seed_result(root, task, {"task_id": task, "root_task_id": task, "status": "completed", "task_type": "task",
                                  "title": "Count sample rows", "result": result, "artifacts": artifacts})
+    retained = {"report": [report], "method": [method], "result": ["task_result"]}
+    return task, store, files, snapshot, result, retained
+
+
+def _offer_saved_file(root, task, snapshot, retained):
+    from ouroboros import artifact_storage, maintenance_jobs, record_compression
+    from ouroboros.payload_release import propose
+    from tests._store_shared import as_install
+    from tests.separate_ui_support import wait_until
+
+    def compression_settled():
+        job = maintenance_jobs.job(root, record_compression.JOB) or {}
+        return (not record_compression.due(root, job, {}, False)
+                and task not in (job.get("waiting", {}).get("evidence") or ()))
+
+    with as_install(root):
+        # Its startup pass can replace this compressible file with the same bytes at a new inode.
+        # The positive case must propose the saved object after that pass, not before it.
+        if artifact_storage.compression_supported():
+            wait_until(compression_settled, timeout=45, message=f"compression did not settle for {task}")
         offer = propose(root, task, [{"path": snapshot, "role": "frozen input", "loss": "Cannot recount these rows."}],
-                        {"report": [report], "method": [method], "result": ["task_result"]},
-                        "The original rows cannot be examined again.", proposer="sample-author")
+                        retained, "The original rows cannot be examined again.", proposer="sample-author")
         assert offer["ok"], offer
-    return task, store, files, snapshot, result
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -191,10 +208,13 @@ def test_owner_releases_one_saved_file_through_storage(direct_server_with_data, 
 
     from playwright.sync_api import expect
 
+    from tests.separate_ui_support import wait_until
+
     server = direct_server_with_data
     server["stop_server"]()
-    task, store, files, snapshot, result = _seed_saved_files(server["data_dir"])
+    task, store, files, snapshot, result, retained = _seed_saved_files(server["data_dir"])
     server["start_server"]()
+    _offer_saved_file(server["data_dir"], task, snapshot, retained)
     base = server["url"]
     detail = f"{base}/api/tasks/{task}"
     free = f"{base}/api/storage/free"
@@ -250,10 +270,22 @@ def test_owner_releases_one_saved_file_through_storage(direct_server_with_data, 
             dialog.get_by_role("button", name="Release 1 file", exact=True).click()
         assert receipt.value.status == 202 and receipt.value.json()["started"]
         assert sent == [{**selection, "accept_loss": True}]
-        settled = page.wait_for_function("""async url => {
-            const {free} = await (await fetch(url)).json();
-            return ['done', 'failed', 'stopped'].includes(free.state) && free;
-        }""", arg=base + "/api/storage", polling=250, timeout=60000).json_value()
+        def poll_free_settled():
+            response = page.request.get(base + "/api/storage")
+            assert response.status == 200, f"GET /api/storage returned {response.status}"
+            body = response.json()
+            assert isinstance(body, dict) and isinstance(body.get("free"), dict), body
+            free_state = body["free"]
+            if free_state.get("plan") == plan and free_state.get("state") in {"done", "failed", "stopped"}:
+                return free_state
+            return None
+
+        settled = wait_until(
+            poll_free_settled,
+            timeout=60,
+            message=f"storage free plan {plan!r} did not reach a terminal state within 60s",
+            interval=0.25,
+        )
         assert settled["state"] == "done" and settled["run"]["done"] == 1, settled
         assert not (store / snapshot).exists()
         lost = page.request.get(f"{detail}/artifacts/{PurePosixPath(snapshot).name}", params={"relpath": snapshot})
