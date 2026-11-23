@@ -1,0 +1,99 @@
+# ONE-OFF, NOT SHIPPED. Exists only on the verification branch ci-check/skills-36812bee: the candidate commit plus
+# the three CI-only files checked in the first step. One push = one run; deleting the branch runs nothing.
+# Read-only token, no secrets, no credential persistence, no change to the runner. The repository's own
+# setup-python-env action, ci_browser_install.py, safe_test.py (fresh profile, deadline), pytest and `node --test`
+# do the work; the verdict script only compares what ran with what was selected.
+name: Skills candidate check (one-off)
+
+on:
+  push:
+    branches: ['ci-check/skills-36812bee']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # No later step runs unless this and the Python setup succeeded: nothing of the checkout executes before it is verified.
+      - name: The checkout is the candidate plus exactly the CI-only files
+        id: tree
+        run: |
+          set -e
+          test "$(git rev-parse 'HEAD~1^{tree}')" = 36812beead9664a0407e1097ed38275ae2fc6db4
+          test "$(git diff --name-only --no-renames HEAD~1 HEAD | sort | tr '\n' ' ')" = ".github/ci-check/verify_skills_candidate.py .github/workflows/skills-candidate-check.yml tests/test_ci_skills_grant_cancel.py "
+      - uses: ./.github/actions/setup-python-env
+        id: py
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      # Its failure does not stop the backend groups; node and browser then stay NOT_RUN and the verdict is not PASS.
+      - name: Install the reviewed Node and Playwright Chromium
+        id: install
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium
+      - name: Run the selected groups
+        id: run
+        timeout-minutes: 40
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_UI_EVIDENCE_OUT: ${{ runner.temp }}/c10/frames
+        run: |
+          set +e  # a red group must not stop the others; the verdict step judges every recorded status
+          S="$RUNNER_TEMP/c10"; V=.github/ci-check/verify_skills_candidate.py
+          mkdir -p "$S/status" "$S/frames" || exit 1
+          for g in builtin-update repair-twice prior-off saved-not-granted node browser; do echo 97 > "$S/status/$g"; done  # 97: not run
+          PY="$(python -c 'import sys; print(sys.executable)')" || exit 1
+          case "$PY" in /*) ;; *) exit 1 ;; esac
+          run() {  # run <group> <seconds>
+            local g=$1 t=$2 sel cmd; local -a A
+            case "$g" in node|browser) [ "$INSTALL_OUTCOME" = success ] || return 0 ;; esac  # no partial environment
+            sel="$("$PY" -I -S "$V" args "$g")" || return 0
+            [ -n "$sel" ] || return 0  # never start a runner without its selected arguments
+            mapfile -t A <<< "$sel"
+            if [ "$g" = node ]; then
+              cmd=("$GITHUB_WORKSPACE/node-standalone/bin/node" --test --test-timeout=300000 --test-reporter=tap --test-reporter-destination="$S/node.tap")
+            else
+              cmd=("$PY" -m pytest -o addopts= -p no:cacheprovider -q --tb=no --color=no --timeout=300 --junitxml="$S/$g.junit.xml")
+            fi
+            "$PY" -I -S scripts/safe_test.py --timeout "$t" --evidence-dir "$S/ev/$g" -- "${cmd[@]}" "${A[@]}"
+            echo $? > "$S/status/$g"
+          }
+          run builtin-update 600; run repair-twice 600; run prior-off 600; run saved-not-granted 400
+          run node 240; run browser 600
+      - name: Verdict
+        id: gate
+        if: ${{ !cancelled() && steps.tree.outcome == 'success' && steps.py.outcome == 'success' }}
+        run: python3 -I -S .github/ci-check/verify_skills_candidate.py gate "$RUNNER_TEMP/c10"
+      # Derived names and statuses only (signed as derived inside); the originals stay in the runner's temp area.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() && steps.gate.outcome != 'skipped' }}
+        with:
+          name: skills-candidate-verdict
+          path: |
+            ${{ runner.temp }}/c10/verdict.json
+            ${{ runner.temp }}/c10/derived.junit.xml
+            ${{ runner.temp }}/c10/derived.tap
+          retention-days: 7
+          if-no-files-found: error
+      # The frame leaves the runner only after the gate passed every group and the frame itself.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ steps.gate.outcome == 'success' }}
+        with:
+          name: skills-candidate-frame
+          path: ${{ runner.temp }}/c10/frames/skills-grant-dialog-1100x750.png
+          retention-days: 7
+          if-no-files-found: error
