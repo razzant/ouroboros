@@ -426,6 +426,13 @@ def matching_project_origin(entry: dict, refs: list) -> str:
     return next((project_origin_identity(ref) for ref in refs if _source_ref_identity(ref) in keys), "")
 
 
+def legacy_owner_source_chat_keys(chat_id: int) -> tuple[Optional[int], ...]:
+    """Indexed chat keys for an owner reference predating client ids (not a display rule)."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
+    return (chat_id, None) if chat_id == WEB_UI_CHAT_ID else (chat_id,)
+
+
 def resolve_owner_message_source(drive_root: Any, ref: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the owner source by its stored identity, checking its original text hash."""
     found = owner_message_entry(drive_root, ref)
@@ -1547,7 +1554,7 @@ def announce_project_started(
 __all__ = ["AGENT_RECEIPT_ID_PREFIX", "announce_project_started",
     "append_chat_annotation", "append_canonical_task_summary",
     "append_terminal_task_projection", "build_owner_message_ref", "chat_annotation_receipt",
-    "entry_matches_source_ref", "latest_chat_annotations", "scoped_chat_annotations",
+    "entry_matches_source_ref", "latest_chat_annotations", "legacy_owner_source_chat_keys", "scoped_chat_annotations",
     "enqueue_project_completion_summary", "project_completion_delivery_outcome",
     "completion_status_label", "outcome_phase", "owner_message_ref_is_valid",
     "project_origin_rows", "project_question_pointer",

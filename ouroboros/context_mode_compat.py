@@ -78,11 +78,13 @@ def normalize_and_persist_context_mode_compat(
     if not lock_held:  # a lock-free read persists nothing: the boot's read or the next owner write does
         log.debug("Context settings normalized in memory; the canonical pair persists at boot or the next write.")
         return normalized
-    from ouroboros.config import serialize_settings  # bound late: config imports this module
+    from ouroboros.config import DATA_DIR as _drive_root, serialize_settings  # bound late: config imports this module
+    from ouroboros.settings_integrity import settings_publication_boundary
 
     try:
         guard_live_write()
-        write_text_atomic(settings_path, serialize_settings(normalized))
+        with settings_publication_boundary(_drive_root):
+            write_text_atomic(settings_path, serialize_settings(normalized))
     except Exception:
         log.warning(
             "Context settings were normalized in memory, but the canonical compatibility "

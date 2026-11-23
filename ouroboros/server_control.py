@@ -29,6 +29,33 @@ def external_owner_binding(state: dict) -> tuple[bool, Any, tuple[int, int]]:
     return user_known and chat_known, owner, pair
 
 
+def restart_consumer_is_live(state: Any) -> bool:
+    """Only the started restart coordinator may accept a Reset, never a bare callback."""
+    is_alive = getattr(getattr(state, "restart_consumer", None), "is_alive", None)
+    if not callable(is_alive):
+        return False
+    try:
+        return bool(is_alive())
+    except Exception:
+        return False
+
+
+def request_owner_restart(state: Any, *, require_consumer: bool = False) -> bool:
+    """Schedule an owner-initiated restart (Reset, Rollback, or Apply Update).
+
+    Unlike an agent restart through the supervisor, this re-reads the runtime mode
+    from settings instead of re-pinning the inherited boot baseline. True means the
+    callback was called, not that restart completed; Reset also needs a live coordinator.
+    """
+    if require_consumer and not restart_consumer_is_live(state):
+        return False
+    callback = getattr(state, "request_restart", None)
+    if callable(callback):
+        callback(owner=True)
+        return True
+    return False
+
+
 def dispatch_accepted_restart(bridge, text: str, *, callback=None, **message) -> None:
     """Schedule accepted Restart after its transport captured the canonical receipt."""
     import logging
@@ -141,6 +168,17 @@ def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=Non
     return action is not None and PanicIngress(action).request(text, evidence=evidence)
 
 
+def restart_arguments(environ) -> tuple[str, ...]:
+    """The restart transport's actual argument selection, also used by Reset."""
+    try:
+        saved = json.loads(environ.get("OUROBOROS_SERVER_REEXEC_ARGV_JSON", "") or "[]")
+        if isinstance(saved, list) and saved and all(isinstance(item, str) and item for item in saved):
+            return tuple(saved)
+    except Exception:
+        pass
+    return tuple(sys.argv)
+
+
 def restart_current_process(
     host: str,
     port: int,
@@ -186,14 +224,7 @@ def restart_current_process(
         from ouroboros.config import BOOT_RUNTIME_MODE_ENV_KEY
 
         env.pop(BOOT_RUNTIME_MODE_ENV_KEY, None)
-    raw_argv = sys.argv
-    try:
-        saved = json.loads(os.environ.get("OUROBOROS_SERVER_REEXEC_ARGV_JSON", "") or "[]")
-        if isinstance(saved, list) and saved and all(isinstance(item, str) and item for item in saved):
-            raw_argv = saved
-    except Exception:
-        raw_argv = sys.argv
-    argv = [sys.executable, *raw_argv]
+    argv = [sys.executable, *restart_arguments(env)]
     handoff_context = contextlib.nullcontext((None, {}))
     if IS_WINDOWS:
         # Windows has no process-image replacement. Its C runtime emulates exec by

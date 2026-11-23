@@ -898,3 +898,14 @@ def test_vendor_program_contracts_have_complete_javascript_twins():
     assert get_args(entry["updateAvailable"]) == ("yes", "no", "cannot_tell")
     assert not {"mechanism", "targetVersion"} & operation.keys()
     assert not {"maintainable", "targets", "installed", "releaseTested", "previous", "available"} & entry.keys()
+
+
+def test_the_reset_receipt_names_the_accepted_reset_in_python_and_javascript():
+    from ouroboros.gateway import management_contracts as contracts
+
+    hints = get_type_hints(contracts.ResetResponse, include_extras=True)
+    assert "reset_id" in hints and get_args(hints["reset_id"]) == (str,)
+    assert "reset_id" in _notrequired_fields(contracts.ResetResponse)
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
+    assert _js_typedef_fields(text, "ResetResponse") == set(hints)

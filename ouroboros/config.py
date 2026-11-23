@@ -875,12 +875,11 @@ def save_settings(
 ) -> None:
     """Persist a view; only an owner writer's authored_keys authors a first saved-choice key.
 
-    Existing SAVED_CHOICE_SETTINGS survive; changed values alone are not authorship.
-    Elevation after initialization is refused (``allow_elevation`` then inert); production calls
+    Existing SAVED_CHOICE_SETTINGS survive; changed values alone are not authorship. Elevation
+    after initialization is refused (``allow_elevation`` then inert); production calls
     ``initialize_runtime_mode_baseline`` before agent code. Outside Cyber Pro, context lowering
-    needs the owner path; the retired auto-Low flag stays false.
-    ``onboarding_safety_default`` allows only a fresh install (no settings file) to choose
-    ``OUROBOROS_SAFETY_MODE="light"``."""
+    needs the owner path; the retired auto-Low flag stays false. ``onboarding_safety_default``
+    allows only a fresh install (no settings file) to choose ``OUROBOROS_SAFETY_MODE="light"``."""
     _guard_live_settings_write()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _acquire_settings_lock()
@@ -933,10 +932,11 @@ def save_settings(
                 f"{baseline_mode!r} -> {new_mode!r}.{hint}"
             )
         from ouroboros.utils import write_text_atomic
-        try:
-            write_text_atomic(SETTINGS_PATH, serialize_settings(settings))
-        except OSError:  # a filesystem that cannot rename a sibling: write in place, same bytes
-            SETTINGS_PATH.write_bytes(serialize_settings(settings).encode("utf-8"))
+        with _settings_integrity.settings_publication_boundary(DATA_DIR):
+            try:
+                write_text_atomic(SETTINGS_PATH, serialize_settings(settings))
+            except OSError:  # a filesystem that cannot rename a sibling: write in place, same bytes
+                SETTINGS_PATH.write_bytes(serialize_settings(settings).encode("utf-8"))
     finally:
         _release_settings_lock(fd)
 
@@ -989,9 +989,11 @@ def apply_settings_to_env(settings: dict, *, environ=None) -> None:
                 elif isinstance(val, (dict, list)):
                     val = json.dumps(val, ensure_ascii=False, separators=(",", ":"))
                 environ[k] = str(val)
-        _settings_integrity.note_proposal_projection(environ, before)
         if not environ.get("OUROBOROS_TASK_REVIEW_MODE"):
             environ["OUROBOROS_TASK_REVIEW_MODE"] = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
+        # The note must see this tree's own injected default: labelled here, it drops with the mirror at a Reset;
+        # unlabelled it would ride the drop as if the operator had supplied it.
+        _settings_integrity.note_proposal_projection(environ, before)
 
 
 # PID lock: platform_layer uses OS-released locks on Unix and Windows.

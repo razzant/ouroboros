@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
 import subprocess
@@ -114,7 +115,8 @@ def assert_served_candidate(url, checkout, data_dir, pid, candidate):
       `ouroboros` package was loaded from this directory.
     """
     from ouroboros.server_process import read_service_bindings
-    from ouroboros.server_web import APPEARANCE_SCOPE_META, UI_OWNER_MARKER, appearance_scope
+    from ouroboros.server_web import (
+        APPEARANCE_SCOPE_META, CHAT_PREVIEW_SCOPE_META, UI_OWNER_MARKER, appearance_scope)
 
     binding = read_service_bindings(data_dir)["main"]
     state = json.loads(_fetch(url + "/api/state"))
@@ -126,13 +128,22 @@ def assert_served_candidate(url, checkout, data_dir, pid, candidate):
     served = state.get("served_ui")
     tree = "/static" if served is None else "/onboarding/static"
     if served is None or served.get("source") == "builtin":
-        # The builtin index response adds exactly its response-only facts to the checkout's bytes: the
-        # core-ownership marker, then the appearance scope of this data root's minted identity (#1111).
         index = candidate.state.files["web/index.html"][0]
-        scope = appearance_scope(data_dir)
-        facts = UI_OWNER_MARKER + (f'<meta name="{APPEARANCE_SCOPE_META}" content="{scope}">' if scope else "")
-        expected = index if served is None else index.replace(b"<head>", b"<head>" + facts.encode(), 1)
-        assert _fetch(url + "/") == expected, "web/index.html"
+        served_index = _fetch(url + "/")
+        if served is None:
+            assert served_index == index, "web/index.html"
+        else:
+            # Appearance derives from the installation at read time. The preview scope is frozen
+            # at boot and may be generation-only, so prove its exact slot and format, not its value.
+            # All bytes before and after that one value must still match the checkout and owner marker.
+            scope = appearance_scope(data_dir)
+            facts = UI_OWNER_MARKER + (f'<meta name="{APPEARANCE_SCOPE_META}" content="{scope}">' if scope else "")
+            prefix, head, suffix = index.partition(b"<head>")
+            opening = f'<meta name="{CHAT_PREVIEW_SCOPE_META}" content="'.encode()
+            expected_head = prefix + head + facts.encode() + opening
+            assert head and served_index.startswith(expected_head), "web/index.html"
+            value, closing, tail = served_index[len(expected_head):].partition(b'">')
+            assert closing and re.fullmatch(rb"[0-9a-f]{16}", value) and tail == suffix, "web/index.html"
     assert _fetch(url + tree + "/modules/api_client.js") == candidate.state.files["web/modules/api_client.js"][0], (
         "web/modules/api_client.js")
     assert _fetch(url + tree + SENTINEL_ROUTE.removeprefix("/static")) == candidate.sentinel_bytes, (

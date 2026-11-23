@@ -1,5 +1,9 @@
 import { backrefs } from './dom_backrefs.js';
 
+// The proven data profile a core-served document names before the chat mounts (server_web.chat_preview_scope):
+// the saved preview keys its rooms by this fact, so a test document that never says it opens cold.
+export const PREVIEW_SCOPE = '0123456789abcdef';
+
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
     add(...names) { names.forEach((name) => this.names.add(name)); this.sync(); }
@@ -202,6 +206,13 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
         createTextNode(data) { return new TextStub(data); },
+        // The core's own index carries the profile meta and, for theme, the installation scope; a document
+        // model without them would be a page the core never serves.
+        querySelector(selector) {
+            if (selector === 'meta[name="ouroboros-chat-preview-scope"]') return { content: PREVIEW_SCOPE };
+            if (selector === 'meta[name="ouroboros-appearance-scope"]') return { content: 'fedcba9876543210' };
+            return null;
+        },
         createTreeWalker(root) {
             const texts = [];
             const collect = node => { for (const child of node.children || []) {
