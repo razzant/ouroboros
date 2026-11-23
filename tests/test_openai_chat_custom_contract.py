@@ -871,6 +871,42 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
     assert all(word in lead for word in words), [word for word in words if word not in lead]
 
 
+_DELEGATION_LEAD_WORDS = {
+    "schedule_subagent": ["knowledge_notes", "knowledge_read", "whole", "declared", "addresses", "reselect",
+                          "none", "READ-ONLY", "self_worktree", "external_workspace", "genesis",
+                          "integrate_subagent_patch", "integrate_delegated_patch", "Runtime data",
+                          "access='readonly'", "prefix write", "continue_from", "subagent_id", "input_files",
+                          "first session start", "message any task in their tree", "interim reports", "when to stop"],
+    "delegate_start": ["knowledge_notes", "knowledge_read", "whole", "declared", "reselect",
+                       "retry_of without selectors", "look up or replay the saved request and receipt",
+                       "reselect or send none", "does not erase history",
+                       "Read-only", "PRIVATE SNAPSHOT", "in_place", "integrate_delegated_patch",
+                       "workspace_capture", "Only integrate_delegated_patch applies copies", "reject there too",
+                       "continue_from", "subagent_id", "Subscription is requested",
+                       "skill_payload", "may not see owner sessions", "starts the leaf before the first round",
+                       "fallback may bill", "zero, billed, estimated, undisclosed", "host verification receipts are yours"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_DELEGATION_LEAD_WORDS))
+def test_delegation_leads_carry_named_notes_and_floor_semantics(name):
+    """On the custom wire only the lead and the bare schema structure arrive (parameter prose is stripped),
+    so the named-notes choice and the pre-call floor — access, writable surfaces, shared/isolated mutation
+    and its integration tool, cost, recovery lookup-vs-continuation, data — must live in the lead itself,
+    unclipped. Semantic word/phrase checks, not exact sentences, so a faithful rephrase still passes."""
+    from ouroboros.tools.control import get_tools as control_tools
+    from ouroboros.tools.delegate import get_tools as delegate_tools
+
+    entry = next(e for e in [*control_tools(), *delegate_tools()] if e.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = _DELEGATION_LEAD_WORDS[name]
+    assert all(word in lead for word in words), [word for word in words if word not in lead]
+
+
 _MEMORY_TEXT_WORDS = {
     "update_identity": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "found once in the revision I read",
                         "all applied or none", "mode='overwrite'", "mode='revert'", "expected_revision", "stale",

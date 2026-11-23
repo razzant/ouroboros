@@ -519,37 +519,6 @@
 "mcp_pinned__lookup",
 "mcp_lazy__search"
 ],
-"1b9f7810dd98": [
-"acceptance_claims",
-"access",
-"allowed_origins",
-"attachment_import",
-"attachment_paths",
-"constraints",
-"context",
-"deadline_at",
-"delegation_intent",
-"directory_strategy",
-"effort",
-"expected_output",
-"input_files",
-"input_sources",
-"max_children",
-"may_fan_out",
-"may_mutate",
-"memory_mode",
-"memory_view",
-"mode",
-"objective",
-"requested_depth",
-"required_capabilities",
-"role",
-"scope_paths",
-"subagent_id",
-"supervisor",
-"workspace",
-"workspace_root"
-],
 "22a60f43dd03": [
 "maintain_harness",
 "free_storage",
@@ -2216,6 +2185,38 @@
 "view_image",
 "ext_9_r_weather_forecast",
 "mcp_pinned__lookup"
+],
+"74bc36a885dc": [
+"acceptance_claims",
+"access",
+"allowed_origins",
+"attachment_import",
+"attachment_paths",
+"constraints",
+"context",
+"deadline_at",
+"delegation_intent",
+"directory_strategy",
+"effort",
+"expected_output",
+"input_files",
+"input_sources",
+"knowledge_notes",
+"max_children",
+"may_fan_out",
+"may_mutate",
+"memory_mode",
+"memory_view",
+"mode",
+"objective",
+"requested_depth",
+"required_capabilities",
+"role",
+"scope_paths",
+"subagent_id",
+"supervisor",
+"workspace",
+"workspace_root"
 ],
 "798a238e152a": [
 "analyze_screenshot",
@@ -5145,6 +5146,25 @@
 "raw_name": "search"
 }
 ],
+"df25b876dee4": [
+"access",
+"attachment_import",
+"attachment_paths",
+"continue_carrier",
+"continue_from",
+"directory_strategy",
+"effort",
+"input_files",
+"knowledge_notes",
+"max_seconds",
+"mode",
+"override_plan_readiness",
+"prompt",
+"retry_of",
+"scope_paths",
+"subagent_id",
+"workspace"
+],
 "e51b4b713853": [
 "browse_page",
 "browser_action",
@@ -5485,24 +5505,6 @@
 "name": "mcp_lazy__search",
 "raw_name": "search"
 }
-],
-"ffa31fba17b7": [
-"access",
-"attachment_import",
-"attachment_paths",
-"continue_carrier",
-"continue_from",
-"directory_strategy",
-"effort",
-"input_files",
-"max_seconds",
-"mode",
-"override_plan_readiness",
-"prompt",
-"retry_of",
-"scope_paths",
-"subagent_id",
-"workspace"
 ]
 },
 "contexts": {
@@ -5539,7 +5541,7 @@
 ]
 },
 "delegate_start": {
-"params": "@ffa31fba17b7"
+"params": "@df25b876dee4"
 },
 "edit_batch": {
 "enums": {
@@ -6291,7 +6293,7 @@
 ]
 },
 "delegate_start": {
-"params": "@ffa31fba17b7"
+"params": "@df25b876dee4"
 },
 "finish_task": {
 "params": [
@@ -6307,7 +6309,7 @@
 ]
 },
 "schedule_subagent": {
-"params": "@1b9f7810dd98"
+"params": "@74bc36a885dc"
 }
 },
 "omissions": [],
@@ -6826,7 +6828,7 @@
 ]
 },
 "delegate_start": {
-"params": "@ffa31fba17b7"
+"params": "@df25b876dee4"
 },
 "finish_task": {
 "params": [
@@ -6842,7 +6844,7 @@
 ]
 },
 "schedule_subagent": {
-"params": "@1b9f7810dd98"
+"params": "@74bc36a885dc"
 },
 "verify_and_record": {
 "enums": {
@@ -7016,7 +7018,7 @@
 ]
 },
 "delegate_start": {
-"params": "@ffa31fba17b7"
+"params": "@df25b876dee4"
 },
 "finish_task": {
 "params": [
@@ -7032,7 +7034,7 @@
 ]
 },
 "schedule_subagent": {
-"params": "@1b9f7810dd98"
+"params": "@74bc36a885dc"
 }
 },
 "omissions": [],

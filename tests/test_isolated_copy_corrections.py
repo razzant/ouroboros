@@ -1429,6 +1429,58 @@ def test_real_schedule_supervisor_stamps_copy_metadata(case, monkeypatch):
     assert (Path(task["workspace_root"]) / "a.txt").read_bytes() == b"uncommitted source\n"
 
 
+@pytest.mark.parametrize("refused", [False, True])
+@pytest.mark.parametrize("surface", ["self_worktree", "genesis"])
+def test_admission_checks_named_notes_in_the_childs_real_folder(case, monkeypatch, tmp_path, surface, refused):
+    """An isolated copy or a new repository exists only at admission. Scheduling binds the addresses after the
+    caller's own check and builds no reader for a folder that does not exist yet; admission hands the check the
+    child's own reader in its real folder (acting profile, read-only for an API child, admitted addresses) before
+    the first input names them. A refusal there queues nothing, removes that folder and names its cause."""
+    from ouroboros import delegate_readonly_inputs, subagent_work_order
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tool_access import active_tool_profile
+    from ouroboros.tools.control_scheduling import _schedule_task
+    from supervisor.events_schedule_task import _handle_schedule_task
+    from tests.test_nested_rights_depth import _fake_ctx
+    from tests.test_task_status_flow import _configure_test_subagent
+    _configure_test_subagent(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(case[1].parent))
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "projects"))
+    assert write_knowledge_note(resolve_knowledge_address(case[2], "alpha-plan", "global"), "Alpha head.\n").ok
+    with monkeypatch.context() as requested:
+        requested.setattr(delegate_readonly_inputs, "receiving_reader",
+                          lambda *_a, **_k: pytest.fail("no reader is built for a folder that does not exist yet"))
+        ctx = parent_context(case)  # a copy starts from the selected folder; genesis creates its own empty one
+        source = {"workspace_root": str(case[1])} if surface == "self_worktree" else {}
+        out = _schedule_task(ctx, subagent_id="api-scout", objective="Change source", expected_output="patch",
+                             write_surface=surface, knowledge_notes=[{"topic": "alpha-plan"}], **source)
+    assert "queued" in out, out
+    checked, actual, evt = [], subagent_work_order._selected_notes, ctx.pending_events[-1]
+
+    def admission(reader, entries, notes, **options):
+        checked.append((str(reader.workspace_root), active_tool_profile(reader), entries, options))
+        if refused:
+            raise subagent_work_order.NamedNoteError(["knowledge_notes 1 'alpha-plan': refused in the child's folder"])
+        return actual(reader, entries, notes, **options)
+
+    monkeypatch.setattr(subagent_work_order, "_selected_notes", admission)
+    enqueued = []
+    supervisor = _fake_ctx(case[2], enqueued); supervisor.REPO_DIR = case[0]
+    _handle_schedule_task(evt, supervisor)
+    [(root, profile, entries, options)] = checked
+    assert profile == "acting_subagent" and options == {"transfer": False, "admitted": True}
+    assert entries == [{"topic": "alpha-plan", "scope": "global"}] and root != str(case[1])
+    if refused:
+        row = load_task_result(case[2], evt["task_id"])
+        assert enqueued == [] and not Path(root).exists() and row["reason_code"] == "knowledge_note_unresolved", row
+        assert "refused in the child's folder" in row["result"]
+    else:
+        [task] = enqueued
+        assert root == task["workspace_root"] and Path(root).is_dir() and task["workspace_mode"] == surface
+        assert "knowledge_read(topic='alpha-plan', scope='global')" in task["text"]
+
+
 @pytest.mark.parametrize(("mode", "grant", "capped", "admitted"), [
     ("advanced", True, False, False), ("pro", False, False, False), ("pro", True, False, True),
     # Owner decision 6A (21.11.2026): Cyber Pro needs no grant, as at the dispatcher; the light cap still binds.

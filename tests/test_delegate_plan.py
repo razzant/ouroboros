@@ -127,6 +127,25 @@ def test_answer_turn_and_clarification_stay_on_same_thread(plan_setup):
     assert p.engine.calls[-1][0] == path and "answersPlanRunId" not in p.engine.calls[-1][1]
 
 
+def test_plan_thread_clarification_carries_its_named_note_in_the_wire_turn_prompt(plan_setup):
+    from ouroboros.knowledge import resolve_knowledge_address
+
+    p = plan_setup
+    first = p.start(mode="plan")
+    p.finish(first["run_id"])
+    address = resolve_knowledge_address(p.root, "plan-evidence", "global")
+    address.path.parent.mkdir(parents=True, exist_ok=True)
+    text = "# Order notes\n\n## Scope\nSynthetic evidence for this turn.\n"
+    address.path.write_text(text, encoding="utf-8")
+    successor = p.start("", continue_from=first["run_id"], knowledge_notes=[{"topic": "plan-evidence"}])
+    assert successor["status"] == "started", successor
+    path, body, _key = p.engine.calls[-1]
+    assert path == f'/v2/threads/{first["thread_id"]}/turns'
+    assert body["prompt"].count(text) == 1 and "## Named knowledge notes" not in body["instructions"]
+    assert successor["named_notes"] == {"sent": [{"scope": "global", "topic": "plan-evidence",
+        "revision": hashlib.sha256(text.encode()).hexdigest(), "chars": len(text)}]}
+
+
 def test_wrong_starter_and_interaction_selector_cannot_answer_plan(plan_setup):
     p = plan_setup
     first = p.start(mode="plan")

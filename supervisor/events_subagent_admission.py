@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, Optional
 from ouroboros.config import MAX_ACTIVE_SUBAGENTS_HARD_CAP
 from ouroboros.delegate_readonly_inputs import native_selection_block
+from ouroboros.subagent_work_order import named_notes_block
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
 from supervisor.events_chat_delivery import _bound_project_chat_id
@@ -249,6 +250,8 @@ def _compose_subagent_text(
     task_constraint=None,
     delegation_budget=None,
     selected_inputs=None,
+    named_notes=None,
+    session: bool = False,
 ) -> str:
     role = str(role or "").strip()
     parts = ["[SUBAGENT ROLE]", role, ""] if role else []
@@ -269,6 +272,8 @@ def _compose_subagent_text(
             "[END_PARENT_CONTEXT]",
         ])
     if block := native_selection_block(selected_inputs):  # host-retained copies, outside the parent's reference text
+        parts.extend(["", block])
+    if block := named_notes_block(named_notes, session=session):  # addresses only; the parent's choice, no text
         parts.extend(["", block])
     parts.extend([
         "",
@@ -348,6 +353,48 @@ def _compose_subagent_text(
         if len(budget_lines) > 2:
             parts.extend(budget_lines)
     return "\n".join(parts)
+
+
+def _named_notes_admission_refusal(ctx: Any, task: Dict[str, Any]) -> str:
+    """An isolated copy or a new repository exists only now: "" once the child's own reader there may read each
+    note its parent named (``knowledge_read``'s gates; a session's nanny must also hand it on), else the refusal.
+
+    Scheduling bound the addresses and checked the caller and every folder that already existed; this is the
+    child's check in its real folder before its first input names them. An admitted address may lose its source,
+    never its gates (``subagent_work_order._selected_notes``); a session's start checks its worker again."""
+    tc = task.get("task_constraint") if isinstance(task.get("task_constraint"), dict) else {}
+    if not task.get("knowledge_notes") or tc.get("surface") not in {"self_worktree", "genesis"}:
+        return ""
+    from ouroboros.subagent_work_order import NamedNoteError, _selected_notes
+
+    try:
+        _selected_notes(_admitted_reader(ctx, task), task["knowledge_notes"], [],
+                        transfer=task.get("requested_executor") == "harness", admitted=True)
+    except NamedNoteError as exc:
+        return f"Subagent rejected: {exc.code}: {exc.detail}."
+    except (OSError, ValueError, RuntimeError) as exc:
+        return ("Subagent rejected: knowledge_note_unresolved: the child's reader could not be bound in its "
+                f"folder ({type(exc).__name__}).")
+    return ""
+
+
+def _admitted_reader(ctx: Any, task: Dict[str, Any]) -> Any:
+    """The reader the child's worker builds from this payload (``agent.py``): the serving body as its system root,
+    its own drive, admitted folder, constraint and contract, and the metadata dispatch gives it."""
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+    from ouroboros.project_facts import resolve_project_id
+    from ouroboros.tools.tool_context import ToolContext
+    from ouroboros.tools.tool_resolution import system_repo_dir_for
+
+    repo = pathlib.Path(getattr(ctx, "REPO_DIR", None) or system_repo_dir_for(ctx))
+    drives = {key: task[key] for key in ("drive_root", "child_drive_root", "budget_drive_root") if task.get(key)}
+    return ToolContext(
+        repo_dir=repo, system_repo_dir=repo, drive_root=pathlib.Path(drives.get("child_drive_root") or ctx.DRIVE_ROOT),
+        workspace_root=pathlib.Path(task["workspace_root"]).resolve(strict=False), workspace_mode=task["workspace_mode"],
+        budget_drive_root=drives.get("budget_drive_root", ""), project_id=resolve_project_id(task),
+        task_metadata={**(task.get("metadata") or {}), **drives}, task_id=str(task["id"]),
+        task_depth=int(task.get("depth") or 0), task_constraint=normalize_task_constraint(task.get("task_constraint")),
+        task_contract=task.get("task_contract") or {})
 
 
 def _validate_external_workspace(ctx, path: str) -> str:

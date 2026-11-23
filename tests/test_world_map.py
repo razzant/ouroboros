@@ -149,8 +149,8 @@ def test_delegate_start_discloses_that_a_run_sees_no_owner_sessions():
     from ouroboros.tools.delegate import get_tools
 
     schema = next(entry.schema for entry in get_tools() if entry.name == "delegate_start")
-    assert "engine-scoped native state" in schema["description"] and "no courier" in schema["description"]
-    assert "owner's own sessions" in schema["description"]
+    assert "In engine-scoped state" in schema["description"]
+    assert "may not see owner sessions and is no courier to them" in schema["description"]
 
 
 def test_write_tools_redirect_the_map_to_update_world():

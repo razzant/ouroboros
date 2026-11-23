@@ -69,8 +69,9 @@ def test_start_receipt_names_the_serving_engine_without_claiming_review_success(
     assert payload["status"] == "started"
     assert "review_passed" not in payload
     description = next(tool.schema["description"] for tool in get_tools() if tool.name == "delegate_start")
-    assert "requests no extra Claudexor review panel" in description
-    assert "recovered historical run" in description
+    assert "No extra Claudexor review panel" in description
+    assert "ordinary default is none on 3.9.8+" in description
+    assert "older/recovered runs may retain review" in description
     assert "self_worktree capture separately requires an unchanged HEAD" in HOST_INSTRUCTIONS
     assert "preserve committed changes" in HOST_INSTRUCTIONS
 

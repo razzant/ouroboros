@@ -70,6 +70,7 @@ _AGENT_FAULT_REASONS = frozenset({
     "idempotency_conflict",
     "input_files_invalid",
     "input_files_readonly_only",
+    "knowledge_notes_invalid",
     "message_text_required",
     "message_frame_conflict",
     "reply_to_mismatch",

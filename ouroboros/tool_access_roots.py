@@ -149,7 +149,7 @@ def project_room_lens_dir(ctx: Any) -> Optional[pathlib.Path]:
     return pathlib.Path(raw).resolve(strict=False)
 
 
-def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
+def folderless_scratch_dir(ctx: Any, *, create: bool = True) -> Optional[pathlib.Path]:
     """Project work WITHOUT a folder: the task's OWN scratch is its default cwd (#1315).
 
     Project-scoped work with no workspace and no room folder (or an explicit
@@ -157,7 +157,8 @@ def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
     default location only — never a workspace: no external-workspace or delegated
     write authority, no change to what the profile may reach (the system repo stays
     one explicit ``root``/``cwd`` away). Main self-work, Presence and an explicit
-    ``system_repo`` intent keep today's default."""
+    ``system_repo`` intent keep today's default. Admission can inspect the prospective
+    path without making the directory (``create=False``)."""
     if getattr(ctx, "workspace_root", None):
         return None
     meta = getattr(ctx, "task_metadata", None)
@@ -173,7 +174,8 @@ def folderless_scratch_dir(ctx: Any) -> Optional[pathlib.Path]:
     if presence_metadata_binding(meta) is not None:
         return None
     scratch = resource_root_path(ctx, "task_drive")
-    scratch.mkdir(parents=True, exist_ok=True)
+    if create:
+        scratch.mkdir(parents=True, exist_ok=True)
     return scratch
 
 
