@@ -85,9 +85,19 @@ def test_ready_detach_arms_then_parks_same_id_and_sleep_grant_is_single_use(tmp_
     if door == "owner_restart":
         from ouroboros.delegate_recovery import consume_owner_restart, pending_owner_restart
         consume_owner_restart(tmp_path, pending_owner_restart(tmp_path))
+        assert q.resume_budget_paused_task("head")["ok"], "explicit Resume can release the retained sleep"
     else:
+        from ouroboros.control_actor import owner_door
+        from ouroboros.work_stop import current_stop
         (tmp_path / "state" / flag).unlink()
-    assert q.resume_budget_paused_task("head")["ok"], "explicit Resume can release the retained sleep"
+        assert q.resume_budget_paused_task("head")["error"] == "panic_requires_owner_resume"
+        assert current_stop(restored)["release"] == "owner"
+        [vetoed] = wake_ready_sleepers(q)
+        assert vetoed["task_id"] == "head" and vetoed["ok"] is False
+        assert vetoed["error"] == "sleep_wake_vetoed" and vetoed["veto"] == "panic_hold"
+        assert current_stop(restored)["release"] == "owner"
+        with owner_door("fixture"):
+            assert q.resume_budget_paused_task("head")["ok"], "explicit owner Resume can release the retained sleep"
 
 
 @pytest.mark.parametrize("kind", ["service", "delegated_run", "custody_unreadable"])

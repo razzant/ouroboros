@@ -777,7 +777,7 @@ class OwnerSubagentsModeResponse(TypedDict):
 
 
 class StateResponse(WorkStateFields):
-    """Shape of ``GET /api/state`` (happy path); the work projection fields come from ``WorkStateFields``."""
+    """Shape of ``GET /api/state`` (happy path); work and recovery fields come from ``WorkStateFields``."""
 
     uptime: int
     workers_alive: int

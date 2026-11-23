@@ -1186,10 +1186,12 @@
 
 /**
  * Send back the opaque IDs offered in this saved task's refusal, with a reason. Do not reconstruct an ID.
- * For a delegated start, external work and costs may continue.
+ * For a delegated start, external work and costs may continue. The Panic selection sends only the
+ * stop it chose (`panic_recovery[].panic_hold_id`); a changed or used stop answers 409 `panic_selection_changed`.
  * @typedef {Object} TaskResumeRequest
  * @property {string[]=} accept_unknown
  * @property {string=} reason
+ * @property {string=} expected_panic_hold_id
  */
 
 /**

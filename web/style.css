@@ -1009,6 +1009,40 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
 .owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
+/* The works Panic stopped (panic_recovery.js): Choose all/none beside the count, then one row per work, its box on the
+   name's first line, its place and its last answer under the name, the Stop… its card had at the row's end; the one
+   Resume follows the list. The whole label is the box's, so a finger reaches it anywhere, and a tap answers with the
+   box alone (no grey flash). Rows part by the divider, as a list in a message does. */
+.panic-recovery-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.panic-recovery-count { margin-inline-end: auto; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.panic-recovery-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.panic-recovery-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-2);
+    align-items: center;
+    padding-block: var(--space-2);
+}
+.panic-recovery-row + .panic-recovery-row { border-top: 1px solid var(--divider); }
+.panic-recovery-pick {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr);
+    column-gap: var(--space-2);
+    row-gap: 2px;
+    align-items: start;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.panic-recovery-pick.is-locked { cursor: default; }
+.panic-recovery-pick > .ui-checkbox { grid-column: 1; grid-row: 1; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
+/* The words keep their column when a row that came back has no box. */
+.panic-recovery-pick > :not(.ui-checkbox) { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
+.panic-recovery-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); font-weight: 500; }
+.panic-recovery-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.panic-recovery-meta:empty { display: none; }
+@media (pointer: coarse) {
+    .panic-recovery-pick { min-height: var(--touch-target-min); align-content: center; }
+}
 .chat-quiz-materials { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-2); }
 
 

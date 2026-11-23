@@ -29,7 +29,7 @@ STATE_FIELDS = {
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
     "works_complete", "works_gaps", "served_ui",
-} | {"main_route"} | {"processing_tiers"}  # Main chat writes Main itself; its tiers beside it
+} | {"main_route", "processing_tiers", "panic_recovery", "panic_recovery_complete"}
 
 
 @pytest.fixture
@@ -104,6 +104,60 @@ def test_the_answer_keeps_the_client_shape_and_names_its_generation(serving):
     assert float(response.headers[publication.AGE_HEADER]) >= 0.0
     assert isinstance(payload["task_bindings"], dict) and payload["task_bindings_unchanged"] is False
     assert payload["boot"]["phase"] in {"starting", "serving", "ready", "failed"}
+
+
+@pytest.mark.parametrize("starts_ready", [False, True], ids=["becomes-ready", "readiness-clears"])
+def test_panic_recovery_completeness_matches_census_and_response_readiness(serving, monkeypatch, starts_ready):
+    ready = threading.Event()
+    if starts_ready:
+        ready.set()
+    serving.app.state.supervisor_ready_event = ready
+    snapshot = gateway_state._state_snapshot
+
+    def changes_readiness(request, direct=None):
+        payload = snapshot(request, direct=direct)
+        if starts_ready:
+            ready.clear()
+        else:
+            ready.set()
+        return payload
+
+    monkeypatch.setattr(gateway_state, "_state_snapshot", changes_readiness)
+    first = _get(serving.app)
+    payload = _payload(first)
+    assert payload["boot"]["tasks_ready"] is not starts_ready
+    assert payload["active_chat_activities_complete"] is True
+    assert payload["panic_recovery"] == [] and payload["panic_recovery_complete"] is False
+    if starts_ready:
+        return
+    after = _get(serving.app)
+    assert after.headers[publication.GENERATION_HEADER] != first.headers[publication.GENERATION_HEADER]
+    assert _payload(after)["panic_recovery_complete"] is True
+    assert _get(serving.app).headers[publication.GENERATION_HEADER] == after.headers[publication.GENERATION_HEADER]
+
+
+@pytest.mark.parametrize("unowned", ["not-initialized", "saved-queue"],
+                         ids=["providerless-boot", "saved-queue-not-restored"])
+def test_ready_boot_does_not_claim_an_unowned_queue_is_empty(serving, monkeypatch, unowned):
+    from ouroboros import server_liveness
+
+    boot = server_liveness.BootDocument()
+    monkeypatch.setattr(server_liveness, "BOOT", boot)
+    boot.serving()
+    boot.steps_done()
+    ready = threading.Event()
+    ready.set()
+    serving.app.state.supervisor_ready_event = serving.app.state.supervisor_init_done_event = ready
+    if unowned == "not-initialized":
+        monkeypatch.setattr(serving.queue, "INITIALIZED", False)
+    else:
+        serving.queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps({
+            "pending": [{"id": "saved", "task": {"id": "saved", "chat_id": 1}}], "running": []}), encoding="utf-8")
+
+    payload = _payload(_get(serving.app))
+    assert payload["boot"]["phase"] == "ready" and payload["boot"]["tasks_ready"] is True
+    assert payload["active_chat_activities_complete"] is True
+    assert payload["panic_recovery"] == [] and payload["panic_recovery_complete"] is False
 
 
 def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count(serving, monkeypatch):

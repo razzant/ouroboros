@@ -66,7 +66,19 @@ def test_kill_saved_warm_sleep_keeps_cause_before_and_after_restore(tmp_path, mo
     assert load_task_result(tmp_path, "root")["status"] != "cancelled"
     assert not parked.get("_budget_pause_resume"), "snapshot null is not a Resume grant"
     if door == "panic":
+        from ouroboros import server_control
+        from ouroboros.control_actor import mind_control, owner_door
+
         (tmp_path / "state" / "panic_stop.flag").unlink()
-    assert q.resume_budget_paused_task("root")["ok"]
+        monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+        assert q.resume_budget_paused_task("root")["error"] == "panic_requires_owner_resume"
+        with mind_control("mind", "resume after panic"):
+            assert q.resume_budget_paused_task("root")["error"] == "panic_requires_owner_resume"
+        assert budget_hold_fact(parked)["reason"] == expected
+        assert not parked.get("_budget_pause_resume")
+        with owner_door("fixture"):
+            assert q.resume_budget_paused_task("root")["ok"]
+    else:
+        assert q.resume_budget_paused_task("root")["ok"]
     ctx.budget_pause_resume = parked["_budget_pause_resume"]
     assert budget_pause.load_budget_pause(ctx)["messages"] == limit.messages
