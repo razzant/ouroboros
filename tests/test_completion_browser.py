@@ -479,11 +479,21 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                             "node => { const range = document.createRange(); range.selectNodeContents(node);"
                             " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);"
                             " return selection.toString(); }")
-                        assert " ".join(selected.split()) == " ".join(child_answer.split()), stage
+                        # The expanded row also selects the report heading and trace.
+                        head, tail = "CHILD_OUTPUT_HEAD", "CHILD_OUTPUT_TAIL"
+                        start = selected.find(head)
+                        end = selected.find(tail, start + len(head))
+                        assert 0 <= start < end, f"{stage}: browser selection lacks the answer boundaries"
+                        selected_answer = selected[start:end + len(tail)]
+                        normalized_answer = " ".join(selected_answer.split())
+                        assert normalized_answer == " ".join(child_answer.split()), stage
                         assert page.locator(feed).get_by_text(parent_answer, exact=True).count() == 1
                         snapshots[stage] = {"parent_cards": parent.count(), "child_cards": child_card.count(),
                             "full_chars": len(full.inner_text()), "selected_raw_chars": len(selected),
-                            "selected_raw_utf8_sha256": hashlib.sha256(selected.encode()).hexdigest()}
+                            "selected_raw_utf8_sha256": hashlib.sha256(selected.encode()).hexdigest(),
+                            "selected_answer_chars": len(selected_answer),
+                            "selected_answer_utf8_sha256": hashlib.sha256(selected_answer.encode()).hexdigest(),
+                            "selected_answer_normalized_utf8_sha256": hashlib.sha256(normalized_answer.encode()).hexdigest()}
                         page.screenshot(path=str(evidence / (stage + ".png")), full_page=True, animations="disabled")
                     _write_receipt(evidence / "receipt.json", wait_clone, engine=engine, width=width,
                         parent_id=parent_id, child_id=child_id, parent_result=result, child_before=child_before,
