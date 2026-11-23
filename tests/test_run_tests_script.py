@@ -541,6 +541,67 @@ def test_the_node_option_runs_only_the_owned_node_lane(run_tests, monkeypatch):
             run_tests.main(combined)
 
 
+def test_a_lane_pass_is_the_batterys_pass_over_the_callers_paths(run_tests, monkeypatch, tmp_path):
+    """CI's form: the lane brings the gate's -m and flags, the caller its paths (or a retry's argument file) and
+    output options; a caller that sets what the lane sets, or mixes the lane with another mode, is refused."""
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    calls = []
+    monkeypatch.setattr(run_tests, "_node_lane", lambda: pytest.fail("a lane pass runs no Node lane"))
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
+    battery = dict((label, argv[4:]) for label, argv in run_tests.battery_commands())  # after `tests/`
+    argsfile = tmp_path / "retry targets.txt"
+    argsfile.write_text("tests/test_a.py::test_case[x@y::z]\n", encoding="ascii")
+    for lane, label in (("parallel", "parallel"), ("exclusive", "serial")):
+        for paths in (["tests/"], ["tests/test_a.py", "tests/test_b.py"], [f"@{argsfile}"]):
+            calls.clear()
+            assert run_tests.main(["--lane-pass", lane, *paths, "-q", "--tb=short"]) == 0
+            assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", *battery[label], *paths,
+                                          "-q", "--tb=short"])]
+    for refused in (["--lane-pass", "parallel", "tests/", "-m", "slow"], ["--lane-pass", "parallel", "-n", "2"],
+                    ["--lane-pass", "parallel", "tests/", "-n4"],
+                    ["--lane-pass", "parallel", "tests/", "--numprocesses=4"],
+                    ["--lane-pass", "exclusive", "--timeout=5"], ["--lane-pass", "exclusive", "--dist", "load"],
+                    ["--lane-pass", "exclusive", "tests/", "--timeout-method=thread"],
+                    ["--lane-pass", "exclusive", "-q", "--tb=short"],
+                    ["--lane-pass", "serial", "tests/"], ["--lane-pass", "parallel", "--selected"],
+                    ["--lane-pass", "parallel", "--node"]):
+        with pytest.raises(SystemExit):
+            run_tests.main(refused)
+    argsfile.write_text("tests/test_a.py\n-n4\n", encoding="ascii")
+    with pytest.raises(SystemExit):
+        run_tests.main(["--lane-pass", "parallel", f"@{argsfile}"])
+
+
+def test_lane_pass_retry_file_uses_the_external_callers_directory(tmp_path):
+    """The real CLI changes to the checkout in safe_test, not before locating the caller's list."""
+    from ouroboros.test_evidence import diagnostic_directory
+    from tests.ci_verdicts import final
+
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    argsfile = caller / "retry targets.txt"
+    targets = [f"tests/test_test_environment.py::{name}" for name in (
+        "test_pytest_cache_belongs_to_session_boundary", "test_static_settings_scrub_covers_runtime_vocabulary",
+    )]
+    argsfile.write_text("\n".join(targets) + "\n", encoding="ascii")
+    evidence = diagnostic_directory(tmp_path / "evidence", "lane-pass-retry-path")
+    env = {**os.environ, "OUROBOROS_TEST_EVIDENCE_ROOT": str(evidence), "OUROBOROS_PREFLIGHT_TEST_WORKERS": "1"}
+    for spelling, path in (("absolute", argsfile), ("relative", argsfile.name)):
+        report_dir = evidence / spelling
+        result = subprocess.run(
+            [sys.executable, str(REPO / "scripts/run_tests.py"), "--lane-pass", "parallel", f"@{path}",
+             "-q", "--tb=short", f"--ci-evidence-dir={report_dir}"],
+            cwd=caller, env=env, capture_output=True, encoding="utf-8", timeout=90,
+        )
+        assert result.returncode == 0, f"{spelling}:\n{result.stdout}\n{result.stderr}"
+        report, error = final(report_dir)
+        assert not error, error
+        assert report["session_exit_code"] == 0 and report["tests_collected"] == len(targets)
+        assert sorted((row["nodeid"], row["outcome"]) for row in report["reports"] if row["phase"] == "call") == [
+            (target, "passed") for target in sorted(targets)
+        ]
+
+
 @pytest.mark.parametrize("tier", ["full", "selected"])
 def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkeypatch, tmp_path, tier):
     from ouroboros import test_selection

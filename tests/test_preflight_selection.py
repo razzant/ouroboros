@@ -316,16 +316,18 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
 
 def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_template_fields(tmp_path):
     """The selected CLI writes the worker probe under the caller's ``--evidence-dir``, as it does the inventory
-    plugin. A root that spells every template field is still the root: the probe's ``_LOG`` and ``_RESULTS`` are the
-    directories the runner reads back."""
+    plugin. Its worker log, results pointer and collection count go where the runner reads them, even when the
+    root spells every template field."""
     import runpy
 
     from ouroboros import preflight_probe
 
-    root = tmp_path.joinpath(*TEMPLATE_FIELDS)
-    module = pr.install_worker_probe(root)
-    probe = runpy.run_path(str(pr.probe_dir(root) / f"{module}.py"))
-    assert (probe["_LOG"], probe["_RESULTS"]) == (preflight_probe._worker_log_dir(root), preflight_probe._results_pointer(root))
+    for root in (tmp_path / "evidence", tmp_path.joinpath(*TEMPLATE_FIELDS)):
+        module = pr.install_worker_probe(root)
+        probe = runpy.run_path(str(pr.probe_dir(root) / f"{module}.py"))
+        assert probe["_LOG"] == preflight_probe._worker_log_dir(root)
+        assert probe["_RESULTS"] == preflight_probe._results_pointer(root)
+        assert probe["_COLLECTION"] == preflight_probe._collection_path(root)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unfinished"])

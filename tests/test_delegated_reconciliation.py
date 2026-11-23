@@ -259,8 +259,7 @@ def test_an_orphaned_delegated_run_is_reconciled_when_its_owner_is_gone(tmp_path
 
 
 def test_what_the_daemon_says_is_absent_is_closed_not_faulted_forever(tmp_path):
-    """One root cause at two surfaces: a 404 is the daemon ANSWERING that the thing is not
-    there, and both were read as "we could not find out".
+    """An owning-store run absence and a bound project absence can each close their duty.
 
     A run the daemon does not have was treated exactly like an unreachable daemon, so it
     was never settled, stayed in `open_runs`, and was re-faulted on EVERY pass — a
@@ -277,22 +276,21 @@ def test_what_the_daemon_says_is_absent_is_closed_not_faulted_forever(tmp_path):
     class _NoSuchProject(_LiveRunStub):
         def get_run(self, rid, **_kw):
             return {"lastSeq": 2, "summary": {"state": "succeeded", "spendUsd": 0.0}}
-        def remove_project(self, pid):
-            raise cx.ClaudexorUnavailable("project_not_found", "no such project", status_code=404)
+
+    from tests._bound_registration import BoundRegistry, owner_facts
 
     dc._CUSTODY.clear()
     for run_id, task in (("run-gone", "t-gone"), ("run-owns-a-dead-project", "t-also-gone")):
         dc.record_started(tmp_path, dc.RunCustody(
-            run_id=run_id, task_id=task, route_id="r", model="m", project_id="prj-ours",
-            daemon_store_id="store-a",
+            run_id=run_id, task_id=task, route_id="r", model="m", project_id="prj-ours", **owner_facts("store-a"),
             project_owned=run_id.endswith("project"), root_task_id=task, ledger_root=str(tmp_path)))
     dc._CUSTODY.clear()
 
-    class _Router(_LiveRunStub):
+    class _Router(BoundRegistry, _LiveRunStub):
         store_identity = "store-a"
         def get_run(self, rid, **_kw):
             return (_NoSuchProject() if rid.endswith("project") else _NoSuchRun()).get_run(rid)
-        def remove_project(self, pid): _NoSuchProject().remove_project(pid)
+        def release_registered(self, pid): return "absent"
 
     passes = []
     for _ in range(3):

@@ -57,16 +57,17 @@ def _skill_owner_state_read_allowed(ctx: ToolContext) -> bool:
 
 def _runtime_data_read_check(ctx: ToolContext, *, listing: bool = False, root: str = "") -> Callable[[pathlib.Path], str]:
     """Prepare the parent's runtime rules once for this read/list/search call."""
-    from ouroboros.tools.core_secret_paths import runtime_data_roots
+    from ouroboros.tools.core_secret_paths import runtime_data_roots, scoped_runtime_read_refusal
 
-    # Explicit user_files uses its own per-mode runtime-overlap policy. Cyber
-    # parents already read those files there; child parity must not narrow it.
-    roots = [] if root == "user_files" else runtime_data_roots(ctx)
+    roots = runtime_data_roots(ctx)
     owner_state_blocked = not listing and not _skill_owner_state_read_allowed(ctx)
 
     def check(target: pathlib.Path) -> str:
         target = pathlib.Path(target).resolve(strict=False)
-        for data_root in roots:
+        if not listing and (reason := scoped_runtime_read_refusal(ctx, target, roots)):
+            return reason
+        # Explicit user_files keeps its own per-mode runtime-overlap policy.
+        for data_root in (() if root == "user_files" else roots):
             try:
                 relative = target.relative_to(data_root).as_posix()
             except ValueError:
@@ -756,10 +757,10 @@ def read_admission(ctx: ToolContext, root: str, path: str, *, bucket: str = "", 
         refusal = ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}")
     if refusal is not None:
         return normalized, None, refusal
-    if not (_presence_binding_allowed(ctx, binding) if prospective_copy is None else binding.target_path == prospective_copy):
-        return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
     if runtime_block := _runtime_data_read_block(ctx, binding.target_path, root=binding.root):
         return normalized, binding, ToolResult(status="blocked", code="DATA_BLOCKED", text=runtime_block)
+    if not (_presence_binding_allowed(ctx, binding) if prospective_copy is None else binding.target_path == prospective_copy):
+        return normalized, binding, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=PRESENCE_RESOURCE_BLOCKED)
     refusal = block_reason_for_path(ctx, binding.target_path, "read_bytes", binding)
     if not refusal and binding.root == "artifact_store":
         from ouroboros.payload_release_state import ReleaseUnavailable, require_file_available
@@ -963,10 +964,8 @@ def _list_files(
     if protected_list_block := block_reason_for_path(ctx, binding.target_path, "static_introspection", binding):
         return protected_list_block
     try:
-        # Every listing branch runs inside this try: a hard iterdir/permission/
-        # race failure from any helper becomes the first-class LIST_FILES_ERROR
-        # below (v6.54.3, review round 3 — helpers no longer swallow it into an
-        # ok-shaped listing).
+        # Every listing branch runs inside this try: a hard iterdir/permission/race
+        # failure from any helper becomes the first-class LIST_FILES_ERROR below.
         if depth > 1 or include:
             return _tree_list(ctx, binding, depth, str(include), max_entries, max_scan)
         if normalized in {"active_workspace", "system_repo", "runtime_data"}:

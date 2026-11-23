@@ -12,9 +12,15 @@ import sys
 import time
 from typing import NamedTuple, Optional, Sequence
 
+from ouroboros.preflight_diagnosis import (
+    _PYTEST_EXIT_NO_TESTS as _PYTEST_EXIT_NO_TESTS,
+    _TIMEOUT_CALLBACK_LINE, _WORKER_CRASH_PATTERNS, _classify_pass_result as _render_pass_result,
+    _containment_failed, _diagnosis as _diagnosis, _plugin_missing_remediation, _prepend_reading,
+    _strip_decoration, _with_timeout_excerpt as _with_timeout_excerpt,
+)
 from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run and the admission beside it: its public contract
     MIN_PREFLIGHT_WORKERS, WORKER_PROBE_MODULE, allocated_worker_count, install_worker_probe, observed_worker_ids,
-    probe_dir, recorded_admission, recorded_session,
+    fresh_collection, fresh_results_pointer, probe_dir, recorded_admission, recorded_collection, recorded_session,
 )
 
 # Node lane of the gate (`run_hermetic_pytest` calls it once the candidate is
@@ -29,7 +35,7 @@ DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
 
 # SSOT for the costly marker lanes that never belong in a local/gate run. It is
 # byte-identical to the ``-m`` expression in pyproject.toml ``addopts`` and is
-# the tail of BOTH ci.yml markexprs. A command-line ``-m`` REPLACES the addopts
+# the tail of both passes' expressions. A command-line ``-m`` REPLACES the addopts
 # ``-m`` entirely, so every pass below must re-state this conjunction or the
 # excluded lanes silently come back. Kept as a constant (not a runtime
 # tomllib parse): README pins Python 3.10+ and tomllib is 3.11+.
@@ -74,9 +80,8 @@ EXCLUSIVE_MARKER = "exclusive"
 # `-p xdist.plugin` would, turning an ordinary green run into a pluggy
 # "Plugin already registered" error.
 #
-# NOT part of `PARALLEL_PASS_FLAGS`: that constant is the CI mirror and is
-# compared token-for-token against ci.yml, where the environment is provisioned
-# and no candidate configuration is in play.
+# NOT part of the pass flags consumed by CI's run_tests.py --lane-pass: that
+# lane provisions its plugins, whereas the hermetic gate checks candidate configuration.
 _FORCED_PLUGIN_FLAGS = ["-p", "xdist", "-p", "timeout"]
 # The serial pass carries `--timeout` too, so it forces the timeout plugin the same way.
 _FORCED_SERIAL_PLUGIN_FLAGS = ["-p", "timeout"]
@@ -102,79 +107,8 @@ _XDIST_ARGV_FLAGS = frozenset({"-n", "--numprocesses", "--dist"})
 # is `-`, not `n`.
 _XDIST_COMBINED_NUMPROCESSES = re.compile(r"^-n\S+$")
 
-# pytest's EXIT_NOTESTSCOLLECTED. Green-empty per pass: a candidate repo may
-# legitimately have zero serial tests. Only ALL passes empty is a block.
-_PYTEST_EXIT_NO_TESTS = 5
-# pytest's EXIT_USAGEERROR — how a missing xdist/timeout plugin surfaces.
-_PYTEST_EXIT_USAGE_ERROR = 4
-
-# Terminal decoration (SGR colours, cursor moves) that xdist/pytest may wrap a
-# reported line in. Stripped before matching so a coloured controller line is not
-# a miss and a decorated assertion line is not a surprise match.
-_ANSI_DECORATION = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-
-def _strip_decoration(line: str) -> str:
-    return _ANSI_DECORATION.sub("", line).strip()
-
-
-# xdist signatures for a worker that DIED rather than reported a failure. A
-# crashed worker is a hard block, never a retryable flake.
-#
-# Both error directions are handled, and they are NOT symmetric:
-#   * a MISS only degrades the label — the nonzero exit still blocks;
-#   * a FALSE POSITIVE would be lossy if the matched lines replaced the report,
-#     so they are only ever a highlighted PREFIX in front of the full pytest
-#     output (see ``_classify_pass_result``). A mislabelled ordinary failure
-#     therefore still costs the reader nothing but a wrong remediation line.
-#
-# Each pattern matches a COMPLETE xdist controller line shape — the full phrase
-# together with the worker id (or the numeric operand) that xdist itself always
-# prints — never a free substring of it. Bare `node down:`, `crashed while
-# running`, `replacing crashed worker` and `maximum crashed workers reached` all
-# occur in ordinary assertion text and captured logs of tests that reason about
-# worker pools, and labelling those `PARALLEL_WORKER_CRASH` handed the author a
-# mark-it-serial instruction for a failure the marker cannot fix.
-#
-# Shapes, from xdist/dsession.py: `handle_crashitem` -> "worker 'gwN' crashed
-# while running 'nodeid'"; `TerminalDistReporter.pytest_testnodedown` -> "[gwN]
-# node down: ..."; and the restart branch, which under our
-# `--max-worker-restart=0` says "worker gwN crashed and worker restarting
-# disabled".
-#
-# Every pattern is anchored to the start of the DECORATION-STRIPPED line
-# (`_strip_decoration` removes ANSI and surrounding whitespace before matching),
-# because xdist emits all of these as whole lines of its own. Without the anchor
-# the same phrases matched anywhere they appear — assertion text, captured logs,
-# and the diff of this very module — so a candidate whose ordinary test failure
-# merely MENTIONS a crashed worker was labelled `PARALLEL_WORKER_CRASH` and
-# handed a mark-it-serial instruction for a failure the marker cannot fix.
-#
-# `handle_crashitem` reports the crash as a TestReport longrepr, so under `-q`
-# pytest ALSO re-emits it mid-line in the short summary. That form is matched by
-# its own anchored pattern rather than by unanchoring the phrase: only pytest's
-# own `FAILED`/`ERROR` line prefix opens the line, which candidate text does not.
-_WORKER_CRASH_PATTERNS = (
-    re.compile(r"^\[gw\d+\] node down:", re.IGNORECASE),
-    re.compile(r"^worker '?gw\d+'? crashed while running\b", re.IGNORECASE),
-    re.compile(r"^(?:FAILED|ERROR) \S+ - worker '?gw\d+'? crashed while running\b", re.IGNORECASE),
-    re.compile(r"^worker '?gw\d+'? crashed and worker restarting disabled", re.IGNORECASE),
-    re.compile(r"^replacing crashed worker '?gw\d+", re.IGNORECASE),
-    re.compile(r"^maximum crashed workers reached: \d+", re.IGNORECASE),
-)
-
-# Why a worker died. pytest-timeout's thread method (the default where SIGALRM does
-# not exist, i.e. Windows) does NOT fail the test: it dumps stacks and `os._exit(1)`s
-# the whole worker, which xdist reports with the crash phrasing above, and the serial
-# mark would only move that hang (the serial pass carries the same per-test timeout).
-# Its banner and stacks go to the worker's stdout, which execnet discards (#1949); a
-# signal-method `Failed: Timeout` fails its test while the worker lives on. So the cause
-# comes from this pass's own results.json (tests/ci_evidence.py), which the probe in this
-# pass's controller locates: a crash row names its worker and, only when the controller
-# matched the record that worker's callback left for exactly that test of this run, the
-# timeout. Printed text is no authority, since any test can print it; this pattern keeps
-# the controller's readable copy of such a row in the display only.
-_TIMEOUT_CALLBACK_LINE = re.compile(r"^\[gw\d+\] pytest-timeout callback invoked\b")
+def _classify_pass_result(*args, **kwargs):
+    return _render_pass_result(*args, parallel_flags=_PARALLEL_FLAG_NAMES, **kwargs)
 
 
 class PreflightPass(NamedTuple):
@@ -331,6 +265,7 @@ _PRE_COMMIT_BASELINE_REFS = ("HEAD",)
 # Phase label the pre-commit review passes; anything else keeps the wider
 # post-commit baseline, so an unrecognised value fails toward MORE blocking.
 PRE_COMMIT_PHASE = "pre_commit"
+_PRECOMMIT_READING_MARKER = "precommit-reading"
 
 
 def _baseline_refs(phase: str) -> tuple:
@@ -618,23 +553,6 @@ def _verify_preflight_plugins(agent_python: str, probe_root: pathlib.Path) -> li
     return _probe_plugins(agent_python, probe_root, isolated=False)
 
 
-def _plugin_missing_remediation(agent_python: str, rejected: str = "") -> str:
-    """Shared instruction line for both routes to PREFLIGHT_PLUGIN_MISSING."""
-    lead = (
-        f"pytest under {agent_python} rejected {rejected}, so the two-pass "
-        if rejected
-        else f"the interpreter {agent_python} could not provide them, so the two-pass "
-    )
-    return (
-        lead
-        + "gate needs pytest-xdist and pytest-timeout installed into THAT interpreter. "
-        "They are declared in pyproject.toml (pytest-xdist>=3.5, pytest-timeout>=2.1). "
-        "The gate does NOT silently fall back to a serial run — a degraded gate is "
-        "indistinguishable from a passing one; set OUROBOROS_PREFLIGHT_SERIAL=1 to "
-        "take the legacy single serial pass deliberately while you provision."
-    )
-
-
 _DEFAULT_PREFLIGHT_TIMEOUT_SEC = 1800  # a selected run's total; the full suite has none
 
 
@@ -767,9 +685,18 @@ def _execute_lane(argv: Sequence[str], worktree: pathlib.Path, temp_root: pathli
     container = ProcessContainer(lifeline=True, overload=True)
     output = FileOutput(temp_root, lane)
     proc = None
+    directory, case_salt = None, b""
     try:
-        proc = container.spawn(argv, background=True, cwd=str(worktree),
-                               env=_preflight_env(temp_root, worktree, node=node),
+        env = _preflight_env(temp_root, worktree, node=node)
+        if lane == "pytest" and (temp_root / _PRECOMMIT_READING_MARKER).is_file():
+            try:
+                case_salt = os.urandom(16)
+            except OSError:
+                pass  # The test lane remains usable without its diagnostic identity.
+            if case_salt:
+                directory = output.root / "session"
+                env.update(OUROBOROS_PRECOMMIT_SESSION_DIR=str(directory), OUROBOROS_PRECOMMIT_CASE_SALT=case_salt.hex())
+        proc = container.spawn(argv, background=True, cwd=str(worktree), env=env,
                                stdout=output.stdout, stderr=output.stderr)
         try:
             returncode: Optional[int] = proc.wait(timeout=timeout)
@@ -784,13 +711,16 @@ def _execute_lane(argv: Sequence[str], worktree: pathlib.Path, temp_root: pathli
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 reap_error = reap_error or f"direct {lane} process did not exit after reap"
-        preview = output.finish(returncode=returncode, containment_error=reap_error, argv=argv)
+        preview = output.finish(returncode=returncode, containment_error=reap_error, argv=argv,
+                                **({"case_key_salt": case_salt.hex()} if case_salt else {}))
         if lane == "pytest":
             try:
                 preview = _controller_diagnostics(output.root) + preview
             except OSError as exc:
                 output.failed("controller diagnostics", exc)
-        return CapturedPass(returncode, preview, reap_error, output.errors, container.token)
+        result = CapturedPass(returncode, preview, reap_error, output.errors, container.token)
+        result.session_directory, result.case_salt = directory, case_salt
+        return result
     except BaseException as exc:
         if proc is not None and proc.poll() is None:
             _terminate_preflight_tree(proc, temp_root)
@@ -821,180 +751,6 @@ def _execute_pytest_pass(
 
     argv = [agent_python, "-m", "pytest", *launch_args(args)]
     return _execute_lane(argv, worktree, temp_root, timeout, "pytest", node)
-
-_TRUNCATION_MARKER = "\n...(truncated)..."
-
-
-def _bounded(output: str, max_output: int) -> str:
-    """Bound pytest output by cutting the MIDDLE, never the tail.
-
-    pytest prints the FAILURES section and the short test summary at the END —
-    a head-only cut (the old shape) discarded exactly the lines that name the
-    failing tests once the run was long enough to need cutting. The head is
-    kept too (collection errors and the session header live there): one third
-    head, two thirds tail."""
-    if len(output) <= max_output:
-        return output
-    head = max_output // 3
-    tail = max_output - head
-    return output[:head] + _TRUNCATION_MARKER + "\n" + output[-tail:]
-
-
-def _diagnosis(header: str, remediation: str, body: str, max_output: int) -> str:
-    """Header, then remediation, THEN the bounded pytest body.
-
-    The caller re-truncates this string from the TAIL at the same limit
-    (ouroboros/tools/review_helpers.py (_run_review_preflight_tests) passes ``limit=MAX_OUTPUT=8000``),
-    so a remediation printed after a full-budget body is the first thing lost —
-    precisely when the output is long enough to need it. The prefix, the
-    truncation marker, and its newline are reserved out of the body's budget
-    too, so the whole string stays inside the caller's declared limit instead
-    of overrunning it (an overrun would cost the tail — the failure summary)."""
-    prefix = f"{header}\n{remediation}\n" if remediation else f"{header}\n"
-    body = body.strip()
-    room = max_output - len(prefix) - len(_TRUNCATION_MARKER) - 1
-    if not body or room <= 0:
-        # A limit too small to hold header+remediation+marker still may not be
-        # overrun: the invariant is unconditional, so the prefix is cut too.
-        return prefix.rstrip("\n")[:max_output]
-    return prefix + _bounded(body, room)
-
-
-_TIMEOUT_EXCERPT_HEADER = (
-    "\nlast output before the kill (the hung test is usually the last one started):\n"
-)
-
-
-def _with_timeout_excerpt(message: str, output: str, max_output: int) -> str:
-    """Append what the killed pass had already flushed to its timeout message.
-
-    A pass killed at its budget produces no exit code to classify, and the 300 s
-    per-test timeout both passes carry did not end its hang first, so without this
-    the operator is told only which pass timed out — with nothing naming the test
-    that hung. The TAIL is kept
-    (progress output ends at the test that never finished) and the whole result
-    stays inside the caller's declared ``max_output`` — unconditionally, exactly
-    as ``_diagnosis`` does, including when the message alone already fills the
-    budget (unreachable at the production 8000, but an invariant with an
-    exception is not one).
-    """
-    body = (output or "").strip()
-    if not body:
-        return message[:max_output]
-    head_marker = _TRUNCATION_MARKER.strip() + "\n"
-    room = max_output - len(message) - len(_TIMEOUT_EXCERPT_HEADER) - len(head_marker)
-    if room <= 0:
-        return message[:max_output]
-    if len(body) > room:
-        body = head_marker + body[-room:]
-    return message + _TIMEOUT_EXCERPT_HEADER + body
-
-
-def _rejected_parallel_flags(output: str) -> list[str]:
-    """Parallel-pass option names that pytest reported as unrecognized.
-
-    Matches WHOLE tokens against ``_PARALLEL_FLAG_NAMES``: the old substring
-    test saw "-n" inside "--no-header" and blamed a missing pytest-xdist for
-    any usage error at all.
-    """
-    rejected: list[str] = []
-    for line in output.splitlines():
-        _, sep, tail = line.partition("unrecognized arguments:")
-        if not sep:
-            continue
-        for token in tail.split():
-            name = token.split("=", 1)[0]
-            if name in _PARALLEL_FLAG_NAMES and name not in rejected:
-                rejected.append(name)
-    return rejected
-
-
-def _crash_remediation(recorded: Optional[dict] = None) -> str:
-    """The instruction line for a dead worker — it depends on WHY it died.
-
-    The label and the hard block are identical either way; only this line changes.
-    ``recorded`` is this pass's own results.json (``recorded_session``). The timeout
-    instruction needs the worker the session recorded dead among its crash rows and
-    every crash row naming its worker and a matched timeout; anything less, a missing
-    or unreadable record included, is diagnosed before any fix is chosen.
-    """
-    record = recorded if isinstance(recorded, dict) else {}
-    dead = record.get("worker_crash")
-    reports = record.get("reports")
-    rows = [row for row in reports if isinstance(row, dict) and row.get("phase") == "crash"] if isinstance(reports, list) else []
-    timed = [row["worker"] for row in rows
-             if isinstance(row.get("worker"), str) and type(row.get("timeout_callback_seconds")) in (int, float)]
-    if rows and len(timed) == len(rows) and isinstance(dead, dict) and dead.get("worker") in timed:
-        return (
-            "pytest-timeout's callback was invoked for the test its worker was running: the per-test "
-            "timer fired before that test finished, and the worker was lost afterwards. Make that test "
-            "faster or split it. Do NOT mark it @pytest.mark.serial: a resource group or the exclusive "
-            "pass carries the same per-test timeout."
-        )
-    return (
-        "A pytest-xdist worker DIED instead of reporting a failure, and nothing recorded why: a native "
-        "crash, an OS kill, an os._exit in a test and a timeout that left no callback record look alike. "
-        "Rerun the test it was running on its own and read that output before choosing a fix; name the host "
-        "resource it cannot isolate (@pytest.mark.serial(\"<resource>\"): a fixed port, a daemon, a process-global "
-        "its fixture cannot restore) only once it proves to share one, serial(\"exclusive\") only when it harms "
-        "or needs no live sibling; never a flake/retry."
-    )
-
-
-def _classify_pass_result(
-    label: str,
-    returncode: Optional[int],
-    output: str,
-    max_output: int,
-    *,
-    parallel: bool,
-    agent_python: str = "python3",
-    elapsed: float = 0.0,
-    recorded: Optional[dict] = None,
-) -> Optional[str]:
-    """Turn one pass's exit code + output into ``None`` or a bounded diagnosis.
-
-    Pure function: no process, no filesystem. Exit 0 and exit 5
-    (nothing collected for this lane) are green here; the orchestrator alone
-    decides that ALL passes being empty is a block. ``recorded`` (this pass's
-    own results.json, when its controller left one) only selects a dead
-    worker's remediation.
-    """
-    if returncode in (0, _PYTEST_EXIT_NO_TESTS):
-        return None
-    head = f"{label} pass, exit {returncode}, {elapsed:.0f}s"
-
-    # Both hard-block labels describe xdist failures, so they are only reachable
-    # for a pass that actually handed the run to xdist. Firing them on the
-    # serial or legacy single pass would not change the fail-closed verdict (a
-    # nonzero exit still blocks) — it would hand the reader a confidently wrong
-    # remediation, which is the expensive part for an autonomous agent.
-    if parallel:
-        if returncode == _PYTEST_EXIT_USAGE_ERROR:
-            rejected = _rejected_parallel_flags(output)
-            if rejected:
-                return _diagnosis(
-                    f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PLUGIN_MISSING (hard block): {head}",
-                    _plugin_missing_remediation(agent_python, " ".join(rejected)),
-                    output, max_output,
-                )
-        matched = [
-            line for line in output.splitlines()
-            if any(p.search(_strip_decoration(line)) for p in _WORKER_CRASH_PATTERNS)
-        ]
-        if matched:
-            # The crash lines lead, but the FULL pytest output still follows:
-            # a crash usually happens alongside real failures, and a pattern
-            # false positive must never cost the reader those lines. The body
-            # budget in `_diagnosis` trims the tail, not the highlight.
-            return _diagnosis(
-                f"⚠️ PRE_PUSH_TEST_ERROR: PARALLEL_WORKER_CRASH (hard block): {head}",
-                _crash_remediation(recorded),
-                "\n".join(matched) + "\n\n" + output, max_output,
-            )
-
-    return _diagnosis(f"⚠️ PRE_PUSH_TEST_ERROR: {head}", "", output, max_output)
-
 
 _SOURCE_INDEX_BLOCK = "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_SOURCE_INDEX (hard block): "
 
@@ -1238,31 +994,93 @@ def _missing_tests_tree(repo: pathlib.Path, phase: str, max_output: int) -> Opti
     return None
 
 
-def _collected_nothing(recorded: Optional[dict]) -> bool:
-    """A green pass whose own results.json (the probe's pointer) counts no collected test."""
-    return isinstance(recorded, dict) and recorded.get("tests_collected") == 0
+def _pass_block(spec, result, elapsed, remaining, timeout, inventory_error,
+                recorded, collected, probe_module, temp_root, agent_python, max_output):
+    """The runner's existing order of blockers; reading follows this decision, never makes it."""
+    returncode, output, reap_error = result
+    if reap_error:
+        return "containment", _containment_failed(spec.label, reap_error, max_output)
+    if returncode is None:
+        return "timeout", _with_timeout_excerpt(
+            f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {remaining:.0f} seconds "
+            f"in the {spec.label} pass (total budget {timeout} seconds)", output, max_output)
+    if inventory_error and returncode in (0, _PYTEST_EXIT_NO_TESTS):
+        return "inventory", f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {spec.label}: {inventory_error}"
+    if returncode == _PYTEST_EXIT_NO_TESTS or returncode == 0 and collected == 0:
+        return None, None
+    if returncode == 0 and spec.parallel and probe_module in spec.args:
+        observed = observed_worker_ids(temp_root)
+        required = min(MIN_PREFLIGHT_WORKERS, allocated_worker_count(temp_root))
+        if len(observed) < required:
+            return "parallelism", _diagnosis(
+                "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PARALLELISM_LOST (hard block): "
+                f"the {spec.label} pass returned green on {len(observed)} xdist "
+                f"worker(s), fewer than the {required} its admitted budget requires",
+                "A pass that never ran concurrently proves nothing about the "
+                "parallel-only defects this gate exists to catch, so it is not "
+                "accepted as green. Check the repository's pytest configuration for "
+                "an addopts entry that disables xdist, and the interpreter for a "
+                "pytest-xdist that cannot start workers. Set "
+                "OUROBOROS_PREFLIGHT_SERIAL=1 to take the legacy single serial pass "
+                "deliberately instead of getting a silently serial one.",
+                "workers observed: " + (", ".join(sorted(observed)) or "none"), max_output)
+    if returncode != 0:
+        # Even an output budget too small to render a diagnosis must not green a red pass.
+        return "pytest_exit", _classify_pass_result(
+            spec.label, returncode, output, max_output, parallel=spec.parallel,
+            agent_python=agent_python, elapsed=elapsed, recorded=recorded,
+        ) or f"⚠️ PRE_PUSH_TEST_ERROR: {spec.label} pass, exit {returncode}, {elapsed:.0f}s"
+    return None, None
 
 
-def _containment_failed(label: str, reap_error: str, max_output: int) -> str:
-    """The pass ran, but the scan says processes it spawned are still alive (or cannot tell): a live tree
-    outlives this whole run, so the pass verdict is not accepted, whatever it was."""
-    return _diagnosis(
-        "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): "
-        f"the {label} pass ran, but processes it spawned were still "
-        "alive afterwards (or could not be determined to be gone)",
-        "The container DETECTS leaked processes; it does not promise to kill "
-        "them, and a process it cannot inspect counts as leaked. The pass "
-        "verdict is not accepted, whatever it was, because a leaked tree "
-        "survives into the next pass and past teardown. Find the test that "
-        "spawns a real process, binds a real port, or daemonises a helper "
-        "and does not wait for it — make it clean up (an owned child it waits "
-        "for marks nothing; a shared host resource is named with "
-        "@pytest.mark.serial(\"<resource>\")); never a "
-        "flake/retry. Kill any pid named below before re-running; when the "
-        "report names none it states the reason instead — read that line, "
-        "since more than one cause leaves no pid to name.",
-        reap_error, max_output,
-    )
+def _gate_reading(evidence, *, cause=None, label=None, code=None, leak=False,
+                  gap="no structured reading for this block", reader=None):
+    """Keep the host's cause even when no attempt ran or the generation lacks its reader."""
+    if cause is None:
+        cleanup = evidence.get("cleanup")
+        leak = bool(cleanup and cleanup[4])
+        cause = evidence.get("block_cause") or ("containment" if leak else "gate_blocked")
+    unknown = {key: None for key in ("failed", "worker_lost", "collection_error", "in_flight", "not_run")}
+    # This reading describes one selected pass, not the number of lanes in the run.
+    # No selected pass does not establish zero attempts after execution begins.
+    attempts = 1 if label is not None else 0 if evidence.get("execution", "not_run") == "not_run" else None
+    if reader is not None:
+        try:
+            facts = reader.block(cause, label=label, exit_code=code, leak=leak, gap=gap)
+            if unknown.keys() <= facts.keys() and unknown.keys() <= facts["counts"].keys():
+                return {**facts, "attempts": attempts}
+        except Exception:
+            pass  # A mixed generation still has the gate's own block.
+    return {"cause": cause, "pass": label, "exit": code, "attempts": attempts,
+            "coverage": "unavailable", "gap": gap, **unknown,
+            "leak": [label or "gate"] if leak else [], "counts": {**unknown, "leak": int(leak)},
+            "evidence": {"gate": "result.json"}, "omitted": {}}
+
+
+def _pinned_reader():
+    # This module is pinned at bootstrap. Do not import a reader from a mutable path at gate time.
+    try:
+        from ouroboros import preflight_receipts
+
+        return getattr(preflight_receipts, "precommit_reader", lambda: None)()
+    except Exception:
+        return None
+
+
+def _with_reading(evidence, message, result, label, cause, inventory, max_output, *, recorded=None):
+    reader = _pinned_reader()
+    gap = "structured pytest reader unavailable"
+    if reader is not None:
+        try:
+            reading = reader.observe(evidence["path"], result, label, cause, inventory, recorded=recorded)
+            shown = _prepend_reading(message, reader.render(reading, max_output), max_output)
+            evidence["reading"] = reading
+            return shown
+        except Exception:  # Diagnostics never displace the gate's known cause or expose an exception body.
+            gap = "structured pytest reader failed or was incompatible"
+    evidence["reading"] = _gate_reading(evidence, cause=cause, label=label, code=result[0],
+                                       leak=bool(result[2]), gap=gap, reader=reader)
+    return _prepend_reading(message, f"Pytest diagnostics unavailable: {gap}", max_output)
 
 
 def _run_hermetic_pytest(
@@ -1303,6 +1121,8 @@ def _run_hermetic_pytest(
     # Check before execution: an unrenderable failure used to become an empty
     # string, which the caller reads as success. Never silently green a red run.
     if max_output <= 0:
+        if evidence is not None:
+            evidence["block_cause"] = "invalid_output_budget"
         return (
             f"⚠️ PRE_PUSH_TEST_ERROR: max_output must be positive (got {max_output}); "
             "refusing to run the preflight with an output budget that cannot render a "
@@ -1312,10 +1132,14 @@ def _run_hermetic_pytest(
     if not (repo / ".git").exists():
         return None
     if not (repo / "tests").exists():
+        if evidence is not None:
+            evidence["block_cause"] = "tests_tree"
         return _missing_tests_tree(repo, phase, max_output)
     agent_python = os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
+        if evidence is not None:
+            evidence["block_cause"] = "source_index"
         return source_index_error
     temp_root = gate_root(evidence=evidence)
     worktree = temp_root / "repo"
@@ -1327,6 +1151,11 @@ def _run_hermetic_pytest(
         from ouroboros.test_parallelism import WaitStopped, reserve
         from ouroboros.tools.shell_process import turn_control_reader
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
+        if phase == PRE_COMMIT_PHASE:
+            try:
+                (temp_root / _PRECOMMIT_READING_MARKER).touch()
+            except OSError:
+                pass  # This request is diagnostic; its loss cannot decide the gate.
         if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
             (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
         # One reservation under the ledger's lock: the admission and this run's row, which stays leased in the
@@ -1338,6 +1167,7 @@ def _run_hermetic_pytest(
                 f"PREFLIGHT_MEMORY_WAIT {text}", file=sys.stderr, flush=True),
                 tell=lambda text: progress(f"Tests preflight {text}"), stop=turn_control_reader(ctx))
         except WaitStopped as stopped:
+            evidence["block_cause"] = "admission_stopped"
             return f"⚠️ PRE_PUSH_TEST_ERROR: {stopped}; no tests ran"
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = install_worker_probe(temp_root, admitted)
@@ -1347,6 +1177,7 @@ def _run_hermetic_pytest(
         if any(spec.parallel for spec in passes):
             problems = _verify_preflight_plugins(agent_python, temp_root)
             if problems:
+                evidence["block_cause"] = "plugin_missing"
                 return _diagnosis(
                     "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PLUGIN_MISSING (hard block): "
                     "interpreter verification",
@@ -1362,11 +1193,13 @@ def _run_hermetic_pytest(
             timeout=60,
         )
         if add.returncode != 0:
+            evidence["block_cause"] = "worktree_create"
             return f"⚠️ PRE_PUSH_TEST_ERROR: could not create hermetic worktree: {add.stderr.strip()}"
         worktree_added = True
 
         if source_index_tree is not None:
             if (source_index_error := _install_source_index_tree(worktree, source_index_tree, max_output)) is not None:
+                evidence["block_cause"] = "source_index"
                 return source_index_error
 
         # One worktree-vs-HEAD capture includes live resolutions. A staged +
@@ -1378,6 +1211,7 @@ def _run_hermetic_pytest(
         # Capture/apply timeouts and filesystem faults are assembly failures,
         # not pytest timeouts or missing interpreters from the outer handlers.
         except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            evidence["block_cause"] = "candidate_assembly"
             return _diagnosis(
                 "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CANDIDATE_ASSEMBLY (hard block): "
                 "the candidate tree could not be assembled from the live worktree",
@@ -1432,6 +1266,7 @@ def _run_hermetic_pytest(
         if node_result is not None:
             _record_lane(evidence, "node", node_result, returncode=node_result.get("returncode"), containment_error=unproven_teardown)
         if node_error := (node_result or {}).get("error"):
+            evidence["block_cause"] = "node"
             return _with_retention_notice(node_error, unproven_teardown, worktree, max_output)
         carried = [node_result["node"]] if (node_result or {}).get("node") else []  # the passes run the lane's Node
         unproven_teardown = "the bytecode warm did not return, so its teardown is unconfirmed"
@@ -1443,15 +1278,18 @@ def _run_hermetic_pytest(
         started += time.monotonic() - warm_started  # the passes keep the budget the warm found: it decides nothing
         unproven_teardown = ""  # it returned: its own reap decided, and a leak is the block below
         if warm_error:
+            evidence["block_cause"] = "warm_containment"
             unproven_teardown = next((lane.get("containment_error") for lane in reversed(evidence.get("lanes", []))
                                       if lane.get("lane") == "warm"), "") or warm_error
             return _with_retention_notice(warm_error, unproven_teardown, worktree, max_output)
         empty_passes: list[str] = []
         timings: list[tuple[str, float]] = []
+        locator_args = {"root": evidence["path"], "seen": set()} if phase == PRE_COMMIT_PHASE else {}
         for spec in passes:
             # Do not round the remaining shared budget up.
             remaining = None if timeout is None else timeout - (time.monotonic() - started)
             if remaining is not None and remaining <= 0:
+                evidence["block_cause"] = "budget_before_pass"
                 return (
                     f"⚠️ PRE_PUSH_TEST_ERROR: the {spec.label} pass never started — the "
                     f"total budget of {timeout} seconds was exhausted by the earlier pass(es)"
@@ -1461,75 +1299,53 @@ def _run_hermetic_pytest(
             # Headers report this pass, not cumulative shared-budget time.
             pass_started = time.monotonic()
             unproven_teardown = f"the {spec.label} pass did not return, so its teardown is unconfirmed"
+            probed = probe_module in spec.args
+            fresh = probed and fresh_results_pointer(temp_root)
+            fresh_count = probed and fresh_collection(temp_root)
             with launching(evidence):
                 lane_result = _execute_pytest_pass(
                     agent_python, worktree, temp_root, spec.args, remaining, *carried
                 )
             returncode, output, reap_error = lane_result
-            _record_lane(evidence, "pytest", lane_result, returncode=returncode, containment_error=reap_error, **{"pass": spec.label})
+            # Unknown is not empty: the count refines exit 0, but its absence
+            # does not alter the existing exit, inventory or worker checks.
+            collected = recorded_collection(temp_root) if fresh_count else None
+            _record_lane(evidence, "pytest", lane_result, returncode=returncode, containment_error=reap_error,
+                         **{"pass": spec.label, "tests_collected": collected})
             unproven_teardown = reap_error
             inventory_error = ""
             if selection is not None:  # the full native inventory is run evidence; ledgers stay compact
-                inventory[spec.label], inventory_error = read_inventory(evidence["path"], spec.label)
+                inventory[spec.label], inventory_error = read_inventory(
+                    evidence["path"], spec.label, diagnostics=phase == PRE_COMMIT_PHASE)
                 if ctx is not None:
                     ctx._preflight_test_inventory = inventory
             elapsed = time.monotonic() - pass_started
             timings.append((spec.label, round(elapsed, 1)))
-            if reap_error:
-                # Checked BEFORE the exit code, including before the green path: an exit 0 taken on top of a
-                # live tree is exactly the fail-open the container exists to close, and the more urgent report.
-                return _with_retention_notice(_containment_failed(spec.label, reap_error, max_output),
-                                              unproven_teardown, worktree, max_output)
-            if returncode is None:
-                return _with_timeout_excerpt(
-                    f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {remaining:.0f} seconds "
-                    f"in the {spec.label} pass (total budget {timeout} seconds)",
-                    output, max_output,
-                )
-            if inventory_error and returncode in (0, _PYTEST_EXIT_NO_TESTS):
-                return f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {spec.label}: {inventory_error}"
-            recorded = recorded_session(temp_root) if probe_module in spec.args else None
-            # A candidate's own default-lane plugin (tests/default_lane.py) ends a pass that holds none of the
-            # selection's tests with 0 and says so; its record still shows what it collected: nothing.
-            if returncode == _PYTEST_EXIT_NO_TESTS or (returncode == 0 and _collected_nothing(recorded)):
+            directory = getattr(lane_result, "session_directory", None)
+            recorded = None
+            if fresh and returncode not in (0, _PYTEST_EXIT_NO_TESTS, None):
+                if phase == PRE_COMMIT_PHASE and directory is not None:
+                    recorded = recorded_session(temp_root, expected_directory=directory, **locator_args)
+                else:
+                    recorded = recorded_session(temp_root, **locator_args)
+            cause, message = _pass_block(spec, lane_result, elapsed, remaining, timeout, inventory_error,
+                                         recorded, collected, probe_module, temp_root, agent_python, max_output)
+            if message is not None:
+                if phase == PRE_COMMIT_PHASE:
+                    message = _with_reading(evidence, message, lane_result, spec.label, cause,
+                                            inventory.get(spec.label, {}) if selection is not None else None, max_output,
+                                            recorded=recorded if directory is not None else None)
+                return _with_retention_notice(message, reap_error, worktree, max_output)
+            if returncode == _PYTEST_EXIT_NO_TESTS or (returncode == 0 and collected == 0):
                 empty_passes.append(spec.label)
-                continue
-            if returncode == 0 and spec.parallel and probe_module in spec.args:
-                # Use the actual nonce flag, not the stem or spec.parallel:
-                # custom argv gets no host probe; red/empty lanes need no count.
-                observed = observed_worker_ids(temp_root)
-                if len(observed) < (required := min(MIN_PREFLIGHT_WORKERS, allocated_worker_count(temp_root))):
-                    return _diagnosis(
-                        "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PARALLELISM_LOST (hard block): "
-                        f"the {spec.label} pass returned green on {len(observed)} xdist "
-                        f"worker(s), fewer than the {required} its admitted budget requires",
-                        "A pass that never ran concurrently proves nothing about the "
-                        "parallel-only defects this gate exists to catch, so it is not "
-                        "accepted as green. Check the repository's pytest configuration for "
-                        "an addopts entry that disables xdist, and the interpreter for a "
-                        "pytest-xdist that cannot start workers. Set "
-                        "OUROBOROS_PREFLIGHT_SERIAL=1 to take the legacy single serial pass "
-                        "deliberately instead of getting a silently serial one.",
-                        "workers observed: " + (", ".join(sorted(observed)) or "none"),
-                        max_output,
-                    )
-            if returncode != 0:
-                # The EXIT CODE decides that this pass failed; the rendered text
-                # only decides how it reads. Gating the return on the diagnosis
-                # being truthy made a budget too small to render one turn a red
-                # pass into a green gate.
-                return _classify_pass_result(
-                    spec.label, returncode, output, max_output,
-                    parallel=spec.parallel, agent_python=agent_python, elapsed=elapsed, recorded=recorded,
-                ) or (
-                    f"⚠️ PRE_PUSH_TEST_ERROR: {spec.label} pass, exit {returncode}, {elapsed:.0f}s"
-                )
         if len(empty_passes) == len(passes):
+            evidence["block_cause"] = "all_passes_empty"
             return (
                 "⚠️ PRE_PUSH_TEST_ERROR: no tests were collected in any preflight pass — "
                 "a repository with a tests/ directory must yield at least one runnable test"
             )
         if selection and (problem := inventory_problem(selection, inventory)):
+            evidence["block_cause"] = "floor_inventory"
             return f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {problem}"
         if ctx is not None:
             ctx._preflight_tests_passed = True
@@ -1548,8 +1364,10 @@ def _run_hermetic_pytest(
                 raise ValueError("selected test scope changed during execution; no proof was minted")
         return None
     except subprocess.TimeoutExpired as exc:  # a command of the gate's own; the lanes report their budget themselves
+        evidence["block_cause"] = "gate_command_timeout"
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {exc.timeout:g} seconds"
     except FileNotFoundError:
+        evidence["block_cause"] = "unavailable_file"
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: pytest not available via interpreter: {agent_python}"
     except Exception as exc:
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
@@ -1596,4 +1414,6 @@ def run_hermetic_pytest(repo_dir, *, timeout=None, pytest_args=None,
                                        full_tests=full_tests, test_reason=test_reason)
         return verdict
     finally:
+        if phase == PRE_COMMIT_PHASE and verdict and "reading" not in evidence:
+            evidence["reading"] = _gate_reading(evidence, reader=_pinned_reader())
         finish_gate(evidence, verdict, phase, _release_hermetic_tree, ctx=ctx)

@@ -247,6 +247,59 @@ def _record_owner_directive(
     directives.append(row)
 
 
+def append_addressed_task_message(messages, ctx, entry, task_id, event_queue, *,
+                                  place_owner_words=False, recovered=False):
+    """Project task-message provenance into the transcript and its review premises.
+
+    Plan and acceptance share the principal's corpus. A host frame or descendant
+    escalation is not a directive; a parent's relay remains the sibling's words,
+    not the parent's. Independent roots and peers are context outside the corpus:
+    owner_source_sha256, post-drain growth and acceptance do not gain owner words.
+    The renderer keeps typed sender/relay attribution, including in live events.
+    """
+    from ouroboros.context_budget import OWNER_WORDS_KIND
+    from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, deliver_task_message
+
+    provenance = str(entry.get("provenance") or "ancestor_task")
+    principal = provenance not in CONTEXT_ONLY_TASK_PROVENANCES
+    if principal:
+        _loop()._record_owner_directive(
+            ctx, content=entry.get("text") or "", msg_id=str(entry.get("msg_id") or ""),
+            source="relayed_peer_message" if provenance == "peer_via_ancestor" else "principal_task_message",
+            origin={"source_task_id": str(entry.get("source_task_id") or ""),
+                    "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
+        )
+    words = OWNER_WORDS_KIND if principal or place_owner_words else ""  # owned words do not fold as context
+    history = "[Previous-attempt mailbox history; not a new delivery]\n" if recovered else ""
+    deliver_task_message(entry, task_id, event_queue,
+                         lambda text: _loop()._append_or_merge_user_message(messages, history + text, slot=ctx, kind=words))
+    from ouroboros.context_assembly_trace import note_contribution  # the row this delivery reached, live or recovered
+
+    arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
+    note_contribution(ctx, messages[-1], "place_arrival" if provenance == "place_event" else "task_mail",
+                      source=arrival.get("source_event_id") or entry.get("msg_id"), form="containing_row")
+
+
+def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):
+    """Rebuild ordinary same-tree input once on a from-start retry, not a new delivery."""
+    from ouroboros.owner_mailbox import (
+        KIND_TASK_MESSAGE, PROVENANCE_PEER_TASK, acknowledged_task_message_ids, drain_owner_entries,
+    )
+
+    attempt = getattr(ctx, "task_attempt", None)
+    if type(attempt) is not int or attempt <= 1:
+        return
+    acked = acknowledged_task_message_ids(drive_root, ctx.task_id, attempt_key=attempt)
+    if not acked:
+        return
+    for entry in drain_owner_entries(drive_root, ctx.task_id, include_acknowledged=True, kinds={KIND_TASK_MESSAGE}):
+        mid = entry["msg_id"]
+        if (mid in acked and mid not in seen and entry.get("source_task_id") and not entry.get("reply_to")
+                and entry["provenance"] in {"ancestor_task", PROVENANCE_PEER_TASK, "peer_via_ancestor"}):
+            append_addressed_task_message(messages, ctx, entry, ctx.task_id, None, recovered=True)
+            seen.add(mid)  # suppress receipts' duplicate views; the durable ACK already exists
+
+
 def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> None:
     """Capture the run's first user turn before system notices are added.
 

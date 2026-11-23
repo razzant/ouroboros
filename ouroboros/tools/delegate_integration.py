@@ -345,6 +345,7 @@ class _RetryBinding(NamedTuple):
     input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
     row_processing: Optional[str]  # the configured row's own tier as recorded; None on a row that recorded none
     named_notes: Optional[Dict[str, Any]]  # the knowledge notes the original start sent, by address and revision
+    registration_workspace: Optional[str] = None  # the start's recorded workspace fact; None on an older row
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -495,6 +496,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
         row_processing=record["row_processing"] if isinstance(record.get("row_processing"), str) else None,
         named_notes=deepcopy(record["named_notes"]) if isinstance(record.get("named_notes"), dict) else None,
+        registration_workspace=record.get("registration_workspace"),
     ), None
 
 
@@ -1276,13 +1278,13 @@ def payload_host_instructions(text: str, skill_name: str) -> str:
 
 
 def claimed_start_request(drive: pathlib.Path, *, actor_ctx: Any = None,
-                          initial_bootstrap: bool = False, serving_store_id: Any = "",
+                          initial_bootstrap: bool = False, serving_store_id: Any = "", gateway: Any = None,
                           **request_row: Any) -> Tuple[bool, Dict[str, Any]]:
     """The pre-POST custody decision; each private capture has its own admission."""
     from ouroboros.delegate_start_claims import claimed_start_request as claim
 
     return claim(drive, actor_ctx=actor_ctx, initial_bootstrap=initial_bootstrap,
-                 serving_store_id=serving_store_id, **request_row)
+                 serving_store_id=serving_store_id, gateway=gateway, **request_row)
 
 
 def _payload_mutation_authority(

@@ -275,23 +275,28 @@ def _project_store_reader_hint(parts: list) -> str:
                     f"knowledge_write(topic={topic!r}, {scope}, mode=..., content=..., expected_revision=...) writes it "
                     "(edit changes exact text, append adds at the end, overwrite replaces it); expected_revision is "
                     "the revision knowledge_read returned, omitted only to create a missing note or for a bare append.")
+        # The journal streams are the place-readable ones (the journal read scope admits a
+        # confirmed Place binding); the workpad keeps its own reader authority, so its
+        # phrase stays the stricter one the existing text pinned.
         part = {
             project_workpad_path(pid).relative_to(own).as_posix(): (
                 "workpad", f"workpad_read(project_id='{pid}')",
                 f"workpad_write(project_id='{pid}', mode=..., expected_revision=...) writes it (edit changes parts, "
-                "overwrite replaces it, revert puts back a version)"),
+                "overwrite replaces it, revert puts back a version)", ""),
             project_workpad_history_path(pid).relative_to(own).as_posix(): (
-                "workpad history", f"memory_read(source='workpad:{pid}')", "each workpad_write appends its row"),
+                "workpad history", f"memory_read(source='workpad:{pid}')", "each workpad_write appends its row", ""),
             project_journal_path(pid).relative_to(own).as_posix(): (
                 "journal", f"journal_read(project_id='{pid}')",
-                f"journal_write(project_id='{pid}', kind=..., text=...) appends to it"),
+                f"journal_write(project_id='{pid}', kind=..., text=...) appends to it",
+                " or a place turn acting under its confirmed binding"),
             project_reflections_path(pid).relative_to(own).as_posix(): (
-                "reflection log", f"journal_read(project_id='{pid}', source='reflections')", ""),
+                "reflection log", f"journal_read(project_id='{pid}', source='reflections')", "",
+                " or a place turn acting under its confirmed binding"),
         }.get(rest)
         if part:
-            noun, reader, writer = part
+            noun, reader, writer, place_reads = part
             return (f"This is project {pid}'s {noun}: {reader} reads it" + (f" and {writer}" if writer else "")
-                    + ". Outside its own project a task reads it only as a root task"
+                    + ". Outside its own project a task reads it only as a root task" + place_reads
                     + ("; it writes it only as a root task placed in no project (such as Main)."
                        if writer else "; no tool writes it."))
     tools = ("knowledge_list/knowledge_read/knowledge_write (knowledge), workpad_read/workpad_write "
@@ -324,7 +329,7 @@ def project_knowledge_dir(project_id: str) -> pathlib.Path:
 def _project_store_root(project_id: str) -> pathlib.Path:
     from ouroboros.config import DATA_DIR
 
-    return pathlib.Path(DATA_DIR) / "projects" / sanitize_project_id(project_id)
+    return pathlib.Path(DATA_DIR) / PROJECT_STORE_DIR_NAME / sanitize_project_id(project_id)
 
 
 def project_journal_path(project_id: str) -> pathlib.Path:
@@ -351,3 +356,27 @@ def project_reflections_path(project_id: str) -> pathlib.Path:
     """Durable per-project execution reflections (full text lives HERE for
     project-scoped roots; the canonical log carries a bounded pointer row)."""
     return _project_store_root(project_id) / "logs" / "task_reflections.jsonl"
+
+
+# The per-project store subtree marker: ONE definition shared by the producers
+# (the path builders above) and the readers (the journal read guard's store
+# comparison), so the guarded comparison spells the store exactly as the writer
+# does. A bare literal here would let the two sides drift apart again.
+PROJECT_STORE_DIR_NAME = "projects"
+
+
+def addressed_store_project_candidates(target: Any) -> list:
+    """Project ids a store layout could place ``target`` under, taken from the one
+    addressed path's own components alone (no tree walk): every
+    ``projects/<id>/…`` pair with a well-formed explicit id. A candidate is only a
+    spelling; the store comparison against the typed readers' own addresses then
+    decides physical identity, so a separate copy outside the store never matches."""
+    parts = pathlib.Path(target).parts
+    candidates: list[str] = []
+    for index in range(len(parts) - 2):
+        if parts[index].casefold() != PROJECT_STORE_DIR_NAME.casefold():
+            continue
+        project = parts[index + 1].casefold()
+        if explicit_project_id_ok(project) and project not in candidates:
+            candidates.append(project)
+    return candidates

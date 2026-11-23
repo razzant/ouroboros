@@ -876,9 +876,7 @@ def _capture_context_core(
     bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
-    books = []
-    book_text = {}
-    book_errors = []
+    books, book_text, book_errors = [], {}, []
     for book_id, entrypoint in BOOK_ENTRYPOINTS.items():
         try:
             book = load_reference_book(env.repo_dir, book_id, read_bytes=lambda path: env.repo_path(path).read_bytes())
@@ -888,8 +886,6 @@ def _capture_context_core(
             log.warning("Reference book unavailable (%s): %s", entrypoint, exc)
             book_errors.append(f"Reference book source unavailable: {entrypoint}. {exc}. Full context is not established.")
             book_text[book_id] = ""
-    architecture_md = book_text["architecture"]
-    development_md = book_text["development"]
     from ouroboros.context_layout import task_design_navigation
 
     # DESIGN follows the selected body, not document names or task prose. Capture its
@@ -1123,9 +1119,12 @@ def _capture_context_core(
     except Exception:
         log.debug("Failed to inject presence context", exc_info=True)
     if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
-        from ouroboros.return_facts import turn_sections
+        from ouroboros.own_time_seed import offer_section  # and, once, the seed an older install never wrote
+        from ouroboros.return_facts import heard_word, turn_sections
 
-        dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+        word = heard_word(task, canonical_root)
+        dynamic_parts.extend([*turn_sections(task, canonical_root, ctx, seen=seen, word=word),
+                              *offer_section(task, view_spec, canonical_root, word)])
     held = held_notes.turn_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx)
     dynamic_parts.extend([*held, held_notes.HELPER_NOTE] if held and helper else held)
 
@@ -1135,8 +1134,8 @@ def _capture_context_core(
         base_prompt_source=base_prompt_source,
         bible_source=bible_source,
         bible_md=bible_md,
-        architecture_md=architecture_md,
-        development_md=development_md,
+        architecture_md=book_text["architecture"],
+        development_md=book_text["development"],
         semi_stable_text=semi_stable_text,
         dynamic_text="\n\n".join(dynamic_parts),
         semi_stable_sections=capture_sections(semi_stable_parts, prefix="stable"),

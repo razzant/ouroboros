@@ -21,6 +21,7 @@ import uuid
 import zlib
 from collections import deque
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 from ouroboros import evidence_packs as packs, store
@@ -101,7 +102,7 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
     return list(dict.fromkeys(path for path in candidates if retained_child_root(canonical, path, task_id)))
 
 
-def read_retained_task_source(root, task_id, ref, *, anchor=None):
+def read_retained_task_source(root, task_id, ref, *, anchor=None, admit_target=None):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.saved_state_retirement import retired_message
@@ -110,7 +111,8 @@ def read_retained_task_source(root, task_id, ref, *, anchor=None):
     for source_root, owner in _source_locations(root, task_id, anchor=anchor):
         tried.append((source_root, owner))
         try:  # loose or packed at this placement; damage is explicit, absence tries the next one
-            return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor)
+            return read_actor_source_bytes(source_root, owner, ref, retained=False, anchor=anchor,
+                                           admit_target=admit_target)
         except FileNotFoundError:
             continue
     name = pathlib.PurePosixPath(str(ref["path"])).name
@@ -162,10 +164,10 @@ def source_handle_digest(relative) -> str:
     return match[1] if len(rel.parts) == 3 and rel.parts[0] == "source_handles" and match else ""
 
 
-def retained_actor_source_read_target(root, task_id, relative):
-    """Placement alias for an advertised immutable source read, not write authority. A name gone everywhere that one
-    location's record says was retired answers with that location, so the miss there names the record."""
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+def retained_actor_source_read_target(root, task_id, relative, *, target_refused=None, defer_reads=None):
+    """Placement alias, not write authority. With a deferred-read map, resolve using only placement metadata
+    and register verification at the exact target instead of opening it. A retired name still explains a miss."""
+    from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.saved_state_retirement import retired_message
 
     digest = source_handle_digest(relative)
@@ -174,14 +176,34 @@ def retained_actor_source_read_target(root, task_id, relative):
     retired = None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
-        if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
-            retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
-            continue  # a packed handle is written back beside its name first
-        ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
-               "size": path.stat().st_size, "sha256": digest}
-        read_actor_source_bytes(source_root, owner, ref)
-        return path.resolve(strict=True)
+        target = path.resolve(strict=False)
+        if target_refused is not None and target_refused(target):
+            return target  # let the file-admission owner publish the refusal; no materialization
+        loose = path.exists() or path.is_symlink()
+        if defer_reads is not None:
+            if loose or packs.has_packed_handle(source_root, owner, relative):
+                defer_reads.setdefault(target, {}).setdefault(
+                    digest, partial(_verify_retained_handle, source_root, owner, relative, digest, path,
+                                    restore=not loose, exact=target))
+                return target
+        elif loose or packs.materialize_handle(source_root, owner, relative) is not None:
+            _verify_retained_handle(source_root, owner, relative, digest, path)
+            return path.resolve(strict=True)
+        retired = retired or (path if retired_message(source_root, owner, pathlib.PurePosixPath(relative).name) else None)
     return retired
+
+
+def _verify_retained_handle(root, owner, relative, digest, path, *, restore=False, exact=None):
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    if exact is not None and path.resolve(strict=False) != exact:
+        raise ValueError("retained source placement changed after admission")
+    if restore:
+        packs.materialize_handle(root, owner, relative)
+    ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
+           "size": path.stat().st_size, "sha256": digest}
+    read_actor_source_bytes(root, owner, ref, retained=exact is None)
+    return {"sha256": digest, "size": ref["size"]}
 
 
 def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:

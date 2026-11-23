@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import html
+import importlib.util
 import json
 import math
 import os
@@ -22,7 +23,17 @@ import runpy
 import sys
 import tempfile
 
-PHASES = frozenset({"setup", "call", "teardown"})
+# These scripts run under -I -S; importing ouroboros.__init__ is not a CI operation.
+_spec = importlib.util.spec_from_file_location(
+    "_ci_case_facts", Path(__file__).resolve().parents[1] / "ouroboros" / "preflight_case_facts.py")
+_case_facts = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_case_facts)
+PHASES = _case_facts.PHASES
+CRASH_FACTS = _case_facts.CRASH_FACTS
+attempt_text, error_text = _case_facts.attempt_text, _case_facts.error_text
+valid = _case_facts.valid
+observed_outcomes, case_key = _case_facts.observed_outcomes, _case_facts.case_key
+
 # One spelling, the runner's: scripts/run_tests.py sets this marker aside with an attempt's files and takes no
 # tests/ helper for it. Read from this checkout's own file by path, never by name: `scripts` is a namespace
 # package, so an import finds whichever checkout stands first on sys.path (a miniature one's adapter runs the
@@ -62,15 +73,6 @@ def cell(value) -> str:
     return html.escape(str(value), quote=True).replace("|", "&#124;").replace("\n", "<br>")
 
 
-def valid(row) -> bool:
-    return (isinstance(row, dict)
-            and all(isinstance(row.get(key), str) for key in ("nodeid", "phase", "outcome"))
-            and (row["phase"] in PHASES or row["phase"] == "crash")
-            and row["outcome"] in {"passed", "failed", "skipped"}
-            and ("is_subtest" not in row or type(row["is_subtest"]) is bool)
-            and (row.get("wasxfail") is None or isinstance(row["wasxfail"], str)))
-
-
 def expected_failures(rows) -> dict[str, str]:
     """{nodeid: its marker's reason} of each test that ran and failed as its xfail marker expects (XFAIL).
 
@@ -93,18 +95,6 @@ def expected_failures(rows) -> dict[str, str]:
             passed.add((row["nodeid"], row["phase"]))
     return {node: reason for node, reason in reasons.items()
             if node not in spoiled and {(node, "setup"), (node, "teardown")} <= passed}
-
-
-def error_text(row) -> str:
-    """The error type, and for a lost worker the timeout callback its own record shows was invoked."""
-    seconds = row.get("timeout_callback_seconds")
-    return str(row.get("error_type") or "") + (
-        f"; timeout callback invoked ({seconds:g}s), worker subsequently lost" if type(seconds) in (int, float) else "")
-
-
-def attempt_text(row) -> str:
-    """Phase and error of a report row or of a retry attempt (scripts/ci_retry.py)."""
-    return ", ".join(str(part) for part in (row.get("phase"), error_text(row)) if part)
 
 
 def session_unavailable(root: Path) -> bool:
@@ -134,8 +124,7 @@ def final(root: Path, *, session: str | None = None) -> tuple[dict, str]:
         return {}, "session identity unavailable"
     if session is not None and (not isinstance(data, dict) or data.get("session") != session):
         return {}, "result projection belongs to another session"
-    reports = data.get("reports") if isinstance(data, dict) else None
-    if isinstance(reports, list) and all(map(valid, reports)):
+    if _case_facts.valid_final(data):
         return data, ""
     return {}, "invalid result projection"
 
@@ -151,15 +140,7 @@ def journal_rows(root: Path) -> list[dict] | None:
         text = (Path(root) / "events.jsonl").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    rows = []
-    for line in text.split("\n"):
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict) and isinstance(row.get("nodeid"), str):
-            rows.append(row)
-    return rows
+    return _case_facts.journal_reports(text)
 
 
 def journal_projection(root: Path) -> dict | None:

@@ -216,7 +216,7 @@ ouroboros/ — agent core and shared runtime (§6)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
   safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet and who wrote each row
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
-  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_clock.py — the background alarm admitting an ordinary Main turn on the supervisor tick; the wake input and what stands in it, accepted transition chain and `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes; named-time and zone facts (§6 Background consciousness)
+  consciousness.py, consciousness_wake.py, consciousness_standing.py, consciousness_transitions.py, consciousness_view.py, consciousness_clock.py, own_time_seed.py — the alarm admitting ordinary Main turns per supervisor tick; wake input, what stands in it, accepted transition chain, `wake_task_metadata` envelope; read-only facts: places, counted roots, bounded recent wakes, named times, zones; the seed claiming `wake` (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task; later changes of its room's and global marks reach a running task's next round as a host row (§6)
@@ -273,7 +273,7 @@ ouroboros/ — agent core and shared runtime (§6)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
   delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py, delegate_accepted.py, delegate_resume.py — exact-leaf recovery, `continue_from` after stops, keyed lookup/replay or lookup-only Resume (§6 Delegated subagents)
-  delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_git_range.py, delegate_documents.py, helper_receipt.py — registration, taken/history, STARTED fields, lineage/files/diffs/docs, receipts (§6)
+  delegate_registration_policy.py, delegate_workspace_hold.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_git_range.py, delegate_documents.py, helper_receipt.py — registration/workspace holds, taken/history, inputs and receipts (§6)
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
   subagent_dispatch_notes.py — executor-note exports shared with `agent.py`; `agent_dispatch.py` implements the note/blocked-outcome pair
   subagent_messages.py, subagents.py, subagent_history.py, subagent_metrics.py, subagent_metric_events.py — child messages, dispatch, dated row measurements, no admission policy (§6)
@@ -293,8 +293,8 @@ ouroboros/ — agent core and shared runtime (§6)
   review.py, code_shape_facts.py — Size and complexity inventory behind the shrink-only ceilings and the diff pulse (§6 Structural gates, Commit preflight)
   size_ratchet_manifest.py — Generated data-only size-debt manifest (`scripts/regenerate_size_ratchet.py`)
   review_execution_projection.py — Reviewer-execution projection; kinds `api` | `harness` | `native`, so the owner can tell a retrieving review from a packet review on the same model
-  preflight_runner.py, preflight_probe.py, preflight_node.py, preflight_receipts.py, test_parallelism.py, test_evidence.py, test_environment.py, test_bytecode.py, safe_test_supervisor.py — Gate, probe, Node, receipts, slot ledger, results, scratch, warm prefix, command lifetime (§6; §8)
-  test_selection.py, preflight_inventory.py, preflight_qualification.py — Scope, execution inventory, adoption evidence (§6)
+  preflight_runner.py, preflight_probe.py, preflight_diagnosis.py, preflight_reading.py, preflight_case_facts.py, preflight_node.py, preflight_receipts.py, test_evidence.py — Gate, probe, failure reading and proof (§6)
+  test_selection.py, preflight_inventory.py, preflight_qualification.py, test_parallelism.py, test_environment.py, test_bytecode.py, safe_test_supervisor.py — Scope, inventory, adoption, slots, scratch, warm and teardown (§6; §8)
   review_substrate.py — Review seat coordinator: independent seats, per-actor records keeping transport, parse, verdict, coverage and quorum distinct (§6 Review stack, Result review)
   review_custody.py, review_source_closure.py, review_operation.py, review_live_join.py — Reviewer workers: no-resend custody, retained owner-bound inputs, panel waits/checkpoints, existing-producer collection/live joins (§6 Review stack; Paid stamp and owner custody)
   review_owner_custody.py — Paid attempts record `(server session, pid)` (§6 Paid stamp and owner custody)

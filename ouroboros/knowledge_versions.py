@@ -36,7 +36,7 @@ from heapq import merge
 from itertools import chain
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from ouroboros import knowledge_rows, text_change, utils
 from ouroboros.knowledge_edits import yaml_form
@@ -89,6 +89,15 @@ def _belongs(row: Any, address: Any) -> bool:
         return False
     where, scope = row.get("address"), getattr(address, "scope", None)
     return not isinstance(where, dict) or where.get("scope", scope) == scope
+
+
+def _commits(row: Any, address: Any) -> bool:
+    """A ``claims_published`` row of this note at its scope; one naming a revision is a publication
+    (``latest_publication``)."""
+    if not is_claim_commit(row) or row.get("topic") != getattr(address, "topic", None):
+        return False
+    where = row.get("address")
+    return not isinstance(where, dict) or where.get("scope", address.scope) == address.scope
 
 
 def _matching_lines(region: bytes, base: int, needle: bytes) -> Iterator[tuple[int, bytes]]:
@@ -252,10 +261,11 @@ def write_tail(journal: Path, address: Any, revision: str | None) -> tuple[Any, 
 
 
 class NoteHistory:
-    """This text's rows over the whole journal, newest first, with the gaps met on the way."""
+    """This text's rows over the whole journal, newest first, with the gaps met on the way; ``commits`` adds its
+    ``claims_published`` rows in their journal order."""
 
-    def __init__(self, address: Any, extra: bytes = b""):
-        self.address, self.extra = address, extra
+    def __init__(self, address: Any, extra: bytes = b"", *, commits: bool = False):
+        self.address, self.extra, self.commits = address, extra, commits
         self.malformed, self.first_malformed, self.error = 0, None, ""
 
     def __iter__(self) -> Iterator[tuple[int, dict]]:
@@ -267,7 +277,7 @@ class NoteHistory:
                 if row is None:
                     self.malformed += 1
                     self.first_malformed = offset  # newest first: the last one met is the first in the file
-                elif _belongs(row, self.address):
+                elif _belongs(row, self.address) or (self.commits and _commits(row, self.address)):
                     yield offset, row
         except FileNotFoundError:
             return
@@ -286,6 +296,7 @@ class NoteHistory:
 
 
 _CLAIMS_PUBLICATION = "claims_published"
+_UNREAD = object()  # prepare_claim_write reads the latest publication itself
 _JOURNAL_STAMP = struct.Struct(">QQQ")
 _HELD_PROOF = b"\xff"  # a flag outside the UTF-8 a Markdown body can contain here
 
@@ -441,20 +452,33 @@ def inventory_claim_names(shelf: Path, rows: Iterator[dict[str, Any]]) -> Iterat
 def _claim_publication(address: Any) -> dict | None:
     """The latest committed publication at this address, including before the projection landed."""
     try:
-        for _offset, line in _journal_lines(journal_path(address), _needle(address)):
-            if b'"claims_published"' not in line:
-                continue
-            row = _parse(line)
-            if (not isinstance(row, dict) or row.get("publication") != _CLAIMS_PUBLICATION
-                    or row.get("topic") != address.topic or not isinstance(row.get("new_sha256"), str)):
-                continue
-            where = row.get("address")
-            if isinstance(where, dict) and where.get("scope", address.scope) != address.scope:
-                continue
-            return row
+        return latest_publication(((None, _parse(line)) for _offset, line in _journal_lines(
+            journal_path(address), _needle(address)) if b'"claims_published"' in line), address)
     except FileNotFoundError:
-        pass
-    return None
+        return None
+
+
+def latest_publication(rows: Iterable[tuple[Any, Any]], address: Any) -> dict | None:
+    """The newest publication of ``address`` among ``(offset, row)`` pairs read newest first."""
+    return next((row for _offset, row in rows if _commits(row, address) and isinstance(row.get("new_sha256"), str)), None)
+
+
+def publication_bound_to_source(rows: Iterable[tuple[Any, Any]], address: Any, writer: Any,
+                                writer_input_ref: Any) -> bool:
+    """Whether the latest ``claims_published`` row follows this very source's own newest capture: equal bytes and
+    claims are this source's publication only then, never an earlier source's that happens to name the same
+    revision (the seed's earlier initialization). ``rows`` are one journal read, newest first; a writer without an
+    identity-bearing ``writer_input_ref`` keeps the revision-only rule."""
+    if not isinstance(writer_input_ref, Mapping):
+        return True
+    commit = own = None
+    for offset, row in rows:
+        if commit is None and _commits(row, address) and isinstance(row.get("new_sha256"), str):
+            commit = offset
+        if (own is None and not is_claim_commit(row) and row.get("writer") == writer
+                and row.get("writer_input_ref") == writer_input_ref):
+            own = offset
+    return commit is not None and own is not None and commit > own
 
 
 def _project_claim_record(path: Path, publication: dict | None) -> None:
@@ -488,13 +512,16 @@ class ClaimWrite:
     removed: bool
     report: bool
     publication: dict | None
+    created: bool = False  # a missing note's creation commits its own names, whatever an earlier note published
+    restored: bool = False  # equal bytes and claims whose standing publication is not this source's own: commit it here
 
     @property
     def changed(self) -> bool:
         return self.active != self.recorded
 
     def needs_publication(self, revision: str) -> bool:
-        return self.changed or bool(self.active and revision != (self.publication or {}).get("new_sha256"))
+        return (self.changed or bool(self.active and (self.created or self.restored
+                or revision != (self.publication or {}).get("new_sha256"))))
 
     def publish(self, address: Any, history: Mapping[str, Any], revision: str) -> None:
         """Commit the names and their latest published revision after the source and index landed."""
@@ -516,7 +543,10 @@ class ClaimWrite:
         _project_claim_record(self.path, publication)
 
 
-def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool) -> ClaimWrite | None:
+def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: bool,
+                        publication: Any = _UNREAD, restored: bool = False) -> ClaimWrite | None:
+    """``publication``: the latest one, when the caller already read it under the same lock; ``restored``: the
+    caller's journal read shows that publication is not this source's own (``publication_bound_to_source``)."""
     before = current.metadata if current is not None else {}
     after = updated.metadata
     path = claim_record_path(address.shelf, address.topic) if address.scope == "global" else None
@@ -524,7 +554,7 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
         return None
     old, new = claim_names(before.get("claims")), claim_names(after.get("claims"))
     # This is a writer/recovery read. Starts read only the derived record.
-    publication = _claim_publication(address) if path is not None else None
+    publication = None if path is None else _claim_publication(address) if publication is _UNREAD else publication
     recorded = claim_names((publication or {}).get("active_claims"))
     if path is None:
         active = []
@@ -540,7 +570,8 @@ def prepare_claim_write(address: Any, current: Any, updated: Any, *, explicit: b
     fields = ({"claims": data["claims"]} if "claims" in data else {} for data in (before, after))
     before_claims, after_claims = map(yaml_form, fields)
     report = explicit or before_claims != after_claims or recorded != active
-    return ClaimWrite(path, recorded, active, new, ignored, removed, report, publication)
+    return ClaimWrite(path, recorded, active, new, ignored, removed, report, publication, created=current is None,
+                      restored=restored)
 
 
 _READ = object()  # find_version reads the live text itself

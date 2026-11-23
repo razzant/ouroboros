@@ -341,9 +341,24 @@ def _s11_task_replies(oracle, task_id, objective, model_calls, *tools):
     return [replies[key] for key in calls]
 
 
-def _assert_s11_removed(row, project_id):
-    assert row["path"] == f"/v2/projects/{project_id}" and 200 <= row["status"] < 300
-    assert row["response"]["projectId"] == project_id and row["response"]["registryRemoved"] is True
+def _s11_registration_posts(daemon):
+    return [row for row in daemon.calls("POST", "/v2/projects") if row["path"] == "/v2/projects"]
+
+
+def _s11_release_posts(daemon):
+    return [row for row in daemon.calls("POST", "/v2/projects/")
+            if row["path"].split("?", 1)[0].rstrip("/").endswith("/release")]
+
+
+def _assert_s11_release(row, registration, *, busy=False):
+    project_id, store_id, root = (registration[key] for key in ("id", "storeId", "root"))
+    assert row["path"] == f"/v2/projects/{project_id}/release"
+    assert row["body"] == {"expectedStoreId": store_id, "expectedRoot": root}
+    if busy:
+        assert (row["status"], row["response"]["code"]) == (409, "project_has_active_run")
+    else:
+        assert row["status"] == 200
+        assert row["response"] == {"projectId": project_id, "storeId": store_id, "root": root, "state": "released"}
 
 
 def _assert_s11_refusal(receipt, failure, *, actor, task, pin, outcome):
@@ -407,7 +422,7 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
     def finish_survey(_body):
         # The settled run can still be continued at this point in its owner's turn.
         captured["success"] = subagent_last_delegation(data_root)
-        captured["live_deletes"] = [row["path"] for row in daemon.calls("DELETE", "/v2/projects/")]
+        captured["live_releases"] = _s11_release_posts(daemon)
         return {"final": S11_PARENT_MARKER}
 
     def wait_for_survey(body):
@@ -423,7 +438,8 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
     script = [_s11_start("cx-scout", "Survey the repository root and report what you find."),
               wait_for_survey, finish_survey]
     with (
-        FakeClaudexorDaemon(reports_created=True, require_registration=True, start_lookup_unavailable=True) as daemon,
+        FakeClaudexorDaemon(reports_created=True, require_registration=True, start_lookup_unavailable=True,
+                            bound_project_registry=True) as daemon,
         ScriptedStubModel(script, final_answer=S11_PARENT_MARKER) as stub,
     ):
         daemon.install(data_root / "claudexor")
@@ -478,7 +494,10 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             refused, unrun, ghost = events["delegate_run_start_failed"]
             assert [row["reason"] for row in (refused, unrun, ghost)] == [
                 "fake_route_refused", "document_import_unsupported", "credential_profile_unknown"]
-            assert unrun["definite"] is True and unrun["project_retired"] is True
+            # The durable refusal closes the unsent invocation before the release;
+            # a later retirement row, not this one, proves the registry changed.
+            assert unrun["definite"] is True and unrun["project_retired"] is False
+            assert unrun["project_retention_reason"] == "retirement_owed"
             assert all(row["definite"] is False and row["project_retired"] is False for row in (refused, ghost))
             blocked, = events["delegate_run_start_blocked"]
             assert (blocked["task_id"], blocked["reason"]) == (pinned_task, unrun["reason"])
@@ -505,11 +524,14 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
                 "succeeded", daemon.applied_model, daemon.applied_profile)
             assert settled["cost_usd"] == 0.0 and settled["cost_final"] is True
 
-            registrations = daemon.calls("POST", "/v2/projects")
+            registrations = _s11_registration_posts(daemon)
             registration_keys = [row["idempotency_key"] for row in registrations]
             assert all(registration_keys) and len(set(registration_keys)) == 5
             assert [(row["body"]["root"], row["response"]["created"]) for row in registrations] == [
                 (str(existing), True), (str(survey), True), (str(existing), False), (str(pinned), True), (str(pinned), True)]
+            assert all(row["store_identity_opt_in"] == "1" and row["response"]["storeId"] == daemon.store_id
+                       and row["response"]["root"] == row["body"]["root"] for row in registrations)
+            _, survey_registration, _, pre_registration, _ = [row["response"] for row in registrations]
             seeded, project, borrowed, pre_project, held = [row["response"]["id"] for row in registrations]
             assert seeded == borrowed == existing_id
             assert all((project, borrowed, pre_project, held)) and len({project, borrowed, pre_project, held}) == 4
@@ -517,7 +539,7 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             assert [(row["project_id"], row["project_owned"]) for row in requested] == [
                 (project, True), (borrowed, False), (held, True)]
             assert entry["project_id"] == project and entry["project_owned"] is True
-            assert captured["live_deletes"] == []
+            assert captured["live_releases"] == []
 
             receipt = captured["success"]
             assert (receipt["task_id"], receipt["invocation_id"], receipt["run_id"]) == (task, success_id, run_id)
@@ -543,10 +565,11 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
             assert any(delta["reason"] == "session_route_resolves_its_own_model" for delta in wait_reply["capability_delta"])
             for reply, row in ((refused_reply, refused), (unrun_reply, unrun), (ghost_reply, ghost)):
                 assert (reply["status"], reply["tool"], reply["reason"]) == ("refused", "delegate_start", row["reason"])
-                assert reply["project_retired"] is row["project_retired"]
+            assert unrun_reply["project_retired"] is True
             assert unrun_reply["definitely_unrun"] is True and "pending_invocation_id" not in unrun_reply
             assert (unrun_reply["project_id"], ghost_reply["project_id"]) == (pre_project, held)
             for reply, row in ((refused_reply, refused), (ghost_reply, ghost)):
+                assert reply["project_retired"] is row["project_retired"] is False
                 assert reply["pending_invocation_id"] == row["invocation_id"]
                 assert reply.get("definitely_unrun", False) is False
             assert {row["invocation_id"] for row in pending_invocations(data_root)} == set(wire_keys[1:])
@@ -556,20 +579,24 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
         # Include A's shutdown. An early sweep could try the busy survey, but
         # only the pre-POST registration could actually be removed in A.
         assert not server.stop_unconfirmed and server.proc.poll() is not None
-        deletes_a = daemon.calls("DELETE", "/v2/projects/")
-        survey_path = f"/v2/projects/{project}"
-        pre_delete, = [row for row in deletes_a if row["path"] != survey_path]
-        _assert_s11_removed(pre_delete, pre_project)
-        for row in deletes_a:
+        assert not daemon.calls("DELETE", "/v2/projects/")
+        releases_a = _s11_release_posts(daemon)
+        survey_path = f"/v2/projects/{project}/release"
+        pre_release, = [row for row in releases_a if row["path"] != survey_path]
+        _assert_s11_release(pre_release, pre_registration)
+        for row in releases_a:
             if row["path"] == survey_path:
-                assert (row["status"], row["response"]["code"]) == (409, "project_has_active_run")
+                _assert_s11_release(row, survey_registration, busy=True)
         events_a, original_events = events_by_type(oracle)
-        assert not events_a.get("delegate_run_project_retired")
+        retired_a, = events_a["delegate_run_project_retired"]
+        assert (retired_a["task_id"], retired_a["run_id"], retired_a["project_id"]) == (pinned_task, "", pre_project)
+        assert retired_a["daemon_store_id"] == daemon.store_id and retired_a["removal_outcome"] == "removed"
         before_boot = replay(data_root)[run_id]
         assert before_boot.settled and before_boot.ledger_recorded and before_boot.project_owned
         assert before_boot.project_id == project
         with ClaudexorGateway(discover_daemon_at(data_root / "claudexor")) as gateway:
-            assert gateway.find_project_id(str(survey)) == project
+            assert {row["root"]: row["id"] for row in gateway.project_registrations()} == {
+                str(survey): project, str(existing): borrowed, str(pinned): held}
         previous_lookups = len(daemon.calls("POST", "/v2/runs/lookup"))
         document.write_text("Revised after the original submission.\n", encoding="utf-8")
         # Boot must read both original requests. An unavailable lookup leaves them pending.
@@ -589,22 +616,22 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
                 assert [row["event_id"] for row in boot_events["delegate_run_start_requested"]] == [
                     row["event_id"] for row in requested]
                 assert [row["event_id"] for row in boot_events["delegate_run_start_blocked"]] == [blocked["event_id"]]
-                retired, = boot_events["delegate_run_project_retired"]
-                assert retired["event_id"] not in original_events
+                retired, = [row for row in boot_events["delegate_run_project_retired"]
+                            if row["event_id"] not in original_events]
                 assert (retired["task_id"], retired["run_id"], retired["project_id"]) == (task, run_id, project)
                 assert not retired.get("project_kept")
+                assert retired["daemon_store_id"] == daemon.store_id and retired["removal_outcome"] == "removed"
                 bound, = replay(data_root).values()
                 assert bound.settled and bound.ledger_recorded and not bound.project_owned
                 assert (bound.task_id, bound.run_id, bound.invocation_id, bound.project_id) == (
                     task, run_id, success_id, project)
-                assert json_value(daemon.calls("POST", "/v2/projects")) == json_value(registrations)
-                deletions = daemon.calls("DELETE", "/v2/projects/")
-                boot_delete, = deletions[len(deletes_a):]
-                _assert_s11_removed(boot_delete, project)
+                assert json_value(_s11_registration_posts(daemon)) == json_value(registrations)
+                releases = _s11_release_posts(daemon)
+                boot_release, = releases[len(releases_a):]
+                _assert_s11_release(boot_release, survey_registration)
                 with ClaudexorGateway(discover_daemon_at(data_root / "claudexor")) as gateway:
-                    assert gateway.find_project_id(str(existing)) == borrowed
-                    assert gateway.find_project_id(str(pinned)) == held
-                    assert not gateway.find_project_id(str(survey))
+                    assert {row["root"]: row["id"] for row in gateway.project_registrations()} == {
+                        str(existing): borrowed, str(pinned): held}
                 assert json_value(subagent_last_delegation(data_root)) == json_value(receipt)
 
                 assert json_value(daemon.run_start_posts()) == json_value(posts)
@@ -651,7 +678,9 @@ def test_s11_delegated_transport_wire_custody_and_typed_refusals(
                 server_b.stop()
         assert not server_b.stop_unconfirmed and server_b.proc.poll() is not None
         assert json_value(daemon.run_start_posts()) == json_value(posts)
-        assert json_value(daemon.calls("DELETE", "/v2/projects/")) == json_value(deletions)
+        assert json_value(_s11_registration_posts(daemon)) == json_value(registrations)
+        assert json_value(_s11_release_posts(daemon)) == json_value(releases)
+        assert not daemon.calls("DELETE", "/v2/projects/")
 
 
 # ===========================================================================

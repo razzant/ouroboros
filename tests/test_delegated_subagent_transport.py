@@ -411,11 +411,13 @@ def test_a_billing_refusal_stays_permanently_classified():
 def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tmp_path):
     """P34R.4 decoupled (owner 2026-08-30): CLOSED_ABSENT lands immediately;
     the registration survives replay on project_owned (no wholesale clear) and
-    the registration sweep retries until the daemon accepts (404 = discharged)."""
+    the registration sweep repeats a lost removal in its owning store."""
     import ouroboros.delegate_custody as dc
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-    class _AbsentRunGateway:
+    from tests._bound_registration import BoundRegistry, ROOT, owner_facts
+
+    class _AbsentRunGateway(BoundRegistry):
         """get_run 404s (run gone); remove_project is temporarily unreachable."""
         store_identity = "store-a"
 
@@ -424,10 +426,13 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
         def get_run(self, rid, **_kw):
             from tests._shared import run_absent_in
             raise run_absent_in("store-a")
-        def remove_project(self, pid):
+        def release_registered(self, pid):
             self.removals.append(pid)
             if self.remove_fails:
                 raise ClaudexorUnavailable("daemon_unreachable", "socket died", status_code=0)
+            return "absent"  # after the outage the registration is gone (``registered_root``)
+        def registered_root(self, pid):
+            return ROOT if self.remove_fails else None
         def close(self): pass
 
     from ouroboros.task_results import write_task_result
@@ -436,7 +441,7 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
     gateway = _AbsentRunGateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-gone", task_id="t-a", route_id="r", model="m",
-        project_id="prj-owned", project_owned=True, ledger_root=str(tmp_path), daemon_store_id="store-a"))
+        project_id="prj-owned", project_owned=True, ledger_root=str(tmp_path), **owner_facts("store-a")))
     dc._CUSTODY.clear()
 
     # 1. Retire unreachable: the run FACT lands now; the debt survives.
@@ -456,16 +461,17 @@ def test_an_absent_run_closes_now_and_its_registration_survives_for_the_sweep(tm
     kinds = _event_types(tmp_path)
     assert "delegate_run_project_retired" in kinds
     assert dc.owned_project_registrations(tmp_path) == []
-    assert gateway.removals == ["prj-owned"] * 2  # retirement belongs to the sweeps
+    assert gateway.removals == ["prj-owned"] * 2, "the same release again; the engine answers absent"
+    assert next(row for row in dc.custody_rows(tmp_path) if row["type"] == dc.PROJECT_RETIRED
+                )["removal_outcome"] == "gone_after_unknown"
 
-    # 3. Absence is discharge: a 404 on the remove itself closes the run.
+    # 3. The release itself can confirm absence in its addressed store.
     class _AllGone(_AbsentRunGateway):
-        def remove_project(self, pid):
-            raise ClaudexorUnavailable("not_found", "no such project", status_code=404)
+        def release_registered(self, pid): return "absent"
 
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-gone-2", task_id="t-b", route_id="r", model="m",
-        project_id="prj-2", project_owned=True, ledger_root=str(tmp_path), daemon_store_id="store-a"))
+        project_id="prj-2", project_owned=True, ledger_root=str(tmp_path), **owner_facts("store-a")))
     dc._CUSTODY.clear()
     out = dc.reconcile_orphaned_runs(tmp_path, set(), gateway_factory=lambda: _AllGone())
     assert [o["action"] for o in out] == ["absent"]
@@ -488,21 +494,24 @@ def test_settlement_follows_the_ledger_and_the_registration_debt_survives(tmp_pa
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
+    from tests._bound_registration import BoundRegistry, owner_facts
+
     failing = {"now": True}
 
-    class _Stub(_LiveRunStub):
+    class _Stub(BoundRegistry, _LiveRunStub):
         def get_run(self, rid, **_kw):
             return {"lastSeq": 9, "summary": {"state": "succeeded", "spendUsd": 0.0,
                                               "inputTokens": 3, "outputTokens": 2}}
-        def remove_project(self, pid):
+        def release_registered(self, pid):
             if failing["now"]:
                 raise gw.ClaudexorUnavailable("daemon_unreachable", "cannot retire")
+            return "released"
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
     entry = delegate._RunCustody(
         run_id="run-1", task_id="t-a", route_id="r", model="m",
-        project_id="prj-ours", project_owned=True, root_task_id="t-a", ledger_root=str(tmp_path))
+        project_id="prj-ours", project_owned=True, **owner_facts(), root_task_id="t-a", ledger_root=str(tmp_path))
     assert dc.record_started(tmp_path, entry) is True, "the authoritative row must land"
     ctx = _nanny_ctx(tmp_path)
 

@@ -62,6 +62,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from ouroboros import own_time_seed
 from ouroboros.config import (
     WAKE_DEFAULT_SEC,
     get_bg_wakeup_max_sec,
@@ -187,6 +188,7 @@ def _persist_start(source: str) -> Tuple[str, str]:
             raise _StopHolds(stopped_by if known and source_known else "")
         live["bg_consciousness_enabled"] = True
         live.pop(STOP_SOURCE_KEY, None)
+        own_time_seed.accept(live)  # a fresh install's first accepted Start owes its seed in this same write
 
     try:
         update_state(enable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
@@ -312,6 +314,8 @@ class BackgroundConsciousness:
         self._skip_basis = _money_skip_basis(state.get(LAST_SKIP_STATE_KEY), persisted)  # memory only
         self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
+        # A seed an accepted Start owes, even while off (no wake starts); still owed, the next wake's launch retries it.
+        self._seed_owed = own_time_seed.settle(self._drive_root)
 
     floor = property(lambda self: int(get_bg_wakeup_min_sec()))
     ceiling = property(lambda self: int(get_bg_wakeup_max_sec()))
@@ -436,6 +440,8 @@ class BackgroundConsciousness:
             chat_id, unread = self._destination()
             if chat_id is None:
                 return self._skip("owner_chat_unknown", now + self.floor, window, now=now, error=unread)
+            if self._seed_owed:  # a failure left the seed owed: retried before this wake's held notes are read
+                self._seed_owed = own_time_seed.settle(self._drive_root)
         return self._launch(now, chat_id, window)
 
     def _settle_unreported_terminal(self) -> bool:
@@ -724,6 +730,7 @@ class BackgroundConsciousness:
             refusal, note = _persist_start(source)
             if refusal:
                 return refusal
+            self._seed_owed = own_time_seed.settle(self._drive_root)  # a fresh install's seed, before any wake can start
             if self._enabled:
                 return "Consciousness is already on." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""

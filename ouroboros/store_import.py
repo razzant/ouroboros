@@ -836,20 +836,19 @@ def _identity(text: str) -> Dict[str, Any]:
 def export_facts(root: Any) -> Dict[str, Any]:
     """The exact inverse of the import, in two transactions around the writes.
 
-    T1 commits ``meta.export_manifest``: the name, size and sha256 of every file the export
-    will write (every row's whole ``load`` document to ``task_results/<id>.json``, every
-    obligation set file in FULL) and the stale result files it removes (admissible files
-    whose row the store no longer holds; refused files and the quarantine stay as evidence).
-    Then the files: tmp + rename, a byte-identical file left alone, fsync of files and
-    directories. T2 refreshes the content baseline to what was written and completes the
-    manifest. A death in between leaves a manifest ``absorb_own_export`` reads at
-    abandonment, so the store's own partial writes are never mistaken for an old body's."""
+    T1 records the path, size and sha256 of whole task documents and obligation sets, plus
+    stale admissible results to remove. Atomic, fsynced writes preserve byte-identical
+    result files, refused files and quarantine. T2 updates the baselines and completes the
+    manifest. After interruption, ``absorb_own_export`` uses it to recognize our writes."""
+    from ouroboros.delegate_custody_current import REGISTRATION_SETS
+
     root = pathlib.Path(root)
-    names: List[str] = []
     with store.open_store(root, write=True, service=True) as txn:  # T1: the plan, durable before the first write
         baseline = txn.meta("baseline") or {}
         task_ids = txn.task_ids()
-        names = sorted(set(txn.set_names()) | set(o.BOOT_SETS))  # an older body expects every set file
+        # A discharged set no longer has a SQL row naming it. Overwrite its old export with {}.
+        previous = {name for name in REGISTRATION_SETS if set_file_path(root, name).exists()}
+        names = sorted(set(txn.set_names()) | set(o.BOOT_SETS) | previous)
         stale = sorted(path.stem for path in task_results_dir(root, create=False).glob("*.json")
                        if path.stem not in task_ids and not (baseline.get(path.stem) or {}).get("refused"))
         manifest = {"status": "writing", "started_at": utc_now_iso(),
@@ -874,8 +873,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
         for name in names:
             atomic_write_json(set_file_path(root, name), o.members_in(txn, name), fsync=True)
     for task_id in stale:
-        with contextlib.suppress(FileNotFoundError):
-            task_result_path(root, task_id).unlink()
+        task_result_path(root, task_id).unlink(missing_ok=True)
     store.fsync_directory(task_results_dir(root, create=False))
     store.fsync_directory(set_file_path(root, "nonterminal").parent)
     with store.open_store(root, write=True, service=True) as txn:  # T2: the baseline follows what was written

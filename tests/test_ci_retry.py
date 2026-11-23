@@ -39,17 +39,17 @@ def _round(evidence, k=1):
 # ---------------------------------------------------------------- the round's command
 
 
-@pytest.mark.parametrize("pass_flags", [
-    ["-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"], ["--timeout=300"],
-], ids=["parallel", "serial"])
-def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, tmp_path, pass_flags):
-    """Exactly what ci.yml wraps; --timeout stays, the shard goes, the evidence moves into the round."""
+@pytest.mark.parametrize("lane", [["--lane-pass", "parallel"], ["--lane-pass", "exclusive"],
+                                  ["--lane-pass=exclusive"]], ids=["parallel", "exclusive", "attached"])
+def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, tmp_path, lane):
+    """Exactly what ci.yml wraps; the lane stays (run_tests.py expands its -m and flags), the shard goes, the
+    evidence moves into the round."""
     evidence = tmp_path / "ci-evidence" / "parallel"
     round_dir, argsfile = _round(evidence)
-    command = ["python", "scripts/run_tests.py", "tests/", "-m", PARALLEL, *pass_flags, "-q", "--tb=short",
+    command = ["python", "scripts/run_tests.py", *lane, "tests/", "-q", "--tb=short",
                f"--ci-evidence-dir={evidence}", "--default-suite-shard=3/8"]
     assert ci_retry.retry_command(command, argsfile=argsfile, direct=[], round_dir=round_dir) == [
-        "python", "scripts/run_tests.py", f"@{argsfile}", "-m", PARALLEL, *pass_flags, "-q", "--tb=short",
+        "python", "scripts/run_tests.py", *lane, f"@{argsfile}", "-q", "--tb=short",
         f"--ci-evidence-dir={round_dir}"]
 
 

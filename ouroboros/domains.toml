@@ -235,6 +235,7 @@ D20 = "Presence"
 "ouroboros/consciousness_standing.py" = "D15"  # what stands in every wake: answerable cards, works that ended without success, the own clock
 "ouroboros/consciousness_transitions.py" = "D15"
 "ouroboros/consciousness_clock.py" = "D15"
+"ouroboros/own_time_seed.py" = "D15"  # the note claiming wake a fresh install's first accepted Start seeds once; an older install's one-time fact in Main
 "ouroboros/chat_annotations.py" = "D17"
 "ouroboros/chat_chain.py" = "D15"
 "ouroboros/chronicle_store.py" = "D15"
@@ -597,6 +598,9 @@ D20 = "Presence"
 "ouroboros/preflight_node.py" = "D06"
 "ouroboros/preflight_probe.py" = "D06"  # the gate's plugin in the candidate run and the admission beside it
 "ouroboros/preflight_inventory.py" = "D06"  # a gate run's expected/executed test ids; compact durable records
+"ouroboros/preflight_case_facts.py" = "D06"  # side-effect-free facts about a pytest case, shared with CI
+"ouroboros/preflight_diagnosis.py" = "D06"  # formatting of hermetic gate blockers
+"ouroboros/preflight_reading.py" = "D06"  # serving-generation reader of local pre-commit evidence
 "ouroboros/preflight_qualification.py" = "D06"  # exact-commit adoption evidence; publication stays full-only
 "ouroboros/preflight_receipts.py" = "D06"  # unsigned full/selected gate receipts and reviewer execution evidence
 "ouroboros/preflight_runner.py" = "D06"
@@ -1138,6 +1142,7 @@ D20 = "Presence"
 # F6 rolling-upstream sync (b9f7597f..8d13373b) — new upstream leaves, placed by
 # their campaign families (same evidence discipline as the base map).
 "ouroboros/delegate_registration_policy.py" = "D07"
+"ouroboros/delegate_workspace_hold.py" = "D07"
 "ouroboros/gateway/endpoint_index.py" = "D11"
 "ouroboros/gateway/routing_decision.py" = "D11"
 "ouroboros/gateway/task_decision.py" = "D11"

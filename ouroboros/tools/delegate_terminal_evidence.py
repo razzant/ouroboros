@@ -648,8 +648,7 @@ def _settlement_projection(entry, result=None):
     """Accounting and registration remain separately disclosed current facts."""
     return {"retried": False, **(result or {}), "settled": entry.settled,
             "ledger_recorded": entry.ledger_recorded,
-            "project_retired": not entry.project_owned and not entry.project_persistent,
-            "project_persistent": entry.project_persistent}
+            **entry.registration_settlement()}
 
 
 def _record_terminal_delivery(ctx, entry, payload):

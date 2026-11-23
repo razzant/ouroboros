@@ -255,7 +255,8 @@ def _drain_incoming_messages(
             break
 
     if drive_root is not None and task_id:
-        from ouroboros.owner_mailbox import CONTEXT_ONLY_TASK_PROVENANCES, KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, acknowledge_transcript_entry, deliver_quiz_answer, deliver_task_message, drain_owner_entries
+        from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, acknowledge_transcript_entry, deliver_quiz_answer, drain_owner_entries
+        from ouroboros.loop_messages import append_addressed_task_message
 
         if owner_ctx:
             owner_ctx._loop_mailbox_seen_ids = _owner_msg_seen
@@ -302,14 +303,6 @@ def _drain_incoming_messages(
                 continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
-                # A principal's words are premises every review reads (plan and acceptance share
-                # one corpus); a host system frame and a descendant's escalation are not the
-                # principal's directives. A sibling's words the parent RELAYED are context with a
-                # real source, not the principal's own directive; an INDEPENDENT task's words (a
-                # peer root speaking for itself) are judged context that enter no owner corpus, so
-                # owner_source_sha256, the post-drain growth check and the acceptance premises stay
-                # the owner's (owner 4=A). The typed provenance and the relay/sender id ride the
-                # row, the injected event and the ack.
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
@@ -326,21 +319,8 @@ def _drain_incoming_messages(
                             content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
                             **place_row_facts(arrival.get("conversation_id"), arrival.get("message"),
                                               _arrival(received=entry.get("ts"))))
-                if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
-                    _loop()._record_owner_directive(
-                        owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
-                        source=("relayed_peer_message" if provenance == "peer_via_ancestor"
-                                else "principal_task_message"),
-                        origin={"source_task_id": str(entry.get("source_task_id") or ""),
-                                "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
-                    )
-                owned = provenance not in CONTEXT_ONLY_TASK_PROVENANCES or arrival.get("confirmed_words") or arrival.get("owner_words")
-                words = OWNER_WORDS_KIND if owned else ""  # my human's words never fold as context
-                deliver_task_message(
-                    entry, task_id, event_queue,
-                    lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
-                )
-                _note_peer_contribution(owner_ctx, messages[-1], provenance, arrival.get("source_event_id") or entry.get("msg_id"))
+                append_addressed_task_message(messages, owner_ctx, entry, task_id, event_queue,
+                                              place_owner_words=arrival.get("confirmed_words") or arrival.get("owner_words"))
                 if provenance == "place_event" and (arrival.get("confirmed_words") or arrival.get("owner_words")):
                     arrivals.append(len(messages) - 1)  # my human's words, from their confirmed account
                 if provenance == "system" and isinstance(entry.get("review_feedback"), dict) and messages:
@@ -463,13 +443,6 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
     _show_held_quote_handles(owner_ctx, messages)
     return controls
-
-
-def _note_peer_contribution(ctx, row, provenance, source):
-    from ouroboros.context_assembly_trace import note_contribution
-
-    note_contribution(ctx, row, 'place_arrival' if provenance == 'place_event' else 'task_mail',
-                      source=source, form='containing_row')
 
 
 def _note_owner_contribution(ctx, row, form, attachment_facts=None, *, owner_words=True):

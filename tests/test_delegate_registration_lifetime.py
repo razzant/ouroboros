@@ -6,18 +6,20 @@ import pytest
 from ouroboros import delegate_collection, delegate_custody as custody
 from ouroboros.delegate_continuation import bind_continuation
 from ouroboros.owner_continue import binding_sha
+from tests._bound_registration import BoundRegistry, owner_facts
 from tests._store_shared import seed_result, unreadable_result
 
 
-class Gateway:
+class Gateway(BoundRegistry):
     def __init__(self):
         self.removed = []
 
     def handshake(self):
         return {}
 
-    def remove_project(self, project_id):
+    def release_registered(self, project_id):
         self.removed.append(project_id)
+        return "released"
 
     def get_run(self, run_id):  # a still-owed receipt is re-read by the ordinary collector
         return {"summary": {"state": "cancelled", "spendUsd": 0, "spendEstimated": False}}
@@ -36,7 +38,7 @@ def result(root, tid, **fields):
 def seed(root, *, task_id='owner', root_task_id='', source='', project='project', run_id='run', invocation_id=''):
     row = custody.RunCustody(run_id=run_id, task_id=task_id, root_task_id=root_task_id, invocation_id=invocation_id,
                             route_id='route', model='model', project_id=project,
-                            project_owned=True, source=source, ledger_root=str(root))
+                            project_owned=True, **owner_facts(), source=source, ledger_root=str(root))
     assert custody.record_started(root, row, shape={'access': 'readonly', 'mode': 'ask'})
     return row
 

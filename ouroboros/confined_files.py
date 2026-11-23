@@ -123,6 +123,35 @@ def lexical_relative(root: Any, path: Any, spellings: Any = ()) -> str:
     return text if all(native_name(part) for part in text.split("/")) else ""
 
 
+def same_store_object(target: Any, source: Any, *, strict: bool = False) -> bool:
+    """One filesystem-identity rule for guarded store comparisons.
+
+    ``target`` and ``source`` name the same stored object when the spellings are
+    equal, when both exist and are one physical object (``samefile``: a
+    differently spelled ancestor, an alias link, a case-insensitive volume), or,
+    before anything is materialized, when their parent folders are physically
+    identical and the leaf names are exactly equal. A genuinely separate object
+    (a distinct physical file, or a differently named entry in the same
+    case-sensitive folder) stays separate. Strict callers distinguish absent
+    components from an I/O failure that makes identity unobservable.
+    """
+    target, source = pathlib.Path(target), pathlib.Path(source)
+    if target == source:
+        return True
+    try:
+        if target.samefile(source):
+            return True
+    except OSError as exc:
+        if strict and not isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            raise
+    try:
+        return target.name == source.name and target.parent.samefile(source.parent)
+    except OSError as exc:
+        if strict and not isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            raise
+        return False
+
+
 class ConfinedDirectory:
     """Held directory, descended only by plain names. The root is host-owned and may
     be a configured junction; descendants never follow links. No path is reopened.
