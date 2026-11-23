@@ -71,3 +71,44 @@ def test_prepared_catchup_prices_images_already_held_without_retroactive_project
         finally:
             await lease.close()
     asyncio.run(run())
+
+
+def test_prepared_catchup_cannot_borrow_a_smaller_reply_than_the_open_socket(host_world, monkeypatch):
+    from dataclasses import replace
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.realtime_setup import measure_session_wire
+    from skills.gemini_live.plugin import GeminiSession
+    from tests._live_wire import Wire
+
+    host = host_world.host
+    host._session_opened = True
+    host.plan = replace(host.plan, output_reserve_tokens=65_536)
+    host.model = replace(host.model, facts=replace(host.model.facts, basis='estimator', conversation_window_tokens=92_000))
+    wire, options = Wire(), LiveOptions()
+
+    def factory(*args, **kwargs):
+        return GeminiSession(*args, connect=wire.connect, **kwargs)
+
+    monkeypatch.setitem(host_world.provider, 'session', factory)
+
+    async def run():
+        lease = await host.prepare_session(options)
+        try:
+            allowance = wire.sent[0]['setup']['generationConfig']['maxOutputTokens']
+            free = 92_000 - max(10_000, allowance) - lease.request.prompt_tokens_estimate
+            tail = {'role': 'user', 'content': 'x' * (4 * (free + 1000))}
+            await host.observe_context(tail)
+            _, new_setup, _, _ = measure_session_wire(lease.view, lease.view.plan,
+                [*lease.view.messages, tail], lease.view.schemas, factory, options, fresh=False, _room_fact=False)
+            assert new_setup.max_completion_tokens < allowance and main_context_fit_refusal(new_setup) is None
+
+            async def consume(session):
+                pytest.fail('the extra row fits only on a newly opened connection')
+            with pytest.raises(RealtimeSetupError, match='prepared_stale'):
+                await lease.run(consume)
+            assert len(wire.sent) == 1 and host._connection_view is None
+        finally:
+            await lease.close()
+
+    asyncio.run(run())

@@ -42,6 +42,7 @@ def _helper_attempt_context(target: Dict[str, Any], payload: Dict[str, Any]):
     window belongs to the model behind the endpoint, and each density witness compares
     the provider's count with the estimator's count of that same physical body.
     """
+    from dataclasses import replace
     from ouroboros import capability_evidence as ce
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload, payload_prompt_rows
     from ouroboros.context_window import resolve_window, route_observation_scope
@@ -70,15 +71,16 @@ def _helper_attempt_context(target: Dict[str, Any], payload: Dict[str, Any]):
     scope = route_observation_scope(route, None, target=target)
     record = resolve_window(evidence, 0, root=root, observation_fp=scope)
     # An accepted input is a lower bound, never proof of room for the reply.
-    limits = [limit.tokens for limit in (record.input, record.total) if limit and limit.source != "accepted"]
-    if not limits:
+    if record.input and record.input.source == "accepted":
+        record = replace(record, input=None)
+    if record.usable is None:
         return None
     raw = bounded_prompt_tokens_for_payload(payload, 0)
     density, basis = ce.resolve_main_token_density(root, evidence.route_fp, model, estimate_tokens=raw, view_kind="helper")
     return PhysicalAttemptContext(profile="task_local_nano", rendered_mode="nano", measurement_basis=basis,
-        route_fp=evidence.route_fp, round_id="", target_total_tokens=None, capacity_total_tokens=min(limits),
+        route_fp=evidence.route_fp, round_id="", target_total_tokens=None, capacity_total_tokens=record.usable,
         context_target_miss=False, automatic_pass_used=False, measurement_density=density, view_kind="helper",
-        window_witness_bound=True, window_observation_fp=scope)
+        window_witness_bound=True, window_observation_fp=scope, window_record=record)
 
 
 def window_reply_candidate(payload, field, context, window, measured, *, helper):
@@ -107,5 +109,6 @@ def window_reply_candidate(payload, field, context, window, measured, *, helper)
         return payload, False, input_tokens, window
     book = int(getattr(context, "required_book_tokens", 0) or 0)
     candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
-        **{**frame, "input_tokens": input_tokens - book}, raw_input_tokens=raw - book / density)}
+        **{**frame, "input_tokens": input_tokens - book}, raw_input_tokens=raw - book / density,
+        window_record=getattr(context, "window_record", None) if not exact and window == context.capacity_total_tokens else None)}
     return candidate, exact and exact_reply_shortfall(**frame), input_tokens, window

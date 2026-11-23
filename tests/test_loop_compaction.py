@@ -77,16 +77,6 @@ def _plan(*, preferred="max"):
     return plan
 
 
-def _lowered_from_max(plan, messages, *, measured_input_tokens=None):
-    """The one rebind the floor makes when memory alone did not save the target: Low books from the level Max showed."""
-    plan.reproject_for_route.assert_called_once_with(
-        window_tokens=500_000, known_window=True, ratio=1.0, output_reserve=65_536,
-        tool_schemas=[], start_mode="max", current_messages=messages, select_mode="low",
-        measured_input_tokens=measured_input_tokens, admitted=True,  # the line this work's own requests go out at
-        reasoning_effort="high")  # the round's effort (``_ctx``): the request shape its measurement counted
-    assert plan.reproject_for_route.call_args.kwargs["current_messages"] is messages  # actual transcript, not a copy
-
-
 def _ctx(tmp_path, *, preferred="max", mode="max"):
     from ouroboros import loop
 
@@ -221,13 +211,14 @@ def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
         "_context_automatic_pass_used": True,
     }
     expected = dict(usage)
-    loop._adopt_fallback_route(
-        SimpleNamespace(active_model="primary"), SimpleNamespace(_ctx=inner),
-        "fallback", False, messages, fallback_messages, candidate_plan, "low", [], usage,
-    )
+    resident, selected = [{"function": {"name": "unfitted"}}], [{"function": {"name": "selected"}}]
+    loop._adopt_fallback_route(SimpleNamespace(active_model="primary"), SimpleNamespace(active_model="fallback",
+        active_use_local=False, tools=SimpleNamespace(_ctx=inner), messages=fallback_messages,
+        context_fit_plan=candidate_plan, tool_schemas=selected), messages, resident, "low")
     assert usage == expected
     assert messages == fallback_messages
     assert inner.context_fit_plan is candidate_plan
+    assert resident == selected and resident is not selected
 
 
 def test_failed_fallback_restores_entire_primary_fit_bundle():
@@ -536,47 +527,46 @@ def test_a_fallback_candidate_in_the_same_round_walks_no_pass_again(tmp_path, mo
 
 
 @pytest.mark.parametrize("saved", [True, False])
-def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusal(tmp_path, monkeypatch, saved):
-    """Owner order 7A with the 06.11 sizing: memory's detail pays the measured excess the bodies left plus the
-    return-after-fold slack, and Max keeps its books through the first pass; only a further refusal of that
-    narrowed candidate turns the books into navigation (task-local Low) in the second pass."""
+def test_the_measured_first_floor_retries_with_whole_books_or_maps(tmp_path, monkeypatch, saved):
+    """A measured first floor decides both books and memory before the next dispatch."""
     from ouroboros import capability_evidence as ce, loop, loop_model_call
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a measured refusal is durable
     context = _ctx(tmp_path)
     target = 520_000 - 480_000 + SLACK  # measured from the accepted floor
     before = _fit(estimated_input=520_000, anchor_input=480_000, anchor_round=3, accepted_input=480_000)
-    after = replace(before, measurement=replace(before.measurement,
-                                                estimated_input_tokens=520_000 - target if saved else 500_000))
+    after = replace(before, measurement=replace(before.measurement, estimated_input_tokens=520_000 - target))
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([before, before, after]))
     monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
                         lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
     coarsened = []
-    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view",
-                        lambda ctx, fit, *, saving=None, slack=0: coarsened.append((saving, slack)) or True)
+    def floor(ctx, fit, *, saving=None, slack=0, telling_floor=False):
+        coarsened.append((saving, slack, telling_floor))
+        if telling_floor and not saved:
+            ctx.active_context_mode = 'low'
+            ctx.messages[0] = {'role': 'system', 'content': 'LOW_SYSTEM'}
+        return True
+
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", floor)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
     sends = []
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         sends.append(candidate_predicate)
-        if len(sends) == 1 or (len(sends) == 2 and not saved):
+        if len(sends) == 1:
             ctx.accumulated_usage["_last_llm_provider_message"] = NUMBERLESS
             ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
             return None, 0.0
-        assert candidate_predicate(_candidate_request(disposition, size=800 if len(sends) == 2 else 700))
+        assert candidate_predicate(_candidate_request(disposition, size=800))
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
-    assert msg["content"] == "fits" and len(sends) == (2 if saved else 3)
-    assert coarsened[0] == (target - SLACK, SLACK)  # the excess the bodies left, and the slack, from the level shown
-    if saved:
-        assert mode == "max" and context.messages[0]["content"] == "MAX_SYSTEM"
-        context.context_fit_plan.reproject_for_route.assert_not_called()
-    else:
-        assert mode == "low" and context.messages[0]["content"] == "LOW_SYSTEM"
-        _lowered_from_max(context.context_fit_plan, context.messages, measured_input_tokens=500_000)
+    assert msg["content"] == "fits" and len(sends) == 2
+    assert coarsened == [(target - SLACK, SLACK, True)]
+    assert mode == ('max' if saved else 'low') and context.messages[0]['content'] == f'{mode.upper()}_SYSTEM'
+    context.context_fit_plan.reproject_for_route.assert_not_called()  # no separate books rung
 
 
 def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch):

@@ -2,6 +2,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import json
+
+import pytest
 
 from ouroboros import capability_evidence as ce
 from ouroboros.contracts.live_conversation import LiveOptions
@@ -86,6 +89,71 @@ def test_open_pins_the_reprepared_account_despite_another_settings_edit(host_wor
     assert records[scopes['second']]['observations'][0]['accepted'] == 150000
     assert len(opened) == 2 and preparations == 3
     assert api.get_settings(['OPENAI_API_KEY']) == settings  # capture is no longer active
+
+
+@pytest.mark.parametrize('host_world', [('low', 500_000, 'estimator')], indirect=True)
+def test_account_repreparation_starts_from_the_lease_source_not_the_discarded_fit(host_world, monkeypatch):
+    from ouroboros import observability
+    from ouroboros.context_window import record_observation
+    from ouroboros.realtime_setup import measure_session_wire
+
+    host = host_world.host
+    source_scope = host.turn.observation_fingerprint()
+    schema = {'type': 'function', 'function': {'name': 'fixture_low_tool', 'description': 'Low tool schema. ' * 30_000}}
+    host.schemas.append(schema)
+    owner_words = {'role': 'user', 'content': 'Preserve these exact synthetic owner words.'}
+    host.messages.append(owner_words)
+    factory, options = host_world.provider['session'], LiveOptions()
+    nano = host.plan.reproject_transcript(host.messages, 'nano')
+    _, small, _, _ = measure_session_wire(host, replace(host.plan, initial_mode='nano'), nano,
+        host._tool_schemas_for_mode('nano'), factory, options)
+    persist = observability.persist_physical_candidate
+    preparations = []
+
+    def record(*args, **kwargs):
+        receipt = persist(*args, **kwargs)
+        attempt = kwargs['attempt_id']
+        if attempt.endswith(('-2', '-2-rebound')):
+            preparations.append(kwargs['candidate_facts']['fit']['measurement']['rendered_mode'])
+            if attempt.endswith('-2'):
+                host_world.settings['TEST_CREDENTIAL'] = 'synthetic-new-account'
+        return receipt
+
+    monkeypatch.setattr(observability, 'persist_physical_candidate', record)
+
+    async def run():
+        ready, stop = asyncio.Event(), asyncio.Event()
+        async def serve(session):
+            ready.set()
+            await stop.wait()
+
+        serving = asyncio.create_task(host.session(serve, options))
+        try:
+            await asyncio.wait_for(ready.wait(), 30)
+            original = host._connection_view
+            record_observation(host.ctx.drive_root, source_scope,
+                refused=small.prompt_tokens_estimate + 30_000, kind='total', basis='provider_stated')
+            lease = await host.prepare_session(options)
+            try:
+                assert preparations == ['nano', 'low']
+                assert host._connection_view is original and not original._context_session.closed
+                assert host.plan.initial_mode == 'low' and schema in host.schemas
+
+                async def consume(session):
+                    assert not original._context_session.closed
+                    assert host.plan.initial_mode == 'low' and host.plan.route_fp != source_scope
+                    rows = json.loads(session.selected.messages_json)
+                    assert rows.count(owner_words) == 1 and schema in json.loads(session.selected.tools_json)
+                    assert sum('Fresh view before this facts row:' in str(row['content']) for row in rows) == 1
+                await lease.run(consume)
+            finally:
+                await lease.close()
+        finally:
+            stop.set()
+            await asyncio.wait_for(serving, 30)
+        assert sum(session.opened for session in host_world.sessions) == 2  # first fit was never opened
+
+    asyncio.run(run())
 
 
 def test_capture_is_private_per_api_and_still_obeys_the_grant(tmp_path):

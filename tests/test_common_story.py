@@ -18,7 +18,6 @@ import re
 
 import pytest
 
-from ouroboros import chat_chain
 from ouroboros import memory_floor as mf
 from ouroboros import memory_inventory as mi
 from ouroboros import memory_view as mv
@@ -26,6 +25,7 @@ from ouroboros.chronicle_store import ChronicleStore, body_sha256
 from ouroboros.tools.chronicle import _chronicle_write, _memory_read
 from ouroboros.tools.registry import ToolContext
 from tests import _memory_inventory_shared as shared
+from tests._chronicle_pages import _page
 
 MAIN = {"id": "turn0001", "chat_id": 1}
 KID = {"id": "kid00001", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "turn0001"}
@@ -66,17 +66,6 @@ def _mapped_changes(snapshot, account_id):
 
     parts = ordinary_composition(snapshot)["blocks"]["story"]["parts"]
     return next(p for p in parts if p["kind"] == "account" and p["sources"][0]["id"] == account_id).get("changes", [])
-
-
-def _page(root, room, first, last, *, author=shared.MIND, text=None):
-    from ouroboros.tools.chronicle import page_covers
-
-    addresses = {pos: address for address, _row, pos in chat_chain.iter_rows(root)}
-    covers = page_covers(root, room, from_addr=addresses[first], to_addr=addresses[last])["covers"]
-    result = ChronicleStore(root).publish_page(room_id=room, text=text or f"Page {room} {first}-{last}.", covers=covers,
-                                               author=author)
-    assert result.ok, result
-    return result.record["id"]
 
 
 def _part(root, room, members, text="A part of my story."):

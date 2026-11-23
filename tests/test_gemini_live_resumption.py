@@ -91,7 +91,14 @@ def test_resumed_replay_keeps_captions_tools_and_usage_once(gemini):
             await receive(session, wire, {"goAway": {"timeLeft": "1s"}})
         finally:
             await session.close()
-        resumed, next_wire = make_session(gemini, LiveOptions(resume_handle="test-resume-handle"))
+        options = LiveOptions(resume_handle="test-resume-handle")
+        sizing, unused_wire = make_session(gemini, options)
+        assert sizing.wire['events'][0]['setup']['sessionResumption']['handle'] == options.resume_handle
+        # Measurement alone (even if this object is retired) must not take ownership of any replay state.
+        discarded, discarded_wire = make_session(gemini, options)
+        await discarded.close()
+        assert not unused_wire.sent and not discarded_wire.sent
+        resumed, next_wire = make_session(gemini, options)
         try:
             await resumed.open()
             await resumed.receive()

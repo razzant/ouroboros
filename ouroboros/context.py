@@ -1253,7 +1253,7 @@ def build_llm_messages(
 
     No model is called on this path: my memory is rendered, never prepared by a paid pass;
     a window too small for it addresses lines and pages instead. ``reasoning_effort`` is the first send's,
-    which shapes the request on a direct OpenAI reasoning route (``context_fit._request_shapes``).
+    which shapes the request on a direct OpenAI reasoning route (``context_measurement._request_shapes``).
     """
     # Keep the legacy public shape while publishing the immutable plan on the
     # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not

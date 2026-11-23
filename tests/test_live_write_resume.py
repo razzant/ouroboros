@@ -1,6 +1,7 @@
 """A send notices transport loss before the reader: native resumption still owns it."""
 import asyncio
 import json
+from dataclasses import replace
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
@@ -114,4 +115,90 @@ def test_failed_tool_result_write_defers_to_native_resumption(gemini, resumable)
         finally:
             host.hub.ended_by_owner = True
             if not running.done(): await asyncio.wait_for(running, 2)
+    asyncio.run(scenario())
+
+
+def test_failed_tool_write_keeps_the_resume_catalog_and_later_tool_loads(gemini):
+    from skills.live_conversation.driver import _Call
+    from tests._live_wire import Batch, Wire, selected
+
+    def schema(name):
+        return {'type': 'function', 'function': {'name': name, 'parameters': {'type': 'object'}}}
+
+    async def scenario():
+        host = Host()
+        host.state['greeted'] = True
+        keep, removed, new = (schema(name) for name in ('read_file', 'old_low_tool', 'newly_loaded'))
+        host.schemas[:] = [keep, removed]
+        call = _Call(host)
+        handle = 'resume-with-new-catalog'
+        wires, effects = [], []
+
+        async def batch(calls):
+            ids = tuple(item['id'] for item in calls)
+            effects.extend(ids)
+            if 'enable' in ids:
+                host.schemas.append(new)
+            return Batch([{'role': 'tool', 'tool_call_id': ident, 'content': 'Completed once.'} for ident in ids],
+                         silent=ids)
+
+        async def connect(consume, options):
+            wire = Wire()
+            wires.append(wire)
+            if len(wires) == 1:
+                write = wire.send
+                async def fail_tool(raw):
+                    if 'toolResponse' in json.loads(raw):
+                        restart = Close(1012, 'synthetic restart')
+                        loss = ConnectionClosedError(restart, restart, True)
+                        wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': handle}})
+                        wire.put(loss)
+                        raise loss
+                    await write(raw)
+                wire.send = fail_tool
+            elif options.resume_handle:
+                host.schemas[:] = [keep]  # the replacement fit's sole catalog change
+            mode = 'low' if len(wires) == 1 else 'nano'
+            session = gemini.GeminiSession(replace(selected(tools=host.schemas), mode=mode), options,
+                                          connect=wire.connect, observe=lambda *_: None)
+            host.sessions.append(session)
+            await session.open()
+            try:
+                return await consume(session)
+            finally:
+                await session.close()
+
+        host.tool_batch, host.session = batch, connect
+        running = asyncio.create_task(call.run())
+        def request(wire, ident):
+            wire.put({'toolCall': {'functionCalls': [{'id': ident, 'name': 'read_file', 'args': {}}]}})
+
+        try:
+            await until(lambda: call.connected.is_set())
+            request(wires[0], 'once')
+            await until(lambda: len(wires) > 1 and any('toolResponse' in event for event in wires[1].sent) or running.done())
+            if running.done():
+                await running
+            resumed = host.sessions[1]
+            assert resumed.options.resume_handle == handle and resumed.selected.mode == 'nano'
+            declarations, = wires[1].sent[0]['setup']['tools']
+            assert [item['name'] for item in declarations['functionDeclarations']] == ['read_file']
+            assert call.serving_catalog() == (keep,) and not resumed.tools_need_renewal((keep,))
+            assert (resumed.selected.model, handle) not in gemini.RESUMPTIONS
+            assert not call.deferred_tool_outputs and not call.renewing
+
+            request(wires[1], 'enable')  # a genuine new declaration still requires a fresh fit
+            await until(lambda: len(wires) == 3 and call.connected.is_set() or running.done())
+            if running.done():
+                await running
+            assert not host.sessions[2].options.resume_handle
+            assert json.loads(host.sessions[2].selected.tools_json) == [keep, new]
+            assert effects == ['once', 'enable']
+            assert [item['id'] for wire in wires for event in wire.sent
+                    for item in event.get('toolResponse', {}).get('functionResponses', ())] == ['once']
+        finally:
+            host.hub.ended_by_owner = True
+            if not running.done():
+                await asyncio.wait_for(running, 2)
+
     asyncio.run(scenario())

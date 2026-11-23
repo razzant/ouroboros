@@ -3,35 +3,8 @@ import dataclasses
 import pytest
 from ouroboros import context_budget as cb, memory_floor as mf
 from ouroboros.context_fit import MinimumViewUnfit
+from tests._context_fit_fixtures import _built
 
-_TASK = {"type": "task", "text": "hi", "id": "tmain", "chat_id": 1}
-
-
-def _built(tmp_path, monkeypatch, *, books=80_000, ratio=None, page_chars=0):
-    """``(core, plan(window, **kw))`` on the shared installation; Max's books grown by ``books`` characters
-    so that Max's fixed part exceeds Low's (the test repository's own books are smaller than its nav map)."""
-    from types import SimpleNamespace
-
-    from ouroboros import context, context_fit
-    from tests._memory_view_context import world
-
-    env, memory, _rooms = world(tmp_path)
-    if page_chars:
-        from ouroboros.chronicle_store import ChronicleStore
-        from tests.test_common_story import _page
-
-        ChronicleStore(memory.drive_root).ensure_activated()
-        _page(memory.drive_root, "1", 10, 11, text="Story. " * (page_chars // 7))
-    core = context._capture_context_core(env, memory, dict(_TASK), None, None)
-    core = dataclasses.replace(core, architecture_md=core.architecture_md + "\n\n" + "word " * (books // 5))
-    if ratio is not None:
-        monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
-
-    def plan(window, *, status="asserted", preferred="max", tool_schemas=None):
-        evidence = SimpleNamespace(route_fp="r", status=status, stale=status != "asserted", window_tokens=window)
-        return context._build_context_fit_plan(env, core, dict(_TASK), preferred_mode=preferred, tool_schemas=tool_schemas,
-                                               route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
-    return core, plan
 
 
 def _on_route(plan, window):

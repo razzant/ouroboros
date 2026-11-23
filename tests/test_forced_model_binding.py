@@ -197,9 +197,10 @@ def test_forced_and_prospective_preserve_task_actor_override_including_auto(acti
 
 
 def test_adopted_fallback_plan_keeps_its_role_not_actor_or_main(acting):
-    plan = SimpleNamespace(model_role="fallback:0", model_route={"credentialProfileId": "observed-not-a-pin"})
-    _adopt_fallback_route(acting.ctx, acting.tools, MODEL, False, acting.ctx.messages,
-        deepcopy(acting.messages), plan, "max", [], acting.ctx.accumulated_usage)
+    plan = SimpleNamespace(model_role="fallback:0", model_route={"credentialProfileId": "observed-not-a-pin"},
+                           projection=lambda _mode: SimpleNamespace(memory_facts={}))
+    _adopt_fallback_route(acting.ctx, SimpleNamespace(active_model=MODEL, active_use_local=False, tools=acting.tools,
+        messages=deepcopy(acting.messages), context_fit_plan=plan, tool_schemas=[]), acting.ctx.messages, [], "max")
     assert acting.tools._ctx.context_fit_plan is plan
     request, prepared = task_pacing.prepared_wrapup_candidate(
         acting.ctx, deepcopy(acting.messages), allow_server_web_search=False)

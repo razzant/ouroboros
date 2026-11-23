@@ -99,6 +99,9 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
     if role and getattr(ctx, "primary_route", None) and not getattr(ctx, "_owner_model_primary_changed", False):
         from ouroboros.primary_route_observation import record_primary_return_request
         record_primary_return_request(ctx, model, use_local, role)
+    if model != previous[0]:
+        # Price the destination's sanitized wire, not reasoning it cannot replay.
+        messages[:] = LLMClient.sanitize_reasoning_on_model_switch(messages, previous[0], model)
     if ((model, use_local) != previous or role  # a view that still fits is never rewritten for an effort alone
             or effort_lengthens_request(str(getattr(context_fit_plan, "provider", "") or ""),
                 getattr(context_fit_plan, "start_reasoning_effort", route[2]), effort)):
@@ -106,12 +109,6 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
             context_fit_plan, tools, messages, model=model, use_local=use_local, preferred_mode=preferred_mode,
             start_mode=active_context_mode, tool_schemas=tool_schemas, reasoning_effort=effort,
             **({"model_role": role, "model_route": {}} if role else {}))
-    if model != previous[0]:
-        # Cross-FAMILY switch: discard provider-private reasoning
-        # signatures before the new route sees them (same family is a no-op).
-        sanitized = LLMClient.sanitize_reasoning_on_model_switch(messages, previous[0], model)
-        if sanitized is not messages:
-            messages[:] = sanitized
     if request_id := getattr(ctx, "_owner_model_request_id", None):
         ctx._owner_model_applied_id, ctx._owner_model_request_id = request_id, None
         ctx._owner_model_primary_changed = False
