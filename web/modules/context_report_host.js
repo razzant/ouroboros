@@ -7,10 +7,15 @@ import { cardThemeValues } from './card_frames.js';
 export function bindContextReport(button, mount) {
     let stopTheme = () => {}, stopBridge = () => {};
     let openGeneration = 0;
+    const detachBridge = () => {
+        const detach = stopBridge;
+        stopBridge = () => {};
+        detach();
+    };
     const close = () => {
         ++openGeneration;
         stopTheme();
-        stopBridge();
+        detachBridge();
         stopTheme = () => {};  // spent: a repeated close calls nothing, and the closed frame is no longer reachable from here
         mount.replaceChildren();
         mount.hidden = true;
@@ -35,7 +40,7 @@ export function bindContextReport(button, mount) {
             if (mountedGeneration !== openGeneration) return;
             const native = window.pywebview?.api;
             if (typeof native?.open_local_context_report !== 'function' || typeof native.shell_info !== 'function') return;
-            stopBridge();
+            detachBridge();
             const actions = document.createElement('div');
             actions.className = 'ui-action-row';
             actions.hidden = true;
@@ -47,12 +52,12 @@ export function bindContextReport(button, mount) {
             status.className = 'ui-result';
             status.setAttribute('role', 'status');
             local.addEventListener('click', async () => {
-                const generation = openGeneration;
+                if (mountedGeneration !== openGeneration) return;
                 local.disabled = true;
                 status.textContent = '';
                 let state;
                 try { ({ state } = await native.open_local_context_report()); } catch { state = 'unavailable'; }
-                if (generation !== openGeneration) return;
+                if (mountedGeneration !== openGeneration) return;
                 local.disabled = false;
                 status.textContent = state === 'opened' ? 'Opened in a separate local window.'
                     : state === 'already_open' ? 'The local viewer is already open.'
@@ -60,14 +65,16 @@ export function bindContextReport(button, mount) {
             });
             actions.append(local, status);
             mount.insertBefore(actions, frame);
-            Promise.resolve().then(() => native.shell_info()).then((facts) => {
+            Promise.resolve().then(() => mountedGeneration === openGeneration && native.shell_info()).then((facts) => {
                 if (mountedGeneration === openGeneration && facts?.local_context_archive === true) actions.hidden = false;
             }, () => {});
+            return true;
         };
         mount.append(frame);
-        stopBridge = () => window.removeEventListener('pywebviewready', offerNative);
-        window.addEventListener('pywebviewready', offerNative);
-        offerNative();
+        if (!offerNative()) {
+            window.addEventListener('pywebviewready', offerNative);
+            stopBridge = () => window.removeEventListener('pywebviewready', offerNative);
+        }
         mount.hidden = false;
         button.setAttribute('aria-expanded', 'true');
     });

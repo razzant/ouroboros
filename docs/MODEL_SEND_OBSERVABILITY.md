@@ -187,8 +187,8 @@ boundary. In-process producer receipts on owner input, task mail, Presence
 reentry, result allocation and registry materialization stay off transcript and
 schemas. If still available, they identify the decision and safe source address
 or count. Attachment staging observes the files listed and composed as images;
-the image route's send-copy marker records caption, refusal or unavailable
-pixels before wire projection removes it. A unique comparable physical representation locates the containing
+the image route binds caption, refusal or unavailable pixels to its actual
+replacement part beside the send copy. A unique comparable physical representation locates the containing
 row (not every part), or the exact schema. Changed, duplicate, unsupported or
 unobserved forms stay unverified. Limits are recorded; older attempts and cold
 restores lacking those receipts gain no historical attribution. None of the
@@ -200,8 +200,9 @@ not anonymized, even when the existing request redactor masks credentials.
 only numeric counters from the HTTP response parser's pre-accounting witness
 (which can represent assembled stream usage), never response text, a projected
 ledger zero, or a neighboring attempt. An omitted counter stays unknown, not
-zero. The native input field retains its provider-specific meaning. Legacy rows
-and paths without the witness (including engine-only accounting) have no receipt.
+zero. An empty receipt means a witness arrived without a usable counter. The native
+input field retains its provider-specific meaning. Legacy rows and paths without
+the witness (including engine-only accounting) have no receipt.
 
 ## 4. Typed exclusions (closed set)
 

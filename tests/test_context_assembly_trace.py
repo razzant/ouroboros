@@ -2,7 +2,7 @@
 from ouroboros import context_attempt_reader, usage_accounting
 from ouroboros.physical_attempt_context import PhysicalAttemptContext
 from ouroboros.context_fit import ContextCore, _governance_blocks
-from ouroboros.context_assembly_trace import layout_witnesses
+from ouroboros.context_assembly_trace import RoomWitness, layout_witnesses
 from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY, split_leading_system_prefix
 from ouroboros.section_floor import HostSection, _system_blocks
 from tests._context_reports import _dispatch
@@ -64,7 +64,7 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
             assert offset == len(text)
 
 
-def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path):
+def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path, monkeypatch):
     import json
     from types import SimpleNamespace
 
@@ -80,13 +80,15 @@ def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_p
     prior_media = {'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,PRIVATE'}}]}
     from ouroboros.vision_routing import _rewrite
 
+    slot = SimpleNamespace()
+    monkeypatch.setattr('ouroboros.model_wait.current_model_wait', lambda: SimpleNamespace(tool_context=slot))
     projected_media, = _rewrite([prior_media], lambda _image: ('PRIVATE image replacement', 'images_off'))
+    assert projected_media['content'] == [{'type': 'text', 'text': 'PRIVATE image replacement'}]
     result = {'role': 'tool', 'tool_call_id': 'call_1', 'content': 'PRIVATE result'}
     result[TOOL_RESULT_RECORD_KEY] = make_tool_result_record({'tool_call_id': 'call_1', 'invocation_id': 'PRIVATE-id'},
                                                             result['content'], source_ref={'path': 'PRIVATE'})
     tools = [{'type': 'function', 'function': {'name': 'inspect', 'parameters': {'type': 'object'}}}]
     projected = {'messages': [owner, peer, projected_media, result], 'tools': tools}
-    slot = SimpleNamespace()
     note_contribution(slot, owner, 'owner_input', form='direct_input')
     note_contribution(slot, peer, 'place_arrival', source='PRIVATE place ID', form='containing_row')
     note_contribution(slot, result, 'result_selection', form='partial_retained')
@@ -123,6 +125,11 @@ def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_p
     assert manifest['late_contributions'] == same and 'contribution_input' not in manifest
     assert 'PRIVATE' not in json.dumps(manifest['late_contributions'])
     assert '_host_context_kind' not in json.dumps(wire)
+
+    # An equal but detached text block was not witnessed by the producer.
+    detached = {'messages': [{**projected_media, 'content': [dict(projected_media['content'][0])]}]}
+    detached_fit = bind_contribution_input(fit, detached, [prior_media], slot)
+    assert not verified_contributions(detached, detached_fit.contribution_input)['entries']
 
 
 
@@ -168,3 +175,82 @@ def test_merged_row_discloses_dropped_contribution_notes():
     assert facts['row_notes_omitted'] == 2
     assert len(facts['entries']) == 32
     assert all(row['path'] == '$.messages[0]' for row in facts['entries'])
+
+
+def test_start_selection_carries_schema_origins_outside_copied_wire_dicts():
+    from types import SimpleNamespace
+
+    from ouroboros.context_assembly_trace import bind_contribution_input, note_schema_origin, verified_contributions
+    from ouroboros.tool_policy import initial_tool_schemas
+
+    slot = SimpleNamespace()
+    names = ('ext_like_builtin', 'notification', 'mcp_reader', 'mcp_unloaded', 'unsourced')
+    canonical = [{'type': 'function', 'function': {'name': name}} for name in names]
+
+    def schemas():
+        for definition, origin in zip(canonical, ('builtin', 'extension', 'mcp', 'mcp')):
+            note_schema_origin(slot, definition, origin)
+        return canonical
+
+    registry = SimpleNamespace(_ctx=slot, schemas=schemas, on_demand_schema_names=lambda: {'mcp_unloaded'})
+    selected = initial_tool_schemas(registry)
+    expected = [*canonical[:3], canonical[4]]
+    assert selected == expected
+    assert all(new is not old for new, old in zip(selected, expected))
+    fit = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
+    request = {'messages': [], 'tools': selected}
+    bound = bind_contribution_input(fit, request, [], slot)
+    entries = verified_contributions(request, bound.contribution_input)['entries']
+    assert [item['path'] for item in entries] == [f'$.tools[{i}]' for i in range(4)]
+    assert [item.get('origin') for item in entries] == ['builtin', 'extension', 'mcp', None]
+    # Equal bytes from an old serialized or unaffiliated list do not prove its origin.
+    detached = {'messages': [], 'tools': [dict(selected[0])]}
+    again = bind_contribution_input(fit, detached, [], slot)
+    assert 'origin' not in verified_contributions(detached, again.contribution_input)['entries'][0]
+
+
+def test_oversize_physical_position_scan_counts_every_unread_item():
+    from ouroboros.context_assembly_trace import bind_contribution_input, verified_contributions
+
+    fit = PhysicalAttemptContext('owner_low', 'low', 'cold_estimate', '', '', None, None, False, False)
+    row = {'role': 'user', 'content': 'synthetic'}
+    logical = [row]
+    fit = bind_contribution_input(fit, {'messages': logical}, logical)
+    for count, omitted in ((264, 0), (265, 265)):
+        facts = verified_contributions({'messages': [row] * count}, fit.contribution_input)
+        assert facts['uninspected_physical_items'] == omitted
+
+
+def test_conversation_observer_uses_same_description_for_every_group_key():
+    from types import SimpleNamespace
+
+    keys = ('telegram:one', 'slack:two', 'github:three', 'project:four')
+    witness = RoomWitness(SimpleNamespace(conversations=[{'key': k, 'rooms': [{'room_id': '42'}]} for k in keys]))
+    pieces = [witness.piece_fact(('conversations', 'group', k, '', (), (), 0)) for k in keys]
+    assert all(piece == pieces[0] and 'provider' not in piece for piece in pieces)
+    assert pieces[0]['family'] == 'other_conversation' and pieces[0]['room_count'] == 1
+
+
+def test_failing_room_observation_does_not_replace_rendered_text():
+    from types import SimpleNamespace
+
+    witness = RoomWitness(SimpleNamespace())
+    lines = ['synthetic']
+    assert witness.part(lines, None, [{}]) is lines  # malformed optional kind deliberately raises
+    assert witness.observe(('late_reviews',), 'reviews') == 'reviews'
+    assert witness.pieces[0]['start'] == 0
+    assert witness.observe(('room',), 'first') == 'first'  # malformed optional key deliberately raises
+    assert witness.observe(('marks',), 'later') == 'later'
+    assert not witness.pieces  # no unwitnessed span is promoted to a memory fit note
+
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='', development_md='',
+                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=False)
+    governance = _governance_blocks(None, core, mode='max')
+    room = 'reviews\n\nfirst\n\nlater'
+    observed = []
+
+    def trace(live):
+        observed.extend(layout_witnesses(core, governance, {}, (), live, story_whole=True, room_pieces=witness.pieces))
+
+    assert _system_blocks(core, governance, '', room, 'max', trace=trace) == _system_blocks(core, governance, '', room, 'max')
+    assert observed[-1]['groups'] == [{'family': 'room', 'form': 'rendered', 'start': 0, 'chars': len(room)}]

@@ -598,7 +598,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
             payload = None
     usage: Any = payload.get("usage") if isinstance(payload, dict) else getattr(response, "usage", None)
     usage = _plain(usage)
-    if not isinstance(usage, dict):
+    witnessed_usage = isinstance(usage, dict)
+    if not witnessed_usage:
         usage = {}
     native_cache_read = _reported_token_count(usage, "cache_read_input_tokens")
     cache_read = cache_read_count(usage)
@@ -630,7 +631,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD, provider: str
     # Tariff validation needs the counts as reported, before normalization reads a malformed one as unknown.
     # Keep only token fields; never accept a provider-supplied witness under this internal key.
     reported = _reported_token_usage(usage)
-    normalized["_reported_token_usage"] = copy.deepcopy(reported)
+    if witnessed_usage:
+        normalized["_reported_token_usage"] = copy.deepcopy(reported)
     # Candidate facts and validated engine reports come from their host owners,
     # never arbitrary extensions inside a provider's token-usage block.
     normalized.pop("effort", None)

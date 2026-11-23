@@ -624,7 +624,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         selected_names = requested.selection.chosen if mode == "nano" else None
     from ouroboros.tool_policy import nano_standing
     schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names,
-                                        standing=nano_standing(tool_ctx)).schemas)
+                                        standing=nano_standing(tool_ctx), observation_slot=tool_ctx).schemas)
                if selected_names is not None else list(current_tools))
     fit_candidate = ctx.fit_candidate
     if fit_candidate is None:

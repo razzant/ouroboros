@@ -115,7 +115,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
 // Full paint — only for a list that has no cards yet.
 function renderShell(host, tabs, contributionVisibility = null) {
     if (!tabs.length) {
-        host.innerHTML = '<div class="muted">No optional extension widgets are active.</div>';
+        host.innerHTML = '<div class="muted">No optional widgets yet. Enable a skill with a widget in Extensions to add one.</div>';
         return;
     }
     host.innerHTML = tabs.map((tab) => renderCardHtml(tab, contributionVisibility)).join('');

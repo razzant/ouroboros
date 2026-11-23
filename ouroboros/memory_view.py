@@ -1495,8 +1495,10 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
 
 
 def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "", observe=None, part=_rendered) -> str:
-    """Block C's memory: tiered room/other conversations, or their reader while import is pending.
-    The floor's note closes the block; an observer sees the same named pieces before the blank-line join."""
+    """Block C: a helper's owner words, late reviews, marks, this room, then my other conversations.
+    The floor's empty level renders the full view. Its closing note is ``### Physical floor`` or ``### Memory check``
+    for a Nano reader path. While import is pending, the room names the gap and a reader without the chronicle.
+    An observer sees the same named pieces before the blank-line join."""
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     draw = (lambda key, make: observe(key, make())) if observe is not None else lambda _key, make: make()
     texts = _room_parts(snapshot, dict(level.addressed), draw, part=part)

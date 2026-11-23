@@ -90,6 +90,11 @@ class PageZoom:
         if _backend() == "cocoa" and hasattr(window.events, "shown"):
             window.events.shown += self._shown
 
+    def apply_saved(self, window: Any) -> None:
+        """On its GUI thread, set the initial zoom of an already created offline window."""
+        self._window, self._percent = window, self._load()
+        self._before_show()
+
     def _before_show(self) -> None:
         """pywebview ``before_show`` (synchronous, the GUI thread, before the first load): find the engine's view and
         give it the stored size, so the first paint is already at it."""

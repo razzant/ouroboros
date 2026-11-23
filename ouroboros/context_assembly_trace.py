@@ -14,6 +14,20 @@ _ROW_ADDRESS = re.compile(r'row:-?\d+@[-0-9T:.+Z]+#[0-9a-f]{12}')
 _MAX_GROUPS_PER_BLOCK = 256
 
 
+def _optional_observation(result_arg=None):
+    """Keep optional diagnostics out of the producer's control path."""
+    def decorate(observe):
+        @wraps(observe)
+        def guarded(*args, **kwargs):
+            try:
+                return observe(*args, **kwargs)
+            except Exception:
+                logging.getLogger(__name__).debug('Context observation %s unavailable', observe.__name__, exc_info=True)
+                return args[result_arg] if result_arg is not None else None
+        return guarded
+    return decorate
+
+
 class AttachmentSelection:
     """Bounded decisions recorded at the existing read/prepare loop, not a second file scan."""
 
@@ -44,6 +58,7 @@ class RoomWitness:
         self.snapshot = snapshot
         self.end = 0
         self.pieces = []
+        self._pieces_complete = True
         self.groups = {group['key']: group for group in getattr(snapshot, 'conversations', ())}
         self.forms = {}
         self.refs = []
@@ -52,6 +67,7 @@ class RoomWitness:
         return {**({'rendered_forms': self.forms} if self.forms else {}),
                 **({'sample_row_addresses': self.refs} if self.refs else {})}
 
+    @_optional_observation(1)
     def part(self, lines, kind='framing', sources=(), form='whole', room_id=None):
         """Selected render only. Record counted forms and a bounded sample of canonical addresses."""
         if lines and kind != 'framing' and isinstance(sources, (tuple, list)):
@@ -66,13 +82,21 @@ class RoomWitness:
                         self.refs.append(value)
         return lines
 
+    @_optional_observation(2)
     def observe(self, key, text):
-        if text:
-            start = self.end + (2 if self.end else 0)
-            self.end = start + len(text)
-            fact = {**self.piece_fact(key), **self.selections()}
-            self.pieces.append({**fact, 'start': start, 'chars': len(text)})
-        self.forms, self.refs = {}, []
+        try:
+            if text and self._pieces_complete:
+                start = self.end + (2 if self.end else 0)
+                self.end = start + len(text)
+                fact = {**self.piece_fact(key), **self.selections()}
+                self.pieces.append({**fact, 'start': start, 'chars': len(text)})
+        except Exception:
+            # An unobserved room piece is not a fit note. Fall back to the whole room.
+            self.pieces.clear()
+            self._pieces_complete = False
+            raise
+        finally:
+            self.forms, self.refs = {}, []
         return text
 
     def piece_fact(self, key):
@@ -84,7 +108,6 @@ class RoomWitness:
             rooms = self.groups.get(group, {}).get('rooms', ())
             room = str(rooms[0].get('room_id', '')) if rooms else ''
             return {'family': 'other_conversation', 'form': 'summary' if form else 'rendered',
-                    'provider': 'telegram' if group.startswith('telegram:') else 'other',
                     'room_count': len(rooms), **({'sample_room': room} if re.fullmatch(r'\d{1,16}', room) else {}),
                     'choices': {'group_form': form, 'words_reduced': len(words),
                                 'owner_words_reduced': len(owners), 'events_counted': events}}
@@ -307,20 +330,6 @@ _CONTRIBUTION_ROWS = 256
 _CONTRIBUTION_PARTS = 32
 
 
-def _optional_observation(result_arg=None):
-    """Keep optional diagnostics out of the producer's control path."""
-    def decorate(observe):
-        @wraps(observe)
-        def guarded(*args, **kwargs):
-            try:
-                return observe(*args, **kwargs)
-            except Exception:
-                logging.getLogger(__name__).debug('Context observation %s unavailable', observe.__name__, exc_info=True)
-                return args[result_arg] if result_arg is not None else None
-        return guarded
-    return decorate
-
-
 @_optional_observation(0)
 def bind_contribution_input(context, kwargs, canonical, slot=None):
     from dataclasses import replace
@@ -340,7 +349,32 @@ def bind_contribution_input(context, kwargs, canonical, slot=None):
     tools = tuple(kwargs.get('tools') or ())
     schema_notes = getattr(slot, '_context_schema_origins', {})
     origins = tuple(schema_notes.get(id(schema), (None, None))[1] for schema in tools[:_CONTRIBUTION_ROWS])
-    return replace(context, contribution_input=(tail, tools, len(rows), notes, origins))
+    projected = getattr(slot, '_context_image_projections', {})
+    image_forms = tuple(_image_forms(row, projected) for row in tail)
+    return replace(context, contribution_input=(tail, tools, len(rows), notes, origins, image_forms))
+
+
+def _image_forms(row, projected):
+    if not projected or not isinstance(row, dict) or not isinstance(content := row.get('content'), list):
+        return {}
+    return {i: held[1] for i, part in enumerate(content[:_CONTRIBUTION_PARTS])
+            if (held := projected.get(id(part))) is not None}
+
+
+@_optional_observation()
+def note_image_projection(block, form):
+    """Witness the actual send-copy part, never stamp the message or reattribute a copy."""
+    from ouroboros.model_wait import current_model_wait
+
+    slot = getattr(current_model_wait(), 'tool_context', None)
+    if slot is None:
+        return
+    notes = getattr(slot, '_context_image_projections', None)
+    if notes is None:
+        notes = slot._context_image_projections = {}
+    notes[id(block)] = (block, form)  # retain identity until eviction, not just its reusable Python id
+    if len(notes) > _CONTRIBUTION_ROWS:
+        del notes[next(iter(notes))]
 
 
 @_optional_observation()
@@ -390,6 +424,15 @@ def note_schema_origin(slot, schema, origin):
     if len(notes) > 2 * _CONTRIBUTION_ROWS:
         del notes[next(iter(notes))]
     return schema
+
+
+@_optional_observation()
+def carry_schema_origins(slot, originals, copies):
+    """The selection owner knows which schema was copied; none is reattributed by name or bytes."""
+    notes = getattr(slot, '_context_schema_origins', {})
+    observed = [(copy, notes[id(original)][1]) for original, copy in zip(originals, copies) if id(original) in notes]
+    for copy, origin in observed:
+        note_schema_origin(slot, copy, origin)
 
 
 @_optional_observation()
@@ -450,7 +493,7 @@ def _indexed_contributions(candidate):
     rows = candidate.get(field)
     index = defaultdict(list)
     if not isinstance(rows, list) or len(rows) > _CONTRIBUTION_ROWS + 8:
-        return index, False, max(0, len(rows) - (_CONTRIBUTION_ROWS + 8)) if isinstance(rows, list) else None
+        return index, False, len(rows) if isinstance(rows, list) else None
     omitted_parts = 0
     for i, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -466,7 +509,7 @@ def _indexed_contributions(candidate):
     return index, omitted_parts == 0, omitted_parts
 
 
-def _row_contributions(row):
+def _row_contributions(row, image_forms):
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
     from ouroboros.tool_result_record import read_tool_result_record
 
@@ -487,12 +530,7 @@ def _row_contributions(row):
                     and capsule.get('visible_sha256') == digest(part['text'])
                     and capsule.get('retention') in {'source_view', 'summarized'}):
                 out.append({'family': 'checkpoint', 'form': capsule['retention']})
-        media = _media(row)
-        for slot, part in enumerate(content[:_CONTRIBUTION_PARTS]):
-            form = part.get('_image_projection_fact') if isinstance(part, dict) else None
-            if form in ('caption', 'caption_after_refusal', 'caption_failed', 'caption_unavailable',
-                        'images_off', 'transport_marker', 'refusal_marker', 'preparation_failed'):
-                media[slot] = form
+        media = {**_media(row), **image_forms}
         for form in dict.fromkeys(media.values()):
             out.append({'family': 'attachment_image', 'form': form, 'count': sum(v == form for v in media.values())})
     return out
@@ -518,7 +556,7 @@ def verified_contributions(candidate, captured):
     """A logical producer observation and a verified prepared location are independent."""
     from collections import Counter
 
-    rows, tools, total, notes, origins = captured
+    rows, tools, total, notes, origins, image_forms = captured
     physical, inspected, omitted = _indexed_contributions(candidate)
     keys = [_carry(row) if isinstance(row, dict) else None for row in rows]
     counts = Counter(key for key in keys if key is not None)
@@ -527,7 +565,7 @@ def verified_contributions(candidate, captured):
     for i, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
-        key, facts = keys[i], _row_contributions(row)
+        key, facts = keys[i], _row_contributions(row, image_forms[i])
         row_notes, row_omitted = notes[i]
         row_notes_omitted += row_omitted
         if row_notes:
@@ -561,30 +599,10 @@ def verified_contributions(candidate, captured):
 
 
 
-def render_observed_projections(core, governance, forms, sections, host_receipts,
-                                story, room, selected, whole, shown, receipt, held_tokens):
-    """Attach origin facts to the chosen form; other forms pay no trace cost."""
-    from ouroboros.memory_floor import MODES
-    from ouroboros.section_floor import _system_blocks, section_views
-
-    contents = {}
-    for mode in MODES:
-        rows = host_receipts(mode)
-        blocks = governance[forms[mode]]
-        addressed = section_views(sections[mode], rows)
-        witnesses = []
-
-        def trace(live):
-            try:
-                witnesses.extend(layout_witnesses(core, blocks, addressed, rows, live, story_whole=whole,
-                    room_pieces=getattr(shown, "room_pieces", ()), story_selection=getattr(shown, "story_selection", None)))
-            except Exception:
-                logging.getLogger(__name__).debug('Context source groups unavailable', exc_info=True)
-
-        system = _system_blocks(core, blocks, story, room, mode, addressed, whole,
-                                trace=trace if mode == selected else None)
-        facts = ({**receipt, 'held_note_request_tokens': held_tokens}
-                 if held_tokens is not None and mode == selected else receipt)
-        contents[mode] = system, {**facts, **({'host_sections_addressed': rows} if rows else {}),
-                                  '_assembly_witnesses': tuple(witnesses)}
-    return contents
+def observe_layout(core, blocks, addressed, rows, whole, shown, witnesses):
+    """Observe the selected rendering without owning its projection or selection."""
+    @_optional_observation()
+    def trace(live):
+        witnesses.extend(layout_witnesses(core, blocks, addressed, rows, live, story_whole=whole,
+            room_pieces=getattr(shown, 'room_pieces', ()), story_selection=getattr(shown, 'story_selection', None)))
+    return trace

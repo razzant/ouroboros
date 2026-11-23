@@ -27,7 +27,6 @@ _ROW_SQL = (f"SELECT {usage_store.TASK_PAGE_COLUMNS}, {usage_store.ATTEMPT_ROW} 
 _PAGE_GAP_FACTS = ("task_id", "attempt_id", "ledger_state", "provider_body", "transport_observation", "model",
                    "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason", "failure", "file_trace",
                    "sha256", "redacted_ref", "context_fit", "authored_prefix", "ledger_usage", "provider_token_receipt",
-                   "assembly_trace",
                    "assembly_source_map", "prepared_inventory", "late_contributions")
 _FACT_CHARS = 200  # a failure's fact is a type or code: a longer one is free text, never carried
 _CMD_PLAIN = re.compile(r"[A-Za-z0-9_.:\\/+-]+")  # what cmd.exe and the Windows argument parser pass on unquoted
@@ -119,9 +118,7 @@ def _assembly_facts(row: dict) -> dict:
     usage = _small_facts(row, counts=_USAGE_COUNTS)
     facts = {"ledger_usage": usage} if usage else {}
     if isinstance(receipt := row.get("provider_token_receipt"), dict):
-        reported = _small_facts(receipt, counts=(*_USAGE_COUNTS, "input_tokens"))
-        if reported:
-            facts["provider_token_receipt"] = reported
+        facts["provider_token_receipt"] = _small_facts(receipt, counts=(*_USAGE_COUNTS, "input_tokens"))
     if isinstance(context := row.get("physical_context"), dict):
         fit = _small_facts(context, _FIT_WORDS, _FIT_COUNTS, _FIT_FLAGS)
         if fit:
@@ -192,8 +189,6 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
                 != (digest, size, basis)):
             raise ValueError("Attempt and model send seal differ")
         facts["file_trace"] = manifest.get("file_trace", "not_recorded")
-        if isinstance(assembly := manifest.get('assembly_trace'), list):
-            facts['assembly_trace'] = assembly
         if isinstance(layout := manifest.get('assembly_source_map'), list):
             facts['assembly_source_map'] = layout
         if isinstance(inventory := manifest.get('prepared_inventory'), dict):

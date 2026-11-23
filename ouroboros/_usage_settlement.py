@@ -199,11 +199,11 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
     return ""
 
 
-def _provider_token_receipt(usage: Mapping[str, Any]) -> dict:
+def _provider_token_receipt(usage: Mapping[str, Any]) -> dict | None:
     """Read the response parser's pre-accounting witness, never the billing-shaped fallback."""
     raw = usage.get("_reported_token_usage")
     if not isinstance(raw, dict):
-        return {}
+        return None
     written, invalid = cache_write_total(raw, cache_write_split(raw))
     return {key: value for key, value in {
         "prompt_tokens": _reported_token_count(raw, "prompt_tokens"),
@@ -305,7 +305,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl=reported_ttl,
-        **({"provider_token_receipt": token_receipt} if token_receipt else {}),
+        **({"provider_token_receipt": token_receipt} if token_receipt is not None else {}),
         # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
         # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
         **{key: copy.deepcopy(normalized[key]) for key in (

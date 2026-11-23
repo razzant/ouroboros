@@ -1400,3 +1400,90 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
     assert sockets and sockets[0]["phase"] == "boot", sockets  # the page's own socket, observed from its start
     assert {each["url"] for each in sockets} == {sockets[0]["url"]}, sockets
     assert not [each for each in sockets for sent in each["sent"] if any(word in sent for word in private)]
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("browser_name", ("chromium", "webkit"))
+def test_private_report_finds_late_copies_and_clears_old_details_before_read(browser_name, tmp_path):
+    """Real report HTML and controls, replacing the native archive only (no Windows claim)."""
+    playwright = pytest.importorskip("playwright.sync_api")
+    source = pathlib.Path(__file__).resolve().parents[1] / "web" / "context-report.html"
+    document = tmp_path / "archive.html"
+    document.write_text(source.read_text(encoding="utf-8").replace('<html lang="en">',
+                        '<html lang="en" data-private-archive>', 1), encoding="utf-8")
+    with playwright.sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_name).launch(headless=True)
+        except playwright.Error as exc:
+            if "Executable doesn't exist" in str(exc):
+                pytest.skip(str(exc))
+            raise
+        try:
+            page = browser.new_page(viewport={"width": 1030, "height": 760}, color_scheme="dark")
+            page.route("**/*", lambda route: route.continue_() if route.request.url == document.as_uri() else route.abort())
+            page.add_init_script("""(() => {
+              const ok = value => ({ok: true, value});
+              const document = (id, read) => JSON.stringify({format: 'ouroboros.context-report/1',
+                stored_json: read ? JSON.stringify({messages: [{role: 'user', content: id}]}) : null,
+                facts: {task_id: 'fixture-only', attempt_id: id, body: read ? 'redacted_host_candidate' : 'not_linked',
+                  assembly_source_map: read ? [{status: 'located', observation: `assembly-for-${id}`,
+                    groups: [{family: 'other_conversation', form: 'rendered', chars: 8}]}] : []}});
+              window.reportCalls = [];
+              window.pywebview = {api: {
+                rooms: () => window.holdRefresh ? new Promise(resolve => { window.finishRefresh = resolve; })
+                  : ok([{id: 1, name: 'Tide charts'}, {id: 2, name: 'Library hours'}]),
+                requests: room => ok(Array.from({length: room === 1 ? 40 : 1}, (_, index) => ({
+                  attempt_id: `${room === 1 ? 'tide' : 'library'}-${index}`, model: 'fixture-model'}))),
+                report: id => {
+                  window.reportCalls.push(id);
+                  if (id === 'library-0') return new Promise(resolve => { window.finishRead = resolve; });
+                  return ok(document(id, id === 'tide-6' || id === 'tide-39'));
+                },
+              }};
+            })();""")
+            page.goto(document.as_uri(), wait_until="domcontentloaded")
+            page.evaluate("() => window.dispatchEvent(new Event('pywebviewready'))")
+            expect = playwright.expect
+            status = page.locator("#report-status")
+            technical = page.locator("#source-technical")
+            attempts = page.locator("#archive-attempt")
+            room = page.locator("#archive-room")
+            compare = page.locator("#archive-compare")
+            expect(attempts).to_have_value("tide-6")
+            expect(technical).to_contain_text("assembly-for-tide-6", use_inner_text=False)
+            expect(page.locator("#privacy")).to_be_visible()
+            expect(page.locator("#privacy")).to_contain_text("Keep this file on this computer")
+            assert page.evaluate("() => window.reportCalls") == [f"tide-{n}" for n in range(7)]
+            compare.click()
+            expect(page.locator("#comparison-status")).to_contain_text("Selected request compared with Earlier 39")
+            assert page.evaluate("() => window.reportCalls") == [f"tide-{n}" for n in range(40)]
+
+            def clean():
+                expect(page.locator("#report-result")).to_be_hidden()
+                assert "assembly-for-tide" not in page.locator("body").text_content()
+                assert technical.text_content() == ""
+                assert page.locator("#comparison-facts").text_content() == ""
+                assert page.locator("#stored-body").text_content() == ""
+                expect(compare).to_be_disabled()
+
+            room.select_option("2")
+            page.wait_for_function("() => typeof window.finishRead === 'function'")
+            expect(status).to_have_text("Opening the saved request…")
+            clean()
+            page.evaluate("() => window.finishRead({ok: false})")
+            expect(status).to_contain_text("No readable copy")
+            expect(attempts).to_have_value("library-0")
+            clean()
+
+            room.select_option("1")
+            expect(technical).to_contain_text("assembly-for-tide-6", use_inner_text=False)
+            page.evaluate("() => { window.holdRefresh = true; }")
+            page.locator("#archive-reload").click()
+            page.wait_for_function("() => typeof window.finishRefresh === 'function'")
+            expect(attempts.locator("option")).to_have_count(0)
+            clean()
+            page.evaluate("() => window.finishRefresh({ok: false, error: 'Fixture refresh refused'})")
+            expect(status).to_have_text("Fixture refresh refused")
+            clean()
+        finally:
+            browser.close()

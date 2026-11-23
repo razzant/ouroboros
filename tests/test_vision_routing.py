@@ -77,7 +77,7 @@ def test_caption_mode_rewrites_send_copy_without_mutating_transcript(monkeypatch
     assert messages[0]["content"][1]["type"] == "image_url"
     from ouroboros.llm_messages import project_wire_messages
 
-    assert out[0]['content'][1]['_image_projection_fact'] == 'caption'
+    assert '_image_projection_fact' not in out[0]['content'][1]
     assert project_wire_messages(out)[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
 
@@ -100,7 +100,7 @@ def test_inline_mode_sends_pixels_even_when_metadata_says_no(monkeypatch):
     out = prepare_messages_for_send(_image_message(), routing=VisionRoutingContext("not/vision", object(), {}))
     from ouroboros.llm_messages import project_wire_messages
 
-    assert out[0]['content'][1]['_image_projection_fact'] == 'caption'
+    assert '_image_projection_fact' not in out[0]['content'][1]
     assert project_wire_messages(out)[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
 

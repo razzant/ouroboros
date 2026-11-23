@@ -117,7 +117,7 @@ def test_deepseek_send_copy_keeps_reasoning_echo_and_user_json(monkeypatch):
     assert sent["messages"][0]["tool_calls"][0]["function"]["arguments"] == arguments
 
 
-def test_main_contributions_stay_out_of_claudexor_wire_even_if_report_fails(claudexor_setup, monkeypatch):
+def test_main_contributions_stay_out_of_claudexor_wire_even_if_report_fails(claudexor_setup, monkeypatch):  # noqa: F811
     from pathlib import Path
     from types import SimpleNamespace
 

@@ -931,6 +931,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     from dataclasses import replace
     from functools import cache
     from ouroboros import memory_floor as floor
+    from ouroboros.context_assembly_trace import observe_layout
     from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
     from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
@@ -1195,10 +1196,15 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                    window_tokens=window, ratio=ratio, required_book_tokens=book)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
-    from ouroboros.context_assembly_trace import render_observed_projections
-
-    contents = render_observed_projections(whole_core, whole_governance, form, sections, lambda m: host_receipts(m, receipts),
-        story, room, mode, whole, shown, receipt, request_cost(mode, sent) if held_heads else None)
+    contents = {}
+    for m in floor.MODES:
+        rows = host_receipts(m, receipts)
+        blocks, addressed = whole_governance[form[m]], section_views(sections[m], rows)
+        witnesses = []
+        trace = observe_layout(whole_core, blocks, addressed, rows, whole, shown, witnesses) if m == mode else None
+        system = _system_blocks(whole_core, blocks, story, room, m, addressed, whole, trace=trace)
+        facts = {**receipt, 'held_note_request_tokens': request_cost(mode, sent)} if held_heads and m == mode else receipt
+        contents[m] = system, {**facts, **({'host_sections_addressed': rows} if rows else {}), '_assembly_witnesses': tuple(witnesses)}
     return contents, mode
 
 
@@ -1591,5 +1597,4 @@ def build_context_fit_plan(
         start_reasoning_effort=reasoning_effort,
         start=started(contents, initial_mode), first_contact=first_contact,
         first_contact_normal=normal_start,
-    # The measured candidate carries its witnesses through context_measurement.
     )

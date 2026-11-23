@@ -47,6 +47,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from urllib.parse import urlsplit
 
 from ouroboros.config import get_image_input_mode, get_vision_caption_timeout_sec, get_vision_model, resolve_effort
+from ouroboros.context_assembly_trace import note_image_projection
 from ouroboros.deadline_utils import owner_deadline_exhausted, transport_timeout_with_deadline
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.provider_models import image_input_from_modalities, provider_for_model, supports_vision
@@ -421,10 +422,10 @@ def _rewrite(messages: List[Dict[str, Any]],
                 out = copy.deepcopy(messages)
             text, form = replacement_value if isinstance(replacement_value, tuple) else (replacement_value, '')
             replacement: Dict[str, Any] = {"type": "text", "text": text}
-            if form:
-                replacement['_image_projection_fact'] = form
             if block.get("_source_path"):
                 replacement["_source_path"] = block["_source_path"]
+            if form:
+                note_image_projection(replacement, form)
             out[msg_index]["content"][block_index] = replacement
     return messages if out is None else out
 

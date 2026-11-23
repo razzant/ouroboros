@@ -413,7 +413,7 @@ def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_comm
             'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'failure', 'file_trace', 'sha256',
             'redacted_ref', 'body', 'recorded_bytes', 'report_bytes', 'report_bytes_at_least', 'page_limit_bytes',
             'retry_max_bytes', 'context_fit', 'authored_prefix', 'ledger_usage', 'provider_token_receipt', 'prepared_inventory',
-            'assembly_source_map', 'assembly_trace', 'late_contributions'}
+            'assembly_source_map', 'late_contributions'}
     args = ['--data-root', str(data_root), 'page-reader-test', '--attempt']
     small_body = _manifest(small)['redacted_projection_ref']['size']
     failed_body = _manifest(next(row for row in _rows(data_root) if row['attempt_id'] == failed))[
@@ -1191,3 +1191,21 @@ def test_selected_report_preserves_response_cache_observation(data_root, monkeyp
     assert facts['provider_token_receipt'] == {
         'prompt_tokens': 50, 'completion_tokens': 2, **({'cached_tokens': cache} if cache is not None else {}),
     }
+
+
+@pytest.mark.parametrize('usage', [None, {}, {'cost': 0.25}])
+def test_report_distinguishes_absent_witness_from_witness_without_counters(data_root, monkeypatch, usage):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    reply = {key: value for key, value in _Response._payload.items() if key != 'usage'}
+    if usage is not None:
+        reply['usage'] = usage
+    monkeypatch.setattr(_Response, '_payload', reply)
+    row = _dispatch(data_root, 'empty-response-counters')
+    facts, body = read_attempt(data_root, 'empty-response-counters', row['attempt_id'], report_facts=True)
+    assert body is not None
+    for exported in (row, facts):
+        if usage is None:
+            assert 'provider_token_receipt' not in exported
+        else:
+            assert exported['provider_token_receipt'] == {}

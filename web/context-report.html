@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qQUHW8mwU661D5V/xv7/P5IJ6ducAUU+QQuocdlhmTc='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-s5ZdNLRaYizA2qTmeEByIJ11YS6ZF4EEvZRW3bWVbn8='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -39,7 +39,8 @@ h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; f
 .button { display: inline-flex; align-items: center; min-block-size: 44px; box-sizing: border-box; padding: 6px 16px;
   border: 0; border-radius: 999px; background: var(--capsule); color: inherit; font: inherit; box-shadow: var(--rest); font-weight: 600; cursor: pointer; }
 .pick:hover .button { background: var(--capsule-hover); }
-.button:hover { background: var(--capsule-hover); }
+.button:enabled:hover { background: var(--capsule-hover); }
+.button:disabled, .archive-selects select:disabled { opacity: 0.58; box-shadow: none; cursor: not-allowed; }
 .pick:active .button { filter: var(--press); }
 .pick input { position: absolute; z-index: 1; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
 .pick input:focus-visible + .button, .button:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -110,6 +111,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 <section id="report-result" hidden>
 <h2 id="headline"></h2>
 <p id="explain"></p>
+<p class="callout" id="privacy"><strong>Private text can remain.</strong> The saved copy masks known secret patterns. It can still contain names, messages and file paths. Keep this file on this computer; it is not meant to be forwarded automatically.</p>
 <dl class="overview" id="overview"></dl>
 <details class="more" id="comparison"><summary>Compare with another report</summary>
 <p class="note">This compares the two saved copies with known secrets masked. The ledger can record zero even if the provider gave no number.</p>
@@ -123,7 +125,6 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 <div id="request"></div>
 <details class="more" id="technical"><summary>Technical details</summary>
 <dl id="attempt-facts"></dl><h2>How this request was built</h2><dl id="build-facts"></dl>
-<p class="callout" id="privacy"><strong>Private text can remain.</strong> The saved copy masks known secret patterns. It can still contain names, messages and file paths.</p>
 <details class="more"><summary>Stored JSON</summary><p class="note" id="stored-note"></p><pre id="stored-body"></pre></details>
 <details class="more" id="record"><summary>All recorded facts of this attempt</summary><pre id="record-body"></pre></details>
 </details>
@@ -430,7 +431,8 @@ function clear() {
   spans = null;
   firstReport = null;
   clearComparison();
-  for (const node of [fields, build, request, stored, byId('stored-note'), byId('source-versions'), byId('record-body'), byId('overview')]) node.replaceChildren();
+  for (const node of [fields, build, request, stored, ...['headline', 'explain', 'stored-note', 'source-limit',
+    'source-versions', 'source-technical', 'record-body', 'overview'].map(byId)]) node.replaceChildren();
   for (const node of result.querySelectorAll('details')) node.open = false;
 }
 function add(label, value, list = fields) {
@@ -580,7 +582,7 @@ function show(facts, name, example = false) {
     add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
     add('Failure', failureWords(facts.failure));
   }
-  byId('privacy').hidden = absent;
+  byId('privacy').hidden = absent || example;
   showBuild(facts);
   // The one whole copy of the request in this frame; a report of a gap names its gap here too.
   stored.textContent = absent ? `Request body unavailable: ${text(facts.body)}` : source;
@@ -606,20 +608,19 @@ function show(facts, name, example = false) {
     && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
   // The first reader wrote `not_recorded` beside `not_linked` without opening any record: as unknown as `not_read`.
   const unread = facts.file_trace === 'not_read' || (facts.file_trace === 'not_recorded' && facts.body === 'not_linked');
-  const contributions = Array.isArray(facts.assembly_trace) ? facts.assembly_trace.filter(isRecord) : [];
   const layout = Array.isArray(facts.assembly_source_map) ? facts.assembly_source_map.filter(isRecord) : [];
   const manifest = isRecord(facts.prepared_inventory) ? facts.prepared_inventory : null;
   const late = isRecord(facts.late_contributions) ? facts.late_contributions : null;
   add('Source coverage', layout.length ? 'Assembly groups recorded; not every original item is traced'
-    : trace.length || contributions.length ? 'Some sources observed; no complete origin map'
+    : trace.length ? 'Some sources observed; no complete origin map'
     : unread ? 'Sealed source record not read' : 'No source versions recorded', build);
   byId('source-limit').textContent = layout.length ? 'This map follows the captured assembly. The prepared request counts include later input, even when its origins were not traced. This is not a count of everything in the archives.'
-    : trace.length || contributions.length ? 'Some sources have a recorded version. For the rest, this report cannot say why they were included or left out.'
+    : trace.length ? 'Some sources have a recorded version. For the rest, this report cannot say why they were included or left out.'
     : 'No initial assembly map is available in this report. Later observations, when available, are listed below.';
   byId('source-versions').textContent = (manifest ? preparedWords(manifest) + '\n\n' : '')
-    + (layout.length ? layoutWords(layout) : sourceSummary(trace, unread, contributions))
+    + (layout.length ? layoutWords(layout) : sourceSummary(trace, unread))
     + (late ? '\n\n' + contributionWords(late) : '');
-  byId('source-technical').textContent = (trace.length || contributions.length || !layout.length ? sourceWords(trace, unread, contributions) : 'Positions are in prepared text before redaction, not in the saved copy.')
+  byId('source-technical').textContent = (trace.length || !layout.length ? sourceWords(trace, unread) : 'Positions are in prepared text before redaction, not in the saved copy.')
     + (layout.length ? '\n\nCaptured assembly coordinates and source addresses:\n' + pretty(layout) : '')
     + (late ? '\n\nLater contributions:\n' + pretty(late) : '')
     + (manifest ? '\n\nPrepared request inventory:\n' + pretty(manifest) : '');
@@ -649,8 +650,7 @@ function layoutWords(layout) {
   const rows = new Map();
   for (const block of layout) {
     for (const group of Array.isArray(block.groups) ? block.groups.filter(isRecord) : []) {
-      const label = SOURCE_NAMES.get(group.family) || 'Other context section';
-      const name = group.provider === 'telegram' ? 'Telegram conversations' : label;
+      const name = SOURCE_NAMES.get(group.family) || 'Other context section';
       const form = SOURCE_FORMS.get(group.form) || 'form not recorded';
       const reason = group.reason === 'physical_window' ? ' · to fit the model window'
         : group.reason === 'mode_or_start_allowance' ? ' · to fit the starting allowance' : '';
@@ -735,23 +735,13 @@ function preparedWords(manifest) {
   }
   return lines.length > 1 ? lines.join('\n') : 'Prepared request inventory unavailable.';
 }
-function sourceSummary(trace, unread, contributions) {
+function sourceSummary(trace, unread) {
   const lines = trace.map((row) => `${row.source_path} · ${row.contribution === 'core_constitution'
     ? 'Constitution carried with the base instructions' : 'Base instructions at the start of the request'}`);
-  for (const row of contributions) {
-    if (row.source_kind === 'room') {
-      lines.push(`${text(row.label)} · ${row.form === 'selected_room_forms' ? 'Shown in shorter forms' : 'Ordinary conversation view'}. The exact source rows and reasons for their selection were not recorded.`);
-    } else {
-      const form = new Map([['whole_book', 'Whole book'], ['chapter_map', 'Chapter overview'],
-        ['chapter_pointer', 'Chapter links only']]).get(row.form) || 'Form not recorded';
-      lines.push(`${text(row.source_path)} · ${form}. ${row.form === 'whole_book'
-        ? 'Source versions are in details.' : 'The underlying file versions and the reason this form was chosen were not recorded.'}`);
-    }
-  }
-  return lines.length ? lines.join('\n\n') : sourceWords(trace, unread, contributions);
+  return lines.length ? lines.join('\n\n') : sourceWords(trace, unread);
 }
-function sourceWords(trace, unread, contributions) {
-  if (!trace.length && !contributions.length) return unread
+function sourceWords(trace, unread) {
+  if (!trace.length) return unread
     ? 'The sealed record was not read; its source versions are unknown.'
     : 'No source versions were recorded for this attempt.';
   const words = new Map([
@@ -767,21 +757,6 @@ function sourceWords(trace, unread, contributions) {
       located ? `${part.path} · characters [${count(part.start_char)}, ${count(part.end_char)}) in prepared text before redaction`
         : 'Exact range not recorded; the seal recorded the contribution, not its length.'].join('\n');
   });
-  const forms = new Map([['whole_book', 'Whole book'], ['chapter_map', 'Chapter overview'],
-    ['chapter_pointer', 'Chapter links; the overview body did not enter this view'],
-    ['ordinary_room_view', 'Ordinary view of this conversation'], ['selected_room_forms', 'Some parts shown in shorter forms']]);
-  for (const row of contributions) {
-    const position = row.prepared_text;
-    const range = isRecord(position) ? `${text(position.path)} · characters [${position.start_char}, ${position.end_char}) in prepared text before redaction` : 'Exact position not recorded';
-    const name = row.source_kind === 'room' ? `${text(row.label)} · conversation ${text(row.room_id)}` : text(row.source_path);
-    const why = row.source_kind === 'room' ? 'This is the conversation the agent was working in. Shown forms refer to that view, not the whole archive.'
-      : 'The context builder chose this form of its architecture reference for the selected view.';
-    const refs = Array.isArray(row.sources) ? row.sources.filter(isRecord).map((ref) =>
-      `${text(ref.path)} · bytes [${ref.start_byte}, ${ref.end_byte}) · SHA-256 ${text(ref.sha256)}`) : [];
-    lines.push([name, forms.get(row.form) || 'Form not recorded', why, range,
-      `Rendered text SHA-256: ${text(row.rendered_sha256)}`,
-      ...(refs.length ? refs : ['Exact underlying source ranges not recorded.'])].join('\n'));
-  }
   return [...lines, 'Unlisted sources and their selection rules are not mapped by this report.'].join('\n\n');
 }
 let generation = 0;
@@ -993,13 +968,14 @@ function bindArchive(api) {
     return `${position} · ${when(row.at) || 'Time not recorded'}`;
   };
   const readCandidate = async (epoch, index) => {
-    const document = unwrap(await issue(epoch, () => api.report(rows[index].attempt_id)));
+    const attemptId = rows[index].attempt_id;
+    const document = unwrap(await issue(epoch, () => api.report(attemptId)));
     return { ...parseReport(JSON.parse(document)), length: new TextEncoder().encode(document).length };
   };
   const recentReadable = async (epoch, start, active) => {
     const gaps = [];
     let firstGap = null;
-    for (let index = start; index < Math.min(start + 5, rows.length); index += 1) {
+    for (let index = start; index < rows.length; index += 1) {
       if (!active()) return null;
       try {
         const candidate = await readCandidate(epoch, index);
@@ -1068,7 +1044,7 @@ function bindArchive(api) {
       if (!candidate || firstReport.size + candidate.length > maxBytes) {
         comparisonStatus.textContent = [gap, candidate
           ? 'Together these reports are too large. The selected request stays open.'
-          : 'No readable earlier request in the next five entries. The selected request stays open.'].filter(Boolean).join(' ');
+          : 'No readable earlier request in this list. The selected request stays open.'].filter(Boolean).join(' ');
         return;
       }
       showComparison(candidate.report, candidate.parsed);
@@ -1083,7 +1059,9 @@ function bindArchive(api) {
   attempt.addEventListener('change', () => selectAttempt());
   const load = async () => {
     const previous = room.value, epoch = change('Opening your conversations…');
-    room.disabled = attempt.disabled = true;
+    room.disabled = true;
+    rows = [];
+    options(attempt, [], label, 'attempt_id');
     try {
       const items = unwrap(await issue(epoch, () => api.rooms()));
       if (epoch !== generation) return;

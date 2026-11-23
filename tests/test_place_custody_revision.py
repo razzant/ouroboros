@@ -745,7 +745,7 @@ def test_a_resumed_author_covers_only_the_arrivals_its_reentry_note_carries_whol
             row(1, historical_import={"authorship": "person"}), row(4, direction="out"),
             row(5, type="presence_delivery"), row(6), row(8)]
     monkeypatch.setattr(pc, "_conversation_rows_since", lambda *_a: (rows, []))
-    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a: "get_task_result(...)")  # a retained source bounds the note
+    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a, **_kw: "get_task_result(...)")
     monkeypatch.setattr(pc, "_REENTRY_NOTE_CHARS", 700)
     monkeypatch.setattr(presence_observations, "transport_queue_observation",
                         lambda *_a: {"status": "unavailable", "reason": "transport_has_not_reported_queue"})
@@ -812,7 +812,7 @@ def test_a_reentry_note_carries_a_reaction_as_context_and_never_as_coverage(tmp_
                  "conversation_key": key, "actor": {"kind": "user"},
                  "message": {"message_id": "1", "source_order": 7, "reaction": reaction}}}]
     monkeypatch.setattr(pc, "_conversation_rows_since", lambda *_a: (rows, []))
-    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a: "")
+    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a, **_kw: "")
     monkeypatch.setattr(presence_observations, "transport_queue_observation",
                         lambda *_a: {"status": "unavailable", "reason": "transport_has_not_reported_queue"})
     event = SimpleNamespace(conversation_key=key, provider="chat", account_id="a", conversation_id="r", thread_id="")
