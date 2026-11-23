@@ -806,7 +806,7 @@ test('the summary warns, and still offers Start, when no reviewer reads the work
         assert.match(warned, warning, query);
         assert.match(warned, /Start Ouroboros/, 'a warning, never a refusal');
     }
-    assert.doesNotMatch(await summaryHtml('pool=reader', { availableSubagents: withReader }), /data-review-pool-warning/);
+    assert.match(await summaryHtml('pool=reader', { availableSubagents: withReader }), /data-review-pool-warning hidden><\/div>/);
 });
 
 // Audit 05.11 item 13: with a subscription, Summary says what an exhausted quota does. A set Fallback continues the
@@ -851,6 +851,14 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const waits = await summary('quota-without-fallback', '');
     assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
     assert.match(waits.html, /Codex · gpt-test · Auto rotation/, 'a subscription source by its catalog label, not its id');
+    // The walked page (owner 2026-11-23): Main among the first-hour choices by its source and model, every role whole
+    // behind the one disclosure; on the way, each Consciousness position said what it does while the owner is away.
+    assert.match(waits.html, /data-summary-part="choices">[\s\S]*?<strong>Main model<\/strong><span>Codex · gpt-test<\/span>/);
+    assert.match(waits.html, /<details class="ui-disclosure summary-assignments" data-summary-assignments>\s*<summary>Models, agents and reviewers<\/summary>[\s\S]*?<strong>Main<\/strong><span>Codex · gpt-test · Auto rotation/);
+    const said = (words) => words.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, '&#39;');
+    for (const [value, away] of [['off', 'offAway'], ['on', 'onAway']]) {
+        assert.match(waits.mind, new RegExp(`data-consciousness-choice="${value}"[^>]*>[^]*?<p>${said(BOOTSTRAP.consciousnessOffer.words[away])}</p>\\s*</button>`));
+    }
     // A record that states no label of its own still names its source by the one visual answer every other surface
     // draws — the program its credential is reached with — never by the raw id's spelling. Both rows that say the
     // connected source agree.
@@ -1177,11 +1185,11 @@ test('Summary names a model the local runtime serves as Local, and a cloud one b
     };
     const row = (html, label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
     const all = await summary('local-all-summary', 'all');
-    assert.match(row(all, 'Main'), /^Local · google\/gemini-3\.8-flash/);
-    assert.match(row(all, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+    assert.match(row(all, 'Main'), /^Local · local-test\.gguf/);
+    assert.match(row(all, 'Fallback'), /^Local · local-test\.gguf/);
     const fallbackOnly = await summary('local-fallback-summary', 'fallback');
     assert.match(row(fallbackOnly, 'Main'), /^OpenRouter · google\/gemini-3\.8-flash/);
-    assert.match(row(fallbackOnly, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+    assert.match(row(fallbackOnly, 'Fallback'), /^Local · local-test\.gguf/);
 });
 
 // Review r4 (witness): a saved subscription source no connected account serves keeps the name its held record
@@ -1224,10 +1232,10 @@ test('Summary names a saved unbound source by its record, including when the des
     assert.match(html, />Codex subscription · no API key</, 'the connected-access row still lists only connected sources');
 
     holdSources = true;
-    const visibleRows = inertElement();
+    const visibleRows = inertElement();  // the assignments, where every model role is named in full
     const prepare = (doc) => {
         const root = doc.getElementById('root'), query = root.querySelector;
-        root.querySelector = (selector) => selector === '.summary-card-rows' ? visibleRows : query(selector);
+        root.querySelector = (selector) => selector === '[data-summary-part="assignments"]' ? visibleRows : query(selector);
     };
     await withWizard({ ...bootstrap, initialState: { ...bootstrap.initialState,
         mainModel: 'vendor/test', openrouterKey: 'sk-or-v1-test-not-a-secret' } }, 'summary-late-source-name', async ({ doc }) => {
@@ -1254,10 +1262,16 @@ test('Summary and quota guidance follow effective locality, not a chat slot’s 
     const row = (html, label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
     const routed = await summary('local-subscription-route', { localSource: '/models/local-test.gguf',
         localRoutingMode: 'all', mainModel: 'claudexor::claude=studio-route', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] });
-    assert.match(row(routed, 'Main'), /^Local · studio-route/, 'the local runtime serves the slot, not the subscription its id implies');
-    assert.doesNotMatch(row(routed, 'Main'), /Auto rotation|Claude Code/, 'no rotation or brand is promised for a local lane');
-    assert.match(row(routed, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/, 'the API-source local row is unchanged');
+    assert.equal(row(routed, 'Main model'), 'Local · local-test.gguf');
+    assert.match(row(routed, 'Main'), /^Local · local-test\.gguf/, 'the local runtime serves the slot, not the stored cloud id');
+    assert.doesNotMatch(row(routed, 'Main'), /studio-route|Auto rotation|Claude Code/, 'no cloud model, rotation or brand is promised for a local lane');
+    assert.match(row(routed, 'Fallback'), /^Local · local-test\.gguf/, 'the local fallback names the same loaded artifact');
     assert.equal(row(routed, 'When quota runs out'), '', 'no active subscription slot consumes quota');
+    const mixed = await summary('local-fallback-route', { localSource: 'fixture/models', localFilename: 'weights.gguf',
+        localRoutingMode: 'fallback', mainModel: 'claudexor::codex=gpt-test', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] });
+    assert.equal(row(mixed, 'Main model'), 'Codex · gpt-test');
+    assert.match(row(mixed, 'Fallback'), /^Local · weights\.gguf/);
+    assert.equal(row(mixed, 'When quota runs out'), 'Tries the Fallback, then waits for the reset');
     const labelled = await summary('local-value-label', { mainModel: 'claudexor::claude=studio-suffix (local)', automaticModels: [] });
     assert.match(row(labelled, 'Main'), /^Claude Code · studio-suffix \(local\) · Auto rotation/);
     assert.notEqual(row(labelled, 'When quota runs out'), '', 'the suffix alone does not bypass subscription quota');

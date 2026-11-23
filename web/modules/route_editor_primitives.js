@@ -115,6 +115,9 @@ export function composeModelSource(source, model) {
     return source === 'openrouter' ? value : `${source}::${value}`;
 }
 
+/** Explicit file paths in a local-model draft, independent of the browser's OS (the host checks existence). */
+export const isLocalFilesystemSource = (value) => /^(?:[/~]|\\|[a-z]:[/\\]|\.\.?[/\\])/i.test(String(value || '').trim());
+
 // Owner-facing order of the direct API providers. OpenRouter first because an
 // unprefixed model id routes through it; the rest follow the settings order.
 export const API_PROVIDER_ORDER = ['openrouter', 'openai', 'anthropic', 'deepseek',

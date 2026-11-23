@@ -167,7 +167,7 @@ class SetupConsciousnessOffer(TypedDict):
     autonomy: Literal["observe", "act", "full"]
     dailyUsd: float  # rolling-24h recorded-spend allowance; subscription quota is separate
     maxTasks: int  # how many of its own tasks may run at once; 0 = it starts none
-    words: Dict[str, str]  # gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
+    words: Dict[str, str]  # gloss, off, on, lead, offAway, onAway, subscriptionCost, door, summaryLead (meaning, choice: older pages)
 
 
 class SetupBootstrap(TypedDict):

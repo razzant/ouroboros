@@ -442,6 +442,7 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
      # A native resume's serving catalog follows its declared tools: a 0.1.35 install is reseeded.
      ('live_conversation', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.35'),
      ('gemini_live', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.21'),
+     ('live_conversation', '201f5b62ce35bdb388c3e238bad261b27d3739a8', '0.1.36'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -477,7 +478,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.36', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.37', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.9.0'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

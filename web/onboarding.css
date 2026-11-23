@@ -1489,16 +1489,20 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
    footer like any tall step, the list's end clear of it. Under the list one small sentence says where the hub's
    skills come from and how they install. Summary keeps one row back to the step. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
+/* Summary's parts (the choices, the limits, the assignments behind their disclosure): one with no row takes no gap. */
+.summary-card-rows:empty,
 [data-starter-skills]:empty { display: none; }
 [data-starter-skills="row"] { display: flex; flex-direction: column; gap: 10px; }  /* the Skills row and a card's, spaced as their neighbours */
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
 /* Summary's row reads as its neighbours do: the value at their size. */
 .skills-starter-value { color: var(--text-primary); }
 .skills-starter-sub { display: block; margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-/* The Consciousness step: its meaning leads as the step's copy; the switch as the wizard's two choices, then what a
-   subscription pays with, its limits and its door. */
+/* The Consciousness step: its question leads as the step's copy; the switch as the wizard's two choices, each saying
+   what it does while the owner is away; then what holds while it is on, one group under its label, and its door. */
 .consciousness-step { display: grid; gap: var(--space-2); }
 .consciousness-step .wizard-choice-grid { margin-bottom: var(--space-1); }
+.consciousness-step-limits { display: grid; gap: 2px; }
+.consciousness-step-label { font-weight: 600; }  /* a label: the meta size and ink its card gives it (DESIGN §2) */
 .skills-starter-change,
 .skills-starter-bulk button {
   padding: 0;

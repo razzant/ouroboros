@@ -9,10 +9,14 @@
       "choice": "Also on its own and in places",
       "door": "Change it later in Dashboard \u203a Consciousness; the allowance is in Dashboard \u203a Costs.",
       "gloss": "When Ouroboros acts.",
-      "meaning": "Off: it works when you write to it, and places you connect are heard, not answered. On: it also keeps waking on its own within its daily allowance, even before your first reply, and answers in places you make Active. Either way, Start begins your first conversation.",
+      "lead": "What should Ouroboros do while you're away? Either way, Start begins your first conversation.",
+      "meaning": "What should Ouroboros do while you're away? Either way, Start begins your first conversation. Off: When you're away, it works only on what you asked. Places you connect are heard, not answered. On: When you're away, it also wakes on its own within its daily allowance, even before your first reply, and answers in places you make Active.",
       "off": "Only when you write to it",
+      "offAway": "When you're away, it works only on what you asked. Places you connect are heard, not answered.",
       "on": "Also on its own",
-      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages."
+      "onAway": "When you're away, it also wakes on its own within its daily allowance, even before your first reply, and answers in places you make Active.",
+      "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
+      "summaryLead": "Check your choices. Start Ouroboros saves them and begins your first conversation."
     }
   },
   "contract": {
@@ -449,7 +453,7 @@
         "title": "Review limits"
       },
       {
-        "copy": "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.",
+        "copy": "Check your choices. Start Ouroboros saves them.",
         "footer": "The same onboarding values remain editable later in Settings.",
         "id": "summary",
         "railCopy": "Final check",

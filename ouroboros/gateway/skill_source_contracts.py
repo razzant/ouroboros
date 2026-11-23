@@ -143,7 +143,9 @@ class SkillCatalogItem(TypedDict, total=False):
     ``signals`` null means no data (never zero); ``installed`` null means not installed, else
     ``{state: installed, version, digest, modified, update_available}`` or ``{state: name_taken,
     source_id, source_name}``. ``updated_at`` is when the release last changed in its source (a git
-    source's newest commit touching it, a registry's update time); absent when unknown.
+    source's newest commit touching it, a registry's update time); absent when unknown. ``type``,
+    ``needs_keys`` and ``permissions`` are the release manifest's: absent for a pointer entry, whose manifest
+    lies in its author's repository and is read only by the detail or the install.
     Official/recommended require exact endorsement through an Official hub row or the bundled source."""
 
     id: Required[str]
@@ -338,8 +340,10 @@ class CompletionConnection(TypedDict, total=False):
 class StarterSkillItem(TypedDict, total=False):
     """One skill the setup's Skills step offers. ``title`` and ``pitch`` are the catalog's optional words for people
     ("" when it has none: show ``name`` and ``description``); ``needs`` is its prerequisite in words ("" none, null
-    when the catalog says nothing) and ``mark`` the same in a few words for its row; ``recommended`` means ticked by the starter list; ``needs_keys`` names every
-    setting the skill reads, required or optional."""
+    when the catalog says nothing) and ``mark`` the same in a few words for its row. ``recommended`` is the tick
+    from the saved settings. ``default_with_keys`` gives supported voice key names and booleans the Accounts draft
+    can update; an empty map leaves the default off (a voice declaration no bundled one matches, or a manifest not
+    read). ``needs_keys`` names settings the skill reads."""
 
     id: Required[str]
     name: Required[str]
@@ -353,6 +357,7 @@ class StarterSkillItem(TypedDict, total=False):
     builtin: bool
     recommended: bool
     needs_keys: List[str]
+    default_with_keys: Dict[str, bool]
     connection: StarterConnection
 
 

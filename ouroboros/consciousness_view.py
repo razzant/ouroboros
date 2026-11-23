@@ -368,19 +368,23 @@ def connect_note(switch: str) -> str:
 
 def first_run_words(autonomy: str = "act") -> dict:
     """The setup step's words, true for the autonomy the offer names (Advises answers nowhere): the gloss, the two
-    positions (an install being set up holds no place yet), what they mean, what a subscription alone pays with (said
-    once: the step's limits leave it out there) and where to change it later. ``choice`` is the on position a page
-    built before the step names (kept for such pages)."""
+    positions (an install being set up holds no place yet), the step's question, what each position does while the
+    owner is away, what a subscription alone pays with (said once, beside the allowance) and where to change it later;
+    ``summaryLead`` is Summary's lead, since this first setup's Start also begins the first conversation. ``meaning``
+    (their whole) and ``choice`` (the on position) are kept for pages built before the step said them."""
     places = ("reads and thinks in places you make Active; what it would say waits for you" if autonomy == "observe"
               else "answers in places you make Active")
+    # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
+    lead = "What should Ouroboros do while you're away? Either way, Start begins your first conversation."
+    off_away = "When you're away, it works only on what you asked. Places you connect are heard, not answered."
+    on_away = ("When you're away, it also wakes on its own within its daily allowance, even before your first reply, "
+               f"and {places}.")
     return {"gloss": SWITCH_GLOSS + ".", "choice": POSITION_WORDS[True], "off": POSITION_WORDS[False],
-            "on": ON_WITHOUT_PLACES,
-            # Start begins the first conversation either way (owner 21.11, 1C); on, the wakes go on before a reply.
-            "meaning": ("Off: it works when you write to it, and places you connect are heard, not answered. On: it also "
-                        f"keeps waking on its own within its daily allowance, even before your first reply, and {places}. "
-                        "Either way, Start begins your first conversation."),
+            "on": ON_WITHOUT_PLACES, "lead": lead, "offAway": off_away, "onAway": on_away,
+            "meaning": f"{lead} Off: {off_away} On: {on_away}",
             "subscriptionCost": "On a subscription alone its wakes use the subscription's quota between your messages.",
-            "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs."}
+            "door": "Change it later in Dashboard › Consciousness; the allowance is in Dashboard › Costs.",
+            "summaryLead": "Check your choices. Start Ouroboros saves them and begins your first conversation."}
 
 
 FIRST_RUN = first_run_words()
