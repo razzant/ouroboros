@@ -21,6 +21,8 @@ from ouroboros import store as task_store
 from ouroboros import subagent_worktrees as sw
 from ouroboros.storage_free import FreeSpace
 from tests._store_journal_shared import held_open, tree_state
+from tests._workspace_git import git_repository, world_git
+from tests._worlds import clone_repository, world
 from tests.test_store import document, publish
 
 OLD = "2026-10-01T00:00:00+00:00"
@@ -147,13 +149,17 @@ def _group(view, group_id):
     return next(group for group in view["groups"] if group["id"] == group_id)
 
 
+def _lay_storage_free_repo(folder: Path) -> None:
+    repo = git_repository(folder / "repo", unborn=True)
+    world_git(repo, "config", "user.email", "t@t")
+    world_git(repo, "config", "user.name", "t")
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    world_git(repo, "add", "a.txt")
+    world_git(repo, "commit", "-qm", "init")
+
+
 def _init_repo(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    for args in (("init", "-q"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
-        subprocess.run(["git", *args], cwd=str(path), check=True, capture_output=True)
-    (path / "a.txt").write_text("hi\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=str(path), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(path), check=True, capture_output=True)
+    clone_repository(world("storage-free-repo", _lay_storage_free_repo) / "repo", path)
 
 
 # ------------------------------------------------------------------ B1, B2
