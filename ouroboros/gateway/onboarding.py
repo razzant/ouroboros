@@ -73,7 +73,7 @@ from ouroboros.settings_setup_contract import (
     parse_completion_attempt, parse_subscription_intent,
 )
 from ouroboros.subscription_install_presets import (
-    PRESET_HARNESSES,
+    HARNESS_CODEX, PRESET_HARNESSES,
     PRESET_MARKER_KEY,
     REVIEWER_PRESET_HARNESSES,
     HarnessDiscovery,
@@ -339,6 +339,8 @@ def verified_harness_discoveries(
         )
     routable, refused = subscription_routable_harnesses(snapshot)
     rows = _discovery_rows(snapshot.get("harnesses"))
+    roster = snapshot.get("profiles") if isinstance(snapshot.get("profiles"), dict) else {}
+    profiles = _profile_index(roster.get("profiles"))
     wanted = [h for h in PRESET_HARNESSES if h in routable]
     if not wanted:
         detail = "; ".join(f"{harness}: {reason}" for harness, reason in sorted(refused.items()))
@@ -356,16 +358,16 @@ def verified_harness_discoveries(
                 "models_unavailable",
                 f"Model discovery for {harness} failed: {row.get('models_error')}",
             )
-        model_ids = tuple(
-            str(model.get("id") or "")
-            for model in (row.get("models") or [])
-            if isinstance(model, dict) and str(model.get("id") or "")
-        )
+        listed = [model for model in row.get("models") or [] if isinstance(model, dict) and str(model.get("id") or "")]
+        # Codex alone (others keep every id) takes a model its account lists by that seat's durable verdict, never
+        # quota; a flattened inventory names no account and stays a candidate (ARCHITECTURE §2 install-time presets).
+        verdicts = [(True, "") if harness != HARNESS_CODEX or not model.get("credential_profile_id")
+                    else _profile_seat_verdict(harness, str(model["credential_profile_id"]), profiles) for model in listed]
+        model_ids = tuple(str(model["id"]) for model, (ok, _why) in zip(listed, verdicts) if ok)
         if not model_ids and harness in required:
-            return (), PresetFailure(
-                "models_unavailable",
-                f"The engine listed no models for {harness}.",
-            )
+            why = "; ".join(dict.fromkeys(why for ok, why in verdicts if not ok))
+            return (), PresetFailure("models_unavailable", f"No {harness} subscription account lists a model: {why}."
+                                     if listed else f"The engine listed no models for {harness}.")
         discoveries.append(HarnessDiscovery(harness_id=harness, model_ids=model_ids))
     return tuple(discoveries), None
 

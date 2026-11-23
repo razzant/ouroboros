@@ -748,8 +748,7 @@ def migrate_model_value(provider: str, value: str) -> str:
 
 
 def legacy_openai_base(settings: Mapping[str, Any] | None = None) -> bool:
-    """Whether the legacy compatible base URL is set: the built-in OpenAI key then belongs
-    to that endpoint (``compatible_endpoint``), so it is not official OpenAI access."""
+    """Whether the legacy base URL is set; the built-in OpenAI key then serves that endpoint, not OpenAI."""
     read = runtime_setting if settings is None else settings.get
     return bool(str(read("OPENAI_BASE_URL", "") or "").strip())
 
@@ -761,16 +760,17 @@ def configured_kinds(settings: Mapping[str, Any] | None = None) -> set[str]:
     return {kind for kind, _name in configured_connections(settings)}
 
 
-def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
-    """The one direct provider an install reaches, else '' (``settings`` None = this process's view).
-
-    OpenRouter, an OpenAI-compatible endpoint or the legacy base URL each mean the
-    router-style defaults stay; among the direct providers one is returned only when
-    exactly one is configured."""
+def direct_only_kinds(settings: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """Direct API kinds that serve, in order; none when OpenRouter or a compatible endpoint (the legacy pair too) does."""
     kinds = configured_kinds(settings)
-    if {"openrouter", "openai-compatible"} & kinds or legacy_openai_base(settings):
-        return ""
-    direct = [kind for kind in PROVIDER_KINDS if kind in kinds and kind in DIRECT_PROVIDER_DEFAULTS]
+    if {"openrouter", "openai-compatible"} & kinds:
+        return ()
+    return tuple(kind for kind in PROVIDER_KINDS if kind in kinds and kind in DIRECT_PROVIDER_DEFAULTS)
+
+
+def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
+    """The one direct-only kind, else ''; any legacy base URL keeps the router-style defaults it always kept."""
+    direct = () if legacy_openai_base(settings) else direct_only_kinds(settings)
     return direct[0] if len(direct) == 1 else ""
 
 
