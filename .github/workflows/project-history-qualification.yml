@@ -1,0 +1,182 @@
+name: Project history and Reset — focused qualification
+'on':
+  push:
+    branches: [qa/project-registry-history-3294]
+permissions:
+  contents: read
+env:
+  QA_PRODUCT_SHA: '58f8be41c18753482ce9a8b59373c623302a67b9'
+  QA_PRODUCT_TREE: '0e6366dfa04616f5b47f181184a70c75767ee5ce'
+  QA_PRODUCT_BASE: 'b75d5c9ea52d426fd7f8c3b5ad3f8e2550cc877d'
+jobs:
+  registry:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, interpreter: shipped, python: '3.12.15', minutes: 115}
+          - {os: windows-2025, interpreter: shipped, python: '3.12.15', minutes: 45}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Bind the workflow overlay to the exact frozen product
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = razzant/ouroboros
+          test "$GITHUB_REF" = refs/heads/qa/project-registry-history-3294
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          product=$(git rev-parse --verify 'HEAD^1^{commit}')
+          test "$(git show -s --format=%P HEAD)" = "$product bc6ebd29ff4e43411bced8a8c0884642724c20c0"
+          test "$(git diff --name-status --no-renames "$product" HEAD --)" = $'A\t.github/workflows/project-history-qualification.yml'
+          tree=$(git rev-parse --verify "${product}^{tree}")
+          base=$(git rev-parse --verify "${product}^1^{commit}")
+          test "$(git show -s --format=%P "$product")" = "$base"
+          test "$product" = "$QA_PRODUCT_SHA"
+          test "$tree" = "$QA_PRODUCT_TREE"
+          test "$base" = "$QA_PRODUCT_BASE"
+          git checkout --detach "$product"
+          test "$(git rev-parse HEAD)" = "$product"
+          test -z "$(git status --porcelain)"
+          printf 'Testing product %s, tree %s, parent %s (workflow commit %s)\n' \
+            "$product" "$tree" "$base" "$GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Put Windows test scratch on the runner work disk
+        if: runner.os == 'Windows'
+        run: printf 'TEMP=%s\nTMP=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      - name: Identify the locked environment's interpreter
+        run: |
+          py=$(python -I -c 'from pathlib import Path; import sys; sys.stdout.write(Path(sys.executable).as_posix())')
+          "$py" -I - '${{ matrix.python }}' <<'PY'
+          import sqlite3, sys
+          from importlib.metadata import version
+          expected = tuple(map(int, sys.argv[1].split('.')))
+          if sys.prefix == sys.base_prefix or sys.version_info[:len(expected)] != expected:
+              raise SystemExit('Wrong interpreter or no active dependency-only environment')
+          print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, Playwright {version("playwright")}')
+          PY
+          printf 'QA_PYTHON=%s\n' "$py" >> "$GITHUB_ENV"
+      - name: Boot, exact history recovery, archive, and synthetic Reset completion
+        run: |
+          "$QA_PYTHON" -I -S scripts/safe_test.py --timeout 900 -- "$QA_PYTHON" -B -m pytest \
+            -o addopts= -v --tb=short --junitxml="$RUNNER_TEMP/registry-product.xml" \
+            'tests/test_boot_readiness.py::test_a_clean_providerless_profile_reads_main_and_creates_its_first_project_without_history_work' \
+            'tests/test_boot_readiness.py::test_a_providerless_legacy_profile_reaches_main_and_its_first_project_through_the_real_boot' \
+            'tests/test_boot_readiness.py::test_interrupted_reset_serves_recovery_without_opening_the_old_profile' \
+            'tests/test_project_registry_evidence.py::test_cold_restore_keeps_its_certificate_across_interruption' \
+            'tests/test_room_archive.py::test_a_healthy_registry_needs_no_archive_and_main_reads_its_history' \
+            'tests/test_room_archive.py::test_a_lost_registry_refuses_main_and_the_archive_shows_only_what_evidence_places' \
+            'tests/test_state_authority.py::test_reset_sets_project_notes_aside_and_reopens_project_creation' \
+            'tests/test_state_authority.py::test_reset_removes_read_only_files_through_the_shared_removal' \
+            'tests/test_state_authority.py::test_each_independent_reset_keeps_its_own_folder' \
+            'tests/test_reset_entry_recovery.py::test_the_live_restart_consumer_acknowledges_and_get_reads_the_same_status' \
+            'tests/test_reset_entry_recovery.py::test_a_repeat_of_an_unfinished_reset_is_accepted_under_the_same_identity' \
+            'tests/test_reset_entry_recovery.py::test_a_pool_that_never_started_has_an_empty_census_not_an_unknown_one' \
+            'tests/test_reset_entry_recovery.py::test_a_missing_worker_census_stays_unknown_on_retry' \
+            'tests/test_reset_entry_recovery.py::test_reset_through_the_real_cli_callback_from_outside_checkout' \
+            'tests/test_reset_entry_recovery.py::test_managed_reset_uses_the_launchers_input_not_its_document' \
+            'tests/test_reset_entry_recovery.py::test_unproved_boot_keeps_confirmed_handoff_without_cleanup' \
+            'tests/test_gateway_client_contract.py::test_the_contract_is_served_derived_and_self_consistent'
+      - name: Check affected maps, contracts and size against the product parent
+        if: runner.os == 'Linux'
+        run: |
+          base=$(git rev-parse --verify 'HEAD^1^{commit}')
+          test "$base" = "$QA_PRODUCT_BASE"
+          # Compare the pinned product commit to its own parent, not the QA overlay.
+          env -u GITHUB_EVENT_NAME OURO_SIZE_RATCHET_BASE_REF="$base" OURO_BOOK_GROWTH_MODE=block \
+            "$QA_PYTHON" -I -S scripts/safe_test.py --timeout 600 -- "$QA_PYTHON" -B -m pytest \
+            -o addopts= -v --tb=short --junitxml="$RUNNER_TEMP/registry-structure.xml" \
+            'tests/test_smoke.py::test_no_oversized_modules' \
+            'tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree' \
+            'tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base' \
+            'tests/test_smoke.py::test_no_extremely_oversized_functions' \
+            'tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book' \
+            'tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts' \
+            'tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact' \
+            'tests/test_generated_inventories.py::test_data_layout_inventory_is_byte_identical' \
+            'tests/test_generated_inventories.py::test_ui_control_text_inventory_is_byte_identical' \
+            'tests/test_domain_manifest.py::test_manifest_covers_the_tracked_population_exactly' \
+            'tests/test_domain_manifest.py::test_strict_direction_matrix_matches_the_pinned_baseline' \
+            'tests/test_domain_manifest.py::test_cycle_groups_match_the_pinned_ceiling' \
+            'tests/test_domain_manifest.py::test_domain_map_is_byte_identical_to_its_regeneration' \
+            'tests/test_client_contract_coverage.py::test_every_address_the_builtin_client_builds_is_an_indexed_route' \
+            'tests/test_client_contract_coverage.py::test_the_matrix_names_every_indexed_route_once' \
+            'tests/test_docs_sync.py'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: runner.os == 'Linux'
+        with:
+          node-version: '22'
+      - name: Check directly affected web consumers
+        if: runner.os == 'Linux'
+        run: |
+          node --version
+          "$QA_PYTHON" -I -S scripts/safe_test.py --timeout 300 -- node --test \
+            web/tests/{room_archive,chat_history_integration,onboarding_overlay,settings_plain_pages,ws_recovery}.test.js
+      - name: Install locked Playwright engines and their pinned driver Node
+        if: runner.os == 'Linux'
+        timeout-minutes: 70
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: '"$QA_PYTHON" -I -S scripts/ci_browser_install.py --pinned-node chromium webkit'
+      - name: WebKit — read-only Archive and recovered Main
+        if: runner.os == 'Linux'
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: webkit
+          OUROBOROS_UI_BROWSER_ENGINE: webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          "$QA_PYTHON" -I -S scripts/safe_test.py --timeout 900 -- "$QA_PYTHON" -B -m pytest \
+            -o addopts= -m ui_browser -v --tb=short --junitxml="$RUNNER_TEMP/registry-webkit.xml" \
+            'tests/test_chat_history_paging_browser.py::test_main_offers_a_read_only_archive_of_what_evidence_places[webkit-390-light-legacy]' \
+            'tests/test_chat_history_paging_browser.py::test_main_shows_the_restored_list_after_a_cold_start'
+      - name: Chromium — a confirmed synthetic Reset in the same tab
+        if: runner.os == 'Linux'
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium
+          OUROBOROS_UI_BROWSER_ENGINE: chromium
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/registry-frames
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+        run: |
+          "$QA_PYTHON" -I -S scripts/safe_test.py --timeout 900 -- "$QA_PYTHON" -B -m pytest \
+            -o addopts= -m ui_browser -v --tb=short --junitxml="$RUNNER_TEMP/registry-chromium.xml" \
+            'tests/test_settings_policy_browser.py::test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab'
+      - name: Require all selected cases and recheck product identity
+        run: |
+          test "$(git rev-parse HEAD)" = "$QA_PRODUCT_SHA"
+          git diff --exit-code HEAD --
+          "$QA_PYTHON" -I - "$RUNNER_TEMP" "$RUNNER_OS" <<'PY'
+          import sys
+          from pathlib import Path
+          from xml.etree import ElementTree
+          reports = {'product': 22}
+          if sys.argv[2] == 'Linux':
+              reports.update(structure=26, webkit=2, chromium=1)
+          for lane, expected in reports.items():
+              report = Path(sys.argv[1]) / f'registry-{lane}.xml'
+              cases = list(ElementTree.parse(report).iter('testcase'))
+              nonpasses = [c.get('name') for c in cases if any(
+                  element.tag in {'skipped', 'failure', 'error'} for element in c)]
+              if len(cases) != expected or len({(c.get('classname'), c.get('name')) for c in cases}) != expected or nonpasses:
+                  raise SystemExit(f'{lane}: expected {expected} passes; got {len(cases)} cases; nonpasses={nonpasses}')
+              print(f'{lane}: {expected}/{expected} passed')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: runner.os == 'Linux'
+        with:
+          name: synthetic-reset-about
+          path: ${{ runner.temp }}/registry-frames/reset-about-same-tab.png
+          if-no-files-found: error
+          retention-days: 7
