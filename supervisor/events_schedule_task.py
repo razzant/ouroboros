@@ -35,6 +35,7 @@ from ouroboros.tools.control_delegation import durable_direct_child_count
 from ouroboros.tools.control_delegation import stamp_depth_provenance
 from supervisor.events_subagent_admission import _active_subagent_count
 from supervisor.events_subagent_admission import _compose_subagent_text
+from supervisor.events_subagent_admission import _named_notes_admission_refusal
 from supervisor.events_subagent_admission import _record_delegation_constraint
 from supervisor.events_subagent_admission import _resolve_subagent_constraint
 from supervisor.events_subagent_admission import _subagent_cap_blocks
@@ -694,14 +695,9 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
     # Assignment, not admission, proves achieved depth.
     admitted_task_contract, admitted_depth_provenance = stamp_depth_provenance(
         r.task_contract, attempted_depth=r.depth, max_depth=r.max_depth, achieved_depth=None)
-    text = _compose_subagent_text(
-        r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
-        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
-        delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
-    ) if delegation_role == "subagent" else r.desc
     evt = r.evt
     task = _build_scheduled_task_payload({
-        "tid": tid, "chat_id": r.chat_id, "text": text, "desc": r.desc, "expected_output": r.expected_output,
+        "tid": tid, "chat_id": r.chat_id, "desc": r.desc, "expected_output": r.expected_output,
         "constraints": r.constraints, "role": role, "task_context": r.task_context, "depth": r.depth,
         "root_task_id": root_task_id, "session_id": r.session_id, "actor_id": r.actor_id,
         "delegation_role": delegation_role, "memory_mode": r.memory_mode, "drive_root": r.drive_root,
@@ -721,6 +717,17 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         **({"presence_binding_authority": evt["presence_binding_authority"]}
            if "presence_binding_authority" in evt else {}),
     })
+    if delegation_role == "subagent" and (detail := _named_notes_admission_refusal(ctx, task)):
+        r.reject(ctx, tid=tid, chat_id=r.chat_id, delegation_role=delegation_role, parent_id=parent_id,
+                 root_task_id=root_task_id, role=role, result_fields=r.result_fields, detail=detail,
+                 reason_code="knowledge_note_unresolved")
+        return
+    task["text"] = _compose_subagent_text(  # the first input names the notes only after that check
+        r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
+        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
+        named_notes=r.intent.get("knowledge_notes"), session=r.intent.get("requested_executor") == "harness",
+        delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
+    ) if delegation_role == "subagent" else r.desc
     if r.project_basis is not None:
         task["_project_admission"] = r.project_basis
     direct_child_count = r.direct_child_count

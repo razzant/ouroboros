@@ -1264,8 +1264,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         if str(options.get("retry_of") or "").strip() and (
             selected_id or selected_snapshot is not None or access is not None
             or options.get("mode") is not None or options.get("override_plan_readiness") is not None
-            or options.get("workspace") is not None or options.get("attachment_paths") is not None
-            or options.get("attachment_import") is not None or options.get("input_files") is not None
+            or any(options.get(key) is not None for key in (
+                "workspace", "attachment_paths", "attachment_import", "input_files", "knowledge_notes"))
         ):
             raise SubagentSelectionError(
                 "retry_selector_conflict",
@@ -1330,6 +1330,30 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 resolve_selection(ctx, entries)
         except InputSelectionError as exc:
             raise SubagentSelectionError(exc.code, exc.detail, {"input_files": exc.results}) from exc
+        from ouroboros.subagent_work_order import NAMED_NOTES, NamedNoteError, prepare_named_notes
+
+        initial = bool(options.pop("_initial_bootstrap", False))
+        selected = options.pop(NAMED_NOTES, None)
+        named_feedback, named_selection = [], ("", None)
+        try:  # invalid/denied selection must not reach startup; a retry has only the original envelope
+            if not retry_token:
+                admitted = (selected is None and compiled_work_order and not selected_id
+                            and isinstance(bootstrap, dict) and not options.get("continue_from"))
+                if admitted:
+                    selected = (getattr(ctx, "task_metadata", None) or {}).get(NAMED_NOTES)
+                    if selected is not None and not initial:
+                        first = _before_first_work_order_start(ctx, bootstrap)
+                        if first is None and selected != []:
+                            raise SubagentSelectionError(
+                                "initial_invocation_unknown",
+                                "The initial invocation could not be read, so the saved knowledge notes cannot "
+                                "be applied or omitted reliably. Reconcile that custody; no new start was sent.")
+                        if first is not True:
+                            selected = None
+                named_selection, named_feedback = prepare_named_notes(ctx, selected, admitted=admitted)
+        except NamedNoteError as exc:
+            status = "invalid" if exc.code == "knowledge_notes_invalid" else "unresolved"
+            raise SubagentSelectionError(exc.code, exc.detail, {"knowledge_notes": status}) from exc
     except SubagentSelectionError as exc:
         from ouroboros.delegate_shared import _fail
 
@@ -1337,7 +1361,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         from ouroboros.delegate_evidence import record_start_blocked
 
         record_start_blocked(ctx, str(getattr(ctx, "task_id", "") or ""), exc.code)
-        facts = {**exc.facts, **({"definitely_unrun": True} if "input_files" in exc.facts else {})}
+        facts = {**exc.facts, **({"definitely_unrun": True} if {"input_files", "knowledge_notes"} & set(exc.facts)
+                                 else {})}
         return _replace_tool_result(_fail("delegate_start", exc.code, exc.detail, **facts),
                                     meta_updates={"operation_outcome": "completed_no_effect"})
 
@@ -1357,7 +1382,7 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             _canonical_work_order_fingerprint=canonical_work_order_fingerprint,
             _work_order_source_request=work_order_source_request,
             _coordination_context=coordination_context,
-            _initial_bootstrap=bool(options.pop("_initial_bootstrap", False)),
+            _initial_bootstrap=initial, **({"_named_notes": named_selection} if named_selection[1] else {}),
             **{key: options.pop(key) for key in (
                 "directory_strategy", "scope_paths", "continue_from", "continue_carrier", "mode",
                 "override_plan_readiness", "_plan_answers", "workspace", "attachment_paths", "_document_intent",
@@ -1382,6 +1407,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
             payload["work_order_source_request"] = dict(work_order_source_request)
         if retry_token and coordination_context:
             payload["coordination_text"] = "not sent: retry_of replays the recorded request unchanged"
+        if named_feedback:  # spellings of knowledge_notes that meant the same, said the house way (arg_feedback)
+            payload["note"] = "\n".join([*filter(None, [payload.get("note")]), *named_feedback])
         return _replace_tool_result(
             result, text=json.dumps(payload, ensure_ascii=False, indent=2))
     except SubagentSelectionError as exc:
@@ -1428,6 +1455,20 @@ def _leaf_effort_choice(ctx: Any, snapshot: Any, request: Any, choice: Any, retr
         model_named=model_named_effort(RouteSpec(str(route.get("kind") or ""), str(route.get("target_id") or ""))),
         binds=effort_range_binds(getattr(ctx, "task_metadata", None)), rng=live_effort_range())
     return effort_fact(requested, level, source)
+
+
+def _before_first_work_order_start(ctx: Any, bootstrap: dict) -> bool | None:
+    """An invocation can already be claimed without a run receipt; unreadable custody is unknown."""
+    from ouroboros.delegate_bootstrap_identity import initial_receipt
+    from ouroboros.store import StoreError
+
+    if bootstrap.get("physical_started") or bootstrap.get("initial_invocation_id"):
+        return False
+    try:
+        # Observe custody, without changing the startup projection or claiming the automatic slot.
+        return not initial_receipt(ctx, dict(bootstrap))
+    except (OSError, ValueError, StoreError):
+        return None
 
 
 def _mark_actor_physical_start(ctx: Any, result: "ToolResult") -> None:

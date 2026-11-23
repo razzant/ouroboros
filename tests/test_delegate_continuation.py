@@ -378,6 +378,39 @@ def test_continue_from_puts_the_engine_key_in_the_body_and_the_facts_in_the_prom
     assert request["prompt"].startswith("HOST FACTS") and not request["prompt"].endswith("\n")
 
 
+@pytest.mark.parametrize("carrier", ["auto", "packet"])
+def test_continuation_delivers_a_new_selection_only_in_the_current_prompt(tmp_path, monkeypatch, carrier):
+    from hashlib import sha256
+
+    from ouroboros.knowledge import resolve_knowledge_address
+
+    selection = [{"topic": "handed-note", "scope": "global"}]
+    address = resolve_knowledge_address(tmp_path, "handed-note", "global")
+    address.path.parent.mkdir(parents=True)
+    old, new = "# Old synthetic note\n\n## Details\nOLD_BODY\n", "# Current synthetic note\n\n## Details\nNEW_BODY\n"
+    address.path.write_text(old, encoding="utf-8")
+
+    def start(run, **options):
+        return _start(tmp_path, monkeypatch, acting=False, access="readonly", run_id=run,
+                      prepare=lambda ctx: ctx.task_metadata.update(knowledge_notes=selection), start_kwargs=options)[:2]
+
+    first, initial = start("first-note-run", knowledge_notes=selection)
+    assert initial["status"] == "started" and first["instructions"].count(old) == 1
+    address.path.write_text(new, encoding="utf-8")
+    _settle(tmp_path, "first-note-run", "t-nanny-read")
+    omitted, result = start("second-note-run", continue_from="first-note-run", continue_carrier=carrier)
+    assert result["status"] == "started" and "named_notes" not in result
+    assert "## Named knowledge notes" not in omitted["prompt"] + omitted["instructions"]
+
+    _settle(tmp_path, "second-note-run", "t-nanny-read")
+    selected, result = start("third-note-run", continue_from="second-note-run", continue_carrier=carrier,
+                             knowledge_notes=selection)
+    assert selected["continueCarrier"] == carrier and selected["prompt"].count(new) == 1
+    assert old not in selected["prompt"] and "## Named knowledge notes" not in selected["instructions"]
+    assert result["named_notes"] == {"sent": [{**selection[0], "revision": sha256(new.encode()).hexdigest(),
+                                                "chars": len(new)}]}
+
+
 def test_an_engine_without_continue_from_refuses_typed_and_starts_nothing(tmp_path, monkeypatch):
     _select_transport_access(monkeypatch, "readonly")   # a read-only child (#1609)
     _start(tmp_path, monkeypatch, acting=False, run_id="run-prev")
