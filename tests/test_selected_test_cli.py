@@ -18,7 +18,7 @@ from tests.test_preflight_runner import _make_repo
 WINDOWS_COMMAND_LINE = 32_767  # CreateProcess takes a command line shorter than this, terminator included
 # The fields the two plugins a run writes are filled from (``preflight_probe.WORKER_PROBE_SOURCE``,
 # ``preflight_inventory.SOURCE``). A path or a module name may spell any of them, and that is never a field.
-TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__SCOPE__", "__RESULT_PATH__")
+TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__COLLECTION_PATH__", "__SCOPE__", "__RESULT_PATH__")
 
 
 def plugin_values(argv, directory):
