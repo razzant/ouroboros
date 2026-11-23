@@ -19,7 +19,7 @@ def test_setup_contract_exposes_cyber_pro_as_fourth_access_level():
     cyber = modes[-1]
     assert cyber["label"] == "Cyber Pro"
     assert cyber["copy"] == "Full say over itself and this computer. Asks for reviews when it judges."
-    assert modes[2]["copy"] == "May change its protected core. Reads a review before each change."
+    assert modes[2]["copy"] == "May change its protected core. Asks for a review before committing new code."
     # Panic and the owner's other controls still stop it, so the copy never says nothing blocks.
     assert "Blocking" not in cyber["copy"] and "Advisory" not in cyber["copy"]
     assert "nothing blocks" not in cyber["copy"] and "owner-controlled" not in cyber["copy"]

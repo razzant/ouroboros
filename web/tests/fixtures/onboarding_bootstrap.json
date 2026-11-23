@@ -385,7 +385,7 @@
       },
       {
         "className": "pro",
-        "copy": "May change its protected core. Reads a review before each change.",
+        "copy": "May change its protected core. Asks for a review before committing new code.",
         "label": "Pro",
         "tone": "Power",
         "value": "pro"

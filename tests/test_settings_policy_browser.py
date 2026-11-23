@@ -133,7 +133,7 @@ def test_cyber_pro_says_what_it_does_to_reviews_and_lowering_it_asks_nothing(dir
                 assert access.locator('[data-setting-value="cyber_pro"] .settings-choice-note').inner_text() == \
                     "Full say over itself and this computer. Asks for reviews when it judges."
                 assert access.locator('[data-setting-value="pro"] .settings-choice-note').inner_text() == \
-                    "May change its protected core. Reads a review before each change."
+                    "May change its protected core. Asks for a review before committing new code."
                 assert "nothing blocks" not in page.locator('[data-settings-page="permissions"]').inner_text()
                 access.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"settings-cyber-{theme}-{width}.png"))

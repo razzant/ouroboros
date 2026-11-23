@@ -207,7 +207,7 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
 _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
     ("light", "Light", "Safest", "light", "Works on your projects. Never changes its own code."),
     ("advanced", "Advanced", "Default", "advanced", "May grow its own skills and outer layer."),
-    ("pro", "Pro", "Power", "pro", "May change its protected core. Reads a review before each change."),
+    ("pro", "Pro", "Power", "pro", "May change its protected core. Asks for a review before committing new code."),
     ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Asks for reviews when it judges."),
 ))
 
