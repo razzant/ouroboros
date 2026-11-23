@@ -4,7 +4,7 @@
 ``context-gate.yml`` selects request/tool/prompt/book changes and their test owners.
 No model calls or provider secrets are needed. TESTS accepts modules and node IDs:
 provider refusals, serving windows, authority histories, whole-input and recovery
-contracts, helper/reviewer budgets, first contact, and generated inventories.
+contracts, helper/reviewer budgets, first contact, and inventory source checks.
 The CLI acquires ``safe_test`` before importing pytest; ``ci_retry`` owns retries and
 outcome evidence. CI uses ``--workers 2`` (xdist loadgroup) inside its 12-minute job;
 local callers may select 0–6 workers and a fresh ``--evidence-dir`` outside Git.

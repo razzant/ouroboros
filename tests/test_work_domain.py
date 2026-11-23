@@ -120,6 +120,86 @@ def test_the_service_performs_no_pathname_effect_on_a_work_tree(env, monkeypatch
     assert attached(docker, "git") and attached(docker, "mv -f") and not docker.records()
 
 
+@pytest.mark.parametrize("managed", [False, pytest.param(True, marks=posix_host)], ids=["native", "managed"])
+def test_architecture_impact_reads_only_admitted_work_book_sources(env, monkeypatch, managed):
+    from ouroboros.tools import core_file_tools
+
+    if managed:
+        _managed(env, monkeypatch)
+    else:
+        disable_safety(monkeypatch)
+    repo = env.work / "project"
+    entry = repo / "docs/ARCHITECTURE.md"
+    chapter = repo / "docs/architecture/contracts.md"
+    chapter.parent.mkdir(parents=True)
+    entry.write_text(
+        "# Architecture\n\nProject source.\n\n## Chapters\n\n- [Contracts](architecture/contracts.md)\n", encoding="utf-8")
+    contents = (
+        "# Contracts\n\nPurpose.\n\n### 11.1 What is frozen\n\n"
+        "A prose owner: `ouroboros/gateway/contracts.py`.\n\n"
+        "| Contract | File | Anchored by |\n|---|---|---|\n"
+        "| `Synthetic` | `ouroboros/gateway/contracts.py` | `tests/test_contracts.py::test_one` |\n"
+    )
+    chapter.write_text(contents, encoding="utf-8")
+    registry = _registry(env, repo)
+    options = {"root": "active_workspace", "op": "architecture",
+               "query": "protected_contracts_affected ouroboros/gateway/contracts.py tests/test_contracts.py"}
+    observation = (service_effects_on(env.work, allowed_opens=(str(env.work),)) if managed
+                   else contextlib.nullcontext([]))
+    with observation as seen:
+        out = registry.execute("query_code", options)
+    assert seen == [], seen
+    assert "3 frozen-contract row(s) affected" in out, out
+    assert "ouroboros/gateway/contracts.py -> frozen-contract" in out
+    assert "`browser-envelope ABI` (owner: ouroboros/gateway/contracts.py)" in out
+    assert "`Synthetic` (anchor: tests/test_contracts.py)" in out
+
+    admit, read = core_file_tools.read_admission, work_domain.read_bytes
+    consulted, opened = [], []
+
+    def refuse_chapter(ctx, root, path, **kwargs):
+        consulted.append(path)
+        if path == chapter.relative_to(repo).as_posix():
+            return root, None, "synthetic read refusal"
+        return admit(ctx, root, path, **kwargs)
+
+    def observe_read(path, **kwargs):
+        if path in (entry, chapter):
+            opened.append((path, kwargs.get("strict")))
+        return read(path, **kwargs)
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(core_file_tools, "read_admission", refuse_chapter)
+        blocked.setattr(work_domain, "read_bytes", observe_read)
+        refused = registry.execute("query_code", options)
+    assert consulted == [entry.relative_to(repo).as_posix(), chapter.relative_to(repo).as_posix()]
+    assert opened == [(entry, True)]
+    assert "frozen-contract coverage unavailable" in refused and "contracts.md" in refused
+
+    if managed:
+        confined = work_domain._confined_parent
+
+        def unavailable_chapter(spelling):
+            if spelling == str(chapter):
+                raise PermissionError(errno.EACCES, "synthetic confined read refusal", spelling)
+            return confined(spelling)
+
+        with monkeypatch.context() as blocked:
+            blocked.setattr(work_domain, "_confined_parent", unavailable_chapter)
+            blocked.setattr(work_domain, "read_in_work", lambda *a, **kw: pytest.fail("must not retry this read"))
+            confined_refusal = registry.execute("query_code", options)
+        assert "frozen-contract coverage unavailable" in confined_refusal and "contracts.md" in confined_refusal
+        assert "frozen-contract row(s) affected" not in confined_refusal
+
+    chapter.unlink()
+    unavailable = registry.execute("query_code", options)
+    assert "frozen-contract coverage unavailable" in unavailable and "contracts.md" in unavailable
+    chapter.write_text(contents + "| `Incomplete` | `ouroboros/gateway/contracts.py` |\n", encoding="utf-8")
+    partial = registry.execute("query_code", options)
+    assert "incomplete frozen-contract table row" in partial
+    assert "frozen-contract row(s) affected" not in refused + unavailable + partial
+
+
 @posix_host
 def test_a_work_root_swapped_for_a_link_reaches_nothing_of_the_service(env, monkeypatch):
     """The employee makes the workspace's folder a link to a service folder after the task began. Which domain an

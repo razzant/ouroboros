@@ -5,16 +5,16 @@ Five pure queries whose consumer #1 is Ouroboros itself (self-evolution):
 - ``owner_of(path|symbol)`` — the domain owner per ``ouroboros/domains.toml``;
 - ``domain_dependencies(d)`` — the manifest-baseline direction edges of one domain;
 - ``facade_consumers(sym)`` — who imports through a compatibility facade (the
-  ``noqa: F401`` re-export convention the facade inventory documents);
+  source's ``noqa: F401`` re-export convention);
 - ``persistence_entities_written_by(sym)`` — the durable entities a writer owns
   per ``docs/PERSISTENCE.md``;
 - ``protected_contracts_affected(diff)`` — the protected surfaces
   (``runtime_mode_policy`` inventories) and frozen-contract rows
-  (``docs/inventories/FROZEN_CONTRACTS_INVENTORY.md``) a change set touches.
+  (ARCHITECTURE §11.1) a change set touches.
 
-Everything here is a pure function over data the repository already pins as
-SSOT — the domain manifest, the generated inventories, and the protected-path
-inventories. No LLM, no caches, no ledgers: every reader takes an explicit
+Everything here derives from the repository's sources: the domain manifest,
+the books, local syntax and the protected-path declarations. No LLM or
+persisted query results: every reader takes an explicit
 ``repo_root``, reads the carrier files fresh, and raises a teaching
 ``ValueError`` when a carrier is missing or an argument is malformed. The
 model consumes these through the existing ``query_code`` tool
@@ -31,10 +31,11 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple
 
 from ouroboros import work_domain
 from ouroboros.code_intelligence import CodeInventory, _resolve_relative_import
+from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book, read_book_section
 
 DOMAIN_MANIFEST_RELPATH = "ouroboros/domains.toml"
 PERSISTENCE_DOC_RELPATH = "docs/PERSISTENCE.md"
-FROZEN_INVENTORY_RELPATH = "docs/inventories/FROZEN_CONTRACTS_INVENTORY.md"
+FROZEN_SECTION = "11.1 What is frozen"
 
 ARCHITECTURE_LIMIT_MARKER = "architecture_coverage_limit:"
 
@@ -46,10 +47,11 @@ ARCHITECTURE_FACTS = (
     "protected_contracts_affected",
 )
 
-# The facade convention the generated facade inventory documents: a top-level
-# ``from <module> import name`` carrying the F401-noqa marker is a re-export.
+# A top-level ``from <module> import name`` carrying the F401-noqa marker is a re-export.
 _NOQA_F401 = re.compile(r"#\s*noqa(?::[^#]*\bF401\b|\s*$|:\s*$)")
 _BACKTICK_SPAN = re.compile(r"`([^`]+)`")
+_PATH_SPAN = re.compile(
+    r"^(?:ouroboros|supervisor|web|tests|scripts|docs|prompts|skills)/[\w./-]+\.\w+")
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DIFF_GIT = re.compile(r"^diff --git a/(\S+) b/(\S+)$", re.MULTILINE)
 _DIFF_FILE = re.compile(r"^(?:\+\+\+|---) (?:[ab]/)?(\S+)", re.MULTILINE)
@@ -80,7 +82,7 @@ def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
         raise ValueError(
             f"architecture carrier {relpath} is unreadable under {repo_root} "
             f"({exc}); architecture facts are defined over an Ouroboros "
-            "checkout that carries its pinned inventories"
+            "checkout that carries its architecture sources"
         ) from exc
 
 
@@ -293,21 +295,16 @@ def reexported_names(tree: ast.Module, lines: List[str], path: str) -> Iterator[
                 yield from ((base, alias) for alias in node.names)
 
 
-def facade_reexports(
-    repo_root: pathlib.Path,
-    manifest: DomainManifest | None = None,
-) -> Dict[str, Dict[str, str]]:
-    """``facade path -> {exported name: leaf path}`` over the manifest population.
+def scan_facade_bindings(
+    repo_root: pathlib.Path, modules: Dict[str, str], *, strict_syntax: bool = False,
+) -> Iterator[Tuple[str, str, str]]:
+    """Yield every ``(facade, name, leaf)`` before collapsing shadowed names.
 
-    Same convention the generated facade inventory pins: a top-level
-    ``from <population module> import ...`` statement carrying the
-    ``noqa: F401`` marker declares re-export bindings.
+    Verification requires valid syntax; the live lookup skips incomplete files.
     """
     root = pathlib.Path(repo_root)
-    manifest = manifest or load_domain_manifest(root)
-    resolve = _population_resolver(manifest.modules)
-    facades: Dict[str, Dict[str, str]] = {}
-    for path in sorted(manifest.modules):
+    resolve = _population_resolver(modules)
+    for path in sorted(modules):
         source_path = root / path
         if not work_domain.is_file(source_path):
             continue
@@ -316,6 +313,8 @@ def facade_reexports(
         try:
             tree = ast.parse(source, filename=path)
         except SyntaxError:
+            if strict_syntax:
+                raise
             continue
         for base, alias in reexported_names(tree, lines, path):
             if alias.name == "*":
@@ -324,8 +323,17 @@ def facade_reexports(
                 leaf = resolve(f"{base}.{alias.name}") or resolve(base)
             if leaf is None or leaf == path:
                 continue
-            exported = alias.asname or alias.name
-            facades.setdefault(path, {})[exported] = leaf
+            yield path, alias.asname or alias.name, leaf
+
+
+def facade_reexports(
+    repo_root: pathlib.Path, manifest: DomainManifest | None = None,
+) -> Dict[str, Dict[str, str]]:
+    """``facade path -> {exported name: leaf path}`` over the manifest population."""
+    manifest = manifest or load_domain_manifest(repo_root)
+    facades: Dict[str, Dict[str, str]] = {}
+    for path, exported, leaf in scan_facade_bindings(repo_root, manifest.modules):
+        facades.setdefault(path, {})[exported] = leaf
     return facades
 
 
@@ -358,7 +366,7 @@ def facade_consumers(
         if not targets:
             raise ValueError(
                 f"{text} is not a facade module (no top-level noqa:F401 re-exports); "
-                "see docs/inventories/FACADE_INVENTORY.md for the facade list"
+                "list facades with python scripts/regenerate_inventories.py --show facades"
             )
     else:
         dotted_map = {_module_dotted(path): path for path in reexports}
@@ -503,32 +511,68 @@ class ProtectedImpact:
     contracts: Tuple[ContractImpact, ...]  # frozen-contract rows affected
 
 
-def _frozen_contract_rows(repo_root: pathlib.Path) -> List[Tuple[str, str, str]]:
-    """``(label, file, role)`` triples of the generated frozen-contracts inventory."""
-    text = _read_carrier(repo_root, FROZEN_INVENTORY_RELPATH)
-    triples: List[Tuple[str, str, str]] = []
-    for line in text.splitlines():
-        if line.startswith("- browser-envelope prose owners:"):
-            for span in _BACKTICK_SPAN.findall(line):
-                triples.append(("browser-envelope ABI", span, "owner"))
+@dataclass(frozen=True)
+class FrozenContractRow:
+    label: str
+    owners: tuple[str, ...]
+    anchors: tuple[str, ...]
+
+
+def _frozen_paths(text: str) -> tuple[str, ...]:
+    spans = (span.replace("\\|", "|") for span in _BACKTICK_SPAN.findall(text))
+    return tuple(span for span in spans if _PATH_SPAN.match(span.split("::", 1)[0]))
+
+
+def parse_frozen_rows(section: str) -> tuple[tuple[str, ...], list[FrozenContractRow]]:
+    """The §11.1 declaration: prose owners before the table, then its rows."""
+    prose, rows = [], []
+    in_table = found_table = False
+    for line in section.splitlines():
+        if line.startswith("|"):
+            cells = _split_md_row(line)
+            if [cell.lower() for cell in cells] == ["contract", "file", "anchored by"]:
+                if found_table:
+                    raise ValueError("§11.1 declares multiple frozen-contract tables")
+                in_table = found_table = True
+                continue
+            if not in_table or set(line.replace("|", "").strip()) <= {"-", " ", ":"}:
+                continue
+            if len(cells) != 3 or not all(cells):
+                raise ValueError("§11.1 has an incomplete frozen-contract table row")
+            label, owners, anchors = cells
+            match = _BACKTICK_SPAN.search(label)
+            label = match.group(1) if match else label.split(" — ", 1)[0].split(".", 1)[0].strip()[:80]
+            rows.append(FrozenContractRow(label.replace("\\|", "|"), _frozen_paths(owners), _frozen_paths(anchors)))
             continue
-        if not line.startswith("|"):
-            continue
-        cells = _split_md_row(line)
-        if len(cells) < 4 or not cells[0].isdigit():
-            continue
-        label_match = _BACKTICK_SPAN.search(cells[1])
-        label = (label_match.group(1) if label_match else cells[1]).replace("\\|", "|")
-        for cell, role in ((cells[2], "owner"), (cells[3], "anchor")):
-            for span in _BACKTICK_SPAN.findall(cell):
-                file_part = span.replace("\\|", "|").split("::", 1)[0].split(" ", 1)[0]
-                if file_part:
-                    triples.append((label, file_part, role))
-    if not triples:
+        if not found_table:
+            prose.append(line)
+        in_table = False
+    if not rows:
+        raise ValueError("§11.1 carries no frozen-contract table rows")
+    return tuple(sorted(set(_frozen_paths("\n".join(prose))))), rows
+
+
+def _frozen_contract_rows(
+    repo_root: pathlib.Path, *, read_book_bytes: Callable[[str], bytes] | None = None,
+) -> List[Tuple[str, str, str]]:
+    """Read the admitted subject's book as data, not a script in that checkout."""
+    reader = read_book_bytes if read_book_bytes is not None else lambda name: work_domain.read_bytes(repo_root / name)
+    try:
+        book = load_reference_book(repo_root, "architecture", reader)
+        section = read_book_section(book, FROZEN_SECTION)
+        prose_owners, rows = parse_frozen_rows(section.text)
+    except work_domain.WorkDomainUnsettled:
+        raise
+    except (OSError, ValueError) as exc:
         raise ValueError(
-            f"{FROZEN_INVENTORY_RELPATH} carries no contract rows; regenerate the "
-            "inventory (scripts/regenerate_inventories.py) before asking for impact"
-        )
+            f"frozen-contract coverage unavailable: {BOOK_ENTRYPOINTS['architecture']} §11.1: {exc}"
+        ) from exc
+    triples = [("browser-envelope ABI", path, "owner") for path in prose_owners]
+    for row in rows:
+        for paths, role in ((row.owners, "owner"), (row.anchors, "anchor")):
+            triples.extend((row.label, span.split("::", 1)[0].split(" ", 1)[0], role) for span in paths)
+    if not triples:
+        raise ValueError("frozen-contract coverage unavailable: §11.1 names no contract paths")
     return triples
 
 
@@ -557,14 +601,15 @@ def paths_from_diff(diff: str | Iterable[str]) -> Tuple[str, ...]:
 
 
 def protected_contracts_affected(
-    repo_root: pathlib.Path, diff: str | Iterable[str],
+    repo_root: pathlib.Path, diff: str | Iterable[str], *,
+    read_book_bytes: Callable[[str], bytes] | None = None,
 ) -> ProtectedImpact:
     """Protected surfaces and frozen contracts a change set touches.
 
     ``diff`` is a unified diff text or an iterable of changed repo-relative
     paths. Protected categories come from the ``runtime_mode_policy``
     inventories (safety-critical / frozen-contract / release-invariant); the
-    contract rows come from the generated frozen-contracts inventory — a
+    contract rows come from ARCHITECTURE §11.1 — a
     changed path that is an owner or anchor file of a row names that contract.
     """
     from ouroboros.runtime_mode_policy import protected_paths_in
@@ -577,7 +622,7 @@ def protected_contracts_affected(
         )
     protected = tuple(protected_paths_in(paths))
     contracts: List[ContractImpact] = []
-    triples = _frozen_contract_rows(repo_root)
+    triples = _frozen_contract_rows(repo_root, read_book_bytes=read_book_bytes)
     for path in paths:
         for label, file_part, role in triples:
             if file_part == path:
@@ -595,6 +640,7 @@ def architecture_fact_rows(
     query: str,
     *,
     inventory: CodeInventory | Callable[[], CodeInventory] | None = None,
+    read_book_bytes: Callable[[str], bytes] | None = None,
 ) -> List[str]:
     """Render one architecture fact as compact tool rows.
 
@@ -657,7 +703,7 @@ def architecture_fact_rows(
             f"{row.entity} [{row.section}] writer: {row.writer_cell}"
             for row in writes
         ]
-    impact = protected_contracts_affected(root, arg)
+    impact = protected_contracts_affected(root, arg, read_book_bytes=read_book_bytes)
     rows = [
         f"{len(impact.paths)} changed path(s): {len(impact.protected)} protected, "
         f"{len(impact.contracts)} frozen-contract row(s) affected"
