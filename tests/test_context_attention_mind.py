@@ -170,8 +170,9 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
                                 tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
-                                reasoning_effort):
+                                reasoning_effort, tool_frames):
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
+            assert tool_frames is None  # no resident schemas: no route schema frame to price
             assert admitted is True  # a view under way is read at the line its own requests go out at
             assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,

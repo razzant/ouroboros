@@ -357,11 +357,14 @@ def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatc
         reprojection_input_tokens=None, estimated_input_tokens=initial.calibrated_tokens,
         capacity_deficit_tokens=0, route_fp="probe"))
     ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=plan.initial_mode,
-        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[],
+        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[], accumulated_usage={},
         messages=[initial.system_message(), {"role": "user", "content": "Continue."}],
         task_id="slack-probe", event_queue=None, drive_logs=tmp_path, round_idx=1)
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **kw: fit)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *a, **kw: None)
+    # The floor prices the candidate's refreshed facts row before it spends the slack; at this constant measure it is free.
+    monkeypatch.setattr("ouroboros.loop_messages.append_context_facts",
+                        lambda call, **_kw: call.messages.append({"role": "user", "content": "Facts."}) or True)
     lmc._apply_refusal_step(ctx, step, fit, target, 12_500)  # a known target holds the 12,500 slack
     hosts = ctx.context_fit_plan.projection(ctx.active_context_mode).memory_facts.get("host_sections_addressed", [])
     assert [row["section_id"] for row in hosts] == outlined

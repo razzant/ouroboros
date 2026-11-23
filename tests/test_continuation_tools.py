@@ -93,6 +93,13 @@ def restore(prepared):
     return state["tool_schemas"]
 
 
+def resume_on(monkeypatch, state, model):
+    """The resumed send's route: a legacy checkpoint follows Main, and restore prices the schema ceiling of the route
+    the next send takes (``owner_wait._continuation_fit_route``), so Main is this saved route too."""
+    state["route"]["active_model"] = model
+    monkeypatch.setenv("OUROBOROS_MODEL", model)
+
+
 @pytest.mark.parametrize("mode", ["max", "nano"])
 def test_a_list_saved_before_the_mcp_gateway_adopts_it_once_where_a_fresh_start_carries_it(tmp_path, monkeypatch, mode):
     """An intact prefix whose saved list predates call_mcp_tool is adopted once on resume when a fresh start in its
@@ -239,8 +246,7 @@ def test_history_check_is_after_the_route_ceiling(tmp_path, monkeypatch, enabled
         {"role": "assistant", "content": [{"type": "tool_use", "name": tail}]}])
     tools, _, messages, _, _, _ = prepared
     tools._ctx.active_model = "openai::unseen-model"
-    # Restore will restore this route too.
-    prepared[1]["route"]["active_model"] = tools._ctx.active_model
+    resume_on(monkeypatch, prepared[1], tools._ctx.active_model)  # restore resumes on this route too
     resident = restore(prepared)
     # A name this task's history already called is kept first within the ceiling (#2332), enabled or not:
     # the fitted set represents its history, so the current set is adopted.
@@ -254,7 +260,8 @@ def test_a_cold_rebuild_names_one_cut_once_in_the_history(tmp_path, monkeypatch)
     def rebuild(root, history):
         root.mkdir(exist_ok=True)
         prepared = prepare(root, monkeypatch, frozen=[_schema("old")], current=_catalog(130), history=history)
-        prepared[0]._ctx.active_model = prepared[1]["route"]["active_model"] = "openai::unseen-model"
+        prepared[0]._ctx.active_model = "openai::unseen-model"
+        resume_on(monkeypatch, prepared[1], "openai::unseen-model")
         restore(prepared)
         return [row.get("content") for row in prepared[2] if "accepts at most 128" in str(row.get("content"))]
 
@@ -279,7 +286,7 @@ def test_ceiling_keeps_enabled_or_legacy_resident_without_inventing_intent(tmp_p
     prepared = prepare(tmp_path, monkeypatch, frozen=frozen, current=catalog, loaded=[tail], legacy=legacy,
                        history=[{"role": "assistant", "tool_calls": [{"function": {"name": "enable_tools"}}]}])
     tools, state, _, _, enabled, _ = prepared
-    state["route"]["active_model"] = model
+    resume_on(monkeypatch, state, model)
     resident = restore(prepared)
     assert len(resident) == count and tail in _names(resident)
     assert tools._ctx._actor_loaded_tool_names is enabled
@@ -298,7 +305,7 @@ def test_a_ceiling_never_forgets_a_selection_across_cold_resumes(tmp_path, monke
     # Loaded on a roomy route; resumed on a route that carries 128 schemas at most.
     first = prepare(tmp_path, monkeypatch, frozen=catalog, current=current, loaded=extras, registry_type=OnDemand)
     tools, state, messages, _, enabled, _ = first
-    state["route"]["active_model"] = "openai::unseen-model"
+    resume_on(monkeypatch, state, "openai::unseen-model")
     resident = restore(first)
     assert len(resident) == 128 and chosen not in _names(resident)
     assert chosen in enabled and revoked not in enabled  # a ceiling keeps the choice; current policy drops a revoked tool
@@ -307,7 +314,7 @@ def test_a_ceiling_never_forgets_a_selection_across_cold_resumes(tmp_path, monke
     (tmp_path / "second").mkdir()
     second = prepare(tmp_path / "second", monkeypatch, frozen=resident, current=current,
                      loaded=saved["actor_loaded_tool_names"], registry_type=OnDemand)
-    second[1]["route"]["active_model"] = "anthropic::unseen"
+    resume_on(monkeypatch, second[1], "anthropic::unseen")
     names = _names(restore(second))
     assert chosen in names and revoked not in names
 

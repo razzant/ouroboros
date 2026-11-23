@@ -799,7 +799,10 @@ def test_pricing_view_does_not_survive_exact_budget_resume(tmp_path, monkeypatch
     assert len(sends) == 1
     assert sends[0]['plan'] == (small if decision == 'legacy' else wide)
     [sent] = sends
-    assert sent['mode'] == ('low' if decision in {'legacy', 'held_low', 'owner_low', 'smaller_resume'} else 'max')
+    # The smaller restored window governs; here it holds neither Low nor Nano, and the restore prices each mode's own
+    # permitted tool declarations, so Nano's smaller selected catalog is the last physical rescue (continuation_tools).
+    assert sent['mode'] == ('nano' if decision == 'smaller_resume' else
+                            'low' if decision in {'legacy', 'held_low', 'owner_low'} else 'max')
     assert (sent['effort'], sent['role'], sent['local'], sent['core']) == (
         'none' if decision == 'legacy' else 'high', 'main', False, old.core_sha256)
     assert sent['tool_evidence_preserved']
