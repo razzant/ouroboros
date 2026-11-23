@@ -1055,10 +1055,11 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     return _window(header, document, start, limit, lambda end: f"memory_read(node_id={node_id}{at}, start={end})")
 
 
-def _source_bytes(root: Path, ref: Any) -> Tuple[bytes, str]:
+def _source_bytes(ctx: Any, root: Path, ref: Any) -> Tuple[bytes, str]:
     """A retained source's exact bytes and its header facts; a chat row's address reads the context recorded
-    with that row (``chat_chain.recorded_context``), its provider thread whole."""
-    from ouroboros.artifacts import read_actor_source_bytes  # D15->D05 is lazy-only
+    with that row (``chat_chain.recorded_context``), its provider thread whole. Reads and quote checks
+    share source admission; a reference grants no rights."""
+    from ouroboros.tools.recent_tasks import read_scoped_actor_source  # D15->D05 is lazy-only
 
     if not isinstance(ref, dict):
         raise ValueError("source_ref is a retained source reference object")
@@ -1066,14 +1067,14 @@ def _source_bytes(root: Path, ref: Any) -> Tuple[bytes, str]:
         address, raw = chat_chain.recorded_context(root, ref)
         return raw, (f"[source {chat_chain.format_address(address)}; recorded with this chat row; {len(raw)} bytes; "
                      f"sha256 {hashlib.sha256(raw).hexdigest()[:12]}]")
-    raw = read_actor_source_bytes(root, str(ref.get("task_id") or ""), ref)
+    raw = read_scoped_actor_source(ctx, root, ref)
     location = f"; location {ref['location']}" if ref.get("location") else ""
     return raw, (f"[source {ref.get('path')}; task {ref.get('task_id')}; {len(raw)} bytes; "
                  f"sha256 {str(ref.get('sha256') or '')[:12]}{location}]")
 
 
-def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
-    raw, head = _source_bytes(root, ref)
+def _read_source(ctx: Any, root: Path, ref: Any, start: int, limit: int) -> str:
+    raw, head = _source_bytes(ctx, root, ref)
     return _window(head, raw.decode("utf-8", errors="replace"), start, limit,
                    lambda end: f"memory_read(source_ref=<same>, start={end})")
 
@@ -1307,6 +1308,8 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
         return _arg_error(ctx, "after_seq and start are non-negative integers")
     limit = tool_result_limit("memory_read")
+    from ouroboros.tools.recent_tasks import RetainedFocusForbidden  # D15->D05 is lazy-only
+
     try:
         root = _root(ctx)
         # A retained source is verified on read, and my human's words are read where they are, without the chronicle.
@@ -1316,7 +1319,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
                 "rows": rows, "story": story, "owner_words": owner_words, "source_ref": source_ref, "after_seq": after_seq,
                 "proposed_selection": proposed_selection, "revision": revision, "task_id": task_id, "period": period, **bounds})
         elif source_ref:
-            text = _read_source(root, source_ref, start, limit)
+            text = _read_source(ctx, root, source_ref, start, limit)
         elif owner_words:  # this work's set exactly as its reviewers and plan council read it (owner_words.work_words)
             from ouroboros.owner_words import work_words_text
 
@@ -1356,6 +1359,8 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         return _not_activated(ctx, exc)
     except chat_chain.RowAddressError as exc:
         return _arg_error(ctx, f"a row bound does not resolve: {exc.resolution.get('status')}")
+    except RetainedFocusForbidden as exc:
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=str(exc)))
     except ValueError as exc:
         return _arg_error(ctx, str(exc))
     except (OSError, TimeoutError) as exc:
@@ -1365,9 +1370,9 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
 
 # --- memory_mark ----------------------------------------------------------------------------------
 
-def _source_texts(root: Path, ref: Dict[str, Any]) -> List[str]:
+def _source_texts(ctx: Any, root: Path, ref: Dict[str, Any]) -> List[str]:
     """A retained source as text, plus every string inside it when it is JSON."""
-    text = _source_bytes(root, ref)[0].decode("utf-8", errors="replace")
+    text = _source_bytes(ctx, root, ref)[0].decode("utf-8", errors="replace")
     texts = [text]
     try:
         stack = [json.loads(text)]
@@ -1417,7 +1422,7 @@ def _mark_target(ctx: Any, root: Path, store: ChronicleStore, a: Dict[str, Any])
     ref = a["source_ref"]
     if not isinstance(ref, dict):
         raise ValueError("source_ref is a retained source reference object")
-    if quote and not any(quote in text for text in _source_texts(root, ref)):
+    if quote and not any(quote in text for text in _source_texts(ctx, root, ref)):
         return None, None, "quote_mismatch"
     return ref, None, ""
 
@@ -1447,6 +1452,8 @@ def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "",
                  source_ref: Any = None, quote: Optional[str] = None, room_id: Any = None, scope: str = "room",
                  mark_id: str = "", visibility: str = "", release_ids: Any = None, reason: str = "",
                  anchor: Any = None) -> str:
+    from ouroboros.tools.recent_tasks import RetainedFocusForbidden  # D15->D05 is lazy-only
+
     try:
         root = _root(ctx)
         store, author = _activated(root), focus_signature(ctx)
@@ -1474,6 +1481,8 @@ def _memory_mark(ctx: Any, text: str = "", node_id: str = "", address: str = "",
                                 scope=str(scope or "room"), quote=quote, anchor=anchor)
     except _NotActivated as exc:
         return _not_activated(ctx, exc)
+    except RetainedFocusForbidden as exc:
+        return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=str(exc)))
     except ValueError as exc:
         return _arg_error(ctx, str(exc))
     except (OSError, TimeoutError) as exc:

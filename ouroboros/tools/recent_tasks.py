@@ -15,7 +15,6 @@ from ouroboros.task_carrier import execution_kind
 from ouroboros.task_status import SETTLED_STATUSES, effective_task_result
 from ouroboros.dialogue_provenance import (
     PRESENCE_OWN_WORK_SCOPE,
-    is_presence_task,
     presence_caller_binding,
     presence_effective_related,
     presence_provenance_from_task,
@@ -525,12 +524,93 @@ def recent_tasks_page(
 
 
 def _restricted_actor(ctx: ToolContext) -> bool:
-    """Children and Presence turns, or work acting for a binding, hold no live cross-focus catalogue."""
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    return bool(str(metadata.get("parent_task_id") or "").strip()
-            or str(metadata.get("delegation_role") or "") == "subagent"
-            or is_presence_task({"metadata": metadata}) or presence_caller_binding(ctx) is not None)
+    """Children and Presence actors hold no cross-focus catalogue."""
+    from ouroboros.tool_access_roots import scoped_read_actor
+
+    return scoped_read_actor(ctx) in {"child", "place", "unverified_place"}
+
+
+_FOCUS_REFUSAL = ("⚠️ TOOL_FORBIDDEN (retained focus source): restricted actors have no cross-focus "
+                  "catalogue; focus/review source selectors are not available to them; a confirmed "
+                  "place's own focus stays with its conversation")
+
+
+def _focus_artifact_homes(target: pathlib.Path, roots, category: pathlib.Path):
+    """Expected placements from the producer's layout and the addressed task component."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.headless import ARTIFACTS_DIR, HEADLESS_TASKS_DIR, TASK_DRIVES_DIR
+    from ouroboros.task_results import validate_task_id
+
+    depth = len(category.parts)
+    offset = depth + 1 + len(ARTIFACTS_DIR.parts)  # the task id follows ARTIFACTS_DIR
+    if len(target.parents) <= offset:
+        return
+    base, drive = target.parents[depth], target.parents[offset]
+    try:
+        task_id = validate_task_id(base.name)
+    except ValueError:
+        return
+    for root in roots:
+        yield task_artifact_dir_path(root, task_id) / category
+        if drive.name:
+            yield task_artifact_dir_path(root / TASK_DRIVES_DIR / drive.name, task_id) / category
+        if drive.parent.name:
+            yield task_artifact_dir_path(root / HEADLESS_TASKS_DIR / drive.parent.name / "data", task_id) / category
+
+
+def retained_focus_path_refusal(ctx: ToolContext, target: pathlib.Path, *, data_roots=None,
+                                artifact_base: pathlib.Path | None = None) -> str:
+    """The catalogue's rule at the physical artifact placement, not on a similar name or digest."""
+    from ouroboros.confined_files import same_store_object
+    from ouroboros.task_finalization import FOCUS_SOURCE_CATEGORY_DIR, FOCUS_SOURCE_NAME_PREFIX
+
+    if not target.name.casefold().startswith(FOCUS_SOURCE_NAME_PREFIX) or not _restricted_actor(ctx):
+        return ""
+    category = pathlib.Path(FOCUS_SOURCE_CATEGORY_DIR)
+    if artifact_base is None:
+        from ouroboros.tools.core_secret_paths import runtime_data_roots
+
+        roots = runtime_data_roots(ctx) if data_roots is None else data_roots
+        homes = _focus_artifact_homes(target, roots, category)
+    else:
+        homes = (artifact_base / category,)
+    try:
+        return _FOCUS_REFUSAL if any(same_store_object(target.parent, home, strict=True) for home in homes) else ""
+    except OSError:
+        return "⚠️ TOOL_FORBIDDEN (retained focus source): cannot verify the source directory identity"
+
+
+def retained_focus_source_refusal(ctx: ToolContext, drive_root: Any, ref: Any) -> str:
+    """Guard a retained source reference by the same original placement rule before dispatching its loader."""
+    if not isinstance(ref, dict) or ref.get("kind") != "task_source" or ref.get("root") != "artifact_store":
+        return ""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.confined_files import relative_parts
+
+    parts = relative_parts(ref.get("path"))
+    if not parts:
+        return ""
+    base = task_artifact_dir_path(drive_root, str(ref.get("task_id") or ""), create=False).resolve(strict=False)
+    target = base.joinpath(*parts).resolve(strict=False)
+    return retained_focus_path_refusal(ctx, target, artifact_base=base)
+
+
+class RetainedFocusForbidden(Exception):
+    """The source's role or identity check refused before its bytes were read."""
+
+
+def read_scoped_actor_source(ctx: ToolContext, drive_root: Any, ref: dict) -> bytes:
+    """Admit both the reference and the actual placement, including retained fallback."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    if refusal := retained_focus_source_refusal(ctx, drive_root, ref):
+        raise RetainedFocusForbidden(refusal)
+
+    def admit_target(base: pathlib.Path, target: pathlib.Path) -> None:
+        if refusal := retained_focus_path_refusal(ctx, target, artifact_base=base):
+            raise RetainedFocusForbidden(refusal)
+
+    return read_actor_source_bytes(drive_root, str(ref.get("task_id") or ""), ref, admit_target=admit_target)
 
 
 @completed_local_read

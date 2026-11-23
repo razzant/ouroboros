@@ -356,7 +356,8 @@ Engine documents use `attachment_paths` (§3a).
 
 `delegate_readonly_inputs` resolves each reader's own dispatch address; a shared
 physical source does not carry the caller's logical grant into the receiver.
-Both must admit read, copy and hash. `delegate_git_range` also checks fixed VCS
+Both must admit read, copy and hash, including the receiver's project-journal scope
+and the retained focus-source catalogue's role restriction. `delegate_git_range` also checks fixed VCS
 scopes and introspection of exact historical entries. A receiver-relative protected
 directory still covers its historical descendants when absent from the worktree.
 Only a scheduled child's own read of each exact copy address, a fixed file binding included, is
@@ -385,6 +386,7 @@ The selecting task's artifact store retains verified bytes under
 with an `inputs.json` source map. A colliding occupied address refuses. Long paths
 can still fail on Windows. Source handles survive drive retirement, stay out of
 deliverables and automatic lineage walks, and can themselves be selected explicitly.
+An admitted source handle in a task artifact store keeps its address hash through the copy check.
 One receipt row names each retained file, its full hash, size, source and local path.
 A range has one row per product. Prepared is not read. Native `read_file` reads
 and hashes the entire file per page; smaller pages bound delivery, not file I/O.
