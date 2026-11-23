@@ -36,7 +36,8 @@ VERSION = 6
 LIST_VERSION = 9
 ORIGIN_VERSION = 10
 CHAT_VERSION = 11
-VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION)  # each schema step that adds these columns
+WORKSPACE_VERSION = 13
+VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION, WORKSPACE_VERSION)
 JOB = "hot_facts"
 TASK_COLUMNS = {
     "owner_pause_state": "TEXT", "owner_pause_fence_id": "TEXT", "owner_pause_facts": "TEXT",
@@ -53,13 +54,21 @@ SELECTION_COLUMNS = ("list_stable", "origin", "chat_id")  # selection, discovery
 CUSTODY_COLUMNS = {
     "root_task_id": "TEXT", "billing_group_id": "TEXT", "output_unread": "INTEGER",
     "payload_held": "INTEGER", "facts_derived": "INTEGER", "write_seq": "INTEGER NOT NULL DEFAULT 0",
+    "registration_workspace": "TEXT",
 }
 # An older body's INDEXED BY probes name this predicate on a shared store: a later column keeps its own index.
 OWN_UNDERIVED = {"origin": "tasks_underived_origin", "chat_id": "tasks_underived_chat"}
 TASK_UNDERIVED = " OR ".join(f"{name} IS NULL" for name in (*TASK_COLUMNS, "root_task_id") if name not in OWN_UNDERIVED)
 CUSTODY_UNDERIVED = "facts_derived IS NULL"
+CUSTODY_WORKSPACE_UNDERIVED = "registration_workspace IS NULL"
 REQUEST_SETS = ("custody_open", "custody_refused")
 REQUEST_UNDERIVED = "set_name IN ('custody_open','custody_refused') AND request_root_task_id IS NULL"
+# Include legacy inline and explicit-root facts. Unprojected CAS bodies are read
+# only to resolve potential open uses, not across the closed history.
+_WORKSPACE_SQL = ("CASE WHEN json_valid({body}) THEN COALESCE(json_extract({body}, '$.request_event.registration_workspace'), "
+                  "NULLIF(json_extract({body}, '$.execution_root'), ''), NULLIF(json_extract({body}, '$.request_event.execution_root'), ''), "
+                  "json_extract({body}, '$.request_event.request.execution.workspaceRoot')) END")
+CUSTODY_WORKSPACE = _WORKSPACE_SQL.format(body="facts")
 INDEXES = (
     f"CREATE INDEX IF NOT EXISTS tasks_underived_hot ON tasks(task_id) WHERE {TASK_UNDERIVED}",
     "CREATE INDEX IF NOT EXISTS tasks_list_stable ON tasks(list_stable, status, ts, task_id)",
@@ -74,6 +83,8 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS custody_unread ON custody_runs(output_unread, run_id)",
     "CREATE INDEX IF NOT EXISTS custody_payload ON custody_runs(payload_held, run_id)",
     f"CREATE INDEX IF NOT EXISTS custody_underived_hot ON custody_runs(run_id) WHERE {CUSTODY_UNDERIVED}",
+    "CREATE INDEX IF NOT EXISTS custody_workspace ON custody_runs(registration_workspace) WHERE registration_workspace<>''",
+    f"CREATE INDEX IF NOT EXISTS custody_workspace_underived ON custody_runs(run_id) WHERE {CUSTODY_WORKSPACE_UNDERIVED}",
     "CREATE INDEX IF NOT EXISTS custody_request_root ON obligations(set_name,request_root_task_id,id) "
     "WHERE set_name IN ('custody_open','custody_refused')",
     f"CREATE INDEX IF NOT EXISTS custody_request_underived ON obligations(set_name,id) WHERE {REQUEST_UNDERIVED}",
@@ -84,6 +95,11 @@ INVALIDATE_CUSTODY = """CREATE TRIGGER IF NOT EXISTS custody_invalidate_hot
 AFTER UPDATE OF facts ON custody_runs WHEN NEW.write_seq=OLD.write_seq
 BEGIN UPDATE custody_runs SET facts_derived=NULL, root_task_id=NULL, billing_group_id=NULL,
 output_unread=NULL, payload_held=NULL, write_seq=OLD.write_seq+1 WHERE run_id=NEW.run_id; END"""
+# Older writers do not write the workspace column. Only a changed address invalidates it.
+INVALIDATE_WORKSPACE = f"""CREATE TRIGGER IF NOT EXISTS custody_invalidate_workspace AFTER UPDATE OF facts ON custody_runs
+WHEN NEW.registration_workspace IS NOT NULL
+ AND json_valid(NEW.facts) AND NEW.registration_workspace<>COALESCE(({_WORKSPACE_SQL.format(body='NEW.facts')}), '')
+BEGIN UPDATE custody_runs SET registration_workspace=NULL WHERE run_id=NEW.run_id; END"""
 INVALIDATE_REQUEST = """CREATE TRIGGER IF NOT EXISTS custody_request_invalidate_hot
 AFTER UPDATE OF facts ON obligations WHEN NEW.set_name IN ('custody_open','custody_refused')
 BEGIN UPDATE obligations SET request_root_task_id=NULL WHERE set_name=NEW.set_name AND id=NEW.id; END"""
@@ -91,7 +107,7 @@ SCHEMA = ";\n".join([
     *(f"ALTER TABLE {table} ADD COLUMN {name} {kind}" for table, columns in
       (("tasks", TASK_COLUMNS), ("custody_runs", CUSTODY_COLUMNS)) for name, kind in columns.items()),
     "ALTER TABLE obligations ADD COLUMN request_root_task_id TEXT",
-    *INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST,
+    *INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST, INVALIDATE_WORKSPACE,
 ]) + ";\n"
 
 
@@ -106,7 +122,7 @@ def upgrade(txn) -> None:
         txn.conn.execute("ALTER TABLE obligations ADD COLUMN request_root_task_id TEXT")
     # Schema 9 extends the underived predicate; replace its schema-6 definition.
     txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_hot")
-    for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST):
+    for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST, INVALIDATE_WORKSPACE):
         txn.conn.execute(sql)
     owed = not _settled(txn, {})  # a fresh store has nothing to classify
     txn.set_meta("job:" + JOB, {"state": "pending" if owed else "done", "cursor": None, "done": 0, "total": None})
@@ -117,7 +133,8 @@ def upgrade(txn) -> None:
 _FAMILIES = {
     "tasks": ("tasks", "task_id", ((TASK_UNDERIVED, "tasks_underived_hot"),
                                    *((f"{name} IS NULL", index) for name, index in OWN_UNDERIVED.items())), "write_seq"),
-    "custody_runs": ("custody_runs", "run_id", ((CUSTODY_UNDERIVED, "custody_underived_hot"),), "write_seq"),
+    "custody_runs": ("custody_runs", "run_id", ((CUSTODY_UNDERIVED, "custody_underived_hot"),
+                                               (CUSTODY_WORKSPACE_UNDERIVED, "custody_workspace_underived")), "write_seq"),
     **{name: ("obligations", "id", ((f"{REQUEST_UNDERIVED} AND set_name='{name}'", "custody_request_underived"),),
               "facts") for name in REQUEST_SETS},
 }
@@ -263,10 +280,17 @@ def custody_columns(facts: dict) -> dict:
         isinstance(settled, numeric) and settled == 1 and isinstance(disposed, str) and disposed)
     group = facts.get("billing_group")
     group_id = group.get("billing_group_id") if isinstance(group, dict) else None
+    request = facts.get("request_event") or {}
+    body = request.get("request") if isinstance(request, dict) else None
+    execution = body.get("execution") if isinstance(body, dict) else None
+    captured = request.get("registration_workspace") if isinstance(request, dict) else None
+    workspace = captured if captured is not None else (facts.get("execution_root")
+        or (request.get("execution_root") if isinstance(request, dict) else None)
+        or (execution.get("workspaceRoot") if isinstance(execution, dict) else None))
     return {"root_task_id": facts.get("root_task_id") if isinstance(facts.get("root_task_id"), str) else None,
             "billing_group_id": str(group_id) if group_id is not None else None,
             "output_unread": int(not ordinary or unread), "payload_held": int(not ordinary or payload),
-            "facts_derived": 1}
+            "registration_workspace": workspace if isinstance(workspace, str) else "", "facts_derived": 1}
 
 
 def request_root(facts: dict) -> str:

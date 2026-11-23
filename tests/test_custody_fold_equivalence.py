@@ -1,9 +1,11 @@
 """CUT1 proof: compare the live row reducer with the import fold on the same chain."""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import sqlite3
+
+import pytest
 
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_custody_current as current
@@ -47,7 +49,20 @@ def _chain():
     add(custody.START_REQUESTED, invocation_id="inv-c", task_id="t3", root_task_id="t1")
     add(custody.STARTED, run_id="d", task_id="t4", root_task_id="t1",
         project_id="project", project_owned=True, delegated=True)
-    add(custody.PROJECT_RETIRED, run_id="d", project_id="project")
+    origin = {"daemon_store_id": "store", "registration_store_id": "store", "registration_root": "/fixture/canonical"}
+    add(custody.STARTED, run_id="bound-run", task_id="t1", project_id="bound", project_owned=True,
+        daemon_store_id="store", project_resolution=origin)
+    add(custody.REGISTRATION_OWED, project_id="bound", daemon_store_id="store",
+        registration_store_id="store", registration_root="/fixture/canonical")
+    add(custody.REGISTRATION_OWED, project_id="project", removal_lane="custody")
+    # A claim that found both duties alive: one use row under each, gone with its own duty ("project" closes below).
+    add(custody.START_REQUESTED, invocation_id="inv-link", task_id="t6", root_task_id="t6",
+        registration_links=[current.owed_key("project", {}), current.owed_key("bound", origin)])
+    add(custody.STARTED, run_id="link-run", invocation_id="inv-link", task_id="t6", root_task_id="t6")
+    add(current.REMOVAL_EVENT, project_id="project", daemon_store_id="elsewhere", removal_lane="historical")
+    add(custody.PROJECT_RETIRED, run_id="d", project_id="project", removal_lane="", removal_outcome="removed")
+    add(custody.PROJECT_RETIRED, project_id="project", removal_lane="")  # distinct event, already closed
+    add(custody.PROJECT_RETIRED, project_id="file-only", removal_lane="")  # no opening event in this chain
     add(custody.SETTLED, run_id="d", task_id="t4")
     add(custody.SETTLED, run_id="unknown-settled", task_id="t9")
     add(custody.CONTAINMENT_FAULT, run_id="unknown-held", task_id="t9")
@@ -68,14 +83,29 @@ def _reduced(rows):
     with closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
         conn.row_factory = sqlite3.Row
         conn.executescript(store._SCHEMA)
-        txn = store.Txn(conn)
+        closed, cleared = set(), {}
+
+        class LiveTxn(store.Txn):
+            def delete_row(self, set_name, identity):
+                if set_name == current.OWED:
+                    closed.add(identity)  # an addressed close also applies to an opening only an export retained
+                super().delete_row(set_name, identity)
+
+        txn = LiveTxn(conn)
         for row in custody._unique_rows(rows):
             current._reduce(txn, row, current._loaded(txn, row), {})
+            if row.get("removal_lane") == "":
+                group, store_id = current._removal_group(row["project_id"], row)
+                assert store_id not in (txn.get_row(current._REMOVALS, group) or {})
+                cleared.setdefault(group, set()).add(store_id)
         return _normalise({
             "runs": {row["run_id"]: (json.loads(row["facts"]), row["state"]) for row in
                      conn.execute("SELECT run_id, facts, state FROM custody_runs")},
             "open": txn.set_rows("custody_open"), "refused": txn.set_rows("custody_refused"),
-            "marks": txn.set_rows("custody_marks"),
+            "marks": txn.set_rows("custody_marks"), "registrations": txn.set_rows(current.OWED),
+            "registration_uses": txn.set_rows(current._USES),
+            "removals": txn.set_rows(current._REMOVALS), "removal_stamp": txn.meta(current._REMOVAL_STAMP) or "",
+            "registration_closures": sorted(closed), "lane_closures": {k: sorted(v) for k, v in cleared.items()},
             "invocations": txn.set_rows(inv.INVOCATIONS), "operations": txn.set_rows(inv.OPERATIONS),
             "event_ordinals": txn.set_rows(inv.EVENTS), "ordinal": txn.meta(inv.ORDINAL),
             "cost_revisions": {tid: facts["cost_revision"] for tid, facts in txn.set_rows("delegated_runs").items()
@@ -97,6 +127,14 @@ def test_required_chain_matches_at_every_prefix_and_at_import(tmp_path):
         assert live == folded, f"prefix {end}"
     assert set(live["open"]) == {"invocation:inv-c"}
     assert set(live["refused"]) == {"inv-b"}
+    [duty] = live["registrations"].values()
+    bound_key = current.owed_key("bound", {"daemon_store_id": "store"})
+    assert live["registration_uses"] == {f"{bound_key}\ninv-link": {"invocation_id": "inv-link"}}, (
+        "one row per linked START, never a rewritten list; the closed duty's row went with it")
+    origin = live["runs"]["bound-run"][0]["project_resolution"]
+    assert all(duty[key] == value for key, value in origin.items())
+    assert (duty["project_id"], duty["registration_store_id"], duty["registration_root"]) == (
+        "bound", "store", "/fixture/canonical")
     assert not live["runs"]["a"][0]["project_owned"]
     assert not live["runs"]["d"][0]["project_owned"]
     assert live["runs"]["a"][0]["collection_attempt"]["generation"] == "body"
@@ -118,6 +156,70 @@ def test_required_chain_matches_at_every_prefix_and_at_import(tmp_path):
         if not expected[tid].get("closed_runs") and not expected[tid].get("cost_revision"):
             del expected[tid]
     assert _normalise(receipts["delegated_runs"]) == expected
+
+
+def test_rebuild_and_discharge_keep_independent_store_intents(tmp_path):
+    engine, other = {"daemon_store_id": "s"}, {"daemon_store_id": "other"}
+    for source in (engine, other):
+        current.mark_removal(tmp_path, "p", source, "custody")
+    current.rebuild(tmp_path, replace=True)
+    assert current.removal_status(tmp_path, "p", engine)[0] == "custody"
+    assert current.removal_status(tmp_path, "p", {})[0] == "store_unproven"
+    assert custody.emit(tmp_path, custody.PROJECT_RETIRED, {"project_id": "p", **engine, "removal_lane": ""})
+    assert not current.removal_status(tmp_path, "p", engine)[0]
+    assert current.removal_status(tmp_path, "p", other)[0] == "custody"
+
+
+def test_rebuild_keeps_a_committed_removal_still_in_the_outbox(tmp_path, monkeypatch):
+    monkeypatch.setattr(current, "_append_durable", lambda *args: None)
+    current.mark_removal(tmp_path, "p", {"daemon_store_id": "s"}, "custody", creator={"task_id": "t"})
+    before = current.removal_status(tmp_path, "p", {"daemon_store_id": "s"})
+    assert before[0] == "custody" and before[1] and current.outbox_depth(tmp_path) == 1
+    current.rebuild(tmp_path, replace=True)
+    assert current.removal_status(tmp_path, "p", {"daemon_store_id": "s"}) == before
+    assert [row["project_id"] for row in current.owed_registrations(tmp_path)] == ["p"]
+
+
+@pytest.mark.parametrize("replace", [False, True], ids=["merge", "replace"])
+def test_rebuild_folds_a_parked_discharge_once_outside_the_writer(tmp_path, monkeypatch, replace):
+    engine = {"daemon_store_id": "s"}
+    current.mark_removal(tmp_path, "p", engine, "custody", creator={"task_id": "t"})
+    with store.open_store(tmp_path, write=False) as txn:
+        old_sets = {name: txn.set_rows(name) for name in current.REGISTRATION_SETS}
+        old_stamp = txn.meta(current._REMOVAL_STAMP)
+    monkeypatch.setattr(current, "_append_durable", lambda *args: None)
+    assert custody.emit(tmp_path, custody.PROJECT_RETIRED, {"project_id": "p", **engine, "removal_lane": ""})
+    after = current.removal_status(tmp_path, "p", engine)
+    assert after[0] == "" and after[1] and current.outbox_depth(tmp_path) == 1
+    # Leave the projection behind the committed evidence. The only proof of closure is still parked.
+    with store.open_store(tmp_path, write=True) as txn:
+        for name, rows in old_sets.items():
+            txn.replace_set(name, rows)
+        txn.set_meta(current._REMOVAL_STAMP, old_stamp)
+
+    opened, fold, calls = store.open_store, current.fold, []
+    writing = False
+
+    @contextmanager
+    def observed_store(*args, write, **kwargs):
+        nonlocal writing
+        with opened(*args, write=write, **kwargs) as txn:
+            writing = write
+            try:
+                yield txn
+            finally:
+                writing = False
+
+    def observed_fold(rows):
+        assert not writing
+        calls.append(True)
+        return fold(rows)
+
+    monkeypatch.setattr(store, "open_store", observed_store)
+    monkeypatch.setattr(current, "fold", observed_fold)
+    current.rebuild(tmp_path, replace=replace)
+    assert calls == [True]
+    assert current.removal_status(tmp_path, "p", engine) == after and current.owed_registrations(tmp_path) == []
 
 
 def test_start_after_repeated_refused_request_preserves_equivalence():

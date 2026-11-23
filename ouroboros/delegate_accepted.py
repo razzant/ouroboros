@@ -166,8 +166,17 @@ def bind_started(drive_root: Any, entry: Any, *, shape: Optional[Dict[str, Any]]
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.delegate_custody_current import run as current_run
+    from ouroboros.delegate_registration_policy import bind_registration_owner
 
     invocation_id, task_id = str(getattr(entry, "invocation_id", "") or ""), str(getattr(entry, "task_id", "") or "")
+    if invocation_id and not task_id and entry.project_id:
+        try:
+            prior = custody.invocation_record(drive_root, invocation_id) or {}
+            bind_registration_owner(drive_root, entry, prior)
+        except Exception:
+            log.warning("Cannot bind the registration of %s", invocation_id, exc_info=True)
+            custody.record_started(drive_root, entry, shape=shape, publish=False)
+            return Bound(entry, False, False)
     if not invocation_id or not task_id:
         return Bound(entry, bool(custody.record_started(drive_root, entry, shape=shape)), False)
     decided = False
@@ -201,6 +210,13 @@ def bind_started(drive_root: Any, entry: Any, *, shape: Optional[Dict[str, Any]]
             if existing is not None:  # the caller's object stays as it was: a copy takes the held run's name
                 entry = copy.copy(entry)
                 entry.run_id = existing.run_id
+                entry.daemon_store_id = existing.daemon_store_id or entry.daemon_store_id
+                entry.project_owned = existing.project_owned and entry.project_owned
+                entry.project_resolution = existing.project_resolution
+            if not entry.project_resolution:
+                decided = False  # an owner that cannot be bound publishes nothing; the invocation stays pending
+                bind_registration_owner(drive_root, entry, prior)
+                decided = True
             return Bound(entry, bool(custody.record_started(drive_root, entry, shape=shape)), existing is not None)
     except Exception:
         if decided:

@@ -238,31 +238,63 @@ def test_an_accepted_successor_whose_reply_was_lost_is_rejoined_with_the_same_ke
     assert a.engine.keys[replay_key] == "run-2" and len(_seat(a, record_id)["continuations"]) == 1
 
 
-@pytest.mark.parametrize("admitted,serving", [("store-a", "store-a"), ("store-a", "store-b"), ("", "store-b")])
+@pytest.mark.parametrize("admitted,serving,ephemeral", [
+    pytest.param("store-a", "store-a", True, id="store-a-store-a"),
+    pytest.param("store-a", "store-b", True, id="store-a-store-b"),
+    pytest.param("store-a", "store-b", False, id="store-a-store-b-registered"),
+    pytest.param("", "store-b", True, id="-store-b"),
+])
 def test_a_successor_is_sent_only_into_the_store_that_admitted_its_stopped_run(stopped_wave, monkeypatch,
-                                                                               admitted, serving):
-    """#2649: the successor's START names the store that admitted run-1 (its continueFrom target), and its first send
-    goes only there. A predecessor bound to no store keeps the earlier replay rule, explicitly."""
+                                                                               admitted, serving, ephemeral):
+    """Wrong store: no START or carried successor, even without registration. Return to A: same token, one POST.
+    A predecessor bound to no store keeps the earlier replay rule."""
+    from ouroboros import delegate_registration_policy
+
     a = stopped_wave
     a.engine.store = admitted
+    monkeypatch.setattr(delegate_registration_policy, "ephemeral_scope", lambda *_a, **_kw: ephemeral)
     monkeypatch.setattr(FakeGateway, "store_identity", admitted, raising=False)
+    looked_up = []
+
+    def lookup(self, _request, *, idempotency_key):
+        looked_up.append((self.store_identity, idempotency_key))
+        return {"status": "not_found", "storeId": self.store_identity}
+
+    monkeypatch.setattr(FakeGateway, "operations", lambda self: [{"method": "POST", "path": "/v2/runs/lookup"}],
+                        raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
     first = _wave(a)
     reference, record_id = first["review_reference"], first["record_id"]
     named = first["continuable_seats"][0]["operation_id"]
     assert delegate_custody.replay(a.data)["run-1"].daemon_store_id == admitted
+    assert bool(a.engine.posts[0][0]["scope"].get("ephemeral")) is ephemeral
     a.engine.store = serving  # the engine now serves another store, or the same one again
     monkeypatch.setattr(FakeGateway, "store_identity", serving, raising=False)
-    _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": named}])
-    token = _seat(a, record_id)["continuations"][0]["invocation_id"]
-    assert delegate_custody.invocation_record(a.data, token)["daemon_store_id"] == admitted
-    sent = [key for body, key in a.engine.posts if "continueFrom" in body]
-    if admitted and admitted != serving:  # a store that never admitted run-1 is never sent its successor
-        assert sent == [] and delegate_custody.invocation_record(a.data, token)["state"] == "pending"
-        seat = _seat(a, record_id)
-        assert seat.get("failure_code") == "invocation_store_unproven", {k: seat.get(k) for k in (
-            "status", "operation_state", "failure_code", "reported_cause", "pending_invocation_id")}
-        return
-    assert sent == [token] and _seat(a, record_id)["status"] == "responded"
+    before = len(FakeGateway.instances)
+    choice = [{"seat_id": "second", "operation_id": named}]
+    result = _call(a, review_reference=reference, continue_seats=choice)
+    [decision] = _seat(a, record_id)["continuations"]
+    token = decision["invocation_id"]
+    if admitted and admitted != serving:
+        assert (result["status"], result["reason"]) == ("decided_unsent", "invocation_store_unproven"), result
+        assert not looked_up and not any(g.project_lookups or g.registrations or g.removals
+                                        for g in FakeGateway.instances[before:])
+        assert delegate_custody.invocation_record(a.data, token) is None
+        row = next(r for r in load_state(a.data).attempts[-1].triad_raw_results if r["slot_id"] == "second")
+        assert row["operation_id"] == named  # no carried START that custody could mistake for a possible send
+        assert len(a.engine.posts) == 1 and token not in a.engine.keys
+        a.engine.store = serving = admitted
+        monkeypatch.setattr(FakeGateway, "store_identity", serving)
+        result = _call(a, review_reference=reference, continue_seats=choice)
+        assert result["continuation"]["continued"][0]["rejoined"] is True, result
+    start = delegate_custody.invocation_record(a.data, token)
+    assert start["daemon_store_id"] == admitted and start["state"] == "started"
+    assert a.engine.posts[1:] == [(start["request"], token)] and start["request"]["continueFrom"] == "run-1"
+    assert looked_up == [(serving, token)]
+    seat = _seat(a, record_id)
+    assert seat["status"] == "responded" and seat["continuations"] == [decision]
+    assert _call(a, review_reference=reference, continue_seats=choice)["state"] == "settled"
+    assert len(a.engine.posts) == 2
     delegate_custody._CUSTODY.clear()
     successor = a.engine.keys[token]
     assert delegate_custody.replay(a.data)[successor].daemon_store_id == serving  # its own receipt's store

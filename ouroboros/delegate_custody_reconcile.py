@@ -193,6 +193,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     if not mine:
         return []
     from ouroboros.delegate_custody_current import open_held_runs, task_snapshot
+    from ouroboros.execution_domain import registration_engine
 
     view = task_snapshot(drive_root, mine)  # one read; pending starts remain the admitted sweep's duty
     if run_ids is not None:
@@ -203,11 +204,11 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     # Also the registration retry lane for the task's OWN settled-but-owned
     # runs in retire-eligible projects (a one-shot process may never see a
     # sweep tick); deferred registrations stay with the periodic sweep. A
-    # project with ANY unsettled run is live; unsettled runs are held rows.
+    # registration with ANY unsettled run on its engine is live; unsettled runs are held rows.
     owned = [r for r in view["runs"].values() if r.project_owned and r.project_id and r.settled]
-    live = ({r.project_id for r in open_held_runs(drive_root).values() if r.project_id and r.run_id and not r.settled}
-            if owned else set())
-    owed = [r for r in owned if r.project_id not in live]
+    live = ({(registration_engine(r), r.project_id) for r in open_held_runs(drive_root).values()
+             if r.project_id and r.run_id and not r.settled} if owned else set())
+    owed = [r for r in owned if (registration_engine(r), r.project_id) not in live]
     if not held and not owed:
         return named  # pending invocations alone open no transport: the sweep or their panel owns them
     return [*named, *_reconcile_each(drive_root, held, gateway_factory or attach_only_gateway,
@@ -320,23 +321,28 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     # Registration duty is real work only for a retire-ELIGIBLE project:
     # a deferred one must not spin the daemon up.
     from ouroboros.delegate_continuation import still_continuable
-    from ouroboros.delegate_custody_current import held_runs
-    from ouroboros.execution_domain import engine_factory, engine_groups
+    from ouroboros.delegate_custody_current import held_runs, owed_registrations
+    from ouroboros.execution_domain import engine_factory, engine_groups, registration_engine
 
-    # Owned registrations and unsettled runs are HELD rows: one indexed read.
+    # Owned registrations and unsettled runs are HELD rows: one indexed read. A registration is a
+    # project id on one engine: the same id on another engine is another registration.
     snapshot = list(held_runs(drive_root).values())
+    owed_rows = owed_registrations(drive_root)  # creations no run row owns, retired like an owned one
+    owed_keys = {(registration_engine(row), str(row.get("project_id") or "")) for row in owed_rows}
     # Only a still-owned registration can be retired, so only its rows are asked
     # (each ask reads task results); one continuable row keeps the whole project.
-    owned = {row.project_id for row in snapshot if row.project_owned and row.project_id}
+    owned = {(registration_engine(row), row.project_id) for row in snapshot if row.project_owned and row.project_id} | owed_keys
     unsettled_projects: set = set()
     for row in snapshot:
-        if (row.project_id in owned and row.project_id not in unsettled_projects and row.run_id
+        key = (registration_engine(row), row.project_id)
+        if (key in owned and key not in unsettled_projects and row.run_id
                 and (not row.settled or still_continuable(
                     drive_root, row, live_task_ids, recoverable_handles=recoverable_handles))):
-            unsettled_projects.add(row.project_id)
-    registrations = [row for row in snapshot
-                     if row.project_owned and row.project_id
-                     and row.project_id not in unsettled_projects]
+            unsettled_projects.add(key)
+    registrations = [*(row for row in snapshot if row.project_owned and row.project_id
+                       and (registration_engine(row), row.project_id) not in unsettled_projects),
+                     *(row for row in owed_rows
+                       if (registration_engine(row), str(row.get("project_id") or "")) not in unsettled_projects)]
     outcomes: List[Dict[str, Any]] = []
     for ref, (bound_runs, bound_pending, bound_registrations, bound_watched) in engine_groups(
             runs, pending or [], registrations, watched or []):
@@ -518,6 +524,12 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         # No row per pass: the pending request row stays the durable fact while that store is not served.
         return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
                 "reason": "invocation_store_unproven", "detail": unproven, "lookup": looked["lookup"]}
+    from ouroboros.delegate_registration_policy import registration_held
+
+    with registration_held(drive_root, gateway, record) as refusal:
+        if refusal:
+            return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
+                    "lookup": looked["lookup"], **refusal}
     request = dict(body)
 
     def submit():

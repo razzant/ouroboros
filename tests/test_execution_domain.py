@@ -25,6 +25,7 @@ from ouroboros import execution_domain as domain
 from ouroboros import platform_layer
 from ouroboros.gateways import claudexor as wire
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
+from tests._bound_registration import BoundRegistry, owner_facts
 from tests._safety_fixtures import disable_safety
 from tests._store_shared import seed_result
 from tests._workspace_executor_shared import fake_docker_cli
@@ -443,24 +444,49 @@ def test_another_engines_absence_never_settles_a_run(env, tmp_path):
     assert not current.run(drive, "run-w").settled
 
 
-def test_a_registration_is_retired_only_through_its_own_engine(env, tmp_path, monkeypatch):
+def test_a_registration_is_retired_only_through_its_own_engine(env, tmp_path):
     drive = tmp_path / "drive"
     drive.mkdir()
-    entry = custody.RunCustody(run_id="run-w", task_id="t", project_id="prj-w", project_owned=True,  # a review
-                               source="review_substrate:seat", engine_ref=work_ref(env), daemon_store_id=STORE,  # seat's run
-                               ledger_root=str(drive))
+    root, ref = str(env.work), work_ref(env)
+    entry = custody.RunCustody(run_id="run-w", task_id="t", project_id="prj-w", project_owned=True,
+                               source="review_substrate:seat", ledger_root=str(drive),
+                               **owner_facts(STORE, root, engine_ref=ref))
     assert custody.record_started(drive, entry)
     assert custody.emit(drive, custody.SETTLED, {"run_id": "run-w", "task_id": "t", "route": "r"})
     assert current.run(drive, "run-w").settled
     removed = []
-    owned = SimpleNamespace(store_identity="store-s", engine_ref=None,
-                            remove_project=lambda pid: (removed.append(("owned", pid)), (_ for _ in ()).throw(
-                                ClaudexorUnavailable("project_not_found", "gone", status_code=404)))[0])
+    class Registry(BoundRegistry):
+        def __init__(self, store, engine_ref):
+            self.store_identity, self.engine_ref = store, engine_ref
+
+        def registered_root(self, project_id): return root
+
+        def release_registered(self, project_id):
+            removed.append((self.store_identity, project_id))
+            return "released"
+
+    owned = Registry("store-s", None)
     custody.retire_project(drive, owned, current.run(drive, "run-w"))
-    assert removed == [] and current.run(drive, "run-w").project_owned  # the owned engine's 404 retires nothing
-    work = SimpleNamespace(store_identity=STORE, engine_ref=work_ref(env), remove_project=lambda pid: removed.append(("work", pid)))
+    assert removed == [] and current.run(drive, "run-w").project_owned
+    work = Registry(STORE, ref)
     custody.retire_project(drive, work, current.run(drive, "run-w"))
-    assert removed == [("work", "prj-w")] and not current.run(drive, "run-w").project_owned
+    assert removed == [(STORE, "prj-w")] and not current.run(drive, "run-w").project_owned
+
+
+def test_an_unbound_start_keeps_its_route_with_an_unknown_store_while_a_saved_store_stays():
+    """A START that says its store is unproven names its route and no store: the store in its reference is the
+    handshake's, so it may share any registration on that route and discharges none. An older record keeps the store
+    it saved, else its reference's."""
+    ref = {"kind": domain.WORK_ENGINE, "descriptor": "/admin/work.json", "store": "handshake"}
+    unbound = {"engine_ref": ref, "daemon_store_id": "", "store_identity_unproven": True}
+    assert domain.registration_engine(unbound) == ("/admin/work.json", "")
+    assert domain.registration_engine({"engine_ref": ref, "daemon_store_id": "saved"}) == ("/admin/work.json", "saved")
+    assert domain.registration_engine({"engine_ref": ref}) == ("/admin/work.json", "handshake")
+    assert domain.registration_engine({"store_identity_unproven": True}) == (None, "")
+    other_store = {"engine_ref": {**ref, "store": "origin"}, "daemon_store_id": "origin"}
+    assert domain.may_share_registration(unbound, other_store), "an unknown store holds a removal on its route"
+    assert domain.registration_engine(unbound) != domain.registration_engine(other_store), "and discharges none"
+    assert not domain.may_share_registration(unbound, {"engine_ref": {**ref, "descriptor": "/other.json"}})
 
 
 def test_the_sweep_replays_and_settles_each_engines_work_only_through_that_engine(env, tmp_path, monkeypatch):

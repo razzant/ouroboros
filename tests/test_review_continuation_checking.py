@@ -162,16 +162,16 @@ def test_a_writable_successor_runs_in_the_held_copy_its_predecessor_left(tmp_pat
     assert area.is_dir() and rc._receipt(drive, "task-1", "op-1")["status"] in ("retained", "partial")
     original = invocation_record(drive, keys[0])["request"]
     successor = {**original, "prompt": "continue", "continueFrom": "run-1"}
-    decision = {"operation_id": "op-2", "invocation_id": "token-2", "surface": "multi_model_review", "thread_id": "",
+    decision = {"operation_id": "review_continue_checking", "invocation_id": "token-2", "surface": "multi_model_review", "thread_id": "",
                 "continues_run": "run-1", "predecessor_invocation_id": keys[0], "origin_invocation_id": keys[0],
                 "request_ref": write_blob(drive, successor, kind="json"), "supersedes": "op-1"}
-    transfer_checking_copy(drive, "task-1", "op-1", "op-2")
+    transfer_checking_copy(drive, "task-1", "op-1", "review_continue_checking")
     assert _start_requested(drive, "task-1", "t1", decision) is True
     recorded = invocation_record(drive, "token-2")
     assert recorded["execution_root"] == str(area) and recorded["request"]["execution"]["workspaceRoot"] == str(area)
     custody._CUSTODY.clear()
     facts = run_delegated_review_session(prompt="continue", root=str(repo), custody_drive=drive, invocation=_invocation(
-        access="workspace_write", checking_source=source, operation_id="op-2",
+        access="workspace_write", checking_source=source, operation_id="review_continue_checking",
         retry_state={"pending_invocation_id": "token-2"}, reconcile_only=True))
     assert facts["text"] == "[]" and not area.exists()  # captured from the same path, then released
     receipt = facts["checking_evidence"]

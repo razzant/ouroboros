@@ -1,6 +1,7 @@
-"""The fake-only capability bridge cannot discover or admit a vendor route."""
+"""Offline controls for the lifecycle witness and its fake-only capability bridge."""
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 import os
 import shutil
 
@@ -137,6 +138,87 @@ def test_legacy_lookup_refuses_missing_archive_even_if_the_record_answers(tmp_pa
     with pytest.raises(smoke.SmokeFailure) as error:
         smoke.retained_legacy_run(SimpleNamespace(get_run=get_run), daemon, fixture)
     assert error.value.code == 'legacy_source_not_preserved'
+
+
+@pytest.mark.parametrize('fault,expected', [
+    ('none', ''),
+    ('missing', 'legacy_finished_owner_project_not_kept'),
+    ('replaced', 'legacy_finished_owner_project_not_kept'),
+    ('owed', 'finished_registration_custody_unexpected'),
+    ('retired', 'finished_registration_custody_unexpected'),
+])
+def test_legacy_registration_remains_after_custody_closes_without_another_start(tmp_path, monkeypatch, fault, expected):
+    from ouroboros import delegate_custody as custody
+
+    root = str(tmp_path / 'fake-repo')
+    finished = custody.RunCustody(project_id='project-a', daemon_store_id='fixture-store',
+                                  project_owned=fault == 'owed',
+                                  registration_outcome='removed' if fault == 'retired' else 'kept')
+    lookup = Mock(side_effect=AssertionError('Legacy smoke must not prepare a continuation.'))
+    monkeypatch.setattr(custody, 'invocation_record', lookup)
+    gateway = SimpleNamespace(
+        store_identity='fixture-store', operations=lambda: [{'method': 'GET', 'path': '/v2/projects'}],
+        project_registrations=lambda: [] if fault == 'missing' else [
+            {'id': 'new-id' if fault == 'replaced' else 'project-a', 'root': root}],
+        bound_registration=Mock(), remove_project=Mock(), start_run=Mock(),
+    )
+    continued = SimpleNamespace(invocation_id='inv-a2', run_id='run-a2')
+    if expected:
+        with pytest.raises(smoke.SmokeFailure) as error:
+            smoke.check_finished_registration(tmp_path, gateway, finished, continued, root)
+        assert error.value.code == expected
+    else:
+        assert smoke.check_finished_registration(tmp_path, gateway, finished, continued, root) == {
+            'finished_owner_registration': 'kept',
+        }
+    lookup.assert_not_called()
+    gateway.bound_registration.assert_not_called()
+    gateway.remove_project.assert_not_called()
+    gateway.start_run.assert_not_called()
+
+
+@pytest.mark.parametrize('state,refusal,expected', [
+    ('absent', (404, 'project_not_registered'), ''),
+    ('present', (404, 'project_not_registered'), 'finished_owner_registration_not_absent'),
+    ('absent', (404, 'run_missing'), 'unexpected_retirement_refusal'),
+    ('absent', (409, 'project_not_registered'), 'unexpected_retirement_refusal'),
+    ('absent', None, 'retired_predecessor_admitted'),
+])
+def test_bound_registration_requires_exact_absence_and_project_not_registered(tmp_path, monkeypatch, state, refusal, expected):
+    from ouroboros import delegate_custody as custody
+
+    root = str(tmp_path / 'canonical-repo')
+    finished = custody.RunCustody(project_id='project-a', daemon_store_id='fixture-store', registration_outcome='removed',
+                                  project_resolution={'registration_store_id': 'fixture-store', 'registration_root': root})
+    continued = SimpleNamespace(invocation_id='inv-a2', run_id='run-a2')
+    request = {'scope': {'root': root}, 'continueFrom': 'run-a1'}
+    lookup = Mock(return_value={'request': request})
+    monkeypatch.setattr(custody, 'invocation_record', lookup)
+    gateway = SimpleNamespace(
+        store_identity='fixture-store', operations=lambda: [
+            {'method': 'POST', 'path': '/v2/projects/:id/release'},
+            {'method': 'GET', 'path': '/v2/projects/:id/registration'},
+        ], project_registrations=lambda: [],
+        bound_registration=Mock(return_value={'state': state, 'projectId': 'project-a', 'storeId': 'fixture-store', 'root': root}),
+        start_run=Mock(side_effect=ClaudexorUnavailable(refusal[1], 'fixture refusal', status_code=refusal[0]) if refusal else None),
+    )
+    if expected:
+        with pytest.raises(smoke.SmokeFailure) as error:
+            smoke.check_finished_registration(tmp_path, gateway, finished, continued, tmp_path / 'noncanonical')
+        assert error.value.code == expected
+    else:
+        assert smoke.check_finished_registration(tmp_path, gateway, finished, continued, tmp_path / 'noncanonical') == {
+            'finished_owner_registration': 'removed', 'retired_continuation_refusal': 'project_not_registered',
+        }
+    gateway.bound_registration.assert_called_once_with('project-a', 'fixture-store', root)
+    if state == 'absent':
+        lookup.assert_called_once_with(tmp_path, 'inv-a2')
+        gateway.start_run.assert_called_once()
+        assert gateway.start_run.call_args.args == ({**request, 'continueFrom': 'run-a2', 'continueCarrier': 'packet'},)
+        assert request['continueFrom'] == 'run-a1'
+    else:
+        lookup.assert_not_called()
+        gateway.start_run.assert_not_called()
 
 
 def test_every_runtime_name_the_witness_imports_inside_a_step_exists():

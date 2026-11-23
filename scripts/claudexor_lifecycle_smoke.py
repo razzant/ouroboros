@@ -228,13 +228,55 @@ def absent_run_store(gateway):
     raise SmokeFailure('unknown_native_run_found', 'An absent probe run id returned a record.')
 
 
+def check_finished_registration(drive, gateway, finished, continued, fixture_root):
+    """Distinguish closing the host's duty from removing the engine's registration."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.gateways.claudexor_maintenance import bound_registration_supported
+
+    bound = bound_registration_supported(gateway)
+    outcome = 'removed' if bound else 'kept'
+    project_id = finished.project_id
+    binding = finished.project_resolution
+    store = finished.daemon_store_id
+    root = binding.get('registration_root')
+    require(project_id and store and store == gateway.store_identity, 'finished_registration_unbound')
+    require(not finished.project_owned and finished.registration_outcome == outcome,
+            'finished_registration_custody_unexpected', expected=outcome, observed=finished.registration_outcome,
+            owned=finished.project_owned)
+    expected_root = root or str(fixture_root)
+    matching = [(row['id'], row['root']) for row in gateway.project_registrations()
+                if row['id'] == project_id or row['root'] == expected_root]
+    if not bound:
+        require(matching == [(project_id, expected_root)], 'legacy_finished_owner_project_not_kept',
+                observed=matching)
+        # A retained project would admit work: do not dispatch a START to test its absence.
+        return {'finished_owner_registration': outcome}
+
+    require(root and binding.get('registration_store_id') == store, 'finished_registration_receipt_unbound')
+    require(not matching, 'finished_owner_project_kept', observed=matching)
+    observed = gateway.bound_registration(project_id, store, root)
+    require(observed.get('state') == 'absent', 'finished_owner_registration_not_absent', observed=observed)
+    request = dict(custody.invocation_record(drive, continued.invocation_id)['request'])
+    request.update(continueFrom=continued.run_id, continueCarrier='packet')
+    try:
+        gateway.start_run(request, idempotency_key=str(uuid.uuid4()))
+    except ClaudexorUnavailable as exc:
+        # Project retirement is checked before predecessor history.
+        require(exc.status_code == 404 and exc.code == 'project_not_registered',
+                'unexpected_retirement_refusal', refusal_code=exc.code, status=exc.status_code)
+        return {'finished_owner_registration': outcome, 'retired_continuation_refusal': exc.code}
+    raise SmokeFailure('retired_predecessor_admitted', 'An archived predecessor was continued.')
+
+
 def lifecycle(seconds):
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import ensure_owned_gateway, get_owned_daemon, owned_config_dir
     from ouroboros.claudexor_runtime import managed_runtime_root
     from ouroboros.config import DATA_DIR
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.owner_continue import continuation_offer
     from ouroboros.platform_layer import request_process_tree_kill
+    from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.delegate import _delegate_cancel
 
     # The repository fetcher and the production installer verify the same pin.
@@ -287,20 +329,19 @@ def lifecycle(seconds):
         owner_result(DATA_DIR, first.task_id, status='completed')
         owner_result(DATA_DIR, second.task_id, status='failed', reason_code='worker_crash_signal')
         custody.reconcile_orphaned_runs(DATA_DIR, set())
-        require(not gateway.find_project_id(str(first.repo_dir)), 'finished_owner_project_kept')
-        require(gateway.find_project_id(str(second.repo_dir)) == b.project_id,
-                'technical_continue_offer_lost')
-        request = dict(custody.invocation_record(DATA_DIR, a2.invocation_id)['request'])
-        request.update(continueFrom=a2.run_id, continueCarrier='packet')
-        try:
-            gateway.start_run(request, idempotency_key=str(uuid.uuid4()))
-        except ClaudexorUnavailable as exc:
-            # Project retirement is checked before predecessor history.
-            require(exc.status_code == 404 and exc.code == 'project_not_registered',
-                    'unexpected_retirement_refusal', refusal_code=exc.code, status=exc.status_code)
-            facts['retired_continuation_refusal'] = exc.code
-        else:
-            raise SmokeFailure('retired_predecessor_admitted', 'An archived predecessor was continued.')
+        after = custody.replay(DATA_DIR)
+        finished, retained = after[a.run_id], after[b.run_id]
+        require(finished.project_id == a.project_id, 'finished_registration_changed')
+        offer = continuation_offer(load_effective_task_result(DATA_DIR, second.task_id, materialize_artifacts=False),
+                                   second.task_id)
+        retained_root = retained.project_resolution.get('registration_root') or str(second.repo_dir)
+        require(offer.get('eligible') is True and offer.get('cause') == 'worker_crash_signal'
+                and retained.project_owned and retained.project_id == b.project_id
+                and retained.daemon_store_id == gateway.store_identity
+                and any(row['id'] == b.project_id and row['root'] == retained_root
+                        for row in gateway.project_registrations()),
+                'technical_continue_offer_lost', offer=offer)
+        facts.update(check_finished_registration(DATA_DIR, gateway, finished, a2, first.repo_dir))
         facts.update(cancel_run=a.run_id, continued_cancel=a2.run_id, killed_pid=victim.pid,
                      crash_run=b.run_id, continued_crash=b2.run_id, owned_pids=[p.pid for p in children],
                      technical_root_project_kept=True)

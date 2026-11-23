@@ -326,7 +326,7 @@ def test_started_invocation_recovery_reuses_exact_durable_custody(
     assert health_calls == []
     assert gateway.run_gets == ["run-started"]
     assert gateway.project_lookups == [] and gateway.registrations == []
-    assert gateway.removals == ["proj-owned"]
+    assert gateway.removals == []  # this historical START has no bound registration receipt
     assert facts["run_id"] == "run-started"
     assert facts["route_id"] == "stored-review"
     assert facts["model"] == "stored-model"
@@ -600,6 +600,9 @@ def test_only_a_start_that_never_entered_its_post_retires_the_registration_it_or
     from ouroboros.owner_pause import OwnerPauseRefused
     from ouroboros.review_execution import ReviewRouteUnavailable
 
+    from tests._bound_registration import enable_start_registry
+
+    enable_start_registry(monkeypatch, fake_route)
     # This start registers the project itself (nothing pre-existing to reuse).
     fake_route.project_unregistered = True
     if stage == "launch_fence":

@@ -305,7 +305,7 @@ def _session_evidence(
     settlement = usage.get("settlement")
     settlement = settlement if isinstance(settlement, dict) else {}
     unsettled = [
-        key for key in ("settled", "ledger_recorded", "project_retired")
+        key for key in ("settled", "ledger_recorded", "registration_discharged")
         if settlement.get(key) is not True
     ]
     if unsettled:
@@ -335,8 +335,8 @@ def _final_session_settlements(drive_root: pathlib.Path) -> dict[str, dict] | No
         str(run_id): {
             "settled": row.settled,
             "ledger_recorded": row.ledger_recorded,
-            "project_retired": not row.project_owned and not row.project_persistent,
-            "project_persistent": row.project_persistent,
+            **row.registration_settlement(),
+            "registration_discharged": not row.project_owned and not row.project_persistent,
             "bound_at": "panel_complete_custody_replay",
         }
         for run_id, row in rows.items()

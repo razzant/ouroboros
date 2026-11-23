@@ -3,14 +3,33 @@
 from __future__ import annotations
 
 import pathlib
+from contextlib import ExitStack
 from typing import Any, Dict, Tuple
 
 from ouroboros import delegate_custody as custody
 
+PENDING_START_RETRY = ("Use delegate_start(retry_of=pending_invocation_id, prompt='') for this request. "
+                       "After a Resume risk decision it can only look up the start. A plain call starts a new run.")
+
+
+def claim_refusal_fields(refusal: Dict[str, Any], replay_token: str) -> Tuple[str, str, Dict[str, Any]]:
+    """A refused replay reports the pending invocation; it cannot disprove the first POST."""
+    if not refusal:
+        refusal = {"reason": "start_request_row_unwritable", "detail":
+                   "The durable start-request row could not be written. Fix the drive/event log before retrying.",
+                   "definitely_unrun": True}
+    facts = dict(refusal)
+    reason = str(facts.pop("reason", "") or "replacement_custody_unknown")
+    detail = str(facts.pop("detail", "") or "Actor start claim unavailable.")
+    if replay_token:
+        facts.pop("definitely_unrun", None)
+        facts.update(pending_invocation_id=replay_token, retry_hint=PENDING_START_RETRY)
+    return reason, detail, facts
+
 
 def claimed_start_request(
     drive: pathlib.Path, *, actor_ctx: Any = None, initial_bootstrap: bool = False,
-    serving_store_id: Any = "",
+    serving_store_id: Any = "", gateway: Any = None, registration_resolution=None,
     **request_row: Any,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Record an independent invocation without limiting other runs or captures.
@@ -25,7 +44,11 @@ def claimed_start_request(
     predecessor can interleave with its hand-over (``delegate_continuation``).
     A start bound to a managed work engine whose request names a path that
     engine does not see is refused before its row (``execution_domain``).
+    With the start's ``gateway`` the row is claimed while the registration it
+    adopted is held (``delegate_registration_policy.registration_held``), inside
+    that disposition lock and outside the actor's decision lock.
     """
+    from ouroboros.delegate_registration_policy import registration_held
     from ouroboros.execution_domain import is_work_ref, request_paths_refusal
     from ouroboros.usage_ledger import BillingAuthorityUnavailable
 
@@ -43,14 +66,14 @@ def claimed_start_request(
     request_row.setdefault("daemon_store_id", "")
     request_row.setdefault("store_identity_unproven", True)
     try:
-        if request_row.get("capture_id") and request_row.get("continuation_of"):
-            from ouroboros.delegate_continuation import snapshot_handover
-
-            with snapshot_handover(drive, request_row) as refusal:
-                if refusal:
+        with ExitStack() as locks:
+            if request_row.get("capture_id") and request_row.get("continuation_of"):
+                from ouroboros.delegate_continuation import snapshot_handover
+                if refusal := locks.enter_context(snapshot_handover(drive, request_row)):
                     return False, refusal
-                return _claimed(drive, actor_ctx, initial_bootstrap, request_row, serving_store_id)
-        return _claimed(drive, actor_ctx, initial_bootstrap, request_row, serving_store_id)
+            if refusal := locks.enter_context(registration_held(drive, gateway, request_row, registration_resolution)):
+                return False, refusal
+            return _claimed(drive, actor_ctx, initial_bootstrap, request_row, serving_store_id)
     except BillingAuthorityUnavailable as exc:
         # Refused before any START row or POST; not a budget limit.
         return False, {"reason": "billing_authority_unavailable", "billing_authority": exc.kind, "detail": (

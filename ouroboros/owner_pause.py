@@ -617,6 +617,7 @@ def admit_delegated_start(drive_root: Any, payload: Dict[str, Any]) -> bool:
     from types import SimpleNamespace
     from ouroboros._usage_wait import retry_presend
     from ouroboros.delegate_custody import emit, START_REQUESTED
+    from ouroboros.delegate_workspace_hold import start_fence
     from ouroboros.model_wait import current_model_wait
     from ouroboros.usage_admission import task_billing_fields
     from ouroboros.utils import utc_now_iso
@@ -648,7 +649,7 @@ def admit_delegated_start(drive_root: Any, payload: Dict[str, Any]) -> bool:
                 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
                 raise PhysicalDispatchInterrupted(reason)
         retrying = True
-        with launch_admission(source, wait=False):
+        with start_fence(drive_root, payload), launch_admission(source, wait=False):  # links and claim: one fence
             return emit(drive_root, START_REQUESTED, payload, propagate_contention=True)
 
     return retry_presend(claim_once, check=False)  # The POST remains outside this unsent claim.

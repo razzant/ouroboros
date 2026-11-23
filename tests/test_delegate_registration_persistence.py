@@ -1,30 +1,33 @@
 """#362: a persistent (stable-target) registration survives every retire path."""
 from __future__ import annotations
 
+from tests._bound_registration import BoundRegistry, binding, owner_facts
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_registration_policy import persistent_registration
 
 
-class _Gateway:
+class _Gateway(BoundRegistry):
     def __init__(self):
         self.removals = []
 
     def handshake(self, **_kw):
         return {}
 
-    def remove_project(self, pid):
+    def release_registered(self, pid):
         self.removals.append(pid)
+        return "released"
 
     def close(self):
         pass
 
 
-class _ProcessGateway:
+class _ProcessGateway(BoundRegistry):
     def __init__(self, removals):
         self.removals = removals
 
-    def remove_project(self, pid):
+    def release_registered(self, pid):
         self.removals.put(pid)
+        return "released"
 
 
 def _settle_shared_project_process(root, run_id, removals, replay_barrier):
@@ -94,7 +97,7 @@ def test_registration_survives_settlement(tmp_path):
     gateway = _Gateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-p", task_id="t-p", route_id="r", model="m",
-        project_id="prj-user", project_owned=True, project_persistent=True,
+        project_id="prj-user", project_owned=True, **owner_facts(), project_persistent=True,
         ledger_root=str(tmp_path)))
     row = dc._CUSTODY["run-p"]
     dc.retire_project(tmp_path, gateway, row)
@@ -175,7 +178,7 @@ def test_orphan_refusal_keeps_persistent_registration(tmp_path):
 
     out = _retire_orphaned_registration(
         _Ctx(), gateway, "prj-tmp", project_persistent=False,
-        definite_refusal=True, reason="claim_refused", invocation_id="inv-9")
+        definite_refusal=True, reason="claim_refused", invocation_id="inv-10", resolution=binding())
     assert gateway.removals == ["prj-tmp"]
 
 
@@ -186,7 +189,7 @@ def test_sweep_converges_after_persistent_discharge(tmp_path):
     gateway = _Gateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-p", task_id="t-p", route_id="r", model="m",
-        project_id="prj-user", project_owned=True, project_persistent=True,
+        project_id="prj-user", project_owned=True, **owner_facts(), project_persistent=True,
         ledger_root=str(tmp_path)))
     dc.emit(tmp_path, dc.SETTLED, {"run_id": "run-p", "task_id": "t-p", "route": "r"})
     dc._CUSTODY.clear()
@@ -205,7 +208,7 @@ def test_persistent_sharer_shields_a_plain_creator(tmp_path):
     gateway = _Gateway()
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-ro", task_id="t-ro", route_id="r", model="m",
-        project_id="prj-shared", project_owned=True, ledger_root=str(tmp_path)))
+        project_id="prj-shared", project_owned=True, **owner_facts(), ledger_root=str(tmp_path)))
     dc.record_started(tmp_path, dc.RunCustody(
         run_id="run-w", task_id="t-w", route_id="r", model="m",
         project_id="prj-shared", project_owned=False, project_persistent=True,
@@ -221,8 +224,8 @@ def test_or_merge_keeps_the_marker_across_duplicate_started(tmp_path):
     dc = custody
     base = dict(run_id="run-d", task_id="t-d", route_id="r", model="m",
                 project_id="prj-user", ledger_root=str(tmp_path))
-    dc.record_started(tmp_path, dc.RunCustody(project_owned=True, project_persistent=True, **base))
-    dc.record_started(tmp_path, dc.RunCustody(project_owned=True, project_persistent=False, **base))
+    dc.record_started(tmp_path, dc.RunCustody(project_owned=True, **owner_facts(), project_persistent=True, **base))
+    dc.record_started(tmp_path, dc.RunCustody(project_owned=True, **owner_facts(), project_persistent=False, **base))
     dc._CUSTODY.clear()
     assert dc.replay(tmp_path)["run-d"].project_persistent is True
 
@@ -269,22 +272,23 @@ def test_concurrent_final_siblings_retire_shared_project_once(tmp_path):
 
     dc = custody
 
-    class _RacingGateway:
+    class _RacingGateway(BoundRegistry):
         def __init__(self):
             self.calls = []
             self.second_arrived = threading.Event()
 
-        def remove_project(self, project_id):
+        def release_registered(self, project_id):
             self.calls.append(project_id)
             if len(self.calls) == 1:
                 self.second_arrived.wait(timeout=0.25)
             else:
                 self.second_arrived.set()
+            return "released"
 
     for run_id, task_id in (("run-a", "task-a"), ("run-b", "task-b")):
         dc.record_started(tmp_path, dc.RunCustody(
             run_id=run_id, task_id=task_id, route_id="r", model="m", source="review_substrate",
-            project_id="project-race", project_owned=True, ledger_root=str(tmp_path),
+            project_id="project-race", project_owned=True, **owner_facts(), ledger_root=str(tmp_path),
         ))
         dc.emit(tmp_path, dc.SETTLED, {"run_id": run_id, "task_id": task_id, "route": "r"})
     rows = dc.replay(tmp_path)
@@ -321,7 +325,7 @@ def test_concurrent_live_settlements_publish_before_last_sibling_retirement(
     for run_id, task_id in (("run-live-a", "task-live-a"), ("run-live-b", "task-live-b")):
         row = dc.RunCustody(
             run_id=run_id, task_id=task_id, route_id="r", model="m", source="review_substrate",
-            project_id="project-live-race", project_owned=True,
+            project_id="project-live-race", project_owned=True, **owner_facts(),
             ledger_root=str(tmp_path), ledger_recorded=True,
         )
         dc.record_started(tmp_path, row)
@@ -363,7 +367,7 @@ def test_cross_process_settlements_retire_shared_project_once(tmp_path):
     for run_id, task_id in (("run-proc-a", "task-proc-a"), ("run-proc-b", "task-proc-b")):
         dc.record_started(tmp_path, dc.RunCustody(
             run_id=run_id, task_id=task_id, route_id="r", model="m", source="review_substrate",
-            project_id="project-process-race", project_owned=True,
+            project_id="project-process-race", project_owned=True, **owner_facts(),
             ledger_root=str(tmp_path), ledger_recorded=True,
         ))
     process_ctx = multiprocessing.get_context("spawn")

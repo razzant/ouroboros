@@ -871,19 +871,8 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         return self.project_registration(root)[0]
 
     def project_registration(self, root: str) -> Tuple[str, Optional[bool]]:
-        """One keyed ``POST /v2/projects``: ``(project_id, created)``. ``created`` is the
-        engine's own answer whether THIS request registered the root, ``None`` when the
-        answer carries no such field (an engine that predates it): presence decides."""
-        body = self._request(
-            "POST", "/v2/projects",
-            json_body={"root": str(root)},
-            headers={"Idempotency-Key": uuid.uuid4().hex},
-        )
-        project_id = str((body or {}).get("id") or "") if isinstance(body, dict) else ""
-        if not project_id:
-            raise ClaudexorUnavailable("malformed_response", "project registration returned no id")
-        created = body.get("created")
-        return project_id, created if isinstance(created, bool) else None
+        answer = self.project_registration_receipt(root)
+        return answer["id"], answer["created"]
 
     def remove_project(self, project_id: str) -> Dict[str, Any]:
         """Retire a project registration. Non-destructive: artifacts are retained."""
