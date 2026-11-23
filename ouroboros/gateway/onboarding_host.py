@@ -48,6 +48,7 @@ from ouroboros.gateway.owner_settings import (
 )
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
+from ouroboros.settings_integrity import skill_settings
 from ouroboros.settings_setup_contract import (
     ATTEMPT_ID_FIELD,
     ONBOARDING_ATTEMPT_KEY,
@@ -84,7 +85,7 @@ def _live_setup(request: Request) -> tuple[dict, dict]:
     from ouroboros.gateway._helpers import request_drive_root
     from ouroboros.skill_starter import starter_choice_open
 
-    settings, _changed, _keys = apply_runtime_provider_defaults(load_settings())
+    settings, _changed, _keys = apply_runtime_provider_defaults(skill_settings(load_settings))
     enabled, first_state = _consciousness_control(request)
     return settings, build_setup_bootstrap(settings, "web", fresh_install=not SETTINGS_PATH.exists(),
                                            consciousness_enabled=enabled, consciousness_first_state=first_state,

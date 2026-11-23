@@ -1,7 +1,7 @@
 ---
 name: live_conversation
 description: Talk with Ouroboros using this room's ordinary memory, tools and controls.
-version: 0.1.36
+version: 0.1.37
 type: extension
 runtime: python3
 entry: plugin.py
@@ -18,16 +18,19 @@ contributes:
     render: {kind: host, entry: ui/index.js}
 ---
 
-Calls are a beta, off by default. The call skills are on by default. To talk,
-turn on Calls (beta), choose an engine and add its API key in Settings → Accounts and keys,
-under the keys the skills request.
-Gemini, Grok and OpenAI supply the engine, model and voice choices from their
-loaded catalogs. The owner's skill auto-grant setting still applies; with it off,
-requested permissions await approval in Skills.
-Having a key does not turn on calls; an unavailable selection is never replaced.
-The selected catalog supplies supported controls, privacy and memory-window
-facts. Call instructions and engine choices apply to the next call. Microphone,
-speaker, camera and echo/noise/gain choices stay on this client and apply live.
+Calls (beta) are off by default. First-run setup ticks a recommended voice engine
+only when its matching API key is configured; you can change the tick yourself.
+If an engine is missing, search for its provider (Gemini, Grok or OpenAI) in
+Extensions → Browse and install its voice skill. Enable it in Extensions → Skills,
+allowing the skill's requested keys and permissions if auto-grant is off. Add the
+matching API key in Settings → Accounts and keys. Open Calls (beta) in
+Settings → Voice and calls, choose the engine, then turn on Calls (beta).
+
+Gemini Live and OpenAI Realtime are not available in Russia or Belarus. Having a
+key does not turn on calls; an unavailable selection is never replaced. The
+selected catalog supplies models, voices, supported controls, privacy and
+memory-window facts. Call instructions and engine choices apply to the next call.
+Microphone, speaker, camera and echo/noise/gain choices stay on this client and apply live.
 Leaving the settings form ends a short device test. It does not end a call.
 
 Talk occupies Send while the composer is empty. Text or a file restores Send;

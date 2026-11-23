@@ -11,7 +11,8 @@ parses the commit it fetched into a
 snapshot beside the clone, so every reader sees one commit and no catalog reader ever waits for the network;
 it dates each entry by the newest fetched commit touching its release (``updated_at``). An entry's files use
 an immutable ``checkout_at_commit`` of the snapshot's commit, fetched locally from the shared clone so a
-later refresh cannot change a folder already handed to a reader.
+later refresh cannot change a folder already handed to a reader. A pointer entry's manifest lies in its author's
+repository, fetched only when a detail sheet or an install reads it: its items carry no manifest facts.
 The built-in source is the bundled ``skills/`` folder with ``skills/builtin.json``; a local folder is
 scanned in place; a registry (ClawHub) has no list here: it answers a search, or one page when named alone.
 A hub entry or a ``builtin.json`` row may carry the catalog's own words for people (``title``, a one-line
@@ -220,7 +221,7 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
             raise ValueError("pointer entry needs a 40-character commit")
         entry["source"] = {"kind": "git", "repo": validate_git_url(str(source.get("repo") or "")),
                            "path": str(source.get("path") or "").strip("/"), "commit": commit}
-        entry.update(_manifest_facts(None))
+        entry.update(connects=[], icon={})  # its manifest lies in the author's repository: no facts, not empty ones
     if "connects" in raw:
         entry["connects"] = connect_services(entry["connects"], raw["connects"])
     if not entry["icon"] and "icon" in raw:
@@ -477,6 +478,16 @@ def _signals(snapshot: Dict[str, Any], entry: Dict[str, Any]) -> Optional[Dict[s
             "discussion_url": skill.get("discussion_url"), "author_repo_stars": stars}
 
 
+def _manifest_fields(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """The manifest facts of an item. A pointer's manifest lies in its author's repository at the pinned commit, which
+    no catalog read fetches (``entry_payload_dir`` does, for a detail sheet or an install): its ``type``, ``needs_keys``
+    and ``permissions`` are absent, never empty, whatever an older snapshot stored."""
+    if (entry.get("source") or {}).get("kind") == "git":
+        return {}
+    return {"type": entry.get("type", ""), "needs_keys": list(entry.get("needs_keys") or []),
+            "permissions": list(entry.get("permissions") or [])}
+
+
 def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The §3.3 items one source contributes (installed state is joined by the caller)."""
     if not snapshot:
@@ -497,8 +508,7 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
             "digest": entry.get("digest", ""), "official": is_official,
             "recommended": is_official and endorsed.get("recommended") is True,
             "owner": entry.get("owner", ""), "signals": _signals(snapshot, entry),
-            "withdrawn": entry.get("withdrawn"), "type": entry.get("type", ""),
-            "needs_keys": list(entry.get("needs_keys") or []), "permissions": list(entry.get("permissions") or []),
+            "withdrawn": entry.get("withdrawn"), **_manifest_fields(entry),
             "installed": None,
             "connects": connect_services(entry.get("connects")), "icon": _catalog_icon(entry.get("icon", "")),
         }

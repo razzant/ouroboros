@@ -189,7 +189,7 @@
  * @property {'observe'|'act'|'full'} autonomy
  * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
  * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
- * @property {Object.<string,string>} words  // gloss, off, on, meaning, subscriptionCost, door (and choice, kept for older pages)
+ * @property {Object.<string,string>} words  // gloss, off, on, lead, offAway, onAway, subscriptionCost, door, summaryLead (meaning, choice: older pages)
  */
 
 /**

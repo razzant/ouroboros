@@ -79,8 +79,14 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     assert (FIRST_RUN["off"], FIRST_RUN["on"]) == (POSITION_WORDS[False], ON_WITHOUT_PLACES)
     assert "quota" in FIRST_RUN["subscriptionCost"] and "allowance" not in FIRST_RUN["subscriptionCost"]
     # On, the wakes go on before a first reply; either position, Start begins the first conversation (owner 21.11, 1C):
-    # no word ties the first message to the switch.
-    assert "even before your first reply" in FIRST_RUN["meaning"] and "Either way, Start begins" in FIRST_RUN["meaning"]
+    # the step's question says so, and no word ties the first message to the switch. Each position says, inside its
+    # own choice, what it does while the owner is away (owner 2026-11-23, the side-by-side); Summary's lead says Start
+    # also begins the first conversation there.
+    assert "Either way, Start begins your first conversation" in FIRST_RUN["lead"]
+    assert "even before your first reply" in FIRST_RUN["onAway"] and "answers in places you make Active" in FIRST_RUN["onAway"]
+    assert FIRST_RUN["offAway"].startswith("When you're away, it works only on what you asked.")
+    assert "begins your first conversation" in FIRST_RUN["summaryLead"]
+    assert FIRST_RUN["meaning"] == f"{FIRST_RUN['lead']} Off: {FIRST_RUN['offAway']} On: {FIRST_RUN['onAway']}"
     assert "only when you write" not in FIRST_RUN["meaning"]
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "observe")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "0")
@@ -88,7 +94,8 @@ def test_the_limits_are_the_runtime_readers_values(monkeypatch):
     assert consciousness_offer({}, enabled=False) == {
         "offered": True, "enabled": None, "autonomy": "observe", "dailyUsd": 0.0, "maxTasks": 0,
         "words": first_run_words("observe")}  # Advises answers nowhere: its first-run words say so (review r3)
-    assert "answers in places" not in first_run_words("observe")["meaning"]
+    assert "answers in places" not in first_run_words("observe")["onAway"]
+    assert "what it would say waits for you" in first_run_words("observe")["onAway"]
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "bogus")  # the reader's own fallback, not a new level
     assert consciousness_offer({})["autonomy"] == "act"
     assert consciousness_offer({}, enabled="yes")["enabled"] is None

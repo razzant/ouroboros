@@ -20,8 +20,10 @@ These tests pin the startup REORDERING and the single wizard host:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import os
 import sys
 import threading
 import types
@@ -461,6 +463,104 @@ def test_pre_server_normalization_never_writes_the_settings_file(monkeypatch, tm
     assert len(applied) == 2
 
 
+@pytest.mark.parametrize("case", ["operator", "source-only", "cleared-before-setup", "cleared-before-spawn"])
+def test_local_readiness_across_launcher_and_server_projection(monkeypatch, tmp_path, case):
+    """Drive both launcher reads, then the server's real readiness call with its inherited env.
+
+    Stop at the process and readiness boundaries: no GUI, server process, listening socket or model.
+    """
+    import launcher
+    import server
+    from ouroboros import config, launcher_onboarding
+    from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV, skill_environ
+
+    class BoundaryReached(Exception):
+        pass
+
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_agent_proc", None)
+    monkeypatch.setattr(launcher, "_agent_start", None)
+    monkeypatch.setattr(launcher, "_shutdown_event", threading.Event())
+    env = {key: value for key, value in os.environ.items() if key not in config.SETTINGS_DEFAULTS}
+    for key in (PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV):
+        env.pop(key, None)
+    monkeypatch.setattr(os, "environ", env)
+    source = "/models/c12-fixture.gguf"
+    operator = case == "operator"
+    if operator or case == "source-only":
+        env["LOCAL_MODEL_SOURCE"] = source
+        if operator:
+            env.update(USE_LOCAL_MAIN="true", LOCAL_MODEL_CONTEXT_LENGTH="032768", OUROBOROS_UI_DIR="none")
+        else:
+            env["LOCAL_MODEL_CONTEXT_LENGTH"] = "not-a-number"  # coercion to the default is not an override
+    else:
+        path.write_text(json.dumps({"LOCAL_MODEL_SOURCE": source, "USE_LOCAL_MAIN": True}), encoding="utf-8")
+        if case == "cleared-before-setup":
+            assert launcher_onboarding.prepare_first_run_settings()[1] is False  # previous document projection
+            path.unlink()
+
+    _settings, setup_required = launcher_onboarding.prepare_first_run_settings()
+    if case == "cleared-before-spawn":
+        path.unlink()  # the retained launcher now reads the cleared profile again at spawn
+
+    spawned: list[tuple] = []
+
+    def capture_spawn(_cmd, **kwargs):
+        child_env = kwargs["env"]
+        spawned.append((child_env.get("LOCAL_MODEL_SOURCE"), child_env.get("USE_LOCAL_MAIN")))
+        monkeypatch.setattr(os, "environ", child_env)
+        raise BoundaryReached("server spawn")
+
+    monkeypatch.setattr(launcher, "_hidden_popen", capture_spawn)
+    with pytest.raises(BoundaryReached, match="server spawn"):
+        launcher.start_agent(port=1)
+
+    observed: list[tuple] = []
+
+    def capture_readiness(settings):
+        local = skill_environ()
+        observed.append((server_readiness(settings), settings["LOCAL_MODEL_SOURCE"],
+                         local.get("USE_LOCAL_MAIN"), local.get("LOCAL_MODEL_CONTEXT_LENGTH"),
+                         settings["OUROBOROS_UI_DIR"]))
+        raise BoundaryReached("server readiness")
+
+    server_readiness = server.has_startup_ready_provider
+    monkeypatch.setattr(server, "has_startup_ready_provider", capture_readiness)
+    monkeypatch.setattr(server, "BOOT", types.SimpleNamespace(reset=lambda: None))
+    monkeypatch.setattr(server, "admit_data_root", lambda *_: None)
+    monkeypatch.setattr(server.process_scope, "initialize_installation_scope", lambda *_: None)
+    monkeypatch.setattr(server.store_switch, "start", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "bind_body_lifespan", lambda *_a, **_k: None)
+    monkeypatch.setattr(server.served_ui, "apply", lambda *_: None)
+    monkeypatch.setattr(config, "initialize_runtime_mode_baseline", lambda: None)
+    monkeypatch.setattr(server, "_set_ws_event_loop", lambda *_: None)
+    for name in ("_extensions_ready", "_supervisor_ready", "_supervisor_stop"):
+        monkeypatch.setattr(server, name, threading.Event())
+    for name in ("_event_loop", "_dialogue_bridge"):
+        monkeypatch.setattr(server, name, None)
+    app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path))
+
+    async def boot():
+        async with server.lifespan(app):
+            pytest.fail("server never passed through the readiness decision")
+
+    with pytest.raises(BoundaryReached, match="server readiness"):
+        asyncio.run(boot())
+
+    assert not path.exists()
+    has_source = operator or case == "source-only"
+    assert spawned == [(source if has_source else None, "True" if operator else "False")]
+    assert (setup_required, observed) == (
+        not (operator or case == "cleared-before-spawn"),
+        [(operator, source if has_source else "",
+          "True" if operator else None, "32768" if operator else None, "none" if operator else "")],
+    )
+
+
 def test_server_boot_never_writes_the_settings_file():
     """The server's boot normalization is APPLIED in-process and persisted
     nowhere (spec 4.3.5: start-time mutators are retired). Every reader
@@ -493,7 +593,7 @@ def test_server_boot_never_writes_the_settings_file():
     assert "SETTINGS_PATH" not in imported
     # The normalization still runs, still reaches the environment, and only then
     # is the owner's runtime-mode baseline pinned against it.
-    applied_at = source.index("apply_runtime_provider_defaults(load_settings(migrate=True))")
+    applied_at = source.index("= apply_runtime_provider_defaults(")
     env_at = source.index("_apply_settings_to_env(settings)")
     baseline_at = source.index("initialize_runtime_mode_baseline()")
     assert applied_at < env_at < baseline_at
