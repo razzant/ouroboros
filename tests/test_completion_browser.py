@@ -2,7 +2,6 @@
 import hashlib
 import json
 import uuid
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -74,6 +73,44 @@ _OBSERVE = f"({_CAPTURE_TEST_SOCKET})();({_OBSERVE_CARDS.replace('document.docum
             });
         }
     };
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+        const barrier = window.__reconnectBarrier;
+        if (!barrier) return nativeFetch(input, init);
+        const raw = typeof input === 'string' ? input : input?.url || String(input);
+        const url = new URL(raw, location.href);
+        const matching = url.pathname === '/api/chat/history'
+            && !url.searchParams.has('cursor') && !url.searchParams.has('around')
+            && Number(url.searchParams.get('chat_id') || 1) === barrier.chatId
+            && window.__ouroWs?.ws && window.__ouroWs.ws !== barrier.oldSocket
+            && window.__ouroWs.ws.readyState === WebSocket.OPEN;
+        if (!matching) return nativeFetch(input, init);
+        barrier.armed = false;
+        return nativeFetch(input, init).then(response => {
+            if (!response.ok) {
+                if (window.__reconnectBarrier === barrier) barrier.armed = false;
+                return response;
+            }
+            const nativeJson = response.json.bind(response);
+            response.json = () => nativeJson().then(data => {
+                if (window.__reconnectBarrier === barrier) {
+                    const fault = Array.isArray(data?.window?.truncated_by)
+                        && data.window.truncated_by.some(c => String(c).endsWith('_projection_failed'));
+                    barrier.armed = Boolean(data && !data.reason_code && !fault
+                        && Array.isArray(data.messages) && typeof data.has_more === 'boolean'
+                        && data.page_cursor != null && (!data.has_more || data.next_cursor != null));
+                }
+                return data;
+            }, err => {
+                if (window.__reconnectBarrier === barrier) barrier.armed = false;
+                throw err;
+            });
+            return response;
+        }, err => {
+            if (window.__reconnectBarrier === barrier) barrier.armed = false;
+            throw err;
+        });
+    };
 })();"""
 
 
@@ -120,17 +157,39 @@ def _open(page, server, project):
     return feed
 
 
-def _reconnect(page, chat_id):
+def _reconnect(page, chat_id, feed):
     page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30000)
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === 1", timeout=30000)
-    page.evaluate("window.__completionDocument = true; window.__oldSocket = window.__ouroWs.ws")
-    def history(response):
-        url = urlsplit(response.url)
-        return url.path == "/api/chat/history" and parse_qs(url.query).get("chat_id", ["1"]) == [str(chat_id)]
-    with page.expect_response(history, timeout=60000):
-        page.evaluate("window.__oldSocket.close()")
-    page.wait_for_function("() => window.__ouroWs.ws !== window.__oldSocket && window.__ouroWs.ws?.readyState === 1",
-                           timeout=30000)
+    armed = page.evaluate("""({chatId, feed}) => {
+        const node = document.querySelector(feed);
+        if (!node || !node.isConnected) return false;
+        window.__reconnectBarrier?.observer?.disconnect();
+        window.__completionDocument = true;
+        window.__oldSocket = window.__ouroWs.ws;
+        const barrier = {chatId: Number(chatId), feed: node, oldSocket: window.__oldSocket, armed: false, applied: false, observer: null};
+        barrier.observer = new MutationObserver(rows => {
+            if (barrier.armed && rows.some(r => r.target === barrier.feed) && barrier.feed.dataset.historyHydrated === 'true') {
+                barrier.applied = true;
+                barrier.armed = false;
+            }
+        });
+        barrier.observer.observe(node, {attributes: true, attributeFilter: ['data-history-hydrated']});
+        window.__reconnectBarrier = barrier;
+        window.__oldSocket.close();
+        return true;
+    }""", {"chatId": chat_id, "feed": feed})
+    assert armed, f"feed {feed!r} was not mounted before reconnect"
+    try:
+        page.wait_for_function("""feed => {
+            const b = window.__reconnectBarrier;
+            return Boolean(b?.applied
+                && window.__ouroWs?.ws && window.__ouroWs.ws !== b.oldSocket
+                && window.__ouroWs.ws.readyState === WebSocket.OPEN
+                && document.querySelector(feed) === b.feed && b.feed.isConnected
+                && b.feed.dataset.historyHydrated === 'true');
+        }""", arg=feed, timeout=60000)
+    finally:
+        page.evaluate("() => { window.__reconnectBarrier?.observer?.disconnect(); window.__reconnectBarrier = null; }")
     assert page.evaluate("window.__completionDocument === true"), "reconnect reloaded the document"
 
 
@@ -268,15 +327,14 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
 def _wire_order(page, task_id, *, chat_id=None):
     page.wait_for_function("({id, chatId}) => window.__completionFrames.some(f => f.type === 'log'"
                           " && f.data?.type === 'task_done' && f.data.task_id === id"
-                          " && (chatId === null || (!f.data._historical && String(f.data.chat_id) === chatId)))",
+                          " && (chatId === null || String(f.data.chat_id) === chatId))",
                           arg={"id": task_id, "chatId": str(chat_id) if chat_id is not None else None}, timeout=30000)
     frames = page.evaluate("() => window.__completionFrames")
     finals = [i for i, f in enumerate(frames) if f.get("type") == "chat"
               and f.get("task_id") == task_id and f.get("role") == "assistant" and not f.get("is_progress")]
     terminals = [i for i, f in enumerate(frames) if f.get("type") == "log"
                  and f.get("data", {}).get("type") == "task_done" and f["data"].get("task_id") == task_id
-                 and (chat_id is None or (not f["data"].get("_historical")
-                                          and str(f["data"].get("chat_id")) == str(chat_id)))]
+                 and (chat_id is None or str(f["data"].get("chat_id")) == str(chat_id))]
     assert len(finals) == 1 and terminals and finals[0] < terminals[0], (finals, terminals)
     return {"final_indices": finals, "terminal_indices": terminals}
 
@@ -355,7 +413,7 @@ def test_native_completion_receipt_keeps_work_and_errors_visible(
                     delivery = _delivery(oracle, task_id, result, answer, chat_id, stop=case == "unfinished_stop")
                     page.screenshot(path=str(evidence / "live.png"), full_page=True, animations="disabled")
                     capture.checkpoint("reconnect", task_id=task_id)
-                    _reconnect(page, chat_id)
+                    _reconnect(page, chat_id, feed)
                     views["reconnected"] = _presentation(page, feed, task_id, answer, case, project)
                     page.screenshot(path=str(evidence / "reconnected.png"), full_page=True, animations="disabled")
                     capture.checkpoint("reload", task_id=task_id)
@@ -453,7 +511,7 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                     for stage in ("live", "reconnected", "reloaded"):
                         capture.checkpoint("child_output_" + stage, parent_id=parent_id, child_id=child_id)
                         if stage == "reconnected":
-                            _reconnect(page, project["chat_id"])
+                            _reconnect(page, project["chat_id"], feed)
                         elif stage == "reloaded":
                             page.reload(wait_until="domcontentloaded")
                             feed = _click_project(page, project)
