@@ -1,8 +1,8 @@
 """CPL-3 architecture-fact suite (plan §7.3).
 
 Pins the five pure queries of ``ouroboros/code_intelligence_architecture.py``
-on the REAL repository carriers — the domain manifest, the generated facade /
-frozen-contract inventories, ``docs/PERSISTENCE.md`` and the
+on the real repository sources — the domain manifest, facade syntax,
+ARCHITECTURE §11.1, ``docs/PERSISTENCE.md`` and the
 ``runtime_mode_policy`` protected inventories — plus their completeness
 against those carriers (a manifest row, facade row, persistence row or
 frozen-contract row the queries cannot reach = red), and the model-facing
@@ -18,7 +18,6 @@ import pytest
 
 from ouroboros.code_intelligence_architecture import (
     ARCHITECTURE_FACTS,
-    FROZEN_INVENTORY_RELPATH,
     PERSISTENCE_DOC_RELPATH,
     _frozen_contract_rows,
     _persistence_rows,
@@ -146,20 +145,6 @@ def test_domain_dependencies_unknown_domain_teaches_the_vocabulary():
 # facade_consumers
 # ---------------------------------------------------------------------------
 
-def test_facade_scan_matches_the_generated_facade_inventory(reexports):
-    """Completeness against the gen/verify-pinned carrier: the runtime scan
-    finds exactly the facade modules docs/inventories/FACADE_INVENTORY.md pins."""
-    inventory_text = (REPO / "docs/inventories/FACADE_INVENTORY.md").read_text(encoding="utf-8")
-    pinned = set()
-    for line in inventory_text.splitlines():
-        if line.startswith("| `") and line.count("|") >= 4:
-            first = line.split("|")[1].strip()
-            if first.startswith("`") and first.endswith("`"):
-                pinned.add(first.strip("`"))
-    assert pinned, "the facade inventory carrier parsed empty"
-    assert set(reexports) == pinned
-
-
 def test_facade_module_query_lists_its_import_consumers(reexports):
     rows = facade_consumers(REPO, "ouroboros/llm.py", reexports=reexports)
     consumers = {r.consumer for r in rows}
@@ -279,15 +264,11 @@ def test_protected_path_list_form_and_release_invariants():
 
 
 def test_every_frozen_contract_row_is_reachable_from_its_owner_file():
-    """Completeness against the generated inventory: feeding each row's own
-    owner file back into the query must name that row."""
+    """Feeding every owner and anchor from §11.1 into the query returns its row."""
     triples = _frozen_contract_rows(REPO)
     assert len({label for label, _f, _r in triples}) >= 20
-    for label, file_part, role in triples:
-        impact = protected_contracts_affected(REPO, [file_part])
-        assert (label, role) in {(c.contract, c.role) for c in impact.contracts}, (
-            label, file_part, role,
-        )
+    impact = protected_contracts_affected(REPO, {path for _, path, _ in triples})
+    assert {(c.contract, c.path, c.role) for c in impact.contracts} == set(triples)
 
 
 def test_protected_inventories_are_fully_categorized():
@@ -322,14 +303,21 @@ def _ctx(tmp_path):
 def test_query_code_architecture_op_serves_the_five_facts(tmp_path):
     from ouroboros.tools.query_code import _query_code
 
-    out = _query_code(_ctx(tmp_path), op="architecture", query="owner_of ouroboros/llm.py")
+    ctx = _ctx(tmp_path)
+    out = _query_code(ctx, op="architecture", query="owner_of ouroboros/llm.py")
     assert "D02" in out and "module_path" in out
 
-    out = _query_code(_ctx(tmp_path), op="architecture", query="domain_dependencies D02")
+    out = _query_code(ctx, op="architecture", query="domain_dependencies D02")
     assert "imports:" in out and "imported by:" in out
 
+    out = _query_code(ctx, op="architecture", query="facade_consumers ouroboros/llm.py", limit=1)
+    assert "from ouroboros/llm.py" in out and "next offset=1" in out
+
+    out = _query_code(ctx, op="architecture", query="persistence_entities_written_by save_settings")
+    assert "`settings.json`" in out
+
     out = _query_code(
-        _ctx(tmp_path), op="architecture",
+        ctx, op="architecture",
         query="protected_contracts_affected BIBLE.md, ouroboros/gateway/contracts.py",
     )
     assert "safety-critical" in out and "frozen contract" in out
@@ -409,4 +397,3 @@ def test_architecture_fact_vocabulary_is_closed():
     )
     with pytest.raises(ValueError, match="owner_of"):
         architecture_fact_rows(REPO, "unknown_fact x")
-    assert FROZEN_INVENTORY_RELPATH.endswith("FROZEN_CONTRACTS_INVENTORY.md")

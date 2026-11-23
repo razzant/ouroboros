@@ -39,10 +39,13 @@ operation does not use are refused rather than silently ignored.
 
 All operations use the existing `root`, `bucket` and `skill_name` resource
 binding. `user_files` requires an explicit target directory or file. Architecture
-facts require an `active_workspace` or `system_repo` carrying the repository's
-inventories. Existing access checks apply before source reads, including for
-subagents; source snippets retain the existing exact-source egress policy with
-no added masking layer.
+facts require an `active_workspace` or `system_repo` carrying the relevant sources:
+the domain manifest and facade syntax, `PERSISTENCE.md`, or ARCHITECTURE §11.1.
+Frozen-contract impact checks each book source with the file-read policy and reads
+that target as data. In a managed work tree it reads regular files through the
+confined reader, without following filesystem links or falling back to the container.
+A missing, refused or unreadable member leaves coverage unavailable, not an empty
+inventory. Existing introspection and exact-source egress checks still apply.
 
 ## Reading the evidence
 
