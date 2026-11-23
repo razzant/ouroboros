@@ -872,7 +872,11 @@ def test_the_brief_of_a_three_file_change_on_the_real_tree_is_measured(tmp_path)
     # grew the repository index past the old 234,000 ceiling; same headroom again.
     # The 7.12.0 cut (2026-11-22) measures 260,956: 258,964 at the 7.12.0 release merge, then about 2K more
     # repository index from the modules merged since (#3756, #3981 and others); same headroom again.
-    assert without_diff < 284_000, without_diff
+    # After composing DESIGN's whole bible (including the palette and recipes), the same subject measures 267,969.
+    # Keep the ~23K allowance, not the previous tree's ceiling. The excerpt must actually have been selected.
+    assert without_diff < 291_000, without_diff
+    assert any(row["path"] == "docs/DESIGN.md#Design bible" and row["disposition"] == "inline"
+               for row in manifest["governance_manifest"])
     assert sections["repository_index"] > 20_000          # the index really ran
     assert sections["governance_stable_inline"] > 40_000  # BIBLE really inline
     assert sections["change_checklist"] > 0 and sections["coupling_checklist"] > 0
