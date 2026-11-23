@@ -446,10 +446,8 @@ def _typed_result_metadata(
     outcome classifier and the web client already read, so the
     cutover replaces the PRODUCER of the field, not its consumers.
 
-    The rules below are deliberately NOT text classification and stay here: the
-    untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts, and the
-    skill-publish projection — all keyed on the tool name and on trusted meta.
+    Use producer facts for artifact registration, plan review, process results and
+    skill publication. Only legacy artifact producers need the full result body.
     """
     text = str(result or "")
     if isinstance(tool_result, ToolResult):
@@ -468,10 +466,11 @@ def _typed_result_metadata(
             meta["verification"] = dict(tool_result.meta["verification"])
         if isinstance(tool_result.meta.get("image_attachment"), dict):
             meta["image_attachment"] = dict(tool_result.meta["image_attachment"])
-    # Legacy non-process deliverable fallback reads the FULL result before trace
-    # truncation. Process producers must supply the typed fact below.
+    # Only fall back to legacy text where no producer effect facts apply.
+    facts = meta.get("tool_result_meta", {})
     if (
         fn_name not in _PROCESS_RESULT_TOOLS
+        and not {"artifact_registered", "target_files_changed"}.intersection(facts)
         and not is_error
         and "ARTIFACT_OUTPUTS" in text
     ):
@@ -1257,8 +1256,6 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
         before = confirmed_delivery_receipts(tools._ctx)
         with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
             timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
-            from ouroboros.place_reply import note_dispatch
-            note_dispatch(tools._ctx, llm_trace, tc, bound=True)
             result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):

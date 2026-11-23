@@ -117,6 +117,36 @@ def test_an_explicit_retry_reads_its_accepted_start_before_route_health_and_send
     assert len(engine.creates) == 1 and len(engine.lookups) == 1
 
 
+def test_accepted_lookup_keeps_the_original_named_note_receipt_after_an_edit(tmp_path, monkeypatch):
+    from hashlib import sha256
+
+    from ouroboros.knowledge import resolve_knowledge_address
+    from ouroboros.subagent_runtime import exact_start
+    from ouroboros.subagents import DelegationRoute
+    from tests._delegated_transport_shared import _transport_snapshot
+
+    registry, engine = _delegating(tmp_path, monkeypatch)
+    address = resolve_knowledge_address(tmp_path, "witness-note", "global")
+    address.path.parent.mkdir(parents=True, exist_ok=True)
+    original = "# A synthetic note\n\nWhole old text.\n"
+    address.path.write_text(original, encoding="utf-8")
+    engine.lose = 1
+    lost = json.loads(exact_start(registry._ctx, "Read the note.", {
+        "snapshot": _transport_snapshot(DelegationRoute("some-route", "weak-model"), "readonly"),
+        "knowledge_notes": [{"topic": "witness-note"}],
+    }).text)
+    token = lost["pending_invocation_id"]
+    address.path.write_text("# Edited later\n", encoding="utf-8")
+    c._CUSTODY.clear()
+    accepted = _start(registry, retry_of=token)
+    revision = sha256(original.encode()).hexdigest()
+    assert accepted["recovered_without_start"] and accepted["named_notes"] == {"sent": [{
+        "topic": "witness-note", "scope": "global", "revision": revision, "chars": len(original)}]}
+    assert f"witness-note (global)@{revision[:12]}" in accepted["note"]
+    assert len(engine.creates) == len(engine.lookups) == 1
+    assert engine.lookups[0][2] == engine.creates[0][2] and original in engine.lookups[0][2]["instructions"]
+
+
 @pytest.mark.parametrize("selected", [True, False], ids=["selected", "lineage"])
 def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_copies_could_be(
         tmp_path, monkeypatch, selected):

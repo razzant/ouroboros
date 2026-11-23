@@ -195,6 +195,34 @@ def test_a_settings_save_that_does_not_edit_a_slot_does_not_author_it(install, m
     assert _slots(_task_start()) == (ANTHROPIC[0], "", ANTHROPIC[2])
 
 
+@pytest.mark.parametrize("document", [
+    {"ANTHROPIC_API_KEY": "sk-ant-present-key", "DEEPSEEK_API_KEY": "sk-ds-present-key"},
+    # The legacy compatible pair still saved with its connection switched off: no compatible access is left.
+    {"ANTHROPIC_API_KEY": "sk-ant-present-key", "DEEPSEEK_API_KEY": "sk-ds-present-key",
+     "OPENAI_API_KEY": "sk-legacy-present-key", "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+     "OUROBOROS_CONNECTIONS": [{"kind": "openai-compatible", "name": "default", "enabled": False}]},
+], ids=["two-direct-keys", "legacy-pair-connection-off"])
+def test_several_direct_keys_keep_unauthored_light_and_fallbacks_on_main_across_saves(install, monkeypatch, document):
+    """Owner 2026-11-22: several direct keys and no router run Light on Main and no fallback chain. Settings saves
+    that post those slots back as shown author neither, so OpenRouter brings its defaults and takes them away."""
+    main = "anthropic::claude-opus-5-5"
+    _write(install, {**document, "OUROBOROS_MODEL": main})
+    pin_safety_model()
+    client = _settings_client(monkeypatch)
+
+    def save(**changes):
+        shown = client.get("/api/settings").json()
+        response = client.post("/api/settings", json={**{slot: shown[slot] for slot in SLOTS}, **changes})
+        assert response.status_code == 200, response.text
+        assert not set(SLOTS[1:]) & set(json.loads(install.read_text(encoding="utf-8")))
+        return _slots(_task_start())
+
+    assert _slots(_task_start()) == (main, "", "")
+    assert save(TOTAL_BUDGET="25") == (main, "", "")
+    assert save(OPENROUTER_API_KEY="sk-or-present-key") == (main, *SHIPPED[1:])
+    assert save(OPENROUTER_API_KEY="") == (main, "", "")
+
+
 @pytest.mark.parametrize("key, value, runs", [
     ("OUROBOROS_MODEL", "anthropic::claude-operator-main", "anthropic::claude-operator-main"),
     ("OUROBOROS_MODEL_LIGHT", "anthropic::claude-operator-light", "anthropic::claude-operator-light"),

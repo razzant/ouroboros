@@ -11,7 +11,7 @@ shipped API default panel into catalog rows for the migration and the wizard.
 
 No settings or transport are read here. Exact discovery misses are typed
 refusals with no partial output; a policy's explicit ordered successor (Codex:
-Sol 6.1 → 5.6; Cursor: Grok 4.7 → 4.6; Agy: Hydrogen → Flash 3.8) answers only
+Sol 6.2 → 6.1 → 5.6; Cursor: Grok 4.7 → 4.6; Agy: Hydrogen → Flash 3.8) answers only
 from discovery, said in the receipt and diagnostics. Rows are unpinned by default so Claudexor owns
 compatible account rotation; Cursor and Agy keep effort in both their compound
 model slug and the explicit row field.
@@ -82,6 +82,7 @@ _MODEL_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "opus-5.5": ("claude-opus-5-5",),
     },
     HARNESS_CODEX: {
+        "gpt-6.2-sol": ("gpt-6.2-sol",),
         "gpt-6.1-sol": ("gpt-6.1-sol",),
         "gpt-5.6-sol": ("gpt-5.6-sol",),
     },
@@ -101,7 +102,8 @@ _MODEL_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
 
 @dataclass(frozen=True)
 class HarnessDiscovery:
-    """One connected harness and the model ids the daemon discovered for it."""
+    """One connected harness and its eligible catalog: the discovered ids a preset seat may take (Codex: those
+    its subscription accounts list, ``gateway/onboarding.verified_harness_discoveries``)."""
 
     harness_id: str
     model_ids: Tuple[str, ...] = ()
@@ -202,9 +204,9 @@ def _surface(preference: str, effort: str, then: Tuple[str, ...] = ()) -> Surfac
     return SurfacePolicy(preference=preference, effort=effort, then=then)
 
 
-# Codex prefers 6.1 Sol and takes 5.6 Sol only when live discovery lacks it (owner 2026-10-18); Cursor
-# prefers the standard (not -fast) Grok 4.7 the same way, Grok 4.6 its successor (owner 2026-11-16).
-_CODEX_SOL = _surface("gpt-6.1-sol", "medium", ("gpt-5.6-sol",))
+# Codex prefers 6.2 Sol, then 6.1 Sol, then 5.6 Sol, each only when its eligible catalog lacks the earlier
+# (owner 2026-11-22); Cursor prefers the standard (not -fast) Grok 4.7 the same way, Grok 4.6 next (2026-11-16).
+_CODEX_SOL = _surface("gpt-6.2-sol", "medium", ("gpt-6.1-sol", "gpt-5.6-sol"))
 _GROK = ("grok-4.6",)
 
 
@@ -295,10 +297,8 @@ def _resolve_seat(seat: PresetSeat,
         )
     return "", "", PresetRefusal(
         code="model_not_in_discovery", seat=seat, candidates=candidates,
-        message=(f"The {seat.harness} harness does not expose "
-                 f"{seat.preference!r} (tried {', '.join(candidates)}), so the "
-                 f"{seat.surface} seat #{seat.position} cannot be filled from live "
-                 "discovery."),
+        message=(f"{seat.harness}'s eligible catalog has none of {', '.join(candidates)}, so the "
+                 f"{seat.surface} seat #{seat.position} cannot be filled from live discovery."),
     )
 
 
@@ -321,7 +321,7 @@ def _resolved_row(seat: PresetSeat, model_id: str, chosen: str = "") -> Dict[str
     }
     if chosen and chosen != seat.preference:
         row["chosen_preference"] = chosen
-        row["reason"] = (f"{seat.harness} discovery has no {seat.preference!r}; "
+        row["reason"] = (f"{seat.harness}'s eligible catalog has no {seat.preference!r}; "
                          f"this seat uses the next preference, {model_id!r}.")
     return row
 

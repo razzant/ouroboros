@@ -44,7 +44,7 @@ from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.shell import _kill_process_group
 from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
-from ouroboros.tools.skill_exec import _scrub_env
+from ouroboros.tools.skill_exec import PYTHON_STDIO_ENCODING, _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -359,6 +359,7 @@ def _child_env(
         pythonpath = os.pathsep.join([pythonpath, env["PYTHONPATH"]])
     env["PYTHONPATH"] = pythonpath
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = PYTHON_STDIO_ENCODING
     return {**env, **_host_service_access(drive_root, skill_name, skill_dir)} if host_access else env
 
 

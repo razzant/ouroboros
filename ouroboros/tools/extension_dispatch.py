@@ -157,26 +157,20 @@ def timeout_dispatch_candidate(
     return resolution
 
 
-def bound_dispatch_candidate(
-    ctx: ToolContext, name: str, *, consume: bool = True,
-) -> tuple[Optional[Dict[str, Any]], bool]:
-    """Read this call's timeout-time resolution; the dispatcher resolves fresh without one.
+def bound_dispatch_candidate(ctx: ToolContext, name: str) -> tuple[Optional[Dict[str, Any]], bool]:
+    """Take this call's timeout-time resolution once; the dispatcher resolves fresh without one.
 
-    By default the dispatcher takes the binding once; a pre-dispatch observation
-    uses ``consume=False`` without spending it or resolving an absent binding. Both require the same context and name. The
-    physical dispatcher still observes liveness itself, so a revocation that
-    lands after the timeout was chosen refuses before the handler runs. The descriptor the dispatcher takes stays
-    in the call's slot for the facts written after it (``dispatched_descriptor``).
+    The binding requires the same context and name. The physical dispatcher still observes liveness itself, so a
+    revocation that lands after the timeout was chosen refuses before the handler runs. The descriptor the dispatcher
+    takes stays in the call's slot for the facts written after it (``dispatched_descriptor``).
     """
     slot = _CALL_RESOLUTION.get()
-    bound = (slot.pop("bound", None) if consume else slot.get("bound")) if slot is not None else None
+    bound = slot.pop("bound", None) if slot is not None else None
     if bound is not None and bound[0] is ctx and bound[1] == name:
         resolution = bound[2]
-    elif consume:
-        resolution = _extension_dispatch_candidate(ctx, name)
     else:
-        return None, False
-    if consume and slot is not None:
+        resolution = _extension_dispatch_candidate(ctx, name)
+    if slot is not None:
         slot["dispatched"] = (ctx, name, resolution[0])
     return resolution
 

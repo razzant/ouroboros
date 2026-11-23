@@ -71,6 +71,30 @@ def finished(tmp_path, monkeypatch):
     return root, store_dir, closure
 
 
+@pytest.mark.parametrize("held_kind", ["same", "child_drive", "other_task", "other_root", "none"])
+def test_publication_borrows_only_the_enclosing_exact_task_custody(finished, monkeypatch, held_kind):
+    from concurrent.futures import ThreadPoolExecutor
+
+    root, directory, _ = finished
+    acquire = task_custody.task_custody_lock
+    monkeypatch.setattr(task_custody, "task_custody_lock",
+                        lambda r, t, **kw: acquire(r, t, timeout_sec=0.01))
+    held = {"same": (root, TASK),
+            "child_drive": (root / "state/headless_tasks/child/data", TASK),
+            "other_task": (root, "other"), "other_root": (root.parent / "other", TASK), "none": None}[held_kind]
+    with acquire(root, TASK) as outer:
+        assert outer
+        with release_state.publication_lock(directory / SNAP, custody_held=held) as borrowed:
+            assert borrowed == (held_kind in {"same", "child_drive"})
+        def contender():
+            with release_state.publication_lock(directory / SNAP) as locked:
+                return locked
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(contender).result() is False
+    with release_state.publication_lock(directory / SNAP) as acquired:
+        assert acquired
+
+
 def _propose(root, files=None, retained=None, consequence="the exact sample snapshot cannot be measured again"):
     files = [{"path": SNAP, "role": "frozen copy of memory.sqlite for the measurement",
               "loss": "the measurement cannot be rerun on the same bytes"}] if files is None else files
@@ -756,7 +780,8 @@ def test_the_archive_never_serves_a_released_member_and_counts_it_apart(finished
     assert not any(name.endswith("memory-snapshot.sqlite") for name in members)
 
 
-def test_a_reused_named_evidence_generation_publishes_what_it_still_holds(finished, monkeypatch):
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_a_reused_named_evidence_generation_publishes_what_it_still_holds(finished, monkeypatch, borrowed):
     """The real publisher path: ``retain_named`` reuses an unchanged generation and its custody receipt says how
     many files the owner released; the immutable summary on disk is never rewritten."""
     from ouroboros import delegate_named_evidence as dne
@@ -780,7 +805,9 @@ def test_a_reused_named_evidence_generation_publishes_what_it_still_holds(finish
     monkeypatch.setattr(delegate_custody, "emit", lambda _root, kind, row: emitted.append((kind, row)) or True)
     _propose(root)
     _choose(_ready(root), root)
-    answer = dne.retain_named(root, entry)
+    with task_custody.task_custody_lock(root, TASK) if borrowed else contextlib.nullcontext(True) as held:
+        assert held
+        answer = dne.retain_named(root, entry, custody_held=(root, TASK) if borrowed else None)
     assert answer["files"] == [{"path": "REPORT.md", "size": 11, "sha256": "y", "mode": 420}]
     assert answer["released"] == ["files/memory-snapshot.sqlite"]
     [(kind, row)] = emitted

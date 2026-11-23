@@ -170,24 +170,21 @@ _START_CHOICE_PARAMS = {
 # Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
 # structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
-    "Start a child on one objective; it returns task_id and reports back. Children may write knowledge notes, "
-    "memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
-    "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. "
+    "One child, one objective. Returns task_id; read the handoff. Child writes: own knowledge notes, memory marks, "
+    "chronicle drafts (accept/reject: chronicle_write kind=decision); no commits, tool self-grants or identity/scratchpad. "
     # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
     # which is all a custom projection without parameter prose shows of that choice.
-    "Default native READ-ONLY children inspect repo/data/history and web/browser; no other "
-    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. Read-only input_files: "
-    "file/git_range. write_surface makes a child ACTING: self_worktree isolates eligible Git files (uncommitted "
-    "too) for integrate_subagent_patch; external_workspace writes the SHARED directory (write_root, else "
-    "workspace_root, else one new Git tree); genesis gives EACH an empty durable Git repo that IS the "
-    "deliverable; harness work uses a private snapshot and integrate_delegated_patch. Non-acting sessions keep "
-    "configured access in an evidence-only private checking copy; access='readonly' selects read-only "
-    "execution. Runtime data is never a write_surface. Cyber-effective children inherit review/skill/runtime "
-    "tools within task restrictions; nesting is capped. Children scheduled in one round run concurrently; on "
-    "cache-write-priced routes each sibling started before the first responds pays a full prefix write. Native "
-    "children can address you, siblings or any task in their tree: state what is interim, whom to address and "
-    "when to stop. Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work "
-    "may repeat. Read the handoff before relying on it."
+    "Default native READ-ONLY: repo/data/history, web/browser; no other writes or shell/review/runtime/skills. "
+    "workspace_root: start folder, else yours. Read-only input_files: file/git_range. "
+    "ACTING write_surface: self_worktree isolates eligible Git files, uncommitted too (integrate_subagent_patch); "
+    "external_workspace writes shared files (write_root, else workspace_root, else new Git tree); "
+    "genesis: own empty durable Git repo as deliverable. Private harness snapshots: integrate_delegated_patch. "
+    "Runtime data is never a write_surface. Non-acting sessions keep configured access in private evidence-only copies; "
+    "access='readonly' forces read-only. knowledge_notes via knowledge_read: whole at first session start, even declared; "
+    "API gets addresses. Later starts reselect; []/omit: none. Cyber children inherit review/skill/runtime tools within "
+    "limits; nesting capped. Same-round starts run concurrently. Priced cache writes: full prefix write per start before "
+    "first reply. Native children message any task in their tree; name interim reports, recipients and when to stop. "
+    "Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work may repeat."
 )
 
 

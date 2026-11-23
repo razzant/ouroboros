@@ -57,6 +57,7 @@ _SKILL_REVIEW_TOOL_TIMEOUT_SEC = int(os.environ.get("OUROBOROS_SKILL_REVIEW_TOOL
 _DEFAULT_TIMEOUT_SEC = 60
 _MAX_STDOUT_BYTES = 256 * 1024
 _MAX_STDERR_BYTES = 128 * 1024
+PYTHON_STDIO_ENCODING = "utf-8:backslashreplace"
 
 _ALLOWED_RUNTIMES = {
     "python": ("python", "python3"),
@@ -730,7 +731,7 @@ def _author_finish_existing_skill_review(
     binds the newly accepted bytes.
     """
     from ouroboros.review_records import RECORDED_REVIEW_AUTHORITY, build_author_disposition
-    from ouroboros.skill_loader import compute_content_hash, load_review_state, save_review_state
+    from ouroboros.skill_loader import load_review_state, save_review_state
     from ouroboros.skill_review import _run_deterministic_preflight
     from ouroboros.tools.review_helpers import cyber_review_authority
 
@@ -738,11 +739,7 @@ def _author_finish_existing_skill_review(
     loaded = load_bound_skill(binding)
     if loaded is None:
         return {"error": _skill_review_refusal(ctx, "LEGACY_UNAVAILABLE", "SKILL_REVIEW_ERROR: selected skill is unavailable for author finish.")}
-    current_hash = compute_content_hash(
-        loaded.skill_dir,
-        manifest_entry=loaded.manifest.entry,
-        manifest_scripts=loaded.manifest.scripts,
-    )
+    current_hash = _payload_hash(loaded)
     drive_root = binding.state_drive_root
     review_state = load_review_state(drive_root, skill_name, skill_type=loaded.manifest.type, skill_dir=loaded.skill_dir)
     feedback, basis, refusal = _earlier_feedback(drive_root, skill_name, review_state, current_hash, review_reference)
@@ -1200,6 +1197,8 @@ def _handle_skill_exec(
         env = augment_env_for_skill_deps(env, loaded.skill_dir)
     except Exception:
         log.debug("Could not augment skill env with isolated dependencies", exc_info=True)
+    if runtime in {"python", "python3"}:
+        env["PYTHONIOENCODING"] = PYTHON_STDIO_ENCODING
 
     if runtime == "deno":
         cmd = [runtime_binary, *_deno_permission_args(ctx, loaded.manifest.permissions, state_dir, env), *cmd[1:]]

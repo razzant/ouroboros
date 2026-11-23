@@ -204,10 +204,12 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
                            "may only be retried by the task that requested it.",
                            retry_of=retry_token)
     if record["state"] == "started":
+        named = record.get("named_notes")
         return None, _fail("delegate_start", "invocation_already_started",
                            "That invocation already bound a run — do not re-post it. "
                            "Wait on the existing run instead.",
-                           retry_of=retry_token, run_id=record["run_id"])
+                           retry_of=retry_token, run_id=record["run_id"],
+                           **({"named_notes": named} if isinstance(named, dict) and named else {}))
     if record["state"] == "failed_definite":
         return None, _fail("delegate_start", "invocation_definitely_refused",
                            "That invocation is recorded as definitively refused (failed_definite); "
@@ -268,11 +270,11 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any], lineag
     return _accepted_result(held, read, retry_token, record.get("request"), (
         "The engine had already accepted this invocation's start; its run is now in custody and nothing was "
         "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
-        record.get("input_files"), lineage)
+        record.get("input_files"), lineage, record.get("named_notes"))
 
 
 def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
-                           request: Any, selected: Any = None, lineage: Any = None) -> Optional[ToolResult]:
+                           request: Any, selected: Any = None, lineage: Any = None, named: Any = None) -> Optional[ToolResult]:
     """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
     once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started, naming the
     start's own selection and lineage fact; else ``None`` and the start keeps its pending token, registration and
@@ -283,25 +285,28 @@ def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: 
     return None if held is None else _accepted_result(held, read, invocation_id, request, (
         "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
         "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."),
-        selected, lineage)
+        selected, lineage, named)
 
 
 def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str,
-                     selected: Any = None, lineage: Any = None) -> ToolResult:
+                     selected: Any = None, lineage: Any = None, named: Any = None) -> ToolResult:
     """The started result of the run custody bound for ``invocation_id`` from the engine's own read: ``selected``
     is the invocation's recorded copies (a binding made by this read carries no request row), ``lineage`` what
-    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing)."""
+    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing), and ``named``
+    what the invocation recorded for its knowledge notes; none is looked up again."""
     from ouroboros.delegate_shared import delegate_result
 
     from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
 
     scope = (request.get("scope") if isinstance(request, dict) else None) or {}
-    rows = selected if isinstance(selected, list) else (held.request_event or {}).get("input_files")
-    facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
-                                                                                  "lineage": lineage}),
+    recorded = held.request_event or {}
+    rows = selected if isinstance(selected, list) else recorded.get("input_files")
+    facts = {**start_facts(request if isinstance(request, dict) else {}, lineage, named or recorded.get("named_notes")),
              "access": [("access", held.access, None)] + ([(  # its key found an investigation: say so, briefly
                  "investigation", "evidence-only investigation: nothing from it is applied", False)]
                  if evidence_only(held) and held.mode == "agent" else [])}
+    if not isinstance(request, dict):
+        facts["assignment"] = (NO_RECORD, PREPARED)
     if isinstance(rows, list):  # this invocation's recorded copies
         facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
             1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
@@ -311,6 +316,7 @@ def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, reques
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
         "effort": held.effort or "", "access": held.access, "mode": held.mode, "isolation": held.isolation or "envelope",
         "root": held.execution_root or str(scope.get("root") or ""), "lookup": read, "note": note,
+        **({"named_notes": facts["knowledge_notes"]} if "knowledge_notes" in facts else {}),
     })
 
 
@@ -338,6 +344,7 @@ class _RetryBinding(NamedTuple):
     prompt_cache_ttl: Dict[str, Any]
     input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
     row_processing: Optional[str]  # the configured row's own tier as recorded; None on a row that recorded none
+    named_notes: Optional[Dict[str, Any]]  # the knowledge notes the original start sent, by address and revision
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -487,6 +494,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
         input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
         row_processing=record["row_processing"] if isinstance(record.get("row_processing"), str) else None,
+        named_notes=deepcopy(record["named_notes"]) if isinstance(record.get("named_notes"), dict) else None,
     ), None
 
 
@@ -623,7 +631,7 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
     read_prefix = f"delegated_runs/{cap_dir.name}"
     unsaved = [str(row.get("path") or "") for row in manifest.get("untracked_excluded") or []
                if isinstance(row, dict) and row.get("reason") in UNSAVED_REASONS] if not evidence_only(entry) else []
-    checkout = ("the copy's checkout itself is released once the capture is saved" if not unsaved else
+    checkout = ("the checkout is eligible for release after capture and evidence retention; custody may defer cleanup" if not unsaved else
                 f"the copy's checkout is KEPT until then: {len(unsaved)} path(s) in it could not be saved in the "
                 f"result (Git repositories or checked-out submodules inside it, or folders Git could not open): "
                 f"{', '.join(unsaved[:8])}. A submodule's own commits live in its separate Git directory "
@@ -679,6 +687,13 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
                     "committed work is still in the captured diff",
         }
     return block
+
+
+def capture_receipt_unwritten(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Bytes exist, but the capture is still owed; retain its readers and custody."""
+    return {**block, "status": "failed", "retry": "transient",
+            "note": "Patch bytes were saved, but the durable capture row could not be written. "
+                    "The result and any private copy and pins are kept. Fix the drive/event log, then call again."}
 
 
 def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_dir: pathlib.Path,
@@ -800,15 +815,11 @@ def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
 
 def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=None,
                                      retain_investigation: bool = True, publish: bool = True) -> Optional[Dict[str, Any]]:
-    """The drive-rooted core of the terminal capture — same contract, no ToolContext.
+    """Capture for collection, maintenance and explicit disposition; reviewers own their capture.
 
-    One ordinary capture author for foreground collection, the body and disposition;
-    startup/control reconciliation leaves its work pending. Reviewers use their native owner. The
-    apply/reject DECISION stays with a live owner, never taken here — an evidence-only investigation has
-    none to take, so its ready capture is retained as evidence at once (#1609). ``patch_captured`` MEANS
-    "a usable patch artifact exists" (C1-R3): the custody row is minted only over a ready-status
-    manifest; a failure manifest is returned as the failed block but leaves the row uncaptured (every
-    retry point stays open), and a pre-R3 row over a failed manifest falls through to a fresh capture.
+    Publish a custody row only for a ready manifest; legacy failed captures may be retried.
+    Maintenance with ``publish=False`` stages bytes but owes publication. Evidence-only
+    investigations may settle after publication (#1609); the live owner decides writer results.
     """
     from ouroboros.delegate_directory import is_directory_run, capture_directory_result, directory_capture_block
     from ouroboros.delegate_capture_attempt import failure_retry
@@ -823,7 +834,12 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         block = in_place_block(entry)  # no run patch, disposition or fictitious apply
         return {**block, "native_capture": note} if note else block
 
-    def finish(block, transport=None):
+    def finish(block, transport=None, *, record=False):
+        if publish and record and not custody.record_patch_captured(
+            drive, entry, status=block["status"], sha256=block["sha256"],
+            patch_size=block["patch_size"], capture_dir=str(cap_dir),
+        ):
+            return capture_receipt_unwritten(block)
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block
 
     if entry is not None and entry.mode == "plan":
@@ -882,13 +898,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         saved = manifest if manifest_path.exists() else {}
         if (str(saved.get("status") or "") in ready and saved.get("result_commit")
                 and saved.get("result_commit") == snapshot.get("result_sha")):
-            # The copy was released after this capture was saved but its row did not
-            # land: the saved result itself is the capture.
-            if publish:
-                custody.record_patch_captured(drive, entry, status=str(saved.get("status") or ""),
-                                              sha256=str(saved.get("sha256") or ""),
-                                              patch_size=saved.get("patch_size"), capture_dir=str(cap_dir))
-            return finish(_capture_block(entry, cap_dir, saved))
+            # The saved result still binds the pin even after checkout release.
+            return finish(_capture_block(entry, cap_dir, saved), record=True)
     if not work_domain.exists(exec_root) and not _restored_from_pin(entry, snapshot):
         # A legacy capture saves file outputs before its diff: a later failure keeps them (#1651).
         kept = len(saved.get("file_output_changes") or []) if saved.get("status") == "failed" else 0
@@ -955,15 +966,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             "note": f"patch capture failed ({type(exc).__name__}: {exc}); the private copy "
                     "is kept — inspect it directly.",
         }
-    if publish and str(manifest.get("status") or "") in ready:
-        custody.record_patch_captured(
-            drive, entry,
-            status=str(manifest.get("status") or ""),
-            sha256=str(manifest.get("sha256") or ""),
-            patch_size=manifest.get("patch_size"),
-            capture_dir=str(cap_dir),
-        )
-    return finish(_capture_block(entry, cap_dir, manifest))
+    block = _capture_block(entry, cap_dir, manifest)
+    return finish(block, record=block["status"] in ready)
 
 
 def capture_stranded_patch(drive_root: Any, run: _RunCustody) -> Dict[str, Any]:

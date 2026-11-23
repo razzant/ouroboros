@@ -538,7 +538,7 @@ def line_start_bodies(root: Any, run_id: str) -> Optional[List[str]]:
 
 
 def with_run_binding(start: ContinuationStart, authority: Any, binding: str, workdir: str,
-                     inputs: str = "") -> ContinuationStart:
+                     inputs: str = "", *, named_notes: str = "") -> ContinuationStart:
     """Restate THIS run's access and workspace in an ordinary continuation's prompt (#2513).
 
     The engine's ``auto`` carrier may resume a native session that keeps an earlier
@@ -546,7 +546,8 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     (a fresh snapshot, a lowering, in place after a copy). Every ordinary continuation,
     not only a changed root, so carries the exact text its own instructions got from the
     same renderers after provisioning, or, where none applies, the directory it starts
-    in, plus this run's own selected ``input_files`` note, if any.
+    in, plus this run's own selected ``input_files`` note. A new named-note selection
+    is sent only in the current prompt, which is read by both the native and packet carriers.
     A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus my human's rows its line
     lacks (``words``) and that note, even when the caller's text is empty. A turn owing either, or a
     promotion (whose access the thread's first instructions do not hold), restates this turn's typed
@@ -558,13 +559,19 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     if not start.facts:
         return start
     if "workspace" not in start.facts:
-        if not (start.words or inputs or start.facts.get("promotion")):
+        if not (start.words or inputs or named_notes or start.facts.get("promotion")):
             return start
         current = access_instruction(authority.access, investigation=authority.investigation).strip() if authority else ""
-        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, current, inputs) if part))
-    current = (access_instruction(authority.access, investigation=authority.investigation)
-               + (binding or no_copy_binding_instruction(workdir)) + inputs)
-    return start._replace(prompt=continuation_prompt(start.facts, start.note, current, start.words))
+        prompt = "\n\n".join(part for part in (start.prompt, start.words, current, inputs) if part)
+    else:
+        current = (access_instruction(authority.access, investigation=authority.investigation)
+                   + (binding or no_copy_binding_instruction(workdir)) + inputs)
+        prompt = continuation_prompt(start.facts, start.note, current, start.words)
+    if named_notes:
+        from ouroboros.held_notes import HELPER_NOTE
+
+        prompt = "\n\n".join(part for part in (prompt, named_notes, HELPER_NOTE) if part)
+    return start._replace(prompt=prompt)
 
 
 def engine_continues(gateway: Any) -> bool:

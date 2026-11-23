@@ -103,6 +103,15 @@ def test_extension_child_runner_uses_host_python_for_host_dependencies():
     assert pathlib.Path(_child_python()).resolve() == pathlib.Path(sys.executable).resolve()
 
 
+def test_extension_child_env_uses_utf8_for_piped_stdio(tmp_path):
+    from ouroboros.extension_process_runner import _child_env
+
+    env = _child_env(drive_root=tmp_path, repo_dir=tmp_path, skill_name="utf8_test", skill_dir=tmp_path,
+                     env_allowlist=[], granted_keys=[], host_access=False)
+
+    assert env["PYTHONIOENCODING"] == "utf-8:backslashreplace"
+
+
 def test_child_extension_load_reuses_one_discovered_peer_snapshot(tmp_path, monkeypatch):
     from ouroboros import extension_process_runner as runner
     from ouroboros import skill_loader

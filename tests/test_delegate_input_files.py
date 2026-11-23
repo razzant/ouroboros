@@ -628,6 +628,11 @@ def test_the_root_vocabulary_is_every_ordinary_file_root_and_the_schema_says_so(
         assert all(root in parameter["description"] for root in INPUT_FILE_ROOTS)
         assert "mandatory" in parameter["description"] and "skill_payload and others refuse" in parameter["description"]
     assert input_files_parameter("x")["input_files"]["description"].endswith(" x")
+    # knowledge_notes rides the same two schemas with one typed item, as knowledge_read's address takes it.
+    named = [next(tool.schema for tool in get_tools() if tool.name == "delegate_start")["parameters"]["properties"][
+        "knowledge_notes"], schedule_subagent_properties()["knowledge_notes"]]
+    assert named[0]["items"] == named[1]["items"] == {"type": "object", "required": ["topic"], "additionalProperties": False,
+                                                       "properties": {"topic": {"type": "string"}, "scope": {"type": "string"}}}
 
 
 def test_every_supported_root_prepares_through_the_real_start(subtests, tmp_path, monkeypatch):

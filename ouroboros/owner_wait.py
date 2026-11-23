@@ -269,8 +269,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_delivery_evidence_revision", "_delivery_evidence_fingerprint",
             "_delivery_effective_criteria", "_delivery_material_tool_indices",
             "_acceptance_ack_source_sha256", "_completion_request", "_completion_conflict", "_completion_selected",
-            "_completion_observation", "_completion_held_sha256", "_presence_completion",
+            "_completion_observation", "_completion_held_sha256", "_completion_riding_send", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
+            "_place_message_calls", "_records_only_noted", "_restored_send_unknown",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
             "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
             "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
@@ -1263,6 +1264,10 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     restore_authoring_handover(ctx, state, trace, usage)
     schedule_report = schedule_report_ctx(ctx)
+    if not schedule_report:
+        from ouroboros.place_reply import restore_send_facts
+
+        restore_send_facts(ctx, trace, messages)
     if schedule_report:
         # Pre-upgrade rows had no wake_silent/quiet facts. The geometry is enough to keep the report a record.
         for name in ("_completion_request", "_completion_selected"):

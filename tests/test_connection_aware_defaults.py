@@ -15,7 +15,11 @@ import pytest
 
 from ouroboros import review_pool_migration as m
 from ouroboros.llm_routing import resolve_target
-from ouroboros.provider_models import CONNECTIONS_KEY, compute_direct_review_seats
+from ouroboros.provider_models import (
+    ANTHROPIC_DIRECT_DEFAULTS,
+    CONNECTIONS_KEY,
+    compute_direct_review_seats,
+)
 from ouroboros.server_runtime import apply_runtime_provider_defaults, provider_slot_proposals
 from ouroboros.subscription_install_presets import factory_actor_rows, factory_review_rows
 
@@ -520,3 +524,116 @@ def test_the_wizard_bootstrap_proposes_on_the_api_of_the_only_named_key(tmp_path
         cfg.reset_runtime_mode_baseline_for_tests()
     assert state["mainModel"] == main
     assert [row.get("api_surface") for row in state["connections"]] == [row.get("api_surface") for row in rows]
+
+
+# --- several direct kinds and no router: unauthored Light follows Main, Fallbacks stay off (owner 2026-11-22) ---
+
+ANTHROPIC_WORK = {"kind": "anthropic", "name": "work", "api_key": "row-anthropic"}
+DEEPSEEK_WORK = {"kind": "deepseek", "name": "work", "api_key": "row-deepseek"}
+OPUS, OPUS_WORK = "anthropic::claude-opus-5-5", "anthropic@work::claude-opus-5-5"
+TWO_DIRECT = {"ANTHROPIC_API_KEY": "k-a", "DEEPSEEK_API_KEY": "k-d", "OUROBOROS_MODEL": OPUS}
+STRAY_URL = "http://127.0.0.1:9/v1"
+COMPATIBLE_OFF = {"kind": "openai-compatible", "name": "default", "enabled": False}
+
+
+def _clear_provider_and_slot_env(monkeypatch):
+    """Absent provider and slot variables, each recorded so the projection a task start writes is undone."""
+    from ouroboros import config as cfg
+    from ouroboros import settings_integrity as integrity
+
+    for key in (*cfg.SETTINGS_DEFAULTS, CONNECTIONS_KEY,
+                integrity.PROJECTED_PROPOSALS_ENV, integrity.PROJECTED_SETTINGS_ENV):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
+
+
+@pytest.mark.parametrize(("document", "environ", "main"), [
+    (TWO_DIRECT, {}, OPUS),
+    (_doc(ANTHROPIC_WORK, DEEPSEEK_WORK, OUROBOROS_MODEL=OPUS_WORK), {}, OPUS_WORK),
+    (_doc(DEEPSEEK_WORK, ANTHROPIC_API_KEY="k-a", OUROBOROS_MODEL=OPUS), {}, OPUS),
+    (_doc({"kind": "openrouter", "name": "default", "enabled": False}, OPENROUTER_API_KEY="k-or", **TWO_DIRECT),
+     {}, OPUS),
+    (_doc({**BYOK, "enabled": False}, ANTHROPIC_WORK, DEEPSEEK_WORK, OUROBOROS_MODEL=OPUS_WORK), {}, OPUS_WORK),
+    # The legacy OPENAI_BASE_URL is compatible access only with OPENAI_API_KEY and that connection on.
+    ({**TWO_DIRECT, "OPENAI_BASE_URL": STRAY_URL}, {}, OPUS),
+    (TWO_DIRECT, {"OPENAI_BASE_URL": STRAY_URL}, OPUS),
+    (_doc(WORK, **TWO_DIRECT, OPENAI_BASE_URL=STRAY_URL), {}, OPUS),
+    (_doc(COMPATIBLE_OFF, **TWO_DIRECT, OPENAI_API_KEY="k-o", OPENAI_BASE_URL=STRAY_URL), {}, OPUS),
+    (_doc(COMPATIBLE_OFF, ANTHROPIC_API_KEY="k-a", OPENAI_API_KEY="k-o", OPENAI_BASE_URL=STRAY_URL,
+          OUROBOROS_MODEL=OPUS), {}, OPUS),
+], ids=["built-in", "named", "built-in-and-named", "built-in-router-off", "named-router-off", "saved-url-no-key",
+        "operator-url-no-key", "named-openai-beside-url", "legacy-pair-connection-off",
+        "legacy-key-beside-one-kind-connection-off"])
+def test_several_direct_kinds_without_a_router_leave_unauthored_light_and_fallbacks_blank(
+        tmp_path, monkeypatch, document, environ, main):
+    """Several serving direct kinds and no OpenRouter or compatible endpoint (``direct_only_kinds``, read from the
+    serving connections): Settings shows unauthored Light and Fallbacks blank and leaves them off the disk, no
+    OpenRouter scout is minted, and a task runs Light on Main with no fallback chain."""
+    from ouroboros.model_slots import get_light_model, parse_fallback_chain
+    from ouroboros.route_choice import following_route
+    from ouroboros.settings_integrity import task_settings_scope
+    from ouroboros.subagent_runtime import apply_task_start_settings
+
+    _clear_provider_and_slot_env(monkeypatch)
+    body = settings_read(tmp_path, monkeypatch, document, **environ)
+    assert (body["OUROBOROS_MODEL"], body["OUROBOROS_MODEL_LIGHT"], body["OUROBOROS_MODEL_FALLBACKS"]) == (main, "", "")
+    assert body["_meta"]["main_connection_choice"] == []
+    on_disk = json.loads((tmp_path / "data" / "settings.json").read_text(encoding="utf-8"))
+    assert not {"OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"} & set(on_disk)
+    assert _actor_targets({**document, **environ}) == {"primary-builder": main}
+    with task_settings_scope(apply_task_start_settings()):
+        assert get_light_model() == main and following_route("light") == (main, False)
+        assert parse_fallback_chain() == []
+
+
+def test_several_direct_kinds_keep_saved_values_blank_main_operator_variables_and_local_lanes(tmp_path, monkeypatch):
+    """Only unauthored slots follow the rule: an absent Main keeps the shipped id (the wizard asks), saved values and
+    an operator's variables win, and a lane routed local while Main is not keeps the shipped id it runs."""
+    from ouroboros import config as cfg
+
+    _clear_provider_and_slot_env(monkeypatch)
+    base = {"ANTHROPIC_API_KEY": "k-a", "DEEPSEEK_API_KEY": "k-d"}
+    shipped = cfg.SETTINGS_DEFAULTS
+    absent_main = settings_read(tmp_path, monkeypatch, base)
+    assert [absent_main[key] for key in MODEL_SLOTS] == [shipped["OUROBOROS_MODEL"], "", ""]
+    blank_main = settings_read(tmp_path, monkeypatch, {**base, "OUROBOROS_MODEL": ""})
+    assert [blank_main[key] for key in MODEL_SLOTS] == ["", "", ""]
+    saved = {"OUROBOROS_MODEL_LIGHT": "deepseek::deepseek-chat", "OUROBOROS_MODEL_FALLBACKS": "deepseek::deepseek-reasoner"}
+    kept = settings_read(tmp_path, monkeypatch, {**base, "OUROBOROS_MODEL": OPUS, **saved})
+    assert {key: kept[key] for key in saved} == saved
+    operator = settings_read(tmp_path, monkeypatch, {**base, "OUROBOROS_MODEL": OPUS}, **saved)
+    assert {key: operator[key] for key in saved} == saved
+    local = {**base, "LOCAL_MODEL_SOURCE": "/m.gguf"}
+    assert provider_slot_proposals({**local, "USE_LOCAL_MAIN": True}) == {
+        "OUROBOROS_MODEL": shipped["OUROBOROS_MODEL"], "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""}
+    local_fallback = provider_slot_proposals({**local, "USE_LOCAL_FALLBACK": True})
+    assert (local_fallback["OUROBOROS_MODEL_LIGHT"], local_fallback["OUROBOROS_MODEL_FALLBACKS"]) == (
+        "", shipped["OUROBOROS_MODEL_FALLBACKS"])
+    local_light = provider_slot_proposals({**local, "USE_LOCAL_LIGHT": True})
+    assert (local_light["OUROBOROS_MODEL_LIGHT"], local_light["OUROBOROS_MODEL_FALLBACKS"]) == (
+        shipped["OUROBOROS_MODEL_LIGHT"], "")
+
+
+def _router(name=""):
+    """The shipped Light and Fallbacks, on the OpenRouter connection ``name`` ('' = the built-in key)."""
+    from ouroboros.provider_models import route_on_connection
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+
+    return tuple(route_on_connection(str(SETTINGS_DEFAULTS[key]), "openrouter", name)
+                 for key in ("OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"))
+
+
+@pytest.mark.parametrize(("document", "expected"), [
+    ({"OPENROUTER_API_KEY": "k-or", **TWO_DIRECT}, _router()),
+    (_doc(BYOK, ANTHROPIC_WORK, DEEPSEEK_WORK, OUROBOROS_MODEL=OPUS_WORK), _router("byok")),
+    ({"OPENAI_COMPATIBLE_BASE_URL": STRAY_URL, **TWO_DIRECT}, _router()),  # its key is optional
+    ({**TWO_DIRECT, "OPENAI_API_KEY": "k-o", "OPENAI_BASE_URL": STRAY_URL}, _router()),  # the legacy pair, on
+    (_doc({"kind": "deepseek", "name": "default", "enabled": False}, **TWO_DIRECT),
+     (ANTHROPIC_DIRECT_DEFAULTS["light"], ANTHROPIC_DIRECT_DEFAULTS["fallback"])),
+    # One direct kind beside the legacy URL keeps the shipped ids it always had (``exclusive_direct_kind``).
+    ({"ANTHROPIC_API_KEY": "k-a", "OPENAI_BASE_URL": STRAY_URL}, _router()),
+], ids=["router", "named-router", "compatible", "legacy-pair", "second-kind-off", "one-kind-beside-url"])
+def test_a_router_a_compatible_endpoint_or_one_direct_kind_keeps_its_proposals(tmp_path, monkeypatch, document, expected):
+    _clear_provider_and_slot_env(monkeypatch)
+    body = settings_read(tmp_path, monkeypatch, document)
+    assert (body["OUROBOROS_MODEL_LIGHT"], body["OUROBOROS_MODEL_FALLBACKS"]) == expected

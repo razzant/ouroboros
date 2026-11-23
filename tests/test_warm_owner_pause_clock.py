@@ -312,7 +312,11 @@ def test_owner_mail_arriving_during_a_warm_selected_answer_park_holds_the_answer
         ctx.owner_message_admission_agent = SimpleNamespace(_busy=True, _current_task_id=tid,
                                                             _accepting_owner_messages=True)
 
-    monkeypatch.setattr("ouroboros.place_reply.routeless_note", pause_after_selection)
+    from ouroboros import delegate_resume  # the call right after the selection reads the owner Pause
+
+    read_selected = delegate_resume.selected_answer_context
+    monkeypatch.setattr(delegate_resume, "selected_answer_context",
+                        lambda *args, **kwargs: pause_after_selection() or read_selected(*args, **kwargs))
     monkeypatch.setattr("ouroboros.review_pause.live_detached_operations", lambda _: [{"operation_id": "critic"}])
     response, _, _, calls = _run_loop(tmp_path, monkeypatch, ["original", "revised"], setup_context=configure)
     assert parks == ["candidate"]

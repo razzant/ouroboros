@@ -419,13 +419,22 @@ def test_both_transport_factories_use_the_same_literal_wire_map_and_origin_guard
     import asyncio
     import contextlib
 
-    seen = []
+    seen, guarded = [], []
+    make_guarded_client = mcp_client._CredentialOriginGuard.client
+
+    def observe_guard_client(guard, *args, **kwargs):
+        client = make_guarded_client(guard, *args, **kwargs)
+        guarded.append((guard.cfg, client, {event: tuple(hooks) for event, hooks in client.event_hooks.items()}))
+        return client
 
     @contextlib.asynccontextmanager
-    async def sdk(url, **kwargs):
-        seen.append((url, kwargs))
-        yield ("read", "write")
+    async def sdk(url, *, headers, httpx_client_factory, auth=None, **kwargs):
+        # The SDK may receive a decorated factory. Create and close its client without sending a request.
+        async with httpx_client_factory(headers=headers, auth=auth) as client:
+            seen.append((url, headers, client))
+            yield ("read", "write")
 
+    monkeypatch.setattr(mcp_client._CredentialOriginGuard, "client", observe_guard_client)
     monkeypatch.setattr(mcp_client, sdk_name, sdk)
     cfg, errors = config(transport=transport, headers={"Authorization": BASIC, "X-Key": CUSTOM, "X-Clear": ""})
     assert not errors
@@ -435,10 +444,12 @@ def test_both_transport_factories_use_the_same_literal_wire_map_and_origin_guard
             return streams
 
     assert asyncio.run(enter()) == ("read", "write")
-    [(url, kwargs)] = seen
-    assert url == cfg.url and kwargs["headers"] == {"Authorization": BASIC, "X-Key": CUSTOM}
-    factory = kwargs["httpx_client_factory"]
-    assert isinstance(factory.__self__, mcp_client._CredentialOriginGuard) and factory.__self__.cfg is cfg
+    [(url, headers, client)] = seen
+    assert url == cfg.url and headers == {"Authorization": BASIC, "X-Key": CUSTOM}
+    [(guard_cfg, guarded_client, guard_hooks)] = guarded
+    assert guard_cfg is cfg and guarded_client is client
+    for event, hooks in guard_hooks.items():
+        assert hooks and all(hook in client.event_hooks[event] for hook in hooks)
 
 
 def test_renamed_test_candidate_cannot_inherit_the_selected_servers_legacy_token(test_endpoint):

@@ -259,6 +259,34 @@ def test_silence_while_a_reply_is_owed_is_refused_on_both_forms(at_limit, form):
     assert INTERNAL not in _spoken(turn, pending, bus) and stored["outcome_axes"]["execution"]["status"] == "failed"
 
 
+@pytest.mark.parametrize("kind", ["focus", "promoted"])
+def test_a_forced_records_only_finish_owes_my_humans_reply_only_on_the_focus_turn(focus, monkeypatch, kind):  # noqa: F811
+    """The forced selector's own R3 scope (owner 21.11, 1A): with my human's reply owed, a NON-silent finish in a
+    records-only place is refused on the place's focus turn and accepted on a root it handed off. Explicit silence
+    (the case above) decides before this branch, so only a spoken answer meets it."""
+    from ouroboros.loop_delivery import forced_completion_selection
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL
+    from ouroboros.place_reply import records_only_now
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_place_focus import _publish_bridge_send, task_for
+    from tests.test_place_reply_revision import promoted
+
+    root = focus[0]
+    _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = task_for(focus) if kind == "focus" else promoted(task_for(focus))
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    ctx = registry._ctx
+    ctx.task_id, ctx.task_metadata, ctx.task_contract = task["id"], task["metadata"], task["task_contract"]
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.loop_messages.owner_reply_owed", lambda _ctx: True)
+    assert records_only_now(ctx) is True
+    request, text, error = forced_completion_selection({"action": "finish", "answer": ANSWER}, False, None, tool_ctx=ctx)
+    if kind == "focus":
+        assert (request, text, error) == (None, None, OWNER_REPLY_OWED_REFUSAL)
+    else:
+        assert error == "" and text == ANSWER and request["answer"] == ANSWER and not request.get("wake_silent")
+
+
 @pytest.mark.parametrize("arguments", [{"action": "finish", "silent": True, "answer": INTERNAL},
                                        {"action": "finish", "summary": SUMMARY, "answer": ANSWER}],
                          ids=["silent", "summary"])

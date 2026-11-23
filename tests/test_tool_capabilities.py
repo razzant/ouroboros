@@ -763,9 +763,8 @@ def test_burst_absorb_clause_states_the_prefix_write_cost():
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     descriptions = {s["function"]["name"]: s["function"]["description"] for s in initial_tool_schemas(registry)}
     description = descriptions["schedule_subagent"]
-    assert "Children scheduled in one round run concurrently" in description
-    assert ("on cache-write-priced routes each sibling started before the first responds pays a full "
-            "prefix write") in description
+    assert "Same-round starts run concurrently" in description
+    assert "Priced cache writes: full prefix write per start before first reply" in description
     assert "With mode=any_terminal it returns as soon as the FIRST child finishes" in descriptions["wait_tasks"]
 
 
