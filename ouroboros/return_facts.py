@@ -534,25 +534,53 @@ def _totals(found: Mapping[str, Any]) -> str:
     return "\n".join([*_head(found), "Since then, counted: " + "; ".join(part for part in parts if part) + "."])
 
 
-def turn_sections(task: Mapping[str, Any], root: Any, ctx: Any = None, seen: Optional[Mapping[str, Any]] = None) -> List[Any]:
+def _origin(task: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Optional[int]]:
+    """The word a turn's origin names, ``{}`` for none, and its room."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    ref = next((value for value in (task.get("origin_message_ref"), metadata.get("origin_message_ref"))
+                if isinstance(value, Mapping) and value.get("client_message_id")), {})
+    return ref, (_chat(ref) if ref.get("chat_id") is not None else _chat(task))
+
+
+def human_word(task: Mapping[str, Any], root: Any) -> Optional[ds.Row]:
+    """My human's word that starts this turn: the accepted row a direct turn's origin names, when it is theirs
+    (``word_to_me``), else ``None``. The facts below and the seed's one-time fact (``own_time_seed``) read it."""
+    ref, chat = _origin(task)
+    if not task.get("_is_direct_chat") or not ref:
+        return None
+    word = ds.accepted_row(root, chat, str(ref["client_message_id"]))
+    return word if word is not None and word_to_me(word.row) else None
+
+
+def heard_word(task: Mapping[str, Any], root: Any) -> Any:
+    """``human_word``, or the exception that left it unread, read once for a turn's sections."""
+    try:
+        return human_word(task, root)
+    except Exception as exc:
+        return exc
+
+
+_UNHEARD = object()  # turn_sections reads the word itself
+
+
+def turn_sections(task: Mapping[str, Any], root: Any, ctx: Any = None, seen: Optional[Mapping[str, Any]] = None,
+                  word: Any = _UNHEARD) -> List[Any]:
     """The sections of a turn my human's word starts (the facts, then the people's newest words), or none. On ``ctx``
     it records where this root's view and facts reach (``REACH_KEY``): the bound of the facts a later word of my
     human brings it while it runs; for a turn my human's word starts, that word (what follows it is told later, never
-    lost between). A read that fails is named in the section; the turn goes on."""
+    lost between). A read that fails is named in the section; the turn goes on. ``word``: this turn's ``heard_word``,
+    when already read."""
     from ouroboros.section_floor import HostSection
 
     if ctx is not None and seen:  # the reach read before this turn's memory view; none read, none recorded (no
         setattr(ctx, REACH_KEY, dict(seen))  # second read after the view: a later word is told from the previous word)
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
-    ref = next((value for value in (task.get("origin_message_ref"), metadata.get("origin_message_ref"))
-                if isinstance(value, Mapping) and value.get("client_message_id")), {})
-    if not task.get("_is_direct_chat") or not ref:
-        return []
     try:
-        chat = _chat(ref) if ref.get("chat_id") is not None else _chat(task)
-        word = ds.accepted_row(root, chat, str(ref["client_message_id"]))
-        if word is None or not word_to_me(word.row):
+        word = human_word(task, root) if word is _UNHEARD else word
+        if isinstance(word, Exception):
+            raise word
+        if word is None:
             return []
+        chat = _origin(task)[1]
         if ctx is not None:
             setattr(ctx, REACH_KEY, {"seq": word.seq + 1, "ts": str(word.row.get("ts") or "")})
         found = facts(root, word, Own(room=chat))

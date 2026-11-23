@@ -36,6 +36,7 @@ INDEX_FILE = "index-full.md"
 UNKNOWN_STAMP = "unknown"  # a history stamp the writer could not name; legacy rows read the same way
 OVERVIEW_TOPIC = "overview"
 PERSON_TYPE = "person"  # Authored note type; its summary survives the outline.
+SEED_WRITER = "host_seed"  # the host's one write of authored text, the owner-approved seed note (own_time_seed.py)
 # Only the overview, the shared orientation every integrating context loads, must stay active.
 ALWAYS_ACTIVE_TOPICS = frozenset({OVERVIEW_TOPIC})
 # Topics with one global home whichever room addresses them. ``patterns`` and
@@ -836,11 +837,13 @@ def write_knowledge_note(
     summary: str | None = None, focus: Any = None,
     reason: str = "", capture_previous: Callable[[KnowledgeNote], dict[str, Any]] | None = None,
     edits: Any = None, version: str | None = None,
+    precondition: Callable[[Any, Any], str] | None = None,
 ) -> KnowledgeWriteResult:
     """Publish a note against the actual current source, with no inference lock.
 
     ``writer`` names the seam that authored ``content`` (the acting mind's
-    ``turn``; earlier rows also name retired automatic writers), ``route`` the
+    ``turn``, whose supplied ``claims`` it records, as for the host's seed note,
+    ``SEED_WRITER``; earlier rows also name retired automatic writers), ``route`` the
     model route it ran on, ``writer_input_ref`` what it saw and ``focus`` which
     focus of the subject wrote it (``focus_signature(ctx)["focus"]``). They are
     host facts stamped on the history row, never on the note body; a caller that
@@ -882,6 +885,12 @@ def write_knowledge_note(
     before history and publication. A failed source capture publishes nothing;
     a failed index publication reports the observed source. Lifecycle no-ops
     rebuild the index so a retry cannot mistake equal note bytes for recovery.
+
+    ``precondition`` (the host's seed note) stands for ``expected_revision``: under the
+    lock it judges the source read there and this note's journal rows
+    (``NoteHistory(commits=True)``, newest first; ``None`` for a journal not read
+    whole). A reason refuses with it; ``""`` admits the write against that very
+    source, and the same rows give the claims their latest publication.
     """
     lifecycle = mode in {"archive", "restore"}
     if mode not in {"overwrite", "append", "edit", "revert", "archive", "restore"} or not isinstance(content, str):
@@ -903,6 +912,8 @@ def write_knowledge_note(
         raise ValueError("content replaces old_str; an edit's content alone is a YAML block, which sets its fields")
     if (mode == "revert") != (version is not None):
         raise ValueError("version is used with mode=revert, which requires it")
+    if precondition is not None and expected_revision is not None:
+        raise ValueError("a precondition judges the current source itself: pass no expected_revision")
     items = edit_items(edits) if edits is not None else None
     target: Any = None
     if mode == "revert":  # outside the lock: a recorded row never changes
@@ -921,6 +932,15 @@ def write_knowledge_note(
             current = read_knowledge_note(address)
         except FileNotFoundError:
             current = None
+        rows = None
+        if precondition is not None:
+            history = knowledge_versions.NoteHistory(address, commits=True)
+            rows = list(history)
+            rows = None if history.error else rows
+            refusal = precondition(current, rows)
+            if refusal:
+                return KnowledgeWriteResult(False, refusal, current, current.revision if current else None)
+            expected_revision = current.revision if current is not None else None
         # Blank is a create-only expectation, checked under the same source lock.
         # Never turn it into an unconditional overwrite/append of an existing note.
         if current is None and expected_revision == "":
@@ -971,7 +991,11 @@ def write_knowledge_note(
                       "archive and restore own that field")
             return KnowledgeWriteResult(False, f"revert_changes_archive_state: version {version} {states}", current,
                                         revision, show_source=False)
-        claims = knowledge_versions.prepare_claim_write(address, current, updated, explicit=writer == "turn" and explicit_claims)
+        claims = knowledge_versions.prepare_claim_write(
+            address, current, updated, explicit=writer in ("turn", SEED_WRITER) and explicit_claims,
+            **({"publication": knowledge_versions.latest_publication(rows, address),
+                "restored": not knowledge_versions.publication_bound_to_source(rows, address, writer, writer_input_ref)}
+               if rows is not None else {}))
         unchanged = current is not None and raw == current.raw
         if unchanged and not (claims and claims.changed):
             try:
@@ -979,7 +1003,10 @@ def write_knowledge_note(
                     # Equal note bytes are no proof a prior index publication landed.
                     rebuild_knowledge_index(address)
                 if claims is not None:
-                    claims.publish(address, {}, revision)
+                    # A restored publication is committed for this very source, so this write's identity lands with it.
+                    claims.publish(address, {key: value for key, value in (
+                        ("task_id", task_id), ("mode", mode), ("writer", writer), ("focus", focus),
+                        ("reason", reason), ("new_sha256", revision)) if value} if claims.restored else {}, revision)
             except (OSError, UnicodeDecodeError):
                 return KnowledgeWriteResult(False, "publication_incomplete", current, revision)
             return KnowledgeWriteResult(True, "unchanged", current, revision,

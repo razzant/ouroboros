@@ -1097,9 +1097,12 @@ def _capture_context_core(
     except Exception:
         log.debug("Failed to inject presence context", exc_info=True)
     if not is_child:  # the facts beside my human's word that started this turn (``return_facts``), else nothing
-        from ouroboros.return_facts import turn_sections
+        from ouroboros.own_time_seed import offer_section  # and, once, the seed an older install never wrote
+        from ouroboros.return_facts import heard_word, turn_sections
 
-        dynamic_parts.extend(turn_sections(task, canonical_root, ctx, seen=seen))
+        word = heard_word(task, canonical_root)
+        dynamic_parts.extend([*turn_sections(task, canonical_root, ctx, seen=seen, word=word),
+                              *offer_section(task, view_spec, canonical_root, word)])
     held = held_notes.turn_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx)
     dynamic_parts.extend([*held, held_notes.HELPER_NOTE] if held and helper else held)
 

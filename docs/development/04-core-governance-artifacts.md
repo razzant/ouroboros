@@ -6,7 +6,7 @@ BIBLE/Architecture/Development ground identity/structure/procedure; DESIGN names
 
 Architecture, constitution and procedure flows receive applicable governance as first-class context: inline or complete navigable sources named by their registry row, never silently omitted or dependent on touched files.
 
-**Review surfaces.** `tools/governance_context.py` supplies CODE/coupling briefs for change-review seats, preflight and deep self-review, by layer (`review_body_fact.layer_for`); the three body tiers and the universal core/foreign section: ARCHITECTURE §6 “Governance delivery”.
+**Review surfaces.** Briefs per layer (`tools/governance_context.py`, `review_body_fact.layer_for`), body tiers and the universal core/foreign section: ARCHITECTURE §6 “Governance delivery”.
 
 **Plan review.** The body pack follows declared `affected_paths`, never prose or plan kind (P5): a body plan reaches the installed repository or a recognized copy, or is folderless research with explicit `context_requires_self_body_docs=true` plus `task_design_source` acceptance; Main/cwd or `[]` alone cannot qualify, and foreign or unknown roots get no Ouroboros governance and no maps. Required assembly failures are `PlanPacketError`; unattached evidence stays named; a participant continues only from its own retained delivery and reply, an unreadable source meaning a fresh send disclosed as `continued`, never a borrowed or invented transcript (ARCHITECTURE §6 “Plan construction and review”, `tools/plan_packet.py`).
 
