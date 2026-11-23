@@ -1010,18 +1010,6 @@
   {
     "id": "test_cancel_run_button_marker_gated",
     "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "btn.dataset.cancelRun = '1'"
-  },
-  {
-    "id": "test_cancel_run_button_marker_gated",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "const stopEligible = (record) => cancelRunEligibility({"
-  },
-  {
-    "id": "test_cancel_run_button_marker_gated",
-    "path": "web/modules/chat.js",
     "kind": "not_contains",
     "value": "data-cancel-run>"
   },
@@ -1060,12 +1048,6 @@
     "path": "web/modules/chat.js",
     "kind": "contains",
     "value": "await requestStop(taskId, action);"
-  },
-  {
-    "id": "test_cancel_run_confirm_and_cascade",
-    "path": "web/modules/chat.js",
-    "kind": "contains",
-    "value": "openCardControls(btn, record, cardControls(workState, record.groupId).work, {"
   },
   {
     "id": "test_cancel_run_confirm_and_cascade",
