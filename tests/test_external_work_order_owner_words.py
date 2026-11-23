@@ -1181,8 +1181,8 @@ def test_scheduling_does_not_claim_archived_or_malformed_notes_were_delivered(tm
     shelf = tmp_path / "memory" / "knowledge"
     archived = "---\narchive: {at: '2026-11-22', reason: superseded}\n---\n# Archived example\nWhole archived text.\n"
     malformed = "---\ntitle: [\n---\nWhole malformed example.\n"
-    (shelf / "alpha-plan.md").write_text(archived, encoding="utf-8")
-    (shelf / "beta-rules.md").write_text(malformed, encoding="utf-8")
+    (shelf / "alpha-plan.md").write_bytes(archived.encode("utf-8"))
+    (shelf / "beta-rules.md").write_bytes(malformed.encode("utf-8"))
     root = _root(tmp_path)
     receipt = control._schedule_task(root, subagent_id="api-builder", objective="Judge", expected_output="Verdict",
                                      knowledge_notes=NAMED)
@@ -1192,7 +1192,7 @@ def test_scheduling_does_not_claim_archived_or_malformed_notes_were_delivered(tm
     assert event["knowledge_notes"] == NAMED
     session = scheduled(knowledge_notes=NAMED)
     archived = archived.replace("Whole archived text.", "Edited but still archived.")
-    (shelf / "alpha-plan.md").write_text(archived, encoding="utf-8")
+    (shelf / "alpha-plan.md").write_bytes(archived.encode("utf-8"))
     result = json.loads(bootstrap_before_context(_child(tmp_path, session), session, dispatch))["startup"]
     assert result["status"] == "started"
     [request] = engine.requests

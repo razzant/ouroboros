@@ -136,7 +136,7 @@ def test_plan_thread_clarification_carries_its_named_note_in_the_wire_turn_promp
     address = resolve_knowledge_address(p.root, "plan-evidence", "global")
     address.path.parent.mkdir(parents=True, exist_ok=True)
     text = "# Order notes\n\n## Scope\nSynthetic evidence for this turn.\n"
-    address.path.write_text(text, encoding="utf-8")
+    address.path.write_bytes(text.encode("utf-8"))
     successor = p.start("", continue_from=first["run_id"], knowledge_notes=[{"topic": "plan-evidence"}])
     assert successor["status"] == "started", successor
     path, body, _key = p.engine.calls[-1]
