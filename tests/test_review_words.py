@@ -327,7 +327,7 @@ def test_real_change_briefs_put_words_before_diff_and_deliver_design_for_python(
     from ouroboros.tools.review_subject import FrozenSubject, ReviewSubjectSpec
     from tests.test_design_review_delivery import DESIGN_BIBLE, _design
 
-    _design(repo, DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.\n')
+    _design(repo, DESIGN_BIBLE + '\n**Seed**\n\nFull design recipes.\n\n## Appearance\n\nScreen recipes beyond the bible.\n')
     before = 'def notice():\n return "Review is ready"\n'
     after = before.replace("ready", "waiting") if word_change else before + "\n# A code-only refactor\n"
     diff = changed_repo(repo, before, after)
@@ -340,7 +340,8 @@ def test_real_change_briefs_put_words_before_diff_and_deliver_design_for_python(
     text = packet["system"]
     assert (HEADING in text) is word_change
     assert (DESIGN_BIBLE in text) is (word_change and layer == "body")
-    assert "Full design recipes." not in text
+    assert ("Full design recipes." in text) is (word_change and layer == "body")  # the seed rides with the principles
+    assert "Screen recipes beyond the bible." not in text  # what follows the section never rides inline
     if word_change:
         diff_heading = "## Staged diff" if retrieves else "# Staged diff"
         assert text.index(HEADING) < text.index(diff_heading)

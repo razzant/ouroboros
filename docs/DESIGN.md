@@ -183,9 +183,10 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
   style.css "Airy dopamine", written once for both themes. A page maps its own
   elements onto these roles and adds no recipe.
 
+## Appearance
 
-The shell offers **Settings → Appearance → Light / Dark / System**. New clients
-start on System; explicit Light or Dark remains pinned. The shared semantic
+**Settings → Appearance → Light / Dark / System**: new clients start on System;
+explicit Light or Dark remains pinned. The shared semantic
 palettes in `web/ui.css` preserve geometry and status meanings. Both themes follow
 the design bible above; neither has a decorative background.
 On Windows the desktop window keeps its ordinary system caption, buttons, Snap and

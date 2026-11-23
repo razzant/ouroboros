@@ -98,6 +98,44 @@ def test_the_measure_reads_each_host_section_by_whose_part_and_adds_up(monkeypat
         memory_facts(dense, "max"))
 
 
+def test_the_design_bible_is_charged_by_its_served_form_never_as_my_knowledge():
+    """The DESIGN slice riding the changing block's head (``design_bible``, C13) is my human's book: charged by the
+    form the request carries — its whole excerpt, its shorter address form when the start relocated it, nothing when
+    no book rides the head — never as my knowledge, and the split keeps the start's numbers exactly as they were."""
+    from ouroboros.section_floor import HostSection, rendered_texts
+
+    design = HostSection("design_bible", "## Design bible\n\n" + "d" * 2_400)
+    index = HostSection("knowledge_index", "k" * 1_200)
+
+    def core(head):
+        return dataclasses.replace(_core(), dynamic_head_text="\n\n".join(head), dynamic_head_sections=head)
+
+    def measure(c, addressed):
+        return mf.max_room_fact(None, rendered_texts(c, addressed), (), story=100, fixed=4_000, schemas=500,
+                                window=100_000, reserve=1_000, work=2_000, ratio=1.0, allowance=5_000,
+                                addressed=addressed)
+
+    tok, short = mf.view_tokens, "## Design bible\n\nDESIGN.md (navigation map) only."
+    whole = core((index, design))
+    full, relocated, absent = (measure(whole, {}), measure(whole, {"design_bible": short}),
+                               measure(core((index,)), {}))
+    parts = [dict(fact["parts"]) for fact in (full, relocated, absent)]
+    # The whole excerpt is its own part beside knowledge: the split moves its tokens, it never mints or drops them
+    assert parts[0]["design bible"] == tok(design) and parts[0]["knowledge"] == tok(whole.dynamic_head_text) - tok(design)
+    assert parts[0]["knowledge"] + parts[0]["design bible"] == tok(whole.dynamic_head_text)
+    # The served form is what is charged: a start that relocated the slice charges the address form's tokens
+    assert parts[1]["design bible"] == tok(short)
+    assert parts[1]["knowledge"] + parts[1]["design bible"] == tok(rendered_texts(whole, {"design_bible": short}).dynamic_head_text)
+    # No book riding the head: no part, no charge; knowledge keeps the head's whole price
+    assert "design bible" not in parts[2] and parts[2]["knowledge"] == tok("\n\n".join((index,)))
+    # The split moves nothing: the start's needs are the same numbers they were without it
+    assert full["zero_need"] == relocated["zero_need"] == absent["zero_need"]
+    assert full["need"] == full["zero_need"] + 100 == relocated["need"]
+    # And it is named as my human's, never mine: the measure's own whose-grouping carries it
+    line = mf.measure_text(full, parts=True)
+    assert "design bible" in line.split("my human's")[1].split(";")[0] and "design bible" not in line.split("my human's")[0].split("mine:")[-1]
+
+
 def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(monkeypatch):
     core = _core()
     held = _fact(_start(core, 2_000_000, monkeypatch))

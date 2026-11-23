@@ -128,8 +128,9 @@ def test_the_public_schema_says_what_true_costs_and_a_subject_caller_omits_it():
               "every mode, never for its subject; a route too small for it refuses the task.")
     assert clause in lead and lead.count("context_requires_development") == 1
     assert "default" not in schema["parameters"]["properties"][KEY] and KEY not in schema["parameters"]["required"]
-    assert "Low/Nano and helpers keep their usual book maps" in schema["parameters"]["properties"][
-        "context_requires_self_body_docs"]["description"]
+    self_body = schema["parameters"]["properties"]["context_requires_self_body_docs"]["description"]
+    assert "Low/Nano and helpers keep their usual book maps" in self_body
+    assert "the design bible of docs/DESIGN.md from any folder" in self_body  # item 97, RV1 (Carbon 1.2)
 
 
 def test_no_public_door_gained_the_requirement():
