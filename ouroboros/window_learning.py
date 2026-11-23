@@ -32,11 +32,11 @@ def _nano_tools(ctx: Any) -> list:
                                 standing=nano_standing(ctx.tools._ctx))
 
 
-def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
+def learn_window_from_refusal(ctx: Any, loop: Any, candidate=None, round_id: str = "") -> bool:
     """Record the refusal's stated window on the route and rebind the plan; True when the shown view changed.
 
     ``ctx`` is the round's model-call context, ``loop`` the loop facade (``_rebind_context_fit_plan``)."""
-    from ouroboros.context_window import observation_scope, record_refusal
+    from ouroboros.context_window import observation_scope, observed_plan, planned_chat, record_refusal
     from ouroboros.size_refusal import for_usage, stamped
 
     usage, plan = ctx.accumulated_usage, ctx.context_fit_plan
@@ -53,7 +53,12 @@ def learn_window_from_refusal(ctx: Any, loop: Any) -> bool:
     scope = observation_scope(plan)
     if not scope:
         return False
-    record_refusal(usage, plan)
+    if observed_plan(plan, usage, candidate) is None:
+        return False  # the current round still reads the refusal, but the planned window cannot learn from this send
+    recorded = (record_refusal(usage, plan, candidate=candidate, round_id=round_id) if candidate is not None
+                else record_refusal(usage, plan))
+    if planned_chat(candidate) and not recorded:
+        return False
     shown, mode = (ctx.messages[0] if ctx.messages else None), ctx.active_context_mode
     ctx.context_fit_plan, ctx.active_context_mode = loop._rebind_context_fit_plan(
         plan, ctx.tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local, start_mode=mode,

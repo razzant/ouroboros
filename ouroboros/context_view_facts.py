@@ -89,6 +89,9 @@ def memory_facts(plan, mode, messages=()):
             line += f"; {ran}, cause {cause}" + (
                 ", a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here"
                 if cause == "route" else "")
+    if preference := receipt.get("first_contact_preference"):
+        form = "chapter maps" if preference == "maps" else "a smaller memory view"
+        line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
              + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
@@ -104,7 +107,8 @@ def held_heads_fact(plan, receipt):
     from ouroboros.held_notes import HeldNoteSection
 
     fact = receipt.get("floor") or {}
-    if sum((fact.get("steps") or {}).values()) <= int(fact.get("by_budget") or 0):
+    steps = fact.get("steps") if "preference" not in fact else fact["preference"]  # exclude advisory cuts
+    if sum((steps or {}).values()) <= int(fact.get("by_budget") or 0):
         return ""
     stepped = {row["section_id"] for row in receipt.get("host_sections_addressed", ()) if row.get("held_note_form")}
     tokens = sum(floor.view_tokens(part.full_text) for part in plan.core.dynamic_sections
@@ -121,14 +125,20 @@ def mode_words(plan, mode):
     (a cold restore's capture may have lowered for another), its shortfall on that cause's basis
     (``memory_floor.lowered_need``); Max says Max is not measured where the row's own window text knows no window
     (``row_window``), whatever its start, a rebind or restore onto an unknown window too, and a window learned later
-    (a rebind, a refusal) is a measured Max."""
+    (a rebind, a refusal) is a measured Max. First-send maps are a preference, not temporary Low due to the window."""
     preferred = str(getattr(plan, "preferred_mode", "") or "")
     if mode == "low" and preferred == "max":
+        from ouroboros.context_fit import FIRST_CONTACT_START
         from ouroboros.context_measurement import mode_cause
 
+        facts = (plan.projection(mode).memory_facts or {}) if hasattr(plan, "projection") else {}
+        room = facts.get("max_room")
+        room = room if isinstance(room, dict) else {}
+        saved_maps = getattr(plan, "start", None) == ("low", FIRST_CONTACT_START["maps"])
+        if facts.get("first_contact_preference") == "maps" or (saved_maps and room.get("cause") not in ("crowded", "route")):
+            return "low (first-send chapter maps; my human's mode: max)"
         cause = mode_cause(plan, mode)
-        room = (plan.projection(mode).memory_facts or {}).get("max_room") if cause in floor.LOWERED_CAUSES else None
-        same = isinstance(room, dict) and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
+        same = cause in floor.LOWERED_CAUSES and room.get("cause") in ("crowded", "route") and floor.lowered_cause(room) == cause
         short = floor.lowered_need(room)[1] - room["window"] if same else 0
         return (f"{floor.TEMPORARY_LOW.lower()} (my human's mode: max)" + (f"; cause {cause}" if cause else "")
                 + (f"; short {short:,}{_SHORT_BASIS.get(cause, '')}" if short > 0 else ""))

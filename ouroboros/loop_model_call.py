@@ -491,6 +491,7 @@ def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:
 
 
 from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
+from ouroboros.loop_routes import adopt_ordinary_first_contact, first_contact_guard, first_contact_route  # noqa: E402
 
 
 def _rebind_context_fit_plan(
@@ -541,6 +542,7 @@ def _rebind_context_fit_plan(
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
+    plan, start_mode = first_contact_route(plan, start_mode, route, tools._ctx, messages)  # an unsent start hint
     from ouroboros.context_window import estimator_ratio, resolve_window, route_window_kwargs
     # Account/server changes have their own anchors and durable window observations.
     scope = route.get("window_observation_fp", evidence.route_fp)
@@ -899,7 +901,7 @@ def _dispatch_round_model(
     ctx.tools._ctx._completion_observation = completion_observation(ctx.tools._ctx, trace)
 
     result, admitted = (None, 0.0), {}
-    with contextlib.ExitStack() as binding, _presend_context_fit(ctx, admitted) as admit:
+    with first_contact_guard(ctx) as hint, contextlib.ExitStack() as binding, _presend_context_fit(ctx, admitted) as admit:
         deferral = None
         if waiter is not None:
             from ouroboros.loop_llm_call import classify_llm_exception
@@ -921,7 +923,7 @@ def _dispatch_round_model(
             owner_input_check=(lambda: sorted(_pending_owner_input_kinds(ctx.tools._ctx, ids=True))) if attempt_cap is None else None,
             allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
             physical_context=(with_attempt_prefix(_physical_context_for_fit(disposition, plan), ctx.accumulated_usage) if disposition is not None else None),
-            candidate_predicate=candidate_predicate, physical_fit_predicate=admit, model_role=role, model_account_override=account,
+            candidate_predicate=candidate_predicate, physical_fit_predicate=hint(admit), model_role=role, model_account_override=account,
             processing_preference=task_processing_preference(
                 {"task_metadata": getattr(ctx.tools._ctx, "task_metadata", {})}, model_role=role),
             # The loop's own active-turn slot: a reprepared send keeps this exact
@@ -934,19 +936,20 @@ def _dispatch_round_model(
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
+    if hint.rebound:  # a start hint read for another scope went unsent: its ordinary view goes instead, once
+        return _dispatch_round_model(ctx, adopt_ordinary_first_contact(ctx, disposition), attempt_cap=attempt_cap,
+                                     candidate_predicate=candidate_predicate, max_tokens=max_tokens)
     capture = _loop().last_physical_attempt_capture()  # the answer's own receipt, as ``send_clock`` reads it
     if result[0] is not None:  # an accepted request is this conversation's next size anchor: the bytes it answered
         for key in (CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY):  # an answer ends the round's refusal (review r2)
             ctx.accumulated_usage.pop(key, None)
         sent = admitted.get(capture.candidate_raw_sha256) if getattr(capture, "state", "") in {"settled", "dispatched"} else None
         record_input_anchor(ctx.accumulated_usage, ctx.context_fit_plan, round_idx=ctx.round_idx,
-                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx), estimate_tokens=sent)
-    if primary and deferral is not None and deferral.fact and result[0] is None:
+                            rewrite_epoch=rewrite_epoch(ctx.tools._ctx), estimate_tokens=sent, candidate=capture)
+    if deferral is not None and deferral.fact and result[0] is None:
         ctx.tools._ctx._deferred_resource_refusal = deferral
-        if not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
+        if primary and not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
             ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
-    elif deferral is not None and deferral.fact and result[0] is None:
-        ctx.tools._ctx._deferred_resource_refusal = deferral
     if result[0] is not None:
         from ouroboros.primary_route_observation import own_call_record
         call = own_call_record(ctx.accumulated_usage, True, previous_call, None)
@@ -1376,7 +1379,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         return msg, cost, ctx.active_context_mode
     if not refused:  # a provider's refusal stating its window in tokens: the route learns it, the plan is rebound (P1)
         from ouroboros.window_learning import learn_window_from_refusal
-        learn_window_from_refusal(ctx, _loop())
+        learn_window_from_refusal(ctx, _loop(), failed_capture, _context_fit_round_id(ctx))
     # A wake's stored-source delivery, or the view the refusal's route rebind narrowed: model-free, already applied,
     # it earns the first retry (memory then keeps what that view kept unless this candidate is refused too).
     prepared = (WAKE_DELIVERY_STEP if _project_wake_input(ctx, overflowed=True)
@@ -1447,7 +1450,8 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None, 
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply, sent = _refusal_window(ctx, fit, refused)
     record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size,  # the provider's count when stated
-                         measured=measurement.anchor_input_tokens is not None, candidate=refused)  # names a local count
+                         measured=measurement.anchor_input_tokens is not None, candidate=refused,
+                         round_id=getattr(measurement, "round_id", ""))
     shed = max(0, sent - measurement.estimated_input_tokens) if rebound else 0  # a view rebound since already dropped it
     if stated:
         return max(0, size + reply - stated - shed) + slack, slack

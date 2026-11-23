@@ -1214,6 +1214,23 @@ def room_candidates(root: Any, stream: str, chat_id: int, *, tasks: Iterable[str
     return probe_rows(root, stream, keys, before=before, lower=lower, limit=limit)
 
 
+def first_room_row(root: Any, chat_id: int, client_message_id: str) -> Optional[Row]:
+    """The named physical row if it opens this room's known history. This optional witness never waits."""
+    if not present(root):
+        return None
+    with transaction(root, write=False, wait_sec=0) as conn:
+        row = conn.execute("SELECT seq, client_message_id FROM dialogue INDEXED BY dialogue_room "
+                           "WHERE stream='chat' AND chat_id=? ORDER BY seq LIMIT 1", (chat_id,)).fetchone()
+        if row is None or row["client_message_id"] != client_message_id or not _planned(conn, root) or conn.execute(
+            "SELECT 1 FROM import_ledger INDEXED BY ledger_state "
+            "WHERE stream='chat' AND state IN ('pending', 'mismatch') AND base<? LIMIT 1", (row["seq"],),
+        ).fetchone() or conn.execute("SELECT 1 FROM skipped WHERE stream='chat' AND seq<? LIMIT 1",
+                                    (row["seq"],)).fetchone():
+            return None
+        record = conn.execute(f"{_SELECT} WHERE stream='chat' AND seq=?", (row["seq"],)).fetchone()
+    return _row(record)
+
+
 def main_candidates(root: Any, stream: str, *, exclude_chats: Iterable[int], pinned_kinds: Iterable[str] = (),
                     before: Optional[int] = None, lower: int = 0, limit: int = 200) -> List[Row]:
     """Main's possible rows, newest first: the rows of every chat no Project owns (the rooms the

@@ -373,6 +373,10 @@ def _record_and_emit_empty_response(
     stamp_owner_provider_message(accumulated_usage, {"message": words.get("provider_message")} if refused else body_error)  # its own sentence
     failure = accumulated_usage["_last_llm_failure"] = accumulated_usage.get("_last_llm_call_meta", {})
     failure.update(failure_code=kind, error=accumulated_usage["_last_llm_error"])
+    finish = str(finish_reason or "").strip().lower()
+    failure.pop("size_finish", None)
+    if event_type == "remote_context_overflow" and not body_error and finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
+        failure["size_finish"] = finish  # this empty reply's own size finish (``context_window.record_start_refusal``)
     _save_timeout_repeat(accumulated_usage, failed=True)
     return event_type, is_provider_glitch, permanent
 
@@ -1450,7 +1454,8 @@ def call_llm_with_retry(
                 writer=persist_call,
             )
             _remember_llm_call(
-                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1]}, model=model,
+                accumulated_usage, call_ids={**call_ids, "physical_attempt_id": (usage.get("ledger_attempt_ids") or [None])[-1],
+                    **({"provider_body_error": True} if usage.get("provider_error") else {})}, model=model,
                 display_model=display_model, provider=provider, request_ref=request_ref,
                 response_ref=response_ref, reported_model=usage.get("resolved_model"), use_local=bool(use_local),
                 requested_profile=(usage.get("claudexor") or {}).get("requested_profile", host_route.get("credential_profile_id", model_account_override)),

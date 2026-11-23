@@ -23,7 +23,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
-from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
+from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched, with_dispatch_stamp
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_failure, usage_from_response,
@@ -1084,7 +1084,7 @@ def mark_dispatched(
     candidate_manifest_ref: Optional[Dict[str, Any]] = None,
     local_answer_owner_pid: int = 0,
     task_receiver: bool = True,  # False: the sender reads its own answer (``answer_owner_fields``)
-) -> None:
+) -> Tuple[int, str]:
     invoke_bound_api_review_paid_stamp(fail_closed=True)
     try:
         _claim_physical_dispatch(reservation.attempt_id)
@@ -1102,8 +1102,9 @@ def mark_dispatched(
         if local_answer_owner_pid == os.getpid():  # only the sender itself binds or proves anything
             from ouroboros.model_wait import answer_owner_fields
             fields.update(answer_owner_fields((reservation.scope or UsageScope()).task_id, task_receiver=task_receiver))
-    _transition(reservation, "dispatched", launch_state="claimed", transport_outcome="unknown", **fields)
+    row = _transition(reservation, "dispatched", launch_state="claimed", transport_outcome="unknown", **fields)
     invoke_bound_api_review_paid_stamp(fail_closed=False)
+    return row["seq"], row["ts"]
 
 
 def release_attempt(
@@ -1476,8 +1477,9 @@ def execute_physical_attempt(
         if manifest_ref is not None and not isinstance(manifest_ref, dict):
             raise TypeError("before_dispatch must return a manifest ref object or None")
         prepared_capture = _record_attempt_capture(reservation, request, "reserved", candidate_manifest_ref=manifest_ref)
-        dispatch_capture = replace(prepared_capture, state="dispatched")
-        mark_dispatched(reservation, candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid())
+        request = with_dispatch_stamp(request, mark_dispatched(reservation, candidate_manifest_ref=manifest_ref,
+                                                               local_answer_owner_pid=os.getpid()))
+        dispatch_capture = replace(prepared_capture, state="dispatched", physical_context=request.physical_context)
         _LAST_PHYSICAL_ATTEMPT.set(dispatch_capture)
     except BaseException as exc:
         failure = _pre_dispatch_failure(
@@ -1551,9 +1553,9 @@ async def execute_physical_attempt_async(
         if manifest_ref is not None and not isinstance(manifest_ref, dict):
             raise TypeError("before_dispatch must return a manifest ref object or None")
         prepared_capture = _record_attempt_capture(reservation, request, "reserved", candidate_manifest_ref=manifest_ref)
-        dispatch_capture = replace(prepared_capture, state="dispatched")
-        await presend_off_loop(mark_dispatched, reservation, candidate_manifest_ref=manifest_ref,
-                               local_answer_owner_pid=os.getpid())
+        request = with_dispatch_stamp(request, await presend_off_loop(mark_dispatched, reservation,
+                               candidate_manifest_ref=manifest_ref, local_answer_owner_pid=os.getpid()))
+        dispatch_capture = replace(prepared_capture, state="dispatched", physical_context=request.physical_context)
         _LAST_PHYSICAL_ATTEMPT.set(dispatch_capture)
     except BaseException as exc:
         failure = await presend_off_loop(_pre_dispatch_failure,
@@ -1593,8 +1595,6 @@ async def execute_physical_attempt_async(
             _record_attempt_capture(reservation, request, terminal_state,
                                     candidate_manifest_ref=manifest_ref, exc=exc)
         raise
-
-
 # Read-side admission projections over this ledger (the review wave's fit and the
 # whole-work group axis) live in their own leaf; the historical binding stays here.
 from ouroboros.usage_admission import review_wave_admission  # noqa: E402,F401 -- historical import surface

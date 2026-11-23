@@ -196,6 +196,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
+    plan = getattr(ctx, "context_fit_plan", None)
+    from ouroboros.context_fit import UNKNOWN_START
     from ouroboros.held_notes import continuation_capture
     from ouroboros.settings_integrity import captured_cognition
     from ouroboros.model_slots import acting_model_role
@@ -207,7 +209,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # an absent legacy dispatch mark can only belong to the original run.
         "retained_work_dispatch_protocol": 1,
         "messages": messages, "trace": trace,
-        **continuation_capture(getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", None)),
+        **continuation_capture(plan, getattr(ctx, "active_context_mode", None)),
         # Live timing cannot retain a monotonic origin across a reboot.
         "usage": without_finalization_timing(usage),
         "cost_ceiling": asdict(cost_ceiling) if cost_ceiling is not None else None,
@@ -217,8 +219,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
         "context_model_role": acting_model_role(ctx),
-        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
-        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
+        # An armed hint has not gone out; its chosen form proves no start (``context_fit.restored_start``).
+        "context_start": list(UNKNOWN_START if getattr(plan, "first_contact_normal", None) is not None
+                              else getattr(plan, "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
         # memory capture, from which mark changes are read again after a new capture (``mark_anchors``).
         "context_observations": {key: getattr(ctx, key) for key in (

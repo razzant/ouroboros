@@ -120,7 +120,7 @@ Calls and text share the transcript remedies: obsolete `host_copies`, exposed `b
 
 Tool-less forced finalization skips this admission. Unbound Auto inherits no account witness.
 
-`_usage_response.provider_answer` is the one reader of a provider's answer for the classifier, owner row, window record and next route's request. `context_budget.size_refusal` and `context_anchor.cited_limit_refusal` recognise a size refusal; `size_refusal` extracts numbers, `window_learning` rebinds the refusing route. `context_window` owns their authority/TTL; unitless/413 teaches none.
+`context_window` learns current whole-request numbers. Numberless Chat advice matches key, filters, cap and function tools (neither mixed nor tool-less). A fresh chat may fold, or use maps after a maps retry. Restore keeps its sent preference, not as a window.
 
 `tool_result_delivery.py` measures Main batches with route, schemas, host rows and reserve. Chosen forms stay whole unless a body alone exceeds usable input or an exact local guard prevents silent truncation. Unasked bodies share the remaining eighth. Partial envelopes name constraints and source gaps; diagnostics are remeasured. A selected window proves no physical pressure. Non-fitting candidates enter pre-send recovery. Producer pages use `tool_capabilities.tool_result_limit`; `read_file(start_char, max_chars)` addresses decoded Unicode characters.
 

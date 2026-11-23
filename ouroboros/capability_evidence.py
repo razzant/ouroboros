@@ -1313,6 +1313,8 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
         main = bool(getattr(physical, "view_kind", ""))
         route = str(getattr(physical, "route_fp", "") or "")
         bound = provider != "claudexor" and bool(getattr(physical, "window_witness_bound", True))
+        if getattr(physical, "first_contact_plan", None) and not bound:
+            return  # a moved Chat candidate has no bound route density or window witness
         if main and bound and route:
             from ouroboros.context_window import record_observation
             record_observation(drive_root_resolver(request.drive_root),
