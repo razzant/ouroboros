@@ -450,51 +450,48 @@ _EFFECT_INTEGRATION_TOOLS = frozenset({"integrate_subagent_patch", "integrate_de
 
 
 def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bool = False) -> List[Dict[str, Any]]:
-    """Return the structured tool effects shared by review and delivery binding.
+    """Return P3's structured effect signal for review and delivery binding.
 
     Reviewable effects are a successful repo commit; a successful write_file/
     edit_text/apply_patch/edit_batch to any non-scratch root; a successful
     tool that registered a canonical artifact; or a native editor's typed changed-path receipt even on error.
     Failed capture does not erase the write, nor does that write make the call successful. Pure scratch (root=task_drive)
-    writes and a call its producer typed ``completed_no_effect`` (a write of the bytes a
-    file already held) do NOT count. Cognitive-memory updates go through
-    update_identity/update_scratchpad/knowledge_write (not write tools) and are
-    intentionally not effects; a light-mode generic cognitive write is
-    advisory-redirected and never succeeds here. This is a P3 deterministic immune
-    signal over observable runtime facts, never message-content inspection.
+    writes, ``completed_no_effect`` (e.g. same-byte writes), and custody decisions
+    without a transfer (``target_files_changed=False``) do not count as file effects.
+    Cognitive-memory tools are not file writers; light-mode generic cognitive writes
+    are redirected. This signal uses runtime facts, never prose.
     ``observed_only`` keeps calls whose outcome the host recorded (the loop always
-    stores a boolean ``is_error``; ``artifact_registered`` comes from the full
-    result): arguments without a recorded result are an intention, not production.
+    stores a boolean ``is_error``; producer facts outrank legacy artifact metadata):
+    arguments without a recorded result are an intention, not production.
     """
     effects: List[Dict[str, Any]] = []
     for index, call in enumerate(llm_trace.get("tool_calls") or []):
         if not isinstance(call, dict):
             continue
-        artifact = call.get("artifact_registered") is True
+        meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
+        artifact = meta.get("artifact_registered") is True or (
+            not {"artifact_registered", "target_files_changed"}.intersection(meta) and call.get("artifact_registered") is True)
         if observed_only and not (artifact or isinstance(call.get("is_error"), bool)):
             continue
         succeeded = not call.get("is_error") and str(call.get("status") or "ok") in _OK_TOOL_STATUSES
-        meta = call.get("tool_result_meta") if isinstance(call.get("tool_result_meta"), dict) else {}
         tool = str(call.get("tool") or "")
         partial = tool in _ROOT_WRITE_TOOLS and bool(meta.get("changed_paths") or meta.get("changed_paths_omitted"))
         if not (succeeded or artifact or partial) or (meta.get("operation_outcome") == "completed_no_effect" and not artifact):
             continue  # the producer proved this call changed nothing (a same-byte write): an outcome, no effect
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        is_effect = succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS)
+        # An empty delegated capture can record custody without delivering any target files.
+        integration = tool in _EFFECT_INTEGRATION_TOOLS and meta.get("target_files_changed") is not False
+        is_effect = succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or integration)
         if (succeeded or partial) and tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
             is_effect = True
-        # Structured flag set from the full (untruncated) tool result at capture time;
-        # covers stopped-service outputs and user_files writes regardless of preview length.
-        if call.get("artifact_registered"):
-            is_effect = True
-        if is_effect:
+        if is_effect or artifact:
             effects.append({
                 "index": index,
                 "tool": tool,
                 "args": args,
                 "status": str(call.get("status") or "ok"),
                 "result": call.get("result"),
-                "artifact_registered": bool(call.get("artifact_registered")),
+                "artifact_registered": artifact,
             })
     return effects
 
