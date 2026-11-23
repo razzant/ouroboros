@@ -1547,10 +1547,9 @@ def get_tools() -> List[ToolEntry]:
                     "keeps what a failed capture saved and applies nothing. A Git run's new .review-evidence/ files are retained "
                     "beside its capture, never applied; while its surviving copy holds named evidence that "
                     "could not be retained, apply and reject both refuse (INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED) "
-                    "and keep the copy. Read the captured result before deciding. A finished "
-                    "run's capture still owed when you call is prepared by this call and returned for "
-                    "inspection, never applied in the same call; one already ready is applied as before, "
-                    "with no proof that you read it. "
+                    "and keep the copy. Newly captured changes are shown before apply; reject can decide "
+                    "immediately, and eligible empty Git captures close as no_changes. An already ready "
+                    "capture can be applied; read it before deciding. "
                     "Undisposed snapshots or directory-copy results remain custody debt; direct runs "
                     "do not create that debt."
                 ),

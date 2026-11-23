@@ -410,13 +410,18 @@ class TestCaptureAndIntegrate:
         target, ctx, handle = self._provisioned(tmp_path, monkeypatch)
         (pathlib.Path(handle.path) / "junk.py").write_text("bad\n", encoding="utf-8")
         entry = _isolated_entry(ctx, target, handle)
+        drive = custody.custody_root(ctx)
+        assert custody.record_started(drive, entry)
+        assert custody.emit(drive, custody.SETTLED, {"run_id": entry.run_id, "task_id": entry.task_id})
         _capture_terminal_patch(ctx, entry)
-        monkeypatch.setattr(custody, "emit", lambda *a, **k: False)
-        out = _integrate_delegated_patch(ctx, "run-1", "reject", "no")
+        with monkeypatch.context() as failing:
+            failing.setattr(custody, "emit", lambda *a, **k: False)
+            out = _integrate_delegated_patch(ctx, "run-1", "reject", "no")
         assert "INTEGRATE_DISPOSITION_UNWRITTEN" in out, out
-        assert "only after a restart" in out
+        assert "read back the durable disposition" in out and "restart" not in out
         assert not (target / "junk.py").exists()
         assert find_execution_snapshot("snapX") is not None
+        assert "🚫 Rejected" in _integrate_delegated_patch(ctx, "run-1", "reject", "no")
         custody._CUSTODY.clear()
 
 
@@ -1159,7 +1164,7 @@ class TestCaptureHonesty:
             tmp_path, monkeypatch, snapshot_id="snapBelt", run_id="run-belt")
         cap_dir = custody.delegated_capture_dir(drive, "t-nanny", "snapBelt")
         _failed_manifest_capture(handle.path, cap_dir)
-        monkeypatch.setattr(si, "_capture_at_disposition", lambda *a, **k: "")
+        monkeypatch.setattr(si, "_capture_at_disposition", lambda *a, **k: {})
         out = si._integrate_delegated_patch(ctx, "run-belt", "reject", "")
         assert "INTEGRATE_DELEGATED_CAPTURE_FAILED" in out, out
         custody._CUSTODY.clear()
