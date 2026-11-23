@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import contextlib
@@ -17,6 +18,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
+
+log = logging.getLogger(__name__)
 
 SETTINGS_INTEGRITY_ENV = "OUROBOROS_SETTINGS_SHA256"
 _TASK_SETTINGS = contextvars.ContextVar("ouroboros_task_settings", default=None)
@@ -72,6 +75,59 @@ def projected_proposals(environ: Mapping) -> dict:
 # down beside the echo. The loader never reads it; a skill read does (``skill_environ``), so a value this tree mirrored
 # from an earlier document, in this process or one it inherited from, never passes for an operator's variable there.
 PROJECTED_SETTINGS_ENV = "OUROBOROS_PROJECTED_SETTINGS"
+NETWORK_PASSWORD_KEY = "OUROBOROS_NETWORK_PASSWORD"
+LAUNCHER_RESET_PROTECTION_ENV = "OUROBOROS_LAUNCHER_RESET_PROTECTION"
+
+
+def _projection_record(environ: Mapping) -> dict | None:
+    try:
+        record = json.loads(environ[PROJECTED_SETTINGS_ENV])
+    except (KeyError, TypeError, ValueError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def reset_operator_password(environ: Mapping) -> str | None:
+    """Only independent launch input. A nonblank value of unknown origin is not proof."""
+    password = (environ.get(NETWORK_PASSWORD_KEY) or "").strip()
+    record = _projection_record(environ)
+    if record is None:
+        return "" if not password and PROJECTED_SETTINGS_ENV not in environ else None
+    return None if password and NETWORK_PASSWORD_KEY in record else password
+
+
+def reset_bind_protection(host: str, password: str) -> str:
+    from ipaddress import ip_address
+
+    try:
+        local = ip_address(host).is_loopback
+    except ValueError:
+        return ""
+    if password:
+        return "local_password" if local else "network_password"
+    return "local" if local else ""
+
+
+def own_reset_settings(root: Path, document: Path, environ: Mapping) -> bool:
+    """Prove the ordinary settings file that this profile's Reset clears."""
+    import stat
+    from ouroboros.deployment_policy import POLICY_ENV
+    from ouroboros.installation_stop import confirm_absent
+
+    own = Path(root) / "settings.json"
+    if (not Path(root).is_absolute() or Path(document) != own
+            or environ.get(SETTINGS_INTEGRITY_ENV) or environ.get(POLICY_ENV)):
+        return False
+    try:
+        try:
+            info = own.lstat()
+        except FileNotFoundError:
+            confirm_absent(own)
+            return True
+        return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    except OSError:
+        return False
+
 
 
 def _value_digest(value: str) -> str:
@@ -80,12 +136,23 @@ def _value_digest(value: str) -> str:
 
 
 def projected_settings(environ: Mapping) -> dict:
-    """``{key: digest}`` of the values this process tree last projected into ``environ`` from its settings."""
-    try:
-        record = json.loads(environ.get(PROJECTED_SETTINGS_ENV) or "{}")
-    except ValueError:
-        return {}
-    return record if isinstance(record, dict) else {}
+    """Values this process tree last projected, by digest."""
+    return _projection_record(environ) or {}
+
+
+def drop_projection(environ) -> None:
+    """Remove settings mirrors, not independent launch inputs."""
+    with SETTINGS_ENV_LOCK:
+        ours, echo = projected_settings(environ), projected_proposals(environ)
+        if not ours and not echo:
+            return
+        for key, digest in ours.items():
+            value = environ.get(key)
+            if value is not None and _value_digest(value) == digest:
+                del environ[key]
+        environ[PROJECTED_SETTINGS_ENV] = "{}"
+        environ[PROJECTED_PROPOSALS_ENV] = json.dumps(
+            {key: value for key, value in echo.items() if environ.get(key) == value}, sort_keys=True)
 
 
 def operator_variables(environ: Mapping, keys) -> dict:
@@ -103,16 +170,16 @@ def note_proposal_projection(environ, before: Mapping) -> None:
     A proposal key no projection exports any more (the catalog: ``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``) keeps no echo:
     an earlier mirror leaves ``environ`` only while its value matches our echo or recorded projection digest.
 
-    Every other projected value is ours by digest (``PROJECTED_SETTINGS_ENV``) when this projection wrote it, when
-    it is what the settings document itself sets (a launcher or an earlier release may have mirrored it there with
-    no record), or when an earlier projection's record already held it; any other variable stays the operator's."""
+    A recorded projection distinguishes an unchanged operator input from our mirror even if the document agrees.
+    An unrecorded legacy input still recognizes equality with the document as a mirror, not as operator proof."""
     from ouroboros.configured_subagents import SUBAGENTS_SETTING
     from ouroboros.server_runtime import MODEL_SLOT_KEYS
     from ouroboros.settings_defaults import settings_env_keys
 
     keys, exported = (*MODEL_SLOT_KEYS, SUBAGENTS_SETTING), set(settings_env_keys())
     echo, operator = projected_proposals(environ), operator_variables(before, keys)
-    ours = projected_settings(before)
+    prior = _projection_record(before)
+    ours = prior or {}
     for key in keys:
         after = environ.get(key)
         if key not in exported and after is not None and (
@@ -130,7 +197,8 @@ def note_proposal_projection(environ, before: Mapping) -> None:
         if value is None:
             continue
         digest = _value_digest(value)
-        if key in document or value != before.get(key) or ours.get(key) == digest:
+        if (value != before.get(key) or ours.get(key) == digest
+                or (key in document and (prior is None or key in ours))):
             record[key] = digest
     environ[PROJECTED_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
 
@@ -659,3 +727,79 @@ def verify_settings_integrity(settings_path: Path) -> str | None:
     """Verify the strict child pin, returning the observed digest when present."""
     raw = read_settings_bytes_verified(settings_path)
     return hashlib.sha256(raw).hexdigest() if raw is not None else None
+
+
+class SettingsPublicationRefused(RuntimeError):
+    """The physical settings-publication boundary refused to persist these bytes.
+
+    ``cause`` is the typed non-save reason a caller reports. ``"reset_interrupted"``
+    is raised ONLY for a proven unfinished owner Reset (the profile witness's own
+    ``resetting``). Every other refusal carries its OWN cause (``"witness_unreadable"``,
+    ``"witness_invalid"``, ``"state_lock_unavailable"``) and never pretends a Reset was
+    observed. Nothing is written and the caller takes no post-save action.
+    """
+
+    def __init__(self, cause: str, detail: str = ""):
+        super().__init__(detail or cause)
+        self.cause = cause
+
+
+@contextlib.contextmanager
+def settings_publication_boundary(drive_root):
+    """The one physical publication boundary every settings writer enters around its
+    byte commit, at the target profile ``drive_root``.
+
+    It is entered AFTER the caller already holds the settings lock
+    (``config._acquire_settings_lock``) and AFTER the persistence prologue and its
+    receipts, so the section holds ONLY a confirmed witness read plus the caller's own
+    commit; no lock here is held across the transform, the deployment policy, the
+    prologue, the receipts, the environment or a restart. It acquires the EXISTING
+    target-profile ``state.lock`` (``<drive_root>/locks/state.lock``) once the settings
+    lock is already held — settings lock first, profile state lock second — then reads
+    the profile witness (``launch_roots.read_witness``):
+
+    - a proven unfinished owner Reset (witness status ``resetting``) refuses with
+      ``cause="reset_interrupted"``, the same typed no-save the gateway already returns;
+    - an unproved witness (``unreadable``/``invalid``) or an unavailable / expired
+      ``state.lock`` refuses with its OWN cause, never pretending a Reset was observed;
+      so does an ``OSError`` raised by the acquisition itself (a permission refusal, a name
+      that is not a file), which is never mistaken for the caller's own commit error;
+    - a confirmed-missing (first use) or ordinary (``ok``) profile yields, and the
+      caller's commit runs with its atomicity unchanged — ``config.save_settings`` keeps
+      its rename-less in-place fallback; the atomic-only writers keep ``write_text_atomic``.
+
+    On refusal nothing is written and the caller runs no post-save action (no receipt,
+    no event); the exception names why nothing was saved. The ``state.lock`` is released
+    before any receipt the caller owns, so no lock spans a receipt."""
+    from ouroboros.launch_roots import RESETTING, read_witness
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    root = Path(drive_root)
+    lock_path = root / "locks" / "state.lock"
+    try:
+        lock_fd = acquire_exclusive_file_lock(lock_path, owner_aware_stale=True)
+    except OSError:  # the ACQUISITION failed, not the caller's commit: nothing was read or written
+        log.warning("Target profile state lock could not be acquired; settings not saved", exc_info=True)
+        raise SettingsPublicationRefused(
+            "state_lock_unavailable",
+            "the target profile's state lock could not be taken; settings not saved")
+    if lock_fd is None:
+        log.warning("Target profile state lock %s is held or expired; settings not saved", lock_path)
+        raise SettingsPublicationRefused(
+            "state_lock_unavailable",
+            "the target profile's state lock is held or expired; settings not saved")
+    try:
+        status, _witness = read_witness(root)
+        if status == RESETTING:
+            raise SettingsPublicationRefused(
+                "reset_interrupted",
+                "an unfinished owner Reset is in progress on this profile; settings not saved")
+        if status in ("unreadable", "invalid"):
+            raise SettingsPublicationRefused(
+                f"witness_{status}",
+                f"the profile initialization witness could not be proven ({status}); "
+                "settings not saved")
+        # ``missing`` (confirmed first use) and ``ok`` (ordinary profile) proceed.
+        yield
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)

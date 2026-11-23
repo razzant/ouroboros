@@ -189,7 +189,8 @@ class SetupBootstrap(TypedDict):
 
 class OnboardingBootstrapResponse(TypedDict):
     """``GET /api/onboarding/bootstrap``: a read that writes nothing. ``ready`` is the readiness
-    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``."""
+    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``.
+    A boot held for an interrupted Reset instead answers 409 ``reset_interrupted`` and serves no setup."""
 
     ready: bool
     bootstrap: SetupBootstrap

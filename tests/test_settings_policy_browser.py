@@ -6,10 +6,11 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+from urllib.parse import urlsplit
 
 import pytest
 
-from tests.settings_browser_helpers import commit_row, open_settings, setting_row
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row, settings_page
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 META = "() => document.querySelector('#page-settings [data-setting-row=\"{row}\"] [data-setting-meta]').textContent"
@@ -158,3 +159,117 @@ def test_cyber_pro_says_what_it_does_to_reviews_and_lowering_it_asks_nothing(dir
             browser.close()
     stored = json.loads(settings_path.read_text(encoding="utf-8"))
     assert stored["OUROBOROS_RUNTIME_MODE"] == "cyber_pro"
+
+
+def _seed_reset_note(data_dir):
+    from ouroboros.projects_registry import create_project
+
+    work = data_dir.parent / "reset-working-folder"
+    work.mkdir()
+    (work / "example.txt").write_bytes(b"A synthetic working file\n")
+    # A shelf on its own cannot prove which working folders this profile owns.
+    assert create_project(data_dir, "alpha", name="Alpha project", working_dir=str(work))["created"]
+    note = data_dir / "projects" / "alpha" / "knowledge" / "one.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("# A single synthetic note\n", encoding="utf-8")
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("direct_server_with_data", [_seed_reset_note], indirect=True)
+def test_reset_from_about_shows_the_successors_completed_receipt_in_the_same_tab(direct_server_with_data):
+    """One confirmed operation through the ordinary isolated server, its replacement, and the same tab."""
+    from playwright.sync_api import expect, sync_playwright
+
+    fixture = direct_server_with_data
+    root = pathlib.Path(fixture["data_dir"]).resolve()
+    mock_url = json.loads((root / "settings.json").read_text(encoding="utf-8"))["OPENAI_COMPATIBLE_BASE_URL"]
+    assert urlsplit(fixture["url"]).hostname == urlsplit(mock_url).hostname == "127.0.0.1"
+    note = pathlib.Path("alpha/knowledge/one.md")
+    original = (root / "projects" / note).read_bytes()
+    meta = 'meta[name="ouroboros-chat-preview-scope"]'
+    posts, reads = [], []
+
+    def path(event):
+        return urlsplit(event.url).path
+
+    def observe_request(request):
+        if request.method == "POST" and path(request) in {"/api/reset", "/api/reset/v1"}:
+            posts.append(path(request))
+
+    def observe_response(response):
+        if response.ok and response.request.method == "GET" and path(response) == "/api/reset":
+            reads.append(response)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.on("request", observe_request)
+        page.on("response", observe_response)
+        try:
+            page.goto(fixture["url"] + "/#settings", wait_until="domcontentloaded")
+            page.locator("#onboarding-overlay").wait_for(state="detached")
+            old_scope = page.locator(meta).get_attribute("content")
+            assert old_scope
+            open_settings(page, "computer/about").locator("[data-settings-fold] > summary").click()
+            setting_row(page, "computer:reset").locator("[data-reset-all]").click()
+            with page.expect_response(lambda r: r.ok and r.request.method == "POST" and path(r) == "/api/reset/v1") as reply:
+                page.get_by_role("dialog").get_by_role("button", name="Delete and restart").click()
+            accepted = reply.value.json()
+            assert accepted["status"] == "requested" and accepted["restarting"] and accepted["reset_id"]
+            page.wait_for_function(
+                "([selector, old]) => { const scope = document.querySelector(selector)?.content; return scope && scope !== old; }",
+                arg=[meta, old_scope], timeout=60_000)
+
+            # The new document is now active. Distinguish its readiness answer from a missing form.
+            ready = page.request.get(fixture["url"] + "/api/onboarding", max_redirects=0)
+            if ready.status == 204:
+                # This successor can skip Setup only when the fixture explicitly supplied its
+                # ordinary provider as launch input rather than retaining the cleared document.
+                assert fixture["env"].get("OPENAI_COMPATIBLE_BASE_URL") == mock_url, \
+                    "Unexpected provider readiness after clearing a file-only mock configuration"
+            else:
+                code = ready.json().get("reason_code") if ready.status == 409 else None
+                if code == "reset_interrupted":
+                    # Read the existing outcome, without requesting another Reset.
+                    response = page.request.get(fixture["url"] + "/api/reset", max_redirects=0, timeout=5_000)
+                    detail = response.json() if response.ok else {}
+                    if detail.get("reset_id") == accepted["reset_id"] and detail.get("status") == "interrupted":
+                        pytest.fail(f"Successor held the accepted Reset: {str(detail.get('error', 'unknown'))[:600]}")
+                    pytest.fail(f"Successor held Reset; its receipt was not confirmed (HTTP {response.status}).")
+                assert ready.status == 200, f"Successor readiness: HTTP {ready.status}, reason={code}"
+                iframe = "#onboarding-overlay iframe.onboarding-frame"
+                page.locator(iframe).wait_for(state="visible", timeout=20_000)
+                wizard = page.frame_locator(iframe)
+                wizard.locator('[data-collapse="api-access"] > summary').click(timeout=20_000)
+                wizard.locator('[data-provider-card="compatible"] [data-provider-toggle]').click()
+                wizard.locator("#s-openai-compatible-base-url").fill(mock_url)
+                wizard.locator("#next-btn").click()
+                wizard.locator('[data-model-role="main"] [data-model-role-model]').fill("openai-compatible::mock-model")
+                for _step in range(wizard.locator(".wizard-step").count() - 2):
+                    wizard.locator("#next-btn").click()
+                wizard.locator(".summary-card").first.wait_for()
+                with page.expect_response(lambda r: path(r) == "/api/onboarding/complete") as configured:
+                    wizard.locator("#next-btn").click()
+                assert configured.value.ok
+            page.locator("#onboarding-overlay").wait_for(state="detached", timeout=60_000)
+
+            # No test-driven reload, second confirmation, navigation to About or unfolding of its result.
+            about = settings_page(page, "computer/about")
+            shown = about.locator("[data-reset-notes-path]")
+            expect(shown).to_be_visible(timeout=30_000)
+            expect(about.locator("[data-setting-result]").last).to_contain_text("Reset complete.")
+            folder = pathlib.Path(shown.inner_text().strip()).resolve()
+            assert path(reads[-1]) == "/api/reset"
+            receipt = reads[-1].json()
+            assert receipt["status"] == "complete" and receipt["reset_id"] == accepted["reset_id"]
+            assert folder == pathlib.Path(receipt["projects_set_aside_path"]).resolve()
+            assert folder.parent == root / "projects" and folder.name.startswith(".before-reset-")
+            assert not (root / "projects" / note).exists() and (folder / note).read_bytes() == original
+            assert posts == ["/api/reset/v1"]
+            assert (root.parent / "reset-working-folder" / "example.txt").read_bytes() == b"A synthetic working file\n"
+            evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(root.parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            shown.scroll_into_view_if_needed()
+            page.screenshot(path=str(evidence / "reset-about-same-tab.png"))
+        finally:
+            browser.close()

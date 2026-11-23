@@ -1459,12 +1459,12 @@ reader; composer files stay.
 ### History edges
 
 An initial read shows one disabled `Loading saved history…` pill at the feed edge,
-not a second loading sentence in the header; where this origin kept the room's
-newest text, a bounded preview stands instead under one `Saved text preview ·
-updating` line: plain words under their speakers, no times, actions or read credit
-(`web/modules/chat_preview.js`). The first canonical page replaces it, a passage the
-owner selected staying until released; a failed read leaves it `not current` beside
-Retry; a refused session, sign-out or a deletion seen here erases only this copy. Task activity remains separate.
+not a header sentence; where this browser kept the room's newest text under the proven
+data profile, a bounded preview stands under one `Saved text preview · updating`
+line: plain words under their speakers, no times, actions or read credit
+(`web/modules/chat_preview.js`). The first canonical page replaces it, a selected
+passage staying until released; a failed read leaves it `not current` beside Retry; a
+refused session, sign-out or deletion erases only this copy. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 

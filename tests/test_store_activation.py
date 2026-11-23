@@ -201,7 +201,17 @@ def test_the_task_reading_gets_answer_503_migrating_instead_of_importing(tmp_pat
         ensure_current_store(root)
         assert [row["task_id"] for row in client.get("/api/tasks").json()["tasks"]] == ["t1"]
         assert client.get("/api/tasks/t1").json()["status"] == "completed"
-        assert client.get("/api/chat/history").status_code == 200
+        # Publishing the task store does not run the dialogue import. A GET must not
+        # take over that job or offer registry recovery for an unexamined legacy file.
+        from tests._dialogue import import_all
+        from ouroboros.dialogue_store import path as dialogue_path
+        had_dialogue = dialogue_path(root).exists()
+        refusal = _migrating_body(client.get("/api/chat/history"))
+        assert "project_registry" not in refusal and dialogue_path(root).exists() == had_dialogue
+        import_all(root)
+        history = client.get("/api/chat/history")
+        assert history.status_code == 200 and any(row.get("quiz", {}).get("quiz_id") == "q1"
+                                                  for row in history.json()["messages"])
 
 
 # ---- the boot door ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import importlib.util
 import logging
 import os
 import pathlib
+import secrets
 import zlib
 from collections.abc import Mapping
 from typing import Any, NamedTuple
@@ -34,6 +35,10 @@ UI_DIR_SETTING = "OUROBOROS_UI_DIR"
 UI_OWNER_MARKER = '<meta name="ouroboros-ui-owner" content="core">'
 # Response-only too: the installation's appearance scope, which web/theme.js reads before any style.
 APPEARANCE_SCOPE_META = "ouroboros-appearance-scope"
+# Response-only too: the data profile the builtin index's saved chat preview belongs to
+# (web/modules/chat_preview.js). Never the installation alone: the same installation serves
+# another profile after an owner Reset, and its rooms must open on their canonical history.
+CHAT_PREVIEW_SCOPE_META = "ouroboros-chat-preview-scope"
 TELEGRAM_MINIAPP_HEADER = "X-Ouroboros-Telegram-MiniApp"
 _NO_STORE = {"Cache-Control": "no-store"}
 BUILTIN_STATIC_CACHE = b"private, no-cache, must-revalidate"
@@ -209,6 +214,58 @@ def appearance_scope(drive_root: Any) -> str:
     return hashlib.sha256(f"ouroboros appearance scope\0{identity}".encode()).hexdigest()[:16] if identity else ""
 
 
+def data_profile_scope(drive_root: Any) -> str:
+    """The data profile's browser-visible scope: a digest of the confirmed initialization identity.
+
+    The profile identity is the pair the current state copy and its completed witness both name: the
+    ``initialization_id`` of a readable primary state proven by ``authority_reason``. A Reset mints a
+    new identity, so the same installation opens cold instead of painting the previous profile's text
+    into a room that merely reuses its number; a backup-only state, a pending or missing witness, a
+    mismatch and an unreadable pair are no proof, and ``""`` means no scope is proven. A digest, never
+    a secret; both records already exist, so no file and no new identifier is created, and it is read
+    once per serving generation (``ServedUI.apply``), never per request, socket, frame or poll.
+
+    Both consumers share this one digest: the builtin index's saved-preview meta
+    (``web/modules/chat_preview.js``) and the serving connection's live admission scope
+    (``gateway/ws.py``), so a page's claim and the host's proof compare as the same value.
+    """
+    if not drive_root:
+        return ""
+    try:
+        from supervisor.state import CURRENT_QUALITIES, read_state
+
+        current = read_state(drive_root)
+        identity = str(current.values.get("initialization_id") or "") if current.source == "primary" else ""
+        if current.quality not in CURRENT_QUALITIES or not identity:
+            return ""
+        return hashlib.sha256(f"ouroboros chat preview scope\0{identity}".encode()).hexdigest()[:16]
+    except Exception:  # an optional response fact never takes the interface down: no proof, so cold
+        log.warning("the data profile scope could not be read; the builtin index opens cold", exc_info=True)
+        return ""
+
+
+def chat_preview_scope(drive_root: Any) -> str:
+    """The saved chat preview's scope; the same digest as :func:`data_profile_scope`."""
+    return data_profile_scope(drive_root)
+
+
+def _generation_profile_scope(drive_root: Any) -> str:
+    """This serving generation's ONE data-profile scope, decided once at admission
+    (``ServedUI.apply``, after the data root is admitted) and frozen for the generation.
+
+    The confirmed current initialization evidence is reused as the durable digest, so a normal
+    same-profile restart serves the same scope and its pages, sockets and queued frames stay.
+    When no identity can be durable (a fresh root, a resetting door, an unreadable pair), a
+    positive scope for THIS serving generation only is minted in memory: never written to a
+    cache or file, never inferred from an old identity, and never changed after boot while
+    sockets live. A digest, never a secret and never auth; no unproven value is promoted to a
+    match. Read once per generation — never per index request, socket or frame (#3294).
+    """
+    if not drive_root:
+        return ""
+    return data_profile_scope(drive_root) or secrets.token_hex(8)
+
+
 def _core_owned(html: str, facts: str = "") -> str:
     """Stamp the ownership marker and the response's other ``facts`` first in ``<head>`` (browsers hoist a leading meta there)."""
     if "<head>" in html:
@@ -218,7 +275,7 @@ def _core_owned(html: str, facts: str = "") -> str:
 
 def make_index_page(web_dir: pathlib.Path, head=None):
     """The builtin index: core-owned, so marked and never cached across a selection change.
-    ``head(request)`` names the response's further leading metas (the appearance scope)."""
+    ``head(request)`` names the response's further leading metas (the appearance and saved-preview scopes)."""
     async def index_page(_request) -> HTMLResponse:
         index = web_dir / "index.html"
         if index.exists():
@@ -299,6 +356,7 @@ class _Generation(NamedTuple):
     static: Any  # the ASGI app serving /static, None without a main interface
     auth_static: Any = None  # the selected directory's intentionally public auth/ bundle
     drive_root: Any = None  # whose installation identity names the appearance scope
+    profile_scope: str = ""  # this generation's frozen data-profile scope (_generation_profile_scope)
 
 
 class ServedUI:
@@ -314,12 +372,18 @@ class ServedUI:
         self.builtin_dir = resolve_web_dir(self.repo_dir)
         self.builtin_dir.mkdir(parents=True, exist_ok=True)
         self._builtin_static = NoCacheStaticFiles(directory=str(self.builtin_dir), cache_control=BUILTIN_STATIC_CACHE)
-        self._builtin_page = make_index_page(self.builtin_dir, head=lambda request: self.appearance_meta(request.headers))
+        self._builtin_page = make_index_page(
+            self.builtin_dir,
+            head=lambda request: self.appearance_meta(request.headers) + self.chat_preview_meta())
         self._current = _Generation(UiSelection("builtin", self.builtin_dir), self._builtin_static)
 
     @property
     def selection(self) -> UiSelection:
         return self._current.selection
+
+    def serving_profile_scope(self) -> str:
+        """This serving generation's frozen data-profile scope; ``""`` only before ``apply`` on a rootless app."""
+        return self._current.profile_scope
 
     def appearance_meta(self, headers: Mapping[str, str]) -> str:
         """The appearance scope's meta for a builtin entry page (``/``, ``/onboarding``, the network login form), else ``""``.
@@ -335,6 +399,20 @@ class ServedUI:
 
     # The interface's own file trees, the only stored files ``GzipText`` compresses.
     STATIC_PREFIXES = ("/onboarding/static", "/static")
+
+    def chat_preview_meta(self) -> str:
+        """The builtin index's saved-preview scope, else ``""``.
+
+        Only the chat document needs it, so ``/onboarding`` and the network login form keep the
+        appearance fact alone. The scope is this generation's ONE frozen value, decided at admission
+        and never re-read per request, so the index, the socket bootstrap and the history response
+        all name the same digest; a rootless app that never applied a generation proves none.
+        """
+        current = self._current
+        if current.selection.source != "builtin":
+            return ""
+        scope = current.profile_scope
+        return f'<meta name="{CHAT_PREVIEW_SCOPE_META}" content="{scope}">' if scope else ""
 
     def mounts(self) -> list[Mount]:
         """Public selected login assets, builtin recovery resources, then selected main assets."""
@@ -352,6 +430,7 @@ class ServedUI:
 
         requested = str(settings.get(UI_DIR_SETTING) or "")
         drive_root = getattr(getattr(app, "state", None), "drive_root", None)
+        profile_scope = _generation_profile_scope(drive_root)  # once per generation, at admission
         try:
             owned = (drive_root, self.repo_dir, pathlib.Path(SETTINGS_PATH).parent)  # data, source, credentials
             protected = tuple(pathlib.Path(p).resolve() for p in owned if p)
@@ -368,7 +447,7 @@ class ServedUI:
                                     f"{UI_DIR_SETTING} {requested!r} was not applied: {type(exc).__name__}: {exc}")
             static = self._builtin_static
             auth_static = None
-        self._current = _Generation(selection, static, auth_static, drive_root)
+        self._current = _Generation(selection, static, auth_static, drive_root, profile_scope)
         app.state.served_ui = self
         record_applied_restart_settings({UI_DIR_SETTING: requested})
         if selection.error:

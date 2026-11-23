@@ -240,15 +240,18 @@ def write_colab_settings(data_dir: pathlib.Path, settings: Dict[str, Any]) -> pa
     from ouroboros.gateway.owner_settings import _owner_write_settings
     from ouroboros.launch_roots import same_location
     from ouroboros.review_pool_receipts import persist_write_receipts
+    from ouroboros.settings_integrity import settings_publication_boundary
 
     path = pathlib.Path(data_dir) / "settings.json"
     if same_location(path, config.SETTINGS_PATH):
         _owner_write_settings(dict(settings), authored_keys=tuple(settings),
-                              allow_context_lowering=True, allow_safety_lowering=True)
+                              allow_context_lowering=True, allow_safety_lowering=True,
+                              drive_root=pathlib.Path(data_dir))
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     persist_write_receipts(data_dir, settings, path)
-    write_text_atomic(path, serialize_settings(dict(settings)))
+    with settings_publication_boundary(data_dir):
+        write_text_atomic(path, serialize_settings(dict(settings)))
     return path
 
 

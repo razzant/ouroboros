@@ -451,6 +451,18 @@ def test_a_fresh_installation_has_no_deleted_projects(roots):
     assert _count(roots)["deleted_projects"] == {"state": "counted", "no_folder": 0, "folders": []}
 
 
+def test_a_binding_without_a_registry_or_its_witness_leaves_the_deleted_project_count_unknown(roots):
+    data, projects, _base = roots
+    _write(projects / "kept" / "a.bin", 100)
+    path = registry._bindings_path(data)
+    path.parent.mkdir()
+    path.write_text(json.dumps({"bindings": {"example-task": {
+        "project_id": "kept", "project_chat_id": registry.project_chat_id("kept")}}}), encoding="utf-8")
+    record = _count(roots)
+    assert record["deleted_projects"] == {"state": "unavailable", "no_folder": 0, "folders": []}
+    assert _place(record, "project_folders")["bytes"] >= 100
+
+
 def test_an_old_count_has_no_field_and_a_new_deletion_waits_for_the_next_count(roots):
     """GET answers what the saved count saw: a count from before the list says nothing, a deletion after a count changes no
     saved answer, and the next count finds it."""
