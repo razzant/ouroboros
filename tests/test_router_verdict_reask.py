@@ -362,3 +362,112 @@ def test_connection_routing_never_lifts_the_sealed_reasoning_pin(monkeypatch, gl
                "reasoning_details": [{"type": "reasoning.encrypted", "data": "blob"}]}]
     block = provider_block(monkeypatch, "deepseek/deepseek-v4-flash-0731", {"allow_fallbacks": True}, sealed)
     assert block["allow_fallbacks"] is False
+
+
+@pytest.mark.parametrize("status", [200, 400], ids=["returned-body", "raised-http"])
+def test_inner_refusal_survives_a_successful_retry_and_dispatch_consumes_prepared(isolated, status):
+    """Main → real retry ladder/SDK/ledger → real compact Logs → ordinary next SDK payload."""
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from ouroboros.context_view_facts import REFUSED_SENDS_KEY
+    from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.loop_llm_call import call_llm_with_retry
+    from ouroboros.loop_messages import append_context_facts
+
+    base = {"id": "gen-size", "created": 1, "model": MODEL, "object": "chat.completion"}
+    rejected = {**base, **error_frame(400, OVERFLOW, receipt(502)), "choices": []}
+    answer = {**base, "id": "gen-accepted", "choices": [
+        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "fits"}}],
+        "usage": {"prompt_tokens": 300, "completion_tokens": 2, "total_tokens": 302, "cost": 0.5}}
+    sent = []
+
+    def wire(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(status, json=rejected) if len(sent) == 1 else httpx.Response(
+            200, json={**answer, "id": f"gen-accepted-{len(sent)}"})
+
+    transport = httpx.MockTransport(wire)
+    client = LLMClient()
+    with openai.OpenAI(api_key="fixture", base_url="https://wire.invalid/v1", max_retries=0,
+                       http_client=httpx.Client(transport=transport)) as sdk:
+        def chat(**kwargs):
+            payload = {**request_kwargs(stream=False), "messages": kwargs["messages"]}
+            with ua.capture_attempt_ids() as ids:
+                result = client._create_chat_completion_with_retries(sdk.chat.completions.create, payload, target())
+            msg, facts = client._normalize_remote_response(result.model_dump(), target(), skip_cost_fetch=True)
+            return msg, {**facts, "ledger_attempt_ids": list(ids)}
+
+        usage = {}
+        ctx = SimpleNamespace(messages=[{"role": "user", "content": "word " * 60}], context_fit_plan=None,
+            tool_schemas=[], active_effort="low", active_model=MODEL, active_context_mode="max", round_idx=1,
+            task_id="reask-task", drive_logs=isolated / "logs", accumulated_usage=usage)
+        ctx.drive_logs.mkdir(exist_ok=True)
+
+        def call(**kw):
+            return call_llm_with_retry(SimpleNamespace(chat=chat), ctx.messages, MODEL, None, "low", 1,
+                ctx.drive_logs, "reask-task", ctx.round_idx, None, usage, attempt_cap=1, **kw)[0]
+
+        assert call()["content"] == "fits"
+        assert len(sent) == 2 and sent[1]["provider"]["allow_fallbacks"] is False
+        [refused, answered] = ledger_rows(isolated)
+        [pair] = usage[REFUSED_SENDS_KEY]
+        assert pair["physical_attempt_id"] == refused["attempt_id"] != answered["attempt_id"]
+        assert pair["provider_counts"]["input"] == 1_067_828 and pair["host"]["input"] > 0
+        request = Request({"type": "http", "method": "GET", "path": "/api/logs/events",
+            "path_params": {"name": "events"}, "query_string": b"view=compact&limit=150", "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace(drive_root=isolated))})
+        compact = asyncio.run(api_logs_tail(request))
+        assert compact.status_code == 200
+        [loaded] = [row for row in json.loads(compact.body)["entries"] if "refused_send" in row]
+        assert loaded["physical_attempt_id"] == pair["physical_attempt_id"] and loaded["refused_send"] == pair
+
+        ctx.round_idx += 1
+        assert append_context_facts(ctx, money={})
+        with pytest.raises(ua.PhysicalAttemptPreconditionFailed):
+            call(physical_fit_predicate=lambda _: False)
+        assert len(sent) == 2 and usage[REFUSED_SENDS_KEY] == [pair]  # an unsent candidate cannot consume it
+        assert call()["content"] == "fits" and len(sent) == 3
+        assert all(pair["text"] not in json.dumps(row["messages"]) for row in sent[:2])
+        assert json.dumps(sent[2]["messages"]).count(pair["text"]) == 1
+        assert REFUSED_SENDS_KEY not in usage
+
+
+@pytest.mark.parametrize("reask_fails", [False, True], ids=["terminal-body", "later-auth-error"])
+def test_returned_body_refusal_pairs_the_named_capture_not_the_last_returned(isolated, reask_fails):
+    """The body owns its pair, whether the loop returns it or a later auth failure ends the re-ask."""
+    from types import SimpleNamespace
+
+    from ouroboros.context_view_facts import REFUSED_SENDS_KEY
+    from ouroboros.loop_llm_call import call_llm_with_retry
+
+    original = AssembledResponse({**error_frame(400, OVERFLOW, receipt(502 if reask_fails else 400)), "choices": []})
+    later = http_error(401, {"error": {"code": "authentication_error", "message": "unavailable credential"}})
+    usage = {}
+
+    def chat(**kw):
+        with ua.capture_attempt_ids() as ids:
+            raw, sent = drive([original, later] if reask_fails else [original],
+                              kwargs={**request_kwargs(stream=False), "messages": kw["messages"]})
+            if reask_fails:
+                assert raw is later and len(sent) == 2
+                raise later
+        assert raw is original and len(sent) == 1
+        reply, facts = LLMClient()._normalize_remote_response(raw.model_dump(), target(), skip_cost_fetch=True)
+        return reply, {**facts, "ledger_attempt_ids": list(ids)}
+
+    logs = isolated / "logs"
+    logs.mkdir(exist_ok=True)
+    assert call_llm_with_retry(SimpleNamespace(chat=chat), [{"role": "user", "content": "hello"}],
+        MODEL, None, "low", 1, logs, "reask-task", 1, None, usage, attempt_cap=1)[0] is None
+    rows = ledger_rows(isolated)
+    [counts] = usage[REFUSED_SENDS_KEY]
+    assert counts["physical_attempt_id"] == rows[0]["attempt_id"]
+    events = [*map(json.loads, (logs / "events.jsonl").read_text().splitlines())]
+    [event] = [r for r in events if "refused_send" in r]
+    assert event["type"] == "remote_context_overflow" and event["refused_send"] == counts
+    if reask_fails:
+        [auth] = [r for r in events if r.get("type") == "llm_api_error"]
+        assert auth["error_kind"] == "auth_error" and "refused_send" not in auth
+        assert auth["physical_attempt_id"] == rows[1]["attempt_id"] != counts["physical_attempt_id"]

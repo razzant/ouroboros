@@ -464,3 +464,20 @@ test('adopting exact sources for live twins costs one pass over the entries, not
     const entriesHeld = live.length;  // 120 groups x 30 rows
     assert.ok(reads <= entriesHeld * 3, `adoption read live keys ${reads} times for ${twins.length} twins over ${entriesHeld} held rows`);
 });
+test('a refused send\'s row and its error row say the two counts whole on live and reloaded Logs', async (t) => {
+    const text = 'Refused send abc123: host estimate ~1,500 input tokens; provider answer: input 90,000, window 80,000.';
+    const rows = [
+        { type: 'remote_context_overflow', ts: at(1), task_id: 'saved', physical_attempt_id: 'saved-send', refused_send: { text } },
+        { type: 'llm_api_error', ts: at(2), task_id: 'saved', error: 'boom', physical_attempt_id: 'saved-error', refused_send: { text } },
+    ];
+    const logs = mountLogs(t, { history: { events: rows.map(row => compactRef(row)) } });
+    await settle();
+    for (const row of rows) logs.emit({ ...row, ts: at(row.type === 'llm_api_error' ? 4 : 3), task_id: 'live' });
+    for (const group of ['saved', 'live']) {
+        const card = logs.card(group);
+        assert.equal(card.dataset.category, 'errors');
+        assert.match(card.textContent, /host estimate ~1,500/);
+        assert.match(card.textContent, /input 90,000/);
+        assert.match(card.textContent, /window 80,000/);
+    }
+});

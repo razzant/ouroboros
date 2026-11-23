@@ -21,7 +21,8 @@ import httpx
 import openai
 import pytest
 
-from ouroboros import capability_evidence as ce, size_refusal as sr
+from ouroboros import capability_evidence as ce
+from ouroboros import size_refusal as sr
 from ouroboros.context_anchor import refused_request_density
 from ouroboros.context_window import record_refusal, resolve_window
 from ouroboros.llm_attempt import body_error_facts
@@ -30,7 +31,6 @@ from ouroboros.loop_model_call import _refusal_target
 from ouroboros.loop_transport import stamp_owner_provider_message
 from ouroboros.window_learning import learn_window_from_refusal
 from tests._size_refusal import _sdk_error
-
 
 ROOT = pathlib.Path(__file__).parent / "fixtures" / "size_refusals"
 CASES = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
@@ -91,11 +91,13 @@ def test_new_wording_with_and_without_declared_limit(case, tmp_path, monkeypatch
 
 def _assert_number_recognition(case, tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from ouroboros import capability_evidence as ce, pricing
+
+    from ouroboros import capability_evidence as ce
+    from ouroboros import pricing
     from ouroboros.context_anchor import cited_limit_refusal
     from ouroboros.context_window import record_refusal
     from ouroboros.loop_llm_call import classify_llm_exception
-    from ouroboros.loop_transport import stamp_owner_provider_message, provider_failure_hint
+    from ouroboros.loop_transport import provider_failure_hint, stamp_owner_provider_message
 
     monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
     catalog = {}
@@ -125,7 +127,7 @@ def _assert_number_recognition(case, tmp_path, monkeypatch):
 
 def test_mlx_unrecognised_refusal_reaches_the_person():
     from ouroboros.loop_llm_call import classify_llm_exception
-    from ouroboros.loop_transport import stamp_owner_provider_message, provider_terminal_fallback_text
+    from ouroboros.loop_transport import provider_terminal_fallback_text, stamp_owner_provider_message
     exc = _sdk_error(400, (ROOT / 'bodies/lmstudio-mlx.body.json').read_bytes())
     verdict = classify_llm_exception(exc)
     assert verdict.kind == 'bad_request' and sr.from_exception(exc) is None
@@ -152,6 +154,7 @@ def test_numberless_zai_form_does_not_shadow_a_stated_limit():
     anchored to the whole sentence, so the shared vocabulary — not the form — reads the numbers.
     Both bodies pass through the real SDK and the host classifier, as a Main call meets them."""
     import json as _json
+
     from ouroboros.loop_llm_call import classify_llm_exception
 
     verbatim = (ROOT / "bodies/zai-1261.body.json").read_bytes()
@@ -519,7 +522,7 @@ def test_structured_counts_survive_learning_storage_and_recovery(tmp_path, monke
     final = resolve_window(evidence, 8192, root=tmp_path)
     assert final.total.tokens == 80000 and final.admitted == 71808
     assert final.total.basis == "provider_stated"
-    from ouroboros.context_view_facts import remember_size_refusal, SIZE_REFUSAL_KEY
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
     # A misleading sentence cannot replace the structured numbers in the round slot.
     remember_size_refusal(ctx, None, measured=False)
     assert usage[SIZE_REFUSAL_KEY]["tokens"] == 90000
@@ -594,6 +597,7 @@ def test_http200_error_keeps_structured_counts_for_round_and_learning():
 ])
 def test_new_wording_needs_upstream_declaration_match(tmp_path, monkeypatch, name, limit):
     from pathlib import Path
+
     from ouroboros import pricing
     from ouroboros.context_anchor import cited_limit_refusal
     from ouroboros.context_window import WindowLimit, WindowRecord
@@ -644,10 +648,11 @@ def test_early_rebind_requires_this_attempts_normalized_size_fact(monkeypatch, s
 
 @pytest.mark.parametrize('owner', [262000, 300000])
 def test_server_read_is_a_declaration_even_when_settings_is_smaller(tmp_path, monkeypatch, owner):
+    from pathlib import Path
+
     from ouroboros import context_window, pricing
     from ouroboros.context_anchor import cited_limit_refusal
     from ouroboros.loop_transport import stamp_owner_provider_message
-    from pathlib import Path
     monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
     monkeypatch.setattr(pricing, 'declared_token_limits', lambda *_: {})
     class Response:
@@ -859,8 +864,8 @@ def test_numberless_fact_does_not_shadow_unitless_recognition(basis, via):
 
 
 def test_http200_text_refusal_rebinds_real_sdk_request_to_nano(tmp_path, monkeypatch):
-    from tests._first_contact import ANSWER, _episode, _run
     from ouroboros.tool_policy import NANO_RESIDENT_SCHEMA_NAMES
+    from tests._first_contact import ANSWER, _episode, _run
     from tests._first_contact_server import FakeLlamaServer
 
     def refusal(count):
@@ -1029,3 +1034,89 @@ def test_a_normalized_excluded_size_is_no_recognition():
     assert _classify_empty_response(excluded, {})[0] == "provider_body_error"
     recognised = {"provider_error": {"answer": {"basis": "context_overflow", "size": {"source": "excluded"}}}}
     assert _classify_empty_response(recognised, {})[0] == "remote_context_overflow"
+# --- R18: one refused send's two calculations, their provenance kept apart (#3669) ---
+
+
+def _capture(**kw):
+    base = dict(attempt_id="att-1", model="m", provider="openrouter", state="settled",
+                prompt_tokens_bounded_estimate=1000, max_completion_tokens=64,
+                physical_context=SimpleNamespace(measurement_density=1.5, measurement_basis="fresh_route_usage"),
+                route_is_loopback=False)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_counts_keeps_route_locality_apart_from_provider_numbers():
+    fact = sr.SizeRefusal(window=80000, requested=90000, meaning="input", source="text:anthropic/prompt-too-long",
+                          upstream="prompt is too long: 90000 tokens > 80000 maximum")
+    row = sr.counts(_capture(provider="local", route_is_loopback=True), fact)
+    assert row["provider"] == "local" and row["route_is_loopback"] is True  # the capture's locality, not the answer
+    assert row["provider_counts"]["input"] == 90000 and row["provider_counts"]["window"] == 80000
+    assert row["host"]["input"] == 1500  # ceil(1000 * 1.5), this capture's own density
+    assert "host estimate ~1,500" in row["text"] and "provider answer" in row["text"]
+
+
+def test_counts_exact_local_count_and_true_zero():
+    row = sr.counts(_capture(prompt_tokens_bounded_estimate=0, prompt_tokens_exact=0,
+                             context_window_tokens_exact=16384), sr.SizeRefusal(source="typed"))
+    assert row["host"] == {"input": 0, "basis": "exact_local_count", "density": 1.0, "window": 16384}
+    assert "exact local count 0" in row["text"] and "16,384" in row["text"]
+
+
+def test_given_counts_preserves_a_stated_zero():
+    fact = sr.SizeRefusal(window=80000, requested=0, meaning="total", source="text:vllm/request-has-input",
+                          upstream="maximum context length is 80000 tokens. However, your request has 0 input tokens")
+    given = sr.given_counts(fact)
+    assert given["input"] == 0 and given["input_given"] == "stated" and given["window"] == 80000
+
+
+@pytest.mark.parametrize("error", [
+    {"message": "upstream rejected the request"},
+    {"error_type": "payload_too_large", "message": "request body too large: 80000 bytes"},
+], ids=["status-alone", "byte-limit"])
+def test_http413_without_contrary_cause_yields_host_only(error):
+    exc = _sdk_error(413, json.dumps({"error": error}).encode())
+    row = sr.send_counts(_capture(), exc)
+    assert row is not None and row["host"]["input"] == 1500
+    assert "input" not in row["provider_counts"] and "HTTP 413" in row["text"]
+
+
+def test_http413_with_typed_other_cause_yields_nothing():
+    exc = _sdk_error(413, json.dumps({"error": {"code": "authentication_error",
+                                                "message": "prompt is too long: 90000 tokens > 80000 maximum"}}).encode())
+    assert sr.send_counts(_capture(), exc) is None
+
+
+def test_body_code_413_is_not_http_status_and_keeps_typed_token_evidence():
+    error = {"code": 413, "message": "prompt is too long: 90000 tokens > 80000 maximum"}
+    row = sr.body_counts(_capture(provider="openai-compatible"), error)
+    assert row is not None
+    assert row["provider_counts"].get("input") == 90000 and row["provider_counts"].get("window") == 80000
+    assert "not an HTTP status" in row["text"]
+    assert sr.parse(413, {"error": error}) is None  # official recovery still excludes these numbers
+    assert sr.body_counts(_capture(), {"code": 413, "message": "request was rejected"}) is None
+
+
+def test_error_type_other_cause_excludes_counts_on_both_paths():
+    body = {"code": 400, "error_type": "authentication_error",
+            "message": "prompt is too long: 90000 tokens > 80000 maximum"}
+    exc = _sdk_error(400, json.dumps({"error": body}).encode())
+    assert sr.send_counts(_capture(), exc) is None
+    assert sr.body_counts(_capture(), body) is None
+
+
+@pytest.mark.parametrize("n", [0, 140_001])
+def test_typed_input_without_a_token_limit_is_display_only(n):
+    inner = {"error": {"type": "invalid_request_error", "message": f"Input too long: {n} input tokens, limit is 120000 for this model"}}
+    error = {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Fixture", "error_type": "context_length_exceeded", "raw": json.dumps(inner)}}
+    exc = _sdk_error(400, json.dumps({"error": error}).encode())
+    for row in (sr.body_counts(_capture(), error), sr.send_counts(_capture(), exc)):
+        assert row["provider_counts"] == {"input": n, "input_given": "stated"}
+    assert sr.from_exception(exc).token_window == sr.from_exception(exc).requested == 0
+
+
+def test_a_released_send_has_no_counts():
+    exc = _sdk_error(400, json.dumps({"error": {"code": "context_length_exceeded",
+                                                "message": "prompt is too long: 90000 tokens > 80000 maximum"}}).encode())
+    assert sr.send_counts(_capture(state="released"), exc) is None

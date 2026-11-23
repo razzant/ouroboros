@@ -264,6 +264,9 @@ def _compact_row(row: dict, source: dict) -> dict:
     # fabricated truncation marker can be mistaken for the original diagnostic.
     result, omitted, used = {}, [], 0
     priority = ("ts", "type", "task_id", "parent_task_id", "root_task_id", "subagent_task_id", "status", "phase")
+    if public.get("type") in {"llm_api_error", "local_context_overflow", "remote_context_overflow"}:
+        # Logs reads the producer's small numeric comparison before optional diagnostics fill the page budget.
+        priority += ("physical_attempt_id", "refused_send", "settled_after_its_call")
     for key in dict.fromkeys([*priority, *public]):
         if key not in public:
             continue

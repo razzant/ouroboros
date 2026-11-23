@@ -9,8 +9,8 @@ measured as an ordinary request, and nothing keeps the density beyond that refus
 """
 from __future__ import annotations
 
-import math
 import json
+import math
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -375,6 +375,7 @@ def test_refusal_measurement_keeps_its_source_label_in_retained_capsules(tmp_pat
     assert capsule["measurement_basis"] == "refused_input"
     assert len(cc._atomic_units(folded)) == 1  # the real reader still accepts the retained capsule
     from dataclasses import asdict
+
     from ouroboros.tools.vision_process import _read_receipt, _restore_capture
     from ouroboros.usage_ledger import _validate_candidate_facts
 
@@ -386,6 +387,12 @@ def test_refusal_measurement_keeps_its_source_label_in_retained_capsules(tmp_pat
     _validate_candidate_facts(raw, 1)
     receipt = _read_receipt({"receipt_id": "same", "capture": raw, "custody": None}, "same")
     assert _restore_capture(receipt["capture"]) == captured
+    for key in ("prompt_tokens_exact", "context_window_tokens_exact"):
+        raw.pop(key)  # a receipt already retained by the old producer
+    assert _restore_capture(_read_receipt({"receipt_id": "same", "capture": raw, "custody": None}, "same")["capture"]) == captured
+    exact = replace(captured, prompt_tokens_exact=0, context_window_tokens_exact=16_384)
+    wire = json.loads(json.dumps({"receipt_id": "same", "capture": asdict(exact), "custody": None}))
+    assert _restore_capture(_read_receipt(wire, "same")["capture"]) == exact
 
 
 _TERMINAL = dict(is_transport_wait=False, waited_sec=0, is_deadline_exhausted=False)
@@ -412,7 +419,9 @@ def test_a_size_terminal_names_the_final_candidate_it_refused(round_call, monkey
     """Admission refused the final physical candidate (here the round's own clock line tips it), before any send: the
     terminal names that candidate's size, what counted it and the window it was held to, never the round's earlier
     estimate; a prediction teaches no refused size, an exact local count does."""
-    from ouroboros import context_window as cw, loop, loop_model_call as lmc
+    from ouroboros import context_window as cw
+    from ouroboros import loop
+    from ouroboros import loop_model_call as lmc
     from ouroboros.llm_attempt import _attempt_request, main_context_fit_refusal
     from ouroboros.send_clock import SendClockPolicy, main_send_scope, stamp_clock_note
     from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed, bind_physical_attempt_context
@@ -483,7 +492,8 @@ def test_a_failed_walk_names_each_size_refusal_with_its_own_route(round_call, mo
     addition, and subtracted only from that candidate's own admission (a prediction before sending), never from
     another route's view. The last failure's row and the acting route's own failure keep their meanings
     for their other readers."""
-    from ouroboros import fallback_cooldown, loop, loop_model_call as lmc
+    from ouroboros import fallback_cooldown, loop
+    from ouroboros import loop_model_call as lmc
     from ouroboros.context_fit import _physical_context_for_fit
     from ouroboros.llm_attempt import refused_candidate_facts
     from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY
@@ -585,7 +595,8 @@ def test_the_round_size_refusal_lives_until_its_round_ends(round_call, monkeypat
     """Written where a refusal ends a send: a changed candidate that was never sent leaves it, the retry the provider
     refused again replaces it with its own facts, a cold continuation keeps it for its round, the next round's terminal
     does not read it, and an answer clears it with the round's refusal."""
-    from ouroboros import loop, loop_model_call as lmc
+    from ouroboros import loop
+    from ouroboros import loop_model_call as lmc
     from ouroboros.context_anchor import REFUSED_INPUTS_KEY
     from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
     from ouroboros.loop_transport import stamp_owner_provider_message
@@ -925,3 +936,78 @@ def test_network_terminal_keeps_size_facts_only_as_an_earlier_refusal(round_call
     assert "smallest refused" not in text
     if not earlier_size:
         assert "window" not in text and "request input" not in text
+# --- R18: the refused-send queue keeps identities until a real dispatch; exact local facts ride the capture ---
+
+
+def test_refused_send_queue_survives_a_rebuild_until_dispatch():
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.context_view_facts import (
+        REFUSED_SENDS_KEY,
+        append_refused_sends,
+        consume_refused_sends,
+        refused_sends_in_messages,
+    )
+
+    a = {"physical_attempt_id": "a", "text": "send a", "provider_counts": {"input": 5}}
+    b = {"physical_attempt_id": "b", "text": "send b", "provider_counts": {"input": 5}}
+    usage = {REFUSED_SENDS_KEY: [a, b]}
+    messages = []
+    assert append_refused_sends(usage, messages)
+    sent = refused_sends_in_messages(usage, messages)
+    assert sent == {"a", "b"}
+    assert refused_sends_in_messages(usage, messages[1:]) == {"b"}
+    assert usage[REFUSED_SENDS_KEY] == [a, b]  # a rebuild before dispatch loses nothing
+    assert "send a" in messages[0]["content"] and "send b" in messages[1]["content"]
+    assert not append_refused_sends(usage, messages)
+    unrelated = [{"role": "user", "content": messages[0]["content"]}, bound_host_row("return_facts", messages[1]["content"]),
+                 {**messages[0], "content": messages[1]["content"]}]  # exact owner/other-host quotes, then a changed host row
+    assert not refused_sends_in_messages(usage, unrelated)
+    assert append_refused_sends(usage, unrelated) and refused_sends_in_messages(usage, unrelated) == sent
+    c = {"physical_attempt_id": "c", "text": "send c"}
+    usage[REFUSED_SENDS_KEY].append(c)  # a late send arrives after preparation
+    assert consume_refused_sends(usage, sent) == [a, b]
+    assert usage[REFUSED_SENDS_KEY] == [c]
+    assert consume_refused_sends(usage, sent) == []  # already consumed: idempotent
+    assert usage[REFUSED_SENDS_KEY] == [c]
+
+
+def test_equal_numbers_stay_distinct_identities():
+    from ouroboros.context_view_facts import REFUSED_SENDS_KEY, append_refused_sends, refused_sends_in_messages
+    from ouroboros.size_refusal import SizeRefusal, counts
+
+    capture = _refused_capture(100)
+    fact = SizeRefusal(requested=5, source="typed")
+    a, b = (counts(replace(capture, attempt_id=identity), fact) for identity in ("a", "b"))
+    assert a["provider_counts"] == b["provider_counts"] and a["physical_attempt_id"] != b["physical_attempt_id"]
+    rows = json.loads(json.dumps([a, b]))  # a persisted row keeps its id; one with no id is not queued
+    messages, usage = [], {REFUSED_SENDS_KEY: [*rows, {"text": "not observed"}]}
+    assert append_refused_sends(usage, messages) and len(messages) == 2
+    assert refused_sends_in_messages(usage, messages) == {"a", "b"}
+
+
+def test_exact_local_measurement_rides_the_capture(tmp_path, monkeypatch):
+    from ouroboros import size_refusal as sr
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    (tmp_path / "data" / "state").mkdir(parents=True)
+    request = ua.AttemptRequest(model="m", provider="local", drive_root=tmp_path / "data", task_id="t",
+                                root_task_id="t", reservation_usd=0.0, prompt_tokens_exact=123,
+                                context_window_tokens_exact=456, max_completion_tokens=64)
+
+    def wire():
+        raise httpx.HTTPStatusError("refused", request=httpx.Request("POST", "http://127.0.0.1:9/v1"),
+            response=httpx.Response(400, json={"error": {"code": "context_length_exceeded",
+                "message": "prompt is too long: 123 tokens > 456 maximum"}}))
+
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        ua.execute_physical_attempt(request, wire)
+    capture = caught.value.physical_attempt_capture
+    assert (capture.prompt_tokens_exact, capture.context_window_tokens_exact) == (123, 456)
+    assert capture.prompt_tokens_bounded_estimate == 0
+    from ouroboros.size_refusal import SizeRefusal
+    row = sr.counts(capture, SizeRefusal(window=456, requested=123, meaning="input",
+                                         source="text:anthropic/prompt-too-long",
+                                         upstream="prompt is too long: 123 tokens > 456 maximum"))
+    assert row["host"]["input"] == 123 and row["host"]["window"] == 456
+    assert row["provider_counts"]["input"] == 123 and row["provider_counts"]["window"] == 456
