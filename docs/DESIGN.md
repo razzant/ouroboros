@@ -2752,7 +2752,11 @@ cards keep their edges rather than taking the shared fade.
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
 - **Beautiful Context.** One neutral button stands after the cards and the board's save note and
-  opens its frame in place below itself; the frame follows the card palette.
+  opens its frame in place below itself; the frame follows the card palette. On a supported Windows
+  shell, **Open recent requests** opens a separate local window: choose a familiar conversation, see
+  the newest readable request among the first five entries and optionally compare with a readable
+  earlier entry among the next five. Missing copies are named and remain selectable. The browser's
+  local file import and example remain available; source versions and exact positions stay folded.
 
 ### Storage
 

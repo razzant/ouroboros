@@ -75,11 +75,21 @@ class ViewFit:
 
     @cached_property
     def story(self) -> str:
-        return mv.render_story(self.snapshot, self.level)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_story(self.snapshot, self.level, part=witness.part)
+        self.story_selection = witness.selections()
+        return text
 
     @cached_property
     def room(self) -> str:
-        return mv.render_room(self.snapshot, self.level, floor_note=self.note)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_room(self.snapshot, self.level, floor_note=self.note, observe=witness.observe, part=witness.part)
+        self.room_pieces = witness.pieces
+        return text
 
     @cached_property
     def story_chars(self) -> int:

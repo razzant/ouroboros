@@ -400,7 +400,7 @@ def _has_image(messages: List[Dict[str, Any]]) -> bool:
 
 
 def _rewrite(messages: List[Dict[str, Any]],
-             project: Callable[[Dict[str, Any]], Optional[str]]) -> List[Dict[str, Any]]:
+             project: Callable[[Dict[str, Any]], Optional[str | tuple[str, str]]]) -> List[Dict[str, Any]]:
     """Replace each image block for which ``project`` returns text; ``messages`` itself when none.
 
     The replacement keeps ``_source_path`` so a re-view hint survives; host
@@ -414,12 +414,15 @@ def _rewrite(messages: List[Dict[str, Any]],
         for block_index, block in enumerate(content):
             if not _is_image(block):
                 continue
-            text = project(block)
-            if text is None:
+            replacement_value = project(block)
+            if replacement_value is None:
                 continue
             if out is None:
                 out = copy.deepcopy(messages)
+            text, form = replacement_value if isinstance(replacement_value, tuple) else (replacement_value, '')
             replacement: Dict[str, Any] = {"type": "text", "text": text}
+            if form:
+                replacement['_image_projection_fact'] = form
             if block.get("_source_path"):
                 replacement["_source_path"] = block["_source_path"]
             out[msg_index]["content"][block_index] = replacement
@@ -760,7 +763,7 @@ def _usable_existing_caption(value: str) -> str:
 
 
 def _caption_or_marker(block: Dict[str, Any], routing: VisionRoutingContext, reason: str,
-                       refusal: Optional[Dict[str, Any]] = None) -> str:
+                       refusal: Optional[Dict[str, Any]] = None) -> tuple[str, str]:
     """A caption (or a truthful marker) in place of the image; ``refusal`` also names the route's refusal."""
     existing = _usable_existing_caption(str(block.get("_caption") or ""))
     caption, failure = (existing, "") if existing else _caption_for_block(
@@ -775,15 +778,15 @@ def _caption_or_marker(block: Dict[str, Any], routing: VisionRoutingContext, rea
     if refusal is not None:
         refusal["projected"] = "caption" if caption else "marker"
         if caption:
-            return f"[{reason}; a caption replaces it] [image caption: {caption}]"
+            return f"[{reason}; a caption replaces it] [image caption: {caption}]", 'caption_after_refusal'
         if failure:
-            return f"[image omitted: {reason}; its caption failed: {failure}]"
+            return f"[image omitted: {reason}; its caption failed: {failure}]", 'caption_failed'
     if caption:
-        return f"[image caption: {caption}]"
+        return f"[image caption: {caption}]", 'caption'
     if failure:
         # A failure is reported as one, never presented as a caption.
-        return f"[image caption unavailable: {failure}]"
-    return f"[image omitted: {reason}; no caption route is available]"
+        return f"[image caption unavailable: {failure}]", 'caption_failed'
+    return f"[image omitted: {reason}; no caption route is available]", 'caption_unavailable'
 
 
 def _lane_marker(lane: str, block: Dict[str, Any]) -> str:
@@ -803,7 +806,7 @@ def _refused_marker(block: Dict[str, Any], refused: Mapping[str, Dict[str, Any]]
 
 
 def _refused_caption(block: Dict[str, Any], routing: VisionRoutingContext,
-                     refused: Mapping[str, Dict[str, Any]]) -> Optional[str]:
+                     refused: Mapping[str, Dict[str, Any]]) -> Optional[tuple[str, str]]:
     facts = refused.get(_image_digest(block))
     return None if facts is None else _caption_or_marker(block, routing, refusal_words(facts), facts)
 
@@ -813,14 +816,15 @@ def _project(messages: List[Dict[str, Any]], routing: VisionRoutingContext, purp
     # A VLM or caption call names its model explicitly: Inline semantics, never a caption.
     mode = get_image_input_mode() if purpose == "main" else "inline"
     if mode == "off":
-        return _rewrite(messages, lambda _block: _OFF_MARKER)
+        return _rewrite(messages, lambda _block: (_OFF_MARKER, 'images_off'))
     # A VLM or caption model was chosen past the routes that refused its image.
     refused = refused_images(routing) if purpose == "main" and not lane else {}
     if mode == "inline":
         if lane:
-            return _rewrite(messages, lambda block: _lane_marker(lane, block))
+            return _rewrite(messages, lambda block: (_lane_marker(lane, block), 'transport_marker'))
         messages = prepare_route_images(messages, routing.model)
-        return _rewrite(messages, lambda block: _refused_marker(block, refused)) if refused else messages
+        return _rewrite(messages, lambda block: (text, 'refusal_marker') if (text := _refused_marker(block, refused))
+                        is not None else None) if refused else messages
     if mode == "auto" and not lane:
         verdict = _image_input_verdict(routing.model, model_role=routing.model_role,
                                        model_account_override=routing.model_account_override)
@@ -849,7 +853,7 @@ def withhold_images(messages: List[Dict[str, Any]], error: BaseException, *,
         return messages
     marker = (f"[image omitted: image preparation failed ({type(error).__name__}); "
               f"not sent under the {mode} image mode]")
-    return _rewrite(messages, lambda _block: marker)
+    return _rewrite(messages, lambda _block: (marker, 'preparation_failed'))
 
 
 def prepare_messages_for_send(

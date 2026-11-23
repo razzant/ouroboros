@@ -130,13 +130,13 @@ def _append_reply_context(messages, target, owner_ctx):
         messages[-1][REPLY_SOURCE_SHA_KEY] = source[HOST_TEXT_SHA_KEY]
 
 
-def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
+def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str, *, attachment_facts=None) -> Any:
     """This delivery's content; its words survive an unexpected image-composition failure.
 
     The drain has already marked the entry seen, so a raise here would consume it unread.
     """
     try:
-        return build_incoming_user_content(entry, drive_root, task_id)
+        return build_incoming_user_content(entry, drive_root, task_id, attachment_facts=attachment_facts)
     except Exception as exc:  # noqa: BLE001 - per-file outcomes are typed inside; this is the residue
         logging.getLogger(__name__).warning("owner content composition failed", exc_info=True)
         return (f"{entry.get('text') or ''}\n\n[attached images were not composed: "
@@ -219,7 +219,8 @@ def _drain_incoming_messages(
                 from ouroboros.owner_words import reply_target
                 target = reply_target(getattr(owner_ctx, "budget_drive_root", None) or drive_root, injected.get("reply_reference"))
                 _append_reply_context(messages, target, owner_ctx)
-                owner_content = _owner_content(injected, drive_root, task_id)
+                attachment_facts = {}
+                owner_content = _owner_content(injected, drive_root, task_id, attachment_facts=attachment_facts)
                 held = _stamp_owner_delivery(
                     owner_ctx,
                     msg_id=str(injected.get("msg_id") or ""),
@@ -237,6 +238,7 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_content(
                     messages, _loop()._owner_marked_content(owner_content), slot=owner_ctx, kind=OWNER_WORDS_KIND,
                 )
+                _note_owner_contribution(owner_ctx, messages[-1], 'direct_input', attachment_facts)
                 arrivals.append(len(messages) - 1)
             else:
                 _loop()._record_owner_directive(
@@ -338,6 +340,7 @@ def _drain_incoming_messages(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
                 )
+                _note_peer_contribution(owner_ctx, messages[-1], provenance, arrival.get("source_event_id") or entry.get("msg_id"))
                 if provenance == "place_event" and (arrival.get("confirmed_words") or arrival.get("owner_words")):
                     arrivals.append(len(messages) - 1)  # my human's words, from their confirmed account
                 if provenance == "system" and isinstance(entry.get("review_feedback"), dict) and messages:
@@ -395,7 +398,9 @@ def _drain_incoming_messages(
 
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
-            owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
+            attachment_facts = {}
+            owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id,
+                                           attachment_facts=attachment_facts)
             from ouroboros.answer_facts import row_source
             from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, reply_target
 
@@ -429,6 +434,7 @@ def _drain_incoming_messages(
                 attachments=((held or {}).get("attachments") or delivery_manifest_refs(entry.get("attachment_manifest"))) if fact else None,
             )
             arrivals.append(_append_owner_mail_input(messages, owner_ctx, entry, owner_content, fact, wordless=bool(fact and not dmsg)))
+            _note_owner_contribution(owner_ctx, messages[arrivals[-1]], "mailbox_input", attachment_facts, owner_words=not bool(fact and not dmsg))
             if source == OWNER_PRESS:
                 mark_press_arrival(owner_ctx, messages[arrivals[-1]])
             ack_content(entry)
@@ -457,6 +463,24 @@ def _drain_incoming_messages(
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
     _show_held_quote_handles(owner_ctx, messages)
     return controls
+
+
+def _note_peer_contribution(ctx, row, provenance, source):
+    from ouroboros.context_assembly_trace import note_contribution
+
+    note_contribution(ctx, row, 'place_arrival' if provenance == 'place_event' else 'task_mail',
+                      source=source, form='containing_row')
+
+
+def _note_owner_contribution(ctx, row, form, attachment_facts=None, *, owner_words=True):
+    from ouroboros.context_assembly_trace import note_contribution
+
+    delivery = getattr(ctx, 'last_owner_delivery', None) or {}
+    if owner_words:
+        note_contribution(ctx, row, 'owner_input', form=form, source=delivery.get('source_row_address', ''))
+    if attachment_facts:
+        note_contribution(ctx, row, 'attachment_manifest', observation=attachment_facts,
+                          source=delivery.get('source_row_address', ''))
 
 
 def _show_held_quote_handles(owner_ctx: Any, messages: List[Dict[str, Any]]) -> None:

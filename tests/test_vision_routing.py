@@ -75,7 +75,10 @@ def test_caption_mode_rewrites_send_copy_without_mutating_transcript(monkeypatch
 
     assert out is not messages
     assert messages[0]["content"][1]["type"] == "image_url"
-    assert out[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
+    from ouroboros.llm_messages import project_wire_messages
+
+    assert out[0]['content'][1]['_image_projection_fact'] == 'caption'
+    assert project_wire_messages(out)[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
 
 def test_inline_mode_sends_pixels_even_when_metadata_says_no(monkeypatch):
@@ -95,7 +98,10 @@ def test_inline_mode_sends_pixels_even_when_metadata_says_no(monkeypatch):
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
     monkeypatch.setattr(vision_routing, "supports_vision", lambda *_a, **_k: False)
     out = prepare_messages_for_send(_image_message(), routing=VisionRoutingContext("not/vision", object(), {}))
-    assert out[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
+    from ouroboros.llm_messages import project_wire_messages
+
+    assert out[0]['content'][1]['_image_projection_fact'] == 'caption'
+    assert project_wire_messages(out)[0]["content"][1] == {"type": "text", "text": "[image caption: old caption]"}
 
 
 def test_an_unreadable_route_fact_is_unknown_not_no(monkeypatch):

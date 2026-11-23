@@ -1503,9 +1503,9 @@ def process_tool_results(
         result_source_ref = view.get("result_source_ref") if isinstance(view.get("result_source_ref"), dict) else {}
         typed = exec_result.get("tool_result")
         producer_ref = exec_result.get("producer_source_ref") or {}
+        from ouroboros.context_assembly_trace import note_contribution
         truncated_result = with_producer_source(exec_result, truncated_result)
         shown_result = with_delivery_note(exec_result, truncated_result)
-
         messages.append({
             "role": "tool",
             "tool_call_id": exec_result["tool_call_id"],
@@ -1514,6 +1514,8 @@ def process_tool_results(
                 exec_result, shown_result, facts=typed_result_facts(exec_result),
                 source_ref=result_source_ref),
         })
+        note_contribution(ctx, messages[-1], 'result_selection', form=(
+            'partial_retained' if result_partial and result_source_ref else 'partial_unavailable' if result_partial else 'selected_result'))
         published = (exec_result.get("result_meta") or {}).get("tool_result_meta") or {}
         if ctx is not None and published.get("sleep_question_notice") and not (is_error or result_partial):
             from ouroboros.model_sleep import acknowledge_question_delivery

@@ -1207,6 +1207,11 @@ def _send_main_candidate(
     predicate = candidate_predicate if candidate_predicate is not None else physical_fit_predicate
     if candidate_predicate is not None and physical_fit_predicate is not None:
         predicate = lambda request: candidate_predicate(request) is not False and physical_fit_predicate(request) is not False
+    if physical_context is not None:
+        from ouroboros.context_assembly_trace import bind_contribution_input
+
+        physical_context = bind_contribution_input(physical_context, kwargs, canonical_messages,
+                                                  getattr(current_model_wait(), 'tool_context', None))
     binding = (contextlib.nullcontext() if physical_context is None and predicate is None else
                bind_physical_attempt_context(physical_context, candidate_predicate=predicate))
     # Main's clock line per physical send; the consumed one joins ``canonical_messages``.

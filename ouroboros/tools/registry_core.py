@@ -852,6 +852,11 @@ class ToolRegistry:
             except Exception as exc:
                 self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
         combined = built_in + extension_schemas + mcp_schemas
+        from ouroboros.context_assembly_trace import note_schema_origin
+
+        for origin, schemas in (('builtin', built_in), ('extension', extension_schemas), ('mcp', mcp_schemas)):
+            for schema in schemas:
+                note_schema_origin(self._ctx, schema, origin)
         if disabled_tools:
             # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
             # built-ins, so a disabled name can never surface from any discovery source.
@@ -892,6 +897,8 @@ class ToolRegistry:
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
+        from ouroboros.context_assembly_trace import note_schema_origin
+
         requested = str(name or "").strip()
         if requested == "presence_finish":
             self._retry_schedule_door()
@@ -905,7 +912,7 @@ class ToolRegistry:
                     "tools": [requested],
                     "details": {requested: availability[2]},
                 })
-            return None if cause else self._schema_for_entry(entry)
+            return None if cause else note_schema_origin(self._ctx, self._schema_for_entry(entry), 'builtin')
         # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
         # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
         if requested in _disabled_tools(self._ctx) and not registry_guards.disabled_tools_dispatch_only(self._ctx):
@@ -931,7 +938,7 @@ class ToolRegistry:
             except Exception:
                 ext_tool = None
             if ext_tool:
-                return _dynamic_tool_schema(ext_tool)
+                return note_schema_origin(self._ctx, _dynamic_tool_schema(ext_tool), 'extension')
         try:
             from ouroboros.mcp_client import (
                 ensure_configured_from_settings as _mcp_ensure_configured,
@@ -950,7 +957,7 @@ class ToolRegistry:
                 return None
             mcp_tool = _mcp_get_manager().get_tool(requested)
             if mcp_tool:
-                return _dynamic_tool_schema(mcp_tool)
+                return note_schema_origin(self._ctx, _dynamic_tool_schema(mcp_tool), 'mcp')
         return None
 
     def on_demand_schema_names(self) -> frozenset:

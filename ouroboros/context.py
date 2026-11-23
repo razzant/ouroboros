@@ -78,17 +78,17 @@ log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
-def build_incoming_user_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
+def build_incoming_user_content(entry: Dict[str, Any], drive_root: Any, task_id: str, *, attachment_facts=None) -> Any:
     """Build only this delivery's images, never the task's historical manifest."""
     task = {**entry, "drive_root": drive_root, "id": task_id}
     if "attachment_manifest" in entry or "attachment_manifest_ref" in entry:
         task["attachment_images"] = entry.get("attachment_manifest") or []
         task["task_contract"] = {key: entry[key] for key in
                                  ("attachment_manifest", "attachment_manifest_ref") if key in entry}
-    return build_user_content(task)
+    return build_user_content(task, attachment_facts=attachment_facts)
 
 
-def build_user_content(task: Dict[str, Any]) -> Any:
+def build_user_content(task: Dict[str, Any], *, attachment_facts=None) -> Any:
     from ouroboros.presence_context import frame_presence_user_content
 
     text = task.get("text", "")
@@ -113,7 +113,8 @@ def build_user_content(task: Dict[str, Any]) -> Any:
 
         raw = read_actor_source_bytes(task["drive_root"], str(task["id"]), task["image_source_ref"])
         image_b64 = base64.b64encode(raw).decode("ascii")
-    attachment_image_blocks = _build_attachment_image_blocks(task)
+    attachment_image_blocks = (_build_attachment_image_blocks(task) if attachment_facts is None
+                               else _build_attachment_image_blocks(task, facts=attachment_facts))
 
     if not image_b64 and not attachment_image_blocks:
         return frame_presence_user_content(task, text or "(empty message)")
@@ -157,13 +158,14 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     return frame_presence_user_content(task, content)
 
 
-def _first_user_content(task: Dict[str, Any], env: Any) -> Any:
+def _first_user_content(task: Dict[str, Any], env: Any, *, attachment_facts=None) -> Any:
     """A task's first input, its staged images read from the drive its actor runs on. A row on the canonical drive may
     record no ``drive_root`` (promotion's and Continue's do not: assignment and terminal files read that field as a
     fork), so the actor's own ``env.drive_root`` names the store its inputs were staged in."""
     from ouroboros.chat_uploads import attachment_delivery_block
 
-    content = build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root})
+    content = build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root},
+                                 attachment_facts=attachment_facts)
     fact = attachment_delivery_block(task.get("attachment_manifest"))
     if not fact:
         return content
@@ -172,7 +174,7 @@ def _first_user_content(task: Dict[str, Any], env: Any) -> Any:
     return f"{content}\n\n{fact}" if task.get("text") else fact
 
 
-def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_attachment_image_blocks(task: Dict[str, Any], *, facts=None) -> List[Dict[str, Any]]:
     """Native image blocks for staged attachment images (v6.52.0, P1).
 
     Each entry in ``task['attachment_images']`` is a staged manifest record
@@ -191,14 +193,22 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
         try:
             entries = resolve_attachment_manifest(drive_root, str(task_id), contract)
         except (OSError, ValueError, TypeError) as exc:
+            if facts is not None:
+                facts['manifest_unavailable'] = True
             return [{"type": "text", "text": f"Attachment source unavailable: {exc}. The inline rows are not the complete input set."}]
     if not isinstance(entries, list) or not entries:
         return []
+    if facts is not None:
+        facts['manifest_items'] = len(entries)
+        facts['manifest_path_only'] = sum(isinstance(row, dict) and (not row.get('is_image') or bool(row.get('path_only')))
+                                          for row in entries)
     import base64 as _b64
 
     from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.context_assembly_trace import AttachmentSelection
     from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
 
+    selection = AttachmentSelection(facts)
     try:
         artifact_dir = task_artifact_dir_path(drive_root, str(task_id), create=False)
     except Exception:
@@ -206,32 +216,44 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
         return []
     blocks: List[Dict[str, Any]] = []
     injected = 0
-    for entry in entries:
-        if injected >= MAX_LIVE_IMAGE_BLOCKS:
-            break  # remaining images stay manifest-readable, not amputated
+    for index, entry in enumerate(entries):
+        if injected >= MAX_LIVE_IMAGE_BLOCKS and (facts is None or index >= selection.limit):
+            selection.omit_remaining(len(entries) - index)
+            break
         if not isinstance(entry, dict) or not entry.get("is_image") or entry.get("path_only"):
+            selection.record(index, "not_selected_as_image" if isinstance(entry, dict) else "unreadable_entry")
+            continue
+        if injected >= MAX_LIVE_IMAGE_BLOCKS:
+            selection.record(index, "image_count_limit")
             continue
         relpath = str(entry.get("relpath") or "").strip()
         if not relpath:
+            selection.record(index, "missing_source")
             continue
         label = str(entry.get("label") or pathlib.Path(relpath).name).strip()
+        failure = "unreadable_source"
         try:
             img_path = (artifact_dir / relpath).resolve(strict=False)
             if not img_path.is_relative_to(artifact_dir.resolve()) or (artifact_dir / relpath).is_symlink():
+                failure = "invalid_source"
                 raise ValueError("image path escapes its staged artifact owner")
             # Keep the existing admission budget; exceeding it is visible while
             # the complete original remains accessible through the manifest.
             if img_path.stat().st_size > 8 * 1024 * 1024:
+                failure = "image_byte_limit"
                 raise ValueError("image exceeds the 8 MiB automatic attachment read budget")
             raw = img_path.read_bytes()
             from hashlib import sha256
             from ouroboros.image_preparation import prepare_image_bytes
             if entry.get("sha256") and sha256(raw).hexdigest() != entry["sha256"]:
+                failure = "source_identity_changed"
                 raise ValueError("staged image no longer matches its captured identity")
+            failure = "image_preparation_failed"
             prepared = prepare_image_bytes(raw, max_bytes=8 * 1024 * 1024)
             mime = prepared.mime
             b64 = _b64.b64encode(prepared.data).decode("ascii")
         except (OSError, ValueError) as exc:
+            selection.record(index, failure)
             blocks.append({"type": "text", "text":
                            f"[image: {label}] Pixels unavailable: {exc}. Original: artifact_store/{relpath}."})
             continue
@@ -244,6 +266,9 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
             "_source_path": str(img_path),
         })
         injected += 1
+        selection.record(index, "prepared_pixels")
+    if facts is not None:
+        facts['manifest_pixels'] = injected
     return blocks
 
 
@@ -809,23 +834,23 @@ def _connections(tool_registry: Any, task: Dict[str, Any]) -> Tuple[str, str]:
 _BASE_PROMPT_PATH = "prompts/SYSTEM.md"
 
 
-def _read_base_prompt(env: Any) -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
-    """The base prompt as this capture reads it, and the witness the send seal checks it by.
+def _read_governance_source(env: Any, path: str, fallback: str = "") -> Tuple[str, Optional[Tuple[str, str, int, str]]]:
+    """Read a governance file once, keeping the witness of that exact capture for the send seal.
 
     The witness is ``(path, file SHA-256, normalized length, normalized SHA-256)``
     (``model_send_seal._file_trace``). An empty prompt has none; one that cannot be
     read or decoded has none and the capture uses the fallback text.
     """
     try:
-        raw = env.repo_path(_BASE_PROMPT_PATH).read_bytes()
+        raw = env.repo_path(path).read_bytes()
         text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except (OSError, UnicodeError) as exc:
         if not isinstance(exc, FileNotFoundError):  # a missing prompt stays quiet, as ``safe_read`` left it
-            log.warning("Base prompt %s could not be read (%s); using fallback", _BASE_PROMPT_PATH, type(exc).__name__)
-        return "You are Ouroboros. Your base prompt could not be loaded.", None
+            log.warning("Governance source %s could not be read (%s); using fallback", path, type(exc).__name__)
+        return fallback, None
     if not text:
         return text, None
-    return text, (_BASE_PROMPT_PATH, hashlib.sha256(raw).hexdigest(), len(text),
+    return text, (path, hashlib.sha256(raw).hexdigest(), len(text),
                   hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
@@ -844,8 +869,9 @@ def _capture_context_core(
         _validate_declared_input_task(task)
     captured_at = utc_now_iso()  # one capture instant for the runtime fact and every snapshot label
     supplementary_messages: List[Dict[str, Any]] = []
-    base_prompt, base_prompt_source = _read_base_prompt(env)
-    bible_md = safe_read(env.repo_path("BIBLE.md"))
+    base_prompt, base_prompt_source = _read_governance_source(
+        env, _BASE_PROMPT_PATH, "You are Ouroboros. Your base prompt could not be loaded.")
+    bible_md, bible_source = _read_governance_source(env, "BIBLE.md")
     from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
 
     books = []
@@ -1101,9 +1127,11 @@ def _capture_context_core(
     held = held_notes.turn_sections(canonical_root, task, view_spec, global_knowledge, ctx=ctx)
     dynamic_parts.extend([*held, held_notes.HELPER_NOTE] if held and helper else held)
 
+    attachment_facts: dict = {}
     return _ContextCore(
         base_prompt=base_prompt,
         base_prompt_source=base_prompt_source,
+        bible_source=bible_source,
         bible_md=bible_md,
         architecture_md=architecture_md,
         development_md=development_md,
@@ -1113,9 +1141,9 @@ def _capture_context_core(
         dynamic_head_sections=capture_sections(head_parts, prefix="head"),
         dynamic_sections=capture_sections(dynamic_parts, prefix="dynamic"),
         section_root=_section_root_for(env, ctx), section_task_id=str(task.get("id") or ""),
-        user_content_json=json.dumps(
-            _first_user_content(task, env), ensure_ascii=False, sort_keys=True,
-        ),
+        user_content_json=json.dumps(_first_user_content(task, env, attachment_facts=attachment_facts),
+                                     ensure_ascii=False, sort_keys=True),
+        initial_attachment_facts=attachment_facts,
         docs_need_development=docs_need_development, development_required=required,
         reference_books=tuple(books),
         reference_book_errors=tuple(book_errors),
@@ -1272,6 +1300,10 @@ def build_llm_messages(
     if ctx is not None:
         ctx.context_fit_plan = plan
     messages = plan.messages_for(plan.initial_mode)
+    if captured := getattr(plan.core, "initial_attachment_facts", None):
+        from ouroboros.context_assembly_trace import note_contribution
+
+        note_contribution(ctx, messages[1], "attachment_manifest", form="opening_input", observation=captured)
     cap_info: Dict[str, Any] = {"context_fit": {
         "core_sha256": plan.core_sha256,
         "preferred_mode": plan.preferred_mode,

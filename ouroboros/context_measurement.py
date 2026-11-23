@@ -288,6 +288,8 @@ def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None)
     from ouroboros.usage_accounting import PhysicalAttemptContext
 
     measurement = disposition.measurement
+    projection_for = getattr(plan, "projection", None)
+    projection = projection_for(measurement.rendered_mode) if callable(projection_for) else None
     return PhysicalAttemptContext(
         view_kind=measurement.view_kind,
         profile=measurement.profile,
@@ -306,6 +308,8 @@ def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None)
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
         mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
         base_prompt_source=getattr(getattr(plan, "core", None), "base_prompt_source", None),
+        bible_source=getattr(getattr(plan, "core", None), "bible_source", None),
+        assembly_witnesses=getattr(projection, "assembly_witnesses", ()),
         first_contact_plan=((plan.first_contact, plan.first_contact_normal is not None)
                             if getattr(plan, "first_contact", "") else None),
     )

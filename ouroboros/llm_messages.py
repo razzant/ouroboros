@@ -44,7 +44,7 @@ DISPLAY_KEY = "_display"
 HOST_ONLY_MESSAGE_KEYS = frozenset({
     "_host_context_kind", "_host_text_sha256", TOOL_RESULT_RECORD_KEY,
     REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY, SHARED_HEAD_KEY,
-    "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
+    "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256", "_image_projection_fact",
     "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
     "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
     DISPLAY_KEY,

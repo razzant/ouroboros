@@ -412,13 +412,15 @@ def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_comm
     kept = {'task_id', 'attempt_id', 'ledger_state', 'provider_body', 'transport_observation', 'model', 'provider',
             'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'failure', 'file_trace', 'sha256',
             'redacted_ref', 'body', 'recorded_bytes', 'report_bytes', 'report_bytes_at_least', 'page_limit_bytes',
-            'retry_max_bytes'}
+            'retry_max_bytes', 'context_fit', 'authored_prefix', 'ledger_usage', 'prepared_inventory',
+            'assembly_source_map', 'assembly_trace', 'late_contributions'}
     args = ['--data-root', str(data_root), 'page-reader-test', '--attempt']
     small_body = _manifest(small)['redacted_projection_ref']['size']
     failed_body = _manifest(next(row for row in _rows(data_root) if row['attempt_id'] == failed))[
         'redacted_projection_ref']['size']
     trace = [{'source_path': 'prompts/SYSTEM.md', 'source_sha256': digest, 'contribution': 'leading_system_prefix',
-              'text_sha256': digest}]
+              'text_sha256': digest, 'normalized_chars': len(prompt),
+              'prepared_text': {'path': '$.messages[0].content', 'start_char': 0, 'end_char': len(prompt)}}]
     # Read whole, its report too large for the page; over this export's bound as well as over the page's; and read
     # whole but itself over the page, so its report is never built.
     for chosen, limit, smaller, allowance, size, report, said, life in (
@@ -528,6 +530,9 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
     prompt = env.repo_path('prompts/SYSTEM.md')
     before = b'System revision seventeen.\r\n'
     prompt.write_bytes(before)
+    bible = env.repo_path('BIBLE.md')
+    bible_before = 'The constitution says lumière.\r\n'.encode('utf-8')
+    bible.write_bytes(bible_before)
 
     def route(_task, *, allow_fetch):
         return {'provider': 'openai', 'model': 'openai/gpt-x'}, CapabilityEvidence(
@@ -545,21 +550,37 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
                          payload['tools'], {'prospective': True})
         payload['messages'] = ready['messages']
     prompt.write_bytes(b'System revision eighteen.\r\n')
+    bible.write_bytes(b'Changed constitution.')
     witness = plan.core.base_prompt_source
+    bible_witness = plan.core.bible_source
     physical = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False,
-                                      base_prompt_source=witness)
+                                      base_prompt_source=witness, bible_source=bible_witness)
     # The witness rides beside the record: a copy keeps it, and no serialized form of the record holds it. A record
     # without one holds just its fields, as the ledger writes them, and a copy of it still reads None.
     assert replace(physical, prefix={'departs': 'first'}).base_prompt_source == witness
-    assert 'base_prompt_source' not in asdict(physical)
+    assert replace(physical, prefix={'departs': 'first'}).bible_source == bible_witness
+    assert not {'base_prompt_source', 'bible_source'} & asdict(physical).keys()
     bare = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
     assert vars(bare) == asdict(bare) and replace(bare, prefix={'departs': 'first'}).base_prompt_source is None
     with ua.bind_physical_attempt_context(physical):
         first = _dispatch(data_root, 'reader-test', payload=payload)
         later = _dispatch(data_root, 'reader-test', payload=_payload())  # the same witness over another first message
+    same = _dispatch(data_root, 'reader-test', payload=payload)
     facts, body = read_attempt(data_root, 'reader-test', first['attempt_id'])
     assert body and b'System revision seventeen.' in body and b'System revision eighteen.' not in body
-    assert facts['file_trace'][0]['source_sha256'] == witness[1] == hashlib.sha256(before).hexdigest()
+    system_fact, bible_fact = facts['file_trace']
+    assert system_fact['source_sha256'] == witness[1] == hashlib.sha256(before).hexdigest()
+    assert bible_fact['source_sha256'] == bible_witness[1] == hashlib.sha256(bible_before).hexdigest()
+    start = witness[2] + len('\n\n## BIBLE.md\n\n')
+    carrier = '$.messages[0].content'
+    if isinstance(payload['messages'][0]['content'], list):
+        carrier += '[0].text'
+    assert bible_fact['prepared_text'] == {
+        'path': carrier,
+        'start_char': start, 'end_char': start + bible_witness[2],
+    }
+    assert first['candidate_raw_sha256'] == same['candidate_raw_sha256']
+    assert first['candidate_raw_size_bytes'] == same['candidate_raw_size_bytes']
     assert read_attempt(data_root, 'reader-test', later['attempt_id'])[0]['file_trace'] == 'not_recorded'
 
     def holders(digest: str) -> list:
@@ -574,7 +595,7 @@ def test_local_request_reader_reports_selected_file_not_current_file(data_root, 
     # The proven trace of the first manifest is the witness's one durable copy: the send that could not prove
     # it stored nothing of it, and neither did an accounting row.
     proven = pathlib.Path(first['candidate_manifest_ref']['path']).resolve()
-    for digest in (witness[1], witness[3]):
+    for digest in (witness[1], witness[3], bible_witness[1], bible_witness[3]):
         assert holders(digest) == [proven] and json.dumps(_manifest(first)).count(digest) == 1
         assert digest not in json.dumps(_rows(data_root), default=str)
 
@@ -1147,3 +1168,10 @@ def test_sweep_rides_the_startup_family(data_root, monkeypatch):
     # Historical reconciliation belongs to the explicit owner/rebuild job;
     # no startup path launches it.
     assert calls == []
+
+
+def test_assembly_report_labels_normalized_attempt_counts_as_ledger_only():
+    from ouroboros.context_attempt_reader import _assembly_facts
+
+    facts = _assembly_facts({'prompt_tokens': 0, 'cached_tokens': 0, 'cache_write_tokens': 0})
+    assert facts == {'ledger_usage': {'prompt_tokens': 0, 'cached_tokens': 0, 'cache_write_tokens': 0}}

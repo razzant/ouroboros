@@ -141,7 +141,7 @@ def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callab
     # nav map in low; DEVELOPMENT inclusion is the caller's mode-independent
     # decision carried on the core (the former per-task force_low_docs lever is
     # gone: workspace binding no longer shapes the docs).
-    static_parts = [core.base_prompt, "## BIBLE.md\n\n" + core.bible_md]
+    static_parts = [HostSection('system', core.base_prompt), HostSection('bible', "## BIBLE.md\n\n" + core.bible_md)]
     sections, development = reference_docs(
         env,
         context_mode="low" if core.compact_reference_docs else mode,
@@ -163,7 +163,8 @@ def render_governance(governance: Tuple[Any, ...], addressed: Optional[Mapping[s
 
 
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "", mode: str = "",
-                   addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True) -> List[Dict[str, Any]]:
+                   addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True,
+                   trace: Any = None) -> List[Dict[str, Any]]:
     # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
     # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
     # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
@@ -173,7 +174,8 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
     own_block = core.docs_need_development or core.development_required
-    shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, core.connections[mode == "nano"]) if part)
+    connections = core.connections[mode == "nano"]
+    shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, connections) if part)
     stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (shared, story) if part))
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
     blocks = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable if text.strip()]
@@ -181,4 +183,7 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
         from ouroboros.llm_messages import SHARED_HEAD_KEY  # here, as its sibling key is: no transport at import time
 
         blocks[-1][SHARED_HEAD_KEY] = {"chars": len(shared) + 2, "story_whole": bool(story_whole)}
-    return blocks + [{"type": "text", "text": "\n\n".join(part for part in (head, room, dynamic) if part)}]
+    changing = "\n\n".join(part for part in (head, room, dynamic) if part)
+    if trace is not None:
+        trace((common, handbook, (semi, connections), story, head, room, dynamic, stable, changing))
+    return blocks + [{"type": "text", "text": changing}]

@@ -55,9 +55,15 @@ class PhysicalAttemptContext:
     # shaped the view; the send seam signs ``first_contact_scope`` from the target it actually resolves.
     first_contact_plan: InitVar[Optional[Tuple[str, bool]]] = None
 
+    bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+    assembly_witnesses: InitVar[tuple] = ()
+    contribution_input: InitVar[Optional[tuple]] = None
+
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
                       first_contact_dispatch: Optional[Tuple[int, str]],
-                      first_contact_plan: Optional[Tuple[str, bool]]) -> None:
+                      first_contact_plan: Optional[Tuple[str, bool]],
+                      bible_source: Optional[Tuple[str, str, int, str]], assembly_witnesses: tuple,
+                      contribution_input: Optional[tuple]) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
         # reads the class's None back (it reads every InitVar with ``getattr``).
         if base_prompt_source is not None:
@@ -67,6 +73,12 @@ class PhysicalAttemptContext:
             object.__setattr__(self, "first_contact_dispatch", first_contact_dispatch)
         if first_contact_plan:
             object.__setattr__(self, "first_contact_plan", tuple(first_contact_plan))
+        if bible_source is not None:
+            object.__setattr__(self, "bible_source", tuple(bible_source))
+        if assembly_witnesses:
+            object.__setattr__(self, 'assembly_witnesses', assembly_witnesses)
+        if contribution_input is not None:
+            object.__setattr__(self, 'contribution_input', contribution_input)
 
 
 def with_dispatch_stamp(request: Any, stamp: Tuple[int, str]) -> Any:

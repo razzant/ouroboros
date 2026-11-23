@@ -153,7 +153,11 @@ def _append_or_merge_user_content(
         prefix = prior_text.rstrip() + "\n\n---\n\n" if prior_text else ""
         merged = (([{"type": "text", "text": prefix}] if prefix else []) + list(content)
                   if isinstance(content, list) else prefix + str(content or ""))
-    messages[-1] = {**messages[-1], "content": merged}
+    from ouroboros.context_assembly_trace import move_contributions
+
+    prior_row = messages[-1]
+    messages[-1] = {**prior_row, "content": merged}
+    move_contributions(slot, prior_row, messages[-1])
 
 
 def _owner_marked_content(content: Any) -> Any:

@@ -1078,7 +1078,11 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                         frame.locator("#report-file").click()
                     picker.value.set_files([] if content is None else content if isinstance(content, str) else {
                         "name": "report.json", "mimeType": "application/json", "buffer": content})
-                    frame.locator(where).get_by_text(shown).wait_for()
+                    if where == "#attempt-facts":
+                        expect(frame.locator("#report-status")).to_have_text("Showing report.json.")
+                        expect(facts).to_contain_text(shown)
+                    else:
+                        frame.locator(where).get_by_text(shown).wait_for()
 
                 def gap_reads_without_opening(words: str) -> None:
                     # What a person sees with every disclosure closed: the gap's headline and its explanation; the
@@ -1119,10 +1123,67 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     return host, inside
 
                 phase[0] = "select"
+                frame.get_by_role("button", name="Try an example").click()
+                expect(frame.locator("#explain")).to_contain_text("Nothing was sent to a model")
+                expect(frame.locator("#overview")).to_contain_text("Tools offered")
+                expect(frame.get_by_text("Can I return a book on Sunday?", exact=True)).to_be_visible()
+                expect(facts).to_be_hidden()
                 choose(reports["first"], first, "#attempt-facts")
+                expect(frame.locator("#overview")).to_contain_text("Low used · Max selected")
+                expect(frame.locator("#overview")).to_contain_text("Input read from cache")
+                expect(frame.locator("#source-limit")).to_be_visible()
+                expect(facts).to_be_hidden()
+                assert "example-request" not in facts.text_content()
+                technical = frame.locator("#technical > summary")
+                technical.click()
+                expect(facts).to_be_visible()
+                technical.click()
+                build = frame.locator("#build-facts")
+                value = lambda label: build.get_by_text(label, exact=True).locator("+ dd").inner_text()
+                assert value("Context mode") == "Low · chosen Max"
+                assert value("Sizing basis") == "Calibrated on recent usage from this route"
+                assert value("Host prefix within this task") == "First change: system blocks · position 3 · shared understanding"
+                assert value("Provider-reported text input") == "50 tokens"
+                assert value("Provider-reported cache read").startswith("0 tokens · ")
+                assert value("Provider-reported cache write") == "Not recorded"
+                assert "private-fixture-route" not in frame.locator("#record-body").text_content()
+                sources = frame.get_by_text("Where these blocks came from", exact=True)
+                sources.click()
+                expect(frame.locator("#source-versions")).to_contain_text("BIBLE.md")
+                expect(frame.locator("#source-versions")).to_contain_text("Your messages · 1 with a matching request row")
+                expect(frame.locator("#source-versions")).to_contain_text("Messages · 4 · 3 without an exact source anchor")
+                expect(frame.locator("#source-technical")).to_contain_text("in prepared text before redaction")
+                assert "SHA-256" not in frame.locator("#source-versions").inner_text()
+                sources.click()
+                frame.locator("#comparison > summary").click()
+                pair = frame.locator("#comparison-facts")
+                second_input = frame.locator("#comparison-file")
+
+                def compare(contents):
+                    second_input.set_input_files({"name": "second.json", "mimeType": "application/json", "buffer": contents})
+                    expect(frame.locator("#comparison-status")).not_to_have_text("Reading the second report…")
+
+                compare(reports["second"])
+                expect(pair).to_contain_text("Identical redacted JSON")
+                assert first not in pair.inner_text() and second not in pair.inner_text()
+                ids = frame.locator("#comparison-identities")
+                expect(ids).not_to_be_visible()
+                frame.locator("#comparison-technical > summary").click()
+                expect(ids).to_contain_text(first)
+                expect(ids).to_contain_text(second)
+                compare(reports["noisy"])
+                expect(pair).to_contain_text("First difference · Messages")
+                expect(pair).to_contain_text("Item 4 differs")
+                expect(pair).to_contain_text("0 tokens → 0 tokens")
+                compare(reports["over_limit"])
+                expect(pair).to_contain_text("at least one report has no stored body")
+                compare(b"{")
+                expect(frame.locator("#comparison-status")).to_contain_text("Cannot compare")
+                assert pair.text_content() == "" and stored_body.text_content() == stored
+                frame.locator("#comparison > summary").click()
                 assert "receipt not confirmed" in facts.inner_text() and second not in facts.inner_text()
                 assert "Request recorded" in frame.locator("#headline").inner_text()
-                assert "Private text can remain" in frame.locator("#privacy").inner_text()
+                assert "Private text can remain" in frame.locator("#privacy").text_content()
                 # The request is in the frame once, whole and literal; the overview names every message and
                 # tool, and a row's text exists only while that row is open.
                 assert stored_body.text_content() == stored
@@ -1141,7 +1202,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     assert first in facts.inner_text() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
                     # Its one pressable control stands on the rest shadow in either theme (DESIGN principle 4).
-                    assert frame.locator(".button").evaluate("(node) => getComputedStyle(node).boxShadow") != "none"
+                    assert frame.locator("label[for='report-file']").evaluate("(node) => getComputedStyle(node).boxShadow") != "none"
                     shoot(f"{step}-{scheme}-switched")
                 (inner,) = [each for each in page.frames if each.url.endswith("/static/context-report.html")]
                 inner.evaluate("""() => window.postMessage({type: 'ouro-context-report-theme', name: 'light',
@@ -1160,11 +1221,19 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(frame.locator(".part")).to_have_count(0)  # `toggle` arrives after the click returns
                 # The same request sent again is another attempt, and it replaces what was shown.
                 choose(reports["second"], second, "#attempt-facts")
+                assert value("Context mode") == "Not recorded" and value("Host prefix within this task") == "Not recorded"
                 assert first not in frame.locator("body").text_content()
                 assert stored_body.text_content() == stored
                 # The first send failed and its retry was answered: the failed attempt's report is that attempt's,
                 # its request included, and its ledger state says how the record was closed, never a price.
                 choose(failed_report, failed, "#attempt-facts")
+                assert pair.text_content() == ""
+                frame.locator("#comparison > summary").click()
+                compare(retried_report)
+                expect(pair).to_contain_text("identical UTF-8 bytes at the start")
+                expect(pair).to_contain_text("temperature")
+                frame.locator("#comparison > summary").click()
+                assert value("Provider-reported cache read") == "Not recorded"
                 words = facts.inner_text()
                 assert "The send raised _Rejected · HTTP 400" in words and retried not in frame.locator("body").text_content()
                 assert "Settled — the ledger closed this attempt’s accounting record without a receipt (abandoned)" in words
@@ -1230,7 +1299,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 choose(gap(body="not_linked", file_trace="not_read"), "No saved request is linked", "#headline")
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
-                assert frame.locator("#source-versions").text_content().startswith("Not read: this report did not open")
+                assert frame.locator("#source-versions").text_content().startswith("The sealed record was not read")
                 # The first reader wrote `not_recorded` beside `not_linked` without opening any record: its versions are
                 # as unknown as when not read, and the report's own fields stay as written. A usage-reported attempt
                 # never had a record, so its `not_recorded` keeps saying that none were recorded.
@@ -1238,12 +1307,12 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 choose(gap(body="not_linked", file_trace="not_recorded", attempt_id="unlinked-first-reader"),
                        "unlinked-first-reader", "#attempt-facts")
                 assert frame.locator("#source-versions").text_content() == unread
-                assert "No supported source versions were recorded" not in frame.locator("#source-versions").text_content()
+                assert "No source versions were recorded" not in frame.locator("#source-versions").text_content()
                 written = json.loads(frame.locator("#record-body").text_content())
                 assert (written["body"], written["file_trace"]) == ("not_linked", "not_recorded")
                 choose(gap(body="receipt_only", file_trace="not_recorded", attempt_id="usage-reported"),
                        "usage-reported", "#attempt-facts")
-                assert frame.locator("#source-versions").text_content().startswith("No supported source versions were recorded")
+                assert frame.locator("#source-versions").text_content().startswith("No source versions were recorded")
                 for facts_of_gap, headline, words in (
                         ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
                           "retry_max_bytes": 2258277}, "sealed record is larger",
@@ -1285,10 +1354,10 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                                "stage": "raised_exception", "exception_type": "_Rejected", "provider_status_code": 400},
                            file_trace=trace), "larger than this page opens", "#headline")
                 assert "The send raised _Rejected · HTTP 400" in facts.inner_text()
-                assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md\nFile SHA-256: ab")
+                assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md\nBase instructions")
                 choose(gap(body="manifest_over_limit", recorded_bytes=2258277, max_bytes=2097152,
                            retry_max_bytes=2258277, file_trace="not_read"), "sealed record is larger", "#headline")
-                assert frame.locator("#source-versions").text_content().startswith("Not read: this report did not open")
+                assert frame.locator("#source-versions").text_content().startswith("The sealed record was not read")
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
                 large = tmp_path / "large-report.json"
                 with large.open("wb") as handle:

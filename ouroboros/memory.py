@@ -841,6 +841,7 @@ class Memory:
         archives unopened without a row is disclosed even when nothing rendered.
         """
         from ouroboros.jsonl_tail import coverage_line
+        from ouroboros.section_floor import HostSection
 
         sections: List[str] = []
         for log_name, header, formatter, want, note in self._recent_sections():
@@ -857,7 +858,7 @@ class Memory:
                 coverage["rendered"] = note(shown)
             summary = formatter(entries)
             if summary or coverage.get("gaps") or coverage.get("archives_bounded"):
-                sections.append(f"{header} ({coverage_line(coverage)})" + (f"\n\n{summary}" if summary else ""))
+                sections.append(HostSection('recent_' + log_name.removesuffix('.jsonl'), f"{header} ({coverage_line(coverage)})" + (f"\n\n{summary}" if summary else "")))
         return sections
 
     def _recent_sections(self) -> tuple:

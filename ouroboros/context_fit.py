@@ -66,6 +66,7 @@ class ContextFitProjection:
     # The memory view's fact of this projection (``memory_floor.view_receipt``): role,
     # room, floor steps and boundaries, block sizes; empty without a view.
     memory_facts: Mapping[str, Any] = field(default_factory=dict)
+    assembly_witnesses: tuple = ()  # host side only; never a message field
     # A route rebind may measure the actual shortened transcript, not the initial tail.
     continuation_messages_json: Optional[str] = None
 
@@ -267,10 +268,13 @@ class ContextFitPlan:
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents and narrowed(projection):
                 system, facts = contents[projection.mode]  # the start's Max room outlives a narrowing, as a selection's
+                facts = dict(facts)
+                witnesses = facts.pop('_assembly_witnesses', ())
                 number = (projection.memory_facts.get("floor") or {}).get("no_memory_tokens")  # so does Low's miss (3A)
                 if number is not None and isinstance(facts.get("floor"), dict):
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
+                                     assembly_witnesses=witnesses,
                                      memory_facts={**facts, **{key: value for key, value in projection.memory_facts.items()
                                                                if key in ("max_room", "first_contact_preference")}},
                                      continuation_messages_json=tail_json,
@@ -373,6 +377,8 @@ class ContextCore:
     development_required: bool = False
     # Repo-relative path, raw digest, normalized character count and digest.
     base_prompt_source: Optional[Tuple[str, str, int, str]] = None
+    bible_source: Optional[Tuple[str, str, int, str]] = None
+    initial_attachment_facts: Mapping[str, Any] = field(default_factory=dict, compare=False)
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
@@ -1189,13 +1195,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                    window_tokens=window, ratio=ratio, required_book_tokens=book)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
-    contents = {}
-    for m in floor.MODES:
-        rows = host_receipts(m, receipts)
-        system = _system_blocks(whole_core, whole_governance[form[m]], story, room, m,
-                                section_views(sections[m], rows), whole)
-        facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = system, {**facts, "host_sections_addressed": rows} if rows else facts
+    from ouroboros.context_assembly_trace import render_observed_projections
+
+    contents = render_observed_projections(whole_core, whole_governance, form, sections, lambda m: host_receipts(m, receipts),
+        story, room, mode, whole, shown, receipt, request_cost(mode, sent) if held_heads else None)
     return contents, mode
 
 
@@ -1498,6 +1501,8 @@ def build_context_fit_plan(
     @timed_section("fit.projections")
     def _projection(mode: str, source: Optional[Dict[str, Tuple[List[Dict[str, Any]], Dict]]] = None) -> ContextFitProjection:
         system_content, memory_facts = (contents if source is None else source)[mode]
+        memory_facts = dict(memory_facts)
+        witnesses = memory_facts.pop("_assembly_witnesses", ())
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
         form = (system_content_json, user_projection)
@@ -1515,6 +1520,7 @@ def build_context_fit_plan(
             calibration_ratio=ratio,
             user_content_json=user_projection,
             memory_facts=memory_facts,
+            assembly_witnesses=witnesses,
             continuation_messages_json=tail_json,
         )
 
@@ -1585,4 +1591,5 @@ def build_context_fit_plan(
         start_reasoning_effort=reasoning_effort,
         start=started(contents, initial_mode), first_contact=first_contact,
         first_contact_normal=normal_start,
+    # The measured candidate carries its witnesses through context_measurement.
     )

@@ -6,6 +6,7 @@ split); loop.py re-exports every name."""
 from __future__ import annotations
 
 from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content
+from ouroboros.context_assembly_trace import bind_contribution_input
 
 from ouroboros.config import runtime_setting
 
@@ -1052,8 +1053,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
     physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
-    if physical is not None:  # the remaining attempts of this call send under the new route's measurement
-        ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
+    if physical is not None:
+        physical = ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = bind_contribution_input(physical, kwargs, ctx.messages, ctx.tools._ctx)
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())
 
 
