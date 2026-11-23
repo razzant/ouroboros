@@ -103,6 +103,31 @@ def _preflight(case):
             "letter": _letter(case, "ready"), "qualification": case["qualification"]}
 
 
+def _shot_attempt_rows(page, shot, rows):
+    # IntersectionObserver accounts for nested scroll clips. Check the text rectangles too: a visible
+    # <dd> with its URL clipped at the right edge is not a screenshot of the URL.
+    visible = '''rows => Promise.all(rows.flatMap(row => ['dt', 'dd'].map(tag => new Promise(resolve => {
+        const el = row.querySelector(tag);
+        const observer = new IntersectionObserver(([e]) => {
+            observer.disconnect();
+            const clip = e.intersectionRect, range = document.createRange();
+            range.selectNodeContents(el);
+            const text = [...range.getClientRects()].filter(r => r.width && r.height);
+            resolve(e.isIntersecting && text.length > 0 && text.every(r => r.left >= clip.left - 1 &&
+                r.right <= clip.right + 1 && r.top >= clip.top - 1 && r.bottom <= clip.bottom + 1));
+        });
+        observer.observe(el);
+    })))).then(results => results.every(Boolean))'''
+    rows[0].evaluate("el => el.scrollIntoView({block: 'start', behavior: 'instant'})")
+    if page.evaluate(visible, [row.element_handle() for row in rows]):
+        shot(page, '06-attempt-rows')
+    else:
+        for attempt, row in zip((2, 1, 'unknown'), rows):
+            row.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+            assert page.evaluate(visible, [row.element_handle()]), f'attempt row {attempt}: label or URL clipped'
+            shot(page, f'06-attempt-rows-{attempt}')
+
+
 @pytest.mark.parametrize(("engine", "width", "height"), [("webkit", 1044, 653), ("chromium", 1044, 653),
                                                           ("webkit", 390, 844)])
 def test_check_and_describe_then_apply_read_the_description_as_prose(engine, width, height, tmp_path):
@@ -270,7 +295,21 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 assert "No description is available for this exact preflight range." in dialog.inner_text()
                 dialog.get_by_role("button", name="Cancel", exact=True).click()
                 dialog.wait_for(state="detached")
-                current["preflight"] = _preflight(large)
+                preflight = _preflight(large)
+                preflight["qualification"] = copy.deepcopy(preflight["qualification"])
+                attempts = preflight["qualification"]["github"]["runs"]
+                rerun_url = "https://github.com/example/fixture/actions/runs/42"
+                rerun_sha = large["key"]["target_sha"]
+                attempts.extend({"sha": rerun_sha, "status": "completed", "conclusion": conclusion,
+                                 "run_id": 42, "attempt": attempt, "url": rerun_url}
+                                for attempt, conclusion in ((2, "success"), (1, "failure")))
+                # A dispatch of the same commit, saved while it ran and kept by a read that could not say how it ended.
+                kept_url = "https://github.com/example/fixture/actions/runs/43"
+                attempts.append({"sha": rerun_sha, "status": "in_progress", "conclusion": None, "run_id": 43,
+                                 "attempt": 1, "url": kept_url, "retained": True})
+                # The fixture's read predates this merge and lists it unobserved; with its attempts observed it is not.
+                preflight["qualification"]["github"]["missing_shas"].remove(rerun_sha)
+                current["preflight"] = preflight
                 page.wait_for_selector("#updates-letter-body h2, #updates-letter-body .md-h2")
                 body = page.locator("#updates-letter-body")
                 rendered = body.inner_text()
@@ -350,12 +389,29 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 details.locator("summary").click()
                 rows = details.locator(".confirm-dialog-detail-row")
                 # Two rows lead them for this range: its own landed rows were not read, and 7 of its 17 commits carry a receipt.
-                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
+                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(attempts) + 1
+                attempt_rows = []
+                for attempt, conclusion in ((2, "success"), (1, "failure")):
+                    label = f"{rerun_sha[:8]} post-merge · run ID 42, attempt {attempt}"
+                    row = rows.filter(has=page.get_by_text(label, exact=True))
+                    assert row.count() == 1
+                    assert row.locator("dd").inner_text() == f"{conclusion} {rerun_url}/attempts/{attempt}"
+                    attempt_rows.append(row)
+                # The kept dispatch names no outcome: its exact attempt and link stay, and it is not said to run.
+                kept = rows.filter(has=page.get_by_text(f"{rerun_sha[:8]} post-merge · run ID 43, attempt 1", exact=True))
+                assert kept.count() == 1
+                assert kept.locator("dd").inner_text() == (
+                    f"final outcome unknown, last seen in_progress (previously observed) {kept_url}/attempts/1")
+                attempt_rows.append(kept)
                 assert rows.nth(0).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
                 assert "7 of the 17 commits listed here carry one" in rows.nth(1).inner_text()
                 assert "Merge pull request #2384" in details.inner_text() and "No matching run observed" in details.inner_text()
+                unobserved = rows.filter(has=page.get_by_text("No matching run observed", exact=True))
+                assert unobserved.count() == 1 and rerun_sha[:8] not in unobserved.locator("dd").inner_text(), (
+                    "a commit whose attempts are listed is not also listed as unobserved")
                 rows.nth(3).scroll_into_view_if_needed()
                 shot(page, "05-apply-large-details")
+                _shot_attempt_rows(page, shot, attempt_rows)
                 # Keyboard: the prose region takes focus and scrolls; Escape cancels without applying.
                 region.focus()
                 assert page.evaluate("document.activeElement.matches('[data-confirm-content]')")

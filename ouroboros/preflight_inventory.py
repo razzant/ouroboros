@@ -54,11 +54,17 @@ def pytest_configure(config):
     _worker = hasattr(config, "workerinput")
     _emit("start")
 
+def pytest_sessionstart(session):
+    identity = getattr(session.config, "_ci_evidence_session", None)
+    if identity:
+        _emit("evidence_session", session=identity)
+
 def pytest_collection_finish(session):
     missing = sorted(str(path) for path in _selection(session.config) - _reached)
     if missing:
         raise pytest.UsageError("selected test modules the collection never reached: " + ", ".join(missing))
-    if not _worker and session.items:
+    # A local collector can report an empty pass. An xdist controller gets its collections from workers.
+    if not _worker and (session.items or not session.config.getoption("numprocesses", default=0)):
         _emit("collection", ids=[item.nodeid for item in session.items])
 
 def _plain(nodeid):
@@ -73,6 +79,10 @@ def pytest_xdist_node_collection_finished(node, ids):
 def pytest_runtest_logreport(report):
     if report.when == "teardown" or report.skipped or report.failed:
         _emit("report", nodeid=_plain(report.nodeid), when=report.when, outcome=report.outcome)
+
+def pytest_collectreport(report):
+    if report.failed or report.skipped:
+        _emit("collector", outcome=report.outcome)
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
@@ -124,31 +134,44 @@ def launch_args(args):
 
 
 def read_inventory(temp_root, label):
+    """Return the inventory and its error. Only damage to the inventory itself stays in the record."""
     try:
         rows = [json.loads(line) for line in
                 (Path(temp_root) / f"inventory-{label}.jsonl").read_text(encoding="utf-8").splitlines()]
         collections = [row["ids"] for row in rows if row["event"] == "collection"]
         reports = [row for row in rows if row["event"] == "report"]
-        result = {"expected": collections[0] if collections else [], "collections": collections,
+        result = {"expected": collections[0] if collections else [], "collection_reports": len(collections),
                   "executed": [r["nodeid"] for r in reports if r["when"] == "teardown"],
                   "skipped": [r["nodeid"] for r in reports if r["outcome"] == "skipped"],
                   "failed": [r["nodeid"] for r in reports if r["outcome"] == "failed"],
-                  "exitcode": rows[-1].get("exitcode") if rows else None}
+                  "exitcode": rows[-1].get("exitcode") if rows and rows[-1]["event"] == "finish" else None}
+        if sessions := [row["session"] for row in rows if row["event"] == "evidence_session"]:
+            if len(sessions) != 1 or not isinstance(sessions[0], str) or not sessions[0]:
+                raise ValueError("ambiguous evidence session")
+            result["session"] = sessions[0]
         expected, executed = result["expected"], result["executed"]
+        collectors = [row["outcome"] for row in rows if row["event"] == "collector"]
+        if collectors or not expected:
+            result["collectors"] = collectors
         if not all(isinstance(value, list) and all(isinstance(item, str) for item in value)
                    for value in (expected, executed, result["skipped"], result["failed"])):
             raise ValueError("invalid node inventory")
         problem = ""
-        if any(collection != expected for collection in result["collections"]):
+        if any(collection != expected for collection in collections):
             problem = "worker collections disagree"
         elif len(set(expected)) != len(expected) or Counter(executed) != Counter(expected):
             problem = "expected and executed test ids differ (missing or duplicate execution)"
-        elif result["exitcode"] not in (0, 5) or result["failed"]:
-            problem = "test session did not finish green"
-        result.pop("collections")
-        return result, problem
+        elif type(result["exitcode"]) is not int:
+            problem = "test inventory has no terminal exit code"
+        elif not collections:
+            problem = "test inventory recorded no collection"
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        return {}, f"test inventory unavailable: {exc}"
+        result, problem = {}, f"test inventory unavailable: {exc}"
+    if problem:
+        result["problem"] = problem  # A retry can settle a test failure, never damage to the inventory.
+    elif result["exitcode"] not in (0, 5) or result["failed"]:
+        return result, "test session did not finish green"
+    return result, problem
 
 
 _LISTED_IDS = 50  # bounded excerpt of ids worth reading; counts and the digest cover the rest

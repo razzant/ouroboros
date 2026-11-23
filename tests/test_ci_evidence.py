@@ -13,6 +13,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+from tests._shared import retire_injected_export_fault
+
 REPO = Path(__file__).resolve().parents[1]
 SECRET = "synthetic-ci-secret-47d5fb6c-never-sent"
 ARTIFACT_URL = "https://github.com/example/project/actions/runs/123/artifacts/456"
@@ -55,17 +57,6 @@ def _producer(tmp_path, source, *, timeout=60, **options):
     result = subprocess.run(command, cwd=REPO, capture_output=True, text=True,
                             encoding="utf-8", timeout=timeout)
     return result, public, private
-
-
-def _retire_injected_export_fault(result, error):
-    """An injected export fault proves no process: retire only the producer's own exact marker."""
-    from tests._shared import retire_synthetic_retention
-
-    for line in result.stderr.splitlines():
-        if line.startswith("SAFE_TEST_RETAINED "):
-            root = Path(line.split(" ", 1)[1])
-            retire_synthetic_retention(root, f"test diagnostics incomplete: {error}",
-                                       f"retention marker or unreadable subtree: {root / 'OUROBOROS_RETAINED.txt'}")
 
 
 def _summary(tmp_path, public, *, producer="success", artifact="success",
@@ -283,7 +274,66 @@ def test_export_failure_never_changes_the_producer_exit(tmp_path, fails):
         assert "diagnostics_incomplete" in summary and "Case outcomes: **unknown**" in summary
         assert SECRET not in summary
     finally:
-        _retire_injected_export_fault(result, "FileExistsError")
+        retire_injected_export_fault(result, "FileExistsError")
+
+
+@pytest.mark.parametrize("blocked", [(), ("results.json",), ("results.json", "events.jsonl")])
+def test_a_reused_directory_sets_the_earlier_export_aside_before_any_test_runs(tmp_path, blocked):
+    """An old pair is not current, even when Windows prevents moving both files."""
+    locked = bool(blocked)
+    public = tmp_path / "public"
+    public.mkdir()
+    earlier = {"format": 1, "session": "earlier", "session_exit_code": 1, "tests_collected": 1,
+               "collection_failures": [],
+               "reports": [{"nodeid": "test_specimen.py::test_gone", "phase": "call", "outcome": "failed"}]}
+    (public / "results.json").write_text(json.dumps(earlier), encoding="utf-8")
+    old_journal = "".join(json.dumps(row) + "\n" for row in (
+        {"event": "session", "session": "earlier"}, {"event": "report", **earlier["reports"][0]},
+    )).encode("ascii")
+    (public / "events.jsonl").write_bytes(old_journal)
+    refusal = f"""
+        import os
+        from pathlib import Path
+        replace = os.replace
+        def guarded(src, dst, *args, **kwargs):
+            if Path(src).name in {blocked!r} or Path(dst).name in {blocked!r}:
+                raise PermissionError("busy")
+            return replace(src, dst, *args, **kwargs)
+        os.replace = guarded
+    """
+    result, public, _ = _producer(tmp_path, f"""
+        import json
+        from pathlib import Path
+
+        def test_now(request):
+            public = Path(request.config.option.ci_evidence_dir)
+            assert (public / "results.json").exists() is {locked}
+            previous = public / ("results.json" if {locked} else "results.previous.json")
+            assert json.loads(previous.read_text(encoding="utf-8"))["session_exit_code"] == 1
+    """, conftest=refusal if locked else "")
+    assert result.returncode == 0, result.stdout + result.stderr
+    if locked:
+        from scripts.post_merge_check import read_session
+        try:
+            assert _results(public) == earlier and "CI_DIAGNOSTICS_INCOMPLETE" in result.stdout
+            current = read_session(public)
+            assert not current["final"]
+            if "events.jsonl" in blocked:
+                from tests.ci_verdicts import final, journal_rows
+
+                assert (public / "events.jsonl").read_bytes() == old_journal
+                assert not current["evidence"] and current["rows"] == []
+                assert final(public)[1] and journal_rows(public) is None
+            else:
+                assert current["journal_intact"]
+                assert [row["nodeid"] for row in current["rows"] if row["phase"] == "call"] == ["test_specimen.py::test_now"]
+        finally:
+            retire_injected_export_fault(result, "PermissionError")
+        return
+    assert [row["nodeid"] for row in _results(public)["reports"] if row["phase"] == "call"] == ["test_specimen.py::test_now"]
+    assert json.loads((public / "results.previous.json").read_text(encoding="utf-8")) == earlier
+    assert (public / "events.previous.jsonl").read_bytes() == old_journal
+    assert "results.previous.json" in result.stdout and "CI_DIAGNOSTICS_INCOMPLETE" not in result.stdout
 
 
 @pytest.mark.parametrize("payload", [None, "[]", '{"reports":[{"nodeid":"x","phase":"unknown","outcome":"passed"}]}'])
@@ -456,7 +506,8 @@ def test_killed_session_names_the_test_in_flight_and_earlier_failures(tmp_path):
     journal = _events(public)
     assert _started(journal)[-1] == blocked
     assert all(row["duration_seconds"] >= 0 for row in journal if row["event"] == "report")
-    assert all(row["elapsed_seconds"] >= 0 for row in journal)
+    assert journal[0]["event"] == "session"
+    assert all(row["elapsed_seconds"] >= 0 for row in journal[1:])
     summary, result = _summary(tmp_path, public, producer="failure")
     assert "Case outcomes: **unknown**. No passing result is inferred." in summary
     assert "ended before its final export" in summary and "diagnostics_incomplete" in summary
@@ -515,7 +566,9 @@ def test_journal_holds_only_redacted_identity_enums_and_exception_types(tmp_path
     assert "CI_DIAGNOSTICS_INCOMPLETE" not in result.stdout
     journal = (public / "events.jsonl").read_text(encoding="utf-8")
     assert SECRET not in journal and "kept-label-***" in journal
-    rows = _events(public)
+    header, *rows = _events(public)
+    assert header == {"event": "session", "session": _results(public)["session"]}
+    assert len(header["session"]) == 32 and int(header["session"], 16) >= 0
     assert [row["event"] for row in rows] == ["start", "report", "report", "report", "finish"] * 2
     assert {tuple(row) for row in rows} == {
         ("event", "nodeid", "elapsed_seconds"),
@@ -856,10 +909,11 @@ def test_journal_failure_is_one_line_and_never_changes_the_producer_exit(tmp_pat
         assert result.stdout.count("CI_DIAGNOSTICS_INCOMPLETE") == (2 if broken == "directory" else 1)
         if broken != "directory":  # The final export does not depend on the journal.
             assert _results(public)["session_exit_code"] == int(fails)
-            assert not _events(public)
+            header = {"event": "session", "session": _results(public)["session"]}
+            assert _events(public) == ([header] if broken == "write" else [])
     finally:
         # Opening the injected directory as a file raises EACCES on Windows, EISDIR on POSIX.
-        _retire_injected_export_fault(result, {
+        retire_injected_export_fault(result, {
             "directory": "FileExistsError",
             "open": "PermissionError" if os.name == "nt" else "IsADirectoryError",
             "write": "ValueError",

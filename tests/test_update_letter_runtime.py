@@ -81,6 +81,25 @@ def test_a_letter_without_qualification_is_unchanged(tmp_path):
     assert runtime_letter({"text": "t", "qualification": None}) == {"text": "t", "qualification": None}
 
 
+def test_query_data_reads_saved_legacy_coverage_as_the_updates_panel_does(tmp_path):
+    """The letter's author follows CHECK_FACTS to query_data: coverage saved before CI published measured bases is
+    gone there as on the panel, the record on disk is untouched, and the reshaped bytes say they are reconstructed."""
+    store_import.ensure_current_store(tmp_path, with_children=False)
+    record = _record(tmp_path)
+    commits = record["qualification"]["commits"]
+    record["qualification"]["github"].update(missing_shas=[], absent_shas=[commits[3]["sha"]])
+    record["qualification"]["github"]["runs"][1]["covered_shas"] = [commits[3]["sha"]]  # no measured base
+    path = tmp_path / "state" / "update_letter.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller")
+    result = json.loads(_query_data(ctx, op="json", kind="update_letter", select="qualification.github",
+                                    max_bytes=1_000_000))
+    panel = update_letter.read_record(tmp_path)["qualification"]["github"]
+    assert result["status"] == "ok" and result["data"] == panel and result["reconstructed"] is True
+    assert commits[3]["sha"] in panel["missing_shas"] and not any(run.get("covered_shas") for run in panel["runs"])
+    assert json.loads(path.read_text(encoding="utf-8")) == record
+
+
 def test_query_data_reads_the_whole_letter_from_the_installation_root(tmp_path):
     store_import.ensure_current_store(tmp_path, with_children=False)
     record = _record(tmp_path)
