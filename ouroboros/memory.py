@@ -118,7 +118,7 @@ def _history_timestamp(value: Any, *, field: str = "ts") -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _chat_history_filter(filters: Mapping[str, str], search: str):
+def chat_history_filter(filters: Mapping[str, str], search: str):
     exact_transport = {
         key: str(filters.get(key) or "").strip()
         for key in ("provider", "account_id", "conversation_id", "thread_id")
@@ -167,7 +167,7 @@ def _chat_history_filter(filters: Mapping[str, str], search: str):
     return matches
 
 
-def _normalized_chat_history_query(filters: Mapping[str, str], search: str) -> Dict[str, str]:
+def normalized_chat_history_query(filters: Mapping[str, str], search: str) -> Dict[str, str]:
     """Canonical actor-query identity for one chat-history snapshot."""
 
     normalized = {
@@ -197,7 +197,7 @@ def _chat_history_snapshot_id(
         })
     payload = {
         "schema_version": 1,
-        "query": _normalized_chat_history_query(filters, search),
+        "query": normalized_chat_history_query(filters, search),
         "generations": generations,
         # Existing consolidator gap blocks are the durable truth that an older
         # span is unknowable after its cursor is rebased.  Their small stable IDs
@@ -584,7 +584,7 @@ class Memory:
             # only A2A virtual transport is excluded. The project-task FOCUS lives
             # in the passive default context (build_recent_sections), NOT in this
             # explicit recall tool — the one mind can deliberately recall anything.
-            matches = _chat_history_filter(filters, search)
+            matches = chat_history_filter(filters, search)
             entries, coverage = self.read_chat_generations(
                 exclude_a2a=True,
                 predicate=matches,
@@ -670,7 +670,7 @@ class Memory:
         Explicit recall requests the whole biography. Room consumers supply their
         room address so filtering never reads another room's history first.
         """
-        from ouroboros import chat_chain, dialogue_store as ds, dialogue_positions as dp
+        from ouroboros import chat_chain, dialogue_store as ds
 
         upper = ds.stream_end(self.drive_root, "chat")
         imported = ds.range_coverage(self.drive_root, "chat", upper=upper)
@@ -680,33 +680,9 @@ class Memory:
         entries = [entry.row for entry in source
                    if not (exclude_a2a and is_a2a_chat_id(entry.row.get("chat_id")))
                    and (predicate is None or predicate(entry.row))]
-        gaps = [{"kind": "jsonl_malformed" if gap.kind == "invalid" else "jsonl_non_object",
-                 "path": str(ds.path(self.drive_root)), "offset": gap.seq, "length": gap.length}
-                for gap in dp.skipped_between(self.drive_root, "chat", upper=upper)]
-        if imported["pending"]:
-            gaps.append({"kind": "history_importing", "detail": "Dialogue history is still importing"})
-        if imported["mismatch"]:
-            gaps.append({"kind": "history_import_failed", "detail": "A segment could not be imported"})
-        if shown:
-            from ouroboros.room_appearances import GAP_DETAILS
+        from ouroboros.dialogue_recall import capture_coverage  # the words reader's postings path shares it
 
-            gaps.extend({"kind": kind, "detail": GAP_DETAILS[kind]} for kind in sorted(shown))
-        coverage = {
-            "generations": ([{"path": str(ds.path(self.drive_root)), "first_line_sha256": "dialogue:chat",
-                              "size": upper, "rows": len(entries)}] if upper else []),
-            "matched_rows": len(entries), "gaps": gaps, "capture_attempts": 1,
-            "snapshot_changed_during_read": False, "snapshot_stable": bool(imported["imported"]),
-            "reader": "chat_history(count, offset, search)",
-        }
-        if imported["imported"]:
-            _position, missing = chat_chain.generation_cursor(self.drive_root, self.load_dialogue_meta())
-            if missing:
-                gaps.append({"kind": "consolidation_cursor_generation_missing",
-                             "detail": "The consolidation cursor names a generation that is no longer readable."})
-        durable_gaps, durable_gap_ids = self._durable_dialogue_gaps()
-        gaps.extend(durable_gaps)
-        coverage["durable_gap_ids"] = durable_gap_ids
-        return entries, coverage
+        return entries, capture_coverage(self, upper=upper, imported=imported, matched=len(entries), shown=shown)
 
     def read_task_recent(
         self, log_name: str, task_id: str, want: int, *, iter_objects=None, list_archives=None, stat=None,

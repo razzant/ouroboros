@@ -352,9 +352,10 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
 });
 
-// The Models door says Main's source by the catalogue a model sheet already holds: a descriptor that names a
-// credential harness draws that mark, and one adopter later repaints that one glyph — never a read, never a whole list.
-test('the Models door wears its descriptor\'s mark, and a late descriptor repaints only that glyph', async (t) => {
+// The Models door says Main's source: its own mark — the record's program when one is held, else the source's own
+// exact mark entry — by the catalogue a model sheet already holds; an adopter repaints that one glyph, never a
+// read, never a whole list.
+test('the Models door wears its source\'s own mark, and a late record repaints only that glyph', async (t) => {
     // Already held when the home is first shown: the true mark at once, and nothing read for it.
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
     const { env, content } = world(t);
@@ -368,29 +369,78 @@ test('the Models door wears its descriptor\'s mark, and a late descriptor repain
     await settle();
     const glyph = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-glyph]');
     const drawn = () => glyph('models').dataset.glyph;
-    assert.match(drawn(), /viewBox="0 0 180 180"/, 'a held descriptor draws its mark at first paint');
+    assert.match(drawn(), /viewBox="0 0 180 180"/, 'a held record draws its mark at first paint');
     assert.ok(!env.calls.some((call) => String(call).startsWith('/api/model-catalog')), 'showing the home still reads no catalogue');
-    // A held list that names no harness (another window's read, a cleared one): the cube, never a brand guessed from
-    // an opaque id that happens to spell one.
+    // A read gap (another window's read, a cleared list): the saved source keeps its own mark.
     const rules = glyph('rules').dataset.glyph, reads = env.calls.length;
     modelCatalog.adopt({ items: [], model_sources: [] });
     await settle();
-    assert.doesNotMatch(drawn(), /viewBox="0 0 180 180"/, 'no descriptor: the neutral cube');
-    // A descriptor adopted later brands the route it names: one glyph, nothing read, no other row touched.
-    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
+    assert.match(drawn(), /viewBox="0 0 180 180"/, 'no record: its own exact mark stays');
+    // A record adopted late wins over the saved mark: one glyph, nothing read, no other row touched.
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'claude' }] });
     await settle();
-    assert.match(drawn(), /viewBox="0 0 180 180"/, 'the descriptor\'s Antigravity mark');
+    assert.match(drawn(), /d="m4\.7144 15\.9555/, 'the record\'s program: Claude Code\'s star');
     assert.equal(glyph('rules').dataset.glyph, rules, 'another row\'s glyph is untouched');
     assert.equal(env.calls.length, reads, 'a mark reads nothing');
     // The same descriptor again writes nothing: the drawn node stays the one the owner sees.
     const node = glyph('models').firstChild;
-    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'agy' }] });
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: 'claude' }] });
     await settle();
     assert.equal(glyph('models').firstChild, node, 'an unchanged result writes nothing');
-    // A descriptor that names no credential harness is no evidence of one: the cube returns.
+    // A record that names no program is no evidence of one: the door's neutral cube returns.
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity', credentialHarness: '' }] });
     await settle();
-    assert.doesNotMatch(drawn(), /viewBox="0 0 180 180"/, 'an unbound opaque id is never branded');
+    assert.doesNotMatch(drawn(), /viewBox="0 0 180 180"/, 'an unbound record is never branded');
+    assert.doesNotMatch(drawn(), /m4\.7144/, 'nor does the earlier program\'s mark stay');
+});
+
+// A known provider as Main's source wears its own sourced mark on the door too — the same one answer every other
+// surface draws of that source (model_source_mark.js) — and a provider without a sourced mark keeps the cube.
+test('the Models door wears a known provider\'s own mark; the cube only where the source has none', async (t) => {
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200, json: async () => ({ ...ANSWERS['/api/settings'],
+        OUROBOROS_MODEL: 'openai/gpt-6' }) }));
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh(['settings']);
+    await settle();
+    const drawn = () => content.querySelector('[data-settings-open="models"]').querySelector('[data-settings-glyph]').dataset.glyph;
+    assert.match(drawn(), /M16\.778 1\.844v1\.919/, 'OpenRouter\'s split arrows, the same sourced mark as every surface');
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200, json: async () => ({ ...ANSWERS['/api/settings'],
+        OUROBOROS_MODEL: 'zai::glm-5.3' }) }));
+    await home.refresh(['settings']);
+    await settle();
+    assert.doesNotMatch(drawn(), /M16\.778/, 'a provider with no sourced mark of its own keeps the cube');
+});
+
+test('the Models door uses Main’s local flag rather than its spelling', async (t) => {
+    let saved = { ...ANSWERS['/api/settings'], OUROBOROS_MODEL: 'zai::glm-5.3' };   // no sourced mark: the cube
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200, json: async () => saved }));
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh(['settings']);
+    await settle();
+    const drawn = () => content.querySelector('[data-settings-open="models"]').querySelector('[data-settings-glyph]').dataset.glyph;
+    const cube = drawn();
+    for (const [model, flag] of [['qwen3 (local)', 'false'], ['openai::gpt-6 (local)', false], ['claudexor::codex=gpt-6 (local)', 'false']]) {
+        saved = { ...ANSWERS['/api/settings'], OUROBOROS_MODEL: model, USE_LOCAL_MAIN: flag };
+        await home.refresh(['settings']);
+        await settle();
+        assert.notEqual(drawn(), cube, `a remote Main (${model}) wears its provider or harness mark`);
+    }
+    saved = { ...ANSWERS['/api/settings'], OUROBOROS_MODEL: 'claudexor::codex=gpt-6 (local)', USE_LOCAL_MAIN: 'true' };
+    await home.refresh(['settings']);
+    await settle();
+    assert.equal(drawn(), cube, 'the flag is still enough by itself');
+    saved = { ...ANSWERS['/api/settings'], OUROBOROS_MODEL: 'openai::gpt-6', USE_LOCAL_MAIN: 'false' };
+    await home.refresh(['settings']);
+    await settle();
+    assert.match(drawn(), /M239\.184/, 'OpenAI as Main still wears its knot');
 });
 
 test('the card\'s first word follows the socket: an open or a close repaints it and reads nothing', async (t) => {

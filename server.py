@@ -29,7 +29,7 @@ from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execu
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
 from ouroboros.server_auth import (
-    NetworkAuthGate,
+    NetworkAuthGate, recall_serving_app,
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
@@ -287,7 +287,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any, *, timeout: float = 1
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
     from supervisor.message_bus import coerce_chat_identity, record_inbound_message
-    from ouroboros.chat_uploads import attachment_placeholder
+    from ouroboros.chat_uploads import attachment_placeholder, local_message_words
 
     for upd in updates:
         cursor[0] += 1
@@ -313,7 +313,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         image_caption = str(msg.get("image_caption") or "")
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, msg.get("task_metadata"))
+        log_text = local_message_words(source, text, image_caption) or attachment_placeholder(image_base64, msg.get("task_metadata"))
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -1485,7 +1485,7 @@ def main() -> int:
         log.info("Stop requested before the server started serving; exiting.")
         return 0
     server.config = uvicorn.Config(
-        app,
+        **recall_serving_app(app),  # proxy headers apply inside the recall door's raw-peer check (server_auth)
         host=args.host,
         port=actual_port,
         log_level="warning",

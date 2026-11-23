@@ -545,6 +545,7 @@ def _attempt_request(
     except Exception:
         prompt_chars = len(str(prompt_payload or ""))
     from ouroboros.context_fit import bounded_prompt_tokens_for_payload
+    from ouroboros.context_window import signed_first_contact
 
     bounded_tokens = bounded_prompt_tokens_for_payload(prompt_payload, prompt_chars)
     request_source = source
@@ -569,12 +570,12 @@ def _attempt_request(
     record_candidate(raw_sha256, clock_note)
     note_candidate_images(raw_sha256, payload)  # the images it carries, for an image-refusal retry's predicate
     measured = _exact_local_measurement(target, payload)
+    reply_cap = int(payload.get("max_completion_tokens") or payload.get("max_tokens") or payload.get("max_output_tokens") or 0)
     return AttemptRequest(
         model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
         provider=str(target.get("provider") or "unknown"),
         prompt_tokens_estimate=max(0, prompt_chars // 4),
-        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens")
-                                  or payload.get("max_output_tokens") or 0),
+        max_completion_tokens=reply_cap,
         source=str(request_source or ""),
         prompt_cache_ttl=_applied_payload_cache_ttl(payload) or "",
         candidate_raw_sha256=raw_sha256,
@@ -582,7 +583,8 @@ def _attempt_request(
         candidate_context_sha256=hashlib.sha256(context).hexdigest(),
         candidate_context_size_bytes=len(context),
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=current_physical_attempt_context() or helper_context_for(target, payload),
+        physical_context=signed_first_contact(current_physical_attempt_context(), target, payload, reply_cap)
+        or helper_context_for(target, payload),
         route_is_loopback=is_loopback_base_url(target.get("base_url")),
         prompt_tokens_bounded_estimate=bounded_tokens,
         prompt_tokens_exact=measured.get("input_tokens"),

@@ -8,7 +8,8 @@ a ref the SERVER measured: ``{"upload", "name", "mime", "kind", "size", "sha256"
 image/video/audio/file from the bytes, never from the client or the extension alone;
 ``size`` and ``mtime_ns`` are the stored file's stat witness). No absolute path,
 base64 or client URL is ever recorded. A frame naming an upload that does not
-exist records ``{"name", "kind": "file", "unavailable": "missing"}`` instead.
+exist records ``{"name", "kind": "file", "unavailable": "missing"}`` instead; media a
+transport could not receive records its own pathless fact (``delivery_ref``).
 
 ``sha256`` is what the bytes were when measured (retry identity, staging
 verification); nothing re-proves it on replay or download. Replay compares only
@@ -40,7 +41,7 @@ import stat
 import threading
 import uuid
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import quote
 
 from ouroboros.confined_files import open_regular_file, plain_name
@@ -54,16 +55,28 @@ _PENDING: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _PENDING_LOCK = threading.Lock()
 # Host placeholders logged when a message carries attachments but no words; the row that
 # carries one says so (``text_placeholder``), so an owner who typed the same words keeps them.
-PLACEHOLDER_TEXTS = ("(image attached)", "(file attached)")
+PLACEHOLDER_TEXTS = ("(image attached)", "(file attached)", "(attachment unavailable)")
+# Media a transport never received (over its download cap, or a failed download): no bytes, no upload.
+DELIVERY_FAILURES = ("too_large", "download_failed")
+_MIME_RE = re.compile(r"[\w.+-]{1,100}/[\w.+-]{1,100}", re.ASCII)
 
 
 def attachment_placeholder(image_base64: Any, metadata: Any) -> str:
     """The same canonical empty-caption text at acceptance and batch dispatch."""
     metadata = metadata if isinstance(metadata, dict) else {}
-    image_ref = any(isinstance(ref, dict) and ref.get("kind") == "image"
-                    for ref in metadata.get("chat_attachments") or ())
+    refs = [ref for ref in metadata.get("chat_attachments") or () if isinstance(ref, dict)]
+    if refs and not image_base64 and all(ref.get("unavailable") in DELIVERY_FAILURES for ref in refs):
+        return "(attachment unavailable)"
+    image_ref = any(ref.get("kind") == "image" for ref in refs)
     return ("(image attached)" if image_base64 or image_ref else
             "(file attached)" if metadata.get("chat_attachment_uploads") or metadata.get("chat_attachments") else "")
+
+
+def local_message_words(source: str, text: str, caption: str) -> str:
+    """Named Telegram media keep their exact caption; other local doors keep their text convention."""
+    if source == "skill:telegram" and caption.strip() and (not text.strip() or text == caption):
+        return caption
+    return text.strip() or caption.strip()
 
 
 def uploads_dir(data_dir: Any = None) -> pathlib.Path:
@@ -257,6 +270,23 @@ def unavailable_ref(label: Any) -> Dict[str, Any]:
     return {"name": _label(label), "kind": "file", "unavailable": "missing"}
 
 
+def delivery_ref(item: Dict[str, Any]) -> Dict[str, Any]:
+    """The ref a row records for a transport's pathless fact ``{name, mime?, size?, unavailable, limit_bytes?}``:
+    media it never received, so nothing is read, stored or downloadable. ``limit_bytes`` (the transport's cap)
+    comes with ``too_large`` only. Anything else is refused (``ValueError``)."""
+    reason, size, limit = item.get("unavailable"), item.get("size"), item.get("limit_bytes")
+    if (reason not in DELIVERY_FAILURES or set(item) - {"name", "mime", "size", "unavailable", "limit_bytes"}
+            or "size" in item and (type(size) is not int or size < 0)
+            or ("limit_bytes" in item) != (reason == "too_large")
+            or "limit_bytes" in item and (type(limit) is not int or limit < 1)):
+        raise ValueError("is not a valid unavailable-media fact")
+    mime = item.get("mime")
+    return {"name": _label(re.split(r"[/\\]", str(item.get("name") or ""))[-1]), "kind": "file",
+            "mime": mime if isinstance(mime, str) and _MIME_RE.fullmatch(mime) else "application/octet-stream",
+            "unavailable": reason, **({"size": size} if "size" in item else {}),
+            **({"limit_bytes": limit} if "limit_bytes" in item else {})}
+
+
 def refs_for_frame(attachments: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
     """Measured refs for a web chat frame's ``attachments``: every one, in order.
 
@@ -316,10 +346,79 @@ def delete_pending_upload(upload: str, data_dir: Any = None) -> str:
 # Identity and presentation
 # ---------------------------------------------------------------------------
 
-def attachment_identity(refs: Any) -> List[List[str]]:
+def delivery_failures(refs: Any) -> list[dict]:
+    """Only observed never-received files, not vanished uploads or user-supplied URLs."""
+    return [{**ref, "ordinal": ordinal} for ordinal, ref in enumerate(refs if isinstance(refs, list) else []) if isinstance(ref, dict)
+            and ref.get("unavailable") in DELIVERY_FAILURES and not ref.get("upload")]
+
+
+def delivery_manifest_rows(attachments: Any) -> list[dict]:
+    """Reports of bytes the transport never received, not staging failures."""
+    return [row for row in (attachments if isinstance(attachments, list) else []) if isinstance(row, dict)
+            and row.get("status") == "rejected" and row.get("reason") in DELIVERY_FAILURES]
+
+
+def delivery_manifest_refs(manifest: Any) -> list[dict]:
+    """The mailbox's retained facts as corpus attachment refs, independent of any other stored row."""
+    return [{"name": row.get("label") or "attachment", "kind": "file", "unavailable": row["reason"],
+             **{key: row[key] for key in ("mime", "size", "limit_bytes") if key in row}}
+            for row in delivery_manifest_rows(manifest)]
+
+
+def delivery_failure_line(name: str, reason: str, ordinal: int, facts: dict) -> str:
+    said = "".join(f", {key}={facts[key]}" for key in ("mime", "size", "limit_bytes") if facts.get(key) is not None)
+    return f"- {name}: not received (reason={reason}{said}, ordinal={ordinal})"
+
+
+def _delivery_block(lines) -> str:
+    body = "\n".join(lines)
+    return ("[Host fact: attachment delivery; not the owner's words]\n"
+            f"[ATTACHMENTS]\n{body}\n[END_ATTACHMENTS]") if body else ""
+
+
+def attachment_delivery_block(manifest: Any) -> str:
+    """Attributed model input on a new delivery, independent of the caption's words."""
+    return _delivery_block(delivery_failure_line(row.get("label") or "attachment", row["reason"], row.get("ordinal", 0), row)
+                           for row in delivery_manifest_rows(manifest))
+
+
+def attachment_ref_delivery_block(refs: Any) -> str:
+    """Same facts from a verified chat row, including each declaration's original position."""
+    return _delivery_block(delivery_failure_line(ref.get("name") or "attachment", ref["unavailable"], ref.get("ordinal", ordinal), ref)
+                           for ordinal, ref in enumerate(refs if isinstance(refs, list) else [])
+                           if isinstance(ref, dict) and ref.get("unavailable") in DELIVERY_FAILURES and not ref.get("upload"))
+
+
+def attachment_reply_context(target: Any) -> str:
+    """An ordinary Reply's exact resolved source, only when it records a transport refusal."""
+    facts = attachment_ref_delivery_block(target.get("attachments"))
+    if not facts or not target.get("address"):
+        return ""
+    return "\n".join(part for part in (
+        f"[Reply source from {target.get('author') or 'author not recorded'} at {target['address']}]",
+        target.get("text"), facts) if part)
+
+
+def retained_attachments_note(files: Any) -> str:
+    """Files named by the host under the row's words: name, type, size, staged path or delivered download URL,
+    or the fact that the file was not given to this work. ``""`` for a row with none."""
+    named = []
+    for ref in files if isinstance(files, list) else []:
+        if isinstance(ref, Mapping) and ref.get("unavailable") not in DELIVERY_FAILURES:
+            facts = ([str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
+                     + [str(ref[key]) for key in ("staged", "download_url") if ref.get(key)])
+            if ref.get("unavailable"):
+                facts.append("unavailable")
+            named.append(str(ref.get("name") or "attachment") + (f" ({', '.join(facts)})" if facts else ""))
+    return "\n".join(part for part in (
+        f"[Host-retained attachments: {'; '.join(named)}]" if named else "", attachment_ref_delivery_block(files)) if part)
+
+
+def attachment_identity(refs: Any) -> list:
     """What makes two deliveries the SAME message's attachments: ordered content and
     names, never the regenerated stored id."""
-    return [[str(ref.get("sha256") or ""), str(ref.get("name") or "")]
+    return [[ref.get(key) for key in ("unavailable", "name", "mime", "size", "limit_bytes")]
+            if ref.get("unavailable") in DELIVERY_FAILURES else [str(ref.get("sha256") or ""), str(ref.get("name") or "")]
             for ref in (refs if isinstance(refs, list) else []) if isinstance(ref, dict)]
 
 
@@ -352,7 +451,9 @@ def same_message(row: Any, text: str, refs: Any) -> bool:
     from ouroboros.project_dialogue import _text_sha256
 
     row = row if isinstance(row, dict) else {}
-    return (_text_sha256(row.get("text")) == _text_sha256(text)
+    same_words = (row.get("text") == text if row.get("source") == "skill:telegram"
+                  else _text_sha256(row.get("text")) == _text_sha256(text))
+    return (same_words
             and attachment_identity(row.get("attachments")) == attachment_identity(refs))
 
 
@@ -362,7 +463,9 @@ def attachment_view(ref: Any) -> Dict[str, Any]:
     upload = upload_id(ref.get("upload"))
     name = _label(ref.get("name"))
     if not upload or ref.get("unavailable"):
-        return {"name": name, "kind": "file", "mime": "", "available": False}
+        facts = ({key: ref[key] for key in ("unavailable", "size", "limit_bytes") if key in ref}
+                 if ref.get("unavailable") in DELIVERY_FAILURES and not upload else {})
+        return {"name": name, "kind": "file", "mime": "", "available": False, **facts}
     kind = ref.get("kind") if ref.get("kind") in {"image", "video", "audio", "file"} else "file"
     size = ref.get("size")
     return {"name": name, "kind": kind, "mime": str(ref.get("mime") or "application/octet-stream"),
@@ -412,14 +515,14 @@ def attachment_views(refs: Any, data_dir: Any = None) -> List[Dict[str, Any]]:
 
 def stored_refs(value: Any) -> List[Dict[str, Any]]:
     """The refs a canonical writer persists: every one, as plain JSON dicts, nothing else."""
-    keys = ("upload", "name", "mime", "kind", "size", "sha256", "mtime_ns", "unavailable")
+    keys = ("upload", "name", "mime", "kind", "size", "sha256", "mtime_ns", "unavailable", "limit_bytes")
     return [{key: ref[key] for key in keys if key in ref}
             for ref in (value if isinstance(value, list) else []) if isinstance(ref, dict)]
 
 
 __all__ = [
-    "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "attachment_identity", "attachment_view",
-    "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "detect_media",
+    "DELIVERY_FAILURES", "DOWNLOAD_ROUTE", "PLACEHOLDER_TEXTS", "attachment_identity", "attachment_view",
+    "attachment_views", "bytes_identity", "claim_refs", "delete_pending_upload", "delivery_ref", "detect_media",
     "inline_image_name", "measure_upload", "new_upload_id", "open_upload", "refs_for_frame",
     "safe_upload_name", "same_message", "source_identity", "store_upload", "stored_refs",
     "unavailable_ref", "upload_id", "uploads_dir",

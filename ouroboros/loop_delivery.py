@@ -1225,15 +1225,14 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     return True, content
 
 
-def _restored_riding_send(ctx: Any, trace: Dict[str, Any]) -> bool:
-    """A restored selection's send fact, read from its trace as ``consume_completion_request`` read it: the calls after
-    its observation. A restored prose answer selected nothing, so nothing rode with it."""
-    from ouroboros.place_reply import riding_sends
+def _restored_riding_send(ctx: Any, trace: Dict[str, Any]) -> bool | None:
+    """Read the restored selection's batch; an unknown past send is not a new one."""
+    from ouroboros.place_reply import restored_riding_send
     selected = getattr(ctx, "_completion_selected", None)
     if not isinstance(selected, dict):
         return False
     calls = (trace.get("tool_calls") or [])[int((selected.get("observation") or {}).get("tool_count") or 0):]
-    return bool(riding_sends(ctx, calls))
+    return restored_riding_send(ctx, calls)
 
 
 def _no_tool_final_answer(

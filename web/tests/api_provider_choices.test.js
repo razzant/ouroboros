@@ -179,6 +179,33 @@ test('every surface draws the same groups, in the same order, with the same word
         .map((group) => group.label), ['API keys', 'Agents · sessions']);
 });
 
+// A source option is named by the one visual answer (harness_presentation.sourcePresentation): the held record's
+// label, else, for a saved source no record lists, the id's own exact mark entry. A saved choice is presented, never
+// judged by its spelling: `native` and `api` are subscription ids here, not the API channel, and `CLAUDE` borrows
+// nothing, while `claude` and `agy` are those programs' own mark entries and say so. What the option saves and the
+// availability word after it stay the owner's facts.
+test('a subscription option names its source by the record or its own mark entry, never by an id read as another thing', () => {
+    const option = (args) => routeChoiceGroups(args).find((group) => group.label === 'Subscriptions · models').options[0];
+    assert.deepEqual(['native', 'api', 'CLAUDE', 'claude', 'agy'].map((id) => option({ currentChoice: `subscription:${id}` })),
+        [{ value: 'subscription:native', label: 'native (model) · not checked' },
+            { value: 'subscription:api', label: 'api (model) · not checked' },
+            { value: 'subscription:CLAUDE', label: 'CLAUDE (model) · not checked' },
+            { value: 'subscription:claude', label: 'Claude Code (model) · not checked' },
+            { value: 'subscription:agy', label: 'Antigravity (model) · not checked' }]);
+    assert.deepEqual([
+        [{ id: 'codex-models', label: 'Codex', credentialHarness: 'codex' }],
+        [{ id: 'kleshonik', credentialHarness: 'codex' }],
+        [{ id: 'personal', credentialHarness: '' }],
+    ].map((sources) => option({ modelSources: sources })),
+    [
+        // The record's own word; a record that states no label is named by the program its credential names; an
+        // explicitly unbound record claims none and keeps its own name.
+        { value: 'subscription:codex-models', label: 'Codex (model)' },
+        { value: 'subscription:kleshonik', label: 'Codex (model)' },
+        { value: 'subscription:personal', label: 'personal (model)' },
+    ]);
+});
+
 test('a saved provider whose key is gone stays selectable and is labelled, never silently swapped', () => {
     const groups = routeChoiceGroups({ currentChoice: 'api:anthropic',
         providers: configuredApiProviders({ OPENROUTER_API_KEY: 'k' }),

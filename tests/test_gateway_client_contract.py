@@ -36,6 +36,7 @@ from tests.test_gateway_parity import _js_typedef_fields
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TWIN = REPO / "web" / "modules" / "client_contract_types.js"
 PLACE_TWIN = REPO / "web" / "modules" / "place_contract_types.js"
+RECALL_TWIN = REPO / "web" / "modules" / "recall_contract_types.js"  # the door's envelopes; no builtin consumer
 
 
 def _all_shapes() -> dict:
@@ -55,7 +56,8 @@ def test_every_client_envelope_has_a_field_identical_browser_twin():
 
     facade = TWIN.read_text(encoding="utf-8")
     places = PLACE_TWIN.read_text(encoding="utf-8")
-    text = facade + "\n" + places
+    recall = RECALL_TWIN.read_text(encoding="utf-8")
+    text = facade + "\n" + places + "\n" + recall
     for module in (client_contracts, history_contracts):
         for name in module.__all__:
             cls = getattr(module, name)

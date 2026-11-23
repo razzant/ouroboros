@@ -754,7 +754,7 @@ def drain_owner_entries(
             if kind == KIND_CONTROL_REVOKED or (mid and mid in revoked):
                 continue
             text = entry.get("text", "")
-            if text or kind == "relay_entry":
+            if text or kind == "relay_entry" or (kind == KIND_OWNER_TEXT and entry.get("attachment_manifest")):
                 # Typed controls retain the owner's request time for the attempt latch.
                 drained = {
                     "msg_id": mid, "text": text, "kind": kind,

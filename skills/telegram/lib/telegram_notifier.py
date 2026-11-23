@@ -31,6 +31,7 @@ from .telegram_state import (
     TelegramDestinationUnavailable,
 )
 from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
+from ouroboros.chat_uploads import DELIVERY_FAILURES
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
 from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, routing_option_label
@@ -270,8 +271,11 @@ def _routing_notice_text(event: Dict[str, Any], lang: str) -> Tuple[str, bool]:
         if len(options) > len(labels):
             lines.append(texts.format("routing_more_targets", count=len(options) - len(labels)))
         lines.append(texts["routing_reply_with_number"])
+    # After confirmed mailbox delivery, the original message already carries the transport failure.
+    delivered = event.get("action") == "mailbox_delivery" and event.get("status") == "delivered"
     names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or []
-             if isinstance(row, dict) and row.get("status") == "rejected"]
+             if isinstance(row, dict) and row.get("status") == "rejected"
+             and not (delivered and row.get("reason") in DELIVERY_FAILURES)]
     if names:
         lines.append(texts.format("attachments_not_attached", names=", ".join(names)))
     return "\n".join(lines), bool(labels)

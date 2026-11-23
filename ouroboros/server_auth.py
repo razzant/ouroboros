@@ -64,6 +64,57 @@ def is_loopback_host(host: str | None) -> bool:
         return False
 
 
+# The neighbour door (``GET /api/recall``, ``gateway/recall.py``) serves a program on this computer only: the
+# accepted connection's own peer is a numeric loopback address and nothing relayed the request. The peer is read
+# from the raw scope before uvicorn's proxy-header processing can rewrite the client (``recall_serving_app``).
+RECALL_PATH = "/api/recall"
+RECALL_PEER = "ouroboros.recall_peer"  # scope key: True only when ``recall_serving_app`` admitted the raw peer
+RECALL_CLOSED = {"error": "GET /api/recall serves only a program on this computer: a direct connection from a "
+                          "loopback address without Forwarded, X-Forwarded-* or X-Real-IP headers.",
+                 "code": "recall_peer_closed"}
+
+
+def recall_peer_admitted(scope: Scope) -> bool:
+    """True when the scope's transport peer is a numeric IPv4 or IPv6 loopback address (an IPv4-mapped literal
+    by its mapped address; a name such as ``localhost`` is not a peer) and no forwarding header is present: a
+    reverse proxy or tunnel on this computer relays someone else, it is not a local tool."""
+    client = scope.get("client")
+    try:
+        address = ipaddress.ip_address(str(client[0]) if client else "")
+    except ValueError:
+        return False
+    if not (getattr(address, "ipv4_mapped", None) or address).is_loopback:
+        return False
+    names = [bytes(name).lower() for name, _value in scope.get("headers") or []]
+    return not any(name in (b"forwarded", b"x-real-ip") or name.startswith(b"x-forwarded-") for name in names)
+
+
+class _RecallPeerGate:
+    """Outermost: records the raw peer's admission for the door and closes a door request it does not admit,
+    before any parsing, gate or handler; every other request passes unchanged to ``app``."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            scope[RECALL_PEER] = recall_peer_admitted(scope)
+            if not scope[RECALL_PEER] and (scope.get("path") or "").rstrip("/") == RECALL_PATH:
+                await JSONResponse(RECALL_CLOSED, status_code=403, headers=_NO_STORE)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def recall_serving_app(app: ASGIApp) -> dict:
+    """The ``uvicorn.Config`` arguments that serve ``app``: uvicorn's own proxy-header middleware moves inside the
+    recall peer gate, with the trusted addresses uvicorn would use (``FORWARDED_ALLOW_IPS``, else 127.0.0.1), so
+    every other route keeps its forwarded scheme and client."""
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    trusted = os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    return {"app": _RecallPeerGate(ProxyHeadersMiddleware(app, trusted_hosts=trusted)), "proxy_headers": False}
+
+
 def validate_network_auth_configuration(bind_host: str) -> str | None:
     return None
 

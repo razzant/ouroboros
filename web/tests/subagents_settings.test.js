@@ -1560,17 +1560,33 @@ test('a list head reads a key\'s catalog only for a row that shows a rate: a tie
     assert.deepEqual(keys(), ['provider_id=openrouter'], 'the edit form still reads the tier row\'s key');
 });
 
-test('an opaque subscription source id is not a harness mark without a descriptor; its label reads the id', () => {
-    // `claudexor::agy=…` spells a program, but without a model-source descriptor that is not evidence of the native
-    // harness: a neutral mark (empty harness id) beside the source's own label. A descriptor's credential harness
-    // earns the real program's mark.
+test('a saved source keeps its program\'s mark and name without a descriptor; a record naming no program wins', () => {
+    // `claudexor::agy=…` presents the program its id exactly names even before any read — the drawing describes the
+    // saved source, never its right to call it — and the chip's name is the same one answer. A descriptor is still
+    // the record: its label is authoritative and its credential harness earns the program's mark; one that names
+    // none binds none.
     const opaque = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::agy=claude-x' } });
     const state = { modelSources: [], snapshot: { harnesses: [] }, catalogKnown: false };
     const unconfirmed = rowIdentity(opaque, state);
-    assert.equal(unconfirmed.harnessId, '');
-    assert.match(unconfirmed.label, /^agy\b/);
+    assert.equal(unconfirmed.harnessId, 'agy');
+    assert.match(unconfirmed.label, /^Antigravity\b/, 'the chip names the source by its own known name');
     const confirmed = rowIdentity(opaque, { ...state, modelSources: [{ id: 'agy', label: 'Antigravity models', credentialHarness: 'agy' }] });
     assert.equal(confirmed.harnessId, 'agy');
+    assert.match(confirmed.label, /^Antigravity models\b/, 'the record\'s label is authoritative');
+    // Codex before any read (its own mark entry, never a guessed binding), and a record naming no program wins.
+    const codex = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex=gpt-x' } });
+    assert.equal(rowIdentity(codex, state).harnessId, 'codex');
+    assert.match(rowIdentity(codex, state).label, /^Codex\b/);
+    const unbound = rowIdentity(codex, { ...state, modelSources: [{ id: 'codex', label: 'Codex', credentialHarness: '' }] });
+    assert.equal(unbound.harnessId, '');
+    assert.match(unbound.label, /^Codex\b/, 'an unbound record keeps its own label, never a mark');
+    const studio = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::claude=studio-x' } });
+    const filtered = { ...QUIET_STATE, modelSources: [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }],
+        sourceDescriptors: [{ id: 'claude', label: 'Studio models', credentialHarness: '' }] };
+    assert.equal(rowIdentity(studio, filtered).harnessId, '');
+    assert.match(rowIdentity(studio, filtered).label, /^Studio models\b/);
+    assert.match(availableSubagentRowMarkup(studio, filtered, 0), /value="subscription:claude" selected>Studio models \(model\) · not checked<\//);
+    assert.doesNotMatch(availableSubagentRowMarkup(codex, filtered, 0), /value="subscription:claude"/);
 });
 
 test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {

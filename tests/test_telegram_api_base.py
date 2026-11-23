@@ -128,6 +128,62 @@ def test_call_hits_custom_base():
     assert calls and calls[0].startswith(_BASE)
 
 
+@pytest.mark.parametrize("body, getfile_size", [(b"note\n", 5), (b"note\n", None), (b"", 0)])
+def test_getfile_returns_a_complete_document(monkeypatch, body, getfile_size):
+    client = _client(api_base_url=_BASE)
+    expected_path = "documents/note.txt"
+    seen = []
+
+    def handler(request):
+        seen.append(request.method)
+        if request.url.path.endswith("/getFile"):
+            result = {"file_path": expected_path}
+            if getfile_size is not None:
+                result["file_size"] = getfile_size
+            return httpx.Response(200, json={"ok": True, "result": result})
+        assert request.url.path.endswith("/" + expected_path)
+        return httpx.Response(200, content=body)
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(api_mod.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
+    assert asyncio.run(client.download_file("note")) == body
+    assert seen == ["POST", "GET"]
+
+
+def test_getfile_size_above_the_cap_needs_no_download(monkeypatch):
+    client = _client(api_base_url=_BASE)
+
+    async def get_file(method, **_kw):
+        assert method == "getFile"
+        return {"result": {"file_path": "documents/recording.mp4", "file_size": 11 * 1024 * 1024}}
+
+    monkeypatch.setattr(client, "call", get_file)
+
+    async def no_download(_path):
+        pytest.fail("getFile already reported that the file is larger than 10 MiB")
+
+    monkeypatch.setattr(client, "_download_bytes", no_download)
+    with pytest.raises(api_mod.TelegramDownloadTooLarge):
+        asyncio.run(client.download_file("recording"))
+
+
+def test_getfile_document_read_interrupted_in_transport(monkeypatch):
+    class InterruptedDocument(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"note\n"
+            raise httpx.ReadError("document download disconnected")
+
+    def handler(request):
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "documents/note.txt", "file_size": 12}})
+        return httpx.Response(200, headers={"Content-Length": "12"}, stream=InterruptedDocument())
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(api_mod.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(RuntimeError, match="file download transport failed"):
+        asyncio.run(_client(api_base_url=_BASE).download_file("note"))
+
+
 def test_download_falls_back_to_disk(tmp_path):
     # HTTP says 404 (local server behavior, tdlib#26); the file exists on disk.
     store = tmp_path / "store"

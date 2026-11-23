@@ -1301,7 +1301,7 @@ def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: 
     (tools / "__init__.py").write_text("", encoding="utf-8")
     (package / "review.py").write_bytes((source_root / "ouroboros" / "review.py").read_bytes())
     (tools / "review_helpers.py").write_text(
-        "_VENDORED_NAMES = frozenset()\n_VENDORED_SUFFIXES = ()\n",
+        "_VENDORED_NAMES = frozenset()\n_VENDORED_PATHS = frozenset()\n_VENDORED_SUFFIXES = ()\n",
         encoding="utf-8",
     )
     marker = tmp_path / "executed"

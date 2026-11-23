@@ -348,7 +348,8 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
             # The smaller send's own provider refusal is window evidence like any other; empty replies are not.
             from ouroboros.context_anchor import record_refused_input
             record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1],
-                                 measured=fit.measurement.anchor_input_tokens is not None, candidate=refused)
+                                 measured=fit.measurement.anchor_input_tokens is not None, candidate=refused,
+                                 round_id=getattr(fit.measurement, "round_id", ""))
     if msg is not None:
         _answered(ctx, msg)
     _save(ctx)

@@ -488,8 +488,9 @@ to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
 
 **Model is the model new work here starts on.** Its glyph is the mark of the source that model is reached through
-(a source without a mark of its own shows its initial, never an invented logo), lit only while the room chose its
-own; then the name is that source. Closed, it always shows the room's choice, never a running work's model, and
+(its own known mark; a held record's program, an explicitly unbound record the generic harness mark — never a
+letter or an invented logo), lit only while the room chose its own; then the name is that source. Closed, it
+always shows the room's choice, never a running work's model, and
 wears no mark for one; a tier other than Standard follows the model in the accent's word (`gpt-6-astra · Fast`). In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
 `model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
@@ -1963,11 +1964,9 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 - **Video and audio** play in the existing inline players; every other file is
   the existing file card (no PDF viewer). A preview the engine cannot show (HEIC
   in Chromium, an unsupported codec) becomes an ordinary card with Open/Download
-  and "Preview unavailable"; a file deleted since it was sent, or whose size or
-  mtime no longer matches the recorded stat witness, is the inert card
-  "Unavailable". The witness is not a hash and nothing rehashes per view: a
-  same-size replacement that restores the mtime is not detected and shows as the
-  original.
+  and "Preview unavailable". The inert card shows why a file was not received
+  and its size if known. A deleted file or a failed size/mtime check shows
+  "Unavailable"; a same-size replacement with restored mtime is not detected.
 - **Actions never depend on hover:** the photo `•••` and file cards are always
   visible and finger-sized under a coarse pointer; a long name wraps to two lines
   and the card's dialog shows it whole. Open/Save succeed only when the desktop
@@ -2935,8 +2934,11 @@ against the route that produced it: when the row's route changed since, the
 line says so and names the earlier route.
 
 Subscription model sources and agent sessions never imply each other's model
-inventory. Source ids are opaque; the model-sources catalog names the
-credential harness. Saved subscription-model account pins survive catalog gaps
+inventory. Source ids are opaque to access: the model-sources catalog alone
+names the credential harness, and a record naming none binds none — but a
+saved source is still presented, never judged by that: without a record its
+exact known-mark entry names and draws it, any other id the generic mark
+beside its own name. Saved subscription-model account pins survive catalog gaps
 and unrelated saves; direct API-key models do not offer a subscription-account
 pin. Catalog entries are suggestions, not account-specific entitlement or
 context evidence. Changing a model or account never changes the delivery kind:

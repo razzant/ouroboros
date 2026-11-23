@@ -120,7 +120,7 @@ ouroboros/ — agent core and shared runtime (§6)
   presence_admission.py, presence_context.py, presence_message_facts.py, presence_authority.py, presence_capabilities.py, presence_bindings.py — connector events resolved to a place, the focus metadata, its FOCUS assignment and message facts; frozen readers of old task ceilings and bindings (§12)
   place_intake.py, place_reply.py, place_projection.py, places_migration.py, presence_runner.py, presence_continuation.py, presence_observations.py, presence_delivery.py, presence_history.py, presence_recovery.py, presence_owner_contact.py, presence_carrier.py, presence_executions.py — model-free attention after capture, the automatic reply's Silent/Safety boundary, owner-facing place views, binding → place import; focus turns: conversation serialization, continuation, observations, receipts, retained facts, private Main contact, the body's carrier and the Host's waiters (§12)
   places.py, place_words_history.py, conversation_lease.py, own_sends.py — the host place record (state, wake list, notes, owner accounts, folder, model) and circles, removed words kept, one author per place conversation with the physical conversation bound, and my posts as an account by provider id (§12)
-  dialogue_provenance.py — exact transport-provenance rendering for history, memory and consolidation
+  dialogue_provenance.py, dialogue_words.py, dialogue_recall.py, dialogue_word_index.py — exact transport-provenance rendering for history, memory and consolidation; one word predicate, `chat_history(words=…)`, its disposable postings (§6)
   extension_companion.py, extension_reconcile_queue.py — host-supervised companion processes for transport skills; durable worker→server reconcile markers (§12; §13)
   event_bus.py — typed in-process event bus for skill subscriptions
   event_usage.py, event_token_totals.py — event token counters, offline totals (§11.4)
@@ -382,7 +382,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_lifecycle_actions.py — Shared grant/toggle/turn-on-when-ready effects and owner-action admission for every adapter
   skill_uninstall_state.py — Uninstall tombstones, the removal rule both removers admit by, authorized local payload/state deletion
   skill_review_runner.py — Writes `review_job.json` and `skill_review_*` events; separate review, dependency and extension outcomes
-  server_auth.py — Non-localhost network gate via `OUROBOROS_NETWORK_PASSWORD`; warns when unset (§8)
+  server_auth.py — Non-localhost network gate via `OUROBOROS_NETWORK_PASSWORD`; warns when unset; the recall door's raw peer (§8)
   server_control.py, server_entrypoint.py, server_runtime.py, server_web.py — restart and panic stop; CLI parsing, data-root admission and port binding; startup wiring and WS liveness; `ServedUI` (§4 main interface)
   server_process.py, server_liveness.py, server_boot.py, server_maintenance.py, server_restart.py, server_owner_routing.py, server_routing_context.py — server leaves the composition root calls: per-process facts, the boot document, coordinator and wedge detection, the coordinator's steps (§2 Boot order), drive upkeep, restart, owner-message routing and its per-turn facts (§9)
   terminal_cost_reconciliation.py — Usage recovery/projection (§6 Budget tracking)
@@ -495,7 +495,7 @@ ouroboros/ — agent core and shared runtime (§6)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
     host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
-    history_paging.py, history_chronology.py, chat_search.py — room pages/search of the dialogue store, Project `latest_arrival`; no history copy (§3 History reads)
+    history_paging.py, history_chronology.py, chat_search.py, recall.py — room pages/search of the dialogue store, Project `latest_arrival`, the neighbour door; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
     projects.py, project_folder_contracts.py — GET/POST /api/projects, /from-task, /update, /delete, /folder
     places_api.py — Owner place and circle choices; every write there is my human's (§12)
@@ -518,7 +518,7 @@ ouroboros/ — agent core and shared runtime (§6)
     vision_process.py — Tracked vision-child IPC: validated receipts, result recovery, parent-owned cancellation
     task_retention.py — `set_task_retention`: a root's keep or release on held owner words (owner_keep.py)
     knowledge.py — Persistent topic-based knowledge files with an auto-maintained index
-    chronicle.py — `chronicle_write`/`memory_read`/`memory_mark`, exported by knowledge.py: host-expanded page row sets, task stamps, checked quotes; reads paged at the source (§6)
+    chronicle.py — `chronicle_write`/`memory_read`/`memory_mark` (members: memory_members.py), exported by knowledge.py: host-expanded page row sets, task stamps, checked quotes; reads paged at the source (§6)
     memory_tools.py — Memory registry tools for data sources, gaps and trust
     health.py — Codebase health tool: complexity metrics and self-assessment
     compact_context.py — the mind's own context view (§6 Context fitting)

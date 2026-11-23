@@ -579,7 +579,11 @@ class TestTerminalFrameDelivery:
         text, meta = self._dispatch_text(tmp_path, monkeypatch)
         assert text == "Subagent completed (publication-auditor)."
         assert meta["subagent_event"] == "completed" and meta["status"] == "completed"
-        assert meta["notice"] == {"code": "subagent_finished", "details": "task child-1"}, "its id is a detail"
+        # The real phrase contract: the constant words ride the translatable template and the role goes
+        # back as a value, never translated; its id is a detail.
+        assert meta["notice"] == {"code": "subagent_finished", "details": "task child-1",
+                                  "template": "Subagent completed ({role}).",
+                                  "values": {"role": "publication-auditor"}}, "its id is a detail"
 
     @pytest.mark.parametrize("terminal_facts", [
         {"outcome_axes": {"execution": {"status": "degraded"}}},

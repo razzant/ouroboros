@@ -5,7 +5,8 @@ recognition. FORMS only extract numbers after that recognition; an unsupported s
 One object is the refusal: the holder of a typed size code, else the object that said the recognised sentence.
 Its subtree on the current path alone supplies structured counts, the sentence numbers are read from, and the
 causes that exclude numbers: a code of another kind (the classifier's, ``OTHER_CAUSE_CODES``), an output or body
-limit. An earlier upstream attempt, a sibling diagnostic and the exception's printed form supply none of these.
+limit. An earlier upstream attempt, a sibling diagnostic and the exception's printed form supply none of these, and
+recognised through them alone the refusal does not supply whole-request evidence for signed Chat (``own``).
 A refusal the Z.ai 1261 pair typed (``paired_size_refusal``, #3858) reads its numbers from that one object alone
 and sets ``retry_only`` when no token window is stated; Z.ai's 1214 parameter refusal (``cited_size_refusal``)
 is no size refusal when size wording belongs only to what it cites or to an earlier attempt.
@@ -93,6 +94,19 @@ _ZAI_PROMPT_PREFIX = re.compile(r"^prompt too long\b", re.I)
 _ZAI_PARAMETER_CODE = "1214"
 _ZAI_PARAMETER_MESSAGE = re.compile(r"^(?:parameter\s+\S+\s+is\s+invalid\b|invalid parameter\b)", re.I)
 
+# A whole prompt's affirmative rejection, not the classifier's substring embedded in an example.
+_WHOLE_REFUSAL = re.compile(
+    r"(?:(?:the |your )?(?:prompt|input|request) (?:is too long|exceeds (?:the )?"
+    r"(?:(?:max|maximum) length|context (?:length|limit|window)(?: of this model)?))|"
+    r"(?:the |this model's )?(?:maximum )?context (?:length|limit|window) (?:(?:was|has been) )?exceeded)\.?", re.I)
+# A closing single quote followed by a word character is internal (e.g. model's or model’s).
+_QUOTED_CLAUSE = re.compile(r"""(?<!\w)(?:'(?:[^'\\]|\\.|'(?=\w))*'(?!\w)|"[^"]*"|"""
+                            r"(?:‘(?:[^’]|’(?=\w))*’(?!\w))|“[^”]*”|«[^»]*»|‹[^›]*›)"
+                            r"|(?<!`)(`+)(?=[^`]*\d)[^`]*\1(?!`)")
+# Generic validation errors can name just one field in their own prose, with no structured param.
+_INVALID_FIELD = re.compile(r"""^\s*invalid\s+(?:(?:field|parameter)\s+)?"""
+                            r"""(?:['"`‘“][\w.\[\]-]+['"`’”]|[\w-]+[.\[][\w.\[\]-]+)\s*:""", re.I)
+
 
 def zai_parameter_refusal(answer) -> bool:
     """True when a current, non-inline object carries Z.ai's documented 1214 parameter refusal (#3858)."""
@@ -150,7 +164,9 @@ class SizeRefusal:
     gateway: str = ""    # the gateway that carried an upstream provider's refusal (OpenRouter's provider_name)
     upstream: str = ""   # the sentence the numbers were read from where the host's owner message lacks it: a gateway's
                          # nested upstream error (#3518), or an error given as a bare string (LM Studio, Ollama native)
-    retry_only: bool = False  # numberless Z.ai 1261 pair (#3858): retries this round without storing an estimate
+    retry_only: bool = False  # numberless Z.ai 1261 pair (#3858): retries this round without storing a window
+    # The direct error states this whole-request fact; looser evidence still sizes the round (``_read_numbers``).
+    own: bool = False
 
     @property
     def has_numbers(self) -> bool:
@@ -272,6 +288,42 @@ def _recognized_subtree(answer, basis: str, code: str, speaker: str, sentence: s
     return answer.recognized_subtree(speaker, sentence, code) if sentence else []
 
 
+def _own_whole_request(answer, subtree, sentence: str, fact: SizeRefusal, *, paired: bool) -> bool:
+    """Require a current error carrier for the fact, then independently test whether it describes the whole send."""
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, INPUT_STRING_LENGTH_CODES
+
+    if not answer.walk_complete or not subtree:
+        return False
+    for index in subtree:
+        obj = answer.objects[index]
+        direct = answer.direct_error(index)
+        direct_text = direct and (sentence == obj.message or any(text == sentence and (
+            field == "" or (field == "detail" and (paired or not obj.message))) for field, text in obj.error_text))
+        forward = bool(sentence) and ("raw", sentence) in obj.error_text and answer.direct_error(index, raw_text=True)
+        if obj.history or obj.inline or not (direct_text or forward):
+            continue
+        if fact.source == "structured:llama.cpp" and str(obj.value.get("type") or "").strip().lower() != LLAMA_CPP_TYPE:
+            continue  # a numeric diagnostic child cannot speak for its parent
+        codes = {code.lower() for code in obj.codes}
+        if (codes & INPUT_STRING_LENGTH_CODES or _ZAI_PARAMETER_MESSAGE.match(obj.message)
+                or _INVALID_FIELD.match(sentence)):
+            return False
+        # ``param: messages`` may label a whole Chat refusal, but only when its code or counts say so.
+        fields = [obj.value[k] for k in ("param", "parameter", "field", "loc") if obj.value.get(k)]
+        typed = bool(codes & (CONTEXT_OVERFLOW_CODES | {LLAMA_CPP_TYPE}))
+        if fields and not (fields == ["messages"] and fact.token_window and (typed or (fact.requested and fact.reply))):
+            return False
+        if fact.token_window and fact.source.startswith("text:") and (plain := _QUOTED_CLAUSE.sub(" ", sentence)) != sentence:
+            stated = _from_text(plain)
+            if stated is None or (stated.window, stated.meaning, stated.requested, stated.reply, stated.requested_total) != (
+                    fact.window, fact.meaning, fact.requested, fact.reply, fact.requested_total):
+                return False  # the number belongs to quoted material, though the retry reader may still read it
+        return bool(paired or typed or fact.token_window or _WHOLE_REFUSAL.fullmatch(sentence)
+                    or any(not form.groups and pattern.match(sentence) for form, pattern in _COMPILED
+                           if form.id != "zai/prompt-too-long"))
+    return False
+
+
 def _read_numbers(answer, status, message="", typed=()):
     """``(excluded, fact)`` for one answer: the recognised refusal's numbers, or why it may state none."""
     from dataclasses import replace
@@ -314,7 +366,8 @@ def _read_numbers(answer, status, message="", typed=()):
     if found is None:
         found = SizeRefusal(units="unstated" if basis == "status_413" else "tokens", source=basis)
     return False, replace(found, gateway=speaker, upstream=sentence,
-                          retry_only=bool(paired and not found.token_window))
+                          retry_only=bool(paired and not found.token_window),
+                          own=_own_whole_request(answer, subtree, sentence, found, paired=paired))
 
 
 def from_answer(answer, status, message="", typed=()):

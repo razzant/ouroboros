@@ -8,7 +8,7 @@ import {
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { fmt } from './i18n.js';
-import { harnessPresentation } from './harness_presentation.js';
+import { sourcePresentation } from './harness_presentation.js';
 
 export const MAIN_CHOICE = Object.freeze({ kind: 'main' });
 export const LOCAL_SOURCE = 'local';
@@ -115,14 +115,15 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         if (!sources.has(id)) {
             const lane = laneOf(id);
             const sub = lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : '';
-            const descriptor = descriptors.find((entry) => entry?.id === sub);
+            // The one visual answer of a subscription source's name and mark (harness_presentation.sourcePresentation);
+            // an API or local lane has no program to present.
+            const presented = lane === 'subscription' ? sourcePresentation(sub, descriptors) : null;
             const { kind, name } = connectionParts(id);
             sources.set(id, {
                 id, lane, pay: PAY_WORDS[lane], leads: false, count: 0, problems: [],
-                label: lane === 'local' ? 'Local' : lane === 'subscription'
-                    ? String(descriptor?.label || harnessPresentation(sub).label) : apiProviderLabel(id, {}, connections || []),
-                harness: lane === 'subscription' ? String(descriptor?.credentialHarness || sub) : '',
-                credentialHarness: lane === 'subscription' ? String(descriptor?.credentialHarness || '') : '',
+                label: lane === 'local' ? 'Local' : presented ? presented.label : apiProviderLabel(id, {}, connections || []),
+                // The program whose mark presents it: never the id's spelling.
+                harness: presented ? presented.harnessId : '',
                 kind: lane === 'api' ? kind : '', named: lane === 'api' && Boolean(name),
             });
         }
@@ -205,6 +206,7 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
     }
     return {
         problems, connections, priced, cacheFigures, cacheTier,
+        modelSources: descriptors,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
@@ -322,32 +324,38 @@ export function describeRoute(index, raw, { tier } = {}) {
     if (!route) return null;
     const id = routeSource(route);
     const lane = laneOf(id);
+    // This is a published route: its flag, not the spelling of the model ID, says which transport runs it.
+    const pay = PAY_WORDS[lane];
     const own = index?.source(id);
     const listed = index?.row(route) || null;
+    // The one visual answer of a subscription source's name and mark (harness_presentation.sourcePresentation),
+    // read from whatever the index holds; an API source keeps its connection's own label.
+    const presented = lane === 'subscription' ? sourcePresentation(id.slice(SUBSCRIPTION.length), index?.modelSources) : null;
     // Settings' own decision (model_roles.js keyNote): a source no enabled key holding its credential serves.
     const cannotSend = lane === 'api' && Array.isArray(index?.connections)
         && !index.connections.some((entry) => entry.id === id && entry.enabled && entry.configured);
-    const base = own?.label || (lane === 'local' ? 'Local' : lane === 'subscription'
-        ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
+    const base = lane === 'local' ? 'Local' : presented ? presented.label
+        : own?.label || apiProviderLabel(id, {}, index?.connections || []);
     const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
     const window = windowWords(listed?.window);
     // A catalog figure is Standard's: a context on another tier is told neither its price, nor the condition its
     // published entry prices it under, nor its cache write.
     const tierPriced = tier === 'fast' || tier === 'economy' || tier === 'ultrafast';
-    const listedPrice = tierPriced ? '' : modelPriceWords(listed);
+    const showCatalogRate = lane !== 'local' && !tierPriced;
+    const listedPrice = showCatalogRate ? modelPriceWords(listed) : '';
     const omitted = tier === '' && connectionParts(id).kind === 'openrouter';
     const price = omitted && listedPrice ? fmt('Catalog rate · {price}', { price: listedPrice }) : listedPrice;
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
         // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
-        sourceLabel, pay: PAY_WORDS[lane], price,
-        cacheWrite: tierPriced || omitted ? '' : cacheWriteWords(listed?.price, index?.cacheTier),
+        sourceLabel, pay, price,
+        cacheWrite: !showCatalogRate || omitted ? '' : cacheWriteWords(listed?.price, index?.cacheTier),
         window, listed: Boolean(listed),
         available: listed?.available ?? null,
-        harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
-        credentialHarness: own?.credentialHarness || '',
-        kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
-        facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
+        // The program whose mark presents it, from the index's descriptors and the source's own mark entry.
+        harness: presented ? presented.harnessId : '',
+        kind: lane === 'api' ? own?.kind || connectionParts(id).kind : '',
+        facts: [sourceLabel, price || pay, window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };
 }
 

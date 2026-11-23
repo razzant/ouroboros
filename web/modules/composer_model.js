@@ -79,7 +79,8 @@ export function mainSheetLists({ works = null, complete = false, projects = [], 
 }
 
 // One row of the sheet's lists: a name over its facts and, where it can be moved, its own tick (a label, so the
-// whole row presses it). After the change the same row says its result instead.
+// whole row presses it). After the change the same row says its result instead. The row's model words come back as
+// `modelText`, so a sheet that says them again keeps the row's node and its tick.
 function offRow(doc, entry, { result = null } = {}) {
     const made = (tag, className, text) => {
         const node = doc.createElement(tag);
@@ -98,7 +99,8 @@ function offRow(doc, entry, { result = null } = {}) {
         row.append(name, meta);
         return { row, input: null };
     }
-    meta.append(made('span', '', entry.why ? `${entry.model} · ` : entry.model));
+    const modelText = made('span', '', entry.why ? `${entry.model} · ` : entry.model);
+    meta.append(modelText);
     if (entry.why) meta.append(made('span', entry.fallback ? 'model-fallback' : '', entry.why));
     if (entry.room) meta.append(made('span', '', ` · ${entry.room}`));
     let input = null;
@@ -109,7 +111,7 @@ function offRow(doc, entry, { result = null } = {}) {
         input.checked = false;  // nothing is ticked until the owner ticks it
     }
     row.append(...[name, input, meta].filter(Boolean));
-    return { row, input };
+    return { row, input, modelText };
 }
 function offList(doc, rows) {
     const list = doc.createElement('ul');
@@ -122,14 +124,25 @@ function offList(doc, rows) {
     return list;
 }
 
+// What a built row's model words say as this catalog has it now: `again` is the row's own entry as the same list
+// builder says it from a fresher index. Only the words move — the row's node, its tick and its target stay the
+// sheet's own — and a row whose fresh entry is not its own keeps the words it was built with.
+function resayRow(made, again) {
+    if (!again || again.id !== made.entry.id) return;
+    const shown = made.entry.why ? `${again.model} · ` : again.model;
+    if (made.modelText.textContent !== shown) made.modelText.textContent = shown;
+}
+
 /**
  * The confirming sheet of a pick in the Main chat, on the shared dialog: what Main becomes and what it was, the new
  * route's facts, what running work does, how many running works follow Main, and in its one sentence what else the
  * change resets. Under them, what is not on Main now (`census`: the page's last state, see mainSheetLists): the works
- * on other models and the rooms with their own, each with a tick to move it too, none ticked beforehand.
+ * on other models and the rooms with their own, each with a tick to move it too, none ticked beforehand. A catalog
+ * read that renames a source reaches these rows like the heading: their model words are said again in place, their
+ * nodes, ticks and targets untouched.
  * Resolves false when the owner cancels, else `{ moves }`: the ticked rows, each to be moved by its own act.
  */
-export async function confirmMainChange({ next, previous, census = null, tierNote = '', dialog = openConfirmDialog, doc = globalThis.document }) {
+export async function confirmMainChange({ next, previous, census = null, tierNote = '', store = null, dialog = openConfirmDialog, doc = globalThis.document }) {
     const resets = previous?.lane === 'subscription' && next.source !== previous.source
         ? 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.'
         : 'A context window set by hand for Main is cleared.';
@@ -146,12 +159,34 @@ export async function confirmMainChange({ next, previous, census = null, tierNot
                 if (text !== undefined) made.textContent = text;
                 return made;
             };
+            const suffix = previous ? `<span data-i18n-skip>${esc(fmt('was {model}', { model: previous.short }))}</span>` : '';
+            const rowHtml = (mark) => `${mark}<b data-i18n-skip>${esc(next.id)}</b>${suffix}`;
+            let markKey = null;
             const row = doc.createElement('p');
             row.className = 'chat-model-sheet-row';
-            row.innerHTML = `${sourceMark(next)}<b data-i18n-skip>${esc(next.id)}</b>`
-                + (previous ? `<span data-i18n-skip>${esc(fmt('was {model}', { model: previous.short }))}</span>` : '');
-            const facts = line(`${routeFacts(next)}.`);
+            const facts = line();
             facts.dataset.i18nSkip = '';
+            const offWorks = [], offRooms = [];  // the built rows, in their lists' order: their model words are the one
+                                                 // part of a row a catalog read can change
+            const syncSource = () => {
+                const index = store?.index ? store.index() : null;
+                const fresh = next?.route && index ? describeRoute(index, next.route) : null;
+                const mark = sourceMark(fresh || next);
+                if (mark !== markKey) {
+                    markKey = mark;
+                    row.innerHTML = rowHtml(mark);
+                }
+                const shownFacts = `${routeFacts(fresh ? { ...next, sourceLabel: fresh.sourceLabel } : next)}.`;
+                if (facts.textContent !== shownFacts) facts.textContent = shownFacts;
+                if (!index) return;
+                // What is not on Main now says its model as this catalog has it now too: the same census, said again
+                // by the same list builder, rewrites each row's model words in place — a late rename of a source
+                // reaches them like the heading, while their nodes, ticks and whom the confirm moves stay put.
+                const again = mainSheetLists({ ...(census || {}), index });
+                offWorks.forEach((made, at) => resayRow(made, again.works[at]));
+                offRooms.forEach((made, at) => resayRow(made, again.rooms[at]));
+            };
+            syncSource();
             const count = line();
             count.dataset.mainFollowers = lists.followers === null ? 'unknown' : String(lists.followers);
             if (lists.followers === null) count.textContent = 'How many running works follow Main is unknown right now: the list of running work is incomplete.';
@@ -165,26 +200,33 @@ export async function confirmMainChange({ next, previous, census = null, tierNot
             if (tier) tier.dataset.i18nSkip = '';
             container.append(...[row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, tier, count].filter(Boolean));
             const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
-            const section = (entries, heading) => {
+            const section = (entries, heading, into) => {
                 if (!entries.length) return;
                 const rows = entries.map((entry) => ({ entry, ...offRow(doc, entry) }));
                 ticks.push(...rows.filter((made) => made.input));
+                into.push(...rows);
                 container.append(heading, offList(doc, rows));
             };
-            section(lists.works, sub(lists.works.some((entry) => entry.id) ? 'Not on Main now · tick to move too' : 'Not on Main now'));
+            section(lists.works, sub(lists.works.some((entry) => entry.id) ? 'Not on Main now · tick to move too' : 'Not on Main now'), offWorks);
             const roomsHead = sub();
             fmtInto(roomsHead, 'Rooms that start new work on their own model · {n}', { n: lists.rooms.length });
-            section(lists.rooms, roomsHead);
-            if (!ticks.length) return undefined;
-            container.append(line('A ticked work follows Main from its next step; a ticked room starts new work on Main.'));
-            // The confirming button says how many more it moves, as the ticks change.
+            section(lists.rooms, roomsHead, offRooms);
+            syncSource();  // the rows say the catalog as it is now, not only as the census met it
+            const unsubStore = typeof store?.subscribe === 'function' ? store.subscribe(syncSource) : null;
             const onTick = () => {
                 const n = ticks.filter((made) => made.input.checked).length;
                 if (n) sheet?.setConfirmLabel('Change Main and move {n} more', { n });
                 else sheet?.setConfirmLabel('Change Main');
             };
-            container.addEventListener('change', onTick);
-            return () => container.removeEventListener('change', onTick);
+            if (ticks.length) {
+                container.append(line('A ticked work follows Main from its next step; a ticked room starts new work on Main.'));
+                container.addEventListener('change', onTick);
+            }
+            if (!unsubStore && !ticks.length) return undefined;
+            return () => {
+                unsubStore?.();
+                if (ticks.length) container.removeEventListener('change', onTick);
+            };
         } },
     });
     return confirmed ? { moves: ticks.filter((made) => made.input.checked).map((made) => made.entry) } : false;
@@ -280,7 +322,7 @@ export function createModelControl({
         const said = describe(shown());
         el.dataset.known = String(Boolean(said));
         el.dataset.own = String(Boolean(said) && !follows());
-        // The mark itself is the identity: what it is drawn from (a subscription's `credentialHarness`) can arrive
+        // The mark itself is the identity: what it is drawn from (a subscription's descriptor) can arrive
         // after the words it stands beside, and a key of hand-picked fields would hide that change.
         const mark = sourceMark(said);
         if (mark !== markKey) { markKey = mark; glyph.innerHTML = mark; }
@@ -509,7 +551,7 @@ export function createModelControl({
                 asked && !tiers.priceOf(effective) && translateString('What Ultrafast costs on this route is not known here.'),
                 ...(asked ? [MAIN_ULTRAFAST_SCOPE, MAIN_ULTRAFAST_ROLES, MAIN_ULTRAFAST_ROLLBACK, pin && PIN_OBSERVATION]
                     .filter(Boolean).map((words) => translateString(words)) : [])].filter(Boolean).join(' ') }) : '';
-        const answer = await askMain({ next, previous, doc, tierNote,
+        const answer = await askMain({ next, previous, doc, tierNote, store,
             census: { works: state.works, complete: state.complete, projects: state.projects, index: store.index() } });
         if (!answer || state.destroyed) return false;
         // A source that moved under the question was not the one asked about: nothing is written.

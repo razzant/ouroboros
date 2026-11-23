@@ -1082,6 +1082,7 @@ class McpSignIn(TypedDict, total=False):
     issuer: str
     pending: bool  # a sign-in was begun and not completed
     required_scope: str  # with insufficient_scope: what a new sign-in asks for
+    required_scope_since: Optional[str]  # with insufficient_scope: when that gap opened (None when an old record kept none)
 
 
 class McpServerStatus(TypedDict, total=False):

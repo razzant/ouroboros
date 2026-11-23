@@ -352,6 +352,72 @@ def riding_sends(ctx, calls) -> list:
     return riding
 
 
+def _could_be_record_send(call, connector: str) -> bool:
+    """Historical connector calls without their own declaration are unknown, not today's sends or reads."""
+    from ouroboros.extension_surface_names import extension_name_prefix
+    from ouroboros.tool_effects import EFFECT_MESSAGE, bound_declaration, effect_of, retained_descriptor
+
+    name = str(call.get("tool") or "")
+    descriptor = retained_descriptor(call)
+    if bound_declaration(descriptor) is not None:
+        return (descriptor["skill"] == connector
+                and effect_of(name, ext_tool=descriptor, args=call.get("args")).effect == EFFECT_MESSAGE)
+    return name.startswith(extension_name_prefix(connector))
+
+
+def restore_send_facts(ctx, trace, messages) -> None:
+    """Read an interrupted batch before its pending calls get synthetic results. Never resolve its old targets anew."""
+    carrier = carrier_now(ctx)
+    if not _door_declared(carrier):
+        return
+    from ouroboros.budget_pause import pending_tool_call_ids
+
+    legacy = trace.get("presence_no_send") or {}
+    if legacy.get("noted") is True:  # this work already read the old record-only reminder
+        ctx._records_only_noted = True
+    pending = set(pending_tool_call_ids(messages))
+    connector = carrier["transport_skill"]
+    batch = next((row for row in reversed(messages)
+                  if isinstance(row, dict) and row.get("role") == "assistant"), {}) if pending else {}
+    prefix_calls = ({"tool": fn.get("name")} for call in batch.get("tool_calls") or ()
+                    if isinstance(call, dict) and str(call.get("id") or "") in pending
+                    and isinstance(fn := call.get("function"), dict))
+    prior_calls = trace.get("tool_calls") or () if getattr(ctx, "_place_message_calls", None) is None else ()
+    ctx._restored_send_unknown = bool(
+        getattr(ctx, "_restored_send_unknown", False) or legacy.get("sends") == "possible"
+        or any(_could_be_record_send(call, connector) for call in prefix_calls)
+        or any(isinstance(call, dict) and _could_be_record_send(call, connector) for call in prior_calls))
+
+
+def restored_riding_send(ctx, calls) -> bool | None:
+    """Fallback when the saved selection lacks a riding-send fact. Do not credit a send to a newly resolved audience."""
+    carrier = carrier_now(ctx)
+    if not _door_declared(carrier):
+        return bool(riding_sends(ctx, calls))  # reply-mode connectors keep their own behavior
+    from ouroboros.presence_context import confirmed_delivery_receipts
+
+    possible, confirmed = False, None
+    for call in calls:
+        if not isinstance(call, dict) or not _could_be_record_send(call, carrier["transport_skill"]):
+            continue
+        possible = True
+        receipts = call.get("presence_delivery_confirmed") or (call.get("result_meta") or {}).get("presence_delivery_confirmed")
+        if not isinstance(receipts, (list, tuple)) or not receipts:
+            continue
+        if confirmed is None:
+            try:
+                confirmed = confirmed_delivery_receipts(ctx)
+            except Exception:  # the transport evidence is unreadable, not negative
+                confirmed = frozenset()
+        if all(isinstance(pair, (tuple, list)) and len(pair) == 2
+               and all(isinstance(part, str) for part in pair) and tuple(pair) in confirmed for pair in receipts):
+            return True
+    if possible:
+        ctx._restored_send_unknown = True
+        return None  # no extra round inviting a new send; no claim that the old one arrived
+    return False
+
+
 def _gesture_on_waking_message(metadata, effect, args) -> bool:
     """A gesture door that need not name a thread lands in this turn's conversation only by its exact message:
     the waking message's id, conversation and (where targeted) account. Any other message stays a result to read."""
@@ -452,7 +518,7 @@ def speak_line(metadata, *, state=None, connector=None) -> str:
 
 def record_note(ctx) -> str:
     """The one return of a records-only finish that posted nothing and sent nothing in its response: the facts (where
-    words go, what this run already sent there, how to send) and the two choices. The mind decides; once per run."""
+    words go, what this run already sent there, how to send) and how to proceed without duplicating a send. Once per run."""
     from ouroboros.place_guard import this_turn_sends
     from ouroboros.presence_context import _source_conversation
 
@@ -463,10 +529,16 @@ def record_note(ctx) -> str:
     pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
                         for row in sends["calls_without_receipt"]) or "none"
     doors = speak_line(metadata, state="active", connector=carrier["transport_skill"])
-    return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
-            f"people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
-            f"there without a receipt yet: {pending}. {doors} Send it now, or finish "
-            "again to keep this text as your record.")  # shown only while records_only_now reads the place Active
+    recovered = getattr(ctx, "_restored_send_unknown", None)
+    next_step = ("An earlier send may have landed. Check its original receipt; do not send it again while its "
+                 "outcome is unknown."
+                 if recovered or (recovered is not None and sends["calls_without_receipt"]) else
+                 "If an earlier attempt to send these words may have run, check its original receipt; do not resend "
+                 "while its outcome is unknown. Send these words explicitly only if you know they were not sent here "
+                 "and you mean to post them.")
+    return (f"[FOCUS_FINISH_IS_A_RECORD] This finish was not posted: in {label} (route {route}) your finish is your record, "
+            f"and people hear only what you send. Confirmed sent there by this run: {sends['confirmed']}. Your own send calls "
+            f"there without a receipt yet: {pending}. {doors} {next_step} Finish again to keep this text as your record.")
 
 
 def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, str]:

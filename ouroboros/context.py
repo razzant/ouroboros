@@ -161,7 +161,15 @@ def _first_user_content(task: Dict[str, Any], env: Any) -> Any:
     """A task's first input, its staged images read from the drive its actor runs on. A row on the canonical drive may
     record no ``drive_root`` (promotion's and Continue's do not: assignment and terminal files read that field as a
     fork), so the actor's own ``env.drive_root`` names the store its inputs were staged in."""
-    return build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root})
+    from ouroboros.chat_uploads import attachment_delivery_block
+
+    content = build_user_content(task if task.get("drive_root") else {**task, "drive_root": env.drive_root})
+    fact = attachment_delivery_block(task.get("attachment_manifest"))
+    if not fact:
+        return content
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": fact}]
+    return f"{content}\n\n{fact}" if task.get("text") else fact
 
 
 def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -444,6 +452,14 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         notes = [] if declared else [row for row in (predecessor_notes_message(task, drive_root=canonical_root),
                                                      late_answer_notes_message(task, drive_root=canonical_root)) if row]
         supplementary_messages_out.extend([*notes, *supplemental])
+        reply = (task.get("metadata") or {}).get("reply_reference") or {}
+        if isinstance(reply, dict) and reply.get("attachment_failures") and not reply.get("excerpt"):
+            from ouroboros.chat_references import reply_target
+            from ouroboros.chat_uploads import attachment_reply_context
+            from ouroboros.context_budget import REPLY_CITATION_KIND, bound_host_row
+
+            if source := attachment_reply_context(reply_target(canonical_root, reply)):
+                supplementary_messages_out.append(bound_host_row(REPLY_CITATION_KIND, source))
     if declared:
         runtime_data["task_constraint"] = task.get("task_constraint") or getattr(ctx, "task_constraint", {})
     runtime_data["operational_reality_rule"] = (
@@ -927,7 +943,7 @@ def _capture_context_core(
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
     skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
     if always_on := always_in_context_section(skills or []):  # a failure (empty, or None) is no skills here
-        semi_stable_parts.append(always_on)
+        semi_stable_parts.append(HostSection("always_on_skills", always_on))  # skills the request carries (max_room_fact)
     from ouroboros.safety_config import owner_rules_section
     semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
     # Knowledge leads the changing block (its edits never cost the cached story) and rides whole

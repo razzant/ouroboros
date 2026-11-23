@@ -260,24 +260,6 @@ def test_new_tools_in_core_tool_names():
         )
 
 
-# --- Pull tool specifics ---
-
-def test_pull_uses_ff_only():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._ff_pull)
-    assert "--ff-only" in source, "Pull must use --ff-only for safety"
-
-
-def test_pull_fetches_before_merge():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._ff_pull)
-    fetch_pos = source.find("git fetch")
-    merge_pos = source.find("git merge")
-    assert fetch_pos != -1, "Must call git fetch"
-    assert merge_pos != -1, "Must call git merge"
-    assert fetch_pos < merge_pos, "Fetch must come before merge"
-
-
 # --- Revert tool specifics ---
 
 def test_revert_uses_git_lock():

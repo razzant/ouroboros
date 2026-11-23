@@ -107,6 +107,10 @@ class TelegramTransportError(RuntimeError):
         self.cause = str(cause or "")  # the transport's own failure class, for status and logs
 
 
+class TelegramDownloadTooLarge(RuntimeError):
+    """A download stopped at this integration's inbound cap: the file is larger than it accepts."""
+
+
 class TelegramTokenMissing(ValueError):
     """No bot token is accepted: there is nothing to send with, which is a wait and never a failure."""
 
@@ -812,19 +816,23 @@ class TelegramClient:
             ) as client:
                 self.check_binding()
                 async with client.stream("GET", f"{self.file_base}/{file_path}") as response:
-                    if response.status_code >= 400:
+                    if response.status_code != 200:
                         raise RuntimeError(f"Telegram file download returned HTTP {response.status_code}")
                     try:
                         announced = int(response.headers.get("content-length", ""))
                     except (TypeError, ValueError):
-                        announced = 0
-                    if announced > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-                        raise RuntimeError("Telegram file exceeds the 10 MiB download limit.")
+                        announced = None
+                    if announced is not None and announced > _MAX_TELEGRAM_DOWNLOAD_BYTES:
+                        raise TelegramDownloadTooLarge("Telegram file exceeds the 10 MiB download limit.")
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
                         if len(content) + len(chunk) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-                            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.")
+                            raise TelegramDownloadTooLarge("Telegram file exceeds the 10 MiB download limit.")
                         content.extend(chunk)
+                    # HTTPX checks wire framing; this also checks the assembled identity body.
+                    if (announced is not None and response.headers.get("content-encoding", "identity").lower()
+                            == "identity" and len(content) != announced):
+                        raise RuntimeError("Telegram file download length does not match HTTP Content-Length.")
         except httpx.TimeoutException:
             raise self._failed(RuntimeError("Telegram file download timed out.")) from None
         except httpx.HTTPError as exc:
@@ -872,7 +880,7 @@ class TelegramClient:
                 raise cause from None
             data = handle.read(_MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
         if len(data) > _MAX_TELEGRAM_DOWNLOAD_BYTES:
-            raise RuntimeError("Telegram file exceeds the 10 MiB download limit.") from cause
+            raise TelegramDownloadTooLarge("Telegram file exceeds the 10 MiB download limit.") from cause
         return data
 
     async def get_updates(self, offset: int) -> list[dict]:
@@ -1015,21 +1023,29 @@ class TelegramClient:
         await self.call("answerCallbackQuery", data=data, timeout=10)
 
     async def download_photo(self, file_id: str) -> tuple[str, str]:
-        payload = await self.call("getFile", data={"file_id": file_id}, timeout=20)
-        file_path = str((payload.get("result") or {}).get("file_path") or "").strip()
-        if not file_path:
-            raise RuntimeError("Telegram file path is missing")
-        content = await self._download_bytes(file_path)
+        file_path, content = await self._get_file_bytes(file_id)
         mime = mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return base64.b64encode(content).decode("ascii"), mime
 
     async def download_file(self, file_id: str) -> bytes:
         """Download an arbitrary file from Telegram servers and return its raw bytes."""
+        _, content = await self._get_file_bytes(file_id)
+        return content
+
+    async def _get_file_bytes(self, file_id: str) -> tuple[str, bytes]:
         payload = await self.call("getFile", data={"file_id": file_id}, timeout=20)
-        file_path = str((payload.get("result") or {}).get("file_path") or "").strip()
+        result = payload.get("result") or {}
+        file_path = str(result.get("file_path") or "").strip()
         if not file_path:
             raise RuntimeError("Telegram file path is missing")
-        return await self._download_bytes(file_path)
+        size = result.get("file_size")
+        known_size = type(size) is int and size >= 0
+        if known_size and size > _MAX_TELEGRAM_DOWNLOAD_BYTES:
+            raise TelegramDownloadTooLarge("Telegram file exceeds the 10 MiB download limit.")
+        content = await self._download_bytes(file_path)
+        if known_size and len(content) != size:
+            raise RuntimeError("Telegram file download length does not match getFile.")
+        return file_path, content
 
     async def edit_message_text_with_inline_keyboard(
         self, chat_id: int, message_id: int, text: str, keyboard: list[list[dict]], parse_mode: str = "HTML"
@@ -1103,7 +1119,7 @@ _MENU_TEXTS_EN = {
     "restricted_safe": "⛔ Restricted in safe mode",
     "unknown_command": "Unknown command",
     "use_miniapp": "Use the Mini App.",
-    "update_failed": "Could not deliver that Telegram update to Ouroboros.",
+    "update_failed": "Could not confirm that Ouroboros received that Telegram update.",
     "reply_not_linked": "Sent, but not linked to the earlier work: a message from before this bridge update can't be matched safely.",
     "metrics_budget_status": "• **Budget Status:**\n  Spent: `${spent_usd}`\n  Limit: `${total_budget}`\n  Remaining: `${rem}`\n\n• **System Environment:**\n  Branch: `{branch}`\n  BG Thoughts: `{bg_status}`",
     "file_too_large_notice": "{filename} is saved in Ouroboros. This file exceeds the Telegram upload limit and cannot be mirrored here.",

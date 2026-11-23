@@ -107,10 +107,14 @@ def _stamp_owner_delivery(
 
 
 def _append_reply_context(messages, target, owner_ctx):
+    from ouroboros.chat_uploads import attachment_reply_context
     from ouroboros.context_budget import HOST_TEXT_SHA_KEY, REPLY_CITATION_KIND, REPLY_SOURCE_SHA_KEY, bound_host_row, host_row_intact
     from ouroboros.dialogue_provenance import excerpt_citation
 
-    if citation := excerpt_citation(target):
+    if not (citation := excerpt_citation(target)):
+        if source := attachment_reply_context(target):
+            messages.append(bound_host_row(REPLY_CITATION_KIND, source))
+    else:
         from ouroboros.owner_words import attachments_line
 
         # The full source is a host row of its own, bound to its exact text (address, author, words and files). A later
@@ -137,6 +141,26 @@ def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
         logging.getLogger(__name__).warning("owner content composition failed", exc_info=True)
         return (f"{entry.get('text') or ''}\n\n[attached images were not composed: "
                 f"{type(exc).__name__}: {exc}; any attached files remain as listed]").strip()
+
+
+def _append_owner_mail_input(messages, owner_ctx, entry, content, fact, *, wordless=False) -> int:
+    """Speech and Host evidence are distinct; a file without a caption is an arrival, not speech."""
+    if wordless:
+        messages.append({"role": "user", "content": fact})
+        return len(messages) - 1
+    from ouroboros.client_surface import noted_owner_text
+
+    if isinstance(content, list):
+        content = [dict(block) for block in content]
+        content[0]["text"] = noted_owner_text(owner_ctx, entry, content[0]["text"])
+    else:
+        content = noted_owner_text(owner_ctx, entry, content)
+    _loop()._append_or_merge_user_content(messages, _loop()._owner_marked_content(content), slot=owner_ctx,
+                                          kind=OWNER_WORDS_KIND)
+    pos = len(messages) - 1
+    if fact:
+        messages.append({"role": "user", "content": fact})
+    return pos
 
 
 def _drain_incoming_messages(
@@ -389,30 +413,24 @@ def _drain_incoming_messages(
             target = (living.get("reply_to") or answered_card_reply(*answered_card_source(entry, chats))
                       or reply_target(chats, entry.get("reply_reference")))
             _append_reply_context(messages, target, owner_ctx)
+            from ouroboros.chat_uploads import attachment_delivery_block, delivery_manifest_refs
+
+            fact = attachment_delivery_block(entry.get("attachment_manifest"))
             _loop()._record_owner_directive(
                 owner_ctx,
                 source=source,
-                content=living["content"] if living else _owner_content(entry, drive_root, task_id), words=None if living else dmsg,  # the rendering, its exact text beside
+                content=living["content"] if living else dmsg if fact else _owner_content(entry, drive_root, task_id),
+                words=None if living else dmsg,
                 msg_id=str(entry.get("msg_id") or ""),
                 # Keep the physical identity and the card fields distinct from the mailbox delivery id.
                 origin={**_arrival(held, entry.get("ts"), held=True), "client_message_id": entry.get("client_message_id"),
                         "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
                 reply_to=target or None,
+                attachments=((held or {}).get("attachments") or delivery_manifest_refs(entry.get("attachment_manifest"))) if fact else None,
             )
-            from ouroboros.client_surface import noted_owner_text
-
-            if isinstance(owner_content, list):
-                owner_content = [dict(block) for block in owner_content]
-                owner_content[0]["text"] = noted_owner_text(owner_ctx, entry, owner_content[0]["text"])
-            else:
-                owner_content = noted_owner_text(owner_ctx, entry, owner_content)
-            _loop()._append_or_merge_user_content(
-                messages, _loop()._owner_marked_content(owner_content),
-                slot=owner_ctx, kind=OWNER_WORDS_KIND,
-            )
-            arrivals.append(len(messages) - 1)
+            arrivals.append(_append_owner_mail_input(messages, owner_ctx, entry, owner_content, fact, wordless=bool(fact and not dmsg)))
             if source == OWNER_PRESS:
-                mark_press_arrival(owner_ctx, messages[-1])
+                mark_press_arrival(owner_ctx, messages[arrivals[-1]])
             ack_content(entry)
             if event_queue is not None:
                 try:

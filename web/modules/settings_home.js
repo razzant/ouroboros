@@ -20,11 +20,12 @@ import { headlineView } from './consciousness_dashboard.js';
 import { consciousnessMark } from './consciousness_words.js';
 import { getContributions } from './contributions.js';
 import { refreshActionKind, verificationBadge } from './harness_accounts.js';
-import { harnessPresentation } from './harness_presentation.js';
+import { sourcePresentation } from './harness_presentation.js';
 import { START_FAILED_LEAD, bootPhase, createHostStart, startingStatus, supervisorReady } from './host_starting_status.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { configuredServerCount, mcpNeedsSignIn, mcpServerOn, mcpStatusSeen, refreshStatus } from './mcp_settings.js';
 import { modelCatalog, watchModelCatalog } from './model_catalog_store.js';
+import { ownSourceMark } from './model_source_mark.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
@@ -299,7 +300,8 @@ export async function askOuroboros(words, { showPage, doc = globalThis.document 
 const OUT_ICON = fluentIcon('arrow-up-right', 14, 'regular');
 const IN_ICON = fluentIcon('chevron-right', 14, 'regular');
 // Glyphs the product's set (page_icons.js) does not carry: Fluent Filled (a row names a place or a thing).
-// Models wears the cube (never a sparkle); Costs and Permissions wear a plain mark, the row's words say the value.
+// Models' cube is the door's own neutral: a source with a mark of its own wears that instead (liveGlyphs, never a
+// sparkle); Costs and Permissions wear a plain mark, the row's words say the value.
 // Agents wears the network of one and its helpers (the owner's choice of 27.10 for subagents), Updates the arrow up.
 const GLYPHS = Object.fromEntries(Object.entries({
     key: 'key',
@@ -326,21 +328,23 @@ function dictationWord() {
     } catch { return undefined; }
 }
 
-const markHtml = (presentation) => `<svg width="18" height="18" viewBox="${presentation.viewBox}" fill="currentColor" aria-hidden="true"><path d="${presentation.path}"/></svg>`;
+const markHtml = ({ viewBox, body }) => `<svg width="18" height="18" viewBox="${viewBox}" fill="currentColor" aria-hidden="true">${body}</svg>`;
 
-/** The descriptor-confirmed mark of Main's subscription route, from the catalogue already held; '' when that list
- *  names no credential harness for it. The opaque source id is never itself evidence of a harness, and nothing is
- *  read here: without a descriptor the caller's neutral cube stands. */
+/** The mark of the source Main's route goes through — the one answer every surface draws of a source: a
+ *  subscription's program (harness_presentation.sourcePresentation over the catalogue already held, else the
+ *  source's own exact mark entry), an API key's provider (ownSourceMark). '' when the source has no mark of its own
+ *  (an empty or local route, an unknown id, a record that names no program): the door's neutral cube then stands.
+ *  The opaque source id is never itself evidence of a harness, and nothing is read here. */
 function mainSourceMark({ value, local, modelSources }) {
-    if (local) return '';
+    if (local || !String(value || '').trim()) return '';
     const source = routeSource({ model: value, use_local: false });
-    if (!source.startsWith('subscription:')) return '';
-    const descriptor = (modelSources || []).find((entry) => entry?.id === source.slice('subscription:'.length));
-    const brand = harnessPresentation(String(descriptor?.credentialHarness || ''));
-    return brand.generic ? '' : markHtml(brand);
+    const own = source.startsWith('subscription:')
+        ? ownSourceMark({ lane: 'subscription', harness: sourcePresentation(source.slice('subscription:'.length), modelSources).harnessId })
+        : ownSourceMark({ kind: source.split('@')[0] });
+    return own ? markHtml(own) : '';
 }
 
-/** The glyphs that say a fact: Main's source (its descriptor-confirmed harness mark, else the cube) and the theme. */
+/** The glyphs that say a fact: Main's source (its own mark — program or provider — else the cube) and the theme. */
 function liveGlyphs({ settings, device = {}, modelSources = [] } = {}) {
     const out = {};
     if (settings) {

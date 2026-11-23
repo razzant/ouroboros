@@ -517,16 +517,19 @@ def _bind_forced_route(ctx: _RoundLimitContext) -> bool:
     """Fit the acting route before a forced candidate is priced or sent. A cold restore may have fitted a pending
     route for the next ordinary round, with another model, role, locality or effort; forced preparation does not
     consume that choice. On rebind failure, another route's plan stays unmeasured; a matching route still measures
-    the acting effort (``_forced_physical_context``). True when fitted here; ordinary work that follows a priced
-    candidate never sent refits its own round's route from the loop's plan (``loop_routes.bind_round_route``)."""
+    the acting effort (``_forced_physical_context``). True when fitted or made plain here; ordinary work that follows
+    a priced candidate never sent refits its own round's route from the loop's plan (``loop_routes.bind_round_route``)."""
     from ouroboros.context_fit import effort_lengthens_request
+    from ouroboros.loop_routes import ordinary_view
 
     tools = getattr(ctx, "tools", None)
     tools_ctx = getattr(tools, "_ctx", None)
     plan = getattr(tools_ctx, "context_fit_plan", None)
+    if restored := getattr(plan, "first_contact_normal", None) is not None:  # Wrap up before a hint's first send
+        plan = ordinary_view(plan, tools_ctx, ctx.messages)  # is priced and sent plain: no gate here checks its scope
     if plan is None or (_plan_for_acting_route(plan, ctx) and not effort_lengthens_request(
             getattr(plan, "provider", ""), getattr(plan, "start_reasoning_effort", ""), ctx.active_effort)):
-        return False
+        return restored
     try:
         from ouroboros.model_slots import acting_model_role, task_model_binding
         from ouroboros.owner_wait import _conversation_account
@@ -542,7 +545,7 @@ def _bind_forced_route(ctx: _RoundLimitContext) -> bool:
             start_mode=getattr(tools_ctx, "active_context_mode", None), reasoning_effort=ctx.active_effort)
     except Exception:
         log.debug("Forced rail kept the restored plan of another route", exc_info=True)
-        return False
+        return restored
     return True
 
 
@@ -956,6 +959,9 @@ def _call_forced_model_once(
     response_meta["reply_calls"] = [dict(name=str(f.get("name") or ""), arguments=f.get("arguments")) for f in (
         (call.get("function") or {}) for call in (final_msg or {}).get("tool_calls") or [] if isinstance(call, dict))]
     ctx.accumulated_usage["_forced_response_meta"] = response_meta
+    if final_msg is not None:  # its own send's receipt now; only a reply the rail keeps publishes it
+        from ouroboros.context_window import start_answer
+        response_meta["start_answer"] = start_answer(ctx.accumulated_usage, _loop().last_physical_attempt_capture(), ctx.round_idx)
     if owner_ctx is not None and final_msg is not None:  # an answered forced final, outside the round observer
         from ouroboros.primary_route_observation import own_call_record
         call = own_call_record(ctx.accumulated_usage, True, previous_call, None)
@@ -1490,6 +1496,7 @@ def _forced_final_answer(
     # Control resolution runs BEFORE the incomplete branch: a retained candidate
     # recovered from a control body must not be discarded as a truncated draft,
     # and a stale-evidence retention keeps its own reason (#447/issue-449).
+    from ouroboros.context_window import publish_start_outcome
     from ouroboros.loop_delivery import carry_forced_selection, forced_completion_call, record_forced_completion
 
     # An adopted native completion request (a reply complete apart from that one call and a provider length
@@ -1551,6 +1558,7 @@ def _forced_final_answer(
             from ouroboros.loop_model_call import observe_authoring_response
             observe_authoring_response(tools_ctx, author, forced=True)
             accept_handover_selection(tools_ctx, llm_trace, request or {}, forced_model=author)
+            publish_start_outcome(None if stop_now else response_meta.get("start_answer"))  # this call's reply, accepted
     if stop_now:
         from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
         return _handle_direct_turn_hard_stop(ctx)

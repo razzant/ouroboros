@@ -18,17 +18,17 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 81 | 0 |
 | D09 | Cancellation, owner control & process custody | 30 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 124 | 0 |
+| D11 | Gateway, server & Web UI | 125 | 0 |
 | D12 | Settings & configuration | 29 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 75 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 44 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 47 | 0 |
 | D16 | Observability, usage accounting & cost | 34 | 0 |
-| D17 | Projects, workspaces & task results | 63 | 0 |
+| D17 | Projects, workspaces & task results | 64 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 27 | 0 |
-| **total** | | **1086** | **0** |
+| **total** | | **1091** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -913,6 +913,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/places_api.py`
 - `ouroboros/gateway/project_folder_contracts.py`
 - `ouroboros/gateway/projects.py`
+- `ouroboros/gateway/recall.py`
 - `ouroboros/gateway/reply_preparation.py`
 - `ouroboros/gateway/router.py`
 - `ouroboros/gateway/routing_decision.py`
@@ -1123,6 +1124,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/consciousness_wake.py`
 - `ouroboros/consolidator.py`
 - `ouroboros/dialogue_provenance.py`
+- `ouroboros/dialogue_recall.py`
+- `ouroboros/dialogue_words.py`
 - `ouroboros/evolution_checkpoints.py`
 - `ouroboros/evolution_fingerprint.py`
 - `ouroboros/held_notes.py`
@@ -1136,6 +1139,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/memory.py`
 - `ouroboros/memory_fallback.py`
 - `ouroboros/memory_inventory.py`
+- `ouroboros/memory_members.py`
 - `ouroboros/memory_nomination_receipts.py`
 - `ouroboros/memory_publication.py`
 - `ouroboros/memory_reader.py`
@@ -1200,6 +1204,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/dialogue_positions.py`
 - `ouroboros/dialogue_retry.py`
 - `ouroboros/dialogue_store.py`
+- `ouroboros/dialogue_word_index.py`
 - `ouroboros/docker_process_observer.py`
 - `ouroboros/execution_domain.py`
 - `ouroboros/headless.py`

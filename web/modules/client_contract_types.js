@@ -426,10 +426,10 @@
  */
 
 /**
- * A `reply_to` reference as the host resolved it; an unresolved one is `{address, unresolved: true}`.
  * @typedef {Object} ChatReplyReference
  * @property {string=} row_sha256  // full digest of the resolved source row
  * @property {ReplyExcerpt=} excerpt
+ * @property {Object[]=} attachment_failures  // pathless facts from this exact source row
  * @property {string=} address
  * @property {number=} chat_id
  * @property {'user'|'assistant'|'system'=} role
@@ -442,7 +442,7 @@
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
  * @property {(number|null)=} telegram_room_chat_id  // the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
- * @property {boolean=} unresolved
+ * @property {boolean=} unresolved  // a missing source leaves only `{address, unresolved: true}`
  */
 
 /**

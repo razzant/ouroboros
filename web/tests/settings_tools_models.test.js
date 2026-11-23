@@ -9,6 +9,7 @@ import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { applyMcpSettings, collectMcpSettings, refreshStatus } from '../modules/mcp_settings.js';
 import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
+import { GENERIC_HARNESS_MARK, HARNESS_MARKS } from '../modules/harness_presentation.js';
 import { modelCatalog } from '../modules/model_catalog_store.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
@@ -1162,59 +1163,134 @@ test('a route is said in the owner\'s words', () => {
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
 });
 
-test('a subscription is named by its held descriptor, and keeps the old generic name without one', () => {
-    // An opaque source id is no readable name; only the catalogue's descriptor names its owner.
+test('a subscription is named by the one answer of its source: the record\'s label, else its own known name', () => {
+    // A held descriptor's label is authoritative; without one the source's exact known name stands, and an id no
+    // mark table entry reads keeps its own spelling — never a guessed product name.
     const sources = [{ id: 'claude', label: 'Claude Code', credentialHarness: 'claude' }];
     assert.deepEqual(routeWords('claudexor::claude=claude-opus-5-5', { modelSources: sources }),
         { name: 'claude-opus-5-5', mark: 'claude', label: 'Claude Code',
             source: 'Claude Code subscription · your accounts in turn' });
+    assert.equal(routeWords('claudexor::claude=claude-opus-5-5').label, 'Claude Code',
+        'no descriptor: its own known name, the same answer before and after any read');
     assert.equal(routeWords('claudexor::future=gpt-x').label, 'future',
-        'no descriptor: the old generic label stands, never a guessed product name');
+        'no descriptor and no mark entry: the id stays itself, never a guessed product name');
     assert.equal(routeWords('claudexor::claude=claude-opus-5-5', { account: 'studio-01', modelSources: sources }).source,
         'Claude Code subscription · account studio-01');
 });
 
-// The Models list's Main row: its mark and its source line come from the catalogue a model sheet already holds.
-// Nothing here reads the catalogue; a descriptor adopted later reaches only those two slots.
-test('the Models Main row wears its descriptor\'s mark and name, and a later descriptor reaches only them', async (t) => {
+// The Models list's Main and fallback rows: their marks and source labels come from the catalogue a model sheet
+// already holds. Nothing here reads the catalogue; a descriptor adopted later reaches only those slots in place.
+test('the Models Main row wears its descriptor\'s mark and name, and a later descriptor reaches only them and fallback names', async (t) => {
+    t.after(() => modelCatalog.adopt({ items: [], model_sources: [] }));
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
     const value = 'claudexor::agy=claude-opus-5-5';
-    const page = await open(t, 'models', { values: { OUROBOROS_MODEL: value, OUROBOROS_MODEL_ACCOUNTS: { main: 'studio-01' } } });
+    const page = await open(t, 'models', { values: {
+        OUROBOROS_MODEL: value,
+        OUROBOROS_MODEL_LIGHT: 'claudexor::agy=claude-light',
+        OUROBOROS_MODEL_FALLBACKS: 'claudexor::agy=claude-sonnet-5-5, openai::gpt-b',
+        OUROBOROS_MODEL_ACCOUNTS: { main: 'studio-01', fallback: ['studio-02', ''] },
+    } });
     const row = () => page.container.querySelector('.models-main-row');
     const meta = () => inside(row(), '.models-main-meta');
     const markNode = () => inside(meta(), '.model-source-mark');
+    const fbRow = head(page.container, 'fallback/1');
+    const fbMeta = inside(fbRow, '.ui-row-meta');
+    const fbAuthored = inside(fbMeta, '[data-i18n-authored]');
+    const fbMove = inside(fbRow, '[data-fallback-move="1"]');
+    const lightValue = () => inside(page.container.querySelector('[data-setting-row="models:light"]'), '[data-row-value]').textContent;
     const catalogueReads = () => page.calls.filter((url) => String(url).startsWith('/api/model-catalog')).length;
-    // Already held: the descriptor's mark and its name at the first paint, with no read of this page's own.
+    fbMove.focus();
+    // Already held: the descriptor's mark and name at first paint on Main and fallback, with no read of this page's own.
     const reads = catalogueReads();
     assert.equal(markNode().getAttribute('viewBox'), '0 0 180 180', 'a held descriptor draws its mark at first paint');
     assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
     assert.equal(inside(meta(), '[data-i18n-authored]').textContent, 'Antigravity work', 'the name is authored, not chrome');
-    // A held list that names no harness: the neutral initial and the old generic name, never a brand guessed from the id.
+    assert.equal(fbMeta.textContent, 'Antigravity work subscription · account studio-02');
+    assert.equal(fbAuthored.textContent, 'Antigravity work');
+    assert.equal(lightValue(), 'claude-light', 'other role doors show only the model name');
+    // A read gap (another window's cleared list): the saved source keeps its own mark and its own known name.
     const rowNode = row();
     modelCatalog.adopt({ items: [], model_sources: [] });
     await settle();
     assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
-    assert.match(markNode().getAttribute('class'), /model-source-initial/, 'no descriptor: a neutral initial');
+    assert.equal(inside(markNode(), 'path').getAttribute('d'), HARNESS_MARKS.agy.path, 'no descriptor: its own exact mark stays');
     assert.match(meta().textContent, /Antigravity subscription · account studio-01/s,
-        'without a descriptor the old generic name stands, and no brand is chosen by the id alone');
-    // A descriptor adopted later brands the route it names: only the mark and its source line change.
+        'without a record the source\'s own known name stands, never a brand guessed beyond its mark entry');
+    assert.equal(head(page.container, 'fallback/1'), fbRow, 'the fallback row stays mounted');
+    assert.equal(page.document.activeElement, fbMove, 'focus stays on the fallback control');
+    assert.equal(fbMeta.textContent, 'Antigravity subscription · account studio-02');
+    assert.equal(fbAuthored.textContent, 'Antigravity');
+    // A descriptor adopted later names the source its own way: only Main's meta and the fallback's authored span change.
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
     await settle();
     assert.equal(row(), rowNode, 'the card is not redrawn for a mark');
-    assert.equal(inside(meta(), '.model-source-mark').getAttribute('viewBox'), '0 0 180 180', 'the descriptor\'s Antigravity mark');
+    assert.equal(inside(meta(), '.model-source-mark').getAttribute('viewBox'), '0 0 180 180', 'still the same Antigravity mark');
     assert.match(meta().textContent, /Antigravity work subscription · account studio-01/);
+    assert.equal(head(page.container, 'fallback/1'), fbRow);
+    assert.equal(inside(fbMeta, '[data-i18n-authored]'), fbAuthored, 'only the authored name updates in place');
+    assert.equal(page.document.activeElement, fbMove);
+    assert.equal(fbMeta.textContent, 'Antigravity work subscription · account studio-02');
+    assert.equal(lightValue(), 'claude-light', 'other role doors gain no source text');
     assert.equal(catalogueReads(), reads, 'no read for a mark');
+    // A matching settings reread keeps the mounted fallback row and its focused control.
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    assert.equal(head(page.container, 'fallback/1'), fbRow);
+    assert.equal(page.document.activeElement, fbMove);
+    assert.equal(fbMeta.textContent, 'Antigravity work subscription · account studio-02');
     // The same descriptor again is a no-op: the drawn nodes stay the ones the owner sees.
     const mark = inside(meta(), '.model-source-mark');
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: 'agy' }] });
     await settle();
     assert.equal(inside(meta(), '.model-source-mark'), mark, 'an unchanged result writes nothing');
-    // A descriptor that names no credential harness is no evidence of one: the neutral initial stays.
+    assert.equal(inside(fbMeta, '[data-i18n-authored]'), fbAuthored);
+    // A descriptor that names no credential harness is no evidence of one: the generic mark stays.
     modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity work', credentialHarness: '' }] });
     await settle();
-    assert.match(inside(meta(), '.model-source-mark').getAttribute('class'), /model-source-initial/,
+    assert.equal(inside(inside(meta(), '.model-source-mark'), 'path').getAttribute('d'), GENERIC_HARNESS_MARK.path,
         'an unbound opaque id is never branded');
     assert.doesNotMatch(meta().innerHTML, /viewBox="0 0 180 180"/);
+    // Unmount detaches the catalogue listener.
+    page.handle.unmount();
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'agy', label: 'Antigravity after unmount', credentialHarness: 'agy' }] });
+    await settle();
+    assert.equal(fbMeta.textContent, 'Antigravity work subscription · account studio-02');
+});
+
+test('the Models summary keeps provider marks and key warnings on flag-off chat slots, and preserves the labelled Vision/Safety boundary', async (t) => {
+    t.after(() => modelCatalog.adopt({ items: [], model_sources: [] }));
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'codex', label: 'Codex Work', credentialHarness: 'codex' }] });
+    assert.deepEqual(routeWords('claudexor::codex=gpt-main (local)', { local: true, account: 'studio-01' }),
+        { name: 'Local model', source: 'On this computer', mark: '', label: '' });
+    const page = await open(t, 'models', { values: {
+        OUROBOROS_MODEL: 'claudexor::codex=gpt-main (local)',
+        OUROBOROS_MODEL_LIGHT: '',
+        OUROBOROS_MODEL_SAFETY: '',
+        OUROBOROS_MODEL_VISION: 'anthropic::claude-v (local)',
+        OUROBOROS_MODEL_FALLBACKS: 'claudexor::codex=gpt-fb (local), anthropic::claude-a (local)',
+        USE_LOCAL_MAIN: false, USE_LOCAL_LIGHT: false, USE_LOCAL_FALLBACK: false,
+        [MODEL_ACCOUNTS_KEY]: { main: 'studio-01', fallback: ['studio-02', ''] },
+        OUROBOROS_CONNECTIONS: [{ kind: 'anthropic', name: 'default', enabled: false }],
+    } });
+    const mainCard = page.container.querySelector('.models-main');
+    const mainMeta = inside(mainCard, '.models-main-meta');
+    assert.equal(inside(mainCard, '.models-main-name').textContent, 'gpt-main (local)');
+    assert.match(mainMeta.textContent, /Codex Work subscription · account studio-01/);
+    assert.ok(inside(mainMeta, '.model-source-mark'));
+    assert.equal(mainMeta.getAttribute('data-tone'), null);
+    assert.match(inside(head(page.container, 'fallback/1'), '.ui-row-meta').textContent, /Codex Work subscription · account studio-02/);
+    const fallbackApi = inside(head(page.container, 'fallback/2'), '.ui-row-meta');
+    assert.match(fallbackApi.textContent, /Anthropic.*off/i);
+    assert.equal(fallbackApi.getAttribute('data-tone'), 'warn');
+    const visionRow = page.container.querySelector('[data-setting-row="models:vision"]');
+    assert.equal(inside(visionRow, '[data-row-value]').textContent, 'Local model');
+    assert.equal(inside(visionRow, '[data-setting-meta]').getAttribute('data-tone'), null);
+    assert.equal(inside(page.container.querySelector('[data-setting-row="models:safety"]'), '[data-row-value]').textContent,
+        'Local model · as Main, via Light');
+    modelCatalog.adopt({ items: [], model_sources: [{ id: 'codex', label: 'Codex Renamed', credentialHarness: 'codex' }] });
+    await settle();
+    assert.match(mainMeta.textContent, /Codex Renamed subscription/);
+    assert.match(inside(head(page.container, 'fallback/1'), '.ui-row-meta').textContent, /Codex Renamed subscription/);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {

@@ -474,7 +474,7 @@ def test_a_cold_starts_failed_route_read_answers_for_the_route_it_asked_about(tm
     plan = cf.build_context_fit_plan(None, core, task, preferred_mode="max", route_resolver=resolver,
                                      reasoning_effort=effort)
     assert (plan.model, plan.provider, plan.status, plan.window_tokens) == (MODEL, "claudexor", "failed", 0)
-    assert plan.start == ("max", "") and task["model"] == "openai::gpt-6-sol"
+    assert plan.start == ("max", "unmeasured") and task["model"] == "openai::gpt-6-sol"  # no window: never a held Max
     assert state["route"].get("active_model_override") == (MODEL if pending else None)
 
 

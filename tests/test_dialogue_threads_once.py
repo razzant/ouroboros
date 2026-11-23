@@ -367,6 +367,7 @@ _BODY_DECODERS = {
     "ouroboros/place_arrivals.py::record_heard": "stored row, identity only",
     "ouroboros/place_arrivals.py::_room_details": "stored row, scalar title/name only",
     "ouroboros/place_arrivals.py::retain_focus_source": "stored row, its address only",
+    "ouroboros/dialogue_word_index.py::_post_segment": "stored row, its typed word fields only (never the thread)",
 }
 # Readers that hand a stored row on whole (a receipt, a comparison, a rebuilt source, the exports) expand it.
 _WHOLE_ROW_READERS = ("ouroboros/dialogue_store.py::append", "ouroboros/dialogue_store.py::_receipt",

@@ -7,6 +7,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildModelIndex, describeRoute, sameRoute } from '../modules/chat_model_routes.js';
+import { GENERIC_HARNESS_MARK } from '../modules/harness_presentation.js';
+import { applyPayload } from '../modules/i18n.js';
 import { createModelList, modelSearchField, routeFacts } from '../modules/model_list.js';
 import { modelSheetOutline, modelSheetRows } from './composer_controls_fixture.js';
 import { domDouble } from './dom_double.js';
@@ -249,6 +251,32 @@ test('a pointer presses a row to pick its model and a Pin to pin it; a Pin\'s pr
     // A Pin's state rides its row.
     assert.deepEqual([l.row(key(PINNED)).dataset.pinned, l.row(key(RECENT)).dataset.pinned], ['true', undefined]);
     assert.equal(l.row(key(PINNED)).querySelector('.chat-model-pin').getAttribute('title'), 'Unpin');
+});
+
+test('a saved route follows its published flag even with a local suffix, including after a language change', () => {
+    const saved = route('claudexor::codex=gpt-test (local)');
+    const store = storeOf({ catalog: {}, status: { read: true, failed: true }, pins: [saved] });
+    const l = mountList({ store, follows: false, current: saved });
+    const row = key(saved);
+    const seen = l.entry(row);
+    assert.deepEqual([seen.selected, seen.pin, seen.facts], [true, true, 'Codex · subscription']);
+    assert.notEqual(l.row(row).querySelector('.model-source-mark path').getAttribute('d'), GENERIC_HARNESS_MARK.path);
+    const local = describeRoute(store.index(), { ...saved, use_local: true });
+    assert.equal(routeFacts(local), 'Local · on this computer');
+    applyPayload({ language: 'ru', english: false, entries: {
+        'code:model.pay.local': { text: 'на этом компьютере' },
+        'code:model.pay.subscription': { text: 'по подписке' },
+    } });
+    try {
+        l.list.paint();
+        assert.equal(l.entry(row).facts, 'Codex · по подписке');
+        assert.equal(routeFacts(local), 'Local · на этом компьютере');
+        l.pin(row);
+        l.press(row);
+        assert.deepEqual([l.said.pins, l.said.routes], [[[saved, false]], [saved]]);
+    } finally {
+        applyPayload({ language: 'en', english: true, entries: {} });
+    }
 });
 
 test('a catalog price is said only where the row\'s context pays the catalog\'s Standard price', () => {

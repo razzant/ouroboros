@@ -147,13 +147,12 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
     """
     from types import SimpleNamespace
 
+    resume_point = state.get("resume_point") or {}
     _write(tools._ctx, SimpleNamespace(
         tools=tools, messages=messages, llm_trace=trace, accumulated_usage=usage, owner_msg_seen=seen,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
-        budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
-        context_model_role=str(state.get("context_model_role") or ""),
-        context_start=state.get("context_start")),
-        "candidate" if (state.get("resume_point") or {}).get("phase") == "candidate" else RESUMED)
+        budget_tail=str(resume_point.get("budget_tail") or "tool")),
+        "candidate" if resume_point.get("phase") == "candidate" else RESUMED, resumed_from=state)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -230,7 +229,8 @@ def _encode_working(ctx: Any, state: Dict[str, Any], encode: Any) -> tuple:
     return data, sum(map(len, tokenized.segments())), written
 
 
-def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -> None:
+def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
+           resumed_from: Optional[Dict[str, Any]] = None) -> None:
     from ouroboros.budget_pause import pending_tool_call_ids
     from ouroboros.owner_wait import continuation_state
     from ouroboros.utils import utc_now_iso, write_bytes_atomic
@@ -252,11 +252,11 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
                               active_context_mode=model_call.active_context_mode, active_role_override=model_call.model_role,
                               route_choice=after_fallback(ctx, not str(model_call.model_role or "").startswith("fallback:")))
         state["context_model_role"] = model_call.model_role or state["context_model_role"]
-    if boundary == RESUMED:  # written before the rebind: the plan is still the new worker's
-        state["context_model_role"] = limit_ctx.context_model_role
+    if resumed_from is not None:  # before rebind on either Resume boundary; the plan is still the new worker's
         from ouroboros.context_fit import carried_start
 
-        state["context_start"] = list(carried_start(limit_ctx.context_start))  # the source's start, or unknown
+        state["context_model_role"] = str(resumed_from.get("context_model_role") or "")
+        state["context_start"] = list(carried_start(resumed_from.get("context_start")))  # source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}

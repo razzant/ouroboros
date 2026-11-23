@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from tests._workspace_git import git_repository, world_git
+from tests._workspace_git import commit, git_repository, world_git
 from tests._worlds import clone_repository, world
 
 
@@ -256,6 +256,44 @@ def test_pull_uses_the_same_selected_binding_as_other_generic_vcs(tmp_path, monk
     assert seen == [project, system]
     assert f"root=active_workspace; repo={project}" in project_result
     assert f"root=system_repo; repo={system}" in system_result
+
+
+@pytest.mark.parametrize("diverged", [False, True], ids=["fast-forward", "diverged"])
+def test_pull_fetches_and_only_fast_forwards_the_selected_working_copy(tmp_path, monkeypatch, diverged):
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    registry, _ctx, system, working = _registry(tmp_path)
+    origin = _repo(tmp_path / "origin", "project")  # Same immutable base as the working copy.
+    _git(working, "remote", "add", "origin", origin.as_uri())
+    system_sha = _git(system, "rev-parse", "HEAD")
+
+    if diverged:
+        # An ordinary merge could succeed: the two branches edit different files.
+        (working / "local.txt").write_text("local work\n", encoding="utf-8")
+        local_sha = commit(working)
+    (origin / "project.txt").write_text("origin advanced\n", encoding="utf-8")
+    origin_sha = commit(origin)
+    assert subprocess.check_output(
+        ["git", "cat-file", "--batch-check"], cwd=working, input=f"{origin_sha}\n", text=True,
+    ).strip() == f"{origin_sha} missing"
+
+    result = registry.execute("vcs_pull_ff", {})
+
+    assert f"root=active_workspace; repo={working}" in result
+    assert _git(working, "symbolic-ref", "--short", "HEAD") == "master"
+    assert _git(working, "rev-parse", "origin/master") == origin_sha
+    if diverged:
+        assert "PULL_ERROR" in result
+        assert local_sha[:8] in result and origin_sha[:8] in result
+        assert _git(working, "rev-parse", "HEAD") == local_sha
+        assert (working / "local.txt").read_text(encoding="utf-8") == "local work\n"
+        assert (working / "project.txt").read_text(encoding="utf-8") == "base\n"
+        assert _git(working, "status", "--porcelain") == ""
+    else:
+        assert "PULL_ERROR" not in result and origin_sha[:8] in result
+        assert _git(working, "rev-parse", "HEAD") == origin_sha
+        assert (working / "project.txt").read_text(encoding="utf-8") == "origin advanced\n"
+    assert _git(system, "rev-parse", "HEAD") == system_sha
+    assert (system / "BIBLE.md").read_text(encoding="utf-8") == "system base\n"
 
 
 def test_light_mode_uses_selected_vcs_target_and_commit_stays_system_intrinsic(

@@ -427,23 +427,7 @@ def get_tools() -> List[ToolEntry]:
                 "reviewer": {"type": "string", "description": "One enabled catalog row by id or handle; empty = the Main model"},
             }, "required": ["reason"]},
         }, _request_deep_self_review),
-        ToolEntry("chat_history", {
-            "name": "chat_history",
-            "description": "Retrieve live and recent archived chat messages. Supports exact provenance/date filters, substring search, and pagination.",
-            "parameters": {"type": "object", "properties": {
-                "count": {"type": "integer", "default": 100, "description": "Number of messages (from latest)"},
-                "offset": {"type": "integer", "default": 0, "description": "Skip N from end (pagination)"},
-                "search": {"type": "string", "default": "", "description": "Text filter"},
-                "provider": {"type": "string", "default": "", "description": "Exact transport provider"},
-                "account_id": {"type": "string", "default": "", "description": "Exact transport account ID"},
-                "conversation_id": {"type": "string", "default": "", "description": "Exact transport conversation ID"},
-                "thread_id": {"type": "string", "default": "", "description": "Exact transport thread ID"},
-                "actor_id": {"type": "string", "default": "", "description": "Exact platform actor ID"},
-                "date_from": {"type": "string", "default": "", "description": "Inclusive ISO-8601 lower timestamp bound"},
-                "date_to": {"type": "string", "default": "", "description": "Inclusive ISO-8601 upper timestamp bound"},
-                "snapshot": {"type": "string", "default": "", "description": "Opaque snapshot returned by the first page; reuse it with offset to refuse shifted/mixed pages"},
-            }, "required": [], "additionalProperties": False},
-        }, _chat_history),
+        ToolEntry("chat_history", CHAT_HISTORY_SCHEMA, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
             "description": "Write working memory (scratchpad): append a timestamped block, or with replaces fold the named blocks (the sha256 after each heading; an "
@@ -610,6 +594,7 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
     _start_task,
 )
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports
+    CHAT_HISTORY_SCHEMA,
     _chat_history,
     _evolution_restart_block_reason,
     _prepare_self_change,

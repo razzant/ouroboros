@@ -320,7 +320,9 @@ def test_a_records_only_final_after_an_ack_returns_once_then_stays_the_record(re
     assert stored["result"] == FINAL and stored["wake_silent"] is True  # the record on the card; the wake ended quiet
     assert room.h.calls == 3
     note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
-    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and "Send it now, or finish again" in note
+    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note
+    assert "do not resend while its outcome is unknown" in note
+    assert "only if you know they were not sent here" in note and "Finish again to keep this text as your record" in note
     assert "A non-silent finish_task answer is posted" not in note  # the posting-form facts do not apply here
     pointer = pointer_of(room, body["turn_ref"])
     assert (pointer["outcome"], pointer["message"], pointer["finish_note"], pointer["transport_sends"]) == ("silent", "", FINAL, [ACK])

@@ -18,6 +18,7 @@ import { documentReaderKind } from './document_reader.js';
 // At most this many `[Attached file: …]` lines ride the message text.
 export const ATTACHMENT_PREVIEW_COUNT = 25;
 const KINDS = new Set(['image', 'video', 'audio', 'file']);
+const DELIVERY_FAILURES = new Set(['too_large', 'download_failed']);
 const UPLOAD_URL_RE = /^\/api\/files\/download\?upload=[0-9a-f]{32}_[^&#\s]+$/;
 const FILE_GLYPH = '<span class="chat-file-glyph" aria-hidden="true">▤</span>';
 
@@ -68,7 +69,8 @@ export function attachmentViews(value) {
     // Every attachment renders: ATTACHMENT_PREVIEW_COUNT bounds only the text tail.
     return value.filter((view) => view && typeof view === 'object').map((view) => {
         const url = String(view.url || '');
-        const available = view.available === true && UPLOAD_URL_RE.test(url);
+        const failure = DELIVERY_FAILURES.has(view.unavailable) ? view.unavailable : '';
+        const available = !failure && view.available === true && UPLOAD_URL_RE.test(url);
         const size = Number.isFinite(Number(view.size)) && view.size !== null && view.size !== '' ? Number(view.size) : null;
         return {
             // Bounded per code point, as the server labels it (chat_uploads._label): a server
@@ -79,6 +81,8 @@ export function attachmentViews(value) {
             size,
             available,
             url: available ? url : '',
+            ...(failure ? { unavailable: failure, ...(Number.isSafeInteger(view.limit_bytes) && view.limit_bytes > 0
+                ? { limit_bytes: view.limit_bytes } : {}) } : {}),
         };
     });
 }
@@ -92,7 +96,8 @@ export function attachmentViews(value) {
 export function paintAttachmentOutcome(bubble, annotation) {
     if (!bubble) return false;
     const rows = Array.isArray(annotation?.attachment_manifest) ? annotation.attachment_manifest : [];
-    const names = rows.filter((row) => row && typeof row === 'object' && row.status === 'rejected')
+    const names = rows.filter((row) => row && typeof row === 'object' && row.status === 'rejected'
+        && !DELIVERY_FAILURES.has(row.reason)) // these files already explain their absence in their own inert cards
         .map((row) => String(row.label || `#${Number(row.ordinal || 0) + 1}`));
     const text = names.length ? `${tr('chat.attachment_not_attached', 'Not attached to the task')}: ${names.join(', ')}` : '';
     const child = (name) => [...bubble.children].find((node) => node.classList?.contains(name));
@@ -124,7 +129,14 @@ function readable(view) {
     return kind === 'markdown' || kind === 'text' ? kind : '';
 }
 
-function cardHtml(view, atoms, note = view.available ? '' : tr('media.attachment_unavailable', 'Unavailable')) {
+function cardHtml(view, atoms, note = '') {
+    if (!note && !view.available) {
+        const limit = atoms.humanSize(view.limit_bytes);
+        note = view.unavailable === 'too_large' && limit
+            ? fmt('media.attachment_download_limit', { limit }, 'File exceeds the download limit ({limit})')
+            : view.unavailable === 'download_failed' ? tr('media.attachment_download_failed', 'File could not be downloaded')
+                : tr('media.attachment_unavailable', 'Unavailable');
+    }
     const meta = metaText(view, atoms, note);
     const kind = note ? '' : readable(view);
     return `<div class="chat-file-item${view.available ? '' : ' is-unavailable'}">
@@ -135,7 +147,7 @@ function cardHtml(view, atoms, note = view.available ? '' : tr('media.attachment
                 <span class="chat-file-name" title="${escapeHtmlAttr(view.name)}">${escapeHtml(view.name)}</span>
                 <span class="chat-file-meta">${escapeHtml(meta)}</span>
             </span>
-            ${kind ? atoms.readLabelHtml(kind) : '<span class="chat-file-more" aria-hidden="true">•••</span>'}
+            ${kind ? atoms.readLabelHtml(kind) : view.available ? '<span class="chat-file-more" aria-hidden="true">•••</span>' : ''}
         </button>
     </div>`;
 }

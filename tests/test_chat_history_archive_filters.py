@@ -256,5 +256,6 @@ def test_chat_history_tool_exposes_only_exact_filter_fields():
     assert set(tool.schema["parameters"]["properties"]) == {
         "count", "offset", "search", "provider", "account_id", "conversation_id",
         "thread_id", "actor_id", "date_from", "date_to", "snapshot",
+        "words", "room_id", "voice", "order",  # the words reader (tests/test_chat_history_words.py)
     }
     assert tool.schema["parameters"]["additionalProperties"] is False

@@ -777,6 +777,8 @@ class AnswerObject:
     codes: Tuple[str, ...]
     message: str = ""
     inline: bool = False  # embedded JSON after non-SSE prose in a string
+    via: str = ""  # parent field carrying this object; blank at the answer's root
+    error_text: Tuple[Tuple[str, str], ...] = ()  # normalized non-message error carriers, not sibling diagnostics
 
 
 @dataclass(frozen=True)
@@ -811,6 +813,22 @@ class ProviderAnswer:
             if i > root and not obj.history and obj.parent in selected:
                 selected.append(i)
         return selected
+
+    def direct_error(self, index: int, *, raw_text: bool = False) -> bool:
+        """Direct body or its bare JSON/SSE error forward, never a cited or diagnostic object."""
+        path = []
+        while index > 0:
+            obj = self.objects[index]
+            if obj.history or obj.inline or obj.parent < 0:
+                return False
+            path.append(obj.via)
+            index = obj.parent
+        # Plain ``metadata.raw`` text sits on the metadata object; its decoded JSON would be a child.
+        if raw_text:
+            if not path or path[0] != "metadata":
+                return False
+            path = path[1:]
+        return path in ([], [""], ["error", ""], ["raw", "metadata"], ["error", "raw", "metadata"])
 
     def facts(self, quoted: Tuple[str, str] = ("", ""), **recognition: Any) -> Dict[str, Any]:
         """This answer for the owner line and the mind that continues, sanitized: the quoted ``speaker`` and
@@ -883,13 +901,13 @@ def provider_answer(source: Any) -> ProviderAnswer:
             for key, value in node.items())
 
     def walk(node: Any, speaker: str, history: bool, lists_are_history: bool, parent: int = -1,
-             inline: bool = False) -> None:
+             inline: bool = False, via: str = "") -> None:
         left[0] -= 1
         if left[0] <= 0:
             return
         if isinstance(node, list):
             for item in node:
-                walk(item, speaker, history or lists_are_history, lists_are_history, parent, inline)
+                walk(item, speaker, history or lists_are_history, lists_are_history, parent, inline, "[]")
             return
         if isinstance(node, str):
             node = {"": node}
@@ -898,7 +916,7 @@ def provider_answer(source: Any) -> ProviderAnswer:
         index, said_start, code_start = len(objects), len(said), len(codes)
         if isinstance(node.get("provider_name"), str) and node["provider_name"].strip():
             speaker = node["provider_name"].strip()
-        inner, message = [], ""
+        inner, error_text, message = [], [], ""
         for key, value in sorted(node.items(), key=lambda item: item[0] != "message"):  # its message leads
             if key in _ANSWER_CODE_KEYS:
                 if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
@@ -907,16 +925,18 @@ def provider_answer(source: Any) -> ProviderAnswer:
                 documents, words = opened(value)
                 if key == "message":
                     message = words
+                elif words and key in ("", "detail", "raw"):
+                    error_text.append((key, words))
                 if " " in words or (words and key == "message"):  # a ``message`` is a sentence even as one word
                     said.append((speaker, words, history))
-                inner.extend((document, None, embedded) for document, embedded in documents)
+                inner.extend((document, None, embedded, key) for document, embedded in documents)
             elif isinstance(value, (dict, list)):
-                inner.append((value, lists_are_history, inline))
+                inner.append((value, lists_are_history, inline, key))
         objects.append(AnswerObject(node, parent, speaker, history,
                                     tuple(row[1] for row in said[said_start:]),
-                                    tuple(row[1] for row in codes[code_start:]), message, inline))
-        for value, rule, embedded in inner:  # an opened document applies the history rule to itself
-            walk(value, speaker, history, states(value) if rule is None else rule, index, inline or embedded)
+                                    tuple(row[1] for row in codes[code_start:]), message, inline, via, tuple(error_text)))
+        for value, rule, embedded, key in inner:  # an opened document applies the history rule to itself
+            walk(value, speaker, history, states(value) if rule is None else rule, index, inline or embedded, key)
 
     def read(payload: Any) -> Optional[int]:
         top = payload["error"] if isinstance(payload, dict) and isinstance(payload.get("error"), (dict, str)) else payload

@@ -1,10 +1,12 @@
 """Main's route-bound window facts, independent of review capability authority.
 
 Acceptances are lower bounds, never evidence of room for a reply. A numbered
-refusal, or a numberless one at the refused request's measured size, caps (never
-raises) its kind of limit until a later larger acceptance or the 24-hour evidence
-expiry; a cold numberless refusal adds none (``record_refusal``).
-The observations share the capability JSON store; old stores need no migration.
+refusal or a measured refusal outside the text Chat start-hint scope may cap its
+kind of limit (``record_refusal``). Comparable numberless Chat refusals instead
+inform first-send composition, independently of window authority, so other foci
+of that route take no cap from them and meet their own refusal (a residual whose
+cost is not measured). Both share the capability JSON store; old stores need no
+migration.
 """
 from __future__ import annotations
 
@@ -213,6 +215,334 @@ def route_observation_scope(route, settings, *, target=None) -> str:
     payload = {"provider": identity.get("provider", target["provider"]), "model": identity.get("model", route["model"]),
                "base_url": identity.get("dispatch_base_url", target.get("base_url", "")), "credentials": credentials}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
+
+
+_START_HINTS = "main_first_contact"
+_START_ROWS = 16  # per outcome kind and exact scope; _trim_start_rows adds back what the reader derives
+
+
+def _http_chat_target(target) -> bool:
+    from ouroboros.llm_fallback import _wire_surface
+    from ouroboros.provider_models import OPENAI_API_SURFACES
+
+    return bool(target and target.get("provider") not in {None, "", "local", "claudexor", "gigachat"}
+                and _wire_surface(target) == OPENAI_API_SURFACES["chat_completions"])
+
+
+def first_contact_scope(target, reply_cap: int, *, payload=None) -> str:
+    """Comparable HTTP Chat sends share the exact credentialed route, raw measure and reply allowance.
+
+    A local server, a subscription harness and GigaChat may carry a Chat-shaped body, but their sizes are
+    not comparable with an HTTP credential's, so this hint scopes none of them. ``_wire_surface`` itself
+    keeps naming the wire for every transport: its other readers price and finalize a send by it.
+    """
+    from urllib.parse import urlsplit
+    if (not _http_chat_target(target) or not target.get("capability_route") or not target.get("api_key")
+            or target.get("keyless") or not target.get("resolved_model") or reply_cap <= 0):
+        return ""
+    try:
+        endpoint = urlsplit(target.get("base_url", ""))
+        if endpoint.scheme not in {"http", "https"} or not endpoint.hostname:
+            return ""
+    except ValueError:
+        return ""
+    route = dict(provider=target["provider"], model=target["resolved_model"], use_local=False)
+    scope = route_observation_scope(route, None, target={**target, "capability_route": {
+        **target["capability_route"], "model": target["resolved_model"]}})
+    if scope and target["provider"] == "openrouter":
+        import hashlib
+        import json
+        from ouroboros.llm_routing import openrouter_chat_routing, sealed_provider_routing
+
+        # A fresh chat has no assistant replay. At send, take the finalized SDK carrier, not current settings.
+        routing = openrouter_chat_routing(target, []) if payload is None else sealed_provider_routing(payload)
+        if routing is None and payload is not None:
+            extra = payload.get("extra_body")
+            if "provider" in payload or (isinstance(extra, dict) and "provider" in extra):
+                return ""  # null is a submitted value, not omission
+        if routing is not None and not isinstance(routing, dict):
+            return ""
+        try:
+            digest = hashlib.sha256(json.dumps(routing or {}, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        except (TypeError, ValueError):
+            return ""
+        scope = f"{scope}:{digest}"  # never matches old observations which omitted the routing carrier
+    return f"chat_function_raw_v2:{scope}:{reply_cap}" if scope else ""  # v1 also accepted tool-less replies
+
+
+def text_chat_rows(rows) -> bool:
+    """Only text content has the estimate's comparability; image pricing is a different measure."""
+    return bool(rows) and all(isinstance(row, dict) and not row.get("audio") and (
+        row.get("content") is None or isinstance(row.get("content"), str)
+        or isinstance(row["content"], list) and all(isinstance(part, dict) and part.get("type") == "text"
+                                                   for part in row["content"])) for row in rows)
+
+
+def signed_first_contact(physical, target, payload, reply_cap):
+    """Stamp only the final Chat candidate of a fresh direct chat's plan (``ContextFitPlan.first_contact``), with the
+    scope its resolved target and reply allowance actually give it; other foci keep the window learning they had.
+    Advice compares function-schema Chat bodies only, not tool-less, server-tool or custom bodies."""
+    from ouroboros.request_wire_contract import infer_tool_dialect
+
+    if physical is None:
+        return None
+    planned = (physical.first_contact_plan or ("",))[0]
+    compare = (planned and physical.view_kind == "owner_turn" and physical.rendered_mode in {"max", "low"}
+               and physical.preferred_mode in {"max", "low"} and physical.round_id)
+    actual = first_contact_scope(target, reply_cap, payload=payload) if planned else ""
+    scope = actual if (compare and actual and payload.get("model") == target.get("resolved_model")
+            and infer_tool_dialect(payload) == "function"
+            and isinstance(payload.get("messages"), list) and text_chat_rows(payload["messages"])) else ""
+    bound = physical.window_witness_bound
+    if planned and bound:  # even when the physical target no longer speaks Chat
+        route = dict(provider=target["provider"], model=target.get("resolved_model"), use_local=False)
+        bound = bool(actual and payload.get("model") == target["resolved_model"]
+                     and actual.rpartition(":")[0] == planned.rpartition(":")[0]
+                     and route_observation_scope(route, None, target=target) == physical.window_observation_fp)
+    if scope or physical.first_contact_scope or bound != physical.window_witness_bound:
+        from dataclasses import replace
+
+        return replace(physical, first_contact_scope=scope, first_contact_dispatch=None, window_witness_bound=bound)
+    return physical
+
+
+def first_contact_rebound(physical) -> bool:
+    """A start the hint shaped for one scope is about to go out under another (a key, account, cap or tool dialect
+    changed between fit and dispatch): it is sent in its ordinary form instead (``loop_model_call``)."""
+    planned, hinted = getattr(physical, "first_contact_plan", None) or ("", False)
+    return bool(hinted and planned != physical.first_contact_scope)
+
+
+def first_contact_route_scope(route) -> tuple[str, int]:
+    """``(scope, reply cap)`` of a fit route's resolved target (``first_contact_scope``), ``("", 0)`` for a local or
+    unresolved one: what a fresh chat's start fit reads, and what a route rebind must still resolve to for an unsent
+    hint to stay armed (``loop_routes.first_contact_route``)."""
+    from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
+    from ouroboros.response_limits import response_limit_for_target
+
+    target = None if route.get("use_local") else route.get("_resolved_target")
+    if not target:
+        return "", 0
+    cap = response_limit_for_target(target).ceiling(MAIN_LOOP_MAX_TOKENS)
+    return first_contact_scope(target, cap), cap
+
+
+def _live_start_rows(rows):
+    from ouroboros.capability_evidence import _CONFIRMED_TTL_SEC
+
+    return [row for row in rows if _window_age(row["at"]) <= _CONFIRMED_TTL_SEC]
+
+
+#: The Max wire: a whole-book send, whole or with memory folded. ``low`` is any other chapter-map send (a known window's
+#: Low, the owner's Low, a start the hint already took to maps); ``maps`` only a same-round retry after a Max refusal.
+_MAX_FORMS = frozenset({"ordinary", "folded"})
+_COVER = "cover"  # the one accepted row standing for the replies the bound folded (``_trim_start_rows``)
+
+
+def _start_form(physical) -> str:
+    origins = (physical.prefix or {}).get("origins", ())
+    if physical.rendered_mode == "low":
+        return ("maps" if physical.preferred_mode == "max" and physical.automatic_pass_used and "low_retry" in origins
+                else "low")
+    return "folded" if "memory_coarsened" in origins else "ordinary"
+
+
+def _pending_starts(rows):
+    """`(refused, followed by a maps rung)` for each refusal no later, no smaller acceptance answers, in exact dispatch
+    order, not publication or wall time. A refused same-round maps send is one too: which start it may bound is
+    ``first_contact_limits``' to say."""
+    answered, maps_rounds = 0, set()
+    for row in reversed(rows):
+        if row["form"] == "maps":
+            maps_rounds.add(row["round"])
+        if row["accepted"]:
+            answered = max(answered, row["raw"])
+        elif row["raw"] > answered:
+            yield row, row["round"] in maps_rounds
+
+
+def _maps_proof(rows, refusal):
+    """The later same-round row that made this refusal's round a proven maps rung."""
+    return next((row for row in rows if row["order"] > refusal["order"] and row["round"] == refusal["round"]
+                 and row["form"] == "maps"), None)
+
+
+def _trim_start_rows(ordered):
+    """Bound the dispatch-ordered set without erasing what the reader derives from it.
+
+    Recency alone is not a bound on meaning: ``first_contact_limits`` reads the smallest and the largest
+    still-unanswered refusal of each class, so a live 548k witness must not leave the set merely because
+    sixteen smaller refusals arrived, and a preserved maps rung keeps the same-round row that proved it.
+    Replies past the newest ``_START_ROWS`` fold into one conservative watermark, the ``cover`` row: accepted at
+    the largest dispatch order and the largest size any of them had, so it answers every refusal they could, one
+    still settling included, and may answer more (a hint lost, never a false one), while a refusal larger than all
+    of them keeps its own witness. A refusal neither live nor a maps proof says nothing and leaves, so an answered
+    refusal never revives when its answer is folded. Bounded by the newest ``_START_ROWS`` of each outcome, each
+    class's two extremes with their proofs and one cover; every other kept row is the very same object, so each
+    original ``at``, and with it its own expiry, stays untouched (the cover keeps its newest reply's).
+    """
+    pending = {row["order"]: maps for row, maps in _pending_starts(ordered)}
+    cells, proofs = {}, set()
+    for row in ordered:
+        if row["order"] in pending:
+            cells.setdefault((pending[row["order"]], row["form"]), []).append(row)
+    replies = [row for row in ordered if row["accepted"] and row["form"] != _COVER]
+    keep = {row["order"] for row in replies[-_START_ROWS:] + [r for r in ordered if not r["accepted"]][-_START_ROWS:]}
+    for (maps, _form), cell in cells.items():
+        for edge in (min(cell, key=lambda row: row["raw"]), max(cell, key=lambda row: row["raw"])):
+            keep.add(edge["order"])
+            if maps and (proof := _maps_proof(ordered, edge)):
+                keep.add(proof["order"])
+                proofs.add(proof["order"])
+    folded, said = [row for row in ordered if row["accepted"] and row["order"] not in keep], pending.keys() | proofs
+    kept = [row for row in ordered if row["order"] in keep and (row["accepted"] or row["order"] in said)]
+    if folded:  # an earlier cover is folded again with them
+        newest = max(folded, key=lambda row: row["order"])
+        kept.append({"attempt": "", "order": newest["order"], "at": newest["at"], "round": "",
+                     "raw": max(row["raw"] for row in folded), "form": _COVER, "accepted": True})
+    return sorted(kept, key=lambda row: row["order"])
+
+
+def first_contact_limits(target, reply_cap: int, *, scope=None) -> tuple[int, int, int]:
+    """``(Max wire, before maps, any form)``: the raw refused Max-wire size for ordinary folding (a whole send's,
+    else a folded one's), the refused Max size a real same-round maps send followed, and the smallest refused size
+    of any form, a refused maps rung included (what a chapter-map start compares with). A chapter-map refusal never
+    bounds a Max start."""
+    from ouroboros import capability_evidence as ce
+
+    if scope is None:
+        scope = first_contact_scope(target, reply_cap)
+    if not scope:
+        return 0, 0, 0
+    rows = (ce._read(ce.canonical_evidence_root()).get(_START_HINTS) or {}).get(scope, [])
+    refused = list(_pending_starts(_live_start_rows(rows)))
+    wire = [(row, maps) for row, maps in refused if row["form"] in _MAX_FORMS]
+    return (min((row["raw"] for row, _ in wire if row["form"] == "ordinary"),
+                default=min((row["raw"] for row, _ in wire), default=0)),
+            min((row["raw"] for row, maps in wire if maps), default=0),
+            min((row["raw"] for row, _ in refused), default=0))
+
+
+def _answers_for(row, other) -> bool:
+    """``row`` answers every refusal ``other`` could, published or still settling: usable, dispatched later, no smaller."""
+    return row["accepted"] and row["order"] > other["order"] and row["raw"] >= other["raw"]
+
+
+def _routine(rows, event) -> bool:
+    """An acceptance that cannot change dispatch-ordered cover: a stored reply already answers for it (a maps proof
+    always counts). Whether a refusal stands yet is irrelevant: an older one may still be settling."""
+    return event["form"] != "maps" and any(_answers_for(row, event) for row in rows)
+
+
+def _start_event(capture, *, accepted: bool):
+    """This send's outcome as plain data, ``[scope, event]`` bound to its dispatch order; None for a replay of an
+    expired address, which is no new observation."""
+    physical = capture.physical_context
+    order, at = physical.first_contact_dispatch
+    event = {"attempt": capture.attempt_id, "order": order, "at": at, "round": physical.round_id,
+             "raw": capture.prompt_tokens_bounded_estimate, "form": _start_form(physical), "accepted": accepted}
+    return [physical.first_contact_scope, event] if _live_start_rows([event]) else None
+
+
+def publish_start_outcome(outcome) -> None:
+    """One receipt (``_start_event``), one locked merge; a routine success (``_routine``) is read, never written."""
+    from ouroboros import capability_evidence as ce
+
+    if not outcome:
+        return
+    scope, event = outcome
+    accepted, root = event["accepted"], ce.canonical_evidence_root()
+    if accepted and _routine(_live_start_rows((ce._read(root).get(_START_HINTS) or {}).get(scope, [])), event):
+        return
+    try:
+        with ce._store_transaction(root):
+            data = ce._load(root)
+            routes = data.setdefault(_START_HINTS, {})
+            rows = _live_start_rows(routes.get(scope, []))
+            if any(row["attempt"] == event["attempt"] or row["order"] == event["order"] for row in rows):
+                return
+            if accepted and _routine(rows, event):
+                return
+            # The replies it answers for go (a maps proof stays): what is left is a dispatch-ordered skyline.
+            kept = [row for row in rows if not (accepted and row["accepted"] and row["form"] != "maps"
+                                                and _answers_for(event, row))]
+            # An acceptance can arrive before an older refusal is published: trim by meaning, not by count.
+            updated = _trim_start_rows(sorted([*kept, event], key=lambda row: row["order"]))
+            if updated != rows:
+                data[_START_HINTS] = {key: fresh for key, prior in routes.items() if (fresh := _live_start_rows(prior))}
+                data[_START_HINTS][scope] = updated
+                ce._save(root, data)
+    except OSError:  # optional evidence; the provider's actual outcome still stands
+        return
+
+
+def _current_request_receipt(capture, call, round_id) -> bool:
+    physical = getattr(capture, "physical_context", None)
+    return bool(physical and round_id and physical.round_id == round_id
+                and capture.attempt_id and call.get("physical_attempt_id") == capture.attempt_id
+                and capture.state in {"dispatched", "settled", "unresolved"}
+                and capture.candidate_measurement_kind == "canonical_json_v1" and capture.candidate_manifest_ref
+                and capture.prompt_tokens_bounded_estimate > 0)
+
+
+def _advice_dispatched(capture) -> bool:
+    physical = getattr(capture, "physical_context", None)
+    return bool(getattr(physical, "first_contact_scope", "") and physical.first_contact_dispatch)
+
+
+def start_answer(usage, capture, round_idx: int):
+    """This round's usable reply as its own send's receipt (``_start_event``, plain data), else None: the capture is
+    the reply's own attempt in this round, with no provider error, body error or substituted model."""
+    call = usage.get("_last_llm_call_meta") or {}
+    round_id = f"{usage['execution_id']}:round:{round_idx}" if usage.get("execution_id") else ""
+    if (_advice_dispatched(capture) and _current_request_receipt(capture, call, round_id) and call.get("round_id") == round_id
+            and not capture.provider_error_type and capture.provider_status_code is None
+            and not call.get("provider_body_error") and not usage.get("_model_substitutions")):
+        return _start_event(capture, accepted=True)
+    return None
+
+
+def record_start_answer(usage, capture, round_idx: int) -> None:
+    """Called only after the Main loop accepts a usable result, including replies without usage. A forced wrap-up
+    takes its receipt at its call (``start_answer``) and publishes it only for a reply its rail keeps."""
+    publish_start_outcome(start_answer(usage, capture, round_idx))
+
+
+def record_start_refusal(usage, capture, round_id: str) -> bool:
+    """The advisory hint takes only a qualified refusal that stated no numbers."""
+    fact = _current_chat_refusal(usage, capture, round_id) if _advice_dispatched(capture) else None
+    if fact is None or fact.has_numbers:
+        return False
+    publish_start_outcome(_start_event(capture, accepted=False))
+    return True
+
+
+def _current_chat_refusal(usage, capture, round_id: str):
+    """This send's own whole-request refusal, before applying the distinct numeric and advisory policies."""
+    from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, INPUT_STRING_LENGTH_CODES, SIZE_REFUSAL_STATUSES
+    from ouroboros.size_refusal import SizeRefusal, stamped
+
+    call, answer = (usage.get(key) or {} for key in ("_last_llm_failure", "_last_llm_provider_answer"))
+    if not _current_request_receipt(capture, call, round_id) or call.get("failure_code") != "context_overflow":
+        return None
+    finish = str(call.get("size_finish") or "").lower()
+    codes = {str(call.get("provider_code") or "").lower(), finish,
+             *(str(code).lower() for _who, code in answer.get("codes") or ())}
+    status, body = capture.provider_status_code, bool(call.get("provider_body_error"))
+    if answer.get("basis") in UNTAUGHT_BASES or codes & INPUT_STRING_LENGTH_CODES:
+        return None
+    if status in SIZE_REFUSAL_STATUSES and not body:
+        fact = stamped(usage)
+        if status == 413 and not (fact and fact.token_window and answer.get("basis") == "typed"
+                                  and codes & CONTEXT_OVERFLOW_CODES):
+            return None  # a bare, prose-only or body-size 413 never teaches from an estimate or a cited number
+    elif status is None and body and isinstance(answer.get("size"), dict):
+        fact = SizeRefusal(**answer["size"])
+    elif status is None and not body and not (answer.get("size") or answer.get("sentence")) and finish in CONTEXT_OVERFLOW_CODES:
+        fact = SizeRefusal(source="finish", own=True)
+    else:
+        return None
+    return fact if fact is not None and fact.own and fact.source not in {"", "excluded", "status_413"} else None
 
 
 def _event_time(value: str):
@@ -442,13 +772,13 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
-def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_estimate") -> None:
+def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_estimate", *,
+                   candidate=None, round_id: str = "") -> bool:
     """Record a typed size refusal for the refusing account: its stated limit (``provider_stated``), else
     ``refused_input`` under ``basis``: ``anchored_estimate``, or ``exact_local_count`` where a local instance counted it.
 
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
-    accepted request of this conversation), passed only when measured: Codex states no number, and a
-    route that never records its refusals keeps planning at a larger acceptance and is refused again.
+    accepted request of this conversation), passed only when measured and outside the Chat start-hint scope.
     A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
     reply too, so it is recorded as the total's own refusal (``WindowRecord.admitted`` then charges the reserve).
     Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
@@ -458,38 +788,58 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     limit. A refusal typed only by the Z.ai 1261 pair while stating no token window (#3858, ``SizeRefusal.retry_only``)
     records nothing at any size either. Below an accepted input, a token limit teaches only a single-server route
     (local or custom OpenAI-compatible): that server may have restarted smaller. A gateway scope does not name the
-    serving endpoint; its smaller statement sizes only this round (``loop_model_call._refusal_window``)."""
+    serving endpoint; its smaller statement sizes only this round (``loop_model_call._refusal_window``).
+    False means the refusal did not qualify for a window observation or rebind."""
     from ouroboros import capability_evidence as ce
     from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
 
-    plan = observed_plan(plan, usage)
+    plan = observed_plan(plan, usage, candidate)
     if (plan is None or not getattr(plan, "window_witness_bound", True)
             or (usage.get("_last_llm_provider_answer") or {}).get("basis") in UNTAUGHT_BASES):
-        return
+        return False
     from ouroboros.size_refusal import for_usage
-    refusal = for_usage(usage)
+
+    chat = planned_chat(candidate)
+    refusal = _current_chat_refusal(usage, candidate, round_id) if chat else for_usage(usage)
+    if refusal is None:
+        return False
     limit = refusal.token_window
     if not limit and refusal.retry_only:
-        return
+        return False
     if not limit:
         if (int(refused_input or 0) > 0
                 and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):
             record, size = getattr(plan, "window_record", None), int(refused_input)
             total = record.total.tokens if record is not None and record.total else 0
             confirms = total - (record.reserve if record is not None else 0) < size <= total
-            record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
-                               refused=total if confirms else size, kind="total" if confirms else "input")
-        return
+            if confirms or not chat:
+                record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
+                                   refused=total if confirms else size, kind="total" if confirms else "input")
+                return True
+        return False
     rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(observation_scope(plan)) or {})
     single_server = getattr(plan, "provider", "") in {"local", "openai-compatible"}
     if not single_server and limit < max((row.get("accepted", 0) for row in rows.get("observations", [])), default=0):
-        return
+        return False
     record_observation(ce.canonical_evidence_root(), observation_scope(plan), refused=limit,
                        kind=refusal.store_kind, basis="provider_stated")
+    return True
 
 
-def observed_plan(plan, usage):
-    """Bind a settled native request to its observed account, never Auto's advertisement."""
+def planned_chat(candidate) -> bool:
+    """The physical candidate was composed for a Chat route, whether or not it can advise a future send."""
+    return bool(getattr(getattr(candidate, "physical_context", None), "first_contact_plan", None))
+
+
+def observed_plan(plan, usage, candidate=None):
+    """Keep a witnessed plan's own window; bind Native to its observed account, never Auto's advertisement."""
+    physical = getattr(candidate, "physical_context", None)
+    if (candidate is None and getattr(plan, "first_contact", "") and getattr(plan, "initial_mode", "") in {"max", "low"}
+            and getattr(plan, "provider", "") not in {"claudexor", "anthropic", "local", "gigachat"}):
+        return None  # this Chat plan has no physical receipt to bind
+    if planned_chat(candidate) and (not physical.window_witness_bound
+                                    or physical.window_observation_fp != observation_scope(plan)):
+        return None  # the final Chat target differed from the plan; its own soft outcome can still be read
     if getattr(plan, "provider", "") != "claudexor":
         return plan
     from dataclasses import replace

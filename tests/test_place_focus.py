@@ -988,7 +988,7 @@ def test_a_handed_off_or_scheduled_roots_finish_follows_its_connectors_declarati
     active = run()
     if door:
         allowed, note = prepare_focus_reply(active, "Hello")
-        assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD] Nothing was posted"), note
+        assert not allowed and note.startswith("[FOCUS_FINISH_IS_A_RECORD] This finish was not posted"), note
         assert "Confirmed sent there by this run: " in note and "Your finish is your record" in note
     assert prepare_focus_reply(active, "Hello") == (True, "")
     assert active._presence_completion["outcome"] == ("silent" if door else "message")
@@ -1241,6 +1241,55 @@ def test_a_restart_after_a_door_roots_saved_answer_reads_the_record_note_first(f
     event = build_presence_result_event(task, text, registry._ctx, terminal_origin=usage.get("terminal_origin", ""),
                                         silent=usage.get("wake_silent") is True)
     assert text == "Hello" and (event["outcome"], event["text"]) == ("silent", "")
+
+
+@pytest.mark.parametrize("saved", ["dispatch", "pending", "legacy_possible", "legacy_result", "other_conversation"])
+def test_a_restored_record_keeps_send_audience_and_does_not_invite_a_repeat(focus, monkeypatch, saved):
+    from ouroboros.owner_wait import continuation_state, restore_continuation_state
+    from ouroboros.place_guard import this_turn_sends
+    from ouroboros.place_reply import prepare_focus_reply
+    from tests.test_place_reply_revision import promoted
+    from tests.test_working_checkpoint import _registry
+
+    root = focus[0]
+    door = _publish_bridge_send(monkeypatch, effect="message", target=["channel"], conversation="channel")
+    task = promoted(task_for(focus))
+    task["metadata"]["presence"]["event"]["conversation_key"] = own = "chat:a:r:0"
+    other = "chat:a:r:other"
+    sent = {"tool": door, "at": "2026-01-01T00:00:00Z", "text": "Prior update",
+            "conversation_keys": [other if saved == "other_conversation" else own]}
+    earlier = _registry(root, monkeypatch, task["id"], 1)
+    earlier._ctx.task_metadata, earlier._ctx.task_contract = task["metadata"], task["task_contract"]
+    earlier._ctx._completion_riding_send = False
+    messages, trace = [], {"presence_no_send": {"sends": "possible"}} if saved == "legacy_possible" else {}
+    if saved in ("dispatch", "other_conversation"):
+        earlier._ctx._place_message_calls = [sent]
+    if saved == "legacy_result":
+        trace["tool_calls"] = [{"tool": door, "status": "timeout", "is_error": True}]
+    if saved == "pending":
+        messages.append({"role": "assistant", "content": None, "tool_calls": [{
+            "id": "synthetic", "type": "function", "function": {"name": door,
+                "arguments": json.dumps({"channel": "r", "text": "Prior update"})}}]})
+    state = json.loads(json.dumps(continuation_state(earlier._ctx, messages, trace, {}, 1, [], set())))
+    resumed = _registry(root, monkeypatch, task["id"], 2)
+    ctx = resumed._ctx
+    ctx.task_metadata, ctx.task_contract = task["metadata"], task["task_contract"]
+    restore_continuation_state(resumed, state, [], {}, {}, set())
+
+    own_sends = this_turn_sends(ctx, own)["calls_without_receipt"]
+    assert [row["text"] for row in own_sends] == ([sent["text"]] if saved == "dispatch" else [])
+    allowed, note = prepare_focus_reply(ctx, "Internal record")
+    assert not allowed
+    if saved == "other_conversation":
+        assert [row["text"] for row in this_turn_sends(ctx, other)["calls_without_receipt"]] == [sent["text"]]
+        assert sent["text"] not in note
+        assert "do not resend while its outcome is unknown" in note
+        assert "only if you know they were not sent here" in note
+    else:
+        assert "do not send it again while its outcome is unknown" in note
+        assert "Send these words explicitly" not in note
+    assert prepare_focus_reply(ctx, "Internal record") == (True, "")
+    assert ctx._presence_completion["quiet"] and ctx._presence_completion["outcome"] == "silent"
 
 
 def test_a_handed_off_roots_door_line_reads_the_place_as_it_is_now(focus, monkeypatch):
