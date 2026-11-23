@@ -797,8 +797,11 @@ def test_scheduled_notes_reach_the_first_physical_start_after_unrun_refusal(
 
 
 @pytest.mark.parametrize("restored", [False, True], ids=["live", "restored"])
-def test_independent_run_does_not_consume_scheduled_notes(tmp_path, monkeypatch, named_session, restored):
+@pytest.mark.parametrize("continuation", ["no-continuation", "continued", "pending-continuation"])
+def test_independent_run_does_not_consume_scheduled_notes(tmp_path, monkeypatch, named_session, restored, continuation):
     from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_bootstrap_identity import read_identity
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.subagent_bootstrap import bootstrap_before_context
     from ouroboros.subagent_runtime import delegate_start_entry
 
@@ -813,22 +816,48 @@ def test_independent_run_does_not_consume_scheduled_notes(tmp_path, monkeypatch,
     assert "## Named knowledge notes" not in independent["instructions"]
     assert custody.emit(tmp_path, custody.SETTLED, {"run_id": separate["run_id"], "task_id": nanny.task_id,
                                                    "route": "codex", "state": "succeeded"})
+    physical_runs = 1
+    if continuation != "no-continuation":
+        start_run = engine.start_run
+
+        def lose_reply(*args, **kwargs):
+            start_run(*args, **kwargs)
+            raise ClaudexorUnavailable("daemon_unreachable", "Synthetic lost continuation reply.")
+
+        with monkeypatch.context() as fault:
+            if continuation == "pending-continuation":
+                fault.setattr(engine, "start_run", lose_reply)
+            followup = json.loads(delegate_start_entry(nanny, "Summarize its result.", continue_from=separate["run_id"]).text)
+        if continuation == "continued":
+            assert followup["status"] == "started", followup
+            physical_runs += 1
+            assert custody.emit(tmp_path, custody.SETTLED, {"run_id": followup["run_id"], "task_id": nanny.task_id,
+                                                           "route": "codex", "state": "succeeded"})
+        invocation = followup.get("invocation_id") or followup["pending_invocation_id"]
+        assert custody.invocation_record(tmp_path, invocation)["continuation_of"] == separate["run_id"]
+        assert "## Named knowledge notes" not in engine.requests[-1]["prompt"] + engine.requests[-1]["instructions"]
+    assert not read_identity(tmp_path, nanny.task_id)
+    before = list(engine.requests)
     if restored:
         nanny = _child(tmp_path, session)
         wake = json.loads(bootstrap_before_context(nanny, {**session, "_working_recovery": {}}, dispatch))
-        assert wake["continuation"]["delegated_runs_started"] == 1 and engine.requests == [independent], wake
+        assert wake["continuation"]["delegated_runs_started"] == physical_runs and engine.requests == before, wake
     assert nanny._configured_actor_bootstrap["physical_started"] is True
 
-    assigned = json.loads(delegate_start_entry(nanny).text)
+    # An unrelated pending run does not prohibit a new prompt; it does fence an empty replacement.
+    prompt = "Proceed with the scheduled task." if continuation == "pending-continuation" else ""
+    assigned = json.loads(delegate_start_entry(nanny, prompt).text)
     assert assigned["status"] == "started", assigned
-    _, request = engine.requests
+    assert engine.requests[:-1] == before
+    request = engine.requests[-1]
     assert request["prompt"] == compile_external_work_order(session)
     assert _named_block(revisions, "Alpha plan", "alpha-plan") in request["instructions"]
+    assert custody.invocation_record(tmp_path, assigned["invocation_id"])["named_notes"] == assigned["named_notes"]
     assert custody.emit(tmp_path, custody.SETTLED, {"run_id": assigned["run_id"], "task_id": nanny.task_id,
                                                    "route": "codex", "state": "failed"})
-    replacement = json.loads(delegate_start_entry(nanny).text)
+    replacement = json.loads(delegate_start_entry(nanny, prompt).text)
     assert replacement["status"] == "started" and "named_notes" not in replacement, replacement
-    assert len(engine.requests) == 3 and "## Named knowledge notes" not in engine.requests[-1]["instructions"]
+    assert len(engine.requests) == len(before) + 2 and "## Named knowledge notes" not in engine.requests[-1]["instructions"]
 
 
 @pytest.mark.parametrize("saved, explicit, probes", [
