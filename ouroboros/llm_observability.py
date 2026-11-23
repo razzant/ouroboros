@@ -126,6 +126,152 @@ def retain_cancelled_response(request, response, capture, *, control_reason: str
     )
 
 
+class SendRefusals:
+    """Observe each physical refusal before an inner retry can replace its capture. The caller's claim and end
+    observer keep their existing contract. The receiver logs and queues the observed pairs at logical exit, handing
+    the pair for its own error or returned body to that existing event. An abandoned send can only log. A new
+    candidate consumes only the pairs carried by its prepared host rows and only at physical dispatch."""
+
+    def __init__(self, claim: Any, drive_logs: Any, event_queue: Optional[queue.Queue], identity: Dict[str, Any],
+                 usage: Optional[Dict[str, Any]] = None):
+        self.claim, self.drive_logs, self.event_queue, self.identity = claim, drive_logs, event_queue, identity
+        self.usage = usage
+        self._lock = threading.Lock()
+        self._returned: Dict[str, bool] = {}
+        self._refused: Dict[str, Dict[str, Any]] = {}
+        self._seen: set = set()
+        self._abandoned: set = set()
+        self._prepared: set = set()
+        self._delivered: Dict[str, list] = {}
+        self._closed = False
+
+    def __call__(self, reservation: Any) -> None:
+        if self.claim is not None:
+            self.claim(reservation)
+
+    def prepared_messages(self, messages) -> None:
+        """Capture only private identities from this send's prepared rows; the wire carries the usual text."""
+        from ouroboros.context_view_facts import refused_sends_in_messages
+
+        self._prepared = set()
+        try:
+            if self.usage:
+                self._prepared = refused_sends_in_messages(self.usage, messages)
+        except Exception:
+            logging.getLogger(__name__).debug("Could not read prepared refused sends", exc_info=True)
+
+    def dispatched(self, capture: Any) -> None:
+        """Called by the physical observer after the ledger's mark, never by the pre-send claim."""
+        from ouroboros.context_view_facts import consume_refused_sends
+
+        if capture.state == "dispatched" and self._prepared and self._bound(capture):
+            self._delivered[capture.attempt_id] = consume_refused_sends(self.usage, self._prepared)
+
+    def _bound(self, capture: Any) -> str:
+        from ouroboros.physical_attempt_context import OBSERVED
+
+        own_round = getattr(getattr(capture, "physical_context", None), "round_id", "")
+        if getattr(capture, "state", "") in OBSERVED and (not own_round or own_round == self.identity.get("round_id")):
+            return str(capture.attempt_id or "")
+        return ""
+
+    def attempt_ended(self, capture: Any, error: Any) -> None:
+        ended = getattr(self.claim, "attempt_ended", None)
+        if ended is not None:
+            ended(capture, error)
+        try:
+            self._observe(capture, error)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read a refused send's counts", exc_info=True)
+
+    def _observe(self, capture: Any, error: Any) -> None:
+        from ouroboros.context_view_facts import REFUSED_SENDS_KEY
+        from ouroboros.size_refusal import send_counts
+
+        attempt_id = capture.attempt_id
+        abandoned = getattr(error, "receiver_abandoned", False)
+        with self._lock:
+            delivered = self._delivered.pop(attempt_id, None)
+            if delivered and capture.state == "released" and not self._closed and attempt_id not in self._abandoned:
+                self.usage.setdefault(REFUSED_SENDS_KEY, [])[:0] = delivered  # commitment was proven unsent
+            if abandoned:
+                self._abandoned.add(attempt_id)
+                late = self._refused.pop(attempt_id, None)
+            else:
+                if not self._closed and attempt_id not in self._abandoned and (self._bound(capture) or capture.state == "released"):
+                    self._returned[attempt_id] = error is None and capture.state != "released"
+                late = None
+        if late:
+            self._log(late, late=True)
+        if not abandoned and isinstance(error, Exception) and self._bound(capture):
+            self._record(send_counts(capture, error))
+
+    def returned_body_refusal(self, capture: Any, payload: dict) -> None:
+        """The wire dict paired by ``_account_response`` with its own capture, for both taken and abandoned sends."""
+        from ouroboros.size_refusal import response_counts
+
+        try:
+            if self._bound(capture):
+                self._record(response_counts(capture, payload))
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read a refused response's counts", exc_info=True)
+
+    def _record(self, counts: Optional[Dict[str, Any]]) -> None:
+        if not counts:
+            return
+        attempt_id = counts["physical_attempt_id"]
+        with self._lock:
+            if attempt_id in self._seen:
+                return
+            self._seen.add(attempt_id)
+            late = self._closed or attempt_id in self._abandoned
+            if not late:
+                self._refused[attempt_id] = counts
+        if late:
+            self._log(counts, late=True)
+
+    def _returned_id(self, ledger_ids) -> Optional[str]:
+        # The wire ladder can return a previous body after a later send raises. An id missing from this tracker
+        # may have returned that body: do not assign it to the most recent ambient capture instead.
+        for attempt_id in reversed(ledger_ids):
+            if attempt_id in self._abandoned or attempt_id not in self._returned:
+                break
+            if self._returned[attempt_id]:
+                return attempt_id
+        return None
+
+    def close(self, error: Any, usage: Dict[str, Any], *, refused_body_ids=()) -> Optional[Dict[str, Any]]:
+        """Close the receiver; yield only the comparison its existing event can own, and tell every observed one."""
+        from ouroboros.context_view_facts import REFUSED_SENDS_KEY
+        from ouroboros.transport_custody import _capture_on_chain
+
+        with self._lock:
+            own = (self._returned_id(refused_body_ids) if error is None else
+                   getattr(_capture_on_chain(error), "attempt_id", None))
+            if hasattr(error, "deadline_attempt_capture"):  # a prior send's custody is not this deadline's answer
+                own = None
+            refused, self._refused, self._closed = self._refused, {}, True
+        final = refused.pop(own, None) if own else None
+        for counts in refused.values():
+            self._log(counts)
+        if told := [*refused.values(), *([final] if final else [])]:
+            usage.setdefault(REFUSED_SENDS_KEY, []).extend(told)
+        return final
+
+    def _log(self, counts: Dict[str, Any], *, late: bool = False) -> None:
+        """One refused send's own Logs row under its call's identity; the call's error row is never repeated here."""
+        from ouroboros.utils import append_jsonl, emit_log_event, has_log_sink, utc_now_iso
+
+        row = {"ts": utc_now_iso(), "type": "local_context_overflow" if counts["provider"] == "local" or counts["route_is_loopback"]
+               else "remote_context_overflow", **self.identity, "physical_attempt_id": counts.get("physical_attempt_id"),
+               "refused_send": counts, **({"settled_after_its_call": True} if late else {})}
+        try:
+            if not append_jsonl(pathlib.Path(self.drive_logs) / "events.jsonl", row) or not has_log_sink():
+                emit_log_event(self.event_queue, row, log_label="Refused send")
+        except Exception:
+            logging.getLogger(__name__).warning("Could not log a refused send", exc_info=True)
+
+
 def persist_observed_call(root: Any, *, payload: Any, writer: Any = None, **identity: Any) -> dict:
     """Best-effort public trace: opaque continuation never enters this projection.
 
