@@ -82,7 +82,7 @@ Owner-source resolution, routing-picker origin reads, `owner_words`, the legacy 
 
 `project_handoff.py` owes Main a transfer receipt through the terminal outbox after durable binding. `handoff_id` binds captured ingress/Project: retries share it, independent requests do not. `RECEIPT_STATES`: `durable`/`already_delivered` prove Main owed/delivered; `origin_unproven` writes none, other states disclose gaps. Main is never default. `/api/projects/from-task` returns `handoff_receipt`/`handoff_id`; nondurability warns, inventing no history.
 
-`work_portal.js` binds Main's card from `/api/projects/from-task`, `task_bindings`, a census row addressed outside Main (`project_id` alone is a lease scope, never a room) or `project_started`/`project_handoff` facts (not entries). The portal reads `active_chat_activities` (§11.1), ends from completion `outcome_axes` or durable detail (`place_origin` too), and uses `task_name`; `task_origin.js` draws the origin as on cards. `task_episodes.js` folds only admitted `continued_by`/`continuation_offer` edges: one work name, physical episode names, old content disclosed through its original Details/timeline/Reviews/children nodes. Current controls stay separate. The chat re-reads predecessors after Continue or a new census root; Main follows a portal's census successor. Reconnect re-proves activity (DESIGN "Work portal").
+`work_portal.js` binds Main’s card from conversion, a durable binding, addressed census or `project_started`/`project_handoff`, not entries or lease scope. Addressed episode facts (§11.1) paint phase and exact controls. Gaps withdraw liveness, not room or outcome. Complete absence reads detail; newer episode facts make older reads review-only. Names and origins use `task_name` and `task_origin.js`. `task_episodes.js` folds admitted `continued_by`/`continuation_offer` edges: one work name, physical episode names and original Details/timeline/Reviews/children. Chat rereads predecessors after Continue or a new root and follows a portal's census successor.
 
 #### Composer, attachments and delivered media
 
@@ -142,7 +142,7 @@ Card `Reviews` keeps skill, plan, result and repository-review authorities disti
 
 #### Stop and cancel controls
 
-Cancel appears only on unfinished root cards (moved works' portals too) whose host attests `cancelable=true`; card shape grants no control, and native direct tasks follow §5 custody. The shared dropdown sends `cascade:true`; Wrap up, or a Stop now not yet confirmed, returns 202 pending. Completion wins and a missing live task reconciles from durable state. Reason lines: `taskReasonDetail` over `cancel_origin` (§3 Task cards, errors and reason lines).
+Cards use work controls when offered (portals use the bound room); legacy Stop needs host cancel authority, never card shape. Presses recheck the current offer (`work_status.js`, `chat_row_menu.js`); native direct tasks follow §5 custody. Stops send `cascade:true`; Wrap up and unconfirmed Stop now return 202 pending. Completion wins; missing tasks reconcile from detail. Reason lines: `taskReasonDetail` over `cancel_origin`.
 
 #### Turning a card into a Project
 

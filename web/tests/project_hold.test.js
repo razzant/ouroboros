@@ -100,9 +100,6 @@ test('a held card with retained progress waits statically; Stop, terminal and sa
     assert.equal(setHistoricalUnavailable(card, false, ''), true);  // same-ID recovery
     assert.equal(card.phaseEl.textContent, 'Working');
     assert.deepEqual([markOf(card.phaseEl), card.phaseEl.dataset.chipTone], ['moving/ink', 'live']);
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    assert.match(chat, /restoreCardActivity\(liveCardRecords\.get\(k\), v\.project_admission_hold\)/);
-    assert.match(chat, /function restoreCardActivity\(record, held = \{\}\) \{\r?\n\s+if \(!setHistoricalUnavailable\(record, false, held\)\)/);
 });
 
 
@@ -210,6 +207,15 @@ async function childQueueHydration({ unconfirmed = false } = {}) {
         const frame = (id, fields = {}) => handlers.get('chat')({ chat_id: 7, role: 'assistant', is_progress: true,
             task_id: id, content: 'Inspecting sources', ts: '2026-09-30T10:00:00Z', ...fields });
         frame('same-id');
+        if (!unconfirmed) {
+            // Exercise the actual room census writer that reads the hold, not the spelling of its call.
+            const chip = walkCard(globalThis.document.byId.get('chat-messages'), 'same-id').querySelector('[data-live-phase]');
+            instance.hydrateStateSnapshot({ active_chat_activities: [held], supervisor_ready: true });
+            assert.deepEqual([chip.textContent, markOf(chip)], [hold.label, 'still/ink']);
+            instance.hydrateStateSnapshot({ active_chat_activities: [{ ...held, phase: 'working', project_admission_hold: {} }],
+                supervisor_ready: true });
+            assert.deepEqual([chip.textContent, markOf(chip)], ['Working', 'moving/ink']);
+        }
         const childFrame = id => frame(id, { delegation_role: 'subagent', subagent_event: 'scheduled',
             subagent_task_id: id, parent_task_id: 'same-id', root_task_id: 'same-id', subagent_role: 'reader' });
         childFrame('child');

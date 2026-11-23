@@ -220,16 +220,12 @@ test('the hurry path never creates a chat bubble in either surface', () => {
 test('Chat and Activity both wire the shared dropdown', () => {
     // Chat cards and the room's Shade open it through work_status.js on their work's controls (a card
     // no work lists keeps the record-aware adapter). Activity still calls the same lower-level dropdown.
-    assert.match(chat, /openCardControls\(/);
-    assert.match(workSrc, /openTaskControlMenu\(/);
-    assert.match(workSrc, /openTaskControls\(/);
     // Exact adapter effects are exercised in test_room_work_review_browser.py;
-    // finding its own function names inside the adapter would prove nothing.
+    // work_portal.test.js presses the real card's commands after a state change, not just their trigger.
     assert.match(activity, /openTaskControlMenu\(/);
     assert.match(activity, /hurryTaskAction\(/);
     assert.match(activity, /requestStop\(/);
     // The trigger renders the shared label on both surfaces; Activity names a single offered action itself.
-    assert.match(chat, /TASK_CONTROL_TRIGGER_LABEL/);
     assert.match(activity, /taskControlTriggerLabel\(/);
     assert.equal(typeof TASK_CONTROL_TRIGGER_LABEL, 'string');
 });
