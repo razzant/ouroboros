@@ -325,7 +325,7 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
 
 
 def _wire_order(page, task_id, *, chat_id=None):
-    page.wait_for_function("({id, chatId}) => window.__completionFrames.some(f => f.type === 'log'"
+    page.wait_for_function("({id, chatId = null}) => window.__completionFrames.some(f => f.type === 'log'"
                           " && f.data?.type === 'task_done' && f.data.task_id === id"
                           " && (chatId === null || String(f.data.chat_id) === chatId))",
                           arg={"id": task_id, "chatId": str(chat_id) if chat_id is not None else None}, timeout=30000)
