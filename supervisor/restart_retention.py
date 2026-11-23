@@ -706,10 +706,11 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
     parked = park_saved_running_rows(selected, pending, (), drive_root)
     for task_id in parked:
         running.pop(task_id, None)
-    returning = [] if panic_recorded(drive_root) else [task_id for task_id in selected
+    door = "panic" if panic_recorded(drive_root) else "update_aborted"
+    returning = [] if door == "panic" else [task_id for task_id in selected
         if batch["rows"][task_id]["returning"]]
     recovered = {task["id"]: task for task in recover_saved_running(
-        selected.values(), drive_root, transaction={"return_ids": returning}, cause="update_aborted")}
+        selected.values(), drive_root, transaction={"return_ids": returning}, cause="update_aborted", stop_door=door)}
     for task_id, meta in selected.items():
         task = recovered.get(task_id)
         if task is None:
@@ -720,9 +721,11 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
             task["_attempt"] = batch["rows"][task_id]["attempt"] + 1
             task.setdefault("_working_recovery", {"source_task_id": task_id,
                 "from_attempt": batch["rows"][task_id]["attempt"], "cause": "update_aborted"})
-            if budget_hold_fact(task) is None:
+            if door == "panic" or budget_hold_fact(task) is None:
+                # The stop matrix keeps stronger, independent holds intact.
                 hold_budget_row(task, reason=HOLD_SAVED_WORK,
                     detail="update aborted; saved work recovery could not be verified",
+                    extra={"door": door},
                     result_root=pathlib.Path(task.get("budget_drive_root") or drive_root), existing_result_only=True)
         # Reuse restore admission for the original scope, lineage, deadline and
         # exact next-attempt source; recovery itself grants none of those gates.
@@ -950,11 +953,12 @@ def _record_refused_returns(drive_root: Any, refused: Dict[str, str], cause: str
 
 
 def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
-                          transaction: Dict[str, Any], cause: str) -> List[Dict[str, Any]]:
+                          transaction: Dict[str, Any], cause: str, stop_door: Optional[str] = None) -> List[Dict[str, Any]]:
     """Interrupted RUNNING rows (and caught direct turns) whose work was saved.
 
     Each becomes its same-id successor carrying the frozen source: dispatchable
     when the fresh transaction returns it, otherwise held for an explicit Resume.
+    A stop observed during recovery can set the door without changing the checkpoint's cause.
     A Stop (active cancel intent), a terminal or unreadable result, a final the
     host already owes, or no usable source keeps the ordinary interrupted path;
     a returned owner turn cut before its first save starts again from its input (D5).
@@ -1033,7 +1037,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
         if not auto:
             hold_budget_row(task, reason=HOLD_SAVED_WORK, result_root=root,
                         detail=f"work saved before the application stopped ({cause}); continues after an explicit Resume",
-                        extra={"root_task_id": str(task.get("root_task_id") or task_id), "door": cause})
+                        extra={"root_task_id": str(task.get("root_task_id") or task_id), "door": stop_door or cause})
         recovered.append(task)
     return recovered
 

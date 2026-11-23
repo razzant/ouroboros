@@ -434,7 +434,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
     ), "replay_unsafe", ""
 
 
-def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[str, Any]:
+def resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_panic_hold_id: str = "") -> Dict[str, Any]:
     from ouroboros.owner_pause import paused_gap
     from ouroboros.delegate_resume import with_resume_decisions
     from ouroboros.pause_notices import gap_fact
@@ -444,12 +444,13 @@ def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[st
     answered = resume_asked(_queue_module(), task_id, selected_by=selected_by)  # and the control it answers about
     seen: List[Dict[str, str]] = []  # what this Resume's own census found; the Pause's record keeps its own
     outcome = with_resume_decisions(task_id, lambda: _resume_budget_paused_task(
-        task_id, selected_by=selected_by, gaps=seen), child=bool(selected_by))
+        task_id, selected_by=selected_by, gaps=seen, expected_panic_hold_id=expected_panic_hold_id),
+        child=bool(selected_by))
     gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))} if seen else gap
     return answered(resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome))
 
 
-def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
+def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_panic_hold_id: str = "",
                                gaps: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Explicitly resume one budget-paused task and, if needed, its root latch.
 
@@ -459,12 +460,13 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
     act, which needs no root grant above itself. ``gaps`` receives the damaged rows each door's owner-Pause tree
     census ties to no tree.
     """
-    from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
     from ouroboros.work_stop import SELECTION_KEY, clear_refusal, release_refusal, selection_record, unsafe_replay_response
+    from supervisor.budget_resume import (
+        observe_panic_resume_money, panic_resume_refusal, panic_selection_lock, panic_working_resume_refusal,
+    )
     q = _queue_module()
     task_id = str(task_id or "").strip()
-    if refusal := release_refusal(observed_control_stop(q.DRIVE_ROOT), control_actor()):
-        return refusal
     if not task_id:
         return {"ok": False, "error": "missing_task_id"}
     from supervisor.events_budget import (
@@ -472,11 +474,13 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         select_held_budget_row,
     )
 
-    external = observation = current = None
+    external = observation = current = panic_money = None
     with q._queue_lock:
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+        if refusal := panic_resume_refusal(q, located, expected_panic_hold_id, selected_by):
+            return refusal
         if refusal := release_refusal(observed_control_stop(
-                q.DRIVE_ROOT, located, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+                q.DRIVE_ROOT, located, budget=q.BUDGET_ROOT_FENCES), resume_author()):
             return refusal
     if located is None:
         # A member parked WARM under the owner's Pause (its stack retained while a
@@ -505,6 +509,8 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
             return late
     with q._queue_lock:
         located = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+        if refusal := panic_resume_refusal(q, located, expected_panic_hold_id, selected_by):
+            return refusal
         if located and located.get("_budget_pause_resume"):
             from supervisor.budget_resume import repark_after_active_start
             if refusal := repark_after_active_start(q, located):
@@ -544,18 +550,29 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
             from supervisor.budget_resume_unstarted import observe_admitted_retry
 
             observe_admitted_retry(q, observation, gaps=gaps)
-    with q._queue_lock:
+    if expected_panic_hold_id and located_state is not None:
+        panic_money = observe_panic_resume_money(q, located_state, result_root, task_id,
+                                                  exact=exact, external=external)
+    with q._queue_lock, contextlib.ExitStack() as held:
         task = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+        refusal, locked_tree = held.enter_context(panic_selection_lock(q, task, expected_panic_hold_id, selected_by))
+        if refusal:
+            return refusal
         if task is None:
             return {"ok": False, "error": "task_not_pending"}
+        if expected_panic_hold_id and (task is not located or task != located_state):
+            return {"ok": False, "error": "selection_authority_changed"}
         if refusal := release_refusal(observed_control_stop(
-                q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+                q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES), resume_author()):
             return refusal
         pause = task.get("_budget_pause") if isinstance(task.get("_budget_pause"), dict) else None
         if pause and pause.get("exact_continuation"):
             if task is not located or task != located_state:
                 return {"ok": False, "error": "selection_authority_changed"}
-            return grant_exact_budget_resume(task, pause, selected_by=selected_by, external=external)
+            return grant_exact_budget_resume(task, pause, selected_by=selected_by, external=external,
+                                             panic_only=bool(expected_panic_hold_id), panic_money=panic_money)
+        if expected_panic_hold_id and (refusal := panic_working_resume_refusal(q, task, result_root, task_id, panic_money)):
+            return refusal
         if observation is not None:
             if observation.get("error"):
                 return {"ok": False, "error": observation["error"]}
@@ -584,7 +601,8 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
         if names_start() and not hold:
             return {"ok": False, "error": "selection_authority_changed"}
         if hold:
-            return select_held_budget_row(q, task, hold, selected_by=selected_by, observation=observation, current=current)
+            return select_held_budget_row(q, task, hold, selected_by=selected_by, observation=observation,
+                                          current=current, locked_tree=locked_tree)
         if not pause:
             if not isinstance(candidate_fence, dict):
                 return {"ok": False, "error": "task_not_budget_paused"}

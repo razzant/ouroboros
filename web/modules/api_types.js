@@ -51,6 +51,8 @@
  * @property {Array<Object>=} main_attention Live human recovery owners, including children; the activity census stays root-only.
  * @property {boolean=} main_attention_complete False retains previously observed actions.
  * @property {Array<Object>=} main_attention_gaps Typed gaps in current action evidence.
+ * @property {Array<{task_id: string, task_name: string, panic_hold_id: string, project_id?: string, chat_id?: number, root_task_id?: string}>=} panic_recovery  // every room's work a Panic stop holds for the owner's Resume (panic_recovery.js)
+ * @property {boolean=} panic_recovery_complete  // true only when that list is the whole set; false or absent: never offer all
  * @property {import('./work_types.js').Work[]} works  // one row per work: a request with its Continue episodes and live members
  * @property {Object<string, import('./work_types.js').RoomStatus>} rooms  // one status per room (chat_id), from its works
  * @property {import('./work_types.js').WorkSummary} work_summary  // the tray's one line

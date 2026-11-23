@@ -58,6 +58,7 @@ def test_mind_pause_other_root_records_actor_and_resume_keeps_attribution(tmp_pa
 
 
 def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monkeypatch):
+    from ouroboros.control_actor import owner_door
     from ouroboros.task_results import write_task_result
     from supervisor.events_budget import HOLD_PANIC, hold_budget_row
     from supervisor.events_mind_controls import _apply
@@ -70,7 +71,8 @@ def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monke
     write_task_result(tmp_path, "other", "scheduled", root_task_id="other")
     assert _apply(_event("resume_task", "other"))["error"] == "panic_requires_owner_resume"
     assert task["_budget_pause_hold"]["reason"] == HOLD_PANIC
-    assert resume_budget_paused_task("other")["ok"]
+    with owner_door("fixture"):
+        assert resume_budget_paused_task("other")["ok"]
 
 
 @pytest.mark.parametrize("declared", ["owner", "ouroboros"])
