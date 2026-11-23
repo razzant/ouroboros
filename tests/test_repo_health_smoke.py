@@ -1275,7 +1275,7 @@ def test_manifest_parser_rejects_blank_rationale() -> None:
 def test_manifest_parser_rejects_executable_code_and_duplicate_dict_keys() -> None:
     text = regenerate._render(_manifest())
     with pytest.raises(ValueError, match="data-only"):
-        parse_size_ratchet_manifest(text + "\nimport os\n")
+        parse_size_ratchet_manifest(text + "\n(17,)\n")
     duplicate = text.replace("BAND_PATHS = {", "BAND_PATHS = {'a.py': None, 'a.py': None,")
     with pytest.raises(ValueError, match="duplicate keys"):
         parse_size_ratchet_manifest(duplicate)
@@ -1292,36 +1292,78 @@ def test_manifest_parser_rejects_executable_code_and_duplicate_dict_keys() -> No
         parse_size_ratchet_manifest(extra)
 
 
-def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: Path) -> None:
-    source_root = Path(__file__).parents[1]
+def _import_review_with_data_manifest(tmp_path: Path, *, unsupported: bool) -> subprocess.CompletedProcess[str]:
+    source_root = Path(__file__).resolve().parents[1]
     package = tmp_path / "ouroboros"
-    tools = package / "tools"
-    tools.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    (tools / "__init__.py").write_text("", encoding="utf-8")
-    (package / "review.py").write_bytes((source_root / "ouroboros" / "review.py").read_bytes())
-    (tools / "review_helpers.py").write_text(
-        "_VENDORED_NAMES = frozenset()\n_VENDORED_PATHS = frozenset()\n_VENDORED_SUFFIXES = ()\n",
-        encoding="utf-8",
-    )
-    marker = tmp_path / "executed"
-    (package / "size_ratchet_manifest.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
-        encoding="utf-8",
+    package.mkdir()
+    # The real package bootstrap and review module run in a root without Git state.
+    # Other modules resolve from the source package, not a copy of a helper stub.
+    for name in ("__init__.py", "version.py", "review.py"):
+        (package / name).write_bytes((source_root / "ouroboros" / name).read_bytes())
+    (tmp_path / "VERSION").write_bytes((source_root / "VERSION").read_bytes())
+    sha = "5eed" * 10
+    text = regenerate._render(_manifest(sha=sha, giant_paths=frozenset({"fixture_only.py"})))
+    if unsupported:
+        # Syntactically valid, but a bare tuple is outside the data format.
+        text += "\n(17,)\n"
+    (package / "size_ratchet_manifest.py").write_text(text, encoding="utf-8")
+    child = """
+import os
+from pathlib import Path
+import sys
+
+root, source_package, sha = sys.argv[1:]
+package = Path(root) / "ouroboros"
+review_file = os.path.normcase(str(package / "review.py"))
+manifest_file = os.path.normcase(str(package / "size_ratchet_manifest.py"))
+seen = []
+
+def audit(event, args):
+    if event != "exec":
+        return
+    code = args[0]
+    filename = os.path.normcase(code.co_filename)
+    if filename == manifest_file or sha in code.co_consts:
+        seen.append("manifest")
+        raise AssertionError("The manifest reached Python execution")
+    if filename == review_file:
+        seen.append("review")
+
+sys.addaudithook(audit)
+sys.path.insert(0, root)
+try:
+    import ouroboros
+    ouroboros.__path__.append(source_package)
+    from ouroboros import review
+finally:
+    # Also prove the spy saw the real module, and fail if a refusal swallowed it.
+    assert seen == ["review"], seen
+assert review.GIANT_PATHS == frozenset({"fixture_only.py"}), review.GIANT_PATHS
+print("REVIEW_MANIFEST_DATA_LOADED")
+"""
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() == "SYSTEMROOT" or key.startswith("OURO_PROC_CONTAINER_")}
+    env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path), TMPDIR=str(tmp_path),
+               TEMP=str(tmp_path), TMP=str(tmp_path), OUROBOROS_DATA_DIR=str(tmp_path / "data"),
+               OUROBOROS_SETTINGS_PATH=str(tmp_path / "settings.json"))
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-X", "utf8", "-c", child, str(tmp_path.resolve()),
+         str(source_root / "ouroboros"), sha],
+        cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=60,
     )
 
-    result = subprocess.run(
-        [sys.executable, "-c", "import ouroboros.review"],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
-    assert result.returncode != 0
-    assert "size manifest is data-only" in result.stderr
-    assert not marker.exists()
+def test_review_import_accepts_literal_manifest_without_executing_it(tmp_path: Path) -> None:
+    result = _import_review_with_data_manifest(tmp_path, unsupported=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1:] == ["REVIEW_MANIFEST_DATA_LOADED"]
+
+
+def test_review_import_rejects_executable_manifest_before_side_effect(tmp_path: Path) -> None:
+    # Keep the historical node; exercise its import boundary with inert data.
+    result = _import_review_with_data_manifest(tmp_path, unsupported=True)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert result.stderr.rstrip().split("\n")[-1].startswith("ValueError: size manifest is data-only"), result.stderr
 
 
 def test_generator_rationale_parser_requires_explicit_nonblank_path_text() -> None:
