@@ -800,9 +800,9 @@ def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mo
     """Whether a start shows less memory than the selected view because of its window: a mode below the owner's, a
     rescued input, host forms or any step of the walk the window took, collapsed task lines (F1) included. Cuts the
     owner's own mode budget took are no narrowing of the window's, but only while that budget is below the window: a
-    window at or below the mode's target sets the start bound itself. Under the budget, only the window's physical
-    fold of this room's uncovered owner rows is the window's; it needs ordinary memory above the budget and takes F7
-    (``memory_floor.fit_memory_view``). An unknown window narrows nothing."""
+    window at or below the mode's target sets the start bound itself. Under the budget only the window's own steps count:
+    the physical fold of this room's uncovered owner rows (F7, needing ordinary memory above the budget) and a host form
+    without ``start_room``, which the budget's steps carry (``memory_floor._host_steps``). An unknown window narrows nothing."""
     if not state.known_window:
         return False
     if delivered or mode != preferred:
@@ -816,7 +816,7 @@ def narrowed_by_window(contents: Mapping[str, Tuple[Any, Mapping[str, Any]]], mo
     owners = budget and not (floor.get("ordinary_unfit") and steps.get("F7"))  # no physical fold: the budget cut alone
     host = facts.get("host_sections_addressed") or ()
     return (bool(cut and not (floor.get("by_budget") and owners))
-            or bool(host and not budget) or any(row.get("held_note_form") for row in host))
+            or any(not budget or not row.get("start_room") or row.get("held_note_form") for row in host))
 
 
 def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
@@ -895,6 +895,20 @@ class MinimumViewUnfit(ValueError):
                          f"deficit={self.deficit_tokens}, work room={work_room_tokens}, "
                          f"fixed/work-room deficit={self.work_room_deficit_tokens} tokens"
                          + (f", required handbook={self.required_book_tokens}" if required_book_tokens else ""))
+
+
+def _required_book_view(shown, *, book, fixed, ratio, reserve, output_reserve, window, mode, work, lowered,
+                        note_window, admit, optional_map):
+    """Add the required handbook after the ordinary fit; its refusal names its exact last frame."""
+    from ouroboros import memory_floor as floor
+
+    room, note_tokens, unfit = floor.fit_required_book(shown, book=book, fixed=fixed, ratio=ratio, reserve=reserve,
+        output_reserve=output_reserve, window=window, mode=mode, work=work, lowered=lowered,
+        note_window=note_window, admit=admit, optional_map=optional_map)
+    if unfit is not None:
+        raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
+            window_tokens=window, ratio=ratio, required_book_tokens=book, **unfit)
+    return shown.story, room, {**shown.facts, BOOK_NOTE_KEY: note_tokens} if note_tokens else shown.facts
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
@@ -1058,6 +1072,11 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         def told(forms):  # ``max_room_lost``'s own test beside these host forms: memory at my shortest telling, the
             return telling_fits(selected, sent, forms, window, boundary, reserve, start_room=kept is None)
         receipts, _ = floor._host_steps(available, prior,  # every frame starts from what was shown
+            optional_fits=lambda forms, level=None: floor.optional_excerpt_fits(
+                host_allowances['window' if kept is None or start_work else 'physical'],
+                owed(measure(selected, sent, forms), reserve) - slack, (story_before, room_before),
+                lambda *memory: measure(selected, sent, forms, *memory),
+                lambda: view(selected, sent, forms, window, boundary, telling_only=True, level=level, **sent_view) if snapshot else floor.NO_VIEW),
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
             told=told if snapshot and known_window else None,
@@ -1069,8 +1088,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             root=core.section_root, task_id=core.section_task_id, bare=lambda forms: measure(selected, sent, forms),
             allowance=host_allowances["margin" if kept is None or start_work else "physical"],
             budget_mode=selected if kept is None and target and target < window else None,
-            window_bound=host_allowances["window"],  # the window's own start bound, whatever target frames the start
-            **({"retain": retain} if retain is not None else {}))
+            window_bound=host_allowances["window"], retain=retain,  # the window's own start bound, whatever target frames the start
+            optional_walk=(lambda forms: view(selected, sent, forms, window, boundary)) if snapshot else None)
         fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
@@ -1169,24 +1188,17 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
                                reserve_tokens=reserve, window_tokens=window, ratio=ratio,
                                work_room_tokens=work() if core_alone else 0)
-    story, room, facts = shown.story, shown.room, shown.facts  # the one view this start delivers: drawn here
     book = whole_core.required_book_tokens(mode)
-    ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
-    note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
-        free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None
-    ) if book and snapshot else ""
-    if note:  # its own cost, like the book's, stays outside every later automatic choice (``required_book_tokens``)
-        room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
+    def optional_map():
+        nonlocal receipts
+        receipts = floor.optional_for_book(sections[mode], receipts, root=core.section_root, task_id=core.section_task_id, retain=retain)
+        return measure(mode, sent, section_views(sections[mode], receipts))
+    story, room, facts = _required_book_view(shown, book=book, fixed=fixed, ratio=ratio, reserve=reserve,
+        output_reserve=output_reserve, window=window, mode=mode, work=work() if book else 0,
+        lowered=bool(room_fact) and mode == "low", note_window=known_window and (kept is None or start_work),
+        admit=known_window and kept is None and current_messages is None, optional_map=optional_map)
     receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
         {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
-    if book and kept is None and known_window and current_messages is None:
-        reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano", owner_nano=False,
-                                                      input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
-        memory = floor.view_tokens(story) + floor.view_tokens(room)
-        if math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window:
-            raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
-                                   fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
-                                   window_tokens=window, ratio=ratio, required_book_tokens=book)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     contents = {}

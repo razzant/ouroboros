@@ -384,7 +384,7 @@ Run the shared semantic-breadth guard before returning:
 - Output ONLY a valid JSON array.  No markdown fences, no text outside the JSON.
 
 The governance documents this change activates follow below, then its evidence.
-Navigation maps identify sources not delivered to this tool-free packet row;
+Navigation maps index sources and ranges, not rule text. This row has no tools;
 state uncertainty where the supplied evidence cannot establish a rule.
 """
 

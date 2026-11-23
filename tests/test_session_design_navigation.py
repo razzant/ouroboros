@@ -25,7 +25,7 @@ def _doc(root, heading):
 
 
 def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=False, missing_bible=False,
-           input_sources="declared", prepare=None):
+           input_sources="declared", prepare=None, declared=True):
     from ouroboros import claudexor_daemon, subagent_runtime
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools import delegate
@@ -37,6 +37,10 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
     _doc(system, "Installed heading")
     if kind == "system":
         target = system
+    elif kind == "foreign_git":  # someone else's repository: proven foreign
+        from tests.test_doc_context import foreign_tree
+
+        foreign_tree(target)
     live_path = _doc(target, "Live target heading")
     prepared_path = _doc(prepared, "Prepared copy heading")
     if missing:
@@ -48,7 +52,7 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
         "source_is_system_repo": kind != "foreign_copy",
     }} if kind.endswith("copy") else {})
     contract = {"objective": "Inspect the selected source", "input_sources": input_sources,
-                "context_requires_self_body_docs": True}
+                "context_requires_self_body_docs": declared}
     ctx = ToolContext(
         repo_dir=system, system_repo_dir=system, drive_root=drive,
         task_id="design-session", task_metadata=metadata, task_contract=contract,
@@ -112,12 +116,13 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
 def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path, monkeypatch, compiled, kind):
     request, row, task, _ctx, live, prepared = _start(tmp_path, monkeypatch, compiled=compiled, kind=kind)
     instructions = request["instructions"]
-    assert "DESIGN NAVIGATION DELIVERY" in instructions
+    assert "DESIGN DELIVERY" in instructions
     assert "Prepared copy heading — lines 3-4" in instructions
-    assert str(prepared) in instructions and str(live) not in instructions.split("DESIGN NAVIGATION DELIVERY", 1)[1]
+    assert str(prepared) in instructions and str(live) not in instructions.split("DESIGN DELIVERY", 1)[1]
     assert "Live target heading" not in instructions and "Installed heading" not in instructions
     assert "Original rule text" not in instructions
     assert "Navigation only" in instructions and "reading or application" in instructions
+    assert "This source has no `## Design bible` section." in instructions  # a book without one says so
     assert sha256(prepared.read_bytes()).hexdigest() in instructions
     assert row["request"] == request  # the actual wire bytes are already in durable custody
     assert request["execution"]["workspaceRoot"] == str(prepared.parent.parent)
@@ -125,11 +130,91 @@ def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path,
     assert ("HOST TASK CONTRACT AUTHORITY" in instructions) is not compiled
 
 
-@pytest.mark.parametrize("kind", ["foreign_copy", "unknown"])
-def test_foreign_and_unidentified_workspaces_get_no_body_design(tmp_path, monkeypatch, kind):
-    request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind)
-    assert "DESIGN NAVIGATION DELIVERY" not in request["instructions"]
-    assert not any(f"{name} heading" in request["instructions"] for name in ("Installed", "Live target", "Prepared copy"))
+BIBLE = ('## Design bible: "Airy dopamine"\n\n1. **The room is plain.** PRINCIPLE_DELIVERED\n\n**Seed**\n\n'
+         "| Role | Light |\n| --- | --- |\n| Room | SEED_DELIVERED |\n")
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["working-tree", "installed"])
+@pytest.mark.parametrize("available", [True, False], ids=["available", "unavailable"])
+def test_design_author_and_session_take_their_view_from_one_scoped_read(tmp_path, monkeypatch, installed, available):
+    from ouroboros import review_body_fact, work_domain
+    from ouroboros.context_layout import task_design_navigation
+
+    system, target, prepared = (tmp_path / name for name in ("system", "target", "prepared"))
+    flags = {"context_requires_self_body_docs": True}
+    if installed:
+        metadata = {}
+        monkeypatch.setattr(review_body_fact, "body_fact", lambda *_a, **_kw: review_body_fact.BodyFact(
+            review_body_fact.BODY_FALSE, "fixture", "A different worktree"))
+    else:
+        metadata = {"workspace_copy": {"execution_root": str(target), "source_is_system_repo": True}}
+    ctx = SimpleNamespace(repo_dir=system, system_repo_dir=system, workspace_root=target, workspace_mode="external",
+                          drive_root=tmp_path / "data", task_metadata=metadata, task_contract=flags)
+    reads = []
+    originals = {root / "docs/DESIGN.md": BIBLE.replace("PRINCIPLE_DELIVERED", f"Rule for {root.name}: é.")
+                 .replace("\n", "\r\n").encode("utf-8") for root in (system, target, prepared)}
+
+    def read(path):
+        reads.append(path)
+        if not available:
+            raise OSError("unavailable")
+        return originals[path]
+
+    monkeypatch.setattr(work_domain, "read_bytes", read)
+    author = task_design_navigation(ctx, {"task_contract": flags})
+    session = session_design_navigation(ctx, target_root=str(target), source_root=str(prepared))
+    author_root, session_root = (system, system) if installed else (target, prepared)
+    assert reads == [root / "docs/DESIGN.md" for root in (author_root, session_root)]
+    for view, root in ((author, author_root), (session, session_root)):
+        assert str(root / "docs/DESIGN.md") in view
+        assert ("from its installed body" in view) is installed
+        assert (f"Rule for {root.name}: é." in view) is available
+        assert ("No DESIGN content or navigation delivered" in view) is (not available)
+    digest = sha256(originals[session_root / "docs/DESIGN.md"]).hexdigest()
+    assert (f"Source bytes SHA-256: {digest}." in session) is available
+    assert ("Source bytes SHA-256:" in session) is available
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_session_start_carries_the_design_bible_whole_with_its_digest(tmp_path, monkeypatch, newline):
+    """The session's start request carries the author's view of the prepared copy (item 97): its design bible
+    verbatim, the rest of the book by headings and the pinned bytes' SHA-256; other rules stay one read away. The view
+    reads the same however the file was written (RV1, Astra 4); the digest names the file's own bytes."""
+    bible = BIBLE
+
+    def with_bible(_ctx):
+        (tmp_path / "prepared/docs/DESIGN.md").write_bytes(("# Design\n\n" + bible + "\n## Prepared copy heading\n"
+            "Original rule text, not navigation.\n").replace("\n", newline).encode("utf-8"))
+
+    request, row, _task, _ctx, live, prepared = _start(tmp_path, monkeypatch, prepare=with_bible)
+    delivered = request["instructions"].split("DESIGN DELIVERY", 1)[1]
+    assert bible.strip() in delivered and '"Airy dopamine" (whole above) — lines 3-12' in delivered
+    assert "Prepared copy heading — lines 13-14" in delivered and "Original rule text" not in delivered
+    assert f"Source bytes SHA-256: {sha256(prepared.read_bytes()).hexdigest()}." in delivered
+    assert "Inlined above: its design bible whole (lines 3-12)" in delivered and "Navigation only" not in delivered
+    assert str(prepared) in delivered and str(live) not in delivered
+    assert row["request"] == request  # pinned in custody: a retry replays these bytes
+
+
+@pytest.mark.parametrize(("kind", "declared", "delivered"), [
+    ("foreign_git", True, True), ("foreign_git", False, False), ("foreign_copy", True, True),
+    ("unknown", True, True), ("unknown", False, True),
+])
+def test_a_session_on_the_works_own_folder_takes_the_authors_choice(tmp_path, monkeypatch, kind, declared, delivered):
+    """A session on the task's own folder that is not the body (RV1, Astra 3): a true declaration, or a body that is
+    unknown, brings the installed bible as it does to the native author; a proven-foreign folder without the
+    declaration brings none. A foreign target's or its copy's own DESIGN never stands in for it."""
+    def installed_bible(_ctx):
+        (tmp_path / "system/docs/DESIGN.md").write_text("# Design\n\n" + BIBLE + "\n## Installed heading\nRule.\n",
+                                                       encoding="utf-8", newline="\n")
+
+    request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind, declared=declared,
+                                                         prepare=installed_bible)
+    instructions = request["instructions"]
+    assert ("DESIGN DELIVERY" in instructions) is delivered and (BIBLE.strip() in instructions) is delivered
+    assert (str(tmp_path / "system/docs/DESIGN.md") in instructions) is delivered
+    assert ("These are the interface rules of Ouroboros itself, from its installed body" in instructions) is delivered
+    assert not any(f"{name} heading" in instructions for name in ("Live target", "Prepared copy"))
     assert row["request"] == request
 
 
@@ -179,7 +264,7 @@ def test_retained_delivery_and_canonical_source_survive_design_changes(tmp_path,
     assert compile_external_work_order(task) == canonical and work_order_fingerprint(task) == fingerprint
     projection, reason = work_order_source_projection(task, 0, len(canonical))
     assert reason == "" and projection["text"] == canonical
-    assert "DESIGN NAVIGATION DELIVERY" not in canonical
+    assert "DESIGN DELIVERY" not in canonical
 
 
 def test_nested_body_start_uses_corresponding_private_repo_root(tmp_path):
@@ -216,9 +301,11 @@ def test_nested_admitted_copy_keeps_its_body_identity_and_document_root(tmp_path
                                          "source_is_system_repo": own_body}}, task_contract={})
     text = session_design_navigation(ctx, target_root=str(copy / "ouroboros"),
                                      source_root=str(prepared / "ouroboros"))
-    assert bool(text) is own_body
     if own_body:
         assert str(prepared / "docs/DESIGN.md") in text and "prepared — lines" in text
+    else:  # a copy of a source not proven to be the body: the installed book, never the copy's own (RV1, Astra 3)
+        assert str(system / "docs/DESIGN.md") in text and "system — lines" in text
+        assert "copy — lines" not in text and "prepared — lines" not in text
 
 
 def test_nested_git_body_source_maps_the_worktree_document(tmp_path):
@@ -250,3 +337,4 @@ def test_declared_folderless_body_work_keeps_system_source_outside_scratch(tmp_p
     delivered = session_design_navigation(ctx, target_root=str(scratch), source_root=str(prepared))
     assert "System body — lines 3-4" in delivered and str(path) in delivered
     assert "Scratch source" not in delivered and "Prepared scratch" not in delivered
+    assert "These are the interface rules of Ouroboros itself, from its installed body" in delivered  # RVD1, Astra 4
