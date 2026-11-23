@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ogZLLZfBly+75O8Z3+s94qToztlF6YVvzV4xyWTizTE='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lOgMkp0AhNBnv6RTMdEshwMZIa/ocgDv8MnfAQZoRvE='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -609,7 +609,7 @@ function show(facts, name, example = false) {
     : trace.length || contributions.length ? 'Some sources have a recorded version. For the rest, this report cannot say why they were included or left out.'
     : 'No initial assembly map was saved for this attempt. Later observations, when available, are listed below.';
   byId('source-versions').textContent = (manifest ? preparedWords(manifest) + '\n\n' : '')
-    + (layout.length ? layoutWords(layout) : sourceSummary(trace, contributions))
+    + (layout.length ? layoutWords(layout) : sourceSummary(trace, unread, contributions))
     + (late ? '\n\n' + contributionWords(late) : '');
   byId('source-technical').textContent = (trace.length || contributions.length || !layout.length ? sourceWords(trace, unread, contributions) : 'Positions are in prepared text before redaction, not in the saved copy.')
     + (layout.length ? '\n\nCaptured assembly coordinates and source addresses:\n' + pretty(layout) : '')
@@ -727,7 +727,7 @@ function preparedWords(manifest) {
   }
   return lines.length > 1 ? lines.join('\n') : 'Prepared request inventory unavailable.';
 }
-function sourceSummary(trace, contributions) {
+function sourceSummary(trace, unread, contributions) {
   const lines = trace.map((row) => `${row.source_path} · ${row.contribution === 'core_constitution'
     ? 'Constitution carried with the base instructions' : 'Base instructions at the start of the request'}`);
   for (const row of contributions) {
@@ -740,7 +740,7 @@ function sourceSummary(trace, contributions) {
         ? 'Source versions are in details.' : 'The underlying file versions and the reason this form was chosen were not recorded.'}`);
     }
   }
-  return lines.length ? lines.join('\n\n') : 'No supported source positions were recorded for this request.';
+  return lines.length ? lines.join('\n\n') : sourceWords(trace, unread, contributions);
 }
 function sourceWords(trace, unread, contributions) {
   if (!trace.length && !contributions.length) return unread

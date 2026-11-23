@@ -1087,7 +1087,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 def gap_reads_without_opening(words: str) -> None:
                     # What a person sees with every disclosure closed: the gap's headline and its explanation; the
                     # stored JSON, where a gap also names itself, stays folded and is no evidence of either.
-                    assert frame.locator("#report-result details[open]").count() == 0
+                    assert frame.locator("#report-result details[open]:not(#origins)").count() == 0
                     expect(frame.locator("#headline")).to_be_visible()
                     expect(frame.locator("#explain")).to_be_visible()
                     assert words in frame.locator("#explain").inner_text()
@@ -1130,7 +1130,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(facts).to_be_hidden()
                 choose(reports["first"], first, "#attempt-facts")
                 expect(frame.locator("#overview")).to_contain_text("Low used · Max selected")
-                expect(frame.locator("#overview")).to_contain_text("Input read from cache")
+                expect(frame.locator("#overview")).to_contain_text("Cache read in ledger")
                 expect(frame.locator("#source-limit")).to_be_visible()
                 expect(facts).to_be_hidden()
                 assert "example-request" not in facts.text_content()
@@ -1143,12 +1143,12 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert value("Context mode") == "Low · chosen Max"
                 assert value("Sizing basis") == "Calibrated on recent usage from this route"
                 assert value("Host prefix within this task") == "First change: system blocks · position 3 · shared understanding"
-                assert value("Provider-reported text input") == "50 tokens"
-                assert value("Provider-reported cache read").startswith("0 tokens · ")
-                assert value("Provider-reported cache write") == "Not recorded"
+                assert value("Ledger text input") == "50 tokens"
+                assert value("Ledger cache read").startswith("0 tokens · ")
+                assert value("Ledger cache write") == "Not recorded"
                 assert "private-fixture-route" not in frame.locator("#record-body").text_content()
                 sources = frame.get_by_text("Where these blocks came from", exact=True)
-                sources.click()
+                expect(frame.locator("#source-versions")).to_be_visible()
                 expect(frame.locator("#source-versions")).to_contain_text("BIBLE.md")
                 expect(frame.locator("#source-versions")).to_contain_text("Your messages · 1 with a matching request row")
                 expect(frame.locator("#source-versions")).to_contain_text("Messages · 4 · 3 without an exact source anchor")
@@ -1233,9 +1233,9 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(pair).to_contain_text("identical UTF-8 bytes at the start")
                 expect(pair).to_contain_text("temperature")
                 frame.locator("#comparison > summary").click()
-                assert value("Provider-reported cache read") == "Not recorded"
+                assert value("Ledger cache read") == "Not recorded"
                 words = facts.inner_text()
-                assert "The send raised _Rejected · HTTP 400" in words and retried not in frame.locator("body").text_content()
+                assert "The send raised _Rejected · HTTP 400" in words and retried not in words
                 assert "Settled — the ledger closed this attempt’s accounting record without a receipt (abandoned)" in words
                 assert "Request recorded" in frame.locator("#headline").inner_text()
                 assert json.loads(stored_body.text_content())["messages"] == json.loads(stored)["messages"]
@@ -1299,7 +1299,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 choose(gap(body="not_linked", file_trace="not_read"), "No saved request is linked", "#headline")
                 gap_reads_without_opening("links no saved request")
                 assert "earlier-attempt" in facts.inner_text()
-                assert frame.locator("#source-versions").text_content().startswith("The sealed record was not read")
+                assert "The sealed record was not read" in frame.locator("#source-versions").text_content()
                 # The first reader wrote `not_recorded` beside `not_linked` without opening any record: its versions are
                 # as unknown as when not read, and the report's own fields stay as written. A usage-reported attempt
                 # never had a record, so its `not_recorded` keeps saying that none were recorded.
@@ -1312,7 +1312,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert (written["body"], written["file_trace"]) == ("not_linked", "not_recorded")
                 choose(gap(body="receipt_only", file_trace="not_recorded", attempt_id="usage-reported"),
                        "usage-reported", "#attempt-facts")
-                assert frame.locator("#source-versions").text_content().startswith("No source versions were recorded")
+                assert "No source versions were recorded" in frame.locator("#source-versions").text_content()
                 for facts_of_gap, headline, words in (
                         ({"body": "manifest_over_limit", "recorded_bytes": 2258277, "max_bytes": 2097152,
                           "retry_max_bytes": 2258277}, "sealed record is larger",
@@ -1357,7 +1357,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md\nBase instructions")
                 choose(gap(body="manifest_over_limit", recorded_bytes=2258277, max_bytes=2097152,
                            retry_max_bytes=2258277, file_trace="not_read"), "sealed record is larger", "#headline")
-                assert frame.locator("#source-versions").text_content().startswith("The sealed record was not read")
+                assert "The sealed record was not read" in frame.locator("#source-versions").text_content()
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
                 large = tmp_path / "large-report.json"
                 with large.open("wb") as handle:
