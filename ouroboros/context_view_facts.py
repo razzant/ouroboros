@@ -8,13 +8,17 @@ import pathlib
 
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY, bound_host_row, host_row_intact
 from ouroboros.memory_waiting import text as waiting_text
 from ouroboros.utils import update_json_locked, utc_now_iso
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
 LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open Main-line periods of Low starts, by cause
 SIZE_REFUSAL_KEY = "_context_size_refusal"  # in a task's usage: its round's latest size refusal, whole
+#: In a task's usage: the refused sends no request has told yet, each its own two counts (``size_refusal.counts``),
+#: queued as their calls end (``llm_observability.SendRefusals``) and told once by the next facts row.
+REFUSED_SENDS_KEY = "_refused_sends"
+_REFUSED_SEND_KIND = "ouroboros_refused_send"
 _REFUSAL_BASES = {"provider_stated": "provider stated",
                   "exact_local_count": "derived from an exact local count before sending",
                   "anchored_estimate": "derived from a refusal that stated no number"}
@@ -277,6 +281,46 @@ def size_refusal(usage, round_idx):
     """The latest size refusal of round ``round_idx`` (``remember_size_refusal``); None after its round."""
     slot = usage.get(SIZE_REFUSAL_KEY)
     return slot if isinstance(slot, dict) and round_idx is not None and slot.get("round") == round_idx else None
+
+
+def _pending_refused_sends(usage):
+    return [row for row in usage.get(REFUSED_SENDS_KEY) or ()
+            if isinstance(row, dict) and row.get("physical_attempt_id") and row.get("text")]
+
+
+def _refusal_notices(usage):
+    return {f"[CONTEXT_FACTS] {row['text']}": row["physical_attempt_id"] for row in _pending_refused_sends(usage)}
+
+
+def _carried_notices(notices, messages) -> set:
+    # A quotation, even another host row's quotation, is no delivery of this fact.
+    return {row["content"] for row in messages if row.get(HOST_CONTEXT_KIND_KEY) == _REFUSED_SEND_KIND
+            and isinstance(row.get("content"), str) and row["content"] in notices and host_row_intact(row)} if notices else set()
+
+
+def refused_sends_in_messages(usage, messages) -> set:
+    """Pending physical identities this prepared send carries in their own intact host rows."""
+    notices = _refusal_notices(usage)
+    return {notices[text] for text in _carried_notices(notices, messages)}
+
+
+def consume_refused_sends(usage, sent: set) -> list:
+    """Take only this dispatch's pairs; their physical sender can return them on a proven-unsent release."""
+    rows = _pending_refused_sends(usage)
+    if kept := [row for row in rows if row["physical_attempt_id"] not in sent]:
+        usage[REFUSED_SENDS_KEY] = kept
+    else:
+        usage.pop(REFUSED_SENDS_KEY, None)
+    return [row for row in rows if row["physical_attempt_id"] in sent]
+
+
+def append_refused_sends(usage, messages) -> bool:
+    """Prepare an intact host row for each untold pair. Never rewrite history; an unsent row consumes nothing."""
+    notices = _refusal_notices(usage)
+    carried = _carried_notices(notices, messages)
+    missing = [bound_host_row(_REFUSED_SEND_KIND, text) for text in notices if text not in carried]
+    messages.extend(missing)
+    return bool(missing)
 
 
 def _refused_request_text(slot):

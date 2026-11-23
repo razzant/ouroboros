@@ -142,21 +142,16 @@ def _record_forced_finalization(
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
     tools = getattr(ctx, "tools", None)  # the task's facts live on its tool context, never on the round limits
+    tools_ctx = getattr(tools, "_ctx", None)
     if getattr(candidate, "quiet", False):
         ctx.accumulated_usage.update(wake_silent=True, terminal_origin=TERMINAL_ORIGIN_MODEL_FINAL)
-    elif schedule_report_ctx(getattr(tools, "_ctx", None)):
+    elif schedule_report_ctx(tools_ctx):
         ctx.accumulated_usage["wake_silent"] = True  # an older schedule's report is a record before selection too
     else:
         ctx.accumulated_usage.pop("wake_silent", None)
     binding = dict(candidate.acceptance_binding or {}) if candidate is not None else {}
-    current_fingerprint = str(
-        getattr(getattr(tools, "_ctx", None), "_delivery_evidence_fingerprint", "")
-        or ""
-    )
-    current_revision = int(
-        getattr(getattr(tools, "_ctx", None), "_delivery_evidence_revision", 0)
-        or 0
-    )
+    current_fingerprint = str(getattr(tools_ctx, "_delivery_evidence_fingerprint", "") or "")
+    current_revision = int(getattr(tools_ctx, "_delivery_evidence_revision", 0) or 0)
     llm_trace["forced_finalization"] = {
         "reason_code": reason_code,
         "source": source,
@@ -559,6 +554,9 @@ def _prepare_forced_prompt(
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The typed facts sit BEFORE the owner-source observation so that one-shot block
     # stays the tail of the message (the prompt-cache prefix rule).
+    from ouroboros.context_view_facts import append_refused_sends
+
+    append_refused_sends(ctx.accumulated_usage, ctx.messages)  # price the same host rows the final send keeps
     head = prompt + _loop()._forced_delegation_note(tools_ctx, llm_trace) + _forced_state_facts(ctx, llm_trace)
     presence = _presence_forced_contract(ctx, tools_ctx)
     return head + presence + _forced_subject_prompt(ctx, llm_trace, presence_armed=bool(presence))
@@ -879,11 +877,14 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
+    from ouroboros.context_view_facts import append_refused_sends
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
     if admitted_request is None and _loop()._retire_main_reasoning(ctx):
         from ouroboros.transcript_prefix import append_reasoning_retirement_fact
         append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), ctx.messages)
+    if admitted_request is None and initial_messages is None:
+        append_refused_sends(ctx.accumulated_usage, ctx.messages)
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The admitted send reuses the lookahead's one measurement (``task_pacing.prepared_wrapup_candidate``);
     # a direct, drift or owner-refresh send measures its own final input afresh.
@@ -1121,40 +1122,34 @@ def _forced_fallback_result(
             candidate.full_text
         )
         ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
-        if composed != candidate.full_text:
+        replaced = composed != candidate.full_text
+        if replaced:
             candidate = _publish_model_forced_candidate(
                 ctx, llm_trace, composed, reason_code,
                 degraded_reason=candidate_reason,
             )
-            ctx.accumulated_usage["_best_effort_extracted"] = True
-            _loop()._record_forced_finalization(
+        else:
+            _loop()._degrade_retained_delivery_candidate(
                 ctx,
                 llm_trace,
-                reason_code=reason_code,
-                source=(
-                    f"{retained_source}_with_host_suffix"
-                    if retained_source else "retained_candidate_with_host_suffix"
-                ),
-                candidate=candidate,
+                candidate,
+                control=retained_control or f"forced_preserve:{reason_code}",
+                reason_code=candidate_reason or reason_code,
             )
-            return composed, ctx.accumulated_usage, llm_trace
-        _loop()._degrade_retained_delivery_candidate(
-            ctx,
-            llm_trace,
-            candidate,
-            control=retained_control or f"forced_preserve:{reason_code}",
-            reason_code=candidate_reason or reason_code,
-        )
         ctx.accumulated_usage["_best_effort_extracted"] = True
         _loop()._record_forced_finalization(
             ctx,
             llm_trace,
             reason_code=reason_code,
-            source=retained_source or "retained_candidate",
+            source=(
+                f"{retained_source}_with_host_suffix"
+                if retained_source else "retained_candidate_with_host_suffix"
+            ) if replaced else retained_source or "retained_candidate",
             candidate=candidate,
         )
-        accept_preserved_handover_stop(tool_ctx, llm_trace)
-        return candidate.full_text, ctx.accumulated_usage, llm_trace
+        if not replaced:
+            accept_preserved_handover_stop(tool_ctx, llm_trace)
+        return (composed if replaced else candidate.full_text), ctx.accumulated_usage, llm_trace
 
     if fallback_is_retained_model_text and live_candidate is not None:
         candidate = _publish_stale_forced_candidate(
