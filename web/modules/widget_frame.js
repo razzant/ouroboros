@@ -328,20 +328,33 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // browser fires a loop error on window, which the bridge's fault
             // channel reports as a widget script error. A microtask would still
             // run inside delivery; an animation frame runs before the next
-            // observation pass, coalesces bursts into one measurement and is
-            // cancelled on dispose. Hidden pages pause both alike.
+            // observation pass and coalesces bursts into one measurement. A frame
+            // out of view (a board card below the fold) gets no animation frames,
+            // so a 100 ms timer races it, also outside delivery: whichever comes
+            // first measures, once. Dispose cancels both.
+            const nextFrame = (callback) => {
+                let frame = 0;
+                let timer = 0;
+                const cancel = () => {
+                    window.cancelAnimationFrame(frame);
+                    window.clearTimeout(timer);
+                };
+                frame = window.requestAnimationFrame(() => { cancel(); callback(); });
+                timer = window.setTimeout(() => { cancel(); callback(); }, 100);
+                return cancel;
+            };
             const scheduleReport = () => {
                 if (disposed || resizeFrame !== null) return;
-                resizeFrame = window.requestAnimationFrame(() => {
+                resizeFrame = nextFrame(() => {
                     resizeFrame = null;
                     report();
                 });
             };
-            // A change in a board document is measured once an animation frame, and reported only when it moved that;
+            // A change in a board document is measured once a frame (nextFrame), and reported only when it moved that;
             // the report goes on from that same measure.
             const scheduleChange = () => {
                 if (disposed || changeFrame !== null) return;
-                changeFrame = window.requestAnimationFrame(() => {
+                changeFrame = nextFrame(() => {
                     changeFrame = null;
                     if (!root || !document.body) return;
                     if (held?.moving && !settling()) {
@@ -398,9 +411,9 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             });
             window.__ouroWidgetOnDispose?.(() => {
                 disposed = true;
-                if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+                resizeFrame?.();
                 resizeFrame = null;
-                if (changeFrame !== null) window.cancelAnimationFrame(changeFrame);
+                changeFrame?.();
                 changeFrame = null;
                 observer?.disconnect();
                 mutations?.disconnect();

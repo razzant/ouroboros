@@ -1604,6 +1604,86 @@ def test_an_animation_that_moves_nothing_does_not_keep_a_follower_growing(direct
             browser.close()
 
 
+# Cards that fill every column (three at 1440 px), so the next one in order lands below the fold.
+_PILLAR = "document.getElementById('root').innerHTML = '<div style=\"height:1400px\">Pillar</div>';\n"
+# Its status arrives after load, while it stands below the fold: a loading line, then 16 rows. It notes when it grew and
+# each report it sent (test observation only).
+_LATE = """(() => {
+    const root = document.getElementById('root');
+    root.innerHTML = '<p style="margin:0">Loading</p>';
+    window.__reportsAt = [];
+    const report = window.__ouroWidgetReport;
+    if (report) window.__ouroWidgetReport = (message) => {
+        window.__reportsAt.push([Math.round(performance.now()), message.height]);
+        report(message);
+    };
+    setTimeout(() => {
+        root.innerHTML = Array.from({ length: 16 }, (_, i) => '<div style="height:20px">Row ' + (i + 1) + '</div>').join('');
+        window.__grownAt = Math.round(performance.now());
+    }, 1500);
+})();
+"""
+_PLACE = """(selector) => {
+    const frame = document.querySelector(`${selector} iframe`).getBoundingClientRect();
+    const view = document.querySelector('.widgets-scroll').getBoundingClientRect();
+    return { top: Math.round(frame.top), height: Math.round(frame.height),
+             viewBottom: Math.round(Math.min(view.bottom, window.innerHeight)) };
+}"""
+
+
+@pytest.mark.parametrize("engine", ("chromium", "webkit"))
+def test_a_card_that_grows_below_the_fold_has_its_height_before_it_is_scrolled_to(direct_server_with_data, engine):
+    """A frame out of view gets no animation frame; its growth is reported all the same, so the card stands at its
+    height before the owner scrolls to it, and scrolling to it moves nothing."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    probe = _write_modules(data_dir, "board_fold_probe", {**{f"pillar{i}": _PILLAR for i in range(3)}, "status": _LATE})
+    late = f'[data-widget-key="{probe}:status"]'
+    shots = evidence_dir(data_dir)
+    report = {}
+
+    with sync_playwright() as pw:
+        browser, context = launch(pw, engine, viewport={"width": 1440, "height": 1000})
+        page = context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            assert page.evaluate("""async (skill) => (await fetch(`/api/skills/${encodeURIComponent(skill)}/toggle`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: true}),
+            })).status""", probe) == 200
+            page.click('[data-nav-page="widgets"]')
+            page.wait_for_function("(s) => document.querySelector(`${s} iframe`)?.dataset.widgetContentHeight",
+                                   arg=late, timeout=30_000)
+            inner = page.locator(f"{late} iframe").element_handle().content_frame()
+            # Polled by interval: the default polls by animation frame, which a frame out of view never runs.
+            inner.wait_for_function("() => window.__grownAt", polling=100, timeout=15_000)
+            report["grown"] = page.evaluate(_PLACE, late)
+            page.wait_for_timeout(1500)
+            report["below"] = page.evaluate(_PLACE, late)
+            report["natural"] = inner.evaluate("() => document.documentElement.scrollHeight")
+            report["reports"] = inner.evaluate("() => ({ grownAt: window.__grownAt, at: window.__reportsAt })")
+            page.screenshot(path=str(shots / f"{engine}-below-the-fold.png"))
+            below = report["below"]
+            assert report["grown"]["top"] >= report["grown"]["viewBottom"], ("it grew below the fold", report)
+            assert below["top"] >= below["viewBottom"], ("still below the fold", report)
+            assert below["height"] > 300 and abs(below["height"] - report["natural"]) <= 2, report
+            page.locator(late).scroll_into_view_if_needed()
+            page.wait_for_timeout(600)
+            report["scrolled"] = page.evaluate(_PLACE, late)
+            page.screenshot(path=str(shots / f"{engine}-below-the-fold-scrolled.png"))
+            assert report["scrolled"]["top"] < report["scrolled"]["viewBottom"], report
+            assert report["scrolled"]["height"] == below["height"], ("scrolling to it moves nothing", report)
+            assert errors == [], errors
+        finally:
+            (shots / f"{engine}-below-the-fold.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            context.close()
+            browser.close()
+
+
 @pytest.mark.parametrize("engine", ("chromium", "webkit"))
 def test_the_owners_height_is_exact_and_ordinary_growth_is_followed_to_its_end(direct_server_with_data, engine):
     """Streaming, a height transition, a shrink and a late image reach their real height with no stop and no drift; the

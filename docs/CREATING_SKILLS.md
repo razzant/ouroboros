@@ -2329,11 +2329,11 @@ For auto-height module CSS, prefer one owner of padding and box geometry between
 `overflow-y: auto` and feed scrollbar width back into wrapping; such CSS stays
 supported. For auto-height modules, the host bootstrap suppresses only
 document-viewport `overflow-y` below the ceiling and releases it at the ceiling;
-horizontal overflow stays the author's. The bootstrap re-measures in the next
-animation frame after a `ResizeObserver` notice, never inside its delivery,
-where a layout write can leave a change undelivered and the loop error would
-reach the fault channel as a widget script error (WebKit: `Script error.`); an
-author observer that writes layout in its own callback can raise the same error.
+horizontal overflow stays the author's. The bootstrap re-measures after a
+`ResizeObserver` notice, never inside its delivery, where a layout write can
+leave a change undelivered and the loop error would reach the fault channel as
+a widget script error (WebKit: `Script error.`); an author observer that writes
+layout in its own callback can raise the same error.
 
 #### The in-frame bridge (`window.OuroborosWidget`)
 

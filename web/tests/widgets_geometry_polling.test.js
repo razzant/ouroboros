@@ -70,6 +70,15 @@ function resizeHarness({
         frames.clear();
         pending.forEach((callback) => callback());
     };
+    // The reporter's timers (window.setTimeout), run only when a case says so, as a frame out of view sees them.
+    let timerId = 0;
+    const timers = new Map();
+    const timerDelays = [];
+    const flushTimers = () => {
+        const pending = [...timers.values()];
+        timers.clear();
+        pending.forEach((callback) => callback());
+    };
     // The reporter owns overflow-y and writes nothing else: any other declaration it set would fail here.
     const createStyle = (label, initial = {}) => {
         const declarations = new Map();
@@ -183,6 +192,8 @@ function resizeHarness({
         innerHeight,
         requestAnimationFrame(callback) { frames.set(++frameId, callback); return frameId; },
         cancelAnimationFrame(id) { frames.delete(id); },
+        setTimeout(callback, delay) { timers.set(++timerId, callback); timerDelays.push(delay); return timerId; },
+        clearTimeout(id) { timers.delete(id); },
         // The bridge's channel, which the resize reporter posts through.
         __ouroWidgetReport(message) {
             messages.push(message);
@@ -236,6 +247,9 @@ function resizeHarness({
         observerDisconnects: () => observerDisconnects,
         pendingFrames: () => frames.size,
         flushFrame,
+        pendingTimers: () => timers.size,
+        timerDelays,
+        flushTimers,
         notify(height) { state.height = height; observerCallback(); },
         resize(height) {
             state.height = height;
@@ -278,6 +292,44 @@ test('resize observer defers layout writes, coalesces updates, and cancels on di
     assert.equal(harness.pendingFrames(), 0);
     assert.deepEqual(harness.messages.map((item) => item.height), [616, 1316]);
     assert.deepEqual(harness.styleWrites, { set: 2, remove: 2 });
+});
+
+test('a frame that gets no animation frame (out of view) still reports after a short timer, once', () => {
+    // A board card below the fold: the browser runs no animation frame in it, only timers.
+    // A root that grows (ResizeObserver), and a board document whose placed box moves with no change to the root's
+    // size (a layout cue).
+    let boxTop = 40;
+    for (const [label, harness, change] of [
+        ['root resize', resizeHarness(), (harness) => harness.notify(1200)],
+        ['document change', resizeHarness({ wholeDocument: true, maxHeight: 8192, placed: [{ top: () => boxTop, height: 20 }] }),
+            (harness) => { boxTop = 1400; harness.documentListeners.get('transitionend')(); }],
+    ]) {
+        harness.flushFrame();
+        const before = harness.messages.length;
+        change(harness);
+        assert.equal(harness.pendingTimers(), 1, label);
+        assert.ok(harness.timerDelays.every((delay) => delay > 16 && delay <= 200), label);
+        harness.flushTimers();
+        assert.equal(harness.messages.length, before + 1, label);
+        assert.ok(harness.messages.at(-1).height > 1200, label);
+        assert.equal(harness.pendingFrames(), 0, `${label}: the timer cancels the frame it raced`);
+        harness.flushFrame();
+        assert.equal(harness.messages.length, before + 1, label);
+    }
+    // Visible: the frame comes first and reports alone; its timer is cleared.
+    const visible = resizeHarness();
+    visible.notify(1200);
+    visible.flushFrame();
+    assert.equal(visible.pendingTimers(), 0);
+    visible.flushTimers();
+    assert.deepEqual(visible.messages.map((item) => item.height), [616, 1216]);
+    // Dispose before either fires cancels both.
+    visible.notify(1300);
+    assert.equal(visible.pendingTimers(), 1);
+    visible.dispose();
+    assert.equal(visible.pendingFrames(), 0);
+    assert.equal(visible.pendingTimers(), 0);
+    assert.deepEqual(visible.messages.map((item) => item.height), [616, 1216]);
 });
 
 test('widget frame contract keeps the bounded host geometry', () => {
