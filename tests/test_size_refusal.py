@@ -684,65 +684,44 @@ def test_server_read_is_a_declaration_even_when_settings_is_smaller(tmp_path, mo
     assert ce._read(tmp_path) == before
 
 
-@pytest.mark.parametrize("standing,history", [(False, False), (False, True), (True, False)])
-def test_window_learning_uses_the_actors_nano_schema_set(tmp_path, monkeypatch, standing, history):
+@pytest.mark.parametrize("standing,history,loaded", [(False, False, False), (False, True, False), (True, False, True)])
+def test_window_learning_uses_the_actors_nano_schema_set(tmp_path, monkeypatch, standing, history, loaded):
+    from ouroboros import context, context_fit as cf, loop
     from ouroboros.tool_policy import initial_tool_schemas
     from ouroboros.tools.registry import ToolRegistry
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx._nano_standing = standing
-    expected = initial_tool_schemas(registry, "nano", ["read_file"] if history else [], standing=standing)
+    registry._ctx._actor_loaded_tool_names = {"query_code"} if loaded else set()
+    expected = initial_tool_schemas(registry, "nano", ["read_file"] if history else ["query_code"] if loaded else [],
+                                    standing=standing)
     if not standing and not history:
         assert {s["function"]["name"] for s in expected} == {
             "compact_context", "enable_tools", "list_available_tools"}
+    full = [*initial_tool_schemas(registry, "low"), {"type": "function", "function": {
+        "name": "unneeded_fixture_tool", "description": "A fat schema. " * 40_000}}]
+    route = {"model": "fixture", "provider": "openai-compatible"}
+    evidence = ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "call-fixture")
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (route, evidence))
+    plan = cf.build_context_fit_plan(None, cf.ContextCore("Core", "BIBLE", "", "", "", "", '"Task"', False),
+                                    {}, preferred_mode="low", tool_schemas=full,
+                                    route_resolver=context._context_fit_route)
     usage = {}
     sr.stamp(usage, _sdk_error(400, json.dumps({"error": {
         "type": sr.LLAMA_CPP_TYPE, "n_ctx": 80000, "n_prompt_tokens": 90000}}).encode()))
-    plan = SimpleNamespace(route_fp="call-fixture", provider="openai-compatible", model="fixture",
-                           window_record=None, window_witness_bound=True)
-    messages = [{"role": "system", "content": "Low view"}]
+    messages = plan.messages_for("low")
     if history:
         messages += [{"role": "assistant", "content": None, "tool_calls": [{"id": "r1", "type": "function",
                       "function": {"name": "read_file", "arguments": "{}"}}]}]
     ctx = SimpleNamespace(accumulated_usage=usage, context_fit_plan=plan, active_use_local=False,
                           active_context_mode="low", active_model="fixture", messages=messages, tools=registry,
-                          tool_schemas=initial_tool_schemas(registry, "low"), model_role="main", task_id="call1")
-
-    def rebind(*args, **kwargs):
-        messages[0] = {"role": "system", "content": "Nano view"}
-        return plan, "nano"
-
-    assert learn_window_from_refusal(ctx, SimpleNamespace(_rebind_context_fit_plan=rebind))
+                          tool_schemas=full, model_role="main", task_id="call1")
+    assert learn_window_from_refusal(ctx, loop) and ctx.active_context_mode == "nano"
     assert ctx.tool_schemas == expected  # same canonical bytes as a Nano start, including history's tools
-
-
-def test_a_tool_loaded_but_not_yet_called_survives_the_rebind_into_nano(tmp_path, monkeypatch):
-    """Review 8 (Fable): enable_tools loaded a tool, a size refusal rebinds the request into Nano before it is called;
-    the loaded tool's schema is still sent."""
-    from ouroboros.tool_policy import initial_tool_schemas
-    from ouroboros.tools.registry import ToolRegistry
-
-    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx._actor_loaded_tool_names = {"query_code"}  # what enable_tools(["query_code"]) leaves
-    usage = {}
-    sr.stamp(usage, _sdk_error(400, json.dumps({"error": {
-        "type": sr.LLAMA_CPP_TYPE, "n_ctx": 80000, "n_prompt_tokens": 90000}}).encode()))
-    plan = SimpleNamespace(route_fp="loaded-fixture", provider="openai-compatible", model="fixture",
-                           window_record=None, window_witness_bound=True)
-    messages = [{"role": "system", "content": "Low view"}]
-    ctx = SimpleNamespace(accumulated_usage=usage, context_fit_plan=plan, active_use_local=False,
-                          active_context_mode="low", active_model="fixture", messages=messages, tools=registry,
-                          tool_schemas=initial_tool_schemas(registry, "low"), model_role="main", task_id="loaded1")
-
-    def rebind(*args, **kwargs):
-        messages[0] = {"role": "system", "content": "Nano view"}
-        return plan, "nano"
-
-    assert learn_window_from_refusal(ctx, SimpleNamespace(_rebind_context_fit_plan=rebind))
-    names = [schema["function"]["name"] for schema in ctx.tool_schemas]
-    assert "query_code" in names and "finish_task" in names
+    if loaded:
+        assert {"query_code", "finish_task"} <= {schema["function"]["name"] for schema in ctx.tool_schemas}
 
 
 def test_engine_display_recognizes_size_but_never_supplies_numbers(tmp_path, monkeypatch):

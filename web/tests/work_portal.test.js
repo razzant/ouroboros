@@ -323,6 +323,9 @@ test('fresh detail with failed open synthesis says Failed; fresh absence cannot 
     const details = { [id]: null };
     const f = fixture({ details });
     try {
+        // Finish Main's initial history replay before counting reads from the test's snapshots.
+        await f.instance.refreshHistory();
+        assert.ok(f.instance.hasPaintedHistory(), 'Main history was applied');
         f.frame(startedAudit);
         f.state({ active_chat_activities: [] });
         await settle();

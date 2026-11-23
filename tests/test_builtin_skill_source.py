@@ -439,6 +439,9 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
      ('live_conversation', 'cf6f95cf4', '0.1.33'),
      # Retained Extensions forms need the new per-root Calls UI bindings after an app update.
      ('live_conversation', '085f41abafcee74a61c60e79824025e7e5d3a4e1', '0.1.34'),
+     # A native resume's serving catalog follows its declared tools: a 0.1.35 install is reseeded.
+     ('live_conversation', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.35'),
+     ('gemini_live', '33d5ea79b65e994f96ccd696117b8f565b3b1cc2', '0.1.21'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -459,6 +462,9 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
     state = drive / "state" / "skills" / name
     (state / "config.json").write_text('{"provider":"grok_realtime:grok"}\n', encoding="utf-8")
     retained = {path: (state / path).read_bytes() for path in ("enabled.json", "config.json")}
+    if name == 'gemini_live' and previous_version == '0.1.21':
+        retained['grants.json'] = b'{"granted_keys":["GEMINI_API_KEY"]}\n'
+        (state / 'grants.json').write_bytes(retained['grants.json'])
     previous_record = read_install_record(drive, name)
     if edited:
         with (installed / "plugin.py").open("a", encoding="utf-8") as stream:
@@ -471,7 +477,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.35', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.36', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.22', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.9.0'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

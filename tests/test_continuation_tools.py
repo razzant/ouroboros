@@ -113,6 +113,34 @@ def test_intact_own_prefix_keeps_frozen_tools_and_reasoning(tmp_path, monkeypatc
     assert len(messages) == 3
 
 
+def test_a_frozen_schema_preview_cannot_pin_cuts_after_current_tools_fit(tmp_path, monkeypatch):
+    from ouroboros import capability_evidence as ce, context, context_fit as cf
+
+    real_rebind = loop._rebind_context_fit_plan
+    large = _schema("withdrawn")
+    large["function"]["description"] = "Schema no longer published. " * 10_000
+    fresh = [_schema("read_file")]
+    prepared = prepare(tmp_path, monkeypatch, frozen=[large], current=fresh)
+    tools, _state, messages, _trace, _enabled, _ = prepared
+    model = tools._ctx.active_model
+
+    def route(_task, **_kw):
+        return {"model": model, "provider": "anthropic"}, ce.CapabilityEvidence(
+            35_000, "confirmed", "metadata", "restore", window_kind="input")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    core = cf.ContextCore("System", "BIBLE", "Architecture", "", "Identity", "Fact", '"Assignment"', False)
+    tools._ctx.context_fit_plan = cf.build_context_fit_plan(None, core, {}, preferred_mode="max", route_resolver=route)
+    original = tools._ctx.context_fit_plan.projection("max").system_message()
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", real_rebind)
+    events = []
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *a, **kw: events.append(a[-1]))
+    assert restore(prepared) == fresh and tools._ctx.active_context_mode == "max"
+    assert messages[0] == original
+    assert [e["effective_mode"] for e in events if e.get("checkpoint_kind") == "context_fit_route_rebound"] == ["max"]
+
+
 @pytest.mark.parametrize("mode", ["max", "low", "nano"])
 def test_changed_system_converges_with_fresh_profile_and_retires_once(tmp_path, monkeypatch, mode):
     prepared = prepare(tmp_path, monkeypatch, mode=mode, current=[_schema("enable_tools"), _schema("new")])
@@ -134,6 +162,36 @@ def test_changed_system_converges_with_fresh_profile_and_retires_once(tmp_path, 
     assert sum(event.get("checkpoint_kind") == "continuation_tools_changed" for event in events) == 1
     saved = owner_wait.continuation_state(tools._ctx, messages, trace, usage, 3, identity, set())
     assert saved["tool_schemas"] == identity
+
+
+@pytest.mark.parametrize('new_tool', [False, True])
+def test_restore_prices_and_publishes_only_the_final_nano_catalog(tmp_path, monkeypatch, new_tool):
+    from ouroboros import capability_evidence as ce, context, context_fit as cf
+
+    rebind = loop._rebind_context_fit_plan
+    essential = [_schema('read_file'), _schema('loaded_explicitly')]
+    full = [*essential, _schema('large_full_tool')]
+    full[-1]['function']['description'] = 'Use this full-mode capability. ' * 6000
+    fresh = [*full, *([_schema('new_full_tool')] if new_tool else [])]
+    prepared = prepare(tmp_path, monkeypatch, frozen=full, current=fresh, mode='low', loaded=['loaded_explicitly'])
+    tools, _, messages, trace, _, _ = prepared
+    model = tools._ctx.active_model
+    def route(*_args, **_kwargs):
+        return {'model': model, 'provider': 'anthropic'}, ce.CapabilityEvidence(
+            35_000, 'confirmed', 'metadata', 'narrow-restored', window_kind='input')
+
+    monkeypatch.setattr(context, '_context_fit_route', route)
+    monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
+    core = cf.ContextCore('System', 'BIBLE', 'Architecture', '', 'Identity', 'Fact', '"Assignment"', False)
+    tools._ctx.context_fit_plan = cf.build_context_fit_plan(None, core, {}, preferred_mode='low', route_resolver=route)
+    monkeypatch.setattr(loop, '_rebind_context_fit_plan', rebind)
+    resident = restore(prepared)
+    assert tools._ctx.active_context_mode == 'nano' and resident == essential
+    facts, = trace['continuation_tools']
+    assert facts['from_tools_digest'] == prefix.tools_digest(full)
+    assert facts['to_tools_digest'] == prefix.tools_digest(resident) and facts['removed'] == ['large_full_tool']
+    notice, = [r['content'] for r in messages if 'tool set changed' in str(r.get('content'))]
+    assert '+added none' in notice and '−removed large_full_tool' in notice and 'new_full_tool' not in notice
 
 
 @pytest.mark.parametrize("trigger", ["no_baseline", "tools_changed", "observer_baseline"])
@@ -165,7 +223,7 @@ def test_history_requires_only_frozen_contracts_after_fitting(tmp_path, monkeypa
     if carried and not available:
         assert "saved tool set was kept" in messages[-1]["content"]
         assert "history_tool" in messages[-1]["content"]
-        assert trace == {} and len(projections) == 1 and enabled == set()
+        assert trace == {} and len(projections) == 2 and enabled == set()  # re-price the notice, not a changed catalog
         assert not hasattr(tools._ctx, "_route_left_out_tool_names")
     else:
         assert len(projections) == 2 and trace["continuation_tools"]

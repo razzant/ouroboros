@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import context_fit as fit, memory_view
+from ouroboros import context_fit as fit, context_measurement, memory_view
 from ouroboros.context_anchor import InputAnchor
 from ouroboros.contracts.realtime import RouteFacts
 from ouroboros.section_floor import HostSection
@@ -138,7 +138,7 @@ def test_measurement_keeps_conversation_capacity_and_uses_its_counter(
     built = plan(core(tmp_path), window, facts=RouteFacts(
         conversation_window_tokens=window, accepted_input_tokens=accepted,
         working_reserve_tokens=24_000, basis=basis))
-    monkeypatch.setattr(fit, "estimate_context_prompt_tokens", lambda *_a, **_kw: 20_000)
+    monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: 20_000)
     monkeypatch.setattr("ouroboros.capability_evidence.resolve_main_token_density",
                         lambda *_a, **_kw: (2.0, "fresh_route_usage"))
     result = fit.measure_main_fit(built, built.messages_for("nano"), [], profile="owner_nano",
@@ -158,7 +158,7 @@ def test_measurement_keeps_conversation_capacity_and_uses_its_counter(
 def test_ordinary_measurement_keeps_reserve_and_density_with_accepted_input_lower_bound(
         tmp_path, monkeypatch, accepted, capacity):
     built = plan(core(tmp_path), 50_000)
-    monkeypatch.setattr(fit, "estimate_context_prompt_tokens", lambda *_a, **_kw: 20_000)
+    monkeypatch.setattr(context_measurement, "estimate_context_prompt_tokens", lambda *_a, **_kw: 20_000)
     measure = fit.measure_main_fit(built, built.messages_for("nano"), [], profile="owner_nano",
         rendered_mode="nano", round_id="r1", accepted_input_tokens=accepted,
         anchor=InputAnchor(40_000, 20_000, 1)).measurement

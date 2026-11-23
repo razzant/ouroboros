@@ -643,8 +643,9 @@ def pytest_configure(config):
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
     config.addinivalue_line("markers", "program_observations: explicitly exercise and join vendor-program observation work")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
-    if evidence and _PYTEST_ROOT is not None and not getattr(config.option, "ci_evidence_dir", None):
-        config.option.ci_evidence_dir = str(pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
+    if not getattr(config.option, "ci_evidence_dir", None) and evidence and _PYTEST_ROOT is not None:
+        config.option.ci_evidence_dir = os.environ.get("OUROBOROS_PRECOMMIT_SESSION_DIR") or str(
+            pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
     selected = getattr(config.option, "ci_evidence_dir", None)
     if selected and _SAFE_TEMP_ROOT and pathlib.Path(selected).resolve().is_relative_to(pathlib.Path(_SAFE_TEMP_ROOT).resolve()):
         _environment["retain_tree"](_SAFE_TEMP_ROOT, f"explicit diagnostics remain inside scratch: {selected}")
@@ -1265,6 +1266,7 @@ def _reset_executing_source_baseline_between_tests(monkeypatch):
     from ouroboros import preflight_receipts
 
     monkeypatch.setattr(preflight_receipts, "_baseline", None)
+    monkeypatch.setattr(preflight_receipts, "_precommit_reader", None)
 
 
 @pytest.fixture(autouse=True)

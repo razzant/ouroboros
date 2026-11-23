@@ -114,6 +114,40 @@ def freeze_tool_profile(task: dict) -> str:
     return task["tool_profile"]
 
 
+def scoped_read_actor(ctx: Any) -> str:
+    """Host identity for project-journal and cross-focus reads, not a tool grant.
+
+    A narrower recipient profile or child lineage wins over any enclosing root
+    or Place facts. A Place marker without a binding proves no room-wide access.
+    """
+    from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
+
+    metadata, contract = (value if isinstance(value, dict) else {} for value in (
+        getattr(ctx, "task_metadata", None), getattr(ctx, "task_contract", None)))
+    carriers = [metadata, contract, metadata.get("task_contract")]
+    carriers += [row.get("lineage") for row in carriers if isinstance(row, dict)]
+    facts = [row for row in carriers if isinstance(row, dict)]
+
+    def any_fact(key: str, value: str = "") -> bool:
+        values = [str(row.get(key) or "").strip() for row in facts]
+        return value in values if value else any(values)
+
+    if (any_fact("parent_task_id") or any_fact("delegation_role", "subagent")
+            or active_tool_profile(ctx) in {"local_readonly_subagent", "acting_subagent"}):
+        return "child"
+    binding = presence_caller_binding(ctx)
+    if binding:
+        return "place"
+    if (binding is not None or is_presence_task({"metadata": metadata,
+            "_presence_turn": metadata.get("_presence_turn") or getattr(ctx, "_presence_turn", False),
+            "_presence_origin": getattr(ctx, "_presence_origin", None)})
+            or any("capability_ceiling" in row for row in facts)):
+        return "unverified_place"
+    if getattr(ctx, "is_direct_chat", False) or any_fact("delegation_role", "root") or any_fact("root_task_id"):
+        return "root"
+    return "scoped"
+
+
 def predicted_subagent_profile(*, write_surface: str = "") -> ToolProfile:
     """The tool profile a scheduled subagent will resolve to, from schedule-time
     inputs only (v6.57.0, 1.6). A valid write_surface → acting_subagent; otherwise

@@ -467,17 +467,11 @@ def refused_candidate_facts(request: AttemptRequest, **measurement: Any) -> Dict
     }
 
 
-def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]]:
-    """Final-candidate W/R/P for Main admission; exact local input outranks density."""
+def main_context_response_reserve(request: AttemptRequest) -> int:
+    """Reply/working reserve Main charges to a sealed candidate's physical window."""
     from ouroboros.context_budget import context_mode_limits
-    from ouroboros.context_fit import reclaim_low_water_margin
 
     physical = request.physical_context
-    if physical is None:
-        return None
-    window = request.context_window_tokens_exact or physical.capacity_total_tokens
-    if window is None:
-        return None  # unknown capacity leaves the first full request admissible
     reserve = physical.response_reserve_tokens or context_mode_limits(
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
@@ -487,20 +481,38 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
     if (request.provider != "claudexor" and request.candidate_measurement_kind == "canonical_json_v1") or (
             getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano"):
         reserve = max(reserve, int(request.max_completion_tokens or 0))
+    return reserve
+
+
+def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]]:
+    """Final-candidate W/R/P for Main admission; exact local input outranks density."""
+    from ouroboros.context_fit import reclaim_low_water_margin
+
+    physical = request.physical_context
+    if physical is None:
+        return None
+    window = request.context_window_tokens_exact or physical.capacity_total_tokens
+    if window is None:
+        return None  # unknown capacity leaves the first full request admissible
+    reserve = main_context_response_reserve(request)
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
     if not exact and physical.view_kind == "helper":
         size = max(size, request.prompt_tokens_bounded_estimate)  # same raw floor as the reply policy
-    free = window - reserve - size
+    record = getattr(physical, "window_record", None) if not request.context_window_tokens_exact else None
+    room = record.input_room(reserve, under_way=True) if record is not None else None
+    free = (window - reserve if room is None else room) - size
     if free >= 0:
         return None  # only physical W gates; the owner target never vetoes a send
+    boundary = getattr(physical, "window_boundary_tokens", None) or window
     return refused_candidate_facts(
-        request, capacity_total_tokens=window, response_reserve_tokens=reserve, free_tokens=free,
+        request, capacity_total_tokens=window if room is None else room + reserve,
+        response_reserve_tokens=reserve, free_tokens=free,
         cause="exact_local_count" if exact else "known_window_prediction",
         **({"input_tokens": size, "context_window_tokens": window} if exact else {
             "estimated_input_tokens": size, "predicted_free_tokens": free,
-            "predicted_slack_tokens": reclaim_low_water_margin(None, window)}),
+            "predicted_slack_tokens": reclaim_low_water_margin(None, boundary)}),
     )
 
 

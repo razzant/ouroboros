@@ -986,7 +986,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     work = work_domain.is_work(search_root)
     search_kind = work_domain.kind(search_root) if work else ""
     if not work:
-        materialize_tree(search_root)  # a task's packed checkpoint handles are written back before the walk
+        materialize_tree(search_root, path_allowed=lambda target: not runtime_check(target))
     if not (search_kind not in ("", "missing") if work else search_root.exists()):
         return f"⚠️ SEARCH_NOT_FOUND: path not found: {display_search_path}"
     protected_root_read_block = block_reason_for_path(

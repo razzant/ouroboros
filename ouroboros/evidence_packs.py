@@ -966,6 +966,13 @@ def _restore_handle(target: pathlib.Path, raw: bytes, sha256: str) -> bool:
     return True
 
 
+def has_packed_handle(root: Any, task_id: str, rel_path: str) -> bool:
+    """Look up a checkpoint placement, without opening, verifying or restoring its payload."""
+    rel = pathlib.PurePosixPath(str(rel_path))
+    return (rel.parts[:2] == CHECKPOINTS_REL.parts
+            and _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix()) is not None)
+
+
 def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathlib.Path]:
     """The loose path of a checkpoint handle, written back from its pack when absent."""
     rel = pathlib.PurePosixPath(str(rel_path))
@@ -1005,13 +1012,15 @@ def _explain_retired(path: Any) -> None:
         raise SavedStateRetired(note)
 
 
-def materialize_tree(path: pathlib.Path) -> None:
-    """Restore handles below the task artifact root, checkpoint directory or exact path."""
+def materialize_tree(path: pathlib.Path, *, path_allowed=None) -> None:
+    """Restore admitted handles below the artifact root, checkpoint directory or exact path."""
     parsed = _checkpoint_path(path)
     if parsed:
         root, task_id, rest = parsed
         for name in ([rest[2]] if len(rest) == 3 else packed_handle_names(root, task_id)):
-            materialize_handle(root, task_id, (CHECKPOINTS_REL / name).as_posix())
+            relative = (CHECKPOINTS_REL / name).as_posix()
+            if path_allowed is None or path_allowed(_handle_path(root, task_id, relative)):
+                materialize_handle(root, task_id, relative)
 
 
 def _pack_roots(root: pathlib.Path) -> List[pathlib.Path]:

@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import uuid
 
+from ouroboros.preflight_case_facts import PHASES
+
 
 MODULE = "ouroboros_selection_inventory"
 SELECT = "--select-test"
@@ -133,18 +135,23 @@ def launch_args(args):
     return [arg for arg in args if not arg.startswith(SELECT + "=")]
 
 
-def read_inventory(temp_root, label):
-    """Return the inventory and its error. Only damage to the inventory itself stays in the record."""
+def read_inventory(temp_root, label, *, diagnostics=False):
+    """Return the inventory and its error. Only damage to the inventory itself stays in the record.
+
+    ``failed_phases[i]`` is the phase of the report behind ``failed[i]`` when present."""
     try:
         rows = [json.loads(line) for line in
                 (Path(temp_root) / f"inventory-{label}.jsonl").read_text(encoding="utf-8").splitlines()]
         collections = [row["ids"] for row in rows if row["event"] == "collection"]
         reports = [row for row in rows if row["event"] == "report"]
+        failures = [r for r in reports if r["outcome"] == "failed"]
         result = {"expected": collections[0] if collections else [], "collection_reports": len(collections),
                   "executed": [r["nodeid"] for r in reports if r["when"] == "teardown"],
                   "skipped": [r["nodeid"] for r in reports if r["outcome"] == "skipped"],
-                  "failed": [r["nodeid"] for r in reports if r["outcome"] == "failed"],
+                  "failed": [r["nodeid"] for r in failures],
                   "exitcode": rows[-1].get("exitcode") if rows and rows[-1]["event"] == "finish" else None}
+        if failures:
+            result["failed_phases"] = [r["when"] for r in failures]
         if sessions := [row["session"] for row in rows if row["event"] == "evidence_session"]:
             if len(sessions) != 1 or not isinstance(sessions[0], str) or not sessions[0]:
                 raise ValueError("ambiguous evidence session")
@@ -157,7 +164,10 @@ def read_inventory(temp_root, label):
                    for value in (expected, executed, result["skipped"], result["failed"])):
             raise ValueError("invalid node inventory")
         problem = ""
-        if any(collection != expected for collection in collections):
+        agreed = all(ids == expected for ids in collections)
+        if diagnostics:
+            result["assignment"] = "unobserved" if not collections else "known" if agreed else "disagreed"
+        if not agreed:
             problem = "worker collections disagree"
         elif len(set(expected)) != len(expected) or Counter(executed) != Counter(expected):
             problem = "expected and executed test ids differ (missing or duplicate execution)"
@@ -178,7 +188,7 @@ _LISTED_IDS = 50  # bounded excerpt of ids worth reading; counts and the digest 
 
 
 def compact_inventory(inventory):
-    """Counts, a digest of the expected ids and only the ids worth reading.
+    """Counts, an expected-id digest and short lists, with phases aligned to failed reports.
 
     The complete inventory stays with the run (and in the CLI's selection.json); a
     durable record repeated in events, exhibits, ledgers and handoffs never carries it.
@@ -186,15 +196,43 @@ def compact_inventory(inventory):
     compact = {}
     for label, row in (inventory or {}).items():
         expected, executed = row.get("expected", []), row.get("executed", [])
+        failed, phases = row.get("failed", []), row.get("failed_phases")
         compact[label] = {
             "expected": len(expected), "executed": len(executed), "skipped": len(row.get("skipped", [])),
             "digest": hashlib.sha256("\n".join(sorted(expected)).encode("utf-8")).hexdigest(),
-            "failed": row.get("failed", [])[:_LISTED_IDS],
+            "failed": failed[:_LISTED_IDS],
+            **({"failed_phases": phases[:_LISTED_IDS]} if isinstance(phases, list) and len(phases) == len(failed)
+               else {}),
             "missing": sorted((Counter(expected) - Counter(executed)).elements())[:_LISTED_IDS],
             "unexpected": sorted((Counter(executed) - Counter(expected)).elements())[:_LISTED_IDS],
             "exitcode": row.get("exitcode"),
         }
     return compact
+
+
+CRASH_PHASE = "???"  # pytest-xdist's phase for its report of the test a dead worker was running
+
+
+def failed_reports(inventory) -> dict:
+    """The failed reports a compact inventory lists, in their order, by what they are.
+
+    ``failed``: the test's own setup, call or teardown failed. ``worker_lost``: xdist's report
+    (``DSession.handle_crashitem``) for the test a worker was running when it died; no assertion
+    of that test is known to have failed. ``unclassified``: an unknown phase, or a lane record
+    without ``failed_phases`` (written before the phase was kept), where both read alike.
+    """
+    classes = {"failed": [], "worker_lost": [], "unclassified": []}
+    for row in (inventory or {}).values():
+        ids = row.get("failed") if isinstance(row, dict) else None
+        if not isinstance(ids, list):
+            continue
+        phases = row.get("failed_phases")
+        phases = phases if isinstance(phases, list) and len(phases) == len(ids) else [None] * len(ids)
+        for node, phase in zip(ids, phases):
+            if isinstance(node, str):
+                classes["failed" if isinstance(phase, str) and phase in PHASES else "worker_lost" if phase == CRASH_PHASE
+                        else "unclassified"].append(node)
+    return classes
 
 
 def scope_record(proof, inventory=None):

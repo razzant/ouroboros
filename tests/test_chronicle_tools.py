@@ -889,9 +889,12 @@ def test_tools_module_imports_no_retired_memory_machinery_and_lazy_domains_stay_
     forbidden = {"ouroboros.chronicle_view", "ouroboros.chronicle_sources", "ouroboros.room_consolidation",
                  "ouroboros.consolidator", "ouroboros.llm", "ouroboros.memory_guidance"}
     assert not (top | nested) & forbidden
+    # Retained source bytes reach D05 through its scoped reader (``recent_tasks.read_scoped_actor_source``),
+    # which admits the reading actor before the artifact loader runs.
     lazy = {"ouroboros.dialogue_evidence", "ouroboros.project_dialogue", "ouroboros.projects_registry",
-            "ouroboros.terminal_projection", "ouroboros.artifacts"}
+            "ouroboros.terminal_projection", "ouroboros.tools.recent_tasks"}
     assert lazy <= nested and not lazy & top
+    assert "ouroboros.artifacts" not in top
 
 
 def test_the_write_and_read_schemas_carry_account_selection_and_revision():

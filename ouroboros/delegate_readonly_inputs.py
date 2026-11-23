@@ -128,7 +128,8 @@ _CHILD_METADATA_KEYS = ("resource_intent", "root_task_id", "session_id", "projec
 
 def receiving_reader(ctx: Any, resource_policy: Any = None, *, workspace_root: str = "", child_task_id: str = "",
                      child_drive: Optional[pathlib.Path] = None, resource_intent: Optional[dict] = None,
-                     task_constraint: Optional[dict] = None, workspace_mode: Optional[str] = None) -> Any:
+                     task_constraint: Optional[dict] = None, workspace_mode: Optional[str] = None,
+                     project_id: Optional[str] = None) -> Any:
     """The recipient's read limits ON TOP of the caller's contract (never instead of its constraint:
     every entry must pass both). A direct start's run reads in the caller's own roots.
 
@@ -149,24 +150,30 @@ def receiving_reader(ctx: Any, resource_policy: Any = None, *, workspace_root: s
         reader.repo_dir = reader.system_repo_dir = serving_repo_dir_for(ctx)
         reader.serving_repo_dir = None
         parent = getattr(ctx, "task_metadata", None) or {}
+        parent_id = task_id_for_artifacts(ctx)
+        lineage = {"parent_task_id": parent_id, "delegation_role": "subagent"}
         # Each check keeps the carrier it reads on the parent (Presence the attribute, protected artifacts a
         # nonempty metadata contract); an empty carrier takes the other's, and both take the child's policy.
         own, held = (value if isinstance(value, dict) else {}
                      for value in (getattr(ctx, "task_contract", None), parent.get("task_contract")))
-        own, held = ({**contract, **({"resource_policy": resource_policy} if resource_policy else {})}
+        own, held = ({**contract, "lineage": {**(contract.get("lineage") or {}), **lineage},
+                      **({"resource_policy": resource_policy} if resource_policy else {})}
                      for contract in (own or held, held or own))
         reader.task_contract = own
         reader.task_id, reader.is_direct_chat = child_task_id, False
+        reader.project_id = project_id if project_id is not None else getattr(ctx, "project_id", "")
+        reader._presence_turn, reader._presence_origin = False, None
         # The child's metadata is what dispatch gives it (supervisor/task_dispatch.py): the lineage and
         # structural keys it names, the tree origin and only the Presence binding, never the speaker's
         # event or a parent's handoff.
         reader.task_metadata = {
             **{key: copy.deepcopy(parent[key]) for key in _CHILD_METADATA_KEYS if key in parent},
+            **lineage, "project_id": reader.project_id,
             **({"task_contract": held} if held else {}),
             **({"resource_intent": copy.deepcopy(resource_intent)} if resource_intent is not None else {}),
-            **consciousness_origin_metadata({**parent, "task_id": task_id_for_artifacts(ctx)}),
+            **consciousness_origin_metadata({**parent, "task_id": parent_id}),
             **presence_binding_authority_metadata(parent, task_contract=getattr(ctx, "task_contract", None)),
-            "parent_task_id": task_id_for_artifacts(ctx), "parent_workspace": capture_parent_workspace(ctx),
+            "parent_workspace": capture_parent_workspace(ctx),
         }
         if child_drive is not None:
             reader.drive_root = child_drive
@@ -193,18 +200,21 @@ def require_selected_tool(ctx: Any, tool: str, args: dict) -> dict:
     return bound
 
 
-def _dispatch_read_binding(reader: Any, args: dict) -> Any:
-    from ouroboros.tools.tool_resolution import _build_builtin_target_binding, _normalize_dispatch_path_args_result
+def _dispatch_read_binding(reader: Any, args: dict, *, defer_reads=None) -> Any:
+    from ouroboros.tool_access import build_resolved_resource_binding
+    from ouroboros.tools.tool_resolution import _normalize_dispatch_path_args_result
 
     args = dict(args)
     _normalize_dispatch_path_args_result(reader, "read_file", args)
-    if (args.get("root") or "active_workspace") not in INPUT_FILE_ROOTS:
+    root = args.get("root") or "active_workspace"
+    if root not in INPUT_FILE_ROOTS:
         raise ValueError("input_files needs an ordinary read_file root")
-    return _build_builtin_target_binding(reader, "read_file", args)
+    return build_resolved_resource_binding(reader, root=root, operation="read", path=args.get("path") or ".",
+                                           defer_reads=defer_reads)
 
 
 def selected_read_binding(reader: Any, args: dict, *, exact: Optional[pathlib.Path] = None,
-                          historic: bool = False) -> Any:
+                          historic: bool = False, defer_reads=None) -> Any:
     """Resolve the reader's own dispatch spelling. Fixed args may address, never replace, the source."""
     from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED
 
@@ -229,31 +239,42 @@ def selected_read_binding(reader: Any, args: dict, *, exact: Optional[pathlib.Pa
         binding = build_resolved_resource_binding(reader, root=bound["root"], operation="read", path=bound["path"],
                                                   literal=True)
     else:
-        binding = _dispatch_read_binding(reader, bound)
+        binding = _dispatch_read_binding(reader, bound, defer_reads=defer_reads)
     if exact is None and bound != args:
-        exact = _dispatch_read_binding(reader, args).target_path
+        exact = _dispatch_read_binding(reader, args, defer_reads=defer_reads).target_path
     if exact is not None and binding.target_path != exact:
         raise PermissionError(PRESENCE_RESOURCE_BLOCKED)
     return binding
 
 
-def _admit_read(reader: Any, binding: Any, *, prospective_copy: Optional[pathlib.Path] = None) -> None:
+def _admit_read(reader: Any, binding: Any, *, prospective_copy: Optional[pathlib.Path] = None,
+                copy_checks=None) -> None:
     from ouroboros.tools.core_file_tools import read_admission
 
+    # A host-issued copy receipt may supply the exact-address grant. Its byte proof belongs after both parties' policy.
+    if copy_checks is not None:
+        from ouroboros.presence_authority import presence_ceiling_allows_binding, presence_ceiling_from_context
+
+        ceiling = presence_ceiling_from_context(reader)
+        if (ceiling is not None and not presence_ceiling_allows_binding(ceiling, binding)
+                and (expected := _prepared_copy_identity(reader, binding)) is not None):
+            prospective_copy = binding.target_path
+            copy_checks.append(expected)
     _, _, refusal = read_admission(reader, binding.root, str(binding.target_path), resolved_binding=binding,
                                   prospective_copy=prospective_copy)
     if refusal is not None:
         raise PermissionError(getattr(refusal, "text", refusal))
 
 
-def admit_selected_source(reader: Any, binding: Any, *, entry: Optional[pathlib.Path] = None) -> None:
+def admit_selected_source(reader: Any, binding: Any, *, entry: Optional[pathlib.Path] = None,
+                          copy_checks=None) -> None:
     """Read and derive only from the proved authority coordinates; historic entries keep their lexical identity.
     Each reader answers for its own working folder beside the address it asked: a relative protected path
     anchors at both, for the caller as for the receiver, so packaging a selection into another reader's
     hands never widens the grounds a participant's own contract already set."""
     if entry is not None:
         binding = replace(binding, requested_path=entry)  # deleted directories still have historical descendants
-    _admit_read(reader, binding)
+    _admit_read(reader, binding, copy_checks=copy_checks)
     admit_selected_path_policy(reader, binding, entry=entry, read_admitted=True)
 
 
@@ -293,38 +314,78 @@ def _admit_copy_address(reader: Any, path: pathlib.Path) -> None:
     _admit_read(reader, binding, prospective_copy=path)
 
 
-def _admit_file_selection(readers: tuple, row: dict, *, scheduled: bool) -> Any:
+def _agreed_input_identity(*requirements: dict) -> dict:
+    expected = {}
+    for requirement in requirements:
+        for key, value in requirement.items():
+            if key in ("sha256", "size") and (value is None or value == ""):
+                raise ValueError(f"empty selected input identity field: {key}")
+            if expected.setdefault(key, value) != value:
+                raise ValueError("conflicting selected input identities")
+    return expected
+
+
+def _admit_file_selection(readers: tuple, row: dict, *, scheduled: bool) -> tuple[Any, dict]:
+    """Two readers admit one physical address before integrity checks or materialization."""
+    from ouroboros.tool_access import placed_source_handle_digest
+
     caller, reader = readers
+    retained_checks, copy_checks = {}, []
     args = {key: value for key, value in row.items() if value}
-    source = selected_read_binding(caller, args)
-    admit_selected_source(caller, source)
+    source = selected_read_binding(caller, args, defer_reads=retained_checks)
+    admit_selected_source(caller, source, copy_checks=copy_checks)
     if scheduled:
         # A relative selector belongs to the caller. Pin its (possibly
         # re-anchored) original address before the recipient resolves its read.
         args = {**({"root": source.root} if "root" in args else {}),
                 "path": str(source.requested_path or source.target_path)}
-    received = selected_read_binding(reader, args, exact=source.target_path)
-    admit_selected_source(reader, received)
-    return source
+    received = selected_read_binding(reader, args, exact=source.target_path, defer_reads=retained_checks)
+    admit_selected_source(reader, received, copy_checks=copy_checks)
+    retained = retained_checks.get(source.target_path, {})
+    placed = {digest for ctx, binding in ((caller, source), (reader, received))
+              if (digest := placed_source_handle_digest(ctx, binding))}
+    expected = _agreed_input_identity(*copy_checks, *({"sha256": digest} for digest in (*retained, *placed)))
+    if copy_checks and not _verify_prepared_copy(source.target_path, copy_checks[0]):
+        from ouroboros.tools.registry_core import PRESENCE_RESOURCE_BLOCKED
+
+        raise PermissionError(PRESENCE_RESOURCE_BLOCKED)
+    for verify in retained.values():
+        expected = _agreed_input_identity(expected, verify())
+    return source, expected
 
 
-def prepared_copy_read(ctx: Any, binding: Any) -> bool:
-    """A read of exactly one retained copy this task was handed (``prepared_input_files``, host-set at
-    admission), unchanged. Its source passed the same inherited Presence ceiling when selected, so the
-    copy needs no artifact or runtime grant; any other path in that store stays outside the ceiling."""
-    from ouroboros.artifacts import stream_artifact_file
+def _prepared_copy_identity(ctx: Any, binding: Any) -> Optional[dict]:
+    """Find the host-issued receipt for this exact copy without reading its contents."""
 
     metadata = getattr(ctx, "task_metadata", None)
     rows = metadata.get("prepared_input_files") if isinstance(metadata, dict) else None
     if str(getattr(binding, "operation", "")) != "read" or not isinstance(rows, list):
-        return False
+        return None
     try:
         target = pathlib.Path(binding.target_path).resolve(strict=True)
         row = next(row for row in rows if isinstance(row, dict) and row.get("status") == "prepared"
                    and row.get("local") and pathlib.Path(row["local"]).resolve(strict=True) == target)
-        return stream_artifact_file(target, expected={"sha256": row["sha256"], "size": row["size"]}) is not None
+        digest, size = row["sha256"], row["size"]
     except (StopIteration, OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+    if type(size) is int and size >= 0 and isinstance(digest, str) and len(digest) == 64:
+        return {"sha256": digest, "size": size}
+    return None
+
+
+def _verify_prepared_copy(target: pathlib.Path, expected: dict) -> bool:
+    from ouroboros.artifacts import stream_artifact_file
+
+    try:
+        return stream_artifact_file(target, expected=expected) is not None
+    except (OSError, ValueError, TypeError, RuntimeError):
         return False
+
+
+def prepared_copy_read(ctx: Any, binding: Any) -> bool:
+    """Only the exact, unchanged copy handed to this task needs no new Presence grant."""
+    expected = _prepared_copy_identity(ctx, binding)
+    return expected is not None and _verify_prepared_copy(binding.target_path, expected)
 
 
 def resolve_selection(ctx: Any, entries: List[Dict[str, Any]], receiving: Any = None, *,
@@ -355,7 +416,7 @@ def resolve_selection(ctx: Any, entries: List[Dict[str, Any]], receiving: Any = 
                 results.append({**row, "status": "unsupported_root",
                                 "detail": f"input_files reads ordinary files from {', '.join(INPUT_FILE_ROOTS)}"})
                 continue
-            binding = _admit_file_selection(readers, row, scheduled=receiving is not None)
+            binding, expected = _admit_file_selection(readers, row, scheduled=receiving is not None)
             row["root"] = binding.root
             target = binding.target_path
         except Exception as exc:  # an escape, policy or resolver refusal: all are denials
@@ -374,7 +435,7 @@ def resolve_selection(ctx: Any, entries: List[Dict[str, Any]], receiving: Any = 
             results.append({**row, "status": "not_a_file", "source": str(target),
                             "detail": "only regular files are copied; select each file, or bind one directory with workspace_root"})
             continue
-        resolved.append({**row, "source": str(target)})
+        resolved.append({**row, "source": str(target), **({"_expected": expected} if expected else {})})
         results.append({**row, "status": "checked", "source": str(target)})
     if any(row["status"] not in {"checked", "deferred"} for row in results):
         raise InputSelectionError("input_files_unavailable", (
@@ -399,10 +460,11 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path], *, 
 
     receipt: List[Dict[str, Any]] = []
     for index, row in enumerate(rows):
-        expected = {"sha256": row["sha256"], "size": row["size"]} if row.get("local") else None
         base = identity(row)
         name = row["path"] if "git_range" in row else pathlib.PurePath(row["source"]).name
         try:
+            recorded = {"sha256": row["sha256"], "size": row["size"]} if row.get("local") else {}
+            expected = _agreed_input_identity(row.get("_expected", {}), recorded) or None
             if root is None:
                 measured, local = stream_artifact_file(row["local"], expected=expected), pathlib.Path(row["local"])
             else:
@@ -414,9 +476,10 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path], *, 
                     staging.parent.mkdir(parents=True, exist_ok=True)
                     with staging.open("xb") as sink:
                         measured = work_domain.measure(origin, sink)
-                    if expected and any(expected[key] != measured[key] for key in ("sha256", "size")):
+                    if any((expected or {}).get(key) not in (None, "") and expected[key] != measured[key]
+                           for key in ("sha256", "size")):
                         staging.unlink(missing_ok=True)
-                        raise ArtifactIdentityError(f"selected input changed: {origin}")
+                        raise ArtifactIdentityError(f"selected input changed: {origin}", source_path=None, source_stamp=())
                 else:
                     measured = copy_artifact_file(origin, staging, expected=expected)
                 local = root / SELECTED_DIR / measured["sha256"][:ADDRESS_HEX] / name  # hash-stable, never positional
@@ -437,7 +500,7 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path], *, 
                         raise OSError(f"{local} already holds other bytes; nothing was overwritten") from None
                 else:
                     staging.replace(local)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             status = ("changed" if isinstance(exc, ArtifactIdentityError) else
                       "denied" if isinstance(exc, PermissionError) else "copy_failed")
             raise InputSelectionError("input_files_unavailable", (
@@ -452,7 +515,8 @@ def copy_selection(rows: List[Dict[str, Any]], root: Optional[pathlib.Path], *, 
 def schedule_selected_inputs(ctx: Any, entries: List[Dict[str, Any]], child_task_id: str,
                              resource_policy: Any = None, *, workspace_root: str = "",
                              child_drive: Optional[pathlib.Path] = None,
-                             resource_intent: Optional[dict] = None) -> List[Dict[str, Any]]:
+                             resource_intent: Optional[dict] = None,
+                             project_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Check and retain a scheduled child's selection before it is queued.
 
     The caller's read authority AND the child's read-only limits (with its own resource
@@ -460,7 +524,7 @@ def schedule_selected_inputs(ctx: Any, entries: List[Dict[str, Any]], child_task
     which its direct child reads as lineage. Later refusals still retain these bytes with the task."""
     folder = f"scheduled-{child_task_id}"
     reader = receiving_reader(ctx, resource_policy, workspace_root=workspace_root, child_task_id=child_task_id,
-                              child_drive=child_drive, resource_intent=resource_intent)
+                              child_drive=child_drive, resource_intent=resource_intent, project_id=project_id)
     return _retain_selection(ctx, entries, folder, reader)
 
 
@@ -726,8 +790,7 @@ def _lineage_copies(ctx: Any, root: pathlib.Path) -> List[Dict[str, Any]]:
     )
     from ouroboros.tools.core_file_tools import _runtime_data_read_check
 
-    reader = copy.copy(ctx)
-    reader.task_constraint = {"mode": "local_readonly_subagent"}
+    reader = receiving_reader(ctx)
     manifest, data = [], canonical_data_root(ctx)
     preserve_compression = compression_supported()
     mode = stat.S_IMODE(root.stat().st_mode) & 0o666  # ROOT is this start's new folder: what a new file gets here

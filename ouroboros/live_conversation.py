@@ -384,8 +384,7 @@ class ConversationHost:
         collisions = self.call_tools.keys() & {schema["function"]["name"] for schema in tools.schemas()}
         if collisions:
             raise RealtimeSetupError("tool_collision", "Call tools collide with ordinary tools: " + ", ".join(sorted(collisions)))
-        self.schemas.extend({"type": "function", "function": {"name": tool.name, "description": tool.description,
-            "parameters": dict(tool.parameters)}} for tool in self.call_tools.values())
+        self.schemas.extend(self._feature_tool_schemas())
         self.schemas, _ = _setup_dynamic_tools(tools, self.schemas, messages, context_mode=self.plan.initial_mode)
         # A call starts with its frame's tools, so it names the rest in its own manifest row;
         # a text turn reads them in the connections map.
@@ -438,21 +437,30 @@ class ConversationHost:
         with _active_hosts_lock:
             _active_hosts.add(self)
 
-    def _reselect_tools(self, mode):
-        """Follow a lower fitted mode, retaining tools explicitly loaded this call."""
-        from ouroboros.loop import _setup_dynamic_tools
-        from ouroboros.tool_policy import initial_tool_schemas
-        from ouroboros.tools.tool_discovery import update_resident_notice
+    def _feature_tool_schemas(self):
+        return [{"type": "function", "function": {"name": tool.name, "description": tool.description,
+                 "parameters": dict(tool.parameters)}} for tool in self.call_tools.values()]
 
-        enabled = set(self.ctx._actor_loaded_tool_names)
-        selected = initial_tool_schemas(self.tools, context_mode=mode, standing=False,
-                                        schema_names=self.turn.feature.get("initial_tools", ()))
-        names = {schema["function"]["name"] for schema in selected}
-        selected.extend(schema for schema in self.schemas
-                        if schema["function"]["name"] in (enabled | self.call_tools.keys()) - names)
-        self.schemas[:] = selected
-        _, rebound = _setup_dynamic_tools(self.tools, self.schemas, self.messages, context_mode=mode)
-        update_resident_notice(self.tools, self.schemas, self.messages)
+    def _tool_schemas_for_mode(self, mode):
+        from ouroboros.tool_policy import initial_tool_schemas
+
+        names = sorted(set(self.turn.feature.get("initial_tools", ())) | self.ctx._actor_loaded_tool_names)
+        return [*initial_tool_schemas(self.tools, context_mode=mode, standing=False, schema_names=names),
+                *self._feature_tool_schemas()]
+
+    def _reselect_tools(self, mode, *, selected=None):
+        """Bind fitted schemas, retaining tools explicitly loaded this call."""
+        from ouroboros.loop import _setup_dynamic_tools
+        from ouroboros.tools.tool_discovery import bind_resident_schemas, update_resident_notice
+
+        enabled = {name for name in self.ctx._actor_loaded_tool_names if self.tools.get_schema_by_name(name) is not None}
+        if selected is None:
+            self.schemas[:] = ConversationHost._tool_schemas_for_mode(self, mode)
+            _, rebound = _setup_dynamic_tools(self.tools, self.schemas, self.messages, context_mode=mode)
+            update_resident_notice(self.tools, self.schemas, self.messages)
+        else:  # the selected wire already carries its notices
+            self.schemas[:] = selected
+            self.ctx._actor_loaded_tool_names = rebound = bind_resident_schemas(self.tools, self.schemas)
         rebound.update(enabled)
         self._schemas_mode = mode
         self._context_changed()
