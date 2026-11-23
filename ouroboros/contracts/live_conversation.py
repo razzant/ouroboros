@@ -14,9 +14,13 @@ Provider events (``LiveEvent.kind`` and its ``data``):
   audio            {item_id, rate, pcm}
   caption          {speaker: "owner"|"ouroboros", item_id, text, final, replace?, incomplete?}
   speech_started   {}: someone spoke over the answer (only where interruptions are on)
-  input_started    {response_id?} / input_done {}: native input boundaries (VAD, transcription),
-                   the only evidence that the input side is quiet; a sent frame is not.
-                   response_id: a response already begun for these words, its transcript lagging
+  input_started    {response_id?, item_id?} / input_done {}: native input boundaries
+                   (VAD, transcription), the only evidence that the input side is quiet;
+                   a sent frame is not.
+                   response_id: a response already begun for these words, its transcript lagging;
+                   item_id: optional utterance id; when given, a final owner caption with that
+                   item_id closes those words when recognition ends (empty text on failure,
+                   writing no empty history row); omitting item_id is supported
   response_started {response_id}
   response_done    {response_id, usage: {USAGE_AXES...}, raw_usage, status, continues}
                    status: completed | interrupted | cancelled | failed | incomplete;
