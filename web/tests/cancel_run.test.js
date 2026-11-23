@@ -9,8 +9,10 @@ import {
     taskOutcomeSeverity,
     taskTerminalPhase,
 } from '../modules/log_events.js';
-import { isTerminalTaskPhase } from '../modules/chat_activity.js';
+import { cardMetaKeys, isTerminalTaskPhase } from '../modules/chat_activity.js';
+import { attemptOf } from '../modules/settled_card.js';
 import { cancelRunEligibility } from '../modules/task_control_menu.js';
+import { captureLiveCardPhaseState, restoreLiveCardPhaseState } from '../modules/task_phase_chip.js';
 
 // --- cancelled severity reducer (added ONCE, consumed everywhere) ---
 
@@ -154,27 +156,41 @@ test('both cancel surfaces report a refused cancellation', () => {
     assert.match(activity, /catch \(exc\)[\s\S]{0,400}showToast\(`Action failed/);
 });
 
-test('a timeout-retry root gains Cancel run: the host marker is the truth', () => {
-    // A retry root's frame carries root_task_id naming the ORIGINAL task, so any
-    // structural frameRoot===taskId gate would reject exactly the marker the
-    // supervisor attested. Pinned at source: the handler trusts the marker alone.
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const handler = chat.match(/function updateLiveCardFromProgressMessage\(msg, \{ grantCancelAuthority = true \} = \{\}\) \{[\s\S]*?\n    \}/)?.[0];
-    assert.ok(handler, 'the progress handler exists');
-    assert.match(handler, /const taskId = msg\?\.task_id \|\| '';/);
-    const guardAt = handler.indexOf('if (!taskId) return false;');
-    const grantAt = handler.indexOf('if (grantCancelAuthority && msg.cancelable === true)');
-    assert.ok(guardAt >= 0 && grantAt > guardAt, 'missing task identity returns before granting authority');
-    // The grant keeps the earlier replayed tool-evidence change instead of overwriting it.
-    assert.match(handler, /if \(grantCancelAuthority && msg\.cancelable === true\) \{\s*changed = markTaskCancelable\(String\(taskId\)\) \|\| changed;\s*\}/);
-    // Project-owned progress is now panel-local; Main only accepts its typed
-    // terminal completion projection, so the old `!isMirror` branch is gone.
-    // The shared thread predicate owns Main/Project routing (server project_thread
-    // stamp + known project set) — behaviour is node-tested in
-    // chat_thread_routing.test.js; here we pin only that Chat routes through it.
+const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const taskKey = (value) => String(value || '').trim();
+// The private handlers' change booleans aren't exposed by the DOM. Run the
+// actual bodies with controlled boundary effects; adjacent tests drive the card.
+function cardHandlers(names, bindings) {
+    const source = names.map((name) => {
+        const body = chat.match(new RegExp(`^    (?:async )?function ${name}\\([\\s\\S]*?\\n    \\}`, 'm'))?.[0];
+        assert.ok(body, `missing chat handler ${name}`);
+        return body;
+    }).join('\n');
+    return new Function(...Object.keys(bindings), `${source}\nreturn ${names.at(-1)};`)(...Object.values(bindings));
+}
+
+test('a timeout-retry root gains Cancel run: the host marker is the truth for its current attempt', () => {
+    const retry = { task_id: 'retry-1', root_task_id: 'original-1', task_attempt: 2, cancelable: true };
+    const cancelableTaskIds = new Set();
+    const progress = cardHandlers(['markTaskCancelable', 'updateLiveCardFromProgressMessage'], {
+        taskKey, attemptOf, cardMetaKeys, cancelableTaskIds, liveCardRecords: new Map([[retry.task_id, { cardAttempt: 2 }]]),
+        modelWaits: { observe() {} }, _historyReplayActive: false, noteToolMetrics: () => true,
+        syncCancelRunButton: () => false, subagentChildParents: new Map(), summarizeChatLiveEvent: () => null,
+    });
+    assert.equal(progress({ ...retry, task_id: '' }), false, 'no task identity means no change');
+    for (const [label, row, scope] of [
+        ['unattested', { ...retry, cancelable: undefined }],
+        ['scoped-away', retry, { grantCancelAuthority: false }],
+        ['stale', { ...retry, task_attempt: 1 }],
+    ]) {
+        progress(row, scope);
+        assert.deepEqual([...cancelableTaskIds], [], `${label} progress cannot grant Stop`);
+    }
+    assert.equal(progress(retry), true, 'an unchanged Stop button must not erase the tool-evidence change');
+    assert.deepEqual([...cancelableTaskIds], ['retry-1'], 'the retry root may differ from the original root id');
+    // The shared predicate owns Main/Project ingress; its routing cases live in chat_thread_routing.test.js.
     assert.match(chat, /const isMyThread = msg => chatThreadAccepts\(msg, isMain, chatId, state\.projectChatIds\);/);
     assert.match(chat, /updateLiveCardFromProgressMessage\(msg, \{ grantCancelAuthority: true \}\)/);
-    assert.doesNotMatch(chat, /frameRoot === taskId\) *&&[\s\S]{0,80}markTaskCancelable/);
     // ...and the eligibility reducer still refuses subagent/finished/reusable cards,
     // so trusting the marker does not widen the button beyond live pooled roots.
     assert.equal(cancelRunEligibility({
@@ -185,16 +201,27 @@ test('a timeout-retry root gains Cancel run: the host marker is the truth', () =
     }), false);
 });
 
-// The 200, 404 and refused paths run as behaviour in cancel_pending_stop.test.js: the
-// real card under every answer and durable record. This keeps what it cannot see.
-test('every Stop answer reconciles through the one helper; a refused one keeps its delta', () => {
-    // The card acts the same under a faithful inline copy of the reconcile (until it
-    // drifts) and under the strict detail read, which fails the same way here. The
-    // refused path's viewport write runs without remoteContent and cancelRunFromCard
-    // drops its result, so a constant in place of the delta changes nothing on screen.
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+// cancel_pending_stop.test.js drives the full 200/404/503 matrix through the UI.
+test('every Stop answer reconciles through the one helper; a refused one keeps its delta', async () => {
     const stop = chat.slice(chat.indexOf('async function cancelRunFromCard'), chat.indexOf('function restoreCardActivity'));
-    assert.equal(stop.match(/reconcileCancelCardFromDetail\(record, taskId, await fetchTaskDetail\(taskId\)\)/g)?.length, 2);
-    assert.match(stop, /let changed = reconcileCancelCardFromDetail\(record, taskId, stored\);/);
-    assert.match(stop, /if \(record\.finished \|\| taskCancelPending\(stored\)\) return changed;/);
+    assert.equal(stop.match(/\breadCardDetail\(/g)?.length, 1, 'one shared reader for every answer');
+    for (const [status, detailChanged] of [[200, false], [404, true], [503, false], [503, true]]) {
+        const record = { groupId: 'r', controlEpisode: {}, cancelRunBtn: { disabled: false } };
+        const stored = { status: 'running' };
+        const calls = [], writes = [];
+        const cancel = cardHandlers(['cancelRunFromCard'], {
+            taskKey, taskCancelPending, ACTION_FINALIZE: 'soft', liveCardRecords: new Map([['r', record]]),
+            captureLiveCardPhaseState, restoreLiveCardPhaseState,
+            withStableViewport: (write) => writes.push(write()),
+            markLiveCardCancelPending: () => { record.cancelPendingPolicy = 'immediate'; },
+            requestStop: async () => { if (status !== 200) throw Object.assign(new Error('Stop refused'), { status }); },
+            showToast() {}, revokeManagedTaskCancelAuthority() {},
+            readCardDetail: async (...args) => { calls.push(['read', ...args]); return stored; },
+            reconcileCancelCardFromDetail: (...args) => { calls.push(['reconcile', ...args]); return detailChanged; },
+            isPortal: () => false, setLiveCardPhase: () => false,
+        });
+        await cancel(record);
+        assert.deepEqual(calls, [['read', record, { fresh: true }], ['reconcile', record, 'r', stored]], `HTTP ${status}`);
+        assert.equal(writes.at(-1), detailChanged, `HTTP ${status}: preserve the reconcile delta even if rollback changes no chip`);
+    }
 });

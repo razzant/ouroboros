@@ -99,10 +99,12 @@ function cardDetailGet(record, after = 0, signal = null) {
 /** The card's task detail (null: absent; undefined: superseded; rejects: unread). A joined read began before this
  *  request: when its answer is not `satisfied` (a running snapshot, an offer not yet settled) one authoritative read
  *  follows, and no more. `fresh`: the answer must come from a read sent now (a press just changed the store). */
-export async function readCardDetail(record, { satisfied = null, fresh = false, signal = null } = {}) {
-    const { get, joined } = cardDetailGet(record, fresh ? record.readEpoch ?? 0 : 0, signal);
+export async function readCardDetail(record, { satisfied = null, fresh = false, after = 0, signal = null, deliver = detail => detail } = {}) {
+    const { get, joined } = cardDetailGet(record, Math.max(after, fresh ? record.readEpoch ?? 0 : 0), signal);
     const detail = await get.done;
-    return !joined || !detail || !satisfied || satisfied(detail) ? detail : cardDetailGet(record, get.epoch, signal).get.done;
+    if (!joined || !detail || !satisfied || satisfied(detail)) return deliver(detail, get.epoch);
+    const later = cardDetailGet(record, get.epoch, signal).get;
+    return deliver(await later.done, later.epoch);
 }
 
 /** The review hydrator's reader: a card's detail is its one read; a review revision this page has not seen needs a
@@ -139,14 +141,17 @@ const settledOrCancelling = detail => isTerminalTaskDetail(detail) || taskCancel
 // `report('error' | 'idle')` hands the read's outcome to the Details' one status owner (the hydrator): an open card's
 // failed read shows its ordinary Retry, and an applied read retires a failure an earlier read left.
 export function readMissingCardDetail(record, shown, apply, report = () => {}) {
-    if (record.managedDetail?.current()) return;
+    const after = record.portalProof?.epoch ?? 0;
+    const prior = record.managedDetail;
+    if (prior?.current() && prior.after >= after) return;
     const attempt = record.handoverAttempt ?? 1;
     const current = () => shown() && (record.handoverAttempt ?? 1) === attempt;
-    const read = { current, done: readCardDetail(record, { satisfied: settledOrCancelling })
-        .then(detail => {
-            if (current() && detail !== undefined && (detail === null || (handoverAttempt(detail) ?? 1) >= attempt)) { apply(detail); report('idle'); }
-        }).catch(() => {  // Failure is not absence; a later snapshot or terminal hint can read again.
-            if (current() && detailsOpen(record)) report('error');
+    const read = { after, current, done: readCardDetail(record, { after, satisfied: settledOrCancelling, deliver: (detail, epoch) => {
+            if (record.managedDetail === read && current() && detail !== undefined && (detail === null || (handoverAttempt(detail) ?? 1) >= attempt)) {
+                apply(detail, epoch); report('idle');
+            }
+        } }).catch(() => {  // Failure is not absence; a later snapshot or terminal hint can read again.
+            if (record.managedDetail === read && current() && detailsOpen(record)) report('error');
         })
         .finally(() => { if (record.managedDetail === read) delete record.managedDetail; }) };
     record.managedDetail = read;
@@ -273,8 +278,16 @@ export function attemptOf(row) {
 
 // A numbered ending/metric owns only its presentation. The task's anchor, money, history and review receipts
 // survive a new physical attempt of the same task. An unnumbered carrier cannot assert a metric for it.
-function selectCardAttempt(record, attempt) {
+export function selectCardAttempt(record, attempt) {
     if (attempt == null || (record.cardAttempt != null && attempt <= record.cardAttempt)) return;
+    if (record.cardAttempt != null) {
+        record.controlEpisode = {};  // invalidate open commands even before a new state body
+        if (record.root?.dataset?.portal === '1') {
+            record.portalOutcome = null;
+            record.observedOutcome = '';
+            record.finalizingHold = false;
+        }
+    }
     if (record.causeHeld || record.collapsedActivity === record.wakeSummary) record.collapsedActivity = '';
     // Keep observed invocations, not the previous attempt's scalar estimates, as the running count.
     if (record.toolFold) record.toolFold.host = null;
@@ -377,6 +390,18 @@ function endingStamp(detail, current, frozen, matchesPhase = true) {
         time: isoMicros(current?.revision || detail.ts || detail.timestamp) };
 }
 
+// A known outcome need not be a replayed ending. The same evidence rank keeps a bare lifecycle
+// from replacing richer facts of that lifecycle while the episode can still be open.
+export function observePortalOutcome(record, source, outcome) {
+    if (!outcome) return record.portalOutcome?.outcome || record.observedOutcome || '';
+    const { lifecycle, rank } = endingStamp(source);
+    const prior = record.portalOutcome;
+    if (!prior || lifecycle !== prior.lifecycle || rank >= prior.rank) {
+        record.portalOutcome = { lifecycle, rank, outcome };
+    }
+    return record.observedOutcome = record.portalOutcome.outcome;
+}
+
 /** Whether a history row draws its task's completion on the card: a settled summary, or the progress or evidence
  *  carrier on which the host stamped the outcome of a summary outside the page. An answer bubble and a receipt settle
  *  the phase and draw no completion row (DESIGN "Conversation activity block": the completion note is not content). */
@@ -394,6 +419,7 @@ export function acceptLiveFrame(row, replayActive, getCard, noteWords) {
         if (attempt < card.cardAttempt || attempt === ended) return false;
         const advances = ended == null ? card.cardAttempt == null || attempt > card.cardAttempt : attempt > ended;
         if (card.finished && !advances) return false;  // a live numbered start may reopen an unnumbered ending
+        if (card.cardAttempt == null && attempt > 1) card.controlEpisode = {};
         selectCardAttempt(card, attempt);
         if (card.finished) {
             Object.assign(card, { finished: false, finalizingHold: false, observedOutcome: '', historicalTerminal: null });
@@ -409,6 +435,8 @@ export function acceptLiveFrame(row, replayActive, getCard, noteWords) {
     // The caller already checked a late result's revision against the displayed outcome. A legacy review can
     // revise that outcome, but it cannot make its unnumbered time, words or counters into attempt evidence.
     if (late) stamp.attempt = attemptOf(late) ?? card.cardAttempt;
+    // The legacy unnumbered carrier can still conclude the first attempt (as its task detail can).
+    if (stamp.attempt == null && card.cardAttempt === 1) stamp.attempt = 1;
     if (card.cardAttempt != null && (stamp.attempt == null || stamp.attempt < card.cardAttempt)) return false;
     const known = card.replayedEnding;
     if (olderEnding(stamp, known)) {

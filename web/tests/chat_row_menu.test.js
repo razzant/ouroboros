@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatRowMenu } from '../modules/chat_row_menu.js';
 import { createMessageActions } from '../modules/message_actions.js';
-import { cardMenuActions, emptyWorkState } from '../modules/work_status.js';
+import { cardControls, emptyWorkState } from '../modules/work_status.js';
 import { installDomDouble } from './dom_double.js';
 
 function fixture({ actions = undefined, selectText } = {}) {
@@ -37,14 +37,16 @@ function fixture({ actions = undefined, selectText } = {}) {
     const activity = { phase: 'working' };
     const works = emptyWorkState();
     const cards = new Map();
+    const episode = { token: {} };
     // chat.js's own wiring: the card's Stop… items come from its work, else from the card's own task controls.
     const menu = createChatRowMenu({ feed, replies, cardOf: (id) => cards.get(id),
-        actionsOf: (record) => cardMenuActions(works, record, activity), actions });
+        readControls: (record) => ({ ...cardControls(works, record.groupId), activity, legacy: true,
+            episode: episode.token, resume: Boolean(record.resumeRunBtn) }), actions });
     const openMenu = () => doc.body.children.find((node) => node.classList.contains('chat-row-menu')) || null;
     const items = () => (openMenu()?.children || []).map((node) => node.dataset.rowAction);
     const touch = (node, type, extra = {}) => node.emit(type, { pointerType: 'touch', isPrimary: true, pointerId: 1,
         clientX: 30, clientY: 60, ...extra });
-    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, openMenu, items, touch,
+    return { ...env, feed, cards, bubble, plain, copy, link, words, menu, started, copied, opened, activity, works, episode, openMenu, items, touch,
         close() { menu.destroy(); env.restore(); } };
 }
 
@@ -466,6 +468,54 @@ test('a work card\'s Pause follows its work\'s controls, never the census phase'
         f.activity.phase = 'budget_paused';
         summary.emit('contextmenu', { clientX: 1, clientY: 1 });
         assert.deepEqual(f.items(), ['reply', 'copy', 'project', 'pause', 'stop'], 'the work\'s Pause, whatever the census says');
+    } finally { f.close(); }
+});
+
+test('a row menu opened before control withdrawal cannot stop, pause or resume, but keeps its reading actions', async (t) => {
+    const f = fixture();
+    const posts = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        if (init?.method === 'POST') posts.push(String(url));
+        return { ok: true, json: async () => ({ ok: true, state: 'paused' }) };
+    });
+    const { card, record, pressed, summary } = workCard(f, { resume: true });
+    const open = () => { f.menu.open(card, { anchor: summary }); return f.openMenu(); };
+    const item = (menu, kind) => menu.children.find((node) => node.dataset.rowAction === kind);
+    const stop = record.cancelRunBtn;
+    try {
+        summary.focus();
+        const pause = item(open(), 'pause');
+        f.activity.phase = 'budget_paused';  // Pause withdrawn, Stop still exists.
+        pause.click();
+        assert.deepEqual(posts, []);
+        assert.equal(f.doc.activeElement, summary, 'a withdrawn press returns focus to its own row');
+
+        f.activity.phase = 'working';
+        const oldAttempt = item(open(), 'pause');
+        f.episode.token = {};
+        oldAttempt.click();
+        assert.deepEqual(posts, [], 'the same visible button does not authorize a different attempt');
+        const openedStop = item(open(), 'stop');
+        stop.remove(); record.cancelRunBtn = null;
+        assert.doesNotThrow(() => openedStop.click());
+        assert.equal(f.doc.activeElement, summary, 'no successor control took focus');
+
+        const openedResume = item(open(), 'resume');
+        record.resumeRunBtn.remove(); record.resumeRunBtn = null;
+        assert.doesNotThrow(() => openedResume.click());
+        assert.deepEqual(pressed, []);
+        assert.equal(f.doc.activeElement, summary);
+        const reading = open();
+        assert.deepEqual(f.items(), ['reply', 'copy', 'project']);
+        item(reading, 'reply').click();
+        assert.deepEqual(f.started, ['task:t-1']);
+        assert.ok(item(open(), 'copy'), 'Copy remains a door on the same row');
+        item(f.openMenu(), 'project').click();
+        card.append(stop); record.cancelRunBtn = stop;
+        item(open(), 'pause').click();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(posts, ['/api/tasks/t-1/pause'], 'a current Pause uses the shared request once');
+        assert.deepEqual(pressed, ['project']);
     } finally { f.close(); }
 });
 
