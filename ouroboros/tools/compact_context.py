@@ -765,7 +765,7 @@ def get_tools() -> List[ToolEntry]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address restores a note whole; no note needed even with other selectors, except untold owner obligations or fold_last_n; at the next boundary. Receipt estimates reread; later round facts report uncached input."},
+                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address: whole note; next boundary. Main: no note with selectors except fold_last_n/untold owner duties. Native-review bars view_address: ToolContext lacks memory fit snapshot. Receipt estimates reread; later uncached input."},
                         "inspect": {"type": "boolean", "description": "Pin view_revision; counts/tokens by kind, one page of unit IDs/eligibility, restore_checkpoint, schema names; no mutation."},
                         "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names the rest."},
                         "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds this call's send."},
@@ -775,7 +775,7 @@ def get_tools() -> List[ToolEntry]:
                         "restore_unit_refs": {"type": "array", "items": {"type": "object", "properties": {
                             "checkpoint_ref": {"type": "object"}, "unit_id": {"type": "string"}, "raw_sha256": {"type": "string"}},
                             "required": ["checkpoint_ref", "unit_id", "raw_sha256"]},
-                            "description": "Restore sources, never replay; alone needs no note, combining selectors needs one; checkpoint_ref is restore_checkpoint (emergency records list members)."},
+                            "description": "Restore sources, no protocol replay; checkpoint_ref is restore_checkpoint (emergency records list members). Main: no note alone; native: explicit working_note (empty ok); selectors need note."},
                         "schema_names": {"type": "array", "items": {"type": "string"}, "description": "Nano schema residency, not permissions; Low/Max keep the full envelope."},
                         "review_notes": {"type": "array", "items": {"type": "object", "properties": {
                             "bound_decision": {"anyOf": [{"type": "object"}, {"type": "string"}]},
