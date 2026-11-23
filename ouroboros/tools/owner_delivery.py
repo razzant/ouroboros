@@ -446,19 +446,16 @@ def _named_receipt(ctx: Any, evt: Dict[str, Any], mode: str, noun: str) -> str:
                 else f"OK: {noun} queued for delivery to owner.")
     if not place_bound:
         return f"OK: {noun} {state} {room}."
-    from ouroboros.presence_context import ROUTED, ROUTELESS, UNKNOWN, final_route
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.place_reply import final_followed, final_is_speech
 
-    try:  # the context's and the forced final's reader, read again now: a source may have published since
-        route, _why = final_route(canonical_data_root(ctx), getattr(ctx, "task_metadata", None),
-                                  getattr(ctx, "task_id", ""))
-    except Exception:
-        route = UNKNOWN
-    path = {ROUTED: "Your final answer has a route there (place state and Safety still apply); a connector tool "
-                    "sends separately.",
-            ROUTELESS: "From this run only a connector tool reaches it.",
-            UNKNOWN: "Whether your final answer reaches it is not settled yet; a connector tool sends there "
-                     "separately."}[route]
+    # The forced final's and the context's fact: a connector's door makes the final a record (owner 21.11, 1A), and
+    # a root the place's turn handed off speaks only if its connector follows that work.
+    metadata = getattr(ctx, "task_metadata", None)
+    path = ("Your final answer has a route there (place state and Safety still apply); a connector tool sends "
+            "separately." if final_followed(metadata) else
+            "If a connector follows this work, your final answer has a route there (place state and Safety still "
+            "apply); otherwise only a connector tool reaches it." if final_is_speech(metadata)
+            else "From this run only a connector tool reaches it.")
     return f"OK: {noun} {state} {room} (Ouroboros side, not the place conversation). {path}"
 
 

@@ -1322,12 +1322,16 @@ Use the connector's ordinary content-hash-bound skill token for:
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
   `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
-  its explicit answer, silence or handoff, never from a delivery receipt. Where the event's own
+  its explicit answer, silence or handoff, never from a delivery receipt; an absent key means an older
+  host without this promise: any confirmed tool receipt may suppress its final. Where the event's own
   connector declares an `effect: message` tool whose targets lie within one conversation (account,
-  its conversation argument, its thread argument), a focus's finish is its record and people hear
-  only what it sends through that tool: the outcome is `silent` and the text stays on the card. A
-  connector without such a tool (a peer URL, mail recipients) keeps the final as its reply. An absent
-  key means an older host without this promise: any confirmed tool receipt may suppress its final.
+  its conversation argument, its thread argument), the finish of every root bound to the place (the
+  focus, a root it handed off, a schedule's run) is its record and people hear only what it sends
+  through that tool: the outcome is `silent` and the text stays on the card. A connector without such a
+  tool (a peer URL) keeps the final as its reply. A connector with one therefore has no final to follow:
+  its custody of an event can close at the admission receipt; a release that stops polling work for finals
+  declares PluginAPI 2.7, so an older host, whose handed-off roots still answer by their final, refuses it
+  before import.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1499,11 +1503,13 @@ its close is acknowledged in its transcript, never read by its model, and starts
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
-message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
-may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
-next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
-Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
-any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
+message tool (above) the finish of the focus and of every root promoted or scheduled from it, a `finish_task`
+answer or a tool-less final alike, is its record: a send may ride in the same response, a finish with words that
+sent nothing there returns once with the facts, the next is accepted (the focus owes a Main message pending from
+the owner first, as for a silent finish); a Silent or Paused place and Advises keep the held draft. Where it has
+none, an answer after any send, file or reaction is new speech for the work the connector follows (the turn, and
+work the turn names); another root is told that its final speaks only if a connector follows it; started work
+stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
 (receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply
@@ -1595,15 +1601,18 @@ event identity). An author parked on a review it left for an addressed message (
 review) yields the conversation and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
 initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
 author-selected early output (`pending_review=finish`) is speech to send once under its
-`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
-both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
+`output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; a connector
+that follows work for speech or status polls both independently (whether a final is speech at all: the
+`presence_explicit_completion` paragraph above; a door connector's finals are records).
+`status: "completed"` (with `continuation_ref: ""`) means the author ended
 within the request. A retry of the same event returns the identical stored envelope, never a rerun;
 `continuing` releases text to you and is not proof of provider delivery.
 
 Poll `GET /presence/work/{continuation_ref}?binding_id=...` like other late work. Ordinary pending
 and terminal continuation views carry producer `task_id`, `work_ref` and `continuation_ref` naming the author, plus
-`child_work_ref` for its promoted independent work (empty if none). Discover and retain the child
-before handling author status; poll it independently. A child promoted after the first yield
+`child_work_ref` for its promoted independent work (empty if none). A connector that follows work
+for speech or status discovers and retains the child before handling author status and polls it
+independently. A child promoted after the first yield
 appears at the next park even if the immutable initial envelope has an empty `work_ref`.
 While the author lives it answers HTTP 202 `pending` with `outputs`: the ordered
 `{output_ref, outcome, text}` the author released so far. Its terminal answers 200 with
@@ -1954,14 +1963,15 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.6; a payload declaring any 2.x minimum negotiates the host's 2.6, methods included; a tool row
-with `touches` needs "2.5" and a payload relying on `get_stop_state` "2.6", which an older host refuses before import):
+(PluginAPI 2.7; a payload declaring any 2.x minimum negotiates the host's 2.7, methods included; a tool row
+with `touches` needs "2.5", a payload relying on `get_stop_state` "2.6" and a connector that stops following work for
+finals "2.7", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.6"            # major strict; minor = required minimum
+plugin_api: "2.7"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.6"
+#   version: "2.7"
 #   capabilities: [register_tool, subscribe_event]
 ```
 

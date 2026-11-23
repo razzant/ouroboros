@@ -1,4 +1,4 @@
-"""External tool effects shared by place policy, Safety and routeless-final observations.
+"""External tool effects shared by place policy, Safety and place door detection.
 
 A connector declares each of its tools in the manifest's ``tools:`` list with
 ``effect: read | message | gesture | write`` (absent = ``write``) and, where it has one,
@@ -29,7 +29,7 @@ before import; an invalid group, or groups under an older declaration, leave the
 (``ToolEffect.problem``).
 
 Consumers: ``place_guard``'s Advises and targeted Silent/Paused refusals,
-routeless-note coverage (``place_reply``), and ``safety`` (declared reads skip
+door detection (``place_reply._door_effect``), and ``safety`` (declared reads skip
 the Outgoing and + Commands checks; ``message`` gets speech semantics).
 Built-in tools are governed by their own policy tables and answer ``""``.
 """

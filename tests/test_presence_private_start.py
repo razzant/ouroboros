@@ -26,7 +26,7 @@ from tests.test_presence_owner_contact import _answer, _ask, _exercise_related_r
 from tests.test_presence_owner_contact import contact_runtime as contact_runtime  # fixture
 
 PRIVATE_START = {"objective": "Investigate the source", "title": "Source research"}
-SPEAKER_KEYS = {"presence", "presence_final_route", "presence_binding_authority"}
+SPEAKER_KEYS = {"presence", "presence_binding_authority"}
 FOCUS_KEYS = {"initiator", "usage_category", "consciousness_autonomy", "consciousness_cause", "focus", "wake_cause",
               "origin_wake_task_id", "disabled_tools", "runtime_mode_cap", "root_cost_ceiling_usd", "model", "model_role"}
 
@@ -302,7 +302,6 @@ def test_admission_reads_the_private_origin_itself_before_any_project_or_source_
 def test_only_the_outward_start_holds_the_first_handoff_in_either_order(contact_runtime, monkeypatch, first, private_outcome):
     """A private start takes no part in the conversation's handoff, whatever its outcome and in either order; the
     outward start keeps exactly what it has without one: the speaker carrier, the held slot, the published work."""
-    from ouroboros.presence_context import PRESENCE_FINAL_ROUTE_KEY as KEY
     from ouroboros.presence_continuation import _handoff_ref
     from ouroboros.presence_runner import build_presence_result_event
     from ouroboros.tools.control_routing import _start_task
@@ -338,7 +337,6 @@ def test_only_the_outward_start_holds_the_first_handoff_in_either_order(contact_
             held = dict(ctx._swarm_handoff_attempt)
             private()
             assert ctx._swarm_handoff_attempt == held
-        assert root["metadata"][KEY] == {"held": True, "work_ref": root["id"], "source_task_id": ctx.task_id}
         assert root["source"] == "presence_promote"
         assert root["metadata"]["presence"]["event"] == task["metadata"]["presence"]["event"]
         assert _handoff_ref(ctx) == root["id"]
@@ -346,7 +344,7 @@ def test_only_the_outward_start_holds_the_first_handoff_in_either_order(contact_
         assert (frame["outcome"], frame["work_ref"]) == ("deferred", root["id"])
         if private_outcome == "scheduled":
             [mine] = [row for row in host.PENDING if row["id"] != root["id"]]
-            assert KEY not in mine["metadata"] and "presence" not in mine["metadata"]
+            assert "presence" not in mine["metadata"]
 
     _run(r, during)
 
@@ -468,8 +466,7 @@ def test_a_later_arrival_and_the_final_stay_out_of_the_private_root(contact_runt
     from ouroboros.conversation_lease import open_root_intake, root_conversation_key
     from ouroboros.dialogue_provenance import is_presence_task, presence_provenance_from_task, presence_related_work
     from ouroboros.place_intake import hand_own_arrival
-    from ouroboros.place_reply import reply_carrier
-    from ouroboros.presence_context import ROUTELESS, final_route
+    from ouroboros.place_reply import final_is_speech, reply_carrier
     from ouroboros.room_reader import conversation_works
     from ouroboros.utils import atomic_write_json
 
@@ -494,7 +491,7 @@ def test_a_later_arrival_and_the_final_stay_out_of_the_private_root(contact_runt
     assert [row["task_id"] for row in conversation_works(r.root, key, [binding])] == [outward["id"]]
     assert presence_related_work(binding, private) and not is_presence_task(private)
     assert reply_carrier(private["metadata"]) == {} and reply_carrier(outward["metadata"])
-    assert final_route(r.root, private["metadata"], private["id"]) == (ROUTELESS, "it carries no place conversation")
+    assert final_is_speech(private["metadata"]) is False and final_is_speech(outward["metadata"]) is True
     assert presence_provenance_from_task(private) == {}
 
 

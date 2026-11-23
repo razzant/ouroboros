@@ -1704,3 +1704,54 @@ def test_a_torn_append_at_a_closed_holder_stays_unknown_and_no_call_claims_nothi
     assert "arrival_effect_unknown:" + holder["id"] in at_holder and "arrival_held_by:" + holder["id"] in elsewhere
     assert "Nothing was delivered" not in at_holder + elsewhere and f"stays with {holder['id']}" in at_holder
     assert place_rows(world.data, other["id"]) == [] and _recipient(world, "unknown-effect") == pin
+
+
+# --- One speech rule (owner 21.11, 1A): a handed-off root's final is served by its connector's declaration ----------
+
+
+HANDED_FINAL = "Nightly check: two of the three services are degraded."
+
+
+def publish_door(monkeypatch, skill):
+    """``skill`` declares an in-conversation ``effect: message`` door (Slack's shape), as the dispatcher's published
+    registry holds it."""
+    from ouroboros import extension_registry_state as registry
+    from ouroboros.extension_surface_names import extension_surface_name
+
+    manifest = SimpleNamespace(raw_extra={"tools": [{"name": "send", "effect": "message", "target": ["channel"],
+                                                     "conversation": "channel", "thread": "thread_ts"}]})
+    bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
+    monkeypatch.setitem(registry._tools, extension_surface_name(skill, "send"), {"skill": skill, "extension_generation": "g1"})
+    monkeypatch.setitem(registry._extensions, skill, bundle)
+
+
+@pytest.mark.parametrize("door", [True, False], ids=["door", "no_door"])
+def test_a_handed_off_roots_final_is_its_record_where_its_connector_declares_a_door(host, monkeypatch, door):
+    """With a door the root's wordy finish that sent nothing returns once with the record note and then stays its
+    record: the work view a connector polls answers ``silent`` with no text. Without one (a peer URL's shape) the
+    view serves the final as the answer. A row stored as speech before the change is served as stored."""
+    world = host()
+    if door:
+        publish_door(monkeypatch, world.skill)
+    task = promote(world, event=event_of(world, "the-handed-off-final"))
+    seen = []
+
+    def again(messages):
+        seen.append(json.dumps(messages, ensure_ascii=False))
+        return finish(HANDED_FINAL)
+
+    box = run_root(world, dispatched(world, task), *((finish(HANDED_FINAL), again) if door else (finish(HANDED_FINAL),)))
+    box["thread"].join(120)
+    assert not box["thread"].is_alive() and "error" not in box, box.get("error")
+    params = {"binding_id": world.place.place_id}
+    view = world.client.get(f"/presence/work/{task['id']}", headers=HEADERS, params=params).json()
+    assert (view["status"], view["outcome"], view["text"]) == (
+        ("completed", "silent", "") if door else ("completed", "message", HANDED_FINAL))
+    assert bool(seen) is door and all("[FOCUS_FINISH_IS_A_RECORD]" in words for words in seen)
+    stored = load_task_result(world.data, task["id"])
+    assert stored["result"] == HANDED_FINAL  # the record stays on the task's card either way
+    legacy = "stored-before-" + task["id"]
+    write_task_result(world.data, legacy, "completed", result=HANDED_FINAL, terminal_origin="model_final",
+                      metadata={**stored["metadata"], "presence_outcome": "message", "presence_result_text": HANDED_FINAL})
+    old = world.client.get(f"/presence/work/{legacy}", headers=HEADERS, params=params).json()
+    assert (old["status"], old["outcome"], old["text"]) == ("completed", "message", HANDED_FINAL)

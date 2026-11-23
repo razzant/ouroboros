@@ -110,9 +110,14 @@ def test_higher_major_is_refused():
 
 
 def test_higher_minor_minimum_is_refused_with_upgrade_education():
-    result = negotiate_plugin_api(_manifest('plugin_api: "2.7"\n'))
+    major, minor = PLUGIN_API_VERSION.split(".")
+    higher = f"{major}.{int(minor) + 1}"  # one minor above whatever this host serves, so no bump stales the case
+    assert negotiate_plugin_api(_manifest(f'plugin_api: "{PLUGIN_API_VERSION}"\n')).ok  # the host's own minor loads
+    result = negotiate_plugin_api(_manifest(f'plugin_api: "{higher}"\n'))
     assert not result.ok
     assert "minimum minor" in result.error and "upgrade" in result.error
+    assert result.error.startswith(f"plugin_api {higher} requires minimum minor {int(minor) + 1}, but this host serves "
+                                   f"PluginAPI {PLUGIN_API_VERSION}")
 
 
 def test_malformed_version_string_is_refused_typed():

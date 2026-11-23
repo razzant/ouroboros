@@ -604,7 +604,8 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
         return ""
     tools_ctx._presence_forced_declaration = {"status": "missing", "reason": "no presence_finish declaration"}
     tools_ctx._presence_forced_pending = None
-    from ouroboros.presence_context import ROUTELESS, UNKNOWN, final_route, presence_send_facts
+    from ouroboros.place_reply import final_followed, final_is_speech
+    from ouroboros.presence_context import presence_send_facts
     from ouroboros.tool_access import canonical_data_root
 
     try:
@@ -612,24 +613,20 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
         sent = presence_send_facts(canonical_data_root(tools_ctx), ctx.task_id, tools_ctx.task_metadata["presence"])
     except Exception:
         sent = "unknown (receipts unreadable)"
-    try:  # the same reader as the context and the send receipts; reading adds no model round
-        route, why = final_route(canonical_data_root(tools_ctx), tools_ctx.task_metadata, ctx.task_id)
-    except Exception:
-        route, why = UNKNOWN, "its route could not be read now"
     handoff = getattr(tools_ctx, "_swarm_handoff_attempt", None)
     scheduled = isinstance(handoff, dict) and str(handoff.get("status") or "") == "scheduled"
     return (
         "\n\n[PRESENCE_DELIVERY]\n"
-        + ((f"This task came from a Presence conversation, but no connector reads its final there ({why}). "
-            "Your answer is its internal record for the owner and review; what you declare here is recorded, not "
-            "sent by itself, and people receive only what a connector tool sends. Return ")
-           if route == ROUTELESS else
-           (f"This task came from a Presence conversation; whether a connector reads its final there is not "
-            f"settled ({why}). Your answer is its internal record for the owner and review; if one does, the "
-            "people there receive only what you declare. Return ")
-           if route == UNKNOWN else
-           "This task answers a Presence conversation. Your answer is its internal record for the "
-           "owner and review; the people in the conversation receive only what you declare. Return ")
+        + ("This task answers a Presence conversation. Your answer is its internal record for the "
+           "owner and review; the people in the conversation receive only what you declare. Return "
+           if final_followed(tools_ctx.task_metadata) else  # the same fact as the context and the send receipts
+           "This task came from a Presence conversation. Your answer is its internal record for the owner and review; "
+           "if a connector follows this work, the people in the conversation receive only what you declare, "
+           "otherwise only what a connector tool sends. Return "
+           if final_is_speech(tools_ctx.task_metadata) else
+           "This task came from a Presence conversation, but no connector reads its final there. Your answer is "
+           "its internal record for the owner and review; what you declare here is recorded, not sent by itself, "
+           "and people receive only what a connector tool sends. Return ")
         + "exactly one JSON object and no other text: "
         '{"action":"finish","answer":"<complete internal record>",'
         '"presence_finish":{"outcome":"message","message":"<new text for the conversation>"}}'

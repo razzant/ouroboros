@@ -1241,32 +1241,12 @@ def _maybe_deadline_local_finalize(
     return _loop()._forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="deadline_local")
 
 
-def _keep_final_over_routeless_round(limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any]):
-    """A round that only the routeless note asks for (``place_reply.routeless_note_pending``, a restored note too) buys
-    nothing past a rail. When Wrap up or the supervisor's grace, a time control, the deadline reserve or a money stop
-    now ends the work, the note is withdrawn once and the retained final finishes as it stood, through the ordinary
-    exit, before any forced wrap-up or pause; owner Stop now keeps its own rail. ``None``: no such round, or it holds."""
-    from ouroboros.place_reply import NO_SEND_KEY, _round_affordable, routeless_note_pending
-
-    ctx, stop = tools._ctx, str(controls.get("finalize_now") or "").splitlines()
-    candidate = getattr(ctx, "_delivery_candidate", None)
-    if (not routeless_note_pending(getattr(limit_ctx, "llm_trace", None), candidate, getattr(limit_ctx, "messages", None))
-            or (stop and stop[0].strip() == REASON_OWNER_STOPPED_DIRECT_TURN)
-            or (not stop and _round_affordable(ctx, limit_ctx, ahead=False))):
-        return None
-    candidate.finalization_control = "candidate"  # withdrawn: the note stays spent and is never shown again
-    limit_ctx.llm_trace[NO_SEND_KEY]["withdrawn"] = True
-    return _loop()._finalize_loop_candidate(None, limit_ctx, tools, lambda *_a, **_k: None, resume_candidate=True)
-
-
 def _maybe_early_finalize(
     limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any],
     *, transport_episode: Optional[TransportWaitEpisode] = None,
     cost_ceiling: Optional[task_pacing.CostCeiling] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Consume supervisor grace, then local deadline, then the round's cost rail."""
-    if (kept := _keep_final_over_routeless_round(limit_ctx, tools, controls)) is not None:
-        return kept
     if controls.get("finalize_now"):
         # The owner's "Stop now" on a direct turn costs no call, so it is
         # honest whatever the transport is doing — never reported to the owner
