@@ -64,7 +64,8 @@ def fit_route_schemas(tools, messages, schemas, model, limit, *, loaded, history
 def route_schema_trials(tools, messages, resident, mode, model, use_local, *, reselect=False):
     """Resolve each tried mode from current authority and the destination's schema cap, once per selection.
 
-    A full return rebuilds what Nano did not carry; both frames keep still-permitted history and explicit loads.
+    A full return rebuilds what Nano did not carry. Between full views, a route change fits the resident list
+    and can restore known ceiling omissions, not replace a selected list with the entire registry.
     A same-route memory pass keeps its shown list except when trying Nano. An absent envelope stays absent.
     """
     if not resident:
@@ -82,12 +83,14 @@ def route_schema_trials(tools, messages, resident, mode, model, use_local, *, re
     @cache
     def selected(nano):
         schemas = resident
-        if (reselect or nano and mode != "nano") and callable(getattr(tools, "schemas", None)):
+        if ((reselect and (mode == "nano" or earlier)) or (nano and mode != "nano")) and callable(getattr(tools, "schemas", None)):
             names = history | loaded | (resident_names if mode == "nano" else set())
             if not nano:
                 names |= resident_names | earlier  # includes the permitted on-demand schemas already resident
             schemas = initial_tool_schemas(tools, context_mode="nano" if nano else "max",
                                            schema_names=sorted(names), standing=nano_standing(slot))
+            if not nano and mode != "nano":
+                schemas = [schema for schema in schemas if schema["function"]["name"] in names]
         return fit_route_schemas(tools, messages, schemas, model, limit, loaded=loaded, history=history)
 
     return lambda target: selected(target == "nano")

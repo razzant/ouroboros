@@ -104,11 +104,19 @@ def window_reply_candidate(payload, field, context, window, measured, *, helper)
         source = registered_source_payload(payload) or payload
         raw = bounded_prompt_tokens_for_payload(source, 0)
         input_tokens = math.ceil(raw * density)
+    record = getattr(context, "window_record", None) if not exact and window == context.capacity_total_tokens else None
+    if (helper and record and record.input and record.input.source == "refusal"
+            and record.input.basis != "provider_stated" and not any(limit.kind == "input" for limit in record.declared)):
+        # An inferred or older input refusal bounds this helper's budget but does not say the reply is outside.
+        # Keep the conservative numeric allowance without promoting the estimate to a provider's total limit.
+        record = None
     frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    if helper and not exact and exact_reply_shortfall(**{**frame, "input_tokens": max(input_tokens, raw)}):
-        return payload, False, input_tokens, window
+    if helper and not exact:
+        reply_window = (record.total.tokens if record.total else None) if record else window
+        if exact_reply_shortfall(**{**frame, "input_tokens": max(input_tokens, raw), "window_tokens": reply_window}):
+            return payload, False, input_tokens, window
     book = int(getattr(context, "required_book_tokens", 0) or 0)
     candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
         **{**frame, "input_tokens": input_tokens - book}, raw_input_tokens=raw - book / density,
-        window_record=getattr(context, "window_record", None) if not exact and window == context.capacity_total_tokens else None)}
+        window_record=record)}
     return candidate, exact and exact_reply_shortfall(**frame), input_tokens, window
