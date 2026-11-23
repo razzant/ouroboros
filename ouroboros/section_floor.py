@@ -206,3 +206,21 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     if trace is not None:
         trace((common, handbook, (semi, connections), story, head, room, dynamic, stable, changing))
     return blocks + [{"type": "text", "text": changing}]
+
+
+def capture_system_projection(core, governance, story, room, mode, addressed, receipts, whole, *, shown, facts):
+    """Render normally and keep its pieces for the selected projection, without opening sources again."""
+    from ouroboros.context_assembly_trace import observe_system_layout
+
+    live = []
+    system = _system_blocks(core, governance, story, room, mode, addressed, whole, trace=live.append)
+    report = observe_system_layout(core, governance, addressed, receipts, live, system, story_whole=whole, shown=shown)
+    return system, {**facts, '_assembly_layout': report}
+
+
+def projection_fields(system, facts, selected=True):
+    """Keep the private observer off the projection and hash only a view chosen for use."""
+    memory_facts = dict(facts)
+    report = memory_facts.pop('_assembly_layout', None)
+    witnesses = report(system, memory_facts.get('first_contact_preference')) if report is not None and selected else ()
+    return {'memory_facts': memory_facts, 'assembly_witnesses': witnesses or ()}

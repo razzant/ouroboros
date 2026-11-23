@@ -2,9 +2,9 @@
 from ouroboros import context_attempt_reader, usage_accounting
 from ouroboros.physical_attempt_context import PhysicalAttemptContext
 from ouroboros.context_fit import ContextCore, _governance_blocks
-from ouroboros.context_assembly_trace import RoomWitness, capture_system_projection, digest, layout_witnesses, projection_fields
+from ouroboros.context_assembly_trace import RoomWitness, digest, layout_witnesses
 from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY, split_leading_system_prefix
-from ouroboros.section_floor import HostSection, _system_blocks
+from ouroboros.section_floor import HostSection, _system_blocks, capture_system_projection, projection_fields
 from tests._context_reports import _dispatch
 
 

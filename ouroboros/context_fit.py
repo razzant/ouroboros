@@ -28,10 +28,10 @@ from ouroboros.context_measurement import (
 )
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
-from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
-                                     _governance_blocks as _section_governance, _system_blocks)
+from ouroboros.section_floor import (HostSection, _governance_blocks as _section_governance, _system_blocks,
+    capture_system_projection, projection_fields, render_governance, rendered_texts, section_views)
 from ouroboros.reference_books import ReferenceBook
-from ouroboros import context_assembly_trace as assembly, context_budget
+from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
@@ -272,7 +272,7 @@ class ContextFitPlan:
                 if number is not None and isinstance(facts.get("floor"), dict):
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-                                     **assembly.projection_fields(system, facts | {key: projection.memory_facts[key]
+                                     **projection_fields(system, facts | {key: projection.memory_facts[key]
                                          for key in ("max_room", "first_contact_preference") if key in projection.memory_facts},
                                          projection.mode == start),
                                      continuation_messages_json=tail_json,
@@ -1205,7 +1205,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     for m in floor.MODES:
         rows = host_receipts(m, receipts)
         facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = assembly.capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
+        contents[m] = capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
             section_views(sections[m], rows), rows, whole, shown=shown,
             facts={**facts, "host_sections_addressed": rows} if rows else facts)
     return contents, mode
@@ -1526,7 +1526,7 @@ def build_context_fit_plan(
             calibrated_tokens=int(estimated * ratio),
             calibration_ratio=ratio,
             user_content_json=user_projection,
-            **assembly.projection_fields(system_content, memory_facts, mode == (normal[1] if source is not None else initial_mode)),
+            **projection_fields(system_content, memory_facts, mode == (normal[1] if source is not None else initial_mode)),
             continuation_messages_json=tail_json,
         )
 

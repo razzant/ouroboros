@@ -31,7 +31,8 @@ from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ord
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
-from ouroboros.section_floor import PROTECTED, predicted_section, relocated_text, retain_section, section_views
+from ouroboros.section_floor import (PROTECTED, capture_system_projection, predicted_section, projection_fields,
+                                     relocated_text, retain_section, section_views)
 
 log = logging.getLogger(__name__)
 
@@ -674,7 +675,6 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     authored restore with an advisory capacity deficit; dispatch fits it later.
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
-    from ouroboros import context_assembly_trace as assembly
     from ouroboros.context_fit import _governance_blocks, _request_tokens
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
@@ -706,14 +706,14 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
         facts["host_sections_addressed"] = receipts
     selected = ViewFit(snapshot, level, note, facts)
     story, room = selected.story, selected.room
-    system, observation = assembly.capture_system_projection(plan.core, governance, story, room, mode,
+    system, observation = capture_system_projection(plan.core, governance, story, room, mode,
         section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected,
         facts=view_receipt(snapshot, story, room, facts))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
                             current_messages=plan.messages_for(mode))
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
         estimated_tokens=tokens, calibrated_tokens=int(tokens * shown.calibration_ratio),
-        **assembly.projection_fields(system, observation))
+        **projection_fields(system, observation))
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 

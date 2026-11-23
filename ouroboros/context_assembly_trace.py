@@ -603,13 +603,8 @@ def verified_contributions(candidate, captured):
             'uninspected_physical_items': omitted}
 
 
-
-def capture_system_projection(core, governance, story, room, mode, addressed, receipts, whole, *, shown, facts):
-    """Render normally and keep its pieces for the selected projection, without opening sources again."""
-    from ouroboros.section_floor import _system_blocks
-
-    live = []
-    system = _system_blocks(core, governance, story, room, mode, addressed, whole, trace=live.append)
+def observe_system_layout(core, governance, addressed, receipts, live, system, *, story_whole, shown):
+    """Bind the renderer's captured pieces to its final, selected blocks."""
     rendered = tuple(block['text'] for block in system)
 
     @_optional_observation()
@@ -622,15 +617,7 @@ def capture_system_projection(core, governance, story, room, mode, addressed, re
         original, changing = rendered[-1], texts[-1]
         if changing != original and not (first_contact and changing.startswith(original)):
             return ()
-        return layout_witnesses(core, governance, addressed, receipts, live[0], story_whole=whole,
+        return layout_witnesses(core, governance, addressed, receipts, live[0], story_whole=story_whole,
             appendix=changing[len(original):],
             room_pieces=getattr(shown, 'room_pieces', ()), story_selection=getattr(shown, 'story_selection', None))
-    return system, {**facts, '_assembly_layout': report}
-
-
-def projection_fields(system, facts, selected=True):
-    """Keep the private observer off the projection and hash only a view chosen for use."""
-    memory_facts = dict(facts)
-    report = memory_facts.pop('_assembly_layout', None)
-    witnesses = report(system, memory_facts.get('first_contact_preference')) if report is not None and selected else ()
-    return {'memory_facts': memory_facts, 'assembly_witnesses': witnesses or ()}
+    return report
