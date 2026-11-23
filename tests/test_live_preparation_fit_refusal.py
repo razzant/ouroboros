@@ -79,7 +79,10 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         assert notice_kwargs["system_type"] == "task_error" and notice_kwargs["task_id"] == task_id
         [final] = [row for row in emitted if row["type"] == "send_message"]
         assert final["role"] == "system" and final["system_type"] == "task_error" and final["task_id"] == task_id
-        assert final["progress_meta"]["task_terminal_status"] == "failed" and "MinimumViewUnfit" in final["text"]
+        assert final["progress_meta"]["task_terminal_status"] == "failed"
+        assert final["text"] == "This turn stopped on an unexpected error."  # the phrase; the raw error rides Details
+        assert final["progress_meta"]["notice"] == {"code": "task_exception",
+                                                    "details": f"MinimumViewUnfit: {errors[0]}"}
         assert not [row for row in emitted if row["type"] not in {"send_message", "direct_turn_phase", "direct_turn_bound"}]
         assert not any(row["type"] == "call.fit_refused" for row in rows)
         return

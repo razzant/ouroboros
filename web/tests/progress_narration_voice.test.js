@@ -679,6 +679,9 @@ test('a skill lifecycle row ends at its typed fact, and an older row at the word
     // A row with its fact is read from the fact, whatever its words say.
     assert.equal(row({ content: 'Skill install: `alpha` — completed', lifecycle: { status: 'failed', phase: 'failed' } }).phase,
         'lifecycle_error');
+    // Another work's row keeps working, whatever its words end with: only a skill lifecycle row ends here.
+    assert.equal(summarizeChatLiveEvent({ type: 'chat', is_progress: true, role: 'system',
+        task_id: 'turn-1', ts: TS, content: 'Step — completed' }).phase, 'working');
 });
 
 test('a host notice on a task card says its line with its step, and its raw details open from that line (RV4 1)', () => {
