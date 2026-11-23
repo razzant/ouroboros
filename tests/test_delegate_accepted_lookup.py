@@ -128,15 +128,16 @@ def test_accepted_lookup_keeps_the_original_named_note_receipt_after_an_edit(tmp
     registry, engine = _delegating(tmp_path, monkeypatch)
     address = resolve_knowledge_address(tmp_path, "witness-note", "global")
     address.path.parent.mkdir(parents=True, exist_ok=True)
-    original = "# A synthetic note\n\nWhole old text.\n"
-    address.path.write_text(original, encoding="utf-8")
+    # Exercise a Windows-authored note on every platform, without text-mode translation.
+    original = "# A synthetic note\r\n\r\nWhole old text.\r\n"
+    address.path.write_bytes(original.encode("utf-8"))
     engine.lose = 1
     lost = json.loads(exact_start(registry._ctx, "Read the note.", {
         "snapshot": _transport_snapshot(DelegationRoute("some-route", "weak-model"), "readonly"),
         "knowledge_notes": [{"topic": "witness-note"}],
     }).text)
     token = lost["pending_invocation_id"]
-    address.path.write_text("# Edited later\n", encoding="utf-8")
+    address.path.write_bytes(b"# Edited later\n")
     c._CUSTODY.clear()
     accepted = _start(registry, retry_of=token)
     revision = sha256(original.encode()).hexdigest()
