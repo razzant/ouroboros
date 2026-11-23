@@ -1,0 +1,57 @@
+# One-off, keyless witness for PR #4077. Keep this file out of the product branch.
+name: PR4077 refused-send loopback witness
+on:
+  push:
+    branches: [ci/context-refusals-4077-d1011936]
+permissions:
+  contents: read
+jobs:
+  loopback:
+    name: Refused-send loopback (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d1011936dc7d22cb18a36b773521c4f62074da19
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify product commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = d1011936dc7d22cb18a36b773521c4f62074da19
+          test "$(git rev-parse 'HEAD^{tree}')" = 1f2f073dd9f8e0b1052e47bb9c4cacda57755346
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+      - name: Run four synthetic loopback cases
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          python -m pytest -o addopts='' -q --tb=short --timeout=180 --junitxml=refusals-4077.xml \
+            'tests/test_size_refusal.py::test_http200_text_refusal_rebinds_real_sdk_request_to_nano' \
+            'tests/test_context_refusal_passes.py::test_first_contact_preference_reaches_the_next_real_chat_request'
+          python - <<'PY'
+          from xml.etree import ElementTree
+
+          cases = ElementTree.parse('refusals-4077.xml').findall('.//testcase')
+          name = 'test_first_contact_preference_reaches_the_next_real_chat_request'
+          expected = {'test_http200_text_refusal_rebinds_real_sdk_request_to_nano', *(f'{name}[{value}]' for value in ('enough', 'maps', 'none'))}
+          assert len(cases) == 4 and {case.get('name') for case in cases} == expected
+          assert all(not any(case.find(kind) is not None for kind in ('failure', 'error', 'skipped')) for case in cases)
+          print('Verified 4 of 4 named loopback cases on the pinned product tree')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: refusals-4077-${{ matrix.os }}
+          path: refusals-4077.xml
+          if-no-files-found: ignore
+          retention-days: 7
