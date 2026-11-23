@@ -873,7 +873,7 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
 /* ---- The register of parts (DESIGN.md principle 8) ------------------------------------------------------------------
    The one list of the parts this sheet holds: each entry names a part's classes (or the attribute that marks it),
    then its job, variants and states, and what a page may not do with it. Screens compose the parts and lay them out
-   in their own containers; a look two screens need changes once, in its part, every consumer shown before and after;
+   in their own containers; a look two screens need changes once, in its part, every consumer named, frames under CHECKLISTS 11(i);
    a part no entry covers is added here with its recipe. The home test (web/tests/ui_primitives.test.js) reads this
    list both ways: what an entry names is selected in this sheet, and every class this sheet selects, and every part
    it draws by an attribute alone, is named by an entry, each part by one entry.
