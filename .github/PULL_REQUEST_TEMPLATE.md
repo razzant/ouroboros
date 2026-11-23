@@ -9,6 +9,7 @@ them in the Review evidence section instead.
 ## Summary
 
 <!-- What changes, and why is it needed? Link an issue or discussion when relevant. -->
+<!-- What does this change remove or consolidate? "Nothing" is a valid answer. -->
 
 ## Scope
 

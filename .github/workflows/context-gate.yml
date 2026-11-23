@@ -37,6 +37,8 @@ on:
       - 'ouroboros/subagents*.py'
       - 'ouroboros/tool*.py'
       - 'ouroboros/tools/**'
+      - 'ouroboros/code_intelligence_architecture.py'
+      - 'scripts/regenerate_inventories.py'
       - 'prompts/**'
       - 'BIBLE.md'
       - 'docs/*.md'

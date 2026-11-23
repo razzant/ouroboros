@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import re
+
+from tests._persistence_rows import inventory_rows, lifetime
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DOC = REPO / "docs" / "PERSISTENCE.md"
-_LIFETIME_RE = re.compile(r"^\[(record|bounded|disposable: ([\w.]+))\]")
 
 # Disposable planes nothing retires yet: only removals, except the cache decision named above.
 DISPOSABLE_WITHOUT_RETIRER = frozenset({
@@ -33,45 +33,6 @@ DISPOSABLE_WITHOUT_RETIRER = frozenset({
     # pruned only explicitly, with the package manager (uv cache prune, pip cache purge, npm cache clean).
     "package-downloads/<manager>/",
 })
-
-
-def _cells(line: str) -> list:
-    cells, current, code = [], [], False
-    for char in line.strip().strip("|"):
-        if char == "`":
-            code = not code
-        if char == "|" and not code:
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    return [*cells, "".join(current).strip()]
-
-
-def inventory_rows(text: str) -> list:
-    """``(key, Retention cell)`` of every body row of a table whose header names Retention,
-    however its first cell starts; the key is that cell's first code span (its first path)."""
-    rows, retention = [], None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            retention = None
-            continue
-        cells = _cells(stripped)
-        if retention is None:  # a header row
-            retention = cells.index("Retention") if "Retention" in cells else None
-        elif not set(stripped) <= set("|-: "):  # not the separator row
-            spans = cells[0].split("`")
-            rows.append((spans[1] if len(spans) > 2 else cells[0], cells[retention]))
-    return rows
-
-
-def lifetime(cell: str):
-    """``(class, retirer)`` named at the start of a Retention cell, or ``None``."""
-    match = _LIFETIME_RE.match(cell)
-    if not match:
-        return None
-    return ("disposable", match.group(2)) if match.group(2) else (match.group(1), None)
 
 
 def resolves(dotted: str) -> bool:

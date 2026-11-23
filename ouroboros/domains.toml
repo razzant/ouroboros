@@ -11,7 +11,7 @@
 #     matrix, cycle ceiling, lazy/dynamic classification and the literal-copy
 #     baseline, pinned as data. Baseline = current reality; tightening any of
 #     it is a separate owner decision (plan §7.1 discipline).
-#   - docs/DOMAIN_MAP.md is generated from this manifest (same --write).
+#   - `python scripts/check_domains.py --map` renders this manifest on stdout.
 #
 # Derivation of the assignment:
 #   - domain vocabulary and the original 411-module assignment parsed from the
@@ -1169,8 +1169,8 @@ D20 = "Presence"
 "ouroboros/icon_geometry.py" = "D14"
 
 [classification]
-# Module placements needing owner review are listed here and starred in
-# docs/DOMAIN_MAP.md. Accepted assignments remain in [modules]; an undecided
+# Module placements needing owner review are listed here and starred by
+# `check_domains.py --map`. Accepted assignments remain in [modules]; an undecided
 # placement belongs on this list rather than being silently accepted.
 proposed = []
 

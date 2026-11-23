@@ -772,6 +772,6 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 └── ouroboros.pid                  ← launcher PID lock; auto-released on crash
 ```
 
-The generated `docs/inventories/DATA_LAYOUT_INVENTORY.md` probes each entry's last literal segment against tracked paths and runtime literals, so a durable file renamed in code turns its row red; it proves nothing stronger.
+`scripts/regenerate_inventories.py --show data-layout` probes each entry's last literal segment against repository paths and runtime literals, not full path ownership.
 
 ---
