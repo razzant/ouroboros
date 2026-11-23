@@ -157,14 +157,17 @@ def _seed_saved_files(root):
     """The synthetic server owns this result store. Register exact bytes as a finished task would."""
     import hashlib
 
+    from ouroboros import artifact_storage
     from tests._store_shared import as_install, seed_result
 
     task = "sample-count"
     directory = "delegated_runs/sample/evidence-final/files/"
     snapshot, report, method, control = [directory + name for name in
                                          ("rows.bin", "report.md", "measure.py", "control.bin")]
-    files = {snapshot: b"row\n" * 24000, report: b"Counted 24000 rows.\n",
+    files = {snapshot: b"r\n" * 24000, report: b"Counted 24000 rows.\n",
              method: b"print(len(rows))\n", control: b"another sample"}
+    # Keep startup compression from changing the identities recorded by the offer.
+    assert all(len(data) < artifact_storage.FLOOR_BYTES for data in files.values())
     result = "The sample contained 24000 rows."
     store = root / "task_results" / "artifacts" / task
     (store / directory).mkdir(parents=True)
@@ -182,21 +185,10 @@ def _seed_saved_files(root):
 
 
 def _offer_saved_file(root, task, snapshot, retained):
-    from ouroboros import artifact_storage, maintenance_jobs, record_compression
     from ouroboros.payload_release import propose
     from tests._store_shared import as_install
-    from tests.separate_ui_support import wait_until
-
-    def compression_settled():
-        job = maintenance_jobs.job(root, record_compression.JOB) or {}
-        return (not record_compression.due(root, job, {}, False)
-                and task not in (job.get("waiting", {}).get("evidence") or ()))
 
     with as_install(root):
-        # Its startup pass can replace this compressible file with the same bytes at a new inode.
-        # The positive case must propose the saved object after that pass, not before it.
-        if artifact_storage.compression_supported():
-            wait_until(compression_settled, timeout=45, message=f"compression did not settle for {task}")
         offer = propose(root, task, [{"path": snapshot, "role": "frozen input", "loss": "Cannot recount these rows."}],
                         retained, "The original rows cannot be examined again.", proposer="sample-author")
         assert offer["ok"], offer

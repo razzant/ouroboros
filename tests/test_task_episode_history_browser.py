@@ -165,6 +165,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 assert first.is_visible() and second.locator('details[data-episode-task="e1"]').count() == 0
                 set_continuation('e1', 'e2', 'admitted')
                 report_successor('e2')
+                second.locator('details[data-episode-task="e1"]').wait_for(state='attached')
                 expand(second)
                 second.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / 'names.png'))
