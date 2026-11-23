@@ -783,7 +783,7 @@ def test_consciousness_host_producer_reads_its_allowance_off_the_queue_lock(host
     from ouroboros.consciousness_allowance import STATUS_AVAILABLE
 
     notices = []
-    monkeypatch.setattr(queue, "send_with_budget", lambda _chat, text, **_k: notices.append(text))
+    monkeypatch.setattr(queue, "send_with_budget", lambda _chat, text, **k: notices.append((text, k)))
     window = {"status": STATUS_AVAILABLE if status == "available" else "exhausted", "limit_usd": 5.0,
               "settled_usd": 0.0 if status == "available" else 5.0,
               "accounted_usd": 0.0 if status == "available" else 5.0, "remaining_usd": 5.0,
@@ -796,4 +796,8 @@ def test_consciousness_host_producer_reads_its_allowance_off_the_queue_lock(host
         assert load_task_result(host.root, tid)["host_admission"]["status"] == "accepted"
     else:
         assert tid is None and not host.pending
-        assert "consciousness_allowance_exhausted" in notices[-1]
+        text, kwargs = notices[-1]
+        assert text == "Deep self-review could not be queued."
+        notice = kwargs["progress_meta"]["notice"]  # the allowance's typed cause is the refusal's detail
+        assert notice["code"] == "deep_self_review_not_admitted"
+        assert notice["details"].startswith("consciousness_allowance_exhausted")

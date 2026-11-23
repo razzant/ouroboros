@@ -113,7 +113,7 @@ def _core_catalogs() -> Dict[str, Tuple[Dict[str, str], str]]:
     from ouroboros.host_notice import step_catalog
 
     return {
-        "notice.step": (step_catalog(), "the next step said after a System notice: a control or a Settings place"),
+        "notice.step": (step_catalog(), "the next step said after a System notice: a control or a place in the interface"),
         "task.headline": ({**pd.OUTCOME_PHASE_HEADLINE, "quiet": pd.QUIET_RUN_HEADLINE},
                           "the one-word status headline of a task card (Working, Done, Failed…)"),
         "task.cause": (pd.TASK_CAUSE_PHRASES,

@@ -468,8 +468,8 @@ def invalidate(reason: str, root: Any = None) -> None:
 
 
 def account_changed(enabled: Optional[bool]) -> None:
-    """A confirmed Settings › Accounts change (``gateway.claudexor_accounts._account_changed``): a disable or removal
-    invalidates, an enable or a new account only asks for a pass."""
+    """A confirmed change in Settings › Accounts and keys (``gateway.claudexor_accounts._account_changed``): a disable
+    or removal invalidates, an enable or a new account only asks for a pass."""
     if enabled is True:
         request_refresh("account_enabled")
     else:

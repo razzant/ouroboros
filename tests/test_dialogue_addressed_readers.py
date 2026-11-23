@@ -575,13 +575,22 @@ def test_memory_readers_do_equal_work_with_one_or_thirty_foreign_rooms(tmp_path,
             "identity": lambda: chat_chain.resolve_row(root, chat_chain.row_address(row))[0],
             "room": lambda: [r for _a, r, _p in chat_chain.iter_room_rows(root, 777)],
             "evidence": lambda: read_room_source(root, 777),
-            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5)[0],
+            "task": lambda: Memory(root).read_task_recent("chat.jsonl", "selected", 5),
         }
         with metered(monkeypatch) as measured:
             result = reads[reader]()
         assert result
         if reader == "evidence":
             assert len(result["rows"]) == 1 and result["rows"][0]["text"] == row["text"]
+        elif reader == "task":
+            # #4012: the task reader also names the row in the retained store — ``dialogue_store.Row.history_id``,
+            # the store's own coordinate ("<stream>:<seq>"), which the mind's clipped progress line quotes. The
+            # row's data, its order, the read's volume and its gaps are what they were; the id is that coordinate.
+            task_rows, task_coverage = result
+            stored = ds.probe_rows(root, "chat", [("task_id", "selected")], limit=5)
+            assert task_rows == [{**row, "history_id": stored[0].history_id}]
+            assert stored[0].history_id == "chat:0"
+            assert task_coverage["shown"] == task_coverage["matched"] == 1 and task_coverage["gaps"] == []
         else:
             assert result == (row if reader == "identity" else [row])
         measurements.append(dict(measured))

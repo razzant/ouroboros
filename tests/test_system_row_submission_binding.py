@@ -72,6 +72,7 @@ def test_direct_lane_refusals_name_their_submission(tmp_path, monkeypatch):
     terminal correlation."""
     from supervisor import state as state_mod
     from supervisor import worker_chat_lane, workers
+    from ouroboros.host_notice import STEPS
     from ouroboros.task_results import load_task_result
     from tests._agent_entry_helpers import task_entry_agent
     from tests.conversation_carrier_support import carry, isolate_lane_pool, lane_rows
@@ -106,16 +107,22 @@ def test_direct_lane_refusals_name_their_submission(tmp_path, monkeypatch):
     for spare in spares:
         with pytest.raises(Exception, match="budget_exhausted"):
             carry(workers, spare, agent)
+    step = STEPS["raise_total_budget"]
+    assert step.strip()
     for task_id in (first, second):
         stored = load_task_result(tmp_path, task_id)
         assert stored["status"] == "failed", stored
-        assert stored["result"].startswith("🚫 Budget exhausted."), stored["result"]
+        # The record keeps the phrase and the owner's step; the setting's key stays a detail (DESIGN principle 7).
+        assert stored["result"] == f"The total budget is spent, so this turn did not start. {step}", stored["result"]
         assert stored.get("reason_code") == "budget_exhausted"
     # The owner reads each refusal once, keyed to its turn, in the closed class's words.
     assert sorted(kwargs["task_id"] for _args, kwargs in finals) == sorted([first, second])
     for args, kwargs in finals:
-        assert args[1].startswith("🚫 Budget exhausted.") and kwargs["system_type"] == "task_not_started"
+        assert args[1] == "The total budget is spent, so this turn did not start.", args[1]
+        assert kwargs["system_type"] == "task_not_started"
         assert kwargs["progress_meta"]["task_terminal_status"] == "failed"
+        assert kwargs["progress_meta"]["notice"] == {"code": "budget_exhausted", "step": "raise_total_budget",
+                                                     "details": "setting: TOTAL_BUDGET"}
         assert ("origin_message_ref" in kwargs["progress_meta"]) is (kwargs["task_id"] == second)
     # Only a host operation keeps durable terminal correlation; client ids stay on the live receipt.
     assert load_task_result(tmp_path, first).get("origin_message_ref") is None
@@ -154,12 +161,23 @@ def test_review_rows_name_the_owner_submission(monkeypatch, reviewer):
     monkeypatch.setattr(queue, "send_with_budget", lambda *a, **k: sent.append((a, k)))
     monkeypatch.setattr(queue, "load_state", lambda: {"owner_chat_id": 1})
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **_k: None)
-    monkeypatch.setattr(queue, "enqueue_with_admission_receipt", lambda task: {**task})
+    queued = []
+    monkeypatch.setattr(queue, "enqueue_with_admission_receipt", lambda task: queued.append(task) or {**task})
     queue.queue_deep_self_review_task("owner:/review", force=True, chat_id=1, reviewer=reviewer,
                                       client_message_id="cm-review")
     (args, kwargs), = sent
     assert kwargs["system_type"] == ("deep_self_review_unavailable" if reviewer else "deep_self_review_queued")
-    assert kwargs["progress_meta"] == {"client_message_id": "cm-review"}
+    assert set(kwargs["progress_meta"]) == {"client_message_id", "notice"}, "no task terminal metadata"
+    assert kwargs["progress_meta"]["client_message_id"] == "cm-review", "the row still names the submission"
+    notice = kwargs["progress_meta"]["notice"]
+    if reviewer:  # the row's own cause is the refusal's detail (DESIGN principle 7)
+        assert notice["code"] == "deep_self_review_unavailable" and notice["step"] == "choose_reviewer"
+        assert notice["details"].startswith("reviewer 'no-such-row' is not an enabled catalog row (")
+    else:
+        assert notice == {"code": "deep_self_review_queued",
+                          "details": f"task {queued[0]['id']}; requested as owner:/review",
+                          "template": "Deep self-review is queued; reviewer: {reviewer}.",
+                          "values": {"reviewer": "Main"}}
 
 
 @pytest.mark.parametrize(("bridge_ready", "chat_id"), [(False, 1), (True, 42)])

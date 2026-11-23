@@ -491,7 +491,7 @@
  * @property {string=} reply_author_label  // whom a Reply to this row names: You, Ouroboros, System or the recorded speaker
  * @property {string=} row_client_message_id  // an outgoing row's own saved name, the same as its client_message_id
  * @property {ChatReplyReference=} reply_to
- * @property {import('./api_types.js').HostNotice=} notice  // a host notice: code, step, details and its line in the install's language
+ * @property {import('./api_types.js').HostNotice=} notice  // HostNotice for this System row
  * @property {Object=} relay
  * @property {string=} reply_to_relay
  * @property {Object.<string,number>=} room_revisions  // a row shown in several rooms: the revision it took in each room it counted in
@@ -746,7 +746,7 @@
  * @property {string=} task_name
  * @property {string=} completion_reason
  * @property {Object=} completion_notice
- * @property {import('./api_types.js').HostNotice=} notice  // its line is the words the bubble draws; its details are not searched
+ * @property {import('./api_types.js').HostNotice=} notice  // its line is the words the bubble draws; its details, template and values are not searched
  */
 
 /**
@@ -1186,10 +1186,12 @@
 
 /**
  * Send back the opaque IDs offered in this saved task's refusal, with a reason. Do not reconstruct an ID.
- * For a delegated start, external work and costs may continue.
+ * For a delegated start, external work and costs may continue. The Panic selection sends only the
+ * stop it chose (`panic_recovery[].panic_hold_id`); a changed or used stop answers 409 `panic_selection_changed`.
  * @typedef {Object} TaskResumeRequest
  * @property {string[]=} accept_unknown
  * @property {string=} reason
+ * @property {string=} expected_panic_hold_id
  */
 
 /**

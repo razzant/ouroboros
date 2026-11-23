@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional, Tuple
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.contracts.task_contract import normalize_budget_profile
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+from ouroboros.host_notice import STEPS
 
 
 log = logging.getLogger(__name__)
@@ -683,7 +684,7 @@ def _wrapup_stop_facts(
         return (
             f"The shared Total budget is nearly used up: ${global_remaining_usd:.2f} left across all "
             f"tasks. {spent}{cleared}.",
-            " Raise Total budget in Settings for more room.",
+            f" {STEPS['raise_total_budget']}",
         )
     wallet = (
         f"; the shared Total budget still has ${global_remaining_usd:.2f}"

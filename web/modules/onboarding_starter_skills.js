@@ -53,8 +53,8 @@ export function needsText(item, keyLabels = {}) {
     return keys.length ? `Uses your ${keyLabels[keys[0]] || keyWords(keys[0])}${more ? ` and ${more} more setting${more === 1 ? '' : 's'}` : ''}` : '';
 }
 
-// How a hub row's skills are named in the sentence under the list and behind it (Settings › Skill sources names the
-// rows themselves): in the sentence the Official row also says where they come from.
+// How a hub row's skills are named in the sentence under the list and behind it (Extensions › Sources lists the rows
+// themselves): in the sentence the Official row also says where they come from.
 const SOURCE_WORDS = { official: [(row) => `Official skills from the ${row.name} hub`, () => 'Official skills'],
     community: [() => 'skills from the community', () => 'Community skills'] };
 const sourceWords = (row, inLine) => SOURCE_WORDS[row.part]?.[inLine ? 0 : 1](row) || `${inLine ? 'skills from ' : ''}${row.name}`;

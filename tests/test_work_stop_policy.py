@@ -56,7 +56,8 @@ def test_scopes_keep_independent_member_authority_and_sleep_is_only_waiting():
     stop = current_stop(task, {"owner": {"state": "paused", "fence_id": "f"}})
     assert stop["cause"] == "pause" and stop["member_stop"]["cause"] == "panic"
     assert release_refusal(stop, {"actor": "ouroboros"})["error"] == "panic_requires_owner_resume"
-    assert release_refusal(stop, {}) is None
+    assert release_refusal(stop, {})["error"] == "panic_requires_owner_resume"
+    assert release_refusal(stop, {"actor": "owner"}) is None
     assert current_stop(task)["release"] == "owner"
 
 
@@ -121,7 +122,7 @@ def test_doors_preserve_the_existing_replacement_matrix(tmp_path, prior, door):
 @pytest.mark.parametrize("reason", [eb.HOLD_SAVED_WORK, eb.HOLD_PANIC, "restore_refused:unavailable", "unknown_name"])
 @pytest.mark.parametrize("door", ["owner", "mind"])
 def test_resume_door_stop_and_source_matrix(tmp_path, monkeypatch, source, reason, door):
-    from ouroboros.control_actor import mind_control
+    from ouroboros.control_actor import mind_control, owner_door
     from ouroboros.task_results import write_task_result
 
     q, state, workers = _install_queue(tmp_path, monkeypatch)
@@ -139,7 +140,7 @@ def test_resume_door_stop_and_source_matrix(tmp_path, monkeypatch, source, reaso
     else:
         eb.hold_budget_row(task, reason=reason)
     before = copy.deepcopy(task)
-    with mind_control("mind", "continue this work") if door == "mind" else nullcontext():
+    with mind_control("mind", "continue this work") if door == "mind" else owner_door("fixture"):
         result = q.resume_budget_paused_task("root")
     allowed = source != "missing" and not (door == "mind" and reason == eb.HOLD_PANIC)
     assert result["ok"] is allowed, result
@@ -153,7 +154,8 @@ def test_resume_door_stop_and_source_matrix(tmp_path, monkeypatch, source, reaso
             assert result["error"] == "panic_requires_owner_resume"
 
 
-def test_pause_cannot_launder_panic_but_owner_can_replace_it(tmp_path, monkeypatch):
+def test_pause_is_not_the_owners_explicit_panic_resume(tmp_path, monkeypatch):
+    from ouroboros.control_actor import owner_door
     from ouroboros.owner_pause import read_fence
     from ouroboros.task_results import write_task_result
     from supervisor.events_mind_controls import _apply
@@ -170,10 +172,10 @@ def test_pause_cannot_launder_panic_but_owner_can_replace_it(tmp_path, monkeypat
                           "action_nonce": action, "reason": "try this decision"})
         assert outcome["error"] == "panic_requires_owner_resume"
         assert task == prior and not read_fence(tmp_path, "root")
-    assert request_owner_pause("root", request_id="owner-replaces")["ok"]
-    assert eb.BUDGET_HOLD_KEY not in task
-    assert current_stop(task, {"budget": q.BUDGET_ROOT_FENCES})["cause"] == "pause"
-    assert q.resume_budget_paused_task("root")["ok"]
+    assert request_owner_pause("root", request_id="not-resume")["error"] == "panic_requires_owner_resume"
+    assert task == prior and not read_fence(tmp_path, "root")
+    with owner_door("fixture"):
+        assert q.resume_budget_paused_task("root")["ok"]
 
 
 def test_pause_does_not_release_a_different_stop_arriving_during_its_fence_write(tmp_path, monkeypatch):
@@ -199,6 +201,8 @@ def test_pause_does_not_release_a_different_stop_arriving_during_its_fence_write
 
 def test_panic_sleep_refuses_both_mind_doors_and_owner_releases(tmp_path, monkeypatch):
     from ouroboros import budget_pause as bp, model_sleep
+    from ouroboros.control_actor import owner_door
+    from ouroboros.work_stop import panic_hold_id
     from supervisor.events_mind_controls import _apply
     from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _quiet_external
     from tests.test_restart_saved_work import _working_run
@@ -231,7 +235,9 @@ def test_panic_sleep_refuses_both_mind_doors_and_owner_releases(tmp_path, monkey
     eb._handle_budget_resume_child({"task_id": "child", "requested_by": "root", "reason": "wake"}, sup)
     assert outcomes[-1]["error"] == "panic_requires_owner_resume"
     assert current_stop(task)["release"] == "owner"
-    assert q.resume_budget_paused_task("child")["ok"]
+    with owner_door("fixture"):
+        result = q.resume_budget_paused_task("child", expected_panic_hold_id=panic_hold_id(task))
+    assert result["ok"] and result["exact_continuation"], result
     assert eb.BUDGET_HOLD_KEY not in task
 
 
