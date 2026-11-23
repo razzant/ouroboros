@@ -464,6 +464,76 @@ def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path,
     assert kept.initial_mode == plain.initial_mode == "low"
 
 
+def test_running_max_rebind_credits_only_books_that_can_yield(tmp_path, fixed_density, monkeypatch):
+    from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR
+    from tests._context_fit_fixtures import _rebind
+
+    # In a body task Max already carries the handbook. It may not be priced as a map when Low keeps it whole.
+    core = _core(tmp_path, required=True, subject=True, book_tokens=65_000, arch_words=96_000, page_chars=30_000)
+    plan = _plan(tmp_path, core, "max", 1_000_000)
+    messages = plan.messages_for("max") + [{"role": "user", "content": "Exact owner follow-up."}]
+    tail = messages[1:]
+    start = math.ceil(fit.estimate_context_prompt_tokens(messages, []) * RATIO)
+    window = start + 8_192 - 174_000
+    kept, mode, _ = _rebind(monkeypatch, tmp_path / 'route', plan, messages, window=window, ratio=RATIO, start_mode='max')
+    assert mode == 'low' and messages[1:] == tail
+    assert _book_blocks(kept, mode) == _book_blocks(plan, 'max')
+    final = measure_main_fit(kept, messages, [], profile='task_local_low', rendered_mode=mode, round_id='r').measurement
+    physical_free = final.capacity_total_tokens - final.response_reserve_tokens - final.estimated_input_tokens
+    print(f'measured Max-to-Low required handbook: {window=} {physical_free=} book={final.required_book_tokens}')
+    assert final.required_book_tokens > 0
+    assert physical_free < 0 and physical_free + final.required_book_tokens >= math.ceil(window / RECLAIM_LOW_WATER_DIVISOR)
+    assert kept.projection(mode).memory_facts['floor']['steps'] == plan.max_projection.memory_facts['floor']['steps']
+
+
+@pytest.mark.parametrize('ordinary_fits', [True, False], ids=['book-only-wall', 'ordinary-wall-too'])
+def test_max_to_low_can_spend_architecture_but_not_low_handbook_addition(tmp_path, fixed_density, monkeypatch, ordinary_fits):
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.usage_accounting import AttemptRequest
+    from tests._context_fit_fixtures import _rebind
+
+    core = _core(tmp_path, required=True, subject=True, book_tokens=55_000, arch_words=6_000)
+    held = _plan(tmp_path, core, 'max', 1_000_000)
+    plain = _plan(tmp_path, replace(core, development_required=False), 'max', 1_000_000)
+    tail = {'role': 'user', 'content': 'Keep this precise owner follow-up.'}
+    low_size = math.ceil(fit.estimate_context_prompt_tokens([*plain.messages_for('low'), tail], []) * RATIO)
+    window = low_size + 8_192 + (14_000 if ordinary_fits else -4_000)
+    outputs = []
+    for plan in (plain, held):
+        messages = [*plan.messages_for('max'), tail]
+        assert math.ceil(fit.estimate_context_prompt_tokens(messages, []) * RATIO) + 8_192 > window
+        kept, mode, _ = _rebind(monkeypatch, tmp_path / ('held' if plan.core.development_required else 'plain'),
+                                plan, messages, window=window, ratio=RATIO, start_mode='max')
+        assert mode == 'low' and messages[-1] == tail
+        disposition = measure_main_fit(kept, messages, [], profile='task_local_low', rendered_mode=mode, round_id='r')
+        measured = disposition.measurement
+        refusal = main_context_fit_refusal(AttemptRequest(model='fixture', provider='fixture',
+            prompt_tokens_bounded_estimate=measured.raw_input_tokens, physical_context=fit._physical_context_for_fit(disposition)))
+        assert bool(_book_blocks(kept, mode)) is plan.core.development_required
+        assert bool(refusal) is plan.core.development_required
+        if refusal:
+            assert 0 < -refusal['free_tokens'] <= measured.required_book_tokens
+        outputs.append(kept.low_projection.memory_facts['floor']['runs'])
+    assert outputs[0] == outputs[1]
+    if not ordinary_fits:
+        assert outputs[0]
+
+
+def test_running_books_do_not_retry_when_only_the_required_development_map_could_save(tmp_path, fixed_density):
+    core = replace(_core(tmp_path, required=True, subject=True, memory=False, book_tokens=60_000), architecture_md='')
+    held = _plan(tmp_path, core, 'max', 1_000_000)
+    plain = _plan(tmp_path, replace(core, development_required=False), 'max', 1_000_000)
+    assert _book_blocks(held, 'max') == _book_blocks(held, 'low') and _book_blocks(held, 'max')
+    def count(plan, mode):
+        return fit.estimate_context_prompt_tokens(plan.messages_for(mode), [])
+    assert count(plain, 'low') < count(plain, 'max')  # only dropping Development would help
+    assert count(held, 'low') >= count(held, 'max')
+    chosen = held.reproject_for_route(window_tokens=80_000, known_window=True, ratio=RATIO, output_reserve=RESERVE,
+        start_mode='max', select_mode='low', tool_schemas=[], current_messages=held.messages_for('max'),
+        books_must_save=True, start_work=False)
+    assert chosen.initial_mode == 'max' and chosen.max_projection.system_content_json == held.max_projection.system_content_json
+
+
 def test_the_target_facts_stay_while_the_goal_excludes_the_book(tmp_path, fixed_density):
     ordinary = _plan(tmp_path, _core(tmp_path), "low", 1_000_000)
     required = _plan(tmp_path, _core(tmp_path, required=True, book_tokens=250_000), "low", 1_000_000)
@@ -523,6 +593,39 @@ def test_a_tight_route_delivers_the_ordinary_output_and_the_admission_charges_th
     assert receipt["unsolicited_allowance_tokens"] == plain_receipt["unsolicited_allowance_tokens"] > 2_000
     assert not plain_receipt["fit"]["capacity_deficit_tokens"]
     assert 0 < receipt["fit"]["capacity_deficit_tokens"] < receipt["fit"]["required_book_tokens"]
+
+
+def test_the_required_nano_book_and_full_reply_fit_an_input_only_limit(tmp_path, fixed_density):
+    from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from ouroboros.llm_helper_window import window_reply_candidate
+    from ouroboros.usage_accounting import AttemptRequest
+
+    width = 100_000
+    core = _core(tmp_path, required=True, book_tokens=60_000, memory=False, arch_words=0, assignment='work ' * 12_000)
+    route = {'provider': 'fixture', 'model': 'fixture'}
+    evidence = CapabilityEvidence(width, 'confirmed', 'metadata', 'input-only', window_kind='input')
+    plan = fit.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core, {'id': 't', 'type': 'task'},
+        preferred_mode='nano', tool_schemas=[], route_resolver=lambda *_a, **_kw: (route, evidence))
+    rows = plan.messages_for('nano')
+    disposition = measure_main_fit(plan, rows, [], profile='owner_nano', rendered_mode='nano', round_id='r')
+    measured = disposition.measurement
+    physical = fit._physical_context_for_fit(disposition)
+    native, shortfall, _count, _window = window_reply_candidate({'max_tokens': RESERVE, 'messages': rows},
+        'max_tokens', physical, physical.capacity_total_tokens, {}, helper=False)
+    request = AttemptRequest(model='fixture', provider='fixture', candidate_measurement_kind='canonical_json_v1',
+        prompt_tokens_bounded_estimate=measured.raw_input_tokens, max_completion_tokens=native['max_tokens'],
+        physical_context=physical)
+    assert 90_000 < measured.estimated_input_tokens < width < measured.estimated_input_tokens + RESERVE
+    assert _book_blocks(plan, 'nano') and measured.required_book_tokens > 74_000
+    assert measured.reply_allowance_tokens == native['max_tokens'] == RESERVE and not shortfall
+    assert main_context_fit_refusal(request) is None and not disposition.predicted_capacity_miss
+    total = WindowRecord('total', total=WindowLimit(width, 'total', 'refusal'), reserve=8192)
+    refused = main_context_fit_refusal(replace(request, physical_context=replace(physical, window_record=total)))
+    assert refused['free_tokens'] == width - RESERVE - measured.estimated_input_tokens < 0
+    print(f'input={measured.estimated_input_tokens} book={measured.required_book_tokens} reply={RESERVE}; '
+          f'input-only accepted, equally-sized proved total {refused["free_tokens"]} tokens short')
 
 
 # --- Growth, refusal and the end of that path ---------------------------------------------------------------------

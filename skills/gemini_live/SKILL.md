@@ -1,7 +1,7 @@
 ---
 name: gemini_live
 description: Gemini native Live audio and image provider for Live Conversation.
-version: 0.1.21
+version: 0.1.22
 type: extension
 runtime: python3
 entry: plugin.py
@@ -32,8 +32,9 @@ feature can continue through a fresh fitted session. Provider refusals remain te
 that handle restores in-process caption, tool, held-context and usage state.
 Completed response ids, timestamped transcripts and function-call ids prevent
 identified replays from being counted twice; identical words without native
-identity are never guessed to be a replay. Reconnecting state is consumed once,
-expires with Google's two-hour handle lifetime and is never written to disk.
+identity are never guessed to be a replay. The opened replacement alone claims
+reconnecting state; wire sizing leaves it untouched. It expires with Google's
+two-hour handle lifetime and is never written to disk.
 The feature must retain playback acknowledgements and defer partial-caption and
 response settlement across a resumed connection; Stop still finalizes them.
 Native VAD and input transcription open input work; sent PCM (including silence)

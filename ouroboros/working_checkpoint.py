@@ -247,11 +247,19 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
         from ouroboros.route_choice import after_fallback
 
         state["messages"] = model_call.messages
+        state["tool_schemas"] = list(model_call.tool_schemas or [])
+        role = model_call.model_role or state["context_model_role"]
         state["route"].update(active_model=model_call.active_model, active_model_override=model_call.active_model,
                               active_use_local=model_call.active_use_local, active_use_local_override=model_call.active_use_local,
-                              active_context_mode=model_call.active_context_mode, active_role_override=model_call.model_role,
-                              route_choice=after_fallback(ctx, not str(model_call.model_role or "").startswith("fallback:")))
-        state["context_model_role"] = model_call.model_role or state["context_model_role"]
+                              active_context_mode=model_call.active_context_mode, active_role_override=role)
+        state["context_model_role"] = role
+        if (primary := getattr(model_call, "fallback_is_primary", None)) is not None:
+            failure = model_call.fallback_entry_failure or {}
+            state["route"].update(route_choice=after_fallback(ctx, primary), _route_facts_pending="",
+                                  _lead_role=role, _lead_cause=failure.get("failure_code") or "configured fallback",
+                                  _lead_return_from=None, _lead_episode=None)
+            if not primary:
+                state["route"]["route_wait_on_primary"] = False
     if resumed_from is not None:  # before rebind on either Resume boundary; the plan is still the new worker's
         from ouroboros.context_fit import carried_start
 
@@ -259,7 +267,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
         state["context_start"] = list(carried_start(resumed_from.get("context_start")))  # source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
-                        "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}
+                        "pending_tool_call_ids": pending_tool_call_ids(state["messages"])}
     degraded: List[str] = []
 
     def opaque(value: Any) -> Dict[str, str]:

@@ -151,8 +151,10 @@ def apply_context_view(host):
         candidate = copy.deepcopy(candidate)
         if any(row.get('_host_context_kind') == 'tool_manifest' for row in candidate):
             update_resident_notice(host.tools, schemas, candidate)
+        opened = getattr(getattr(host, '_connection_view', None) or host, '_context_session', None)
         _, _, evidence, _ = measure_session_wire(host, host.plan, candidate, schemas,
-            host._view_session_factory, host._view_session_options, fresh=False, _room_fact=False)
+            host._view_session_factory, host._view_session_options, fresh=False, _room_fact=False,
+            opening_allowance_tokens=(opened.output_bound_tokens or opened.selected.output_allowance_tokens) if opened else None)
         # Ordinary Main's authored-view policy: predictions inform dispatch;
         # they do not veto the mind's view. The next open still checks capacity.
         return {'accepted': True, 'strict_bound_proven': False,

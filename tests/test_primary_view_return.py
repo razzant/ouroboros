@@ -21,7 +21,7 @@ from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
 from ouroboros.primary_route_observation import hold_selection, record_round_route_result
 from ouroboros.tools.registry import ToolRegistry
 from tests.test_memory_view_lever import plan as synthetic_plan
-from tests.test_memory_view_modes import _built
+from tests._context_fit_fixtures import _built
 
 WINDOWS = {"primary": 1_000_000, "reserve": 65_537}
 
@@ -155,6 +155,111 @@ def test_a_failed_primary_row_leaves_the_acting_view(tmp_path, monkeypatch, rese
     assert sent["view"] == shown  # the primary row was offered its own view
     assert (msg, model, plan_after, mode_after) == (None, reserve, away, away_mode)
     assert messages[0] == acting_view  # the reserve keeps showing its own view, not the primary's Max
+
+
+@pytest.mark.parametrize('switch', ['unchanged', 'account', 'model'])
+def test_the_deferred_fallback_owns_its_view_and_schema_facts_only_when_it_answers(tmp_path, monkeypatch, routes, switch):
+    from copy import deepcopy
+
+    monkeypatch.setattr(config, "fallback_candidate_targets", lambda **_kw: [SimpleNamespace(model_id="reserve")])
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_: False)
+    monkeypatch.setattr(fallback_cooldown, "mark_cooldown", lambda *_: None)
+    waiter = SimpleNamespace(overrides={}, waits_allowed=True)
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    _core, build = _built(tmp_path, monkeypatch, ratio=1, page_chars=400_000)
+    plan = build(WINDOWS["primary"])
+    resolve = context._context_fit_route
+    def bound(task, **kwargs):
+        if task['model'] == 'roomy' or task.get('credential_profile_id') == 'roomy-account':
+            route, evidence = resolve({**task, 'model': 'primary'}, **kwargs)
+            return {**route, 'model': task['model']}, evidence
+        return resolve(task, **kwargs)
+    monkeypatch.setattr(context, '_context_fit_route', bound)
+    for outcome in ("reply", "llm_output_exhausted", "transport_unavailable"):
+        waiter.overrides.clear()
+        tools = _registry(tmp_path)
+        tools._ctx.route_wait_on_primary = True
+        messages = plan.messages_for("max")
+        original = deepcopy(messages)
+        # No provider: the seam dispatches the chosen plan and schemas, then a fake transport settles it.
+        before_schemas = [{"type": "function", "function": {"name": "finish_task"}}]
+        schemas = list(before_schemas)
+        calls, owner = [], []
+
+        def ask(_):
+            owner.append(True)
+            if switch != 'unchanged':
+                waiter.overrides['fallback:0'] = {'model': 'roomy' if switch == 'model' else 'reserve',
+                    'use_local': False, 'model_account_override': 'roomy-account'}
+                return waiter.overrides['fallback:0']
+
+        def round_model(call):
+            calls.append(call.active_context_mode)
+            if len(calls) == 1:
+                call.tools._ctx._deferred_resource_refusal = SimpleNamespace(ask_owner=ask)
+                call.tools._ctx._route_left_out_tool_names = {"ceiling_first"}
+                call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+                return None, 0.0, call.active_context_mode
+            assert getattr(call.tools._ctx, '_route_left_out_tool_names', None) is None
+            if switch != 'unchanged':
+                assert call.active_context_mode == 'max' and call.messages[0] == original[0]
+            call.tools._ctx._route_left_out_tool_names = {"ceiling_final"}
+            call.messages.append({"role": "user", "content": "Notice on the retried route only."})
+            call.accumulated_usage["_last_llm_error_kind"] = "" if outcome == "reply" else outcome
+            return ({"role": "assistant", "content": "answer"} if outcome == "reply" else None), 0.0, call.active_context_mode
+
+        monkeypatch.setattr(loop, "_call_round_model", round_model)
+        reply, model, _local, selected, mode = loop._run_cross_model_fallback_chain(
+            llm=SimpleNamespace(), ctx=tools._ctx, tools=tools, messages=messages, active_model="primary",
+            active_use_local=False, tool_schemas=schemas, active_effort="medium", max_retries=1, drive_logs=tmp_path,
+            task_id="k04", round_idx=2, event_queue=None, accumulated_usage={"_last_llm_error_kind": "auth_error"},
+            task_type="", emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode="max")
+        assert owner == [True] and len(calls) == 2 and calls[0] != "max"
+        assert (reply is not None) == (outcome == "reply")
+        if outcome == "transport_unavailable":
+            assert (model, mode, selected) == ("primary", "max", plan)
+            assert messages == original and schemas == before_schemas
+            assert getattr(tools._ctx, "_route_left_out_tool_names", None) is None
+        else:
+            assert (model, mode) == ('roomy' if switch == 'model' else 'reserve', calls[-1])
+            assert selected is tools._ctx.context_fit_plan and messages[0] == selected.projection(mode).system_message()
+            assert messages[-1]["content"] == "Notice on the retried route only."
+            assert tools._ctx._route_left_out_tool_names == {"ceiling_final"}
+            assert tools._ctx.route_choice['source'] == 'fallback' and tools._ctx.route_wait_on_primary is False
+
+
+def test_a_discarded_same_family_send_carries_the_capability_change_to_the_next_route(tmp_path, monkeypatch):
+    from ouroboros import capability_breakage as cb
+
+    primary, refused, answering = (f'openai/gpt-{name}' for name in ('primary', 'refused', 'answering'))
+    _windows_by(monkeypatch, 'model', {model: 1_000_000 for model in (primary, refused, answering)})
+    monkeypatch.setattr(config, 'fallback_candidate_targets', lambda **_kw: [
+        SimpleNamespace(model_id=model) for model in (refused, answering)])
+    monkeypatch.setattr(fallback_cooldown, 'is_cooling_down', lambda *_a: False)
+    monkeypatch.setattr(fallback_cooldown, 'mark_cooldown', lambda *_a: None)
+    monkeypatch.setattr(cb, 'read_facts', lambda *_a, **_kw: cb.Observed(broken={'mcp:fixture': 'temporarily unavailable'}))
+    plan, tools, messages = _primary_on(primary, tmp_path, monkeypatch)
+    setattr(tools._ctx, cb._TOLD, {'facts': {}, 'mcp': True})
+    sends = []
+
+    def transport(_llm, rows, model, _schemas, _effort, _retries, _logs, _task_id, _round, _queue, usage, *_a, **_kw):
+        sends.append((model, [r['content'] for r in rows if r.get('_host_context_kind') == cb.CHANGE_KIND]))
+        if model == refused:
+            usage['_last_llm_error_kind'] = 'quota_exhausted'
+            return None, 0.0
+        usage['_last_llm_error_kind'] = ''
+        return {'role': 'assistant', 'content': 'Answered.'}, 0.0
+
+    monkeypatch.setattr(loop, 'call_llm_with_retry', transport)
+    reply, model, *_ = loop._run_cross_model_fallback_chain(
+        llm=SimpleNamespace(), ctx=tools._ctx, tools=tools, messages=messages, active_model=primary,
+        active_use_local=False, tool_schemas=[], active_effort='medium', max_retries=1, drive_logs=tmp_path,
+        task_id='k04', round_idx=2, event_queue=None, accumulated_usage={'_last_llm_error_kind': 'auth_error'},
+        task_type='', emit_progress=lambda *_a, **_kw: None, context_fit_plan=plan, active_context_mode='max')
+    assert reply['content'] == 'Answered.' and model == answering
+    assert [entry[0] for entry in sends] == [refused, answering]
+    assert sends[0][1] == sends[1][1] and len(sends[1][1]) == 1 and 'MCP server fixture' in sends[1][1][0]
+    assert [m['content'] for m in messages if m.get('_host_context_kind') == cb.CHANGE_KIND] == sends[1][1]
 
 
 @pytest.mark.parametrize("pin", ["", "account-a"], ids=["auto", "pinned"])

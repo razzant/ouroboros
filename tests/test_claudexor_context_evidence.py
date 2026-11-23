@@ -307,6 +307,7 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
     so it reads account-b's record instead of asking again."""
     from types import SimpleNamespace
     from ouroboros import continuation_tools, loop, owner_wait
+    from ouroboros.window_learning import RouteSchemas
 
     catalog["value"] = _catalog("account-b", "identity-b")
     conversation = {"source": "test-source", "model": "exact-model", "credentialProfileId": "account-a",
@@ -320,7 +321,11 @@ def test_the_rebind_after_tool_reconciliation_reuses_the_first_answer(tmp_path, 
         return SimpleNamespace(model_route=_binding(evidence) if evidence.account_fingerprint else {}), "max"
 
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", rebind)
-    monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a: True)
+    replacement = continuation_tools.RestoredTools(RouteSchemas([{"function": {"name": "new"}}], []))
+    monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a, **_kw: replacement)
+    monkeypatch.setattr(owner_wait, "get_context_mode", lambda: "max", raising=False)
+    monkeypatch.setattr(loop, "get_context_mode", lambda: "max")
+    monkeypatch.setattr("ouroboros.loop_model_call.publish_rebound_view", lambda *_a, **_kw: None)
     monkeypatch.setattr(owner_wait, "sanction_rewrite", lambda *_a, **_kw: None)
     ctx = SimpleNamespace(context_fit_plan=None, active_model=MODEL, active_use_local=False, task_metadata={},
                           model_wait_context=None, active_context_mode="max")
@@ -486,7 +491,7 @@ def test_a_late_answer_on_another_provider_walks_again_only_where_the_request_sh
     """Settings moved Main from the engine to another provider while the guard's early answer narrowed the view: the
     usual point's answer names the same window, reserves and density. The plan is that answer's, and so is its view:
     walked again where the provider changes the request's shape (direct OpenAI reasoning sends the longer custom
-    ladder, ``context_fit._request_shapes``); otherwise the walk it has holds that view already. 15.11.2026 (Astra):
+    ladder, ``context_measurement._request_shapes``); otherwise the walk it has holds that view already. 15.11.2026 (Astra):
     the engine's walk stayed for direct OpenAI, 496 tokens of memory where its own fit holds 16,895."""
     from ouroboros import context_fit as cf, memory_view as mv
     from tests import _memory_view_synthetic as syn

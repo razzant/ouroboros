@@ -64,7 +64,7 @@ def test_failed_preparation_cannot_flush_a_result_known_not_to_fit_serving_conne
             'text_input_tokens': host._selected_raw_estimate,
             'audio_input_tokens': 39000 - host._selected_raw_estimate}, raw_usage={}, status='completed')
         assert host._held_input == 39000
-        from tests.test_context_source_view import _tool
+        from tests._context_source_fixtures import _tool
         text = 'Exact chosen read result. ' * 6000
         result_rows = _tool('read-chosen', invocation='one-read', text=text)
         result_rows[0]['tool_calls'][0]['function'] = {'name': 'read_file',
@@ -241,6 +241,85 @@ def test_catalog_record_survives_native_resume_but_new_fit_rebinds(host_world, r
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('host_world', [('low', 1_000_000, 'estimator')], indirect=True)
+@pytest.mark.parametrize('narrowed', [True, False])
+def test_a_native_resume_serves_with_the_catalog_its_opening_declared(host_world, monkeypatch, narrowed):
+    """Gemini's resumed setup declares its selected tools again; the serving guard prices the catalog it declared.
+
+    The resumed connection's ordinary fit may select another mode's tools while it continues the same server-side
+    conversation, and the host prices its serving baseline with those adopted tools. A resume whose selection is
+    unchanged keeps the catalog the conversation was last delivered.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    from skills.live_conversation.driver import _Call
+    from tests._live_wire import Wire
+
+    spec = importlib.util.spec_from_file_location(
+        'gemini_serving_plugin', Path(__file__).resolve().parents[1] / 'skills/gemini_live/plugin.py')
+    gemini = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gemini)
+    wires = []
+
+    def factory(selected, options, *, observe):
+        wires.append(Wire())  # a fake socket: no network, the adapter's own serializer
+        return gemini.GeminiSession(selected, options, connect=wires[-1].connect, observe=observe)
+
+    monkeypatch.setitem(host_world.provider, 'session', factory)
+    host = host_world.host
+    host.model = replace(host.model, facts=replace(gemini.FACTS, conversation_window_tokens=1_000_000))
+    call, seen = _Call(host), {}
+
+    async def wait(): await asyncio.Future()
+    async def complete(): return None
+    call.provider = call.mailbox = wait
+    call.finalize = complete
+
+    async def serving():  # the first connection's guard read its catalog; the provider then asks to resume
+        seen['first'] = call.serving_catalog()
+        host.state['resume_handle'] = 'test-resume-handle'
+        call.renewing = call.resume = True
+
+    async def resumed():
+        seen['declared'] = json.loads(call.session.selected.tools_json)
+        seen['setup'] = wires[-1].sent[0]['setup']  # what the adapter sent when it reopened
+        seen['catalog'] = call.serving_catalog()
+        mail = {'role': 'user', 'content': 'Two words.'}
+        host.messages.append(mail)
+        host._context_changed()
+        call.pending_context_rows.append(mail)
+        call.connected.set()
+        try:
+            await call.release_serving()  # the connection's delivery worker
+            seen['mail'] = 'delivered'
+        except RealtimeSetupError as exc:
+            seen['mail'] = exc.code
+
+    async def run():
+        call.peers = serving
+        handle = await host.session(call.consume, LiveOptions())
+        assert handle == 'test-resume-handle' and host.plan.initial_mode == 'low'
+        if narrowed:
+            host.model = replace(host.model, facts=gemini.FACTS)  # the route's own 92,000-token window
+        call.peers = resumed
+        await host.session(call.consume, LiveOptions(resume_handle=handle))
+
+    asyncio.run(run())
+    names = [tool['function']['name'] for tool in seen['declared']]
+    sent = [entry['name'] for block in seen['setup']['tools'] for entry in block.get('functionDeclarations', ())]
+    print(f"native resume: {narrowed=} mode={host.plan.initial_mode} first={len(seen['first'])} "
+          f"declared={len(names)} serving={len(seen['catalog'])} mail={seen['mail']}")
+    assert seen['setup']['sessionResumption'] == {'handle': 'test-resume-handle'}
+    assert sent == names  # the resumed setup carries the tools this connection selected
+    assert host.plan.initial_mode == ('nano' if narrowed else 'low')
+    assert (len(names) < len(seen['first'])) is narrowed
+    assert seen['catalog'] == (tuple(seen['declared']) if narrowed else seen['first'])
+    assert seen['mail'] == 'delivered'
+    assert isinstance(wires[-1].sent[-1].get('clientContent'), dict) and 'Two words.' in json.dumps(wires[-1].sent[-1])
+
+
 @pytest.mark.parametrize('large', [True, False])
 def test_serving_delivery_prices_its_body_even_after_an_authored_view_shrank(host_world, large):
     from ouroboros.context_fit import estimate_context_prompt_tokens
@@ -259,7 +338,7 @@ def test_serving_delivery_prices_its_body_even_after_an_authored_view_shrank(hos
 def test_changed_view_gets_fresh_fit_before_old_socket_refuses_deferred_result(host_world, record_property):
     from ouroboros.contracts.realtime import RealtimeSetupError
     from skills.live_conversation.driver import _Call
-    from tests.test_context_source_view import _tool
+    from tests._context_source_fixtures import _tool
     host=host_world.host
     host.model=replace(host.model,facts=replace(host.model.facts,conversation_window_tokens=50000,working_reserve_tokens=10000))
     async def consume(session):

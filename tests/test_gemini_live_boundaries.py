@@ -4,16 +4,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import importlib.util
-import json
 import socket
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
 from ouroboros.contracts.live_conversation import Audio, LiveOptions, ToolOutputs
-from ouroboros.contracts.realtime import RealtimeInput, canonical_json
 from tests._socket_seal import block_network_except_socketpair
+from tests._live_wire import Wire, selected
 
 
 @pytest.fixture(autouse=True)
@@ -33,39 +31,6 @@ def gemini():
     return module
 
 
-class Wire:
-    def __init__(self):
-        self.sent, self.incoming = [], asyncio.Queue()
-        self.closed = False
-
-    def put(self, event):
-        self.incoming.put_nowait(event)
-
-    async def send(self, raw):
-        event = json.loads(raw)
-        self.sent.append(event)
-        if "setup" in event:
-            self.put({"setupComplete": {}})
-
-    async def recv(self):
-        event = await self.incoming.get()
-        if isinstance(event, Exception):
-            raise event
-        return json.dumps(event)
-
-    @asynccontextmanager
-    async def connect(self, model):
-        try:
-            yield self
-        finally:
-            self.closed = True
-
-
-def selected(model="gemini-3.8-live", tools=(), messages=None):
-    return RealtimeInput(model, canonical_json(messages or [
-        {"role": "system", "content": "Host system rules."},
-        {"role": "user", "content": "Original owner history."},
-    ]), canonical_json(tools), 256, "nano", "core", "view")
 
 
 def make_session(gemini, options=None, **kwargs):

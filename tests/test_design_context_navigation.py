@@ -553,6 +553,100 @@ def test_without_a_measured_window_only_a_refusal_past_tellings_takes_the_bible(
     assert design.full_text in fitted(0, "nano", known=False)[-1]
 
 
+def test_running_max_keeps_the_books_at_both_sides_of_the_design_boundary(tmp_path, monkeypatch, record_property):
+    """At a measured wall, compare both Max frames at the same room goal before useful book maps."""
+    import copy
+    from dataclasses import replace
+    from hashlib import sha256
+
+    from ouroboros import context_budget, context_fit as fit, memory_floor as floor, memory_view as mv
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.context_layout import book_navigation
+    from ouroboros.section_floor import predicted_section, relocated_text
+    from tests._context_fit_fixtures import _rebind
+    from tests._memory_view_synthetic import pages
+
+    design, fitted = _fitting(tmp_path, monkeypatch, others=False, authored=True)
+    memory = mv.snapshot_from_json(fitted.core.memory_view_json)
+    story = tuple({**page, "lead_rule": 2, "text": f"{page['id']} MY_OWN_RECAP.\n\n{page['text']} SEALED_PAGE_TAIL"}
+                  for page in pages(6, 12_000))
+    memory = replace(memory, story=story, owner_words="Governing owner words: keep the lamp blue.")
+    core = replace(fitted.core, dynamic_head_sections=(design,), dynamic_sections=(),
+                   memory_view_json=mv.snapshot_json(memory))  # only the authored pages or DESIGN can pay before the books
+    initial, *_ = fitted(2_000_000, "max", core=core)
+    sent = initial.messages_for("max") + [{"role": "assistant", "content": "Exact earlier reply."},
+                                           {"role": "user", "content": "Exact latest words 🧪."}]
+    reserve = initial.output_reserve_tokens
+    level = floor.telling_level(memory)
+    gov = fit._governance_blocks(None, core, mode="max")
+    bound = fit.estimate_context_prompt_tokens(sent, []) + reserve
+    divisor = context_budget.RECLAIM_LOW_WATER_DIVISOR
+
+    def threshold(addressed):
+        window = bound
+        while True:  # the number printed in the floor note is part of the charge
+            note = floor.floor_note(level, window_tokens=window, mode="max", snapshot=memory)
+            blocks = fit._system_blocks(core, gov, mv.render_story(memory, level),
+                                        mv.render_room(memory, level, floor_note=note), "max", addressed, story_whole=False)
+            charge = fit.estimate_context_prompt_tokens([{"role": "system", "content": blocks}, *sent[1:]], []) + reserve
+            # Smallest W where W - ceil(W / divisor) still covers the input and the full reply.
+            needed = (charge * divisor + divisor - 2) // (divisor - 1)
+            if needed == window:
+                return needed
+            assert needed < window
+            window = needed
+
+    whole = threshold({})
+    pointer = threshold({"design_bible": relocated_text(design, predicted_section(design)["reader"])})
+    assert pointer < whole < bound
+    assert sum(block["text"].count("SEALED_PAGE_TAIL") for block in sent[0]["content"]) == len(story)
+    for case, window in (("wide", bound + 100), ("whole", whole), ("pointer", whole - 1),
+                         ("pointer_edge", pointer), ("low", pointer - 1)):
+        messages = copy.deepcopy(sent)
+        rebound, mode, event = _rebind(monkeypatch, tmp_path / case, initial, messages, window=window,
+                                        holds_reply=True, start_mode="max")
+        facts = rebound.projection(mode).memory_facts
+        text = "\n".join(block["text"] for block in messages[0]["content"])
+        assert rebound.preferred_mode == "max" and mode == event["effective_mode"]
+        assert messages[1:] == sent[1:]
+        assert "OWNER_UNTOLD_WHOLE" in text and memory.owner_words in text
+        assert "SYSTEM WHOLE" in text and "BIBLE WHOLE" in text and "IDENTITY WHOLE" in text
+        assert event["view_kept"] is (case == "wide")
+        whole_design = design.full_text in text
+        addressed = [row for row in facts.get("host_sections_addressed", ()) if row["section_id"] == "design_bible"]
+        if not whole_design:
+            row, = addressed
+            assert str(tmp_path / "repo/docs/DESIGN.md") in text and design.operative_view in text and row["reader"] in text
+            assert row["source_ref"]["sha256"] == sha256(design.full_text.encode()).hexdigest()
+            assert read_actor_source_bytes(core.section_root, core.section_task_id, row["source_ref"]) == design.full_text.encode()
+        else:
+            assert not addressed
+        free = window - reserve - event["projected_prompt_tokens"]
+        eighth = (window + divisor - 1) // divisor
+        whole_books = core.architecture_md in text and core.development_md in text
+        if not whole_books:
+            assert all(book_navigation(book) in text for book in core.reference_books)
+        recaps, tails = text.count("MY_OWN_RECAP."), text.count("SEALED_PAGE_TAIL")
+        record_property(case, json.dumps(dict(window=window, reserve=reserve, free=free, required=0 if case == "wide" else eighth,
+            input=event["projected_prompt_tokens"], original_input=bound - reserve, whole_threshold=whole, pointer_threshold=pointer,
+            preferred=rebound.preferred_mode, effective=mode, books="whole" if whole_books else "chapter_maps", design=whole_design,
+            recaps=recaps, whole_page_tails=tails, owner_and_tail_exact=True,
+            host_steps=[r["section_id"] for r in facts.get("host_sections_addressed", ())],
+            request_sha256=sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest())))
+        if case == "wide":
+            assert 0 <= free < eighth and messages == sent
+        else:
+            assert free >= eighth, (case, free, eighth)
+        assert not (set(facts["floor"]["steps"]) - {"F5l"})
+        if case == "low":
+            assert mode == "low" and not whole_books and whole_design
+            assert facts["floor"]["mode_switch"] == {"from": "max", "to": "low"} and not facts["floor"]["by_budget"]
+        else:
+            assert mode == "max" and whole_books and whole_design is (case in {"wide", "whole"})
+            if case == "whole":
+                assert recaps == len(story) and tails == 0
+
+
 def test_an_actor_without_a_reader_gets_the_whole_bible_or_its_name_unavailable(tmp_path, monkeypatch):
     """Only an accessible source may be named when the excerpt yields."""
     design, fitted = _fitting(tmp_path, monkeypatch, section_root="")

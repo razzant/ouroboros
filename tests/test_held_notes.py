@@ -1646,6 +1646,36 @@ def test_cold_replay_prices_the_restored_tail_and_resident_schemas(world, monkey
             assert _cuts(plan) == _cuts(grown) and _held(plan) == _held(grown)
 
 
+@pytest.mark.parametrize('mode', ['low', 'nano'])
+def test_required_book_does_not_change_the_ordinary_held_frame_on_capture_and_restore(world, monkeypatch, mode):
+    head = 'An established observation in the working room. ' * 500
+    _write(world, 'resumed', head, summary='Authored durable observation.')
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK['id'])
+    core = _core(world, ctx=ctx)
+    core = replace(core, development_md='# Development\n\n## Review\n\n' + 'Required handbook. ' * 400)
+    schemas = [{'type': 'function', 'function': {'name': 'read_loaded_source', 'description': 'Read the source.'}}]
+    ordinary = _plan(world, 70_000, mode=mode, core=core, tool_schemas=schemas)
+    required = _plan(world, 70_000, mode=mode, core=replace(core, development_required=True), tool_schemas=schemas)
+    later = {'role': 'user', 'content': 'Keep this owner follow-up exactly.'}
+    fitting = []
+    for opening in (ordinary, required):
+        messages = [*opening.messages_for(mode), later]
+        fitted = _rebind(monkeypatch, ctx, opening, messages, 70_000, tool_schemas=schemas)
+        assert fitted.initial_mode == mode and head in _held(fitted)
+        state = json.loads(json.dumps(continuation_state(ctx, messages, {}, {}, 2, schemas, set())))
+        capture = held_notes.restored_capture(state)
+        receipt = fitted.projection(mode).memory_facts['held_note_request_tokens']
+        assert capture['frame'][-1] == receipt
+        replay = _plan(world, 70_000, mode=mode, core=replace(opening.core, held_note_resume=capture), tool_schemas=[])
+        assert replay.initial_mode == mode and _held(replay) == _held(fitted)
+        assert replay.messages_for(mode)[1:] == messages[1:]
+        assert replay.projection(mode).memory_facts['held_note_request_tokens'] == receipt
+        if opening.core.development_required:
+            assert any(block['text'].startswith('## DEVELOPMENT.md\n') for block in _blocks(replay))
+        fitting.append(receipt)
+    assert fitting[0] == fitting[1]
+
+
 @pytest.mark.parametrize("outlined", [False, True], ids=["whole-index", "outlined-index"])
 def test_reprojection_voice_and_cold_resume_keep_held_rows_and_refresh_unrelated_addresses(world, monkeypatch, outlined):
     from ouroboros.task_results import STATUS_RUNNING, write_task_result

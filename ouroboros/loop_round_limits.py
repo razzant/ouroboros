@@ -1344,7 +1344,7 @@ def _publish_reclaimed_transcript(ctx: Any, rebuilt: list, *, by: str = "compact
     prune_reclaim_trace_refs(ctx.tools._ctx, ctx.messages)
 
 
-def _measure_trial_candidate(ctx: Any, messages: list) -> Any:
+def _measure_trial_candidate(ctx: Any, messages: list, *, frame=None, facts_cost=False) -> Any:
     """Measure ``messages`` as the sealed candidate with its next facts line; the live round stays untouched."""
     from ouroboros.loop_messages import append_context_facts
 
@@ -1355,12 +1355,23 @@ def _measure_trial_candidate(ctx: Any, messages: list) -> Any:
     trial.tools._ctx = copy.copy(ctx.tools._ctx)
     trial.tools._ctx.messages = trial.messages
     trial.tools._ctx._accumulated_usage = trial.accumulated_usage
+    if frame is not None:
+        trial.context_fit_plan, trial.active_context_mode, trial.tool_schemas = frame
+        trial.tools._ctx.context_fit_plan = trial.context_fit_plan
+        trial.tools._ctx.active_context_mode = trial.active_context_mode
     # The baseline is the current refused transcript, not a hypothetical
     # reprepare with another facts line. Only replacements earn new send facts.
+    before = None
     if messages is not ctx.messages:
         _loop().seal_task_transcript(trial.messages)
+        if facts_cost:
+            before = _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
         append_context_facts(trial)
-    return _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
+    after = _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
+    if not facts_cost:
+        return after
+    return after, (max(0, after.measurement.estimated_input_tokens - before.measurement.estimated_input_tokens)
+                   if before and after else 0)
 
 
 def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_tokens: Optional[int] = None,
@@ -1416,46 +1427,78 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     return receipt
 
 
-def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0) -> bool:
+def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0, telling_floor: bool = False) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
     The view saves the measured ``saving`` (else the capacity
     deficit, else at least one element) from the level it shows (no target or working margin
     reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
     memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
-    beside it is no excess, so no whole-or-outline section pays."""
+    beside it is no excess, so no whole-or-outline section pays. A measured first pass can try whole books
+    beside tellings before trying maps; a further or unmeasured refusal keeps its own order."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:
         return False
     mode = str(ctx.active_context_mode or "max")
-    before = plan.projection(mode).system_content_json
+    before = plan.projection(mode)
     capacity = measurement.capacity_total_tokens
-    rebound = plan.reproject_for_route(
-        window_tokens=int(capacity or 0), known_window=capacity is not None, admitted=True,
-        ratio=measurement.measurement_density,
-        output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
-        current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
-        reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),  # the shape the round measured
-        refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
-                        else max(1, int(measurement.capacity_deficit_tokens or 0))),
-        **({"slack_tokens": int(slack)} if slack else {}),
-    )
+    from ouroboros.window_learning import route_schema_trials
+
+    trials = (route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, mode, plan.model, plan.provider == "local")
+              if capacity is not None else None)
+    def project(room):
+        return plan.reproject_for_route(
+            window_tokens=int(capacity or 0), known_window=capacity is not None, admitted=True,
+            ratio=measurement.measurement_density,
+            output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
+            tool_frames=(lambda selected: trials(selected).price()) if trials else None,
+            current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
+            reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),
+            refused_tokens=(int(saving) if saving or (saving == 0 and slack)
+                            else max(1, int(measurement.capacity_deficit_tokens or 0))),
+            **({"slack_tokens": int(room)} if room else {}),
+            **({"telling_floor": True} if telling_floor else {}),
+        )
+
+    rebound = project(slack)
+    if slack and capacity is not None and (rebound.initial_mode != mode or
+            rebound.projection(mode).system_content_json != before.system_content_json):
+        selected = rebound.initial_mode
+        schemas, note = trials(selected).price() if trials else (ctx.tool_schemas, [])
+        rows = [*rebound.reproject_transcript(ctx.messages, selected), *note]
+        priced, charge = _measure_trial_candidate(ctx, rows, frame=(rebound, selected, schemas), facts_cost=True)
+        if charge and (measured := priced.measurement).capacity_total_tokens is not None:
+            free = (measured.capacity_total_tokens - measured.response_reserve_tokens
+                    - measured.estimated_input_tokens + measured.required_book_tokens)
+            if free < slack:
+                rebound = project(slack + min(charge, slack - free))
     selected_mode = rebound.initial_mode
-    if selected_mode == mode and rebound.projection(mode).system_content_json == before:
+    after = rebound.projection(selected_mode)
+    trial = trials(selected_mode) if trials else None
+    if (selected_mode == mode and after.system_content_json == before.system_content_json
+            and (trial is None or trial.schemas == ctx.tool_schemas and not trial.notice)):
         return False
+    maps_retry = mode == "max" and selected_mode == "low"
+    books_only = maps_retry and (
+        (before.memory_facts.get("floor") or {}).get("runs") == (after.memory_facts.get("floor") or {}).get("runs"))
     mode = selected_mode
     ctx.active_context_mode = ctx.tools._ctx.active_context_mode = mode
     ctx.context_fit_plan = rebound
     ctx.tools._ctx.context_fit_plan = rebound
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
-    rewrite_view(ctx.tools._ctx, ctx.task_id, "memory_coarsened")
+    if maps_retry and not books_only:
+        sanction_rewrite(ctx.tools._ctx, "memory_coarsened", scope="system")
+    if trial:
+        trial.adopt(ctx.tools._ctx, ctx.tool_schemas, ctx.messages, by="memory_coarsened")
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry" if maps_retry else "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
     from ouroboros.loop_model_call import _adopt_view_facts, _shown
 
     _adopt_view_facts(ctx.tools._ctx, rebound, mode)  # the narrowed view's fact, read back as a memory shortage
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-        "checkpoint_kind": "context_memory_coarsened", "round": ctx.round_idx,
+        "checkpoint_kind": "context_fit_low_retry" if books_only else "context_memory_coarsened", "round": ctx.round_idx,
+        **({"preferred_mode": plan.preferred_mode, "owner_visible": True} if maps_retry else {}),
         "route_fp": measurement.route_fp, **_shown(rebound, mode),
         "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
