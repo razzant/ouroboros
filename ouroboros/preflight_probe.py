@@ -6,8 +6,8 @@ nonce-named pytest plugin that every pass loads with ``-p``: on the parallel pas
 xdist worker that really started, which the gate reads back to refuse a nominally parallel pass that ran
 on one worker; on both passes it reads ``serial("exclusive")`` the gate's way and registers the derived
 ``exclusive`` marker, so a candidate repository needs no conftest of its own for the pass split. The
-probe's results pointer names the pass's own ``results.json`` for the crash classifier. Nothing here is
-part of the repository under test.
+controller records its count independently of the optional results export, whose pointer is used
+only for crash diagnosis. Nothing here is part of the repository under test.
 """
 from __future__ import annotations
 
@@ -74,6 +74,7 @@ import pytest
 
 _LOG = pathlib.Path(__WORKER_LOG__)
 _RESULTS = pathlib.Path(__RESULTS_POINTER__)
+_COLLECTION = pathlib.Path(__COLLECTION_PATH__)
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -105,6 +106,15 @@ def pytest_configure(config):
         (_LOG / worker).write_text(worker, encoding="utf-8")
     except OSError:
         pass
+
+
+def pytest_sessionfinish(session):
+    # xdist gives the controller the size of the workers' selected collection.
+    if not hasattr(session.config, "workerinput"):
+        try:
+            _COLLECTION.write_text(str(session.testscollected), encoding="ascii")
+        except OSError:
+            pass  # The gate reads a missing count as unobserved, never as zero.
 '''
 
 
@@ -120,12 +130,54 @@ def _results_pointer(temp_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(temp_root) / "ci-evidence-dir"
 
 
-def recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
-    """This pass's own results.json, as its controller located it; None when absent or unreadable."""
+def _collection_path(temp_root: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(temp_root) / "collected-tests"
+
+
+def _clear(path: pathlib.Path) -> bool:
     try:
-        directory = _results_pointer(temp_root).read_text(encoding="utf-8")
-        recorded = json.loads((pathlib.Path(directory) / "results.json").read_text(encoding="utf-8"))
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def fresh_results_pointer(temp_root: pathlib.Path) -> bool:
+    """A stale or unreadable locator grants no evidence for the next pass."""
+    return _clear(_results_pointer(temp_root))
+
+
+def fresh_collection(temp_root: pathlib.Path) -> bool:
+    return _clear(_collection_path(temp_root))
+
+
+def recorded_collection(temp_root: pathlib.Path) -> Optional[int]:
+    """The just-finished pass's count, which does not depend on pytest's optional export."""
+    try:
+        count = int(_collection_path(temp_root).read_text(encoding="ascii"))
     except (OSError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def recorded_session(temp_root: pathlib.Path, *, root=None, seen=None, expected_directory=None) -> Optional[dict]:
+    """Read the controller's export; pre-commit accepts each retained directory at most once."""
+    try:
+        pointer = _results_pointer(temp_root)
+        if root is not None and (pointer.is_symlink() or not pointer.is_file()):
+            return None
+        directory = pathlib.Path(pointer.read_text(encoding="utf-8"))
+        if not directory.is_absolute() or expected_directory is not None and directory != expected_directory:
+            return None
+        final = directory / "results.json"
+        if root is not None:
+            if not directory.is_relative_to(root) or directory == root or final.resolve() != final or directory in seen:
+                return None
+            seen.add(directory)
+            if not final.is_file():
+                return None
+        recorded = json.loads(final.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
         return None
     return recorded if isinstance(recorded, dict) else None
 
@@ -150,7 +202,8 @@ def write_worker_probe(temp_root: pathlib.Path) -> str:
     probe.mkdir(parents=True, exist_ok=True)
     # One pass fills the template's own fields: a root that spells one (a caller's `--evidence-dir`) is not read as one.
     fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
-              "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
+              "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root))),
+              "__COLLECTION_PATH__": repr(str(_collection_path(temp_root)))}
     (probe / f"{module}.py").write_text(
         re.sub("|".join(fields), lambda match: fields[match[0]], WORKER_PROBE_SOURCE), encoding="utf-8")
     return module

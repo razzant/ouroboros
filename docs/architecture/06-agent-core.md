@@ -458,9 +458,9 @@ Every outcome returns whole with `review_reference` before Git; `shown_outcomes`
 
 #### Hermetic preflight proof
 
-Only `preflight_runner.py` mints `ctx._preflight_test_proof` after green lanes/containment, binding HEAD/tree/index, pass specs, isolated env, Python and Node. `test_selection.py` selects the commit's tests; release-only text normalizes EOLs. `preflight_inventory.py` reconciles executed IDs; a lane start needs an acquired process (else not started/unknown). Tiers, records and forced runs: DEVELOPMENT "The tiered commit and CI gates".
+Only `preflight_runner.py` mints `ctx._preflight_test_proof` after green lanes and teardown: HEAD/tree/index, pass specs, isolated env, Python and Node. `test_selection.py` selects tests (release-only text normalizes EOLs); `preflight_inventory.py` reconciles executed IDs. Pinned `preflight_reading.py` summarizes a blocked pre-commit pass from its own artifacts without retry. Each seat gets frozen `preflight_execution`: `status` alone claims proof; `observed` carries other runs, checks and whole credential-redacted diagnoses.
 
-`preflight_qualification.py` consumes exact-commit evidence for adoption/evolution publication. Complete runs (all lanes, two workers or the one admitted) write unsigned cross-process `state/preflight_receipts/<key>.json`; selected records need an exact commit (schema 2, never full). Identity binds Git, Python metadata and loaded source, not evidence paths. Forgery, other executables and unrecorded package edits are outside its trust. Seats receive frozen `preflight_execution`, whose `status` alone claims proof (`observed`: other runs, whole redacted diagnoses, checks).
+`preflight_qualification.py` uses exact-commit evidence for adoption/evolution publication. Complete runs (all lanes, two workers or the one admitted) write shared unsigned `state/preflight_receipts/<key>.json`; schema 2 records exact-commit selections, never full runs. Identity binds Git, Python metadata and loaded source, not evidence paths; forgery, other executables and unrecorded package edits are outside trust. Tiers: DEVELOPMENT §14.
 
 #### Commit preflight
 

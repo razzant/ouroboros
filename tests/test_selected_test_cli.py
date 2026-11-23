@@ -379,7 +379,7 @@ def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     for job in ("quick-test", "full-test-runs"):
         runs = [step.get("run", "") for step in WORKFLOW["jobs"][job]["steps"]]
         assert not any("--selected" in run for run in runs), job
-        assert sum("python scripts/run_tests.py tests/ -m " in run for run in runs) == 2, job
+        assert sum("python scripts/run_tests.py --lane-pass " in run for run in runs) == 2, job
 
 
 @pytest.mark.parametrize("tier", ["selected", "full"])

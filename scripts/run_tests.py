@@ -8,6 +8,7 @@
     python scripts/run_tests.py --node            only the complete Node lane (CI runs it as its own step)
     python scripts/run_tests.py --evidence-dir DIR  pytest diagnostics in DIR/<phase>, passed by argv
     python scripts/run_tests.py tests/test_x.py  focused run; every argument is forwarded to pytest
+    python scripts/run_tests.py --lane-pass parallel|exclusive PATHS ...  one CI pass over explicit test targets
 
 A bare call always means the FULL battery — it never skips a test on the
 strength of an earlier run. It runs the two passes of `ouroboros.preflight_runner`
@@ -22,7 +23,11 @@ durable logs/source/diagnostics in <checkout>/../.test-evidence by default, wher
 tests/ci_evidence.py): the table the xdist groups are ordered by, longest first.
 Ctrl-C reaches each phase's runner, allowing pytest JUnit/results export before escalation.
 Marker exclusions/xdist flags come from the gate's SSOT
-(`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`); conftest isolates test roots.
+(`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`), including CI's `--lane-pass`.
+That form takes test targets (or ci_retry's targets-only @file) and the existing
+CI output and shard options, not arbitrary pytest switches. The @file path is
+relative to the caller; its test targets are still relative to the checkout.
+Conftest isolates test roots.
 """
 from __future__ import annotations
 
@@ -123,16 +128,54 @@ def recorded_durations() -> tuple[dict | None, str]:
     return table, source if " " in source else f"run {source}"  # CI names a run id, a session names itself
 
 
-def battery_commands() -> list[tuple[str, list[str]]]:
-    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
+def lane_pass_args(lane: str) -> list[str]:
+    """One default pass's selection and execution flags, shared by CI and the battery."""
     from ouroboros.preflight_runner import EXCLUSIVE_MARKER, LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 
+    if lane == "parallel":
+        return ["-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]
+    return ["-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]
+
+
+def _lane_target_args(parser: argparse.ArgumentParser, args: list[str], caller_dir: pathlib.Path) -> list[str]:
+    """Validate the lane inputs and give pytest the same retry file we read."""
+    args = args.copy()
+    targets = False
+    for index, arg in enumerate(args):
+        if arg in ("-q", "--tb=short"):
+            continue
+        name, equals, value = arg.partition("=")
+        if equals and value and name in ("--ci-evidence-dir", "--default-suite-shard"):
+            continue
+        if not arg or arg.startswith("-"):
+            parser.error("--lane-pass accepts test targets, -q, --tb=short, --ci-evidence-dir=DIR "
+                         "and --default-suite-shard=K/N")
+        if arg.startswith("@"):
+            # Keep the file as one argv entry: Windows cannot carry a long retry
+            # list inline. Rebase only the file path, not the tests listed in it.
+            path = pathlib.Path(arg[1:])
+            if not path.is_absolute():
+                path = caller_dir / path
+                args[index] = f"@{path}"
+            try:
+                lines = path.read_text(encoding="ascii").splitlines()
+            except (OSError, UnicodeError):
+                parser.error("--lane-pass could not read the retry target file")
+            if any(not line or line.lstrip().startswith(("-", "@")) for line in lines):
+                parser.error("--lane-pass requires test targets only in the retry file")
+            targets = targets or bool(lines)
+        else:
+            targets = True
+    if not targets:
+        parser.error("--lane-pass requires at least one test target")
+    return args
+
+
+def battery_commands() -> list[tuple[str, list[str]]]:
+    """The gate's two passes; the xdist pass's groups go longest-first by the table named out loud."""
     base = [sys.executable, "-m", "pytest", "tests/"]
     print(f"=== xdist groups ordered by {recorded_durations()[1]}", flush=True)
-    return [
-        ("parallel", [*base, "-m", f"not {EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *PARALLEL_PASS_FLAGS]),
-        ("serial", [*base, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS]),
-    ]
+    return [("parallel", [*base, *lane_pass_args("parallel")]), ("serial", [*base, *lane_pass_args("exclusive")])]
 
 
 def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
@@ -436,7 +479,7 @@ def _defer_full(selection, fell_back=None):
     return dataclasses.replace(selection, tier="selected", files=tuple(sorted(set(FLOOR_TESTS) | set(files) | extra)))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, caller_dir: pathlib.Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--selected", action="store_true", help="floor + affected tests and complete Node lane")
     parser.add_argument("--base", help="Git base for --selected; defaults to HEAD")
@@ -454,6 +497,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="with --selected: also select what each first-parent commit since --base changed, "
                              "which their net diff hides once a later commit reverts it (the post-merge window)")
     parser.add_argument("--node", action="store_true", help="only the complete Node lane, owned like every pass")
+    parser.add_argument("--lane-pass", choices=("parallel", "exclusive"),
+                        help="one CI pass over test targets; keeps the gate's -m, process and timeout policy")
     parser.add_argument("--evidence-dir", type=pathlib.Path,
                         help="write pytest diagnostics under DIR/<phase>; never inherited by nested pytest",
                         metavar="DIR")
@@ -470,14 +515,17 @@ def main(argv: list[str] | None = None) -> int:
                               or args.keep_going or args.each_commit):
         parser.error("--base, --defer-full, --keep-going, --each-commit and widening options require --selected")
     if args.node:
-        if args.selected or pytest_args:
+        if args.selected or pytest_args or args.lane_pass:
             parser.error("--node runs only the Node lane")
         code, node = _node_lane()
         return 2 if code == 1 and not node else code
     if args.selected:
-        if pytest_args:
-            parser.error("--selected cannot be combined with arbitrary pytest arguments")
+        if pytest_args or args.lane_pass:
+            parser.error("--selected cannot be combined with --lane-pass or arbitrary pytest arguments")
         return _selected(args, evidence)
+    if args.lane_pass:
+        pytest_args = _lane_target_args(parser, pytest_args, caller_dir or pathlib.Path.cwd())
+        pytest_args = [*lane_pass_args(args.lane_pass), *pytest_args]
     if pytest_args:
         if evidence is not None:
             pytest_args = ["--ci-evidence-dir", str(evidence / "focused"), *pytest_args]
@@ -510,9 +558,13 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # CLI execution always acquires a real outer owner. A merely present temp
     # variable cannot prove one exists; in-process main() remains a plain helper.
-    bootstrap = "import runpy,sys; raise SystemExit(runpy.run_path(sys.argv[1])['main'](sys.argv[2:]))"
+    # safe_test starts its command in REPO. Carry the caller's cwd separately.
+    bootstrap = (
+        "import pathlib,runpy,sys; "
+        "raise SystemExit(runpy.run_path(sys.argv[1])['main'](sys.argv[3:], caller_dir=pathlib.Path(sys.argv[2])))"
+    )
     owner = [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--",
-             sys.executable, "-c", bootstrap, str(pathlib.Path(__file__).resolve()), *sys.argv[1:]]
+             sys.executable, "-c", bootstrap, str(pathlib.Path(__file__).resolve()), os.getcwd(), *sys.argv[1:]]
     if os.name == "nt":
         sys.exit(subprocess.call(owner))  # Windows exec is a new process; keep the waiting parent.
     os.execv(sys.executable, owner)  # POSIX: the signalled PID is the owner itself.

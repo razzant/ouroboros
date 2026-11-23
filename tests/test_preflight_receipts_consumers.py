@@ -454,14 +454,35 @@ _NOISY_RED_SUITE = ("def test_a_noisy_failure():\n"
                     "    assert 2 + 2 == 5\n")
 
 
+def _recorded(run: dict) -> dict:
+    """The runner's own record of ``run`` (its result.json, the author's), whose diagnosis
+    names the decisive failure only past a preview-sized prefix."""
+    record = json.loads((pathlib.Path(run["evidence"]) / "result.json").read_text(encoding="utf-8"))
+    assert record["verdict"].index("test_z_decisive_failure") > 2000, record["verdict"]
+    return record
+
+
 def _whole_diagnosis(run: dict) -> str:
-    """The runner's own diagnosis of ``run`` (its result.json), checked to name the decisive
-    failure only past a preview-sized prefix, as delivered: credentials redacted."""
+    """A post-commit run's diagnosis as delivered: the whole record, credentials redacted."""
     from ouroboros.observability import redact_projection
 
-    verdict = json.loads((pathlib.Path(run["evidence"]) / "result.json").read_text(encoding="utf-8"))["verdict"]
-    assert verdict.index("test_z_decisive_failure") > 2000, verdict
-    return str(redact_projection(verdict).value)
+    return str(redact_projection(_recorded(run)["verdict"]).value)
+
+
+_DECISIVE = "test_body.py:7: assert (2 + 2) == 5"
+
+
+def _public_diagnosis(run: dict) -> tuple:
+    """``(text, printed root, record)``: what a seat must read of a pre-commit run's
+    diagnosis, derived from the record alone. Pytest printed the hermetic checkout under the
+    gate's scratch root, in whatever spelling; that root reads ``<test scratch>``, nothing else
+    changes, and no other private root of the run appears in this text."""
+    record = _recorded(run)
+    line = next(line for line in record["verdict"].splitlines() if line.endswith(_DECISIVE))
+    printed = line[:-len("/repo/tests/" + _DECISIVE)]
+    assert os.path.normcase(os.path.realpath(printed)) == os.path.normcase(os.path.realpath(record["scratch"]))
+    assert run["evidence"] not in record["verdict"] and run["repository"] not in record["verdict"]
+    return record["verdict"].replace(printed, "<test scratch>"), printed, record
 
 
 def _red_body(tmp_path):
@@ -484,12 +505,15 @@ def test_a_red_suite_reaches_every_gate_seat_as_an_observation_and_the_tests_fac
     (a red lane on these bytes and its whole diagnosis, which names the decisive failing
     test past a preview-sized prefix) reaches every seat of the wave, packet, native and
     session alike, inside the frozen exhibit; the proof status and the record's tests
-    fact stay NOT_RUN."""
+    fact stay NOT_RUN. The gate's scratch root its pytest printed reads ``<test scratch>``.
+    The body's own suite exports no pass-owned pytest evidence, so the seats read the
+    reading's gap beside the gate's cause, its counts unknown and no list of failed tests."""
     import ouroboros.review_substrate as substrate
     from ouroboros.tools.git_review_cycle import _run_non_committing_review_cycle
     from ouroboros.tools.registry import ToolContext
     from tests.review_pool_rosters import set_review_pool
 
+    receipts.capture_executing_source_baseline()  # as a worker does at boot: its generation's reader is bound
     repo = _red_body(tmp_path)
     head = shared.git(repo, "rev-parse", "HEAD")
     set_review_pool(monkeypatch, shared.golden_pool())
@@ -509,16 +533,24 @@ def test_a_red_suite_reaches_every_gate_seat_as_an_observation_and_the_tests_fac
     assert record["tests"] == {"policy": "NOT_RUN", "result": "unknown"}
     [run] = exhibit["observed"]
     assert (run["outcome"], run["tier"], run["relation"], run["tested"]["head"]) == ("failed", "full", "same_bytes", head)
-    assert run["terminal"] == "read" and run["diagnosis"] == _whole_diagnosis(run)
+    public, printed, terminal = _public_diagnosis(run)
+    assert run["terminal"] == "read" and run["diagnosis"] == public and run["masked_locations"] == ["<test scratch>"]
+    assert "FAILED tests/test_body.py::test_z_decisive_failure" in run["diagnosis"]
+    gap = terminal["reading"]["gap"]
+    assert gap and run["pass_reading"] == {"pass": "parallel", "cause": "pytest_exit", "coverage": "unavailable",
+                                           "gap": gap, "counts": terminal["reading"]["counts"]}
+    assert not any(key in run for key in ("failed_tests", "worker_lost_tests", "unclassified_failed"))
     assert any(lane.get("returncode") not in (0, None) for lane in run["lanes"])
     section = receipts.execution_section(exhibit)
     assert "FAILED: a lane exited red, on the bytes of this candidate" in section
-    assert "test_z_decisive_failure" in section and "Runner diagnosis (whole" in section
+    assert 'cause "pytest_exit"; structured reading UNAVAILABLE' in section and "failed unknown" in section
+    assert gap in section and "<test scratch>" in section and "Failed tests (" not in section
     assert "running" not in json.dumps(exhibit)
     assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
     assert all(_brief_text(brief).count(section) == 1 for brief in briefs)
     # The run's evidence directory stays the author's: no seat is handed a path it was not granted.
-    assert run["evidence"] and not any(run["evidence"] in _brief_text(brief) for brief in briefs)
+    assert run["evidence"] and all(printed not in _brief_text(brief) and run["evidence"] not in _brief_text(brief)
+                                   for brief in briefs)
     assert len(evidence) == 3 and all(item["preflight_execution"] == exhibit for item in evidence)
 
 
@@ -558,13 +590,123 @@ def test_a_selected_red_run_of_earlier_bytes_reaches_a_public_review_as_their_hi
     [run] = exhibit["observed"]
     assert (run["outcome"], run["tier"], run["relation"], run["differs"]) == ("failed", "selected", "other_bytes", ["tree"])
     assert run["tested"]["tree"] == tested_a != record["subject"]["tree_sha"]
-    assert run["failed_tests"] == ["tests/test_lib.py::test_lib"] and run["selected_modules"] == 2
+    # No pass reading names cases here (the project exports no pytest evidence): the selection
+    # inventory does, each report with its phase, so an assertion failure reads as a failed test.
+    assert (run["failures_from"], run["failed_tests"], run["failed_listed"]) == (
+        "inventory", ["tests/test_lib.py::test_lib"], 1) and run["selected_modules"] == 2
     assert record["tests"]["policy"] == "NOT_RUN"
     section = receipts.execution_section(exhibit)
+    assert "Failed tests (1 of 1 the selection inventory listed)" in section
     assert "FAILED: a lane exited red, on OTHER bytes (differs: tree)" in section
     assert "not a result of this candidate" in section and "PASS" not in section
     assert sorted(brief["slot_id"] for brief in briefs) == ["s1", "t1", "t2"]
     assert all(_brief_text(brief).count(section) == 1 for brief in briefs)
+
+
+# Inert records use the same two inputs as a pre-commit exhibit: the attempt row
+# and the terminal result. A worker-loss row exercises reporting, not process control.
+_WINDOWS_SCRATCH = r"C:\Users\builder\AppData\Local\Temp\gate-7f3a"
+
+
+def _attempt(tmp_path, *, scratch=None, verdict=None, reading=None, inventory=None,
+             phase=pr.PRE_COMMIT_PHASE, lanes=()):
+    evidence, repo = tmp_path / "gate evidence" / "run-1", tmp_path / "author checkout"
+    evidence.mkdir(parents=True)
+    repo.mkdir()
+    if verdict is not None:
+        (evidence / "result.json").write_text(json.dumps({
+            "verdict": verdict(evidence, repo), "phase": phase, "execution": "executed", "scratch": scratch,
+            **({"reading": reading} if reading is not None else {}),
+        }), encoding="utf-8")
+    row = {"type": "preflight_test_attempt", "evidence": str(evidence), "outcome": "failed", "tier": "selected",
+           "lanes": list(lanes), "inventory": inventory}
+    ctx = SimpleNamespace(repo_dir=repo, _preflight_test_evidence=str(evidence), _preflight_test_disclosure=row)
+    exhibit = receipts.execution_exhibit(ctx)
+    assert exhibit["status"] == "not_run"
+    [run] = exhibit["observed"]
+    return run, receipts.execution_section(exhibit)
+
+
+def test_partial_pre_commit_reading_keeps_cause_and_masks_only_the_runs_known_roots(tmp_path):
+    scratch = _WINDOWS_SCRATCH
+    failed, lost = "tests/test_math.py::test_sum", "tests/test_math.py::test_product"
+    counts = {"leak": 0, "worker_lost": 2, "collection_error": None, "failed": 1, "in_flight": None, "not_run": None}
+    reading = {"cause": "pytest_exit", "pass": "parallel", "coverage": "partial", "gap": "some reports lack identity",
+               "counts": counts, "failed": [{"nodeid": failed}], "worker_lost": [{"nodeid": lost}, {"nodeid": None}]}
+
+    def diagnoses(root, evidence, repo):
+        git, quoted = root.replace("\\", "/"), root.replace("\\", "\\\\")
+        return ("⚠️ PRE_PUSH_TEST_ERROR: parallel pass, exit 1\n"
+                f"{root}\\repo\\tests\\test_math.py:12: assert (3 + 4) == 8\n"
+                f"Git: '{git.lower()}/repo'; Python: {quoted}\\\\repo\n"
+                f"report: {evidence}/results.json; author checkout: {repo}/lib.py\n"
+                f"{scratch}-old and {scratch}b are different folders\n"
+                f"FAILED {failed} - assert (3 + 4) == 8")
+
+    lanes = [{"lane": "pytest", "pass": "parallel", "returncode": 1, "containment_error": f"retained {scratch}\\repo"}]
+    run, section = _attempt(tmp_path, scratch=scratch, reading=reading, lanes=lanes,
+                            verdict=lambda evidence, repo: diagnoses(scratch, evidence, repo))
+    expected = diagnoses("<test scratch>", "<test evidence>", "<repository>")
+    assert run["diagnosis"] == expected
+    assert run["pass_reading"] == {key: reading[key] for key in ("pass", "cause", "coverage", "gap", "counts")}
+    assert (run["failed_tests"], run["worker_lost_tests"], run["worker_lost_listed"]) == ([failed], [lost], 2)
+    for takeaway in ('cause "pytest_exit"', "PARTIAL", reading["gap"], "worker lost at least 2", "not run unknown",
+                     "Tests a worker was running when it died", "retained <test scratch>"):
+        assert takeaway in section
+    assert section.count("<test scratch>") >= 4 and "<test evidence>" in section and "<repository>" in section
+    assert not any(run[key] in section for key in ("evidence", "repository"))
+
+
+def test_older_pre_commit_is_masked_and_failures_of_unrecorded_phase_are_not_test_failures(tmp_path):
+    scratch = tmp_path / "gate scratch"
+    node = "tests/test_a.py::test_sum"
+    run, section = _attempt(tmp_path, scratch=str(scratch), inventory={"parallel": {"failed": [node]}},
+                            verdict=lambda _e, _r: f"{scratch / 'repo'}: original pytest explanation")
+    assert run["diagnosis"] == f"<test scratch>{os.sep}repo: original pytest explanation"
+    assert run["pass_reading"] == {"coverage": "not_recorded"}
+    assert run["unclassified_failed"] == [node] and "failed_tests" not in run
+    assert "No structured reading" in section and "Failed reports of unknown phase" in section and node in section
+    assert "Failed tests (" not in section and str(scratch) not in section
+
+
+def test_inventory_phases_distinguish_failures_from_worker_loss_without_a_structured_reading(tmp_path):
+    from ouroboros.preflight_inventory import compact_inventory, read_inventory
+    from ouroboros.preflight_reading import block
+
+    failed, lost, unknown = (f"tests/test_a.py::test_{kind}" for kind in ("sum", "product", "other"))
+    rows = [{"event": "collection", "ids": [failed, lost, unknown]},
+            *({"event": "report", "nodeid": node, "outcome": "failed", "when": phase}
+              for node, phase in zip((failed, lost, unknown), ("call", "???", "unknown-phase"))),
+            {"event": "finish", "exitcode": 1}]
+    (tmp_path / "inventory-parallel.jsonl").write_text("\n".join(map(json.dumps, rows)), encoding="utf-8")
+    row, error = read_inventory(tmp_path, "parallel", diagnostics=True)
+    assert error and row["failed"] == [failed, lost, unknown]
+    reading = block("timeout", label="parallel", gap="no pass-owned pytest evidence")
+    run, section = _attempt(tmp_path, inventory=compact_inventory({"parallel": row}), reading=reading,
+                            verdict=lambda _e, _r: "⚠️ PRE_PUSH_TEST_ERROR: pytest timed out")
+    assert run["failures_from"] == "inventory"
+    assert (run["failed_tests"], run["worker_lost_tests"], run["unclassified_failed"]) == ([failed], [lost], [unknown])
+    assert 'cause "timeout"; structured reading UNAVAILABLE' in section
+    assert "failed unknown" in section and "worker lost unknown" in section
+    assert "pytest timed out" in section
+
+
+def test_absent_terminal_and_post_commit_do_not_claim_a_pre_commit_reading(tmp_path):
+    missing, section = _attempt(tmp_path / "missing")
+    assert not {"pass_reading", "diagnosis", "failed_tests"} & missing.keys()
+    assert "result.json is unavailable" in section and missing["evidence"] not in section
+
+    scratch = tmp_path / "gate scratch"
+    post, section = _attempt(tmp_path / "post", scratch=str(scratch), phase="post_commit",
+                             verdict=lambda _e, _r: f"⚠️ red under {scratch}")
+    assert post["diagnosis"] == f"⚠️ red under {scratch}"
+    assert not {"masked_locations", "pass_reading"} & post.keys()
+    assert post["diagnosis"] in section and "credentials redacted" in section and "locations" not in section
+
+    frozen = {"source": "hermetic_tests", "outcome": "failed", "relation": "same_bytes",
+              "failed_tests": ["tests/test_a.py::test_sum"], "failed_listed": 1}
+    section = receipts.execution_section({"status": "not_run", "observed": [frozen]})
+    assert "Failed reports of unknown phase" in section and "Failed tests (" not in section
 
 
 def test_an_observation_of_another_repository_is_left_out_and_a_public_one_stays_unobserved(tmp_path, monkeypatch):
