@@ -265,15 +265,18 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
             "mounted_cards": page.evaluate("() => window.__mountedCards")}
 
 
-def _wire_order(page, task_id):
-    page.wait_for_function("id => window.__completionFrames.some(f => f.type === 'log'"
-                          " && f.data?.type === 'task_done' && f.data.task_id === id)",
-                          arg=task_id, timeout=30000)
+def _wire_order(page, task_id, *, chat_id=None):
+    page.wait_for_function("({id, chatId}) => window.__completionFrames.some(f => f.type === 'log'"
+                          " && f.data?.type === 'task_done' && f.data.task_id === id"
+                          " && (chatId === null || (!f.data._historical && String(f.data.chat_id) === chatId)))",
+                          arg={"id": task_id, "chatId": str(chat_id) if chat_id is not None else None}, timeout=30000)
     frames = page.evaluate("() => window.__completionFrames")
     finals = [i for i, f in enumerate(frames) if f.get("type") == "chat"
               and f.get("task_id") == task_id and f.get("role") == "assistant" and not f.get("is_progress")]
     terminals = [i for i, f in enumerate(frames) if f.get("type") == "log"
-                 and f.get("data", {}).get("type") == "task_done" and f["data"].get("task_id") == task_id]
+                 and f.get("data", {}).get("type") == "task_done" and f["data"].get("task_id") == task_id
+                 and (chat_id is None or (not f["data"].get("_historical")
+                                          and str(f["data"].get("chat_id")) == str(chat_id)))]
     assert len(finals) == 1 and terminals and finals[0] < terminals[0], (finals, terminals)
     return {"final_indices": finals, "terminal_indices": terminals}
 
@@ -431,9 +434,16 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                     assert len(calls["parent"]) == 2
                     capture.checkpoint("parent_stopped_child_running", parent_id=parent_id, child_id=child_id)
                     parent_delivery = _delivery(oracle, parent_id, result, parent_answer, project["chat_id"], stop=True)
+                    # Delivery and an early Stopped chip can precede the terminal cause.
+                    parent_order = _wire_order(page, parent_id, chat_id=project["chat_id"])
+                    page.locator(f'{feed} .chat-live-card[data-task-id="{parent_id}"][data-finished="1"]').wait_for(timeout=30000)
                     _presentation(page, feed, parent_id, parent_answer, "unfinished_stop", project, managed=True)
                     page.locator(f'{feed} .chat-live-card[data-task-id="{child_id}"]').wait_for(timeout=30000)
                     page.screenshot(path=str(evidence / "parent-stopped-child-running.png"), full_page=True, animations="disabled")
+                    child_at_release = oracle.task_result(child_id)
+                    assert child_at_release["status"] in {"scheduled", "running"}, child_at_release
+                    assert child_id not in oracle.cancel_intents()
+                    assert not gate.release.is_set() and not gate.timed_out
                     gate.release.set()
                     child_result = wait_durable_result(oracle, child_id, timeout=120)
                     assert child_result["result"] == child_answer and child_result["terminal_origin"] == "model_final"
@@ -465,16 +475,21 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                         full = line.locator(":scope > .chat-live-line-body")
                         full.wait_for(state="visible")
                         expect(full).to_contain_text(child_answer, use_inner_text=True, timeout=30000)
-                        full.evaluate("node => { const range = document.createRange(); range.selectNodeContents(node);"
-                                      " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }")
-                        assert "CHILD_OUTPUT_TAIL" in page.evaluate("window.getSelection().toString()")
+                        selected = full.evaluate(
+                            "node => { const range = document.createRange(); range.selectNodeContents(node);"
+                            " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);"
+                            " return selection.toString(); }")
+                        assert " ".join(selected.split()) == " ".join(child_answer.split()), stage
                         assert page.locator(feed).get_by_text(parent_answer, exact=True).count() == 1
-                        snapshots[stage] = {"parent_cards": parent.count(), "child_cards": child_card.count(), "full_chars": len(full.inner_text())}
+                        snapshots[stage] = {"parent_cards": parent.count(), "child_cards": child_card.count(),
+                            "full_chars": len(full.inner_text()), "selected_raw_chars": len(selected),
+                            "selected_raw_utf8_sha256": hashlib.sha256(selected.encode()).hexdigest()}
                         page.screenshot(path=str(evidence / (stage + ".png")), full_page=True, animations="disabled")
                     _write_receipt(evidence / "receipt.json", wait_clone, engine=engine, width=width,
                         parent_id=parent_id, child_id=child_id, parent_result=result, child_before=child_before,
-                        child_result=child_result, parent_delivery=parent_delivery,
-                        selected_child_sha256=hashlib.sha256(child_answer.encode()).hexdigest(),
+                        child_at_release=child_at_release, child_result=child_result,
+                        parent_delivery=parent_delivery, parent_wire_order=parent_order,
+                        expected_child_utf8_sha256=hashlib.sha256(child_answer.encode()).hexdigest(),
                         model_calls={name: len(rows) for name, rows in calls.items()}, snapshots=snapshots)
         finally:
             gate.release.set()
