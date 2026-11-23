@@ -33,6 +33,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
     from ouroboros.delegate_documents import attachment_parameters
     from ouroboros.delegate_readonly_inputs import input_files_parameter
     from ouroboros.settings_scales import EFFORT_SCALE
+    from ouroboros.subagent_work_order import knowledge_notes_parameter
 
     return {
         "mode": {"type": "string", "enum": ["ask", "plan", "agent"], "description":
@@ -62,19 +63,19 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks, the knowledge outline and, unless declared, the heads of the notes that claim its room and of the notes their heads link, but none of my other memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: give the purpose, prior decisions and material paths. The child does not see this conversation; input_sources describes its starting context. For a harness-dispatched child, this goes in the work order. The first session start gets my human's words, marks, the knowledge outline and its selected knowledge_notes. Only shared input adds room-claiming note heads and their linked heads; none of my other memory goes along. Put recipes and details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
-                "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
-                "with the heads of the notes that claim its room and of the notes their heads link, SYSTEM/BIBLE, "
-                "book maps, my identity, life's top-level account (except Agent-session "
-                "supervisors), the child's room page, full assignment and attachments. declared selects only "
-                "the authored objective/context/constraints and full governance/task authority for an independent "
-                "first position; it excludes the rest of shared memory (identity, life account, room page), "
-                "dialogue, inherited parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
-                "declared. Selection lasts for the task; the assignment defines retention/collaboration, "
+                "and the knowledge outline, plus full governance (SYSTEM/BIBLE) and task authority. Omit or shared: "
+                "add room-claiming and linked note heads, book maps, my identity, life's top-level account (except "
+                "Agent-session supervisors), the child's room page, full assignment and attachments. declared: add "
+                "authored objective/context/constraints for an independent first position, without automatically "
+                "loaded note heads or other shared memory (identity, life account, room page), dialogue, inherited "
+                "parent context or attachments; put common evidence in context. Either choice can select knowledge_notes: "
+                "whole notes for the first session start, addresses only for API children. Other knowledge stays one read away. "
+                "Descendants cannot widen inherited declared. Selection lasts for the task; the assignment defines retention/collaboration, "
                 "and tool results/messages can broaden input. It prescribes no exchange sequence or "
                 "transport, provides no access isolation and makes no claim about provider context or priors."
             ),
@@ -136,6 +137,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "Omit write_surface or use read_only. Checked for caller and child before queueing; [] reports an empty "
             "receipt. API children read each copy with read_file. The first session start verifies retained bytes "
             "unless it explicitly replaces the selection."),
+        **knowledge_notes_parameter(
+            "Checked before queueing. The first session start uses these whole current notes unless it explicitly "
+            "selects its own. Continuations and replacements do not inherit the selection. An API child receives "
+            "only the addresses. Explicit selections work with declared input. Omit or pass [] to name none."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree, directly or by applying its own children's patches. Pro runtime mode needs it, Cyber Pro does not, lower modes refuse either way; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
@@ -268,6 +273,13 @@ def _shape_problems(params: Dict[str, Any], unsupported: Any) -> tuple[list[str]
             selections["input_files"] = selection_entries(params["input_files"])
         except InputSelectionError as exc:
             problems.append(exc.detail)
+    if params.get("knowledge_notes") is not None:
+        from ouroboros.subagent_work_order import NamedNoteError, named_note_arguments
+
+        try:
+            selections["named_note_selection"] = named_note_arguments(params["knowledge_notes"])
+        except NamedNoteError as exc:
+            problems.append(f"{exc.code}: {exc.detail}")
     if "allowed_origins" in params:
         from ouroboros.contracts.task_contract import normalize_browser_origin
 
@@ -415,6 +427,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None,
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,
+        **({"named_note_selection": selections["named_note_selection"]} if "named_note_selection" in selections else {}),
         **input_source_fields,
         **directory_options,
     }, ""

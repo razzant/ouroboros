@@ -48,14 +48,14 @@ def initial_receipt(ctx: Any, bootstrap: dict) -> dict:
             raise ValueError("bootstrap custody unreadable")
         row = read_identity(drive, task_id)
         if not row:
-            # Pre-v2 tasks have no marker: exact assignment custody proves that
-            # automatic bootstrap already happened. No event history is rewritten.
+            # Legacy or model-issued starts can lack a marker. Only a fresh
+            # assignment start counts: a continuation may carry its fingerprint.
             from ouroboros.delegate_custody_current import task_snapshot
 
             view = task_snapshot(drive, task_id)
             candidates = [vars(run) for run in view["runs"].values() if not run.review_owned]
             candidates += [item for item in view["pending"] if not custody.review_owned_source(item.get("source"))]
-            row = next((item for item in candidates if item.get("invocation_id") and all(
+            row = next((item for item in candidates if item.get("invocation_id") and not item.get("continuation_of") and all(
                 str(item.get(key) or "") == str(bootstrap.get(key) or "") for key in (
                     "selected_subagent_id", "config_fingerprint", "work_order_fingerprint"))), {})
         if not row:

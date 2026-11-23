@@ -284,6 +284,97 @@ def test_resolve_cooperative_write_root_routes_flat_parent(monkeypatch):
     assert err2 == "" and eff2 == "/some/dir"
 
 
+def test_cooperative_tree_is_registered_only_after_one_childs_checks(tmp_path, monkeypatch):
+    """Both directions with an ordinary double for one child's checks: a refusal that needs no folder creates
+    no tree; a refusal in a fresh tree removes it unregistered; a pass registers it; a registered tree stays
+    shared, unchecked again before a mint, whatever a later child's check answers."""
+    from ouroboros.tools import control_delegation as CD
+
+    projects = tmp_path / "projects"
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects))
+    CD._COOP_SHARED_ROOTS.clear()
+    (tmp_path / "repo").mkdir()
+    ctx = types.SimpleNamespace(repo_dir=str(tmp_path / "repo"), task_id="root-3")
+    asked = []
+
+    def admit(answer):
+        return lambda root: asked.append(root) or answer(root)
+
+    assert CD.ensure_cooperative_shared_root(ctx, "root-3", admit(lambda root: root or "⚠️ caller")) == "⚠️ caller"
+    assert asked == [""] and not projects.exists() and CD._COOP_SHARED_ROOTS == {}
+    refused = CD.ensure_cooperative_shared_root(ctx, "root-3", admit(lambda root: root and "⚠️ child"))
+    fresh = asked[-1]
+    assert refused == "⚠️ child" and asked[1:] == ["", fresh] and fresh.startswith(str(projects))
+    assert not Path(fresh).exists() and CD._COOP_SHARED_ROOTS == {}
+    shared = CD.ensure_cooperative_shared_root(ctx, "root-3", admit(lambda root: ""))
+    assert (Path(shared) / ".git").is_dir() and CD._COOP_SHARED_ROOTS == {"root-3": shared}
+    del asked[:]
+    assert CD.ensure_cooperative_shared_root(ctx, "root-3", admit(lambda root: "⚠️ later child")) == "⚠️ later child"
+    assert asked == [shared] and Path(shared).is_dir() and CD._COOP_SHARED_ROOTS == {"root-3": shared}
+
+
+def test_named_notes_of_a_cooperative_child_are_checked_before_its_shared_tree_exists_and_in_it(tmp_path, monkeypatch):
+    """A flat parent's external_workspace child with knowledge_notes, through schedule_subagent. A fictitious
+    missing note is refused before anything is prepared: no shared tree, no child drive, no event. A child
+    refused in the fresh tree leaves none behind. An accepted child's reader is checked in that very tree, with
+    the acting profile, before the tree is registered for the next wave."""
+    from ouroboros import delegate_readonly_inputs, genesis_project, subagent_work_order
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.tool_access import active_tool_profile
+    from ouroboros.tools import control, control_delegation as CD, control_scheduling
+    from ouroboros.tools.registry import ToolContext
+    from tests._shared import configure_test_subagent
+
+    projects, data = tmp_path / "projects", tmp_path / "data"
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects))
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    CD._COOP_SHARED_ROOTS.clear()
+    assert write_knowledge_note(resolve_knowledge_address(data, "alpha-plan", "global"), "Alpha head.\n").ok
+    selected = configure_test_subagent(monkeypatch)
+    (tmp_path / "repo").mkdir()
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=data)
+    ctx.task_id, ctx.pending_events = "flat-root", []
+    prepared, minted, readers = [], [], []
+    mint, prepare, bind = (genesis_project.provision_genesis_project, control_scheduling._prepare_child_drive,
+                           delegate_readonly_inputs.receiving_reader)
+    monkeypatch.setattr(genesis_project, "provision_genesis_project",
+                        lambda **kw: minted.append(mint(**kw)) or minted[-1])
+    monkeypatch.setattr(control_scheduling, "_prepare_child_drive", lambda *a: prepared.append(a) or prepare(*a))
+
+    def recipient(*args, **kwargs):
+        reader = bind(*args, **kwargs)
+        readers.append((str(reader.workspace_root), reader.workspace_mode, active_tool_profile(reader),
+                        dict(CD._COOP_SHARED_ROOTS)))
+        return reader
+
+    monkeypatch.setattr(delegate_readonly_inputs, "receiving_reader", recipient)
+    base = dict(subagent_id=selected, objective="Build it", expected_output="The tree", write_surface="external_workspace")
+    missing = control._schedule_task(ctx, **base, knowledge_notes=[{"topic": "no-such-note"}])
+    assert "knowledge_note_unresolved" in missing and "no note 'no-such-note'" in missing, missing
+    assert minted == prepared == readers == ctx.pending_events == [] and not projects.exists()
+    actual = subagent_work_order.resolve_named_notes
+
+    def refuse_in_tree(caller, selection, *, recipient=None, session=False):
+        if recipient is not None:
+            raise subagent_work_order.NamedNoteError(["knowledge_notes 1 'alpha-plan': refused in the child's folder"])
+        return actual(caller, selection, recipient=recipient, session=session)
+
+    with monkeypatch.context() as refusing:
+        refusing.setattr(subagent_work_order, "resolve_named_notes", refuse_in_tree)
+        refused = control._schedule_task(ctx, **base, knowledge_notes=[{"topic": "alpha-plan"}])
+    assert "refused in the child's folder" in refused and [readers[0][0]] == [handle.path for handle in minted]
+    assert not Path(readers[0][0]).exists() and CD._COOP_SHARED_ROOTS == {} and prepared == ctx.pending_events == []
+    readers.clear()
+    queued = control._schedule_task(ctx, **base, knowledge_notes=[{"topic": "alpha-plan"}, {"topic": "alpha-plan"}])
+    [event] = ctx.pending_events
+    tree = event["task_constraint"]["write_root"]
+    assert "queued" in queued and readers == [(tree, "external_workspace", "acting_subagent", {})], (queued, readers)
+    assert CD._COOP_SHARED_ROOTS == {"flat-root": tree} and event["knowledge_notes"] == [{"topic": "alpha-plan",
+                                                                                           "scope": "global"}]
+    # Checked twice (before the tree, then in it), the repeat is still said once.
+    assert sum("knowledge_notes 2" in line for line in queued.splitlines()) == 1, queued
+
+
 def test_v651_stringified_argv_recovery_and_check_normalization():
     """v6.51.0 idea-1: the SSOT stringified-argv recovery + check normalization."""
     from ouroboros.shell_parse import normalize_check_argv, recover_stringified_argv

@@ -127,8 +127,9 @@ _CHILD_METADATA_KEYS = ("resource_intent", "root_task_id", "session_id", "projec
 
 
 def receiving_reader(ctx: Any, resource_policy: Any = None, *, workspace_root: str = "", child_task_id: str = "",
-                     child_drive: Optional[pathlib.Path] = None, resource_intent: Optional[dict] = None) -> Any:
-    """The read-only recipient's limits ON TOP of the caller's contract (never instead of its constraint:
+                     child_drive: Optional[pathlib.Path] = None, resource_intent: Optional[dict] = None,
+                     task_constraint: Optional[dict] = None, workspace_mode: Optional[str] = None) -> Any:
+    """The recipient's read limits ON TOP of the caller's contract (never instead of its constraint:
     every entry must pass both). A direct start's run reads in the caller's own roots.
 
     A scheduled child is the reader its worker will build (``agent.py``): the serving body as its system
@@ -136,7 +137,7 @@ def receiving_reader(ctx: Any, resource_policy: Any = None, *, workspace_root: s
     the scheduled workspace and resource intent; and the parent's contract under the child's ``resource_policy``.
     Its project folder may differ from either body root: a source passes only where both readers name it."""
     reader = copy.copy(ctx)
-    reader.task_constraint = {"mode": "local_readonly_subagent"}
+    reader.task_constraint = task_constraint if task_constraint is not None else {"mode": "local_readonly_subagent"}
     if child_task_id:
         from ouroboros.artifacts import task_id_for_artifacts
         from ouroboros.body_candidate import serving_repo_dir_for
@@ -171,10 +172,11 @@ def receiving_reader(ctx: Any, resource_policy: Any = None, *, workspace_root: s
             reader.drive_root = child_drive
             reader.task_metadata.update(drive_root=str(child_drive), child_drive_root=str(child_drive),
                                         budget_drive_root=str(canonical_data_root(ctx)))
-    if workspace_root:
+    if workspace_root or workspace_mode is not None:
         from ouroboros.work_domain import settle
 
-        reader.workspace_root, reader.workspace_mode = settle(workspace_root), "read_only"
+        reader.workspace_root = settle(workspace_root) if workspace_root else None
+        reader.workspace_mode = "read_only" if workspace_mode is None else workspace_mode
     return reader
 
 
@@ -249,25 +251,35 @@ def admit_selected_source(reader: Any, binding: Any, *, entry: Optional[pathlib.
     Each reader answers for its own working folder beside the address it asked: a relative protected path
     anchors at both, for the caller as for the receiver, so packaging a selection into another reader's
     hands never widens the grounds a participant's own contract already set."""
-    from ouroboros.protected_artifacts import block_reason_for_path
-
     if entry is not None:
         binding = replace(binding, requested_path=entry)  # deleted directories still have historical descendants
     _admit_read(reader, binding)
-    operations = ("copy", "hash") if entry is None else ("copy", "hash", "static_introspection")
+    admit_selected_path_policy(reader, binding, entry=entry, read_admitted=True)
+
+
+def admit_selected_path_policy(reader, binding, *, entry=None, read_admitted=False, transfer=True):
+    """Check read and, when bytes are handed on, transfer, after the tool/geometry checks."""
+    from ouroboros.protected_artifacts import block_reason_for_path
+
+    operations = ("copy", "hash") if transfer else ()
+    if entry is not None and transfer:
+        operations += ("static_introspection",)
     targets = ((binding.target_path, False),) if entry is None else ((binding.target_path, False), (entry, True))
     policies = [binding]
     # Rebase only relative policy paths, never read grants or the historical entry: each reader's own
     # effective working folder (``active_repo_dir``'s rule, so a folderless task answers for its task
     # drive) anchors its contract's relative paths exactly as the asked address does.
+    from ouroboros.tool_access import folderless_scratch_dir
     from ouroboros.tools.tool_resolution import active_repo_dir_for
     from ouroboros.work_domain import settle
 
-    if (workspace := settle(active_repo_dir_for(reader))) != settle(binding.base_path):
+    workspace = settle(folderless_scratch_dir(reader, create=False) or active_repo_dir_for(reader))
+    if workspace != settle(binding.base_path):
         policies.append(replace(binding, base_path=workspace))
     for policy in policies:
         for target, is_entry in targets:
-            for operation in ("read_bytes", *operations) if is_entry or policy is not binding else operations:
+            needs_read = not read_admitted or is_entry or policy is not binding
+            for operation in ("read_bytes", *operations) if needs_read else operations:
                 if reason := block_reason_for_path(reader, target, operation, policy, entry=is_entry):
                     raise PermissionError(reason)
 

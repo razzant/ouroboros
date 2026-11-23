@@ -696,14 +696,18 @@ def profile_from_task_constraint(task_constraint: Dict[str, Any]) -> str:
     )
 
 
-def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
+def ensure_cooperative_shared_root(ctx: Any, root_task_id: str, admit: Any = None) -> str:
     """Mint (once per task-tree) ONE shared from-scratch git tree for a cooperative
     acting-subagent build, reusing ``genesis_project.provision_genesis_project``
     (a durable standalone repo under the projects root, outside repo/ and data/).
     Cached by ``root_task_id`` so multiple fan-out waves share ONE tree. Children
     write into it via ``write_surface=external_workspace``; deeper descendants inherit
     it automatically through ``parent_workspace_root``. Returns the tree path, or a
-    ``⚠️`` error string for the LLM."""
+    ``⚠️`` error string for the LLM.
+
+    ``admit(root)``, when given, answers this child's own checks with a ``⚠️`` refusal or "": first with ""
+    (before a fresh tree exists, so what needs no folder refuses without one), then with the tree, before it
+    is registered: a refused fresh tree is removed unregistered. A registered tree stays shared either way."""
     key = str(root_task_id or "").strip() or str(getattr(ctx, "task_id", "") or "").strip()
     # Hold the lock across BOTH the cache check AND the mint so two concurrent fan-out
     # waves of the same root cannot each provision a tree (no double-mint / orphan tree).
@@ -711,9 +715,11 @@ def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
     with _COOP_LOCK:
         cached = _COOP_SHARED_ROOTS.get(key)
         if cached and pathlib.Path(cached).is_dir():
-            return cached
+            return (admit(cached) if admit else "") or cached
+        if admit and (refusal := admit("")):
+            return refusal
         try:
-            from ouroboros.genesis_project import provision_genesis_project
+            from ouroboros.genesis_project import provision_genesis_project, remove_genesis_project
 
             handle = provision_genesis_project(
                 repo_dir=ctx.repo_dir,
@@ -727,16 +733,21 @@ def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
                 f"({type(exc).__name__}: {exc}); pass write_root explicitly or schedule read-only children."
             )
         path = str(handle.path)
+        if admit and (refusal := admit(path)):
+            remove_genesis_project(path)
+            return refusal
         _COOP_SHARED_ROOTS[key] = path
         return path
 
 
 def resolve_cooperative_write_root(
-    ctx: Any, requested_surface: str, write_root: str, workspace_root: str, metadata: Dict[str, Any]
+    ctx: Any, requested_surface: str, write_root: str, workspace_root: str, metadata: Dict[str, Any],
+    admit: Any = None,
 ) -> tuple[str, str, str]:
     """Resolve the effective acting write_root and the caller profile for a scheduled
     wave. A flat parent (no inherited workspace) requesting external_workspace with no
-    write_root builds cooperatively from scratch, so the host mints ONE shared tree.
+    write_root builds cooperatively from scratch, so the host mints ONE shared tree
+    (``admit``: ``ensure_cooperative_shared_root``).
     Returns ``(effective_write_root, caller_profile, error_or_empty)``. Gated on the
     mutative toggle so a disabled setup falls through to the disabled message rather
     than minting an unused tree."""
@@ -754,7 +765,7 @@ def resolve_cooperative_write_root(
 
         if get_allow_mutative_subagents("external_workspace"):
             key = str((metadata or {}).get("root_task_id") or getattr(ctx, "task_id", "") or "").strip()
-            shared = ensure_cooperative_shared_root(ctx, key)
+            shared = ensure_cooperative_shared_root(ctx, key, admit)
             if isinstance(shared, str) and shared.startswith("⚠️"):
                 return "", caller_profile, shared
             effective = shared
