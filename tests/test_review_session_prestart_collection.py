@@ -196,6 +196,9 @@ def test_unwritable_start_row_cleans_once_without_no_send(tmp_path, monkeypatch,
     write_task_result(tmp_path, 't-b', 'running', root_task_id='t-b')
     repo = tmp_path / 'repo'
     repo.mkdir()
+    from tests._bound_registration import enable_start_registry
+
+    enable_start_registry(monkeypatch, fake_route)
     FakeGateway.project_unregistered = True
     state = {}
     monkeypatch.setattr(delegate_custody, 'record_start_requested', lambda *a, **k: False)

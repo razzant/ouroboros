@@ -192,7 +192,7 @@ def test_an_older_store_gains_the_flag_once_and_derives_it_from_the_canon(finish
     store_import.upgrade_current_schema(root)  # the first-touch writer's preparation
     with store.open_store(root, write=False) as txn:
         assert txn.row(TASK, "has_payload_offer") == 1 and not store_import._flags_need_derivation(txn)
-        assert txn.meta("schema_version") == store.SCHEMA_VERSION == 12
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION
     assert TASK in pr.offered(root)
 
 

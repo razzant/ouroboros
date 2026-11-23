@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import math
 import pathlib
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -686,48 +688,80 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
                 restore_released_subject(custody, restore)
         except ValueError as exc:
             raise ContinuationRefused("subject_unavailable", f"{exc}; nothing was sent") from exc
-    project_id, owned, left = str(source.get("project_id") or ""), False, _seconds_left(closes)
-    scope = body.get("scope") or {}
-    if not decision.get("thread_id") and scope.get("kind") == "project" and not scope.get("ephemeral"):
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
-        from ouroboros.delegate_registration_policy import resolve_registration
-        from ouroboros.execution_domain import run_gateway
-
-        gateway = run_gateway(source, ensure_owned_gateway)  # its engine; the stopped run's registration may be retired
-        try:
-            project_id, owned_id, _persistent, _ = resolve_registration(gateway, str(scope.get("root") or ""), "",
-                                                                     str(body.get("access") or "readonly"))
-            owned, left = bool(owned_id), _seconds_left(closes)  # what remains once it is registered
-            if owned and left is not None and left <= 0:  # the window closed meanwhile: no START will name it
-                gateway.remove_project(project_id)
-        finally:
-            gateway.close()
-    if left is not None and left <= 0:
-        return None
-    if left is not None:
-        now = bounded_seconds(left, default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
-        body["maxSeconds"] = min(int(body.get("maxSeconds") or now), now)
-    facts = copy.deepcopy(source.get("work_order_source_request") or {})
-    facts.pop("original_prompt_sha256", None)
-    (facts.get("turn_sources") or {}).pop("prompt", None)
-    # The successor continues its stopped run (or that run's thread) where that run was admitted: the start is for that
-    # store, and its first send or exact replay goes nowhere else (``replay_store_unproven``). A predecessor bound to
-    # no store (an older engine or receipt) leaves "" and the earlier replay rule; never the cached handshake.
+    from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.delegate_custody_current import run as custody_run
+    from ouroboros.delegate_pending import replay_store_unproven
+    from ouroboros.delegate_registration_policy import continued_binding, engine_facts, resolve_for_start, retire_unstarted
+    from ouroboros.delegate_workspace_hold import prepare_workspace_use, start_workspace
+    from ouroboros.execution_domain import run_gateway
 
-    stopped = custody_run(custody, str(decision.get("continues_run") or "")) if decision.get("continues_run") else None
-    written = custody_module.record_start_requested(
-        custody, run_id="", task_id=task_id, idempotency_key=token, invocation_id=token,
-        daemon_store_id=str(getattr(stopped, "daemon_store_id", "") or ""),
-        operation_id=decision["operation_id"], max_seconds=int(body.get("maxSeconds") or 0), request=body,
-        continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
-        surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
-        project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
-        prompt_cache_ttl=source.get("prompt_cache_ttl") or None, **({RESTORE_KEY: restore} if restore else {}),
-        **({"engine_ref": source["engine_ref"]} if source.get("engine_ref") else {}),  # the predecessor's engine
-        **({"generation_end_at": closes.isoformat()} if closes is not None else {}),
-        **{key: str(source.get(key) or "") for key in ("root_task_id", "parent_task_id", "category", "source",
-                                                       *REVIEW_ATTRIBUTION_KEYS, "authority_source", "execution_root", "target_root")})
+    stopped = custody_run(custody, str(decision["continues_run"])) if decision.get("continues_run") else None
+    predecessor_store = str(getattr(stopped, "daemon_store_id", "") or "")
+    project_id, owned, written = str(source.get("project_id") or ""), False, False
+    scope, gateway, registration_resolution = body.get("scope") or {}, None, None
+    bound_project = project_id if decision.get("thread_id") else ""
+    bound_binding = continued_binding(source, bound_project) if bound_project else None
+    uses_registration = (scope.get("kind") == "project" and not scope.get("ephemeral")
+                         and (bound_project or not decision.get("thread_id")))
+    # The predecessor's recorded workspace fact (its thread's folder included), else what its body and root name.
+    workspace = str(source.get("registration_workspace") or "") or start_workspace(body, source.get("execution_root"))
+    registry_preparation = ExitStack()
+    try:  # a gateway that registered the root holds the registration it adopted until the START below lands
+        if predecessor_store or uses_registration or workspace:
+            # A wrong store cannot decide this first send's fate. Leave the choice unprojected so
+            # returning to its store can send it once, even if no registration is needed.
+            gateway = run_gateway(source, ensure_owned_gateway)
+            if why := replay_store_unproven({"daemon_store_id": predecessor_store}, getattr(gateway, "store_identity", "")):
+                raise ContinuationRefused("invocation_store_unproven", why)
+        if uses_registration:  # the stopped one-shot's registration may be retired; a thread cannot retarget
+            project_id, owned_id, persistent, _, registration_resolution = resolve_for_start(
+                custody, gateway, str(scope.get("root") or ""), "", str(body.get("access") or "readonly"),
+                task_id=task_id, invocation_id=token, preparation=registry_preparation,
+                used_workspace=workspace, bound_project_id=bound_project, bound_resolution=bound_binding)
+            owned = bool(owned_id)
+        elif workspace:
+            prepare_workspace_use(custody, gateway, workspace, engine_facts(gateway), token, registry_preparation)
+        left = _seconds_left(closes)
+        if left is not None and left <= 0:
+            return None
+        if left is not None:
+            now = bounded_seconds(left, default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
+            body["maxSeconds"] = min(int(body.get("maxSeconds") or now), now)
+        facts = copy.deepcopy(source.get("work_order_source_request") or {})
+        facts.pop("original_prompt_sha256", None)
+        (facts.get("turn_sources") or {}).pop("prompt", None)
+        # The successor continues its stopped run (or that run's thread) where that run was admitted: the start is for that
+        # store, and its first send or exact replay goes nowhere else (``replay_store_unproven``). A predecessor bound to
+        # no store (an older engine or receipt) leaves "" and the earlier replay rule; never the cached handshake.
+        written = custody_module.record_start_requested(
+            custody, gateway=gateway if uses_registration else None, registration_resolution=registration_resolution,
+            run_id="", task_id=task_id, idempotency_key=token, invocation_id=token,
+            daemon_store_id=predecessor_store, registration_workspace=workspace,
+            operation_id=decision["operation_id"], max_seconds=int(body.get("maxSeconds") or 0), request=body,
+            continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
+            surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
+            project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
+            **({"project_persistent": persistent} if registration_resolution is not None else {}),
+            prompt_cache_ttl=source.get("prompt_cache_ttl") or None, **({RESTORE_KEY: restore} if restore else {}),
+            **({"engine_ref": source["engine_ref"]} if source.get("engine_ref") else {}),  # the predecessor's engine
+            **({"generation_end_at": closes.isoformat()} if closes is not None else {}),
+            **{key: str(source.get(key) or "") for key in ("root_task_id", "parent_task_id", "category", "source",
+                                                           *REVIEW_ATTRIBUTION_KEYS, "authority_source", "execution_root", "target_root")})
+    except Exception as exc:
+        if getattr(exc, "code", "") == "registration_replaced":
+            owned = False
+        raise
+    finally:
+        registry_preparation.close()
+        if gateway is not None:
+            try:
+                if owned and not written:
+                    # A failed write may have landed. Count even this token as a possible use.
+                    retire_unstarted(custody, gateway, project_id, task_id=task_id, resolution=registration_resolution)
+            except Exception:
+                logging.getLogger(__name__).warning("Successor project cleanup deferred for %s", token, exc_info=True)
+            finally:
+                gateway.close()
     if not written:
         raise ContinuationRefused("start_request_unwritable", "the successor start request could not be recorded; nothing was sent")
     return True
@@ -749,13 +783,21 @@ def _retire_start(custody: Any, task_id: str, seat_id: str, decision: Dict[str, 
     """A START no roster row carries can never be sent: its definite refusal (the existing START_FAILED fact)
     keeps every collector and recovery from sending it later."""
     from ouroboros import delegate_custody
+    from ouroboros.delegate_registration_policy import engine_facts, record_persistent, registration_proof
 
     token = str(decision["invocation_id"])
-    if (delegate_custody.invocation_record(custody, token) or {}).get("state") != "pending":
+    start = delegate_custody.invocation_record(custody, token) or {}
+    if start.get("state") != "pending":
         return
+    duty = {}
+    resolution = start.get("project_resolution") or {}
+    if (start.get("project_id") and start.get("project_owned") and not record_persistent(start)
+            and "creator_invocation" not in resolution):
+        duty = {"project_id": start["project_id"], "project_retention_reason": code,
+                "registration_owed": {**engine_facts(resolution or start), **registration_proof(resolution)}}
     if not delegate_custody.emit(custody, delegate_custody.START_FAILED, {
             "run_id": "", "invocation_id": token, "task_id": task_id, "reason": code, "definite": True,
-            "surface": str(decision["surface"]), "slot_id": seat_id}):
+            "surface": str(decision["surface"]), "slot_id": seat_id, **duty}):
         raise ContinuationRefused("start_retirement_unwritable", "the never-sent start could not be retired")
 
 

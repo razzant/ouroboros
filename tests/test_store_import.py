@@ -453,6 +453,54 @@ def test_a_rebuild_does_not_readmit_a_pending_invocation_the_chain_has_since_bou
     assert c.invocation_record(root, "inv-refused")["state"] == "failed_definite"
 
 
+def test_export_overwrites_the_last_closed_registration_in_both_set_files(tmp_path):
+    from ouroboros import delegate_custody as c, delegate_custody_current as current
+    from ouroboros.store_switch import _retire
+
+    ensure_current_store(tmp_path, with_children=False)
+    facts = {"daemon_store_id": "s"}
+    current.mark_removal(tmp_path, "p", facts, "custody", creator={"task_id": "t"})
+    assert c.emit(tmp_path, c.START_REQUESTED, {"invocation_id": "i", "task_id": "t", "root_task_id": "t",
+                                                 "registration_links": [current.owed_key("p", facts)]})
+    export_facts(tmp_path)
+    files = [set_file_path(tmp_path, name) for name in current.REGISTRATION_SETS]
+    assert all(json.loads(path.read_bytes()) for path in files), "the duty, its removal mark and its linked use"
+    assert c.emit(tmp_path, c.PROJECT_RETIRED, {"project_id": "p", **facts, "removal_lane": ""})
+    export_facts(tmp_path)
+    assert [json.loads(path.read_bytes()) for path in files] == [{}, {}, {}]
+    before = current.removal_status(tmp_path, "p", facts)
+    _retire(tmp_path)
+    assert ensure_current_store(tmp_path, with_children=False)["status"] == "completed"
+    assert current.owed_registrations(tmp_path) == []
+    assert current.removal_status(tmp_path, "p", facts) == before and before[0] == ""
+
+
+def test_fresh_import_applies_registration_closures_only_to_the_addressed_store(tmp_path):
+    from ouroboros import delegate_custody as c, delegate_custody_current as current
+
+    for store_id in ("closed", "legacy"):
+        engine = {"daemon_store_id": store_id}
+        add_set_member(tmp_path, current.OWED, current.owed_key("p", engine), {"project_id": "p", **engine})
+    group, _ = current._removal_group("p", engine)
+    add_set_member(tmp_path, current._REMOVALS, group, {"closed": "custody", "legacy": "historical"})
+    append_jsonl(c.event_log_path(tmp_path), {"type": c.PROJECT_RETIRED, "project_id": "p",
+                "daemon_store_id": "closed", "removal_lane": "", "event_id": "closed-after-export"})
+    assert ensure_current_store(tmp_path, with_children=False)["status"] == "completed"
+    assert current.owed_registrations(tmp_path) == [{"project_id": "p", "daemon_store_id": "legacy"}]
+    assert current.removal_status(tmp_path, "p", {"daemon_store_id": "closed"}) == ("", "closed-after-export")
+    assert current.removal_status(tmp_path, "p", {"daemon_store_id": "legacy"}) == ("historical", "closed-after-export")
+
+
+def test_direct_custody_rebuild_first_imports_unpublished_legacy_files(tmp_path):
+    from ouroboros import delegate_custody as c, delegate_custody_current as current
+
+    write_result(tmp_path, result("task"))
+    append_jsonl(c.event_log_path(tmp_path), {"type": c.STARTED, "task_id": "task", "run_id": "r"})
+    assert store.probe(tmp_path)[0] == "absent"
+    assert current.rebuild(tmp_path) == 1
+    assert current.run(tmp_path, "r").task_id == "task" and load(tmp_path, "task")["status"] == "completed"
+
+
 def test_p6_applies_the_custody_events_an_old_body_appended_after_the_boundary_once(tmp_path):
     """B4: the import records the chain boundary and every own append moves it; a P6' reduces
     the legacy events after it (event-id dedup, a replayed request re-opens nothing) and moves

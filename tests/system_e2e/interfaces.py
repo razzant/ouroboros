@@ -34,6 +34,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs
 
 _NOT_LANDED = (
     "{name} is an unimplemented interface stub for {lane} scenarios. "
@@ -165,7 +166,8 @@ class FakeClaudexorDaemon:
                  live_input: str = "mid_turn",
                  reports_created: bool = False,
                  require_registration: bool = False,
-                 start_lookup_unavailable: bool = False) -> None:
+                 start_lookup_unavailable: bool = False,
+                 bound_project_registry: bool = False) -> None:
         self.harness_id = str(harness_id)
         # The harness row's declared live-input capability (``liveInput``); a
         # scenario passes "none" to script a route with no mid-run channel.
@@ -177,6 +179,8 @@ class FakeClaudexorDaemon:
         self.reports_created = bool(reports_created)
         self.require_registration = bool(require_registration)
         self.start_lookup_unavailable = start_lookup_unavailable
+        # A single fixture store survives Ouroboros restarts. Legacy actors opt out.
+        self.store_id = "fake-store-" + uuid.uuid4().hex if bound_project_registry else ""
         pin_version, pin_sha = _tree_engine_identity()
         self.engine_version = str(engine_version or pin_version)
         self.engine_build_sha = str(engine_build_sha or pin_sha)
@@ -228,6 +232,8 @@ class FakeClaudexorDaemon:
                     "protocol_major": str(self.headers.get("X-Claudexor-Protocol-Major") or ""),
                     "body": body,
                 }
+                if outer.store_id:
+                    record["store_identity_opt_in"] = self.headers.get("X-Claudexor-Store-Identity", "")
                 with outer._lock:
                     outer.requests.append(record)
                     if self.headers.get("Authorization") != f"Bearer {outer.token}":
@@ -235,7 +241,8 @@ class FakeClaudexorDaemon:
                                            "message": "bad bearer token"}, 401)
                     status, payload = outer._route(method, self.path, record)
                     if ((method == "POST" and self.path in ("/v2/projects", "/v2/runs", "/v2/runs/lookup"))
-                            or (method == "DELETE" and self.path.startswith("/v2/projects/"))):
+                            or (method == "DELETE" and self.path.startswith("/v2/projects/"))
+                            or (outer.store_id and method == "POST" and self.path.startswith("/v2/projects/"))):
                         record.update(status=status, response=payload)
                 return self._send(payload, status)
 
@@ -313,10 +320,12 @@ class FakeClaudexorDaemon:
     def _route(self, method: str, path: str, record: Dict[str, Any]) -> tuple:
         """Answer one authenticated request. Caller holds the lock."""
         body = record["body"]
-        clean = path.split("?", 1)[0].rstrip("/")
+        clean, _, query = path.partition("?")
+        clean = clean.rstrip("/")
+        store = {"storeId": self.store_id} if self.store_id and record.get("store_identity_opt_in") == "1" else {}
         parts = [p for p in clean.split("/") if p]
         if method == "POST" and clean == "/v2/handshake":
-            return 200, {"compatible": True, "protocolMajor": 3,
+            return 200, {"compatible": True, "protocolMajor": 3, **store,
                          "engine": {"version": self.engine_version,
                                     "sha": self.engine_build_sha}}
         if method == "GET" and clean == "/v2/agent-capabilities":
@@ -330,6 +339,13 @@ class FakeClaudexorDaemon:
                 {"id": "run.control", "method": "POST", "path": "/v2/runs/:id/control",
                  "mutability": "mutating", "idempotency": "natural"},
             ]
+            if self.store_id:
+                operations.extend([
+                    {"id": "project.registration", "method": "GET", "path": "/v2/projects/:id/registration",
+                     "mutability": "read_only"},
+                    {"id": "project.release", "method": "POST", "path": "/v2/projects/:id/release",
+                     "mutability": "mutating", "idempotency": "natural"},
+                ])
             if self.start_lookup_unavailable:
                 operations.append({"id": "run.lookup", "method": "POST", "path": "/v2/runs/lookup",
                                    "mutability": "read_only", "idempotency": "key_required"})
@@ -358,19 +374,28 @@ class FakeClaudexorDaemon:
                 fresh = root not in self._projects
                 pid = self._projects.get(root) or ("proj" + uuid.uuid4().hex[:12])
                 self._projects[root] = pid
-                return 200, {"id": pid, **({"created": fresh} if self.reports_created else {})}
+                return 200, {"id": pid, **({"created": fresh} if self.reports_created else {}),
+                             **({"root": root, **store} if self.store_id else {})}
+        if self.store_id and len(parts) == 4 and parts[:2] == ["v2", "projects"]:
+            if method == "GET" and parts[3] == "registration":
+                fields = parse_qs(query, keep_blank_values=True)
+                binding = {key: values[0] for key, values in fields.items() if len(values) == 1}
+                if len(binding) == len(fields):
+                    return self._bound_registration(parts[2], binding)
+                return 400, {"code": "invalid_request", "message": "expected one value per field"}
+            if method == "POST" and parts[3] == "release" and not query:
+                return self._bound_registration(parts[2], body, release=True)
         if method == "DELETE" and len(parts) == 3 and parts[:2] == ["v2", "projects"]:
             for root, pid in list(self._projects.items()):
                 if pid == parts[2]:
-                    if root == self._busy_project_root or any(
-                            run["project_id"] == pid and run["state"] in {"queued", "running"}
-                            for run in self.runs.values()):
+                    if self._project_busy(root, pid):
                         return 409, {"code": "project_has_active_run", "message": "project has an active run"}
                     del self._projects[root]
                     return 200, {"projectId": pid, "root": root, "registryRemoved": True, "artifactsRetained": True}
             return 404, {"code": "project_not_found", "message": "no such project"}
         if method == "POST" and clean == "/v2/runs":
-            return self._start_run(record)
+            status, payload = self._start_run(record)
+            return status, ({**payload, **store} if status == 200 and store else payload)
         if len(parts) >= 3 and parts[:2] == ["v2", "runs"]:
             run = self.runs.get(parts[2])
             if run is None:
@@ -411,6 +436,31 @@ class FakeClaudexorDaemon:
                     return 200, {"accepted": True, "status": "cancelling"}
                 return 400, {"code": "unknown_control", "message": "unsupported control kind"}
         return 404, {"code": "not_found", "message": f"no route for {method} {clean}"}
+
+    def _project_busy(self, root: str, pid: str) -> bool:
+        return root == self._busy_project_root or any(
+            run["project_id"] == pid and run["state"] in {"queued", "running"} for run in self.runs.values())
+
+    def _bound_registration(self, pid: str, binding: Any, *, release: bool = False) -> tuple:
+        """Compare and, when idle, mutate the same in-memory registry under the request lock."""
+        if (not isinstance(binding, dict) or set(binding) != {"expectedStoreId", "expectedRoot"}
+                or not all(isinstance(value, str) and value for value in binding.values())):
+            return 400, {"code": "invalid_request", "message": "store and root are required"}
+        expected_root = binding["expectedRoot"]
+        if binding["expectedStoreId"] != self.store_id:
+            return 409, {"code": "store_mismatch", "message": "different registry store"}
+        root = next((root for root, known in self._projects.items() if known == pid), None)
+        state = "absent"
+        if root is not None:
+            if root != expected_root:
+                return 409, {"code": "project_root_mismatch", "message": "different registered root"}
+            state = "present"
+            if release:
+                if self._project_busy(root, pid):
+                    return 409, {"code": "project_has_active_run", "message": "project has an active run"}
+                del self._projects[root]
+                state = "released"
+        return 200, {"projectId": pid, "storeId": self.store_id, "root": expected_root, "state": state}
 
     def _harness_row(self) -> Dict[str, Any]:
         return {"id": self.harness_id, "enabled": True,

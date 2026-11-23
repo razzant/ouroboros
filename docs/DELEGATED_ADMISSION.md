@@ -191,13 +191,35 @@ to the immutable stored request (`execution.workspaceRoot` + `access`) at recove
 (`record_persistent`); rows that carry the key are authoritative and are never
 recomputed from a live engine. Older engines keep the legacy snapshot-in-`scope.root`
 shape: that host-minted snapshot declares `scope.ephemeral` and registers nothing where
-the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`), and otherwise
-retires its one-shot registration as before. A target Ouroboros minted itself
+the engine accepts the field (`CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION`). A target Ouroboros minted itself
 (`delegate_registration_policy.minted_root`: a folder inside a task's own drive, a review
 tree, a registry copy) is no user identity either and declares `scope.ephemeral` the same
 way; a sticky thread on such a root does so from `CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION`,
 the engine release that sweeps the lanes those threads leave, and below it keeps the
 registration the thread is bound to.
+
+A disposable registration's keyed POST records store, project id, canonical root and `created`.
+The historical walk needs a minted folder and a registry receipt binding its creation to this store
+and folder. Creator custody can supply the ownership bit, never the store of a handshake or run.
+Adoption or a completed release grants nothing. Automatic release needs catalog `POST /v2/projects/:id/release` and
+`GET /v2/projects/:id/registration`, both bound by `expectedStoreId` and `expectedRoot`.
+A lost send closes on a matching `absent` read or on a repeated bound release returning
+`released`/`absent`; `present`, 404 or changed binding keep the intent pending until a definite
+addressed answer, and never authorize a second START.
+Missing proof or routes opens no release intent. A later engine upgrade does not give the host ownership of an old entry: registrations left without creation evidence stay for manual resolution.
+
+Ordinary starts and fresh or continued reviews hold the confirmed registration per invocation, not
+across everyone's imports. START takes over that hold through binding or definite refusal. A start of
+another project whose `execution.workspaceRoot` may be a temporary registration's folder holds it too,
+without registering or owning it (`delegate_workspace_hold`): only the engine's `candidateMatch` on the
+bound read (`candidate` = the folder as sent) frees it with `different`; `unknown`, no field, a refusal
+or a lost read hold, and no START carries it. One lock per engine route orders preparations, claims and
+releases; each side records what it observed before the lock goes, and a release's folder mark keys its
+exact recorded root until answered. An ended use keeps holding through its task's Keep gate and Continue,
+found only through the owed duty of each temporary registration (`workspace_uses`, gone with the duty): a
+START's claim names the duties alive on its engine and adds its invocation to each, and a creation records
+the live uses it observed before its possibly-creating request, under the one hold that writes its duty; unable to
+observe, it sends nothing. A use that ended before a registration existed never met it; its next start prepares again.
 
 ## 3. What Ouroboros actually controls
 

@@ -79,10 +79,13 @@ def test_conflict_recovery_keeps_original_key_request_and_registration(tmp_path,
 
 
 @pytest.mark.parametrize("existing_project", [False, True])
-def test_fresh_conflict_retires_nothing_and_keeps_its_token(tmp_path, fake_route, existing_project):
+def test_fresh_conflict_retires_nothing_and_keeps_its_token(tmp_path, fake_route, monkeypatch, existing_project):
     """A key conflict answers an ENTERED POST: the key may hold an accepted run, so neither the registration this
     start created nor its token is retired and its fate stays pending (#3138), whoever owns the project."""
     row = next(r for r in RESPONSES if r["route"] == "create" and r["scenario"] == "conflict")
+    from tests._bound_registration import enable_start_registry
+
+    enable_start_registry(monkeypatch, fake_route)
     fake_route.project_unregistered = not existing_project
     fake_route.start_error = _problem(row)
     state = {}
@@ -90,6 +93,7 @@ def test_fresh_conflict_retires_nothing_and_keeps_its_token(tmp_path, fake_route
         _run_session_directly(tmp_path, retry_state=state, operation_id="fresh")
     gateway = fake_route.instances[-1]
     assert len(gateway.start_requests) == 1 and state == {"pending_invocation_id": gateway.start_keys[0]}
+    assert gateway.registrations == ([] if existing_project else ["/tmp/fake-repo"])
     assert gateway.removals == []
     retained = custody.invocation_record(tmp_path, gateway.start_keys[0])
     assert retained["state"] == "pending"
@@ -115,7 +119,9 @@ def test_unwritable_request_keeps_existing_or_thread_owned_registration(
     tmp_path, fake_route, monkeypatch, existing_project, retained_thread,
 ):
     from ouroboros import observability, review_execution
+    from tests._bound_registration import enable_start_registry
 
+    enable_start_registry(monkeypatch, fake_route)
     fake_route.project_unregistered = not existing_project
     threads = []
 

@@ -11,6 +11,7 @@ from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import write_task_result
 from ouroboros.tools import delegate
+from tests._bound_registration import StartRegistry, enable_start_registry
 from tests._delegated_transport_shared import (
     _LiveRunStub, _nanny_ctx, _select_transport_access,
     _owned_gateway_uses_each_test_transport as _owned_gateway_fixture,
@@ -25,7 +26,17 @@ _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
 fake_route = _fake_route
 
 
-class ToolGateway(_LiveRunStub):
+@pytest.fixture(autouse=True)
+def bound_review_registry(monkeypatch):
+    enable_start_registry(monkeypatch, FakeGateway)
+
+
+def legacy_retry_store(monkeypatch):
+    for gateway in (FakeGateway, ToolGateway):
+        monkeypatch.setattr(gateway, "store_identity", "")
+
+
+class ToolGateway(StartRegistry, _LiveRunStub):
     def __init__(self, *, shared=False):
         super().__init__()
         self.shared = shared
@@ -38,9 +49,6 @@ class ToolGateway(_LiveRunStub):
     def register_project(self, root):
         self.registrations.append(root)
         return "proj-new"
-
-    def remove_project(self, project_id):
-        self.removals.append(project_id)
 
     def start_run(self, request, *, idempotency_key=""):
         self.start_requests.append((request, idempotency_key))
@@ -113,7 +121,9 @@ def test_interrupted_unsent_claim_retires_fresh_registration(start_case, tmp_pat
     assert len(events) == 1 and gateway().start_requests == []
     assert gateway().removals == ["proj-new"]
     row = failures(tmp_path)[-1]
-    assert row["definite"] is True and row["project_retired"] is True
+    assert row["definite"] is True
+    [release] = [r for r in custody.custody_rows(tmp_path) if r["type"] == custody.PROJECT_RETIRED]
+    assert release["project_id"] == row["project_id"] and release["removal_outcome"] == "removed"
     assert row["invocation_id"] == events[0]["invocation_id"]
 
 
@@ -133,6 +143,7 @@ def test_preclaim_exception_keeps_shared_registration(start_case, tmp_path, monk
 
 
 def test_recovered_unknown_start_is_not_retired_by_new_preclaim_error(start_case, tmp_path, monkeypatch):
+    legacy_retry_store(monkeypatch)
     start, gateway, _shared, fail, state = start_case
     fail(gateway_module.ClaudexorUnavailable("daemon_unreachable", "POST response lost"))
     try:
@@ -188,6 +199,7 @@ def test_pause_before_callable_reports_only_a_fresh_start_as_unrun(start_case, t
     start, gateway, _shared, fail, state = start_case
     original = None
     if recovering:
+        legacy_retry_store(monkeypatch)
         fail(gateway_module.ClaudexorUnavailable("daemon_unreachable", "POST response lost"))
         start()
         original = custody.invocation_record(tmp_path, state["pending_invocation_id"])
@@ -211,7 +223,12 @@ def test_pause_before_callable_reports_only_a_fresh_start_as_unrun(start_case, t
         assert record["project_id"] == original["project_id"] == "proj-new"
         assert payload["project_retention_reason"] == "start_outcome_unknown_run_may_exist"
     else:
+        from ouroboros.delegate_custody_current import owed_registrations
+
         assert "pending_invocation_id" not in payload and record["state"] == "failed_definite"
+        assert payload["project_retired"] is True and not owed_registrations(tmp_path)
+        retired, = (r for r in custody.custody_rows(tmp_path) if r.get("type") == custody.PROJECT_RETIRED)
+        assert retired["removal_outcome"] == "removed"
 
 
 @pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
@@ -239,7 +256,9 @@ def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, mo
     assert len(events) == 1 and gateway().start_requests == []
     assert gateway().removals == ["proj-new"]
     row = failures(tmp_path)[-1]
-    assert row["definite"] is True and row["project_retired"] is True
+    assert row["definite"] is True
+    [release] = [r for r in custody.custody_rows(tmp_path) if r["type"] == custody.PROJECT_RETIRED]
+    assert release["project_id"] == row["project_id"] and release["removal_outcome"] == "removed"
 
 
 def test_untyped_transport_failure_keeps_possible_run_registration(start_case, tmp_path):
@@ -303,6 +322,7 @@ def test_review_preclaim_control_cleans_only_fresh_registration(tmp_path, monkey
             prompt="review this", root="/tmp/fake-repo", custody_drive=tmp_path, invocation=invocation)
 
     if recovering:
+        legacy_retry_store(monkeypatch)
         FakeGateway.start_error = gateway_module.ClaudexorUnavailable("daemon_unreachable", "lost response")
         with pytest.raises(gateway_module.ClaudexorUnavailable):
             start()

@@ -38,6 +38,25 @@ def owned_started_review_custody(
     return run_id, found
 
 
+def recover_review_start(custody, drive, token, task_id, surface):
+    """Read an exact pending or started invocation, including one whose request body is missing."""
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    record = custody.invocation_record(drive, token) if token else None
+    if record is not None:
+        if record["state"] == "legacy_gap":
+            raise ReviewRouteUnavailable(f"legacy_gap: {record['reason']}; delegated invocation needs repair",
+                                         code="review_custody_legacy_gap")
+        if record["state"] == "started" and record["run_id"]:
+            return (record, *owned_started_review_custody(custody, drive, record, task_id))
+        if record["state"] == "pending":
+            return record, "", None
+    if token and surface != "skill_review":
+        raise ReviewRouteUnavailable("delegated retry token has no durable invocation; refusing a second paid run",
+                                     code="review_custody_lost")
+    return None, "", None
+
+
 def recorded_review_shape(run_request: Any) -> Optional[Any]:
     """The run shape a stored review request recorded, or None when no review runs it.
 

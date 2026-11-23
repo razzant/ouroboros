@@ -231,6 +231,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "request": request_body(drive_root, row),
         "route": str(row.get("route") or ""),
         "project_id": str(row.get("project_id") or ""),
+        **({"project_resolution": row["project_resolution"]} if "project_resolution" in row else {}),
         "project_owned": bool(row.get("project_owned")),
         # Absence is a fact: legacy rows fall back to the stored request.
         **({"project_persistent": bool(row["project_persistent"])}
@@ -247,6 +248,9 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         # target the original attempt bound — never a re-derivation.
         "snapshot_id": str(row.get("snapshot_id") or ""),
         "execution_root": str(row.get("execution_root") or ""),
+        # The start's one workspace fact as recorded (a thread's folder included); absent on an older row.
+        **({"registration_workspace": row["registration_workspace"]}
+           if isinstance(row.get("registration_workspace"), str) else {}),
         "execution_binding_fingerprint": str(row.get("execution_binding_fingerprint") or ""),
         "baseline_sha": str(row.get("baseline_sha") or ""),
         "target_root": str(row.get("target_root") or ""),

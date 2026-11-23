@@ -162,6 +162,88 @@ def test_old_custody_upsert_invalidates_columns_in_its_own_transaction(tmp_path)
             "new", 1, seq + 1)
 
 
+def test_workspace_lookup_keeps_legacy_users_during_backfill(tmp_path):
+    from ouroboros.delegate_workspace_hold import workspace_holds, workspace_lock
+
+    folder = str(tmp_path / "q")
+    run = {"run_id": "ended", "project_id": "p", "task_id": "legacy", "settled": True, "source": "review_substrate"}
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.put_custody("ended", run, state="closed")
+        assert txn.conn.execute("SELECT registration_workspace FROM custody_runs").fetchone()[0] == ""
+        older = {**run, "request_event": {"request": {"execution": {"workspaceRoot": folder}}}}
+        # A v12 UPSERT advances the old sequence but does not assign the workspace projection.
+        txn.conn.execute("UPDATE custody_runs SET facts=?, write_seq=write_seq+1 WHERE run_id='ended'", (json.dumps(older),))
+        assert txn.conn.execute("SELECT registration_workspace FROM custody_runs").fetchone()[0] is None
+
+    for derived in (False, True):
+        if derived:
+            assert hot.run_hot_facts(tmp_path)["state"] == "done"
+            with store.open_store(tmp_path, write=False) as txn:
+                assert txn.conn.execute("SELECT registration_workspace FROM custody_runs").fetchone()[0] == folder
+        with workspace_lock(tmp_path, {}):
+            assert workspace_holds(tmp_path, None, "q", folder, {}, live_task_ids=set()) == (False, {"legacy"})
+
+
+def _drop_workspace_projection(txn):
+    txn.conn.execute("DROP TRIGGER custody_invalidate_workspace")
+    txn.conn.execute("DROP INDEX custody_workspace")
+    txn.conn.execute("DROP INDEX custody_workspace_underived")
+    txn.conn.execute("ALTER TABLE custody_runs DROP COLUMN registration_workspace")
+
+
+@pytest.mark.parametrize("version", [5, 11, 12])
+def test_workspace_lookup_reads_a_store_the_boot_has_not_upgraded(tmp_path, monkeypatch, version):
+    """A drive still at ``schema_version < WORKSPACE_VERSION`` (boot upgrades the root in place; a child waits
+    for its first writer) has no ``registration_workspace`` column or partial index: the passive lookup reads its
+    rows without DDL and still holds the registration — never a StoreError from the index it cannot name."""
+    from ouroboros.delegate_workspace_hold import workspace_holds, workspace_lock
+    from ouroboros.store_import import upgrade_current_schema
+
+    folder = str(tmp_path / "q")
+    (tmp_path / "q").mkdir()
+    row = json.dumps({"run_id": "old", "project_id": "p", "task_id": "legacy", "settled": True,
+                      "source": "review_substrate",
+                      "request_event": {"request": {"execution": {"workspaceRoot": folder}}}})
+    if version == 5:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_SCHEMA", store._SCHEMA.removesuffix(hot.SCHEMA))
+            patch.setattr(store, "SCHEMA_VERSION", version)
+            with store.open_store(tmp_path, write=True) as txn:
+                txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,project_id,facts,state) VALUES (?,?,?,?,?)",
+                                 ("old", "legacy", "p", row, "closed"))
+    else:
+        with store.open_store(tmp_path, write=True) as txn:
+            _task(txn, "legacy", status="completed", payload_release={"offers": {"offer": {"state": "open"}}})
+            stored_task = txn.body_text("legacy")
+            assert txn.row("legacy", "has_payload_offer") == 1
+            _drop_workspace_projection(txn)
+            if version == 11:
+                txn.conn.execute("DROP INDEX tasks_has_payload_offer")
+                txn.conn.execute("DROP INDEX tasks_underived_flags")
+                txn.conn.execute("ALTER TABLE tasks DROP COLUMN has_payload_offer")
+            txn.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(version),))
+            txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,project_id,facts,state) VALUES (?,?,?,?,?)",
+                             ("old", "legacy", "p", row, "closed"))
+    store.close_connections(store.store_path(tmp_path))
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == version
+        assert "registration_workspace" not in [each[1] for each in txn.conn.execute("PRAGMA table_info(custody_runs)")]
+    with workspace_lock(tmp_path, {}):
+        assert workspace_holds(tmp_path, None, "releasing", folder, {}, live_task_ids=set()) == (False, {"legacy"})
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == version, "the passive read ran no schema upgrade"
+        assert "registration_workspace" not in {record["name"] for record in txn.conn.execute("PRAGMA table_info(custody_runs)")}
+    if version == 5:  # Its upgrade is covered by test_schema_gate_is_atomic_and_never_decodes_old_bodies.
+        return
+    upgrade_current_schema(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION >= hot.WORKSPACE_VERSION > version
+        assert txn.row("legacy", "has_payload_offer") == 1 and txn.body_text("legacy") == stored_task
+        assert txn.conn.execute("SELECT registration_workspace FROM custody_runs WHERE run_id='old'").fetchone()[0] is None
+    with workspace_lock(tmp_path, {}):
+        assert workspace_holds(tmp_path, None, "releasing", folder, {}, live_task_ids=set()) == (False, {"legacy"})
+
+
 def _schema_five(root, monkeypatch):
     """A real pre-upgrade store, not a new schema with a falsified version stamp."""
     with monkeypatch.context() as patch:
@@ -891,8 +973,9 @@ def _lineage_chats(root, ids):
 
 
 def schema_ten(root):
-    """The store an older body left before the chat step: no chat column or index, version 10."""
+    """The pre-chat store lacks both the chat column and the later workspace projection."""
     with store.open_store(root, write=True) as txn:
+        _drop_workspace_projection(txn)
         txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_chat")
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
         txn.conn.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
@@ -959,6 +1042,7 @@ def test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_d
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.meta("schema_version") == store.SCHEMA_VERSION  # the upgrade reached the newest step
         assert hot.CHAT_VERSION <= store.SCHEMA_VERSION  # ...which includes the chat step (later steps may follow)
+        assert "registration_workspace" in {row["name"] for row in txn.conn.execute("PRAGMA table_info(custody_runs)")}
         assert txn.row("legacy", "chat_id") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
     assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # underived: its body
     assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"

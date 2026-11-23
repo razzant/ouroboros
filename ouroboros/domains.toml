@@ -1138,6 +1138,7 @@ D20 = "Presence"
 # F6 rolling-upstream sync (b9f7597f..8d13373b) — new upstream leaves, placed by
 # their campaign families (same evidence discipline as the base map).
 "ouroboros/delegate_registration_policy.py" = "D07"
+"ouroboros/delegate_workspace_hold.py" = "D07"
 "ouroboros/gateway/endpoint_index.py" = "D11"
 "ouroboros/gateway/routing_decision.py" = "D11"
 "ouroboros/gateway/task_decision.py" = "D11"

@@ -295,7 +295,9 @@ def test_smoke_retry_budget_and_final_no_mutation_are_strict(
     root.mkdir()
     (root / smoke.README_NAME).write_text(smoke.README_SEED, encoding="utf-8")
 
-    class FakeGateway:
+    from tests._bound_registration import BoundRegistry
+
+    class FakeGateway(BoundRegistry):
         engine_version = "9.9.9"
 
         def __init__(self):
@@ -308,9 +310,13 @@ def test_smoke_retry_budget_and_final_no_mutation_are_strict(
         def handshake(self):
             return {"protocolMajor": 3, "engine": {"sha": "a" * 40}}
 
-        def register_project(self, path):
+        def registered_root(self, project_id):
+            return str(root)
+
+        def project_registration_receipt(self, path):
             assert path == str(root)
-            return "project-1"
+            return {"id": "project-1", "created": True, "registration_root": path,
+                    "registration_store_id": self.store_identity}
 
         def start_run(self, request, idempotency_key):
             self.requests.append(request)
@@ -332,8 +338,9 @@ def test_smoke_retry_budget_and_final_no_mutation_are_strict(
         def cancel_run(self, run_id, reason):
             self.cancelled.append((run_id, reason))
 
-        def remove_project(self, project_id):
+        def release_registered(self, project_id):
             self.removed.append(project_id)
+            return "released"
 
         def close(self):
             self.closed += 1

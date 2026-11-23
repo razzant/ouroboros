@@ -243,6 +243,25 @@ def engine_key(record: Any) -> Optional[Tuple[str, str]]:
     return (str(ref.get("descriptor") or ""), str(ref.get("store") or "")) if is_work_ref(ref) else None
 
 
+def registration_engine(record: Any) -> tuple:
+    """Engine route and store for a registry duty. An unbound owned-engine row has (None, '').
+
+    A START that says its store is unproven (``store_identity_unproven``) keeps its route with an unknown store:
+    the store its reference names is the handshake's, never proof of where its POST lands. An older record
+    without that fact keeps the store it saved (``daemon_store_id``, else its reference's)."""
+    key = engine_key(record)
+    if isinstance(record, dict) and record.get("store_identity_unproven") is True:
+        return (key[0] if key else None, "")
+    store = record.get("daemon_store_id") if isinstance(record, dict) else getattr(record, "daemon_store_id", "")
+    return (key[0] if key else None, str(store or (key[1] if key else "")))
+
+
+def may_share_registration(left: Any, right: Any) -> bool:
+    """A missing store can hold a removal. Only equal registration_engine keys discharge duties."""
+    a, b = registration_engine(left), registration_engine(right)
+    return a[0] == b[0] and (a[1] == b[1] or not a[1] or not b[1])
+
+
 def engine_groups(*collections: Iterable[Any]) -> List[Tuple[dict, List[List[Any]]]]:
     """Split parallel collections (runs, pending invocations) by bound engine, the owned engine's group first;
     each group keeps one list per collection, in order. One group with an empty reference: nothing is bound."""

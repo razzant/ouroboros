@@ -13,6 +13,8 @@ a dict this process happens to still hold.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 from ouroboros.owner_pause import run_operation, OwnerPauseRefused
 from ouroboros.delegate_resume import BUSY as START_BUSY, UNREADABLE as START_UNREADABLE, checked_start, close_unsent_start, StartHeld
 
@@ -104,7 +106,9 @@ from ouroboros.deadline_utils import deadline_expired
 from ouroboros.delegate_directory import (
     blocked_geometry_refusal, git_directory_options_refusal, in_place_refusal, in_place_start, is_in_place_run,
     prepare_directory_execution, snapshot_checkout, started_receipt)
-from ouroboros.delegate_registration_policy import minted_root, resolve_registration
+from ouroboros.delegate_registration_policy import confirm_registration, minted_root, resolve_for_start, retire_unstarted
+from ouroboros.delegate_start_claims import PENDING_START_RETRY as _RETRY_HINT, claim_refusal_fields
+from ouroboros.delegate_workspace_hold import start_workspace
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
 from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, replayed_lineage, start_inputs
 from ouroboros.helper_receipt import build as build_receipt, render as render_receipt, start_facts
@@ -166,19 +170,6 @@ _CLAUDEXOR_MAX_SECONDS = 604_800
 # The process-local memo of the durable custody rows (the authority lives in the module
 # above); re-bound here because sibling code and tests name it on this surface.
 _CUSTODY = custody._CUSTODY
-_RETRY_HINT = ("Use delegate_start(retry_of=pending_invocation_id, prompt='') for this request. "
-               "After a Resume risk decision it can only look up the start. A plain call starts a new run.")
-
-
-def _unclaimed_start_facts(refusal, recovering):
-    facts = dict(refusal or {
-        "reason": "start_request_row_unwritable",
-        "detail": "The durable start-request row could not be written. Fix the drive/event log before retrying.",
-        **({} if recovering else {"definitely_unrun": True}),
-    })
-    reason = str(facts.pop("reason", "") or "replacement_custody_unknown")
-    detail = str(facts.pop("detail", "") or "Actor start claim unavailable.")
-    return reason, detail, facts
 
 
 def _held_start(code, invocation_id):
@@ -447,9 +438,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         bound = bounded_max_seconds(ctx, max_seconds)
         if bound.refusal_code:
             return _fail("delegate_start", bound.refusal_code, bound.refusal_detail, definitely_unrun=True)
-        seconds_basis = bound.basis
+        seconds, seconds_basis = bound.seconds, bound.basis
     drive = custody.custody_root(ctx)
-    owned_project_id, project_persistent, readonly_root = "", False, ""
+    owned_project_id, project_persistent, readonly_root, registration_resolution = "", False, "", None
     invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
     binding_fingerprint, held, named = "", None, _named_notes[1]  # the start's named-note receipt, or replayed below
     processing_info: Dict[str, Any] = {}
@@ -469,7 +460,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         (request_body, route, authority, root, key, project_id, owned_project_id,
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint,
-         seconds_basis, continuation, ttl_info, retained_inputs, row_processing, named) = binding
+         seconds_basis, continuation, ttl_info, retained_inputs, row_processing, named, used_workspace) = binding
         invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
     else:
         route, row_processing = actor["route"], actor.get("row_processing")  # the row's own tier: custody, never the request
@@ -496,12 +487,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             authority, assignment, payload_skill=payload_skill, coordination_context="" if continuation_token else _coordination_context,
         )
     start_attempted = recovering  # Recovery may already own a physical run.
+    registry_preparation = ExitStack()
     requested = False
     try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
         engine, gateway = start_engine(drive, retry_token, continuation_token)
     except ClaudexorUnavailable as exc:
         resolution = resolve_subagent_executor("harness", route=route, unavailable_reason=exc.code)
-        return _fail("delegate_start", exc.code, str(exc), executor=resolution.executor)
+        return _fail("delegate_start", exc.code, str(exc), executor=resolution.executor,
+                     **({"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT} if recovering else {}))
     history_facts = session_request_facts(
         request_body if recovering else {"model": route.model, "credentialProfileId": route.profile_id,
                                         "effort": route.effort, "access": authority.access},
@@ -524,7 +517,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 "The delegated route cannot run now. This is a typed blocker: do NOT "
                 "silently fall back onto metered API spend — decide explicitly "
                 "(wait for the reset, deliver partial work, or ask the parent).",
-                executor="blocked", reset_at=resolution.reset_at, route=route.route_id, definitely_unrun=True,
+                executor="blocked", reset_at=resolution.reset_at, route=route.route_id,
+                **({"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT} if recovering else {"definitely_unrun": True}),
             )
         snapshot = None
         if not recovering:
@@ -593,13 +587,22 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
             instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
             continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root, inputs.selection_note, named_notes=_named_notes[0])
-            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(gateway, scope_root, execution_root, authority.access,
-                minted=bool(readonly_root) or minted_root(scope_root, drive), thread=authority.mode == "plan" or bool(continuation.custody.get("thread_id")))
-            if directory_options or is_in_place_run({"resource_ref": resource_ref}):
-                project_persistent = True
+            sticky = authority.mode == "plan" or bool(continuation.custody.get("thread_id"))
+            # The one workspace fact its preparation, claim, retry and readers share: the body's execution folder, else
+            # the recorded execution root, else its thread's folder: a continued thread's own record, a new plan's
+            # in-place scope root (body, access and route unchanged).
+            thread_folder = ((continuation.folder or "") if continuation.custody.get("thread_id") else scope_root) if sticky else ""
+            used_workspace = start_workspace({"execution": {"workspaceRoot": execution_root}},
+                                             root if snapshot_id or resource_ref.get("strategy") in ("direct", "in_place") else "",
+                                             thread_folder)
+            project_id, owned_project_id, project_persistent, ephemeral, registration_resolution = resolve_for_start(
+                drive, gateway, scope_root, execution_root, authority.access,
+                minted=bool(readonly_root) or minted_root(scope_root, drive), thread=sticky,
+                persistent=bool(directory_options or is_in_place_run({"resource_ref": resource_ref})),
+                task_id=str(getattr(ctx, "task_id", "") or ""), invocation_id=invocation_id, preparation=registry_preparation,
+                used_workspace=used_workspace)
             if authority.access == "full":
                 gateway.ensure_full_access(scope_root)
-            seconds = bound.seconds
             documents = attach_selected_documents(ctx, gateway, route.route_id, attachment_paths, _document_intent, _document_first_start)
             instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service, start_body=None if continuation_token else f"{text}\n{instructions}", named_notes="" if continuation_token else _named_notes[0])
             held = getattr(ctx, "_session_held_heads", None)
@@ -607,9 +610,13 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                                           seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral, service_roots=service.roots,
                                           **({"directory_options": directory_options} if directory_options else {}))
             request_body, processing_info = _processing_start_request({**request_body, **documents.request}, actor, gateway, route)
+            if sticky:  # typed checks under the project lock, released before the thread creation below
+                confirm_registration(drive, gateway, {"project_id": project_id, "request": request_body, "invocation_id": invocation_id,
+                                                      "registration_workspace": used_workspace}, registration_resolution)
+            # Once thread creation can be in flight, a lost reply keeps its cleanup with the sweep.
+            project_persistent = project_persistent or sticky
             continuation = bind_start(gateway, request_body, route, invocation_id, continuation, authority,
                                       ceiling_authority, actor_facts, target_root, root if snapshot else "")
-            project_persistent = project_persistent or bool(continuation.custody.get("thread_id"))
             ttl_info = _prompt_cache_ttl_request(request_body, route, gateway, drive, continuation_token)
             history_facts["access"] = request_body["access"]
             key = custody.idempotency_key(getattr(ctx, "task_id", ""), route.route_id,
@@ -622,7 +629,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                               execution_binding_fingerprint=binding_fingerprint, **continuation.custody, **engine)
         requested, claim_refusal = claimed_start_request(
             drive, actor_ctx=ctx, initial_bootstrap=_initial_bootstrap and not recovering,
-            serving_store_id=str(getattr(gateway, "store_identity", "") or ""),
+            serving_store_id=str(getattr(gateway, "store_identity", "") or ""), gateway=gateway,
+            registration_resolution=registration_resolution,
             run_id="", task_id=str(getattr(ctx, "task_id", "") or ""),
             idempotency_key=key, invocation_id=invocation_id,  # claimed_start_request records store observations, not admission
             max_seconds=seconds, max_seconds_basis=seconds_basis, request=request_body, project_id=project_id,
@@ -630,20 +638,22 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             root_task_id=str(lineage.get("root_task_id") or ""), parent_task_id=str(lineage.get("parent_task_id") or ""),
             **snapshot_facts,
             execution_root=(root if snapshot_id or resource_ref.get("strategy") in ("direct", "in_place") else ""),
+            registration_workspace=used_workspace or "",  # "" (an older retried row): derived from body and root
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
             processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
             prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody, **({"held_heads": held} if held else {}), **({"named_notes": named} if named else {}),
         )
+        registry_preparation.close()  # A landed START_REQUESTED takes over the preparation's hold.
         if not requested or claim_refusal:
-            reason, detail, facts = _unclaimed_start_facts(claim_refusal, recovering)
-            return _fail(
-                "delegate_start", reason, detail, **facts,
-                **_retire_orphaned_registration(ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
-                    definite_refusal=not recovering,
-                    reason=reason, invocation_id=invocation_id, snapshot_id=("" if recovering else snapshot_id),
-                ),
-            )
+            reason, detail, facts = claim_refusal_fields(claim_refusal, invocation_id if recovering else "")
+            if reason == "registration_replaced":
+                owned_project_id = ""  # the old id no longer names this folder
+            settlement = _retire_orphaned_registration(
+                ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
+                definite_refusal=not recovering, resolution=registration_resolution, reason=reason,
+                invocation_id=invocation_id, snapshot_id="" if recovering else snapshot_id)
+            return _fail("delegate_start", reason, detail, **facts, **settlement)
         def submit():
             nonlocal start_attempted
             start_attempted = True  # The durable request is not physical submission.
@@ -659,35 +669,16 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     except StartHeld as exc:
         return _held_start(str(exc), invocation_id)
     except BaseException as exc:
-        typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
-        code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
-        # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
-        # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
-        definite = not start_attempted
-        if definite and requested:
-            definite = close_unsent_start(drive, str(ctx.task_id), invocation_id, code)
+        registry_preparation.close()
         if (start_attempted and isinstance(exc, ClaudexorUnavailable)
                 and (accepted := accepted_refused_start(drive, gateway, invocation_id, exc, request_body, inputs.selected,
                                                    _start_lineage(request_body, invocation_id, authority, inputs, recovering), named)) is not None):
             return accepted
-        try:
-            cleanup = _retire_orphaned_registration(
-                ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
-                definite_refusal=definite, reason=code,
-                invocation_id=invocation_id, snapshot_id=("" if recovering else snapshot_id))
-        except Exception:
-            log.warning("Start cleanup failed for %s", invocation_id, exc_info=True)
-            cleanup = {"project_id": owned_project_id, "project_retired": False,
-                       "project_retention_reason": "cleanup_unconfirmed"}
-        if not typed:
-            raise
-        # Only the caller identifies a retry: unknown returns the original token;
-        # definite refusal retires it, so the next intention gets a new identity.
-        pending = ({} if definite or not invocation_id else
-                   {"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT})
-        return _fail("delegate_start", code, str(exc), executor="blocked",
-                     **({"definitely_unrun": True} if definite else {}),
-                     reset_at=getattr(exc, "reset_at", ""), **pending, **cleanup)
+        return _settle_failed_start(ctx, gateway, exc, recovering=recovering, start_attempted=start_attempted,
+                                    requested=requested, invocation_id=invocation_id,
+                                    owned_project_id=owned_project_id, project_persistent=project_persistent,
+                                    history_facts=history_facts, registration_resolution=registration_resolution,
+                                    snapshot_id=snapshot_id)
     finally:
         gateway.close()
     # A start whose custody row did not land does not wear the plain name: the run
@@ -834,7 +825,7 @@ def _settle_refused_provision(ctx: ToolContext, gateway: Any, refusal: ToolResul
 
 def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: str, *,
                                   definite_refusal: bool, reason: str,
-                                  project_persistent: bool = False,
+                                  project_persistent: bool = False, resolution=None,
                                   invocation_id: str = "",
                                   snapshot_id: str = "", history_facts: Optional[dict] = None) -> Dict[str, Any]:
     """Retire a registration this start created but never bound to a run.
@@ -852,6 +843,8 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
     would 409 forever), while an unknown outcome leaves it pending so a transport retry
     presents the same key and lands on whatever the daemon really has. Written even
     with no registration to retire, because the invocation's fate is its own fact.
+    A registration another start or run on its engine still uses stays, its retirement
+    owed to the custody sweep (``delegate_registration_policy.retire_unstarted``).
     """
     if snapshot_id and definite_refusal and not any(  # a continuation's predecessor snapshot stays its run's
             run.snapshot_id == snapshot_id for run in custody.replay(custody.custody_root(ctx)).values()):
@@ -865,22 +858,19 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
         except Exception:
             log.warning("Failed to retire delegated execution snapshot %s", snapshot_id,
                         exc_info=True)
-    retired = False
+
+    def publish(retired, kept, owed=None):
+        return _emit(ctx, custody.START_FAILED, {"run_id": "", "project_id": project_id,
+            "project_retired": retired, "reason": reason, "invocation_id": invocation_id,
+            **({"project_retention_reason": kept} if kept else {}), "definite": bool(definite_refusal),
+            **({"registration_owed": owed} if owed is not None else {}), **(history_facts or {})})
+
+    retired, kept = False, ""
     if project_id and definite_refusal and not project_persistent:
-        try:
-            gateway.remove_project(project_id)
-            retired = True
-        except Exception as exc:
-            # A registration the daemon does not have is already retired: the same
-            # absence-is-discharge fact `retire_project` settles on.
-            retired = custody.daemon_says_absent(exc)
-            if not retired:
-                log.warning("Failed to retire orphaned delegated project %s", project_id, exc_info=True)
-    if project_id or invocation_id:
-        _emit(ctx, custody.START_FAILED, {"run_id": "", "project_id": project_id,
-                                          "project_retired": retired, "reason": reason,
-                                          "invocation_id": invocation_id,
-                                          "definite": bool(definite_refusal), **(history_facts or {})})
+        retired, kept = retire_unstarted(custody.custody_root(ctx), gateway, project_id, publish=publish, resolution=resolution,
+                                         task_id=str(getattr(ctx, "task_id", "") or ""), invocation_id=invocation_id)
+    elif project_id or invocation_id:
+        publish(False, "")
     if not project_id:
         return {"project_retired": False}
     if project_persistent and definite_refusal:
@@ -889,10 +879,51 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
         # has landed, so the lane cannot livelock on a forever-pending id.
         return {"project_retired": False, "project_id": project_id,
                 "project_retention_reason": "persistent_registration"}
+    if kept:
+        return {"project_retired": False, "project_id": project_id, "project_retention_reason": kept}
     if retired or definite_refusal:
         return {"project_retired": retired, "project_id": project_id}
     return {"project_retired": False, "project_id": project_id,
             "project_retention_reason": "start_outcome_unknown_run_may_exist"}
+
+
+def _settle_failed_start(ctx: ToolContext, gateway: Any, exc: BaseException, *, recovering: bool,
+                         start_attempted: bool, requested: bool, invocation_id: str, owned_project_id: str,
+                         project_persistent: bool, history_facts: Optional[dict],
+                         registration_resolution: Any, snapshot_id: str) -> ToolResult:
+    """The settlement every start that fails between its route check and its POST reaches
+    once: a recorded request is closed as unsent before anything retires (a Resume decision
+    keeps it lookup-only and unknown), the orphaned registration retires through the same one
+    path (an unknown outcome keeps it for the custody sweep), the invocation's fate row lands
+    either way (#1241), and a typed failure answers with the refusal a retry can act on;
+    anything else re-raises after cleanup."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    typed = isinstance(exc, (ClaudexorUnavailable, OwnerPauseRefused))
+    code = getattr(exc, "code", str(exc)) if typed else f"pre_custody_exit_{type(exc).__name__}"
+    # A request row is not a POST; an entered one stays unknown whatever the engine answered (its accepted
+    # work is read), so only a fresh start that never entered it is definite. Recovery retains its fate.
+    definite = not start_attempted
+    if definite and requested:
+        definite = close_unsent_start(custody.custody_root(ctx), str(ctx.task_id), invocation_id, code)
+    try:
+        cleanup = _retire_orphaned_registration(
+            ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,
+            definite_refusal=definite, reason=code, resolution=registration_resolution,
+            invocation_id=invocation_id, snapshot_id=("" if recovering else snapshot_id))
+    except Exception:
+        log.warning("Start cleanup failed for %s", invocation_id, exc_info=True)
+        cleanup = {"project_id": owned_project_id, "project_retired": False,
+                   "project_retention_reason": "cleanup_unconfirmed"}
+    if not typed:
+        raise
+    # Only the caller identifies a retry: unknown returns the original token;
+    # definite refusal retires it, so the next intention gets a new identity.
+    pending = ({} if definite or not invocation_id else
+               {"pending_invocation_id": invocation_id, "retry_hint": _RETRY_HINT})
+    return _fail("delegate_start", code, str(exc), executor="blocked",
+                 **({"definitely_unrun": True} if definite else {}),
+                 reset_at=getattr(exc, "reset_at", ""), **pending, **cleanup)
 
 
 class MaxSecondsBound(NamedTuple):

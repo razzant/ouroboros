@@ -544,34 +544,73 @@ def test_a_window_closing_while_the_successor_project_registers_retires_it_and_w
     """A successor whose recorded scope names a registered project registers it before its START is written, and the
     window closes during that registration: no START will ever name the registration it created, so it is retired
     again, and the seat settles as never sent (a definite zero-send, offered no more)."""
-    from ouroboros import deadline_utils, observability
+    from ouroboros import deadline_utils, delegate_registration_policy
+    from tests._bound_registration import enable_start_registry
     from tests._review_session_route_shared import FakeGateway
 
     a = stopped_wave
+    monkeypatch.setattr(delegate_registration_policy, "ephemeral_scope", lambda *_a, **_kw: False)
     first = _timed_wave(a, monkeypatch)
+    scope = a.engine.posts[0][0]["scope"]
+    assert scope["kind"] == "project" and not scope.get("ephemeral")
     decision = _recorded_then_crashed(a, monkeypatch, first)
     clock = _shifted_clock(monkeypatch, (_original_end(a) - deadline_utils.utc_now()).total_seconds() - 10)
-    read, register, removed = observability.read_blob_ref, FakeGateway.register_project, []
-
-    def registered_scope(*args, **kwargs):  # the recorded body as a review of a registered project carries it
-        body = read(*args, **kwargs)
-        if isinstance(body, dict) and isinstance(body.get("scope"), dict):
-            body["scope"] = {key: value for key, value in body["scope"].items() if key != "ephemeral"}
-        return body
+    before, register = len(FakeGateway.instances), FakeGateway.register_project
+    enable_start_registry(monkeypatch, FakeGateway)
 
     def slow_registration(self, root):  # the engine takes 15 s to register it
         clock["offset"] += timedelta(seconds=15)
         return register(self, root)
-    monkeypatch.setattr(observability, "read_blob_ref", registered_scope)
     monkeypatch.setattr(FakeGateway, "project_unregistered", True)
     monkeypatch.setattr(FakeGateway, "register_project", slow_registration)
-    monkeypatch.setattr(FakeGateway, "remove_project", lambda self, project_id: removed.append(project_id) or {"removed": True})
     collected = _call(a, review_reference=first["review_reference"])
     seat = _seat(a, first["record_id"])
-    assert len(a.engine.posts) == 1 and removed == ["proj-new"], (a.engine.posts[1:], removed)
+    gateways = FakeGateway.instances[before:]
+    assert [root for gateway in gateways for root in gateway.registrations] == [scope["root"]]
+    assert len(a.engine.posts) == 1 and [project for gateway in gateways for project in gateway.removals] == ["proj-new"]
     assert delegate_custody.invocation_record(a.data, decision["invocation_id"]) is None
     assert (seat["status"], seat["failure_code"]) == ("not_dispatched", review_continuation.WINDOW_SPENT), seat
     assert collected["continuation"]["window_spent"] == ["second"], collected
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["run", "thread"])
+@pytest.mark.parametrize("refused", [False, True], ids=["claimed", "unsent"])
+def test_review_successor_preparation_protects_the_recorded_project(fake_route, tmp_path, monkeypatch, threaded, refused):
+    from ouroboros import delegate_custody_usage as usage
+    from ouroboros.observability import write_blob
+
+    body = {"prompt": "stopped review", "access": "readonly", "scope": {"kind": "project", "root": str(tmp_path)}}
+    if threaded:
+        body.update(_thread_id="fixture-thread", _use_thread=True)
+    old = "inv-old"
+    assert delegate_custody.record_start_requested(tmp_path, task_id=TASK, invocation_id=old, request=body,
+                                                   project_id="proj-1", idempotency_key=old)
+    assert delegate_custody.record_started(tmp_path, delegate_custody.RunCustody(
+        run_id="stopped", task_id=TASK, project_id="proj-1", invocation_id=old))
+    decision = {"invocation_id": "inv-new", "origin_invocation_id": old, "continues_run": "stopped",
+                "request_ref": write_blob(tmp_path, body, kind="json"), "surface": "scope_review",
+                "operation_id": "review_continue_fixture", "thread_id": body.get("_thread_id", "")}
+    record = delegate_custody.record_start_requested
+    seen = []
+
+    def inspect(root, **kwargs):
+        with usage.project_retirement_lock(root, "proj-1"):
+            seen.append(usage.project_preparing(root, "proj-1", {}))
+        if refused:
+            raise OSError("request was not written")
+        return record(root, **kwargs)
+
+    monkeypatch.setattr(delegate_custody, "record_start_requested", inspect)
+    if refused:
+        with pytest.raises(OSError, match="request was not written"):
+            review_continuation._start_requested(tmp_path, TASK, "seat", decision)
+        assert not delegate_custody.invocation_record(tmp_path, "inv-new")
+    else:
+        assert review_continuation._start_requested(tmp_path, TASK, "seat", decision)
+        assert delegate_custody.invocation_record(tmp_path, "inv-new")["project_id"] == "proj-1"
+    assert seen == [True] and not fake_route.instances[-1].registrations and not fake_route.instances[-1].start_requests
+    with usage.project_retirement_lock(tmp_path, "proj-1"):
+        assert not usage.project_preparing(tmp_path, "proj-1", {})
 
 
 def test_an_owner_deadline_inside_the_window_bounds_the_delayed_successor_start_and_its_polling(stopped_wave, monkeypatch):

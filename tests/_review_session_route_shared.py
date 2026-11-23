@@ -126,6 +126,8 @@ class FakeGateway:
 
     def find_project_id(self, root):
         self.project_lookups.append(root)
+        if root in self.registrations:  # what this engine registered it lists from then on
+            return "proj-new"
         return "" if FakeGateway.project_unregistered else "proj-1"
 
     def register_project(self, root):
@@ -134,7 +136,7 @@ class FakeGateway:
 
     def remove_project(self, project_id):
         self.removals.append(project_id)
-        return {"removed": True}
+        return {"projectId": project_id, "registryRemoved": True}
 
     def start_run(self, request, *, idempotency_key=""):
         self.start_requests.append(dict(request))
