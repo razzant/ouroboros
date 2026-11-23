@@ -1,0 +1,129 @@
+# Temporary hosted qualification of the proposed merge, not part of the product.
+name: Skills shape check (one-off)
+
+on:
+  push:
+    branches: ['ci-check/skills-shape-06bfc223']
+
+permissions:
+  contents: read
+
+jobs:
+  shape:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      PREVIEW_SHA: d424e814c4e2a10f2987b1fc279b2d69bb3d435d
+      PREVIEW_TREE: 06bfc223faf38f4383000818ca96bc245c3305d1
+      PREVIEW_BASE: 3c27e01388edd6befe883c50104df2c697a9ab62
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.PREVIEW_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      # Git only; no later step runs unless this passes. A GitHub merge preview has the size base as its first parent
+      # (a longer linear branch would need full depth and merge-base instead).
+      - name: Pin the clean preview and its size base
+        run: |
+          test "$(git rev-parse HEAD)" = "$PREVIEW_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PREVIEW_TREE"
+          test "$(git rev-parse HEAD^1)" = "$PREVIEW_BASE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      # The one helper lives in the runner temp, not the checkout: it runs a group under the repository's safe_test.py
+      # with the named absolute interpreter, then reads that group's JUnit exactly against the listed ids and prints
+      # names and statuses only.
+      - name: Name the absolute interpreter and write the helper
+        id: helper
+        run: |
+          PY="$(python -c 'import sys; print(sys.executable)')"
+          case "$PY" in /*) ;; *) exit 1 ;; esac
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/g.py" <<'EOF'
+          import os, subprocess, sys
+          import xml.etree.ElementTree as ET
+
+          group, secs, *args = sys.argv[1:]
+          py, tmp, ruff = os.environ["PY"], os.environ["RUNNER_TEMP"] + "/shape", group == "ruff"
+          env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_EVENT_NAME", "GITHUB_REF")}  # a push event would skip book growth
+          junit = f"{tmp}/{group}.junit.xml"
+          if ruff:
+              diff = subprocess.run(["git", "diff", "-z", "--name-only", "--diff-filter=ACMR", env["PREVIEW_BASE"], "HEAD", "--", "*.py"],
+                                    capture_output=True, text=True, check=True).stdout
+              args = [f for f in diff.split("\0") if f] or sys.exit("ruff: no changed Python file; nothing checked is not a pass")
+              ids, cmd = ["ruff::check --select F"], [py, "-m", "ruff", "check", "--select", "F", "--no-cache", *args]
+          else:
+              ids = [a for a in args if "::" in a]
+              cmd = [py, "-m", "pytest", "-o", "addopts=", "-p", "no:cacheprovider", "-q", "--tb=short", "--color=no",
+                     "--timeout=300", "--junitxml=" + junit, *args]
+          os.makedirs(f"{tmp}/ev/{group}", exist_ok=True)
+          code = subprocess.run([py, "-I", "-S", "scripts/safe_test.py", "--timeout", secs, "--evidence-dir", f"{tmp}/ev/{group}",
+                                 "--", *cmd], env=env).returncode
+          if ruff:  # inert JUnit derived from the one real run: one case carrying its exit, nothing claimed per file
+              suite = ET.Element("testsuite", name="ruff", tests="1", failures=str(int(code != 0)))
+              case = ET.SubElement(suite, "testcase", classname="ruff", name="check --select F")
+              if code:
+                  ET.SubElement(case, "failure", message=f"exit {code}")
+              ET.SubElement(case, "system-out").text = f"exit {code} over {len(args)} files"
+              ET.ElementTree(suite).write(junit, encoding="utf-8", xml_declaration=True)
+          want = {(i.split("::")[0].removesuffix(".py").replace("/", "."), i.split("::", 1)[1]): i for i in ids}
+          cases = list(ET.parse(junit).getroot().iter("testcase"))
+          got = {(c.get("classname"), c.get("name")): {m.tag for m in c if m.tag in ("failure", "error", "skipped")}
+                 for c in cases}
+          for key, node in want.items():
+              print("MISSING" if key not in got else "/".join(sorted(got[key])).upper() or "PASSED", node)
+          for key in got.keys() - want.keys():
+              print("UNLISTED", *key)
+          ok = code == 0 and len(cases) == len(got) == len(want) and got.keys() == want.keys() and not any(got.values())
+          print(f"{group}: exit {code}, {'PASS' if ok else 'NOT A PASS'}")
+          sys.exit(not ok)
+          EOF
+      - name: "size: the seven size_ratchet tests, measured from the exact base"
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: ${{ env.PREVIEW_BASE }}
+          OURO_BOOK_GROWTH_MODE: block
+        run: >-
+          "$PY" -I "$RUNNER_TEMP/g.py" size 900 -m size_ratchet
+          tests/test_smoke.py::test_no_oversized_modules
+          tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree
+          tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base
+          tests/test_smoke.py::test_no_extremely_oversized_functions
+          tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book
+          tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts
+          tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact
+      - name: "domains: manifest completeness, direction matrix, checker CLI"
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        run: >-
+          "$PY" -I "$RUNNER_TEMP/g.py" domains 600
+          tests/test_domain_manifest.py::test_manifest_covers_the_tracked_population_exactly
+          tests/test_domain_manifest.py::test_strict_direction_matrix_matches_the_pinned_baseline
+          tests/test_domain_manifest.py::test_checker_cli_is_green_on_this_tree
+      - name: "inventories and guides: UI-control snapshot, frozen contracts, architecture map, reference books"
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        run: >-
+          "$PY" -I "$RUNNER_TEMP/g.py" inventories 600
+          tests/test_generated_inventories.py::test_ui_control_text_inventory_is_byte_identical
+          tests/test_generated_inventories.py::test_every_frozen_contract_reference_resolves
+          tests/test_docs_sync.py::test_architecture_component_map_covers_every_live_runtime_module
+          tests/test_reference_book_validation.py::test_current_reference_books_pass_the_final_chaptered_admission
+      # skill_exec._EXEC_SCHEMA is what the patch changes. I found no static test of its parameters, and
+      # test_workflow_skill_finality.py::test_exec_schema_states_the_author_path_its_gate_permits runs a script, so it
+      # stays out. These are the closest static registry-wide checks: skill_exec registered, the parameters shape of
+      # every registered schema, its policy entry, its frozen module.
+      - name: "skill declarations: skill_exec registration, schema parameters, policy entry"
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        run: >-
+          "$PY" -I "$RUNNER_TEMP/g.py" skills 600
+          "tests/test_smoke.py::test_tool_registered[skill_exec]"
+          tests/test_smoke.py::test_tool_schemas_valid
+          tests/test_skill_exec.py::test_skill_exec_tools_have_policy_entries
+          tests/test_skill_exec.py::test_skill_exec_in_frozen_modules
+      - name: "ruff: F rules on the Python files the preview changes (one run, one derived JUnit case)"
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
+        run: '"$PY" -I "$RUNNER_TEMP/g.py" ruff 300'
