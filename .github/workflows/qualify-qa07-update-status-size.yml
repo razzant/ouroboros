@@ -1,0 +1,34 @@
+name: QA07 update-status size witness
+on:
+  push:
+    branches: [qualification/qa07-update-status-size]
+permissions:
+  contents: read
+jobs:
+  size-witness:
+    if: github.repository == 'razzant/ouroboros'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the exact product candidate
+        env:
+          PRODUCT: 66e0914cfe54648bc75642b394225c1b4d08d89d
+          BASE: c8d5bbd8ef67c2f29dd7b37d66ee0a6bef34ab63
+        run: |
+          test "$(git rev-parse HEAD^)" = "$PRODUCT"
+          test "$(git rev-parse "$PRODUCT^")" = "$BASE"
+          git switch --detach "$PRODUCT"
+          git rev-parse HEAD HEAD^{tree}
+      - uses: ./.github/actions/setup-python-env
+      - name: Run the repository size witnesses
+        env:
+          OURO_SIZE_RATCHET_BASE_REF: c8d5bbd8ef67c2f29dd7b37d66ee0a6bef34ab63
+        run: >-
+          python -m pytest -o addopts= -q -m size_ratchet
+          tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree
+          tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base
+          tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact
