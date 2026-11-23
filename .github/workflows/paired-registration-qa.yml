@@ -1,0 +1,268 @@
+# Separation of concerns:
+#  - engine-contract and host-registry are product checks on the two candidates;
+#    no QA fixture files and no tokens are involved.
+#  - paired-registration and shared-catalog-consumer stage the consumable kit
+#    files (pair-test, pair-driver, consumer-test) from ./qa into the disposable
+#    engine checkout and run them. The one-time operator token is generated inside
+#    the test process (randomBytes) and passed to the driver over stdin only; no
+#    token ever appears in workflow env, logs, or step input.
+name: Paired registration QA
+on:
+  push:
+    branches: [qa/paired-registration]
+permissions:
+  contents: read
+env:
+  # Exact CI subjects, including the host corrections made after review.
+  OUROBOROS_SHA: a74446f9f8559f890069aebe81481b919064f8e7
+  CLAUDEXOR_SHA: 86b28aac09370f1b04612ceeafb2c60cb0d49459
+  OUROBOROS_TREE: 1ca619ffe17052964d4880be32ebe4360c74a0c5
+  CLAUDEXOR_TREE: e739091db4dedd667057e6b6cf5b39bc4b139e85
+
+jobs:
+  engine-contract:
+    # Product checks on the engine candidate only (bound registration routes and
+    # store home tests, the release-fence holder reads, plus the revert-replay
+    # guard).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: razzant/claudexor
+          ref: ${{ env.CLAUDEXOR_SHA }}
+          path: claudexor
+          persist-credentials: false
+      - name: Verify the engine subject
+        shell: bash
+        run: |
+          [[ "$CLAUDEXOR_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git -C claudexor rev-parse HEAD)" = "$CLAUDEXOR_SHA"
+          test "$(git -C claudexor rev-parse 'HEAD^{tree}')" = "$CLAUDEXOR_TREE"
+          printf 'Claudexor %s (%s)\n' "$CLAUDEXOR_SHA" "$CLAUDEXOR_TREE"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.3'
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: claudexor/package.json
+      - name: Build the disposable engine checkout
+        working-directory: claudexor
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter '@claudexor/cli...' build
+          test -f packages/daemon/dist/store/flusher-worker.js
+      - name: Fail loudly on any missing referenced engine test
+        working-directory: claudexor
+        shell: bash
+        run: |
+          for f in \
+            packages/daemon/src/store/project-registration-release.test.ts \
+            packages/daemon/src/store/project-registration-holders.test.ts \
+            packages/control-api/src/project-registration-routes.test.ts \
+            packages/daemon/src/store/project-contract.test.ts \
+            packages/daemon/src/store/deferred-project-routing.test.ts \
+            packages/cli/src/thread-history.integration.test.ts \
+            packages/cli/src/thread-delivery-receipt.test.ts \
+            packages/control-api/src/run-delivery-refusal-code.test.ts \
+          ; do test -f "$f" || { echo "missing engine test: $f"; exit 1; }; done
+      - name: Check the bound registry, release-fence holders and routing home tests
+        working-directory: claudexor
+        run: >-
+          pnpm test --passWithNoTests=false
+          packages/daemon/src/store/project-registration-release.test.ts
+          packages/daemon/src/store/project-registration-holders.test.ts
+          packages/control-api/src/project-registration-routes.test.ts
+          packages/daemon/src/store/project-contract.test.ts
+          packages/daemon/src/store/deferred-project-routing.test.ts
+          packages/cli/src/thread-history.integration.test.ts
+          packages/cli/src/thread-delivery-receipt.test.ts
+      - name: Check that replay preserves a completed Revert
+        working-directory: claudexor
+        shell: bash
+        run: |
+          pnpm test --passWithNoTests=false --reporter=json --outputFile="$RUNNER_TEMP/revert.json" \
+            -t 'a replay after revert_run stays reverted over the reverted tree, its anchor unchanged' \
+            packages/control-api/src/run-delivery-refusal-code.test.ts
+          node -e 'const r=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); if (!r.success || r.numPassedTests!==1) process.exit(1)' "$RUNNER_TEMP/revert.json"
+
+  paired-registration:
+    # Product A/B lifecycle: host run A is definitely unsent, run B is pending;
+    # the shared registration survives both and is released exactly once after
+    # settlement. Consumables: qa/pair-qa/paired-registration.test.ts (staged into
+    # the engine's packages/cli/src) and qa/pair-qa/positive.py (read from qa/).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: qa
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.OUROBOROS_SHA }}
+          path: ouroboros
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: razzant/claudexor
+          ref: ${{ env.CLAUDEXOR_SHA }}
+          path: claudexor
+          persist-credentials: false
+      - name: Verify the paired subjects
+        shell: bash
+        run: |
+          [[ "$OUROBOROS_SHA" =~ ^[a-f0-9]{40}$ && "$CLAUDEXOR_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git -C ouroboros rev-parse HEAD)" = "$OUROBOROS_SHA"
+          test "$(git -C claudexor rev-parse HEAD)" = "$CLAUDEXOR_SHA"
+          test "$(git -C ouroboros rev-parse 'HEAD^{tree}')" = "$OUROBOROS_TREE"
+          test "$(git -C claudexor rev-parse 'HEAD^{tree}')" = "$CLAUDEXOR_TREE"
+          printf 'Ouroboros %s (%s)\nClaudexor %s (%s)\n' "$OUROBOROS_SHA" "$OUROBOROS_TREE" "$CLAUDEXOR_SHA" "$CLAUDEXOR_TREE"
+      - name: Fail loudly on any missing kit file
+        shell: bash
+        run: |
+          for f in \
+            qa/pair-qa/paired-registration.test.ts \
+            qa/pair-qa/positive.py \
+          ; do test -f "$f" || { echo "missing QA kit file: $f"; exit 1; }; done
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.3'
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: claudexor/package.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install locked Python dependencies
+        run: python3 -m pip install -r ouroboros/requirements-runtime.lock
+      - name: Build the disposable engine checkout
+        working-directory: claudexor
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter '@claudexor/cli...' build
+          test -f packages/daemon/dist/store/flusher-worker.js
+      - name: Stage the paired fixture and run its lifecycle
+        working-directory: claudexor
+        env:
+          PAIR_QA_JOB: github-hosted
+        run: |
+          install -m 644 ../qa/pair-qa/paired-registration.test.ts packages/cli/src/paired-registration.test.ts
+          test -f packages/cli/src/paired-registration.test.ts
+          pnpm test --passWithNoTests=false packages/cli/src/paired-registration.test.ts
+
+  shared-catalog-consumer:
+    # The ordinary consumer: a queued command of project P uses the separately
+    # registered catalog Q; Q is held while queued and archived exactly once after
+    # the command closes; the independent R releases freely. Consumable:
+    # qa/consumer/shared-catalog-normal-use.test.ts (staged into packages/cli/src).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: qa
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: razzant/claudexor
+          ref: ${{ env.CLAUDEXOR_SHA }}
+          path: claudexor
+          persist-credentials: false
+      - name: Verify the engine subject
+        shell: bash
+        run: |
+          [[ "$CLAUDEXOR_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git -C claudexor rev-parse HEAD)" = "$CLAUDEXOR_SHA"
+          test "$(git -C claudexor rev-parse 'HEAD^{tree}')" = "$CLAUDEXOR_TREE"
+          printf 'Claudexor %s (%s)\n' "$CLAUDEXOR_SHA" "$CLAUDEXOR_TREE"
+      - name: Fail loudly on any missing kit file
+        shell: bash
+        run: |
+          test -f qa/consumer/shared-catalog-normal-use.test.ts \
+            || { echo "missing QA kit file: qa/consumer/shared-catalog-normal-use.test.ts"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.3'
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: claudexor/package.json
+      - name: Build the disposable engine checkout
+        working-directory: claudexor
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter '@claudexor/cli...' build
+          test -f packages/daemon/dist/store/flusher-worker.js
+      - name: Stage the consumer fixture and run it
+        working-directory: claudexor
+        env:
+          SHARED_CATALOG_QA_JOB: github-hosted
+        run: |
+          install -m 644 ../qa/consumer/shared-catalog-normal-use.test.ts packages/cli/src/shared-catalog-normal-use.test.ts
+          test -f packages/cli/src/shared-catalog-normal-use.test.ts
+          pnpm test --passWithNoTests=false packages/cli/src/shared-catalog-normal-use.test.ts
+
+  host-registry:
+    # Host-side checks on the host candidate in the same isolated runner: retention,
+    # legacy records, workspace holds, old-engine compatibility, and the agreed S11
+    # scenario.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.OUROBOROS_SHA }}
+          persist-credentials: false
+      - name: Verify the host subject and pin the scenario source
+        shell: bash
+        run: |
+          [[ "$OUROBOROS_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$OUROBOROS_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$OUROBOROS_TREE"
+          git switch -c registration-scenario-source "$OUROBOROS_SHA"
+      - name: Fail loudly on any missing referenced host test
+        shell: bash
+        run: |
+          for f in \
+            tests/test_delegate_registration_recovery.py \
+            tests/test_delegate_shared_registration.py \
+            tests/test_claudexor_bound_registration.py \
+            tests/test_delegate_workspace_hold.py \
+            tests/test_historical_retirement.py \
+            tests/system_e2e/test_system_scenarios_w3b.py \
+            .github/actions/setup-python-env/action.yml \
+          ; do test -e "$f" || { echo "missing host file: $f"; exit 1; }; done
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Check host retention, legacy records, workspace holds and old-engine compatibility
+        run: >-
+          python -m pytest -o addopts='' -q --tb=short
+          tests/test_delegate_registration_recovery.py
+          tests/test_delegate_shared_registration.py
+          tests/test_claudexor_bound_registration.py
+          tests/test_delegate_workspace_hold.py
+          tests/test_historical_retirement.py::test_historical_minted_folder_requires_original_registration_ownership
+      - name: Run the agreed S11 scenario on the isolated runner
+        env:
+          OUROBOROS_E2E_DEEP: mock
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/registration-s11/app
+          OUROBOROS_REPO_DIR: ${{ runner.temp }}/registration-s11/repo
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/registration-s11/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/registration-s11/data/settings.json
+        shell: bash
+        run: |
+          python -m pytest -o addopts='' -q --tb=short --junitxml="$RUNNER_TEMP/s11.xml" tests/system_e2e/test_system_scenarios_w3b.py::test_s11_delegated_transport_wire_custody_and_typed_refusals
+          python - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as ET
+          result = ET.parse(pathlib.Path(os.environ['RUNNER_TEMP']) / 's11.xml')
+          cases = list(result.iter('testcase'))
+          assert len(cases) == 1 and cases[0].get('name') == 'test_s11_delegated_transport_wire_custody_and_typed_refusals'
+          assert not any(cases[0].find(k) is not None for k in ('failure', 'error', 'skipped'))
+          print('S11 passed on host commit', os.environ['OUROBOROS_SHA'])
+          PY
