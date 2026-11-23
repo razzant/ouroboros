@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-s5ZdNLRaYizA2qTmeEByIJ11YS6ZF4EEvZRW3bWVbn8='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hJEJgDpuh22MRmLEVHT2H2D4xSblifnA8TdN8j4Okog='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -498,12 +498,12 @@ function showBuild(facts) {
   const total = usage?.prompt_tokens;
   const cached = usage?.cached_tokens;
   const split = knownCount(total) && total > 0 && knownCount(cached) && cached <= total;
-  write('Ledger text input', tokenWords(total));
+  write('Ledger input', tokenWords(total));
   write('Ledger cache read', tokenWords(cached)
     + (split ? ` · ${(cached / total).toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 })} of input` : ''));
-  if (split) write('Other text input', tokenWords(total - cached));
+  if (split) write('Input outside the recorded cache read', tokenWords(total - cached));
   write('Ledger cache write', tokenWords(usage?.cache_write_tokens));
-  write('Ledger text output', tokenWords(usage?.completion_tokens));
+  write('Ledger output', tokenWords(usage?.completion_tokens));
   const reported = reportedUsage(facts);
   write('Provider token receipt', reported ? 'Recorded for this attempt' : 'Not recorded for this attempt');
   if (reported) for (const [key, label] of REPORTED_COUNTS) {
@@ -699,7 +699,7 @@ function contributionWords(late) {
       details.push(...lines);
     }
     const attachments = row.family === 'attachment_manifest' && (row.manifest_unavailable ? 'file list unavailable'
-      : `${count(row.manifest_items)} entries considered · ${count(row.manifest_path_only)} files not read as images`
+      : `${count(row.manifest_items)} entries considered · ${count(row.manifest_path_only)} non-image or path-only entries`
         + (Number.isSafeInteger(row.manifest_pixels) ? ` · ${count(row.manifest_pixels)} opened as images before routing` : ''));
     const label = attachments ? `${title}: ${attachments}` : forms.has(row.form) ? `${title}, ${forms.get(row.form)}` : title;
     const tally = groups.get(label) || [0, 0, 0];
@@ -784,6 +784,7 @@ function refuse(epoch, reason) {
 const comparisonInput = byId('comparison-file');
 const comparisonStatus = byId('comparison-status');
 const comparisonFacts = byId('comparison-facts');
+const comparison = byId('comparison');
 let firstReport = null;
 let comparisonGeneration = 0;
 function clearComparison() {
@@ -791,6 +792,10 @@ function clearComparison() {
   comparisonInput.value = '';
   comparisonStatus.textContent = '';
   comparisonFacts.replaceChildren();
+  if (!byId('archive').hidden) {
+    comparison.hidden = true;
+    comparison.open = false;
+  }
   const details = byId('comparison-technical');
   details.hidden = true;
   details.open = false;
@@ -1033,7 +1038,8 @@ function bindArchive(api) {
     if (!earlier || !firstReport) return;
     clearComparison();
     const epoch = comparisonGeneration;
-    byId('comparison').open = true;
+    comparison.hidden = false;
+    comparison.open = true;
     compare.disabled = true;
     comparisonStatus.textContent = 'Reading the previous request…';
     try {

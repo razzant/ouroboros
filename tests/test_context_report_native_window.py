@@ -98,6 +98,7 @@ _SNAPSHOT = r'''(() => {
     reportVisible: !get('report-result').hidden,
     importHidden: get('report-opening').hidden,
     compareDisabled: get('archive-compare').disabled,
+    comparisonHidden: get('comparison').hidden,
     compared: get('comparison').open,
     identitiesHidden: get('comparison-technical').hidden,
     identities: fields('comparison-identities'),
@@ -185,6 +186,7 @@ def _exercise(window, fixture, artifacts):
     a = _await_page(window, 'project A opens its latest saved request', selected(fixture['zero']))
     assert a['attempts'] == [fixture[key] for key in ('zero', 'unreported', 'older')], a['attempts']
     assert not a['compareDisabled'] and A_MARKERS[0] in a['request'], a['request']
+    assert a['comparisonHidden'] and not a['compared'], a
     assert a['build']['Provider token receipt'] == 'Recorded for this attempt', a['build']
     assert a['build']['Provider · Cache read'] == '0 tokens', a['build']
 
@@ -211,7 +213,8 @@ def _exercise(window, fixture, artifacts):
     }
     for label, value in expected.items():
         assert compared['comparison'].get(label) == value, (label, value, compared['comparison'])
-    assert compared['compared'] and compared['comparisonStatus'].startswith('Selected request compared with Previous')
+    assert not compared['comparisonHidden'] and compared['compared']
+    assert compared['comparisonStatus'].startswith('Selected request compared with Previous')
     assert compared['identities']['Compared task / attempt'] == f"tide-fixture / {fixture['unreported']}"
     assert compared['identities']['Selected task / attempt'] == f"tide-fixture / {fixture['zero']}"
 
@@ -220,6 +223,7 @@ def _exercise(window, fixture, artifacts):
     _screenshot(window, artifacts / 'b-after-switch.png')
     assert b['room'] == str(fixture['b']) and b['attempts'] == [fixture['single']], (b['room'], b['attempts'])
     assert B_MARKER in b['request'] and b['compareDisabled'], b['request']
+    assert b['comparisonHidden'], b
     assert b['identitiesHidden'] and not (b['compared'] or b['comparison'] or b['identities'] or b['comparisonStatus']), b
     a_traces = (*A_MARKERS, 'tide-fixture', *(fixture[key] for key in ('zero', 'unreported', 'older')))
     retained = [trace for trace in a_traces if trace in b['dom'] or trace in b['attempts']]

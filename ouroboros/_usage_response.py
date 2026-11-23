@@ -544,6 +544,37 @@ def provider_token_counts(raw: Dict[str, Any]) -> dict:
     }.items() if value is not None and value <= 2**53 - 1}
 
 
+class ChatUsageReceipt:
+    """Attempt-bound Chat SSE counters. None means no actual usage object arrived."""
+
+    def __init__(self, attempt_id: str):
+        self.attempt_id = attempt_id
+        self.counts: dict | None = None
+
+    def observe(self, usage: Any) -> None:
+        if isinstance(usage, dict):
+            if self.counts is None:
+                self.counts = {}
+            self.counts.update(provider_token_counts(_reported_token_usage(usage)))
+
+    def for_attempt(self, attempt_id: str) -> dict | None:
+        return self.counts if self.attempt_id == attempt_id else None
+
+
+def chat_usage_receipt(source: Any) -> ChatUsageReceipt | None:
+    """Read a typed host observation, never an extension field from a provider body."""
+    receipt = getattr(source, "_chat_usage_receipt", None)
+    if receipt is None and isinstance(source, BaseException):
+        receipt = getattr(getattr(source, "response", None), "_chat_usage_receipt", None)
+    return receipt if isinstance(receipt, ChatUsageReceipt) else None
+
+
+def chat_usage_fields(source: Any, attempt_id: str) -> dict:
+    receipt = chat_usage_receipt(source)
+    counts = receipt.for_attempt(attempt_id) if receipt is not None else None
+    return {"provider_token_receipt": counts} if counts is not None else {}
+
+
 _MEDIA_DETAIL_FIELDS = frozenset(_TOKEN_DETAIL_FIELDS) | {
     "input_token_details", "output_token_details", "cached_tokens_details",
     "promptTokensDetails", "responseTokensDetails", "response_tokens_details", "cacheTokensDetails", "cache_tokens_details",
@@ -1127,8 +1158,8 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             return None
     body = reports[selected][0]
     usage, _, _ = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
-    # Reports are newest first; the complete price and each cumulative counter are independent facts.
-    latest, witness = {}, None
+    # Reports are newest first; the complete price and each accounting counter are independent facts.
+    latest = {}
     for index, (report, _, raw) in enumerate(reports):
         if isinstance(raw, dict) and raw:
             counts = usage if index == selected else usage_from_response(
@@ -1136,17 +1167,9 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
                 if counts[key] is not None:
                     latest.setdefault(key, counts[key])
-        if provider == "openrouter" and isinstance(raw, dict):
-            if witness is None:
-                witness = {}
-            # Resolve wire aliases within each snapshot so a newer top-level zero can beat an older detail.
-            for key, count in provider_token_counts(_reported_token_usage(raw)).items():
-                witness.setdefault(key, count)
     if usage.get("cache_write_tokens_invalid"):
         latest.pop("cache_write_tokens", None)  # A malformed reported total is not an absent report.
     usage.update(latest)
-    if witness is not None:
-        usage["_reported_token_usage"] = witness  # only the report reads this on OpenRouter; pinned tariffs are untouched
     usage.pop("cost_basis", None)  # Only the matching, complete wallet report supplies this basis.
     if basis:
         usage.update(cost=cost, cost_basis=basis)

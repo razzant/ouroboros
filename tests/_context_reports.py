@@ -61,12 +61,12 @@ def _rows(root: pathlib.Path):
     return ledger_rows(root)
 
 
-def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None):
+def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None, response_factory=_Response):
     client = LLMClient(api_key="unused")
     scope = _scope(root, task_id)  # other modules bind their own scope here (tests/test_boot_dependency_sync.py)
     with ua.usage_scope(scope if category is None else dataclasses.replace(scope, category=category)):
         client._create_chat_completion_with_retries(
-            lambda **_candidate: _Response(),
+            lambda **_candidate: response_factory(),
             payload if payload is not None else _payload(),
             target if target is not None else _target(),
         )
@@ -190,20 +190,31 @@ def _dispatch_staged_media(root, monkeypatch, fit):
     task = 'media-task'
     folder = task_artifact_dir_path(root, task, create=True) / 'attachments'
     folder.mkdir(exist_ok=True)
-    Image.new('RGB', (24, 24), (80, 120, 180)).save(folder / 'harbor.png')
-    (folder / 'schedule.txt').write_text('Tide table', encoding='utf-8')
+    manifest = []
+    for index in range(6):
+        name = f'harbor-{index}.png'
+        Image.new('RGB', (24, 24), (80 + index, 120, 180)).save(folder / name)
+        manifest.append({'relpath': f'attachments/{name}', 'is_image': True})
     observed = {}
-    entry = {'text': 'Where did the attachment go?', 'attachment_manifest': [
-        {'relpath': 'attachments/harbor.png', 'is_image': True},
-        {'relpath': 'attachments/schedule.txt', 'is_image': False},
-    ]}
+    entry = {'text': 'Where did the attachment go?', 'attachment_manifest': manifest}
     row = {'role': 'user', 'content': build_incoming_user_content(entry, root, task, attachment_facts=observed)}
-    assert observed['manifest_pixels'] == 1
+    assert observed['manifest_pixels'] == 5 and observed['manifest_path_only'] == 0
+    assert observed['attachment_items'][-1] == {'number': 6, 'decision': 'image_count_limit'}
     with monkeypatch.context() as m:
         m.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'off')
         projected = prepare_messages_for_send([row], routing=VisionRoutingContext('not/vision', object(), {}))
     slot = SimpleNamespace()
     note_contribution(slot, row, 'attachment_manifest', observation=observed)
     logical = {**_payload(), 'messages': projected}
+
+    class MixedUsage(_Response):
+        # The ledger's totals include non-text traffic; the cache subtraction is not a text subtotal.
+        _payload = {**_Response._payload, 'usage': {
+            'prompt_tokens': 1000, 'completion_tokens': 100, 'cost': 0.0,
+            'prompt_tokens_details': {'audio_tokens': 5, 'cached_tokens': 100},
+            'completion_tokens_details': {'audio_tokens': 8},
+        }}
+
     with ua.bind_physical_attempt_context(bind_contribution_input(fit, logical, [row], slot)):
-        return _dispatch(root, task, payload={**logical, 'messages': project_wire_messages(projected)})['attempt_id']
+        return _dispatch(root, task, payload={**logical, 'messages': project_wire_messages(projected)},
+                         response_factory=MixedUsage)['attempt_id']

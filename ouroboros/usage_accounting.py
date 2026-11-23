@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_
 from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched, with_dispatch_stamp
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
-    _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_failure, usage_from_response,
+    _normalized_input_token_usage, _reported_token_count, chat_usage_fields, observed_processing_mode, usage_from_failure, usage_from_response,
     _plain, _provider_exception_facts, failure_settlement_price, physical_failure_evidence, refusal_failure_payload, provider_cost_value, refusal_conflicts,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
@@ -1017,13 +1017,8 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
             if fence := member_fence(scope):
                 from ouroboros.llm_attempt import _PhysicalSendNotStarted
                 raise _PhysicalSendNotStarted(str(fence.get("reason") or "owner_pause"))
-            effective = {key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision",
-                "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")}
-            if scope.root_limit_source == "attempt_request":
-                effective.update(root_limit_usd=scope.root_limit_usd, root_limit_source=scope.root_limit_source,
-                                 root_limit_revision=scope.root_limit_revision)
-            scope = replace(scope, **effective)
-            fields.update(effective)
+            fields.update({key: getattr(scope, key) for key in ("root_limit_usd", "root_limit_source", "root_limit_revision",
+                "billing_group_id", "billing_group_limit_usd", "billing_group_limit_source", "billing_group_limit_revision")})
             _check_dispatch_fences(scope, reservation.drive_root)
             limit_request = AttemptRequest(model=reservation.model, provider=reservation.provider,
                 global_limit_usd=(current.get("global_limit_usd") if current.get("global_limit_source")
@@ -1116,7 +1111,7 @@ def release_attempt(
         {"candidate_manifest_ref": candidate_manifest_ref} if candidate_manifest_ref else {}))
 
 
-def mark_unresolved(reservation: AttemptReservation, reason: str) -> None:
+def mark_unresolved(reservation: AttemptReservation, reason: str, *, token_source: Any = None) -> None:
     try:
         from ouroboros.observability import redact_projection
 
@@ -1125,7 +1120,8 @@ def mark_unresolved(reservation: AttemptReservation, reason: str) -> None:
         ).value)
     except Exception:
         safe_reason = "provider_outcome_unknown:redaction_failed"
-    _transition(reservation, "unresolved", reason=safe_reason[:500])
+    _transition(reservation, "unresolved", reason=safe_reason[:500],
+                **chat_usage_fields(token_source, reservation.attempt_id))
 
 
 def terminalize_abandoned_attempt(
@@ -1162,8 +1158,10 @@ def settle_attempt(
     cost_final: bool = False,
     expected_revision: Optional[int] = None,
     estimate_cache_ttl: Optional[str] = None,
+    token_source: Any = None,
 ) -> None:
-    fields = _settlement_fields(reservation, usage, cost_usd, cost_final, estimate_cache_ttl=estimate_cache_ttl)
+    fields = _settlement_fields(reservation, usage, cost_usd, cost_final,
+                                estimate_cache_ttl=estimate_cache_ttl, token_source=token_source)
     _transition(reservation, "settled", _expected_revision=expected_revision, **fields)
     if not reservation.provider_reported_cost_only:
         stash_task_cache_split(
@@ -1257,11 +1255,12 @@ def _retain_physical_failure(reservation, *, exc=None, response=None):
     return payload
 
 
-def _settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cache_ttl=None) -> Dict[str, Any]:
+def _settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cache_ttl=None, token_source=None) -> Dict[str, Any]:
     from ouroboros._usage_settlement import settlement_fields
 
     return settlement_fields(reservation, usage, cost_usd, cost_final,
-                             estimate_cost_optional=estimate_cost_optional, estimate_cache_ttl=estimate_cache_ttl)
+                             estimate_cost_optional=estimate_cost_optional, estimate_cache_ttl=estimate_cache_ttl,
+                             token_source=token_source)
 
 
 def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, cost_usd=None, pending=False) -> AttemptReservation:
@@ -1354,12 +1353,13 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
     priced = failure_settlement_price(exc, payload, provider, opencode_go=reservation.opencode_go)
     if isinstance(exc, ProcessingNotStarted) and not tier_conflict and not (reservation.opencode_go and priced):
         _transition(reservation, "settled", cost_usd=priced[1] if priced else None,
-                    cost_final=priced is not None, settle_reason="processing_not_started")
+                    cost_final=priced is not None, settle_reason="processing_not_started",
+                    **chat_usage_fields(exc, reservation.attempt_id))
         return "settled"
     if priced:
         # A reconciled provider bill settles, a reported zero included, even with work evidence.
         usage, cost, final = priced
-        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
+        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final, token_source=exc)
         return "settled"
     if provider == "openrouter" and not reservation.provider_reported_cost_only and not tier_conflict:
         for reason, predicate in (("pre_routing_rejection", _is_pre_routing_rejection), ("tos_rejection", _is_tos_rejection)):
@@ -1372,14 +1372,14 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
             # An estimate uses the frame's own facts and its bound send's TTL; an empty TTL means unbound.
             from ouroboros._usage_settlement import frame_estimate_ttl
 
-            settle_attempt(reservation, usage, cost_usd=None, cost_final=False,
+            settle_attempt(reservation, usage, cost_usd=None, cost_final=False, token_source=exc,
                            estimate_cache_ttl=frame_estimate_ttl(reservation, request, exc))
             return "settled"
     from ouroboros.transport_custody import attempt_custody_event_fields
     cause = attempt_custody_event_fields(exc).get("transport_cause_type")
     suffix = f" [cause: {cause}]" if cause else ""
     # Suffix leads: a verbose provider body must not truncate it away (mark_unresolved keeps 500 chars).
-    mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}")
+    mark_unresolved(reservation, f"{type(exc).__name__}{suffix}: {exc}", token_source=exc)
     return "unresolved"
 
 
@@ -1517,14 +1517,14 @@ def _account_response(reservation, request, response, extractor, manifest_ref):
         usage = dict(usage or {})
         if request.prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = request.prompt_cache_ttl
-        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final)
+        settle_attempt(reservation, usage, cost_usd=cost, cost_final=final, token_source=response)
         _observe_token_density(request, usage)
     except Exception as exc:
         # Preserve a paid/useful response; accounting failure leaves an open bound.
         log.exception("Failed to account paid provider response: %s", reservation.attempt_id)
         terminal_state = "dispatched"
         try:
-            mark_unresolved(reservation, f"post_response_accounting_failed:{type(exc).__name__}")
+            mark_unresolved(reservation, f"post_response_accounting_failed:{type(exc).__name__}", token_source=response)
             terminal_state = "unresolved"
         except Exception:
             log.exception("Failed to mark post-response accounting failure unresolved")

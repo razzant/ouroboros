@@ -27,7 +27,7 @@ import re
 from typing import Any, Callable
 
 from ouroboros._usage_response import (
-    merge_usage_reports, provider_cost_value, reported_price, update_snapshot as _snapshot,
+    ChatUsageReceipt, merge_usage_reports, provider_cost_value, reported_price, update_snapshot as _snapshot,
 )
 
 
@@ -286,7 +286,7 @@ class _Accumulator:
 
 
 class ChatAccumulator(_Accumulator):
-    def __init__(self, expected_choices: int = 1, on_generation_id: Callable | None = None):
+    def __init__(self, expected_choices: int = 1, on_generation_id: Callable | None = None, *, attempt_id: str = ""):
         super().__init__()
         self.body: dict = {"object": "chat.completion"}
         self.choices: dict[int, dict] = {}
@@ -294,6 +294,7 @@ class ChatAccumulator(_Accumulator):
         self.on_generation_id = on_generation_id
         self.usage_reports: list[dict] = []
         self.terminal_usage_start: int | None = None
+        self.token_receipt = ChatUsageReceipt(attempt_id)
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -312,6 +313,9 @@ class ChatAccumulator(_Accumulator):
             return
         if self.on_generation_id is not None:
             self.on_generation_id(chunk.get("id"))
+        if isinstance(chunk.get("error"), dict):
+            self.token_receipt.observe(chunk["error"].get("usage"))
+        self.token_receipt.observe(chunk.get("usage"))  # the frame's own object wins over its error detail
         if isinstance(chunk.get("error"), dict):
             # The exception carries this frame's total verbatim. Keep the preceding envelope as a fallback.
             _snapshot(self.body, {key: value for key, value in chunk.items()
@@ -695,7 +699,8 @@ class _StreamAssembly:
         self.generation_binding_error = ""
         self.generation_bound = False
         self.accumulator = (AnthropicAccumulator() if native else ResponsesAccumulator() if responses else
-                            ChatAccumulator(expected_choices, self.observe_generation))
+                            ChatAccumulator(expected_choices, self.observe_generation,
+                                            attempt_id=self.reservation.attempt_id if self.reservation else ""))
         self.frames = _SSEFrames()
         self.raw: list[bytes] = []
         headers = getattr(response, "headers", {})
@@ -734,6 +739,8 @@ class _StreamAssembly:
 
     def preserve_failure_usage(self, error: BaseException) -> None:
         """Money survives read/close/cancel errors independently of reply completeness."""
+        if isinstance(self.accumulator, ChatAccumulator):
+            error._chat_usage_receipt = self.accumulator.token_receipt
         usage = self.accumulator.body.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         complete_usage = (self.accumulator.usage_final if isinstance(self.accumulator, AnthropicAccumulator)
@@ -848,6 +855,13 @@ class _StreamAssembly:
             self.accumulator.accept(event, data)
         return self.accumulator.result()
 
+    def completed_response(self, body: dict) -> AssembledResponse:
+        body["_stream_receipt"] = self.retain(complete=True)
+        response = AssembledResponse(body)
+        if isinstance(self.accumulator, ChatAccumulator):
+            response._chat_usage_receipt = self.accumulator.token_receipt
+        return response
+
 
 def consume_stream(stream: Any, *, native: bool = False, expected_choices: int = 1,
                    responses: bool = False, opencode_go: bool = False) -> AssembledResponse:
@@ -868,8 +882,7 @@ def consume_stream(stream: Any, *, native: bool = False, expected_choices: int =
         except BaseException:
             pass  # Cleanup cannot replace the original stream/cancellation cause.
         raise
-    body["_stream_receipt"] = assembly.retain(complete=True)
-    return AssembledResponse(body)
+    return assembly.completed_response(body)
 
 
 async def consume_stream_async(stream: Any, *, expected_choices: int = 1, responses: bool = False,
@@ -899,5 +912,4 @@ async def consume_stream_async(stream: Any, *, expected_choices: int = 1, respon
         except BaseException:
             pass
         raise
-    body["_stream_receipt"] = assembly.retain(complete=True)
-    return AssembledResponse(body)
+    return assembly.completed_response(body)

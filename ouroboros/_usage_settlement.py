@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from ouroboros._usage_response import (
-    _reported_token_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
+    _reported_token_count, cache_write_split, cache_write_total, chat_usage_receipt, nontext_counts, observed_processing_mode,
     processing_receipt, provider_cost_value, provider_token_counts, text_token_counts,
 )
 
@@ -199,14 +199,16 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
     return ""
 
 
-def _provider_token_receipt(usage: Mapping[str, Any]) -> dict | None:
+def _provider_token_receipt(usage: Mapping[str, Any], attempt_id: str, token_source: Any) -> dict | None:
     """Read the response parser's pre-accounting witness, never the billing-shaped fallback."""
+    if (stream := chat_usage_receipt(token_source)) is not None:
+        return stream.for_attempt(attempt_id)  # An empty stream witness is distinct from no usage frame.
     raw = usage.get("_reported_token_usage")
     return provider_token_counts(raw) if isinstance(raw, dict) else None
 
 
 def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,
-                      estimate_cache_ttl: Optional[str] = None) -> Dict[str, Any]:
+                      estimate_cache_ttl: Optional[str] = None, token_source: Any = None) -> Dict[str, Any]:
     """Normalize reported usage before the monetary transaction; no live pricing I/O."""
     normalized = dict(usage or {})
     evidence = copy.deepcopy(normalized.get("cost_evidence") or {})
@@ -285,7 +287,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
     if has_nontext_usage(normalized):
         evidence.setdefault("usage", copy.deepcopy({key: value for key, value in normalized.items()
                                                    if key != "cost_evidence"}))
-    token_receipt = _provider_token_receipt(normalized)
+    token_receipt = _provider_token_receipt(normalized, reservation.attempt_id, token_source)
     return dict(
         cost_usd=cost,
         cost_final=bool(cost_final and cost is not None),

@@ -202,13 +202,3 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     if trace is not None:
         trace((common, handbook, (semi, connections), story, head, room, dynamic, stable, changing))
     return blocks + [{"type": "text", "text": changing}]
-
-
-def witnessed_system_blocks(core, governance, story, room, mode, addressed, receipts, story_whole, *, shown=None):
-    """Render a projection and its host-only witness together, without reopening the view's sources."""
-    from ouroboros.context_assembly_trace import observe_layout
-
-    witnesses = []
-    trace = observe_layout(core, governance, addressed, receipts, story_whole, shown, witnesses) if shown is not None else None
-    system = _system_blocks(core, governance, story, room, mode, addressed, story_whole, trace=trace)
-    return system, tuple(witnesses)

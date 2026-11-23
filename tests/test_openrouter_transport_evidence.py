@@ -337,6 +337,62 @@ def test_interrupted_openrouter_receipt_keeps_latest_counters_separate_from_pric
     assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("close_fails", [False, True], ids=["completed", "close-failed"])
+def test_chat_receipt_resolves_aliases_per_frame_after_done(isolated, asynchronous, close_fails):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    wire = Wire([
+        frame(usage={"cost": 0.25, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}}),
+        frame(usage={"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}),
+        frame(usage={"cached_tokens": False, "cache_write_tokens": 2**53}, finish="stop"),
+        b"data: [DONE]\n\n",
+    ], close_error=RuntimeError("synthetic close failure") if close_fails else None)
+    if close_fails:
+        with pytest.raises(RuntimeError, match="synthetic close failure"):
+            run_driver(wire, asynchronous=asynchronous)
+    else:
+        result = run_driver(wire, asynchronous=asynchronous)
+        assert "_chat_usage_receipt" not in result.model_dump()
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_final"] is True and row["cost_usd"] == 0.25
+    assert row["cached_tokens"] == 1  # Neither normalization nor the price uses the independent receipt.
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    expected = {"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("witnessed", [False, True], ids=["absent-usage", "explicit-empty-usage"])
+def test_chat_price_only_envelope_never_synthesizes_a_usage_receipt(isolated, asynchronous, witnessed):
+    wire = Wire([b'data: {"total_cost_usd": 0.25}\n\n', frame(usage={} if witnessed else None)],
+                read_error=RuntimeError("synthetic read interrupted"))
+    with pytest.raises(RuntimeError, match="synthetic read interrupted"):
+        run_driver(wire, asynchronous=asynchronous)
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_final"] is True and row["cost_usd"] == 0.25
+    assert ("provider_token_receipt" in row) is witnessed
+    if witnessed:
+        assert row["provider_token_receipt"] == {}
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_unpriced_chat_interruption_reads_observed_counters_on_the_same_attempt(isolated, asynchronous):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    error = RuntimeError("synthetic read interrupted before any price")
+    wire = Wire([frame(usage={"prompt_tokens_details": {"cached_tokens": 1}}), frame(usage={"cached_tokens": 0})],
+                read_error=error)
+    with pytest.raises(RuntimeError) as caught:
+        run_driver(wire, asynchronous=asynchronous)
+    assert caught.value is error and getattr(error, "stream_usage", None) is None
+    row, = ledger_rows(isolated)
+    assert row["attempt_id"] == error.stream_receipt["attempt_id"]
+    assert row["state"] == "unresolved" and row.get("cost_usd") is None and not row.get("cost_final")
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == {"cached_tokens": 0}
+
+
 @pytest.mark.parametrize(("usage", "asynchronous"), [
     pytest.param({"prompt_tokens": 2}, False, id='usage0-False'),
     pytest.param({"cost": 0.125, "prompt_tokens": 2}, True, id='usage1-True'),

@@ -2,7 +2,7 @@
 from ouroboros import context_attempt_reader, usage_accounting
 from ouroboros.physical_attempt_context import PhysicalAttemptContext
 from ouroboros.context_fit import ContextCore, _governance_blocks
-from ouroboros.context_assembly_trace import RoomWitness, layout_witnesses
+from ouroboros.context_assembly_trace import RoomWitness, capture_system_projection, digest, layout_witnesses, projection_fields
 from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY, split_leading_system_prefix
 from ouroboros.section_floor import HostSection, _system_blocks
 from tests._context_reports import _dispatch
@@ -62,6 +62,27 @@ def test_assembled_sources_survive_split_and_unverified_placement_is_named(tmp_p
                 assert text[offset:group['start']] == ('\n\n' if offset else '')
                 offset = group['start'] + group['chars']
             assert offset == len(text)
+
+
+def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append():
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text',
+                       development_md='Handbook', semi_stable_text='', dynamic_text='', user_content_json='null',
+                       docs_need_development=True, dynamic_sections=(HostSection('recent_tools', 'Tools ran'),))
+    governance = _governance_blocks(None, core, mode='max')
+    facts = {'floor': {'steps': {}}}
+    system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'max', {}, (), True,
+                                                  shown=None, facts=facts)
+    appended = [*system[:-1], {**system[-1], 'text': system[-1]['text'] + '\n\nSelected first-contact note'}]
+    first_contact = {**captured, 'first_contact_preference': True}
+    assert projection_fields(system, captured, selected=False) == {'memory_facts': facts, 'assembly_witnesses': ()}
+    assert projection_fields(appended, captured)['assembly_witnesses'] == ()
+    measured = projection_fields(appended, first_contact)
+    assert measured['memory_facts'] == {**facts, 'first_contact_preference': True}
+    tail = measured['assembly_witnesses'][-1]
+    assert tail['carrier_sha256'] == digest(appended[-1]['text'])
+    assert tail['groups'][-1]['family'] == 'memory_fit_notes'
+    changed_book = [{**appended[0], 'text': 'Different stable text'}, *appended[1:]]
+    assert projection_fields(changed_book, first_contact)['assembly_witnesses'] == ()
 
 
 def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path, monkeypatch):

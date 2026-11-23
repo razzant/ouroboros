@@ -639,8 +639,8 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     authored restore with an advisory capacity deficit; dispatch fits it later.
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
+    from ouroboros import context_assembly_trace as assembly
     from ouroboros.context_fit import _governance_blocks, _request_tokens
-    from ouroboros.section_floor import witnessed_system_blocks
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -671,13 +671,14 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
         facts["host_sections_addressed"] = receipts
     selected = ViewFit(snapshot, level, note, facts)
     story, room = selected.story, selected.room
-    system, witnesses = witnessed_system_blocks(plan.core, governance, story, room, mode,
-        section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected)
+    system, observation = assembly.capture_system_projection(plan.core, governance, story, room, mode,
+        section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected,
+        facts=view_receipt(snapshot, story, room, facts))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
                             current_messages=plan.messages_for(mode))
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-        memory_facts=view_receipt(snapshot, story, room, facts), estimated_tokens=tokens,
-        calibrated_tokens=int(tokens * shown.calibration_ratio), assembly_witnesses=witnesses)
+        estimated_tokens=tokens, calibrated_tokens=int(tokens * shown.calibration_ratio),
+        **assembly.projection_fields(system, observation))
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 

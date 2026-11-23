@@ -29,9 +29,9 @@ from ouroboros.context_measurement import (
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
 from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
-                                     _governance_blocks as _section_governance, _system_blocks, witnessed_system_blocks)
+                                     _governance_blocks as _section_governance, _system_blocks)
 from ouroboros.reference_books import ReferenceBook
-from ouroboros import context_budget
+from ouroboros import context_assembly_trace as assembly, context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
@@ -268,15 +268,13 @@ class ContextFitPlan:
         def project(projection: Optional[ContextFitProjection]) -> Optional[ContextFitProjection]:
             if projection is not None and projection.mode in contents and narrowed(projection):
                 system, facts = contents[projection.mode]  # the start's Max room outlives a narrowing, as a selection's
-                facts = dict(facts)
-                witnesses = facts.pop('_assembly_witnesses', ())
                 number = (projection.memory_facts.get("floor") or {}).get("no_memory_tokens")  # so does Low's miss (3A)
                 if number is not None and isinstance(facts.get("floor"), dict):
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-                                     assembly_witnesses=witnesses,
-                                     memory_facts={**facts, **{key: value for key, value in projection.memory_facts.items()
-                                                               if key in ("max_room", "first_contact_preference")}},
+                                     **assembly.projection_fields(system, facts | {key: projection.memory_facts[key]
+                                         for key in ("max_room", "first_contact_preference") if key in projection.memory_facts},
+                                         projection.mode == start),
                                      continuation_messages_json=tail_json,
                                      estimated_tokens=_request_tokens(system, projection.user_content_json or self.user_content_json,
                                          supplementary_messages_json=self.core.supplementary_messages_json,
@@ -1194,10 +1192,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     contents = {}
     for m in floor.MODES:
         rows = host_receipts(m, receipts)
-        system, witnesses = witnessed_system_blocks(whole_core, whole_governance[form[m]], story, room, m,
-            section_views(sections[m], rows), rows, whole, shown=shown if m == mode else None)
-        facts = {**receipt, 'held_note_request_tokens': request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = system, {**facts, **({'host_sections_addressed': rows} if rows else {}), '_assembly_witnesses': witnesses}
+        facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
+        contents[m] = assembly.capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
+            section_views(sections[m], rows), rows, whole, shown=shown,
+            facts={**facts, "host_sections_addressed": rows} if rows else facts)
     return contents, mode
 
 
@@ -1500,8 +1498,6 @@ def build_context_fit_plan(
     @timed_section("fit.projections")
     def _projection(mode: str, source: Optional[Dict[str, Tuple[List[Dict[str, Any]], Dict]]] = None) -> ContextFitProjection:
         system_content, memory_facts = (contents if source is None else source)[mode]
-        memory_facts = dict(memory_facts)
-        witnesses = memory_facts.pop("_assembly_witnesses", ())
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
         form = (system_content_json, user_projection)
@@ -1518,8 +1514,7 @@ def build_context_fit_plan(
             calibrated_tokens=int(estimated * ratio),
             calibration_ratio=ratio,
             user_content_json=user_projection,
-            memory_facts=memory_facts,
-            assembly_witnesses=witnesses,
+            **assembly.projection_fields(system_content, memory_facts, mode == (normal[1] if source is not None else initial_mode)),
             continuation_messages_json=tail_json,
         )
 

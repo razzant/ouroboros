@@ -161,7 +161,8 @@ def section_fact(part, addressed, receipts, books):
     return fact
 
 
-def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole, room_pieces, story_selection=None):
+def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole, room_pieces, story_selection=None,
+                     appendix=''):
     """Coordinates of the renderer's already-joined blocks; group names never come from text."""
     common, handbook, shared, story, head, room, dynamic, stable, changing = live
     books = {book.book_id: book for book in core.reference_books}
@@ -212,6 +213,10 @@ def layout_witnesses(core, governance, addressed, receipts, live, *, story_whole
         else:
             fragment(changing_groups, 'room', room, ())
     fragment(changing_groups, 'runtime', dynamic, typed(core.dynamic_sections))
+    if appendix:  # the first-contact selector appends these exact bytes to the changing block
+        changing_groups.append({'family': 'memory_fit_notes', 'form': 'rendered',
+                                'start': len(changing), 'chars': len(appendix)})
+        changing += appendix
 
     groups = [common_groups, *([list(span_groups([(handbook_group(), handbook[0])]))] if own_block and handbook else ()), shared_groups]
     selected = [(block, parts) for block, parts in zip(stable, groups) if block.strip()]
@@ -599,10 +604,33 @@ def verified_contributions(candidate, captured):
 
 
 
-def observe_layout(core, blocks, addressed, rows, whole, shown, witnesses):
-    """Observe the selected rendering without owning its projection or selection."""
+def capture_system_projection(core, governance, story, room, mode, addressed, receipts, whole, *, shown, facts):
+    """Render normally and keep its pieces for the selected projection, without opening sources again."""
+    from ouroboros.section_floor import _system_blocks
+
+    live = []
+    system = _system_blocks(core, governance, story, room, mode, addressed, whole, trace=live.append)
+    rendered = tuple(block['text'] for block in system)
+
     @_optional_observation()
-    def trace(live):
-        witnesses.extend(layout_witnesses(core, blocks, addressed, rows, live, story_whole=whole,
-            room_pieces=getattr(shown, 'room_pieces', ()), story_selection=getattr(shown, 'story_selection', None)))
-    return trace
+    def report(final, first_contact):
+        # First contact can extend the changing block, not replace any rendered part. The fitter's fact
+        # identifies that append; keep no witness for any other change to the selected blocks.
+        texts = tuple(block['text'] for block in final)
+        if not texts or texts[:-1] != rendered[:-1]:
+            return ()
+        original, changing = rendered[-1], texts[-1]
+        if changing != original and not (first_contact and changing.startswith(original)):
+            return ()
+        return layout_witnesses(core, governance, addressed, receipts, live[0], story_whole=whole,
+            appendix=changing[len(original):],
+            room_pieces=getattr(shown, 'room_pieces', ()), story_selection=getattr(shown, 'story_selection', None))
+    return system, {**facts, '_assembly_layout': report}
+
+
+def projection_fields(system, facts, selected=True):
+    """Keep the private observer off the projection and hash only a view chosen for use."""
+    memory_facts = dict(facts)
+    report = memory_facts.pop('_assembly_layout', None)
+    witnesses = report(system, memory_facts.get('first_contact_preference')) if report is not None and selected else ()
+    return {'memory_facts': memory_facts, 'assembly_witnesses': witnesses or ()}

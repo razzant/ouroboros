@@ -196,13 +196,14 @@ facts stores image bytes, caption text, schema bodies or underlying words.
 The report is private: source addresses and exact saved request previews are
 not anonymized, even when the existing request redactor masks credentials.
 
-`provider_token_receipt` is optional attempt-bound response evidence. It copies
-only numeric counters from the HTTP response parser's pre-accounting witness
-(which can represent assembled stream usage), never response text, a projected
-ledger zero, or a neighboring attempt. An omitted counter stays unknown, not
-zero. An empty receipt means a witness arrived without a usable counter. The native
-input field retains its provider-specific meaning. Legacy rows and paths without
-the witness (including engine-only accounting) have no receipt.
+`provider_token_receipt` is optional response evidence from the HTTP parser,
+separate from accounting. Chat SSE resolves aliases in each actual usage frame
+and keeps the latest usable counters in arrival order, including on an unresolved
+attempt. An envelope price alone does not imply a usage frame. The receipt holds
+no text, projected ledger zeros or counters from a neighboring attempt. Missing
+counters stay unknown; an empty receipt means an observed usage object supplied no
+usable count. The native input field keeps its provider-specific meaning. Legacy
+rows and engine-only paths without a parser witness have no receipt.
 
 ## 4. Typed exclusions (closed set)
 

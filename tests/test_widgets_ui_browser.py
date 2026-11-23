@@ -1143,9 +1143,12 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert value("Context mode") == "Low · chosen Max", ascii(value("Context mode"))
                 assert value("Sizing basis") == "Calibrated on recent usage from this route"
                 assert value("Host prefix within this task") == "First change: system blocks · position 3 · shared understanding"
-                assert value("Ledger text input") == "50 tokens"
+                assert value("Ledger input") == "50 tokens"
+                assert value("Ledger output") == "2 tokens"
                 assert value("Ledger cache read").startswith("0 tokens · ")
+                assert value("Input outside the recorded cache read") == "50 tokens"
                 assert value("Ledger cache write") == "Not recorded"
+                assert 'Ledger text' not in build.text_content()
                 assert "private-fixture-route" not in frame.locator("#record-body").text_content()
                 sources = frame.get_by_text("Where these blocks came from", exact=True)
                 expect(frame.locator("#source-versions")).to_be_visible()
@@ -1155,6 +1158,16 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(frame.locator("#source-technical")).to_contain_text("in prepared text before redaction")
                 assert "SHA-256" not in frame.locator("#source-versions").inner_text()
                 sources.click()
+                choose(reports['media'], 'media-task', '#attempt-facts')
+                media_sources = frame.locator('#source-versions')
+                expect(media_sources).to_be_visible()
+                expect(media_sources).to_contain_text('6 entries considered · 0 non-image or path-only entries')
+                expect(media_sources).to_contain_text('Entry 6 · image limit reached; not opened')
+                assert value('Ledger input') == '1,000 tokens'
+                assert value('Ledger output') == '100 tokens'
+                assert value('Input outside the recorded cache read') == '900 tokens'
+                shoot('attachment-label')
+                choose(reports['first'], first, '#attempt-facts')
                 frame.locator("#comparison > summary").click()
                 pair = frame.locator("#comparison-facts")
                 second_input = frame.locator("#comparison-file")
@@ -1450,16 +1463,19 @@ def test_private_report_finds_late_copies_and_clears_old_details_before_read(bro
             room = page.locator("#archive-room")
             compare = page.locator("#archive-compare")
             expect(attempts).to_have_value("tide-6")
+            expect(page.locator("#comparison")).to_be_hidden()
             expect(technical).to_contain_text("assembly-for-tide-6", use_inner_text=False)
             expect(page.locator("#privacy")).to_be_visible()
             expect(page.locator("#privacy")).to_contain_text("Keep this file on this computer")
             assert page.evaluate("() => window.reportCalls") == [f"tide-{n}" for n in range(7)]
             compare.click()
             expect(page.locator("#comparison-status")).to_contain_text("Selected request compared with Earlier 39")
+            expect(page.locator("#comparison")).to_be_visible()
             assert page.evaluate("() => window.reportCalls") == [f"tide-{n}" for n in range(40)]
 
             def clean():
                 expect(page.locator("#report-result")).to_be_hidden()
+                assert page.locator("#comparison").get_attribute("hidden") is not None
                 assert "assembly-for-tide" not in page.locator("body").text_content()
                 assert technical.text_content() == ""
                 assert page.locator("#comparison-facts").text_content() == ""
