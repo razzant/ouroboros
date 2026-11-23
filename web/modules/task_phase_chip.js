@@ -235,6 +235,8 @@ export function censusTaskPhase(activity, detail = null, connected = true, { wai
 function recordPhase(record = {}, terminalPhase = 'done') {
     const finishingChild = record.isSubagent && record.finalizingHold;
     const view = finishingChild && !record.workView?.finalizing ? null : record.workView;
+    if (!record.finished && record.root?.dataset?.portal === '1' && record.parkedPhase === 'unknown'
+        && !record.finalizingHold && record.observedOutcome && !record.cancelPendingPolicy) return outcomeView(record.observedOutcome);
     const phase = record.isSubagent ? view?.phase || record.censusPhase || '' : record.censusPhase || 'working';
     // The card's one parked word also represents an optional question gap;
     // its observed census phase distinguishes that from unknown activity.
@@ -281,9 +283,9 @@ function chipLook(view) {
  * `active_chat_activities`): paused/pausing/unknown park it until a positive
  * phase releases it. true when the chip changed.
  */
-export function syncParkedPhase(record, phase = '', activity = {}) {
+export function syncParkedPhase(record, phase = '', activity = {}, observedFacts = null) {
     if (!record || record.finished) return false;
-    const facts = censusTaskFacts({ ...activity, phase: activity.phase || phase });
+    const facts = observedFacts || censusTaskFacts({ ...activity, phase: activity.phase || phase });
     if (facts.outcome) record.observedOutcome = facts.outcome;
     if (facts.finalizing) record.finalizingHold = true;
     if (activity._activityUnconfirmed) phase = 'unknown';

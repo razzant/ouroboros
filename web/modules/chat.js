@@ -24,12 +24,12 @@ import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
 import { SERVER_ANSWERS_EVENT } from './ws.js';
 import { disposeCardModel, followCardCatalogue } from './card_model.js';
-import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, memberActivityEvidenced, openCardControls, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView } from './work_status.js';
+import { applyCardWorkViews, cardControls, changedOffers, emptyWorkState, memberActivityEvidenced, noteControlQueue, ownStopPress, promoteChildCard, reconcileWorkState, roomStatusView, syncCardControls } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
-import { acceptLiveFrame, applyCardEnding, cardDetailReader, cardMetricFacts, closingLine, foldCardMetrics, hydrateOpenSettledChild, hydrateRevealedCard, hydrateRevealedChildren, noteHandoverAttempt, readCardDetail, readMissingCardDetail, refreshSettledCardDetail, replayedTerminalRecords, syncClosingSentence, syncSettledItems, terminalChildFrame } from './settled_card.js';
+import { acceptLiveFrame, applyCardEnding, attemptOf, cardDetailReader, cardMetricFacts, closingLine, foldCardMetrics, hydrateOpenSettledChild, hydrateRevealedCard, hydrateRevealedChildren, noteHandoverAttempt, readCardDetail, readMissingCardDetail, refreshSettledCardDetail, replayedTerminalRecords, syncClosingSentence, syncSettledItems, terminalChildFrame } from './settled_card.js';
 import { noteOrigin, paintOrigin } from './task_origin.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
@@ -38,7 +38,7 @@ import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './
 import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset, readBand } from './project_read_state.js';
 import { createSharedReadTracker } from './read_ahead.js';
 import { adoptsRetainedCopy, createReplayKeys, livePriorBubble, matchesHistoryBubble, messagePlacementKey, ownerMessageBubble, ownerRowRoom, mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
-import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
+import { apiClient, apiFetch, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
 import {
@@ -62,9 +62,7 @@ import {
 import {
     ACTION_FINALIZE,
     REUSABLE_TASK_IDS,
-    TASK_CONTROL_TRIGGER_LABEL,
     cancelRunEligibility,
-    createTaskResumeButton,
     requestStop,
 } from './task_control_menu.js';
 import { composerMarkup, createComposer } from './composer.js';
@@ -518,7 +516,8 @@ export function createChatInstance({
     const portals = createWorkPortals({ isMain, feed: messagesDiv, records: liveCardRecords, onDomWrite: withStableViewport,
         isConnected: () => ws.isConnected?.() !== false, onConverted: () => composer?.signalFreed(), remember: rememberMessageKey,
         append: (msg, text, opts) => appendProjectRow(addMessage, msg, text, opts), actionsOf: ensureLiveActionsEl,
-        card: { get: getLiveCardRecord, show: ensureLiveCardVisible, reanchor: reanchorTaskCard, restore: restoreCardActivity,
+        card: { get: getLiveCardRecord, show: ensureLiveCardVisible, reanchor: reanchorTaskCard,
+            restore: (r, hold) => { const changed = restoreCardActivity(r, hold); return markReviewAnchor(r) || changed; },
             meta: renderLiveCardMeta, controls: syncCancelRunButton, finish: finishLiveCardMutation, note: noteTaskDetails,
             missing: observeMissingManagedTask, summary: appendTaskSummaryToLiveCard,
             collapse: (record) => (explicitCardExpansion.delete(record.groupId), record.root.dataset.expanded === '1'
@@ -527,7 +526,7 @@ export function createChatInstance({
         activity: (record) => currentActivity(record), follow: portals.follow,
         expand: (record) => { setLiveCardExpanded(record, true); hydrateShownDetails(record); revealChildDetails(record); }, meta: renderLiveCardMeta });
     const rowMenu = createChatRowMenu({ feed: messagesDiv, replies, cardOf: (id) => liveCardRecords.get(id),
-        actionsOf: (record) => cardMenuActions(workState, record, currentActivity(record)), afterAction: reread });
+        readControls: cardOffer, afterAction: reread });
 
     let childHoldRead = false;
     async function refreshChildProjectHolds() {
@@ -574,9 +573,9 @@ export function createChatInstance({
         if (Array.isArray(data?.works)) settleAbsentChildren(snapshotRequestedAt);
         withStableViewport(() => applyCardWorkViews(liveCardRecords, workState));
         chatDecision.syncWorks(workState);
-        changedOffers(liveCardRecords, before, workState).forEach(syncCancelRunButton);
+        changedOffers(liveCardRecords, before, workState).filter(r => !isPortal(r)).forEach(syncCancelRunButton);
         syncHeaderControlState(data ?? { accounting: { available: false } });
-        portals.sync(data);
+        portals.sync(data, Array.isArray(data?.works) ? workState.episodes : null);
         mainWaiting?.snapshot(data, snapshotRequestedAt);
         hostStart.read(data);
         const activities = Array.isArray(data?.active_chat_activities)
@@ -808,67 +807,32 @@ export function createChatInstance({
     }
 
     function syncCancelRunButton(record) {
-        return withStableViewport(() => syncCancelRunButtonMutation(record));
+        return withStableViewport(() => syncCardControls(record, { read: cardOffer, actionsOf: ensureLiveActionsEl,
+            stop: cancelRunFromCard, afterAction: refreshHeaderControlState }));
     }
 
-    // The live activity a card's controls act on: this chat's census row, or — for a Main portal —
-    // its work's row in the room's chat (the portal carries the same Stop/Resume on every surface).
-    const currentActivity = (record) => activeDirectActivities.get(record?.groupId) || portals.activity(record);
+    const currentActivity = (r) => isPortal(r) ? portals.activity(r) : activeDirectActivities.get(r?.groupId);
 
-    // Shared Stop predicate: a hidden button cannot justify a visible block.
-    const stopEligible = (record) => cancelRunEligibility({
+    // The old Main marker never speaks for a portal. A room row can offer legacy Stop only without a work offer.
+    const stopEligible = (record, activity = currentActivity(record), work = undefined) => cancelRunEligibility({
         groupId: record.groupId, isSubagent: record.isSubagent, finished: record.finished,
-        cancelable: !record.historicalUnavailable && !record.historicalUnconfirmed
-            && (cancelableTaskIds.has(record.groupId) || activeDirectActivities.has(record.groupId) && blockHasWork(record)
-                || Boolean(portals.activity(record))),
+        cancelable: !record.historicalUnavailable && !record.historicalUnconfirmed && (isPortal(record)
+            ? work === null && activity?.cancelable === true
+            : cancelableTaskIds.has(record.groupId) || activity?.cancelable === true
+                || activity && activity.kind !== 'direct_chat' && blockHasWork(record)),
     });
 
-    function syncCancelRunButtonMutation(record) {
-        if (!record?.root) return false;
-        // Resume where the card's work offers it.
-        const canResume = () => cardControls(workState, record.groupId).resume;
-        const resumable = canResume();
-        let changed = false;
-        if (resumable && !record.resumeRunBtn) {
-            record.resumeRunBtn = createTaskResumeButton(record.groupId, { canResume,
-                onSettled: refreshHeaderControlState });
-            // One order everywhere: [Turn into project] [Resume] [Stop…].
-            const actions = ensureLiveActionsEl(record);
-            actions?.insertBefore(record.resumeRunBtn, actions.querySelector('[data-cancel-run]'));
-            changed = true;
-        } else if (!resumable && record.resumeRunBtn) {
-            record.resumeRunBtn.remove(); record.resumeRunBtn = null; changed = true;
-        }
-        const eligible = stopEligible(record) || resumable || cardControls(workState, record.groupId).menu;
-        const existing = record.root.querySelector('[data-cancel-run]');
-        if (!eligible) {
-            if (!existing) return changed;
-            existing.remove();
-            record.cancelRunBtn = null;
-            return true;
-        }
-        if (existing) {
-            record.cancelRunBtn = existing;
-            if (record.finished) existing.disabled = false;
-            return changed;
-        }
-        const actions = ensureLiveActionsEl(record);
-        if (!actions) return false;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        // Neutral trigger: Resume or Continue stays the card's one primary.
-        btn.className = 'btn btn-sm btn-default ui-hit-area';
-        btn.dataset.cancelRun = '1';
-        btn.textContent = TASK_CONTROL_TRIGGER_LABEL;
-        // Pending cancel offers only hard escalation; dismiss keeps the run.
-        btn.addEventListener('click', (event) => {
-            event.stopPropagation();
-            openCardControls(btn, record, cardControls(workState, record.groupId).work, { activity: currentActivity(record),
-                stop: (action) => cancelRunFromCard(record, action), afterAction: refreshHeaderControlState });
-        });
-        actions.appendChild(btn);
-        record.cancelRunBtn = btn;
-        return true;
+    function cardOffer(record) {
+        if (destroyed || leaving || liveCardRecords.get(record.groupId) !== record) return {};
+        const portal = isPortal(record);
+        const attempt = portal ? undefined : workState.attempts.get(record.groupId);
+        noteControlQueue(record, attempt);
+        const stopOnly = attempt < Math.max(record.controlQueueAttempt ?? 0, record.cardAttempt ?? 0);
+        const work = portal ? portals.workOf(record) : stopOnly ? null : undefined;
+        const activity = stopOnly ? null : currentActivity(record);
+        return { ...cardControls(workState, record.groupId, work, portal), activity, stopOnly,
+            legacy: stopEligible(record, activity, work), episode: record.controlEpisode,
+            scope: portal ? record.root.dataset.projectId : '' };
     }
 
     // Pending intent stays live until settled; soft stop shows Finalizing….
@@ -890,7 +854,8 @@ export function createChatInstance({
             if (!record || record.finished || !record.phaseEl) return false;
             const anchored = markReviewAnchor(record);
             if (record.cancelPendingPolicy) return anchored;
-            record.observedOutcome = taskTerminalSummary({ ...fact, task_phase: 'finalizing' }).observedOutcome || record.observedOutcome;
+            const view = taskTerminalSummary({ ...fact, task_phase: 'finalizing' });
+            record.observedOutcome = portals.summary(record, fact, view).observedOutcome || record.observedOutcome;
             record.finalizingHold = true;
             const desired = desiredLiveCardPhase(record);
             const phased = setLiveCardPhase(
@@ -903,81 +868,54 @@ export function createChatInstance({
     // Durable cancel state wins over legacy status; only settled truth closes the card.
     function reconcileCancelCardFromDetail(record, taskId, stored) {
         return withStableViewport(() => {
-            if (!stored || !record || record.finished) return false;
+            if (!stored || !record || record.finished && !isPortal(record)) return false;
             if (taskCancelPending(stored)) {
                 return markLiveCardCancelPending(taskId, taskSoftStopPending(stored));
             }
-            if (!taskDoneIsTerminal(stored)) return false;
-            return appendTaskSummaryToLiveCard({ ...stored, task_id: taskId });
+            return taskDoneIsTerminal(stored) ? appendTaskSummaryToLiveCard({ ...stored, task_id: taskId })
+                : portals.observeDetail(record, stored);
         });
     }
 
     async function cancelRunFromCard(record, action = '') {
         const taskId = taskKey(record?.groupId);
         if (!taskId || record.finished) return;
-        // Q2: the dropdown itself is the confirmation surface — dismissing it
-        // continued the run, so a selected action executes immediately.
         const soft = action === ACTION_FINALIZE;
         const btn = record.cancelRunBtn;
+        const { portalProof, controlEpisode } = record;
         const priorPhase = captureLiveCardPhaseState(record);
         withStableViewport(() => {
             if (btn) btn.disabled = true;
             return markLiveCardCancelPending(taskId, soft);
         });
+        let restore = false;
         try {
             await requestStop(taskId, action);
-            // Durable detail heals lost best-effort task_done publication
-            try {
-                reconcileCancelCardFromDetail(record, taskId, await fetchTaskDetail(taskId));
-            } catch {
-                // The card still resolves on its own frame if one arrives.
-            }
-            // Soft stop keeps hard escalation reachable while finalizing.
-            if (btn && !record.finished && record.cancelPendingPolicy === 'finalize') {
-                btn.disabled = false;
-            }
         } catch (exc) {
-            // Said once, by the request; 404 is the task already gone.
             if (exc?.status !== 404) showToast(`Cancel failed: ${exc?.message || exc}`, 'error');
-            if (exc?.status === 404 || record.finished) {
-                // Completion won: remove the dead action, then reconcile detail.
-                revokeManagedTaskCancelAuthority(taskId);
-                try {
-                    reconcileCancelCardFromDetail(record, taskId, await fetchTaskDetail(taskId));
-                } catch {
-                    // A later terminal frame can still resolve the card.
-                }
-                return;
-            }
-            // Reconcile durable truth before restoring any optimistic UI.
-            let stored = null;
-            try {
-                stored = await fetchTaskDetail(taskId);
-            } catch {}
-            if (stored === null) {
-                // Only a fetched, live, non-pending detail restores the button.
-                return;
-            }
-            withStableViewport(() => {
-                let changed = reconcileCancelCardFromDetail(record, taskId, stored);
-                if (record.finished || taskCancelPending(stored)) return changed;
-                if (btn) btn.disabled = false;
-                const restoredPhase = restoreLiveCardPhaseState(record, priorPhase);
-                if (restoredPhase) {
-                    changed = setLiveCardPhase(
-                        record, restoredPhase.phase, restoredPhase.text, restoredPhase.className,
-                        restoredPhase.secondary,
-                    ) || changed;
-                }
-                return changed;
-            });
+            restore = exc?.status !== 404 && !record.finished;
+            if (!restore && record.controlEpisode === controlEpisode) revokeManagedTaskCancelAuthority(taskId);
         }
+        if (liveCardRecords.get(taskId) !== record || record.controlEpisode !== controlEpisode) return;
+        const stored = await readCardDetail(record, { fresh: true }).catch(() => undefined);
+        withStableViewport(() => {
+            if (liveCardRecords.get(taskId) !== record || record.controlEpisode !== controlEpisode) return false;
+            if (btn && !record.finished && soft && record.cancelPendingPolicy === 'finalize') btn.disabled = false;
+            if (!stored || isPortal(record) && !portals.acceptsDetail(record, stored)) return false;
+            const changed = reconcileCancelCardFromDetail(record, taskId, stored);
+            if (!restore || record.finished || taskCancelPending(stored)
+                    || record.cancelPendingPolicy !== (soft ? 'finalize' : 'immediate')) return changed;
+            if (btn) btn.disabled = false;
+            const phase = restoreLiveCardPhaseState(record, record.portalProof === portalProof ? priorPhase : captureLiveCardPhaseState(record));
+            return setLiveCardPhase(record, phase.phase, phase.text, phase.className, phase.secondary) || changed;
+        });
     }
 
     function restoreCardActivity(record, held = {}) {
         if (!setHistoricalUnavailable(record, false, held)) return;
         renderLiveCardMeta(record);
         syncCancelRunButton(record);
+        return true;
     }
 
     function settleMissingTaskRecord(record) {
@@ -992,11 +930,12 @@ export function createChatInstance({
         return changed;
     }
 
-    function markTaskCancelable(taskId = '') {
+    function markTaskCancelable(taskId = '', attempt) {
         const id = taskKey(taskId);
-        if (!id) return false;
+        const record = liveCardRecords.get(id);
+        if (!id || attempt < record?.cardAttempt) return false;
         cancelableTaskIds.add(id);
-        return syncCancelRunButton(liveCardRecords.get(id));
+        return syncCancelRunButton(record);
     }
 
     const reviewAnchorEligible = (id) => !liveCardRecords.has(id) && !activeDirectActivities.has(id);
@@ -1024,17 +963,19 @@ export function createChatInstance({
 
     function attachTaskDetailReviews(taskId, detail, stored = false) {
         return withStableViewport(() => {
-            const id = taskKey(taskId);
-            modelWaits.observe(id, detail);
-            const filed = noteTaskDetails(liveCardRecords.get(id), detail, stored);
+            const id = taskKey(taskId), prior = liveCardRecords.get(id);
+            if (!id || stored && !prior) return false;
+            const portal = stored && isPortal(prior);
+            const stale = portal && !portals.acceptsDetail(prior, detail);
+            if (!stale) modelWaits.observe(id, detail);
             const groups = reviewGroupsFromTaskDetail(detail, id);
-            if (!id || groups.length === 0) return filed;
-            const fresh = !liveCardRecords.has(id);
-            const record = getLiveCardRecord(id);
-            if (fresh) reanchorTaskCard(record, detail?.ts || detail?.timestamp || '');
+            const record = liveCardRecords.get(id) || (groups.length ? getLiveCardRecord(id) : null);
+            const filed = !stale && noteTaskDetails(record, detail, stored);
+            const reconciled = !stale && (portal || groups.length) && reconcileCancelCardFromDetail(record, id, detail);
+            if (!groups.length) return Boolean(filed || reconciled);
+            if (!prior) reanchorTaskCard(record, detail?.ts || detail?.timestamp || '');
             const changed = record.reviewController.updateMany(groups);
             ensureLiveCardVisible(record);
-            const reconciled = reconcileCancelCardFromDetail(record, id, detail);
             return Boolean(changed || reconciled || filed);
         });
     }
@@ -1148,12 +1089,13 @@ export function createChatInstance({
             if (!_historyReplayActive) noteToolMetrics(row.task_id, row, row.ts);
             // The task's own evidence: mints its card at the carrier's row (zero tools included).
             const record = getLiveCardRecord(row.task_id);
-            const activity = activeDirectActivities.get(row.task_id);
+            const activity = currentActivity(record);
             if (row.ts) reanchorTaskCard(record, row.ts);
             if (row.suggested_name) applySuggestedName(row.task_id, row.suggested_name);
             if (row.task_phase === 'finalizing') markLiveCardFinalizing(row.task_id, row);
-            else if (!row.task_terminal_status && !activity) setHistoricalUnconfirmed(record);
-            if (activity) syncParkedPhase(record, activity.phase, activity);
+            else if (!row.task_terminal_status && !activity && !isPortal(record)) setHistoricalUnconfirmed(record);
+            if (isPortal(record)) portals.present(record);
+            else if (activity) syncParkedPhase(record, activity.phase, activity);
             syncCancelRunButton(record);
             return true;
         }
@@ -1823,14 +1765,15 @@ export function createChatInstance({
         changed = noteToolMetrics(taskId, msg, rawTs, { suppressDomInsert, recorded: currentOutcome }) || changed;
         msg = { quiet_effective: record.quietEffective ?? record.historicalTerminal?.quiet_effective, ...msg };
         const summary = taskTerminalSummary({ ...msg, task_id: taskId });
+        const view = portals.summary(record, msg, summary);
         changed = noteTaskDetails(record, msg) || changed;
         if (finalizing && !record.finished) record.finalizingHold = true;
         changed = applyLiveCardState(
-            { ...summary, visible: drawn && summary.visible, currentOutcome, costProjection: taskCostProjection(msg, rawTs) },
+            { ...view, visible: drawn && summary.visible, currentOutcome, costProjection: taskCostProjection(msg, rawTs) },
             taskId, rawTs, { suppressDomInsert },
         ) || changed;
         if (finalizing) return changed;
-        changed = finishLiveCard(taskId, summary.phase) || changed;
+        changed = finishLiveCard(taskId, view.phase) || changed;
         return changed;
     }
 
@@ -1921,7 +1864,7 @@ export function createChatInstance({
         let changed = !_historyReplayActive && noteToolMetrics(taskId, msg, rawTs);
         // Only host-attested progress grants Stop authority.
         if (grantCancelAuthority && msg.cancelable === true) {
-            changed = markTaskCancelable(String(taskId)) || changed;
+            changed = markTaskCancelable(String(taskId), attemptOf(msg)) || changed;
         }
         const lifecycleParent = taskKey(msg.parent_task_id);
         if (msg.subagent_event && lifecycleParent) {
@@ -2067,13 +2010,14 @@ export function createChatInstance({
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
         let changed = false;
-        const wasFinished = liveCardRecords.get(taskId)?.finished;
+        const prior = liveCardRecords.get(taskId), wasFinished = prior?.finished, attempt = prior?.cardAttempt;
         if ((late && !lateOutcomeIsCurrent(liveCardRecords.get(taskId), evt)) || ((late || ['task_started', 'task_done'].includes(eventType))
                 && !acceptLiveFrame(evt, _historyReplayActive, () => getLiveCardRecord(taskId), (card, words) => { changed = noteTaskDetails(card, words); }))) {
             const journal = evt.tool_evidence && noteToolMetrics(taskId, { tool_evidence: evt.tool_evidence }, '');
             return renderLiveCardMeta(liveCardRecords.get(taskId), taskCostProjection(evt, rawTs)) || Boolean(journal) || changed;
         }
         if (wasFinished && !liveCardRecords.get(taskId)?.finished) concludedDirectActivities.delete(taskId);
+        if (eventType === 'task_started' && attemptOf(evt) > (attempt ?? 0)) cancelableTaskIds.delete(taskId);
         const metrics = late || evt;
         changed = ((metrics.tool_evidence || Number.isInteger(metrics.rounds)
             || ['task_metrics_event', 'task_eval', 'task_done'].includes(eventType)) && noteToolMetrics(taskId, metrics, rawTs)) || changed;
@@ -2093,7 +2037,7 @@ export function createChatInstance({
         if (childInfo) return Boolean(changed || queued);
         const subagentChanged = updateSubagentCardFromEvent(evt, rawTs);
         // Host-attested Stop facts also travel on tool-only turns.
-        if (evt.cancelable === true) markTaskCancelable(taskId);
+        if (evt.cancelable === true) markTaskCancelable(taskId, attemptOf(evt));
         if (eventType === 'task_done' && summary.terminal) {
             recordTerminalActivity(taskId, summary.phase);
             syncChatStatus();
@@ -2305,7 +2249,7 @@ export function createChatInstance({
                         updateLiveCardFromProgressMessage(msg, { grantCancelAuthority: msg.project_mirror !== true });
                         const historyCard = liveCardRecords.get(taskId);
                         if (msg.review_overrides) noteTaskDetails(historyCard, msg);
-                        if (historyCard && !historyCard.isSubagent && !activeDirectActivities.has(taskId)
+                        if (historyCard && !historyCard.isSubagent && !isPortal(historyCard) && !activeDirectActivities.has(taskId)
                                 && !msg.task_terminal_status && msg.task_phase !== 'finalizing'
                                 && setHistoricalUnconfirmed(historyCard)) {
                             syncCancelRunButton(historyCard);
@@ -2431,7 +2375,7 @@ export function createChatInstance({
                 // Cards without terminal or census evidence remain unconfirmed.
                 for (const [id, record] of liveCardRecords) {
                     mountReplayedCard(record);
-                    if (!knownCards.has(id) && !record.finished && !currentActivity(record)) {
+                    if (!knownCards.has(id) && !record.finished && !isPortal(record) && !currentActivity(record)) {
                         setHistoricalUnconfirmed(record);
                         syncCancelRunButton(record);
                         renderLiveCardMeta(record);
@@ -3102,18 +3046,23 @@ export function createChatInstance({
                 || concludedDirectActivities.has(taskId) || !missingManagedTaskIds.has(taskId)) return;
         const shown = () => !destroyed && !leaving && visit === started && liveCardRecords.get(taskId) === record
             && isPortal(record) === portal;
-        readMissingCardDetail(record, shown, detail => {
+        readMissingCardDetail(record, shown, (detail, epoch) => {
             onDomWrite(() => {
+                if (portal) {
+                    if (detail !== null) return attachTaskDetailReviews(taskId, detail, true);
+                    return !record.finished && !record.observedOutcome && portals.acceptsDetail(record, null, epoch)
+                        && settleMissingTaskRecord(record);
+                }
                 if (record.finished || concludedDirectActivities.has(taskId)) {
                     return isTerminalTaskDetail(detail) && attachTaskDetailReviews(taskId, detail, true);
                 }
+                const vouched = !missingManagedTaskIds.has(taskId) || activeDirectActivities.has(taskId);
                 let changed = attachTaskDetailReviews(taskId, detail, true);
                 const cancelPending = taskCancelPending(detail);
                 if (cancelPending || taskKey(detail?.status)) {
                     changed = setHistoricalUnavailable(record, false) || changed;
                     changed = markReviewAnchor(record) || changed;
                 }
-                const vouched = !missingManagedTaskIds.has(taskId) || activeDirectActivities.has(taskId);
                 if (!vouched && detail === null) {
                     revokeManagedTaskCancelAuthority(taskId);
                     return settleMissingTaskRecord(record) || changed;
@@ -3154,6 +3103,7 @@ export function createChatInstance({
         for (const [k, v] of nextMap.entries()) {
             if (v.clientMessageId) pendingSubmissions.delete(v.clientMessageId);
             const record = liveCardRecords.get(k);
+            if (isPortal(record) || attemptOf(v) < record?.cardAttempt) continue;
             if (!connected) v._activityUnconfirmed = true;
             const facts = censusTaskFacts(v);
             if (facts.ended) {
@@ -3162,24 +3112,30 @@ export function createChatInstance({
                 continue;
             }
             activeDirectActivities.set(k, v);
-            restoreCardActivity(liveCardRecords.get(k), v.project_admission_hold);
+            restoreCardActivity(record, v.project_admission_hold);
             syncParkedPhase(record, v.phase, v);
             syncCancelRunButton(record);
             markReviewAnchor(record);
             if (v.kind === 'managed_task') missingManagedTaskIds.delete(k);
         }
-        for (const taskId of globallyActiveActivityIds) missingManagedTaskIds.delete(taskId);
+        for (const taskId of globallyActiveActivityIds) {
+            if (!isPortal(liveCardRecords.get(taskId))) missingManagedTaskIds.delete(taskId);
+        }
         for (const row of settledDirectRows) {
             // Visible task cards settle from durable detail in the scan below.
-            if (!REUSABLE_TASK_IDS.has(row.activityId)
-                    && !isForegroundLiveCard(liveCardRecords.get(row.activityId))) recordConcludedActivity(row.activityId);
+            const record = liveCardRecords.get(row.activityId);
+            if (!REUSABLE_TASK_IDS.has(row.activityId) && !isPortal(record) && !isForegroundLiveCard(record)) {
+                recordConcludedActivity(row.activityId);
+            }
             if (row.clientMessageId) pendingSubmissions.delete(row.clientMessageId);
         }
         for (const taskId of departedManagedTaskIds) revokeManagedTaskCancelAuthority(taskId);
-        for (const taskId of disappearedManagedTaskIds) observeMissingManagedTask(taskId);
+        for (const taskId of disappearedManagedTaskIds) {
+            if (!isPortal(liveCardRecords.get(taskId))) observeMissingManagedTask(taskId);
+        }
         if (complete) for (const taskId of unconfirmedForegroundCardIds(
             Array.from(liveCardRecords, ([id, r]) => ({
-                id, finished: r.finished, isSubagent: r.isSubagent, connected: r.root?.isConnected,
+                id, finished: r.finished, isSubagent: r.isSubagent, connected: r.root?.isConnected && !isPortal(r),
             })),
             globallyActiveActivityIds,
         )) {
@@ -3192,7 +3148,8 @@ export function createChatInstance({
             }
         }
         if (complete) for (const taskId of missingManagedTaskIds) {
-            if (!activeDirectActivities.has(taskId)) void reconcileMissingManagedTask(taskId);
+            const record = liveCardRecords.get(taskId);
+            if (!isPortal(record) && !currentActivity(record)) void reconcileMissingManagedTask(taskId);
         }
     }
 
@@ -3460,6 +3417,7 @@ export function createChatInstance({
             }
             let changed = false;
             for (const [id, record] of liveCardRecords) {
+                if (isPortal(record)) continue;
                 record.childDetailRead = undefined;
                 if (record.isSubagent) record.parkedOffline = true;  // this client's own park, not the server's view
                 changed = syncParkedPhase(record, 'unknown', activeDirectActivities.get(id)) || changed;
