@@ -199,10 +199,12 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
     return ""
 
 
-def _provider_token_receipt(usage: Mapping[str, Any], attempt_id: str, token_source: Any) -> dict | None:
-    """Read the response parser's pre-accounting witness, never the billing-shaped fallback."""
+def _provider_token_receipt(usage: Mapping[str, Any], reservation: Any, token_source: Any) -> dict | None:
+    """Read the response parser's pre-accounting witness, never the billing-shaped fallback.
+
+    Only a stream witness needs the attempt id it is bound to; without one the reservation's id is never read."""
     if (stream := chat_usage_receipt(token_source)) is not None:
-        return stream.for_attempt(attempt_id)  # An empty stream witness is distinct from no usage frame.
+        return stream.for_attempt(reservation.attempt_id)  # An empty stream witness is distinct from no usage frame.
     raw = usage.get("_reported_token_usage")
     return provider_token_counts(raw) if isinstance(raw, dict) else None
 
@@ -287,7 +289,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
     if has_nontext_usage(normalized):
         evidence.setdefault("usage", copy.deepcopy({key: value for key, value in normalized.items()
                                                    if key != "cost_evidence"}))
-    token_receipt = _provider_token_receipt(normalized, reservation.attempt_id, token_source)
+    token_receipt = _provider_token_receipt(normalized, reservation, token_source)
     return dict(
         cost_usd=cost,
         cost_final=bool(cost_final and cost is not None),

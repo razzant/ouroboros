@@ -374,8 +374,8 @@ def test_reported_cost_controls_return_and_settlement(monkeypatch, isolated, rep
     observed = []
     settle = ua.settle_attempt
 
-    def record(reservation, usage, *, cost_usd=None, cost_final=False):
-        settle(reservation, usage, cost_usd=cost_usd, cost_final=cost_final)
+    def record(reservation, usage, *, cost_usd=None, cost_final=False, **receipt):
+        settle(reservation, usage, cost_usd=cost_usd, cost_final=cost_final, **receipt)
         observed.append((reservation.opencode_go, usage["prompt_tokens"], cost_usd, cost_final))
 
     monkeypatch.setattr(ua, "settle_attempt", record)
@@ -498,9 +498,9 @@ def test_sdk_stream_policy_matches_durable_settlement(monkeypatch, isolated, del
 
     settle = ua.settle_attempt
 
-    def record(reservation, usage, *, cost_usd=None, cost_final=False, estimate_cache_ttl=None):
+    def record(reservation, usage, *, cost_usd=None, cost_final=False, estimate_cache_ttl=None, **receipt):
         settle(reservation, usage, cost_usd=cost_usd, cost_final=cost_final,
-               estimate_cache_ttl=estimate_cache_ttl)
+               estimate_cache_ttl=estimate_cache_ttl, **receipt)
         prices.append((reservation.opencode_go, usage["prompt_tokens"], cost_usd, cost_final))
 
     monkeypatch.setattr(ua, "settle_attempt", record)
