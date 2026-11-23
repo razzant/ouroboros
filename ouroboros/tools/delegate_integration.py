@@ -204,10 +204,12 @@ def _validated_invocation(drive: Any, retry_token: str, task_id: str,
                            "may only be retried by the task that requested it.",
                            retry_of=retry_token)
     if record["state"] == "started":
+        named = record.get("named_notes")
         return None, _fail("delegate_start", "invocation_already_started",
                            "That invocation already bound a run — do not re-post it. "
                            "Wait on the existing run instead.",
-                           retry_of=retry_token, run_id=record["run_id"])
+                           retry_of=retry_token, run_id=record["run_id"],
+                           **({"named_notes": named} if isinstance(named, dict) and named else {}))
     if record["state"] == "failed_definite":
         return None, _fail("delegate_start", "invocation_definitely_refused",
                            "That invocation is recorded as definitively refused (failed_definite); "
@@ -268,11 +270,11 @@ def _accepted_retry(drive: Any, retry_token: str, record: Dict[str, Any], lineag
     return _accepted_result(held, read, retry_token, record.get("request"), (
         "The engine had already accepted this invocation's start; its run is now in custody and nothing was "
         "re-sent. Poll with delegate_wait; the run's own claims are evidence to check, not a verified result."),
-        record.get("input_files"), lineage)
+        record.get("input_files"), lineage, record.get("named_notes"))
 
 
 def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: BaseException,
-                           request: Any, selected: Any = None, lineage: Any = None) -> Optional[ToolResult]:
+                           request: Any, selected: Any = None, lineage: Any = None, named: Any = None) -> Optional[ToolResult]:
     """A start whose POST the engine answered with an error: the run it nonetheless accepted, read and bound
     once on the start's own gateway (``delegate_accepted.accepted_after_refusal``), answered as started, naming the
     start's own selection and lineage fact; else ``None`` and the start keeps its pending token, registration and
@@ -283,25 +285,28 @@ def accepted_refused_start(drive: Any, gateway: Any, invocation_id: str, error: 
     return None if held is None else _accepted_result(held, read, invocation_id, request, (
         "The engine answered this start with an error, yet it had accepted the start: its run is now in custody "
         "and nothing was sent again. Poll with delegate_wait; the run's own claims are evidence to check."),
-        selected, lineage)
+        selected, lineage, named)
 
 
 def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, request: Any, note: str,
-                     selected: Any = None, lineage: Any = None) -> ToolResult:
+                     selected: Any = None, lineage: Any = None, named: Any = None) -> ToolResult:
     """The started result of the run custody bound for ``invocation_id`` from the engine's own read: ``selected``
     is the invocation's recorded copies (a binding made by this read carries no request row), ``lineage`` what
-    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing)."""
+    the caller may state of automatic lineage copies (``_start_lineage``; None says nothing), and ``named``
+    what the invocation recorded for its knowledge notes; none is looked up again."""
     from ouroboros.delegate_shared import delegate_result
 
     from ouroboros.helper_receipt import NO_RECORD, PREPARED, build, render, start_facts
 
     scope = (request.get("scope") if isinstance(request, dict) else None) or {}
-    rows = selected if isinstance(selected, list) else (held.request_event or {}).get("input_files")
-    facts = {**(start_facts(request, lineage) if isinstance(request, dict) else {"assignment": (NO_RECORD, PREPARED),
-                                                                                  "lineage": lineage}),
+    recorded = held.request_event or {}
+    rows = selected if isinstance(selected, list) else recorded.get("input_files")
+    facts = {**start_facts(request if isinstance(request, dict) else {}, lineage, named or recorded.get("named_notes")),
              "access": [("access", held.access, None)] + ([(  # its key found an investigation: say so, briefly
                  "investigation", "evidence-only investigation: nothing from it is applied", False)]
                  if evidence_only(held) and held.mode == "agent" else [])}
+    if not isinstance(request, dict):
+        facts["assignment"] = (NO_RECORD, PREPARED)
     if isinstance(rows, list):  # this invocation's recorded copies
         facts.update(inputs=rows, inputs_when="prepared before the first send", inputs_outside=sum(
             1 for row in rows if isinstance(row, dict) and row.get("carrier") == "outside_scope_path"))
@@ -311,6 +316,7 @@ def _accepted_result(held: Any, read: Dict[str, Any], invocation_id: str, reques
         "recovered_without_start": True, "custody_durable": True, "route": held.route_id, "model": held.model,
         "effort": held.effort or "", "access": held.access, "mode": held.mode, "isolation": held.isolation or "envelope",
         "root": held.execution_root or str(scope.get("root") or ""), "lookup": read, "note": note,
+        **({"named_notes": facts["knowledge_notes"]} if "knowledge_notes" in facts else {}),
     })
 
 
@@ -338,6 +344,7 @@ class _RetryBinding(NamedTuple):
     prompt_cache_ttl: Dict[str, Any]
     input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
     row_processing: Optional[str]  # the configured row's own tier as recorded; None on a row that recorded none
+    named_notes: Optional[Dict[str, Any]]  # the knowledge notes the original start sent, by address and revision
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -487,6 +494,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
         input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
         row_processing=record["row_processing"] if isinstance(record.get("row_processing"), str) else None,
+        named_notes=deepcopy(record["named_notes"]) if isinstance(record.get("named_notes"), dict) else None,
     ), None
 
 

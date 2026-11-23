@@ -737,7 +737,11 @@ def test_saved_answer_resumes_at_delivery_without_another_model_call(tmp_path, m
     answer = "Here is the completed work."
     with monkeypatch.context() as first:
         if door in {"lookup", "read"}:
-            first.setattr("ouroboros.place_reply.routeless_note", lookup_before_finish)
+            from ouroboros import delegate_resume  # the call right after the selection reads the owner Pause
+
+            read_selected = delegate_resume.selected_answer_context
+            first.setattr(delegate_resume, "selected_answer_context",
+                          lambda *args, **kwargs: lookup_before_finish() or read_selected(*args, **kwargs))
             first.setattr("ouroboros.place_reply.prepare_focus_reply",
                           lambda *_a, **_k: pytest.fail("selected beside a running writer"))
         elif door == "cleanup":

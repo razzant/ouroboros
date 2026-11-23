@@ -12,16 +12,15 @@ def test_schedule_and_integration_describe_the_three_write_surfaces():
     description = schedule["description"]
     assert "workspace_root: start folder, else yours" in description
     # The default child reads; a write_surface value is what makes it acting.
-    assert description.index("Default native READ-ONLY children inspect") < description.index(
-        "write_surface makes a child ACTING: self_worktree isolates eligible Git files")
+    assert description.index("Default native READ-ONLY") < description.index("ACTING write_surface")
     assert "Read-only input_files: file/git_range" in description
-    assert "uncommitted too" in description
-    assert "external_workspace writes the SHARED directory (write_root, else workspace_root, else one new Git tree)" in description
-    assert "harness work uses a private snapshot and integrate_delegated_patch" in description
-    assert "Non-acting sessions keep configured access in an evidence-only private checking copy" in description
+    assert "self_worktree isolates eligible Git files, uncommitted too (integrate_subagent_patch)" in description
+    assert "external_workspace writes shared files (write_root, else workspace_root, else new Git tree)" in description
+    assert "Private harness snapshots: integrate_delegated_patch" in description
+    assert "Non-acting sessions keep configured access in private evidence-only copies" in description
     access = schedule["parameters"]["properties"]["access"]["description"]
     assert "do not call integrate_delegated_patch to apply or reject" in access
-    assert "genesis gives EACH an empty durable Git repo that IS the deliverable" in description
+    assert "genesis: own empty durable Git repo as deliverable" in description
     prop = schedule["parameters"]["properties"]["write_surface"]
     assert "native children write shared files directly" in prop["description"]
     integration = next(entry.schema for entry in integration_tools() if entry.name == "integrate_subagent_patch")

@@ -51,18 +51,17 @@ def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
                              {"model_account_override": ""})["tools"][0]["function"]
     assert projected["description"].startswith(expected)
 
-# Conditions the custom projection clipped, wholly or partly, from the schedule_subagent lead before
-# #502 (full and acting kept 2310 of its 3392 characters, readonly 2552 and so lost fewer), in the
-# wording that now reaches that consumer.
-_SCHEDULE_TAIL = (
-    "no child commits, grants itself tools or writes identity/scratchpad",
-    "Cyber-effective children inherit review/skill/runtime tools within task restrictions; nesting is capped",
-    "Children scheduled in one round run concurrently",
-    "each sibling started before the first responds pays a full prefix write",
-    "Native children can address you, siblings or any task in their tree",
-    "state what is interim, whom to address and when to stop",
+# Conditions the custom projection clipped from the schedule_subagent tail before #502. Check the
+# instructions in the delivered lead, not the placement or exact wording of the old paragraph.
+_SCHEDULE_PRECALL = (
+    "no commits, tool self-grants or identity/scratchpad",
+    "Cyber children inherit review/skill/runtime tools within limits; nesting capped",
+    "Same-round starts run concurrently",
+    "Priced cache writes: full prefix write per start before first reply",
+    "Native children message any task in their tree",
+    "name interim reports, recipients and when to stop",
     "Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work may repeat",
-    "Read the handoff before relying on it",
+    "read the handoff",
 )
 
 
@@ -83,23 +82,25 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     catalog = project_function_tools_to_openai_custom([schema])
     description = catalog.wire_tools()[0]["custom"]["description"]
     assert description.startswith(" ".join(function["description"].split()) + "\n")
-    assert "access='readonly' selects read-only execution" in description
-    assert "evidence-only private checking copy" in description
-    for condition in _SCHEDULE_TAIL:
+    assert "access='readonly' forces read-only" in description
+    assert "Non-acting sessions keep configured access in private evidence-only copies" in description
+    for condition in _SCHEDULE_PRECALL:
         assert condition in description, condition
     assert catalog.schema_binding("schedule_subagent").schema() == function["parameters"]
 
 
 @pytest.mark.parametrize("name,arguments,invalid_field,invalid_value", [
     ("schedule_subagent", {"subagent_id": "actor-1", "objective": "Inspect interfaces",
-                          "expected_output": "Findings", "role": "", "write_surface": "read_only"},
+                          "expected_output": "Findings", "role": "", "write_surface": "read_only",
+                          "knowledge_notes": [{"topic": "interfaces", "scope": "global"}]},
      "write_surface", "invented_surface"),
     ("plan_task", {"goal": "Repair interfaces", "plan": "Inspect and verify", "affected_paths": [],
                    "done_when": [{"id": "c1", "claim": "Interfaces remain compatible", "support": "run the suite"}],
                    "ask": "council", "message": "First look."},
      "ask", "everyone"),
     ("delegate_start", {"prompt": "New evidence", "subagent_id": "actor-1",
-                        "continue_from": "settled-run", "continue_carrier": "packet"},
+                        "continue_from": "settled-run", "continue_carrier": "packet",
+                        "knowledge_notes": [{"topic": "notes/changes"}]},
      "continue_carrier", "restart"),
     ("query_data", {"op": "jsonl", "kind": "events_log", "tail": 20}, "max_rows", 0),
 ])
@@ -139,13 +140,15 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # 60ab2c0f421da812.
 # delegate_start and schedule_subagent: input_files also accepts git_range with nonempty base/head, its two
 # disjoint item shapes under anyOf.
+# Both starts add optional knowledge_notes (array of {topic, scope?}); removing that field recovers
+# the previous hashes in every profile, without changing previously published structure.
 _STRUCTURE = {
     "query_data": {"full": "d7100565e686c951", "readonly": "d7100565e686c951", "acting": "d7100565e686c951"},
-    "delegate_start": {"full": "c2326654b1c27628", "readonly": "3b1fa4fdb26740ea", "acting": "3b1fa4fdb26740ea"},
+    "delegate_start": {"full": "f08b11bb73f9a737", "readonly": "722bc912841f2df4", "acting": "722bc912841f2df4"},
     "delegate_wait": {"full": "a5b3b83441b79479", "readonly": "a5b3b83441b79479", "acting": "a5b3b83441b79479"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
-    "schedule_subagent": {"full": "46fb645e7633c47e", "readonly": "423db7ac0f9ac81f", "acting": "46fb645e7633c47e"},
+    "schedule_subagent": {"full": "f770c5c50794d5a2", "readonly": "89f5c5b9ba37c901", "acting": "f770c5c50794d5a2"},
 }
 
 
@@ -194,8 +197,8 @@ _SCHEDULE_REMOVALS_CARRIED_BY = (
     ("forward_to_worker", "To wait for a reply without spending model rounds, call await_messages", _EVERY),
     ("delegate_answer", "Answer a delegated run's pending interactive question", _EVERY),
     ("chronicle_write", "publishes pages and parts only as drafts signed in its own name", _EVERY),
-    ("delegate_start", "A TOP-LEVEL task may select one existing user-managed skill via root='skill_payload', "
-                       "bucket and skill_name", _EVERY),
+    ("delegate_start", "Only a top-level task can edit one existing user-managed skill (root='skill_payload', "
+                       "bucket, skill_name)", _EVERY),
     # Only a caller that can request write_surface can schedule these children.
     ("integrate_subagent_patch", "Genesis is a standalone directory, not a repo patch", {"full", "acting"}),
     ("integrate_subagent_patch", "This never commits", {"full", "acting"}),
@@ -260,10 +263,11 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
             custom = next(tool["custom"]["description"] for tool in project_function_tools_to_openai_custom(schemas).wire_tools()
                           if tool["custom"]["name"] == "schedule_subagent")
             assert custom.startswith(" ".join(function["description"].split()) + "\n")
-            for condition in (*_SCHEDULE_TAIL, "write_root, else workspace_root, else one new Git tree",
-                              "Default native READ-ONLY children inspect", "write_surface makes a child ACTING: self_worktree",
+            for condition in (*_SCHEDULE_PRECALL, "write_root, else workspace_root, else new Git tree",
+                              "Default native READ-ONLY", "no other writes or shell/review/runtime/skills",
+                              "ACTING write_surface: self_worktree",
                               "Runtime data is never a write_surface",
-                              "access='readonly' selects read-only execution", "evidence-only private checking copy"):
+                              "access='readonly' forces read-only", "private evidence-only copies"):
                 assert condition in custom, condition
             system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")
                               .read_text(encoding="utf-8").split())

@@ -1097,7 +1097,7 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     resolution is pure"). The argument names are the handler's own signature."""
     from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
     from ouroboros.dialogue_provenance import presence_caller_binding
-    from ouroboros.place_reply import reply_carrier
+    from ouroboros.place_reply import carrier_now
     from ouroboros.task_results import resolve_ctx_lineage
 
     if not isinstance(arguments, dict) or "action" not in arguments or set(arguments) - _FINISH_TASK_ARGUMENTS:
@@ -1130,7 +1130,7 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     # the fold it would stand for goes with it.
     ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
                if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
-    if silent and not self_started and not reply_carrier(metadata):
+    if silent and not self_started and not carrier_now(ctx, metadata):  # a retained legacy binding resolves too
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
                       "silent also on a task answering its own place conversation")

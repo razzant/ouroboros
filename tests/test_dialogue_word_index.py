@@ -9,10 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import dialogue_import as di, dialogue_recall, dialogue_store as ds, dialogue_word_index as dwi
-from ouroboros import maintenance
+from ouroboros import maintenance, store
 from ouroboros.tools.control_runtime import _chat_history
 from tests import _dialogue as dialogue_test
 from tests._dialogue import chat_rows, seed
+from tests._store_shared import independent_writer
 
 needs_fts5 = pytest.mark.skipif(not dwi.fts5_available(), reason="this SQLite has no FTS5")
 
@@ -440,15 +441,13 @@ def test_a_runtime_without_fts5_beside_a_postings_table_keeps_every_dialogue_pat
                 conn.execute(statement)
         conn.execute("INSERT INTO dw_meta (id, format, generation, seen_rev, usable, built_epoch) "
                      "VALUES (1, ?, ?, 0, 1, 0)", (dwi.FORMAT, f"{dwi.FORMAT}:x:g"))
-    raw = sqlite3.connect(ds.path(held))
-    version = raw.execute("PRAGMA schema_version").fetchone()[0]
-    raw.execute("PRAGMA writable_schema=ON")
-    raw.execute("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
-                "('table', 'dw_post', 'dw_post', 0, 'CREATE VIRTUAL TABLE dw_post USING no_such_fts(tokens)')")
-    raw.execute(f"PRAGMA schema_version={version + 1}")
-    raw.execute("PRAGMA writable_schema=OFF")
-    raw.commit()
-    raw.close()
+    with independent_writer(ds.path(held)) as conn, store.transaction(conn, write=True):
+        version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.execute("PRAGMA writable_schema=ON")
+        conn.execute("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES "
+                     "('table', 'dw_post', 'dw_post', 0, 'CREATE VIRTUAL TABLE dw_post USING no_such_fts(tokens)')")
+        conn.execute(f"PRAGMA schema_version={version + 1}")
+        conn.execute("PRAGMA writable_schema=OFF")
     monkeypatch.setattr(dwi, "_FTS5", False)
     for root in (plain, held):
         receipt = _say(root, "2026-11-02T00:00:00Z", "plum appended")

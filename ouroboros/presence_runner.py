@@ -127,7 +127,7 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
     from ouroboros.presence_continuation import _handoff_ref, terminal_output
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS, schedule_report_run
 
-    from ouroboros.place_reply import prepare_focus_reply, reply_carrier
+    from ouroboros.place_reply import carrier_now, prepare_focus_reply
     if schedule_report_run(task):
         # A legacy schedule's report is retained in the result only. Host facts alone decide whether work is owed;
         # neither the forced declaration nor a finish note may carry its text to the next turn.
@@ -149,10 +149,14 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
             "type": "presence_result", "task_id": str(task.get("id") or ""), "outcome": outcome,
             "text": "", "message": "", "work_ref": work_ref, "output_ref": "", "ts": utc_now_iso(),
         }
-    carrier = reply_carrier(task.get("metadata") or {})
+    # A new selection meets the place a retained legacy binding resolves to; a frozen-ceiling run keeps its forced
+    # declaration (``place_reply.carrier_now``). A hold before any body ends with no run (``ctx`` None): no selection.
+    carrier = carrier_now(ctx, task.get("metadata") or {}) if ctx is not None else {}
     if carrier:
         # Ordinary exits have already returned flags to the mind. Forced exits cannot buy a
         # new round: preserve the flag as a held reply instead of releasing unchecked speech.
+        # No round reads a record note now, so a records-only finish is simply the record.
+        ctx._records_only_noted = True
         allowed, refusal = prepare_focus_reply(ctx, str(text or ""), quiet=terminal_origin != "model_final" or silent)
         if not allowed:
             from ouroboros.place_reply import record_notice
@@ -175,6 +179,10 @@ def build_presence_result_event(task: dict[str, Any], text: str, ctx: Any, *, te
         # when owed work below turns the outcome into deferred.
         text = str(completion.get("message") or "") if completion.get("outcome") in {"message", "deferred"} else ""
     note = str(completion.get("message") or "") if completion.get("outcome") == "tool_delivered" else ""
+    if silent and not completion.get("quiet") and completion.get("outcome") != "tool_delivered":
+        # An accepted silent finish is never words, whatever the carrier read returned (none from an unreadable
+        # store): the quiet outcome its selection gives it (``place_reply.prepare_focus_reply``), no outward body.
+        completion = {**completion, "outcome": "deferred" if _handoff_ref(ctx) else "silent", "quiet": True}
     if completion.get("quiet"):
         # Not speech, so an owed handoff below polls with an empty body; the mind's own
         # silent words stay its finish note, host text never becomes one.

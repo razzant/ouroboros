@@ -78,7 +78,10 @@ def test_configured_nanny_note_states_the_charter_and_defers_truth_to_receipt():
     assert "explicit separate child" in note
     assert "zero_run_decision=incomplete|unknown" in note
     assert "delegate everything you can" not in note
-    assert "WORK ORDER" not in note
+    # C03 moved the product's vocabulary to the lowercase "work order"; the
+    # meaning is what the check keeps: the nanny note never frames the child's
+    # work as a work order.
+    assert "work order" not in note.lower()
 
 
 def test_agent_reexports_the_moved_note_pair():
@@ -353,7 +356,10 @@ def test_schedule_subagent_descriptions_carry_the_delegation_guidance():
     objective = props["objective"]["description"]
     assert "OUTCOME" in objective and "script" in objective
     context = props["context"]["description"]
-    assert "not instructions" in context and "WORK ORDER" in context
+    assert "not instructions" in context
+    # The same meaning in the product's lowercase spelling (C03): a
+    # harness-dispatched child's context goes into the work order, not the instructions.
+    assert "goes in the work order" in context
     selector = props["subagent_id"]["description"]
     assert "Available subagent" in selector and "exact" in selector.lower()
     assert "model_lane" not in props

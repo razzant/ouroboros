@@ -64,8 +64,8 @@ explicit work-order review obligations.
   decision to continue over critical findings, quorum failure, infrastructure
   failure or a missing review leaves a durable trace: a `review_advisory_override`
   event in `events.jsonl` plus the persistent `advisory_overrides_count` /
-  recent-overrides fields in `review_status`; restart and update notices name
-  the commits that landed over it. Silent continuation is forbidden.
+  recent-overrides fields in `review_status`; restart notices and the Update
+  window name the commits that landed over it. Silent continuation is forbidden.
 - **Author finality remains evidence, not reviewer PASS:** the authors of a task
   result, a skill and a commit may record an explicit author disposition against the
   exact current subject after received feedback or a disclosed unavailable review.
@@ -665,11 +665,10 @@ gate admits those bytes only (`trusted_source`); any later edit leaves the
 release and is unreviewed again. No synthetic `clean` verdict is written;
 the deterministic preflight still gates the bytes an install or update lands (a
 built-in re-seeded with an app update carries the app's own release); a source's
-trust never rewrites earlier installs. A skill installed from a source that
-reviews each skill keeps blocker findings non-executable
-until the owner skips the review. Enablement of such installs is the
-owner's choice or the install's turn-on-when-ready request, never over an
-explicit Off. The Built in row of the source list sets built-in trust;
+trust never rewrites earlier installs. See [Severity rules](#severity-rules-1)
+for strict installs. Enablement is the owner's choice or the install's
+turn-on-when-ready request, never over an explicit Off. The Built in row of
+the source list sets built-in trust;
 `OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS=false` only seeds that row while no list is saved.
 A built-in whose manifest `os` excludes this host is neither offered nor newly
 installed; an installed copy is still re-seeded and discovery hides it, except a
@@ -699,13 +698,11 @@ configuration does not turn a self-authored decision into an owner attestation. 
 expressed owner instruction through `skill_owner_action`; the shared host owner
 checks the actual caller, resolved member source, selected revision and source
 eligibility before invoking this same attestation. The model interprets the
-owner's words; a formatted reference alone grants nothing. Without a review
-panel, exact bytes are accepted only by: a trusted source (`trusted`); Ouroboros's
-own recorded check of that release, only in Cyber Pro (`self_check`, its notes in
-`install.json`; outside Cyber Pro it admits nothing); the owner's Skip review or "Update without
-review" of that release (owner attestation, `owner_skip`); and an owner edit: the
-admitted selected-skill task the owner's own door started records `owner_edit.json`
-for each revision it writes. Each binds to exact bytes; any later edit leaves it.
+owner's words; a formatted reference alone grants nothing. Host-recorded bases
+for accepting exact bytes without a panel include a trusted source, a recorded
+self-check while Cyber Pro is active, owner Skip (including "Update without review"), and an edit
+by a task the owner started for that skill. An author finish is separate; see
+[Severity rules](#severity-rules-1) for when it can admit the current bytes.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is default-on as of v6.10.0 (the owner
 may disable it), in which case a fresh executable review grants only
 manifest-declared settings keys and host permissions for that exact content
@@ -736,7 +733,9 @@ source membership/provenance and current manifest/review/dependency restrictions
 the acting model interprets the source's meaning. A formatted reference or an
 automatically generated repair request is not owner permission. Ordinary repair
 does not grant all permissions, self-attest or authorize deletion. Preserve the
-configured auto-grant policy, ClawHub no-Skip rule, and explicit owner disable/Stop.
+configured auto-grant policy and explicit owner disable/Stop. Outside Cyber Pro,
+strict-review installs with `blockers`, `pending` or a stale review need a
+separate valid basis for those bytes (see Severity rules), not author acceptance.
 Do not require repeated owner clicks for operations already covered by the task.
 
 Keep review, grants, desired enablement, dependency readiness and loaded/tested
@@ -805,20 +804,24 @@ the reviewer's word.
   - `warnings` — one or more advisory FAIL findings, no blocker findings.
   - `blockers` — one or more critical/blocker FAIL findings.
   - `pending` — no reliable completed review verdict.
-- Outside Cyber Pro, verdicts map to execution:
-  - `clean`, `warnings`, and `blockers` are executable. This changes
-    `executable_review` only; it does not rewrite the verdict, suppress
-    findings, or change `skill_review_status` semantics.
-  - Outside Cyber Pro, `pending` is not executable. A stale critic verdict does not authorize bytes;
-    a separate current author acceptance may admit the payload
-    after deterministic preflight.
-- Review state stores findings and computes the verdict at load time. Agents
-  and UI callers must use `review_gate.executable_review` / `executable_review`,
-  not the raw status string, when deciding whether the skill is runnable.
-- A deterministic `skill_preflight` FAIL is a structural gate failure, not an LLM
-  verdict: it persists and aggregates to `pending`, which is non-executable
-  outside Cyber Pro. Cyber keeps the failed check
-  and pending verdict visible while leaving the execution decision to Ouroboros.
+- Outside Cyber Pro:
+  - `strict_review` derives from the install record: a `review` or `self_check`
+    basis, except converted legacy installs, which stay advisory.
+  - Subject to preflight, fresh `clean` and `warnings` admit the bytes; fresh
+    `blockers` alone suffice only for non-strict installs. Neither `pending`
+    nor a stale review admits bytes on its own.
+  - Recording a new author finish requires a current preflight pass and either
+    earlier reviewer feedback or a terminal no-verdict reference. A valid saved
+    finish can admit only the exact bytes of a non-strict install.
+  - A separate valid exact-byte basis (e.g. owner Skip or edit) may admit the bytes.
+- For review admission of the current bytes, use `review_gate.executable_review`
+  / `executable_review` (`SkillReviewState.gate_for`), not the verdict. The gate
+  leaves verdicts and findings intact.
+- A deterministic `skill_preflight` FAIL stops the operation that requires a
+  pass; it is not an LLM verdict. The gate uses recorded preflight state, not the
+  operation result; a saved preflight finding yields `pending`. Check the gate
+  for the current bytes: outside Cyber Pro, strict-review rules still apply where
+  required; in Cyber Pro, the failure informs Ouroboros's decision.
 - Hard trust-boundary items are blocker findings on any FAIL regardless of
   reviewer-supplied severity: `manifest_schema`,
   `permissions_honesty`, `no_repo_mutation`, `path_confinement`,

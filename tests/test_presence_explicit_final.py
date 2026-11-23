@@ -320,7 +320,9 @@ def test_a_records_only_final_after_an_ack_returns_once_then_stays_the_record(re
     assert stored["result"] == FINAL and stored["wake_silent"] is True  # the record on the card; the wake ended quiet
     assert room.h.calls == 3
     note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
-    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and "Send it now, or finish again" in note
+    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note
+    assert "do not resend while its outcome is unknown" in note
+    assert "only if you know they were not sent here" in note and "Finish again to keep this text as your record" in note
     assert "A non-silent finish_task answer is posted" not in note  # the posting-form facts do not apply here
     pointer = pointer_of(room, body["turn_ref"])
     assert (pointer["outcome"], pointer["message"], pointer["finish_note"], pointer["transport_sends"]) == ("silent", "", FINAL, [ACK])
@@ -378,16 +380,71 @@ def test_a_threadless_gesture_on_the_waking_message_in_a_thread_rides_and_any_ot
     assert [row["message_id"] for row in room.transport.provider] == ["chat:a:1", "chat:a:other", "chat:a:3", "chat:a:4"]
 
 
-def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room):
+@pytest.mark.parametrize("then", ["finish", "prose"])
+def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room, then):
     """Review R1 MAJOR-2: a tool-less final carries nothing that rides, so after an ack it gets the one return with the
-    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack."""
+    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack. The note
+    is one-shot facts, so an explicit finish_task and the same prose again both stand (no selection is owed)."""
     room = records_room
-    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    after = finish(answer=FINAL) if then == "finish" else {"content": FINAL, "tool_calls": []}
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, after]
     view, stored = settle(room, turn(room))
     assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
     assert stored["result"] == FINAL and stored["wake_silent"] is True and room.h.calls == 3
     note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
     assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and FINAL not in room.transport.texts()
+    rows = room.h.inputs[-1]  # the note's request carries the words it asks to send, as the model's own row before it
+    at = next(index for index, row in enumerate(rows) if RECORD_NOTE in str(row.get("content")))
+    assert (rows[at - 1].get("role"), rows[at - 1].get("content")) == ("assistant", FINAL), rows[at - 1]
+    assert note.count(RECORD_NOTE) == 1, "the note is shown once"
+
+
+def test_a_records_only_note_lets_the_model_send_the_answer_it_wrote_once(records_room):
+    """Review round 2 (Grok, Astra 3): after an ack through the door the model writes its answer as prose; the note
+    returns it once, and the model, which can only copy what its request shows, sends those exact words through the
+    door with its finish. The person receives the answer once and the finish is the turn's silent record."""
+    room = records_room
+
+    def send_what_it_wrote(messages):
+        written = [row.get("content") for row in messages
+                   if row.get("role") == "assistant" and isinstance(row.get("content"), str)]
+        words = next((text for text in reversed(written) if text.strip()), "")
+        door = record_send(text=words, request_id="answer")["tool_calls"] if words else []
+        return {"content": None, "tool_calls": [*door, *finish(answer=FINAL)["tool_calls"]]}
+
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, send_what_it_wrote]
+    view, stored = settle(room, turn(room))
+    assert room.transport.texts() == [ACK, FINAL], "the answer reaches the person once, through the door"
+    assert (view["outcome"], view["text"]) == ("silent", "") and stored["metadata"]["presence_outcome"] == "silent"
+    assert stored["result"] == FINAL and room.h.calls == 3
+    assert [RECORD_NOTE in json.dumps(rows, ensure_ascii=False) for rows in room.h.inputs] == [False, False, True]
+
+
+def test_a_peer_message_at_the_final_drain_leaves_the_answer_once_before_the_record_note(records_room, monkeypatch):
+    """Review round 3 (Astra 4): an independent task's message reaches the finish's final drain after the answer's
+    provisional row, so that row stays in the transcript; the record note's request then holds the answer once, before
+    the peer's message and the note, never a second copy of it."""
+    from ouroboros import loop
+    from ouroboros.owner_mailbox import write_task_message
+    room = records_room
+    peer, drain, injected = "The peer archive is available.", loop._drain_incoming_messages, []
+
+    def peer_at_close(messages, incoming, root, task_id, *args, **kwargs):
+        if not injected and messages[-1].get("role") == "assistant" and messages[-1].get("content") == FINAL:
+            assert write_task_message(root, peer, task_id, source_task_id="synthetic-peer", provenance="independent_task")
+            injected.append(True)
+        return drain(messages, incoming, root, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(loop, "_drain_incoming_messages", peer_at_close)
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    view, stored = settle(room, turn(room))
+    rows = room.h.inputs[-1]
+    answers = [index for index, row in enumerate(rows) if row.get("role") == "assistant" and row.get("content") == FINAL]
+    notes = [index for index, row in enumerate(rows) if RECORD_NOTE in str(row.get("content"))]
+    peers = [index for index, row in enumerate(rows) if peer in str(row.get("content"))]
+    assert injected and len(answers) == len(peers) == len(notes) == 1 and answers[0] < peers[0] < notes[0], (
+        answers, peers, notes)
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
 
 
 def test_a_prose_final_into_a_records_only_turn_keeps_the_owed_reply(records_room):
@@ -595,19 +652,20 @@ class WorkerDeath(BaseException):
     """The worker process dies here: nothing after it runs."""
 
 
-def promoted_root(room, monkeypatch, responses, *, chat_id=1, project=None, crash=False):
+def promoted_root(room, monkeypatch, responses, *, chat_id=1, project=None, crash=False, turn_script=None):
     """A root promoted from this conversation keeps the speaker carrier: the real loop and pipeline run it.
 
     A response may be a callable of the messages, like a turn's script; ``None`` is a provider that returns nothing.
     ``chat_id`` is the room it was admitted in (``"place"``: the conversation's own room); ``project`` binds it
     there, as admission does. ``pending`` holds the pipeline's events for the supervisor. ``crash``: the worker
-    dies inside the result store, after its answer was owed."""
+    dies inside the result store, after its answer was owed. ``turn_script`` replaces the source turn's one finish."""
     import queue
 
     from ouroboros import agent_task_pipeline as pipeline, loop
     from ouroboros.tools.registry import ToolRegistry
 
-    room.h.script = [finish(answer="I will compile the report as separate work.")]
+    room.h.script = (list(turn_script) if turn_script is not None
+                     else [finish(answer="I will compile the report as separate work.")])
     body = turn(room)
     room.transport.submit("chat:a:1", body)
     root_id = "promoted-place-root"
@@ -721,6 +779,47 @@ def test_a_promoted_place_root_in_a_project_answers_there_once_beside_its_conver
     assert not [row for row in pending_deliveries(room.data, strict=True) if row.get("task_id") == root.id]
     assert outward == ([] if case == "held" else [answer])
     assert root.stored["metadata"]["presence_outcome"] == ("silent" if case == "held" else "message")
+
+
+def test_a_records_only_handed_off_root_in_a_project_still_answers_there_once(records_room, monkeypatch):
+    """R6 under one speech rule (owner 21.11, 1A): the place hears nothing from the final of a door connector's
+    handed-off root (one return with the record note, then its record), while the internal Project it lives in still
+    receives that final as its ordinary answer, once."""
+    from ouroboros.projects_registry import create_project
+
+    room = records_room
+    project = create_project(room.data, "report", name="Report")
+    answer = "The compiled report is attached above."
+    root = promoted_root(room, monkeypatch, [finish(answer=answer), finish(answer=answer)], chat_id=project["chat_id"],
+                         project=project, turn_script=[finish(silent=True, answer=NOTE)])
+    assert len(root.inputs) == 2 and RECORD_NOTE in json.dumps(root.inputs[-1], ensure_ascii=False)
+    assert root.stored["metadata"]["presence_outcome"] == "silent" and root.stored.get("wake_silent") is not True
+    before = room.transport.texts()
+    room.transport.work[root.id] = "chat:a:1"
+    room.transport.poll()
+    assert room.transport.texts() == before, "nothing from the final reaches the place"
+    supervise(room.data, monkeypatch, root.pending)
+    assert room_speech(room.data, project["chat_id"], root.id) == [answer]
+
+
+def test_my_humans_message_holds_a_records_only_focus_turn_never_a_root_it_handed_off(records_room, monkeypatch):
+    """R3 keeps its scope (owner 21.11, 1A): the focus turn above owes my human's Main message a reply before its
+    records-only finish; a handed-off root's words never went to my human, so its finish is the record note's one
+    return and then its record, never the owed-reply refusal."""
+    from ouroboros.owner_mailbox import write_owner_message
+
+    room = records_room
+
+    def owner_writes_then_finish(_messages):
+        write_owner_message(room.data, "One more thing.", "promoted-place-root", msg_id="owner-1")
+        return finish(answer=FINAL)
+
+    root = promoted_root(room, monkeypatch, [owner_writes_then_finish, finish(answer=FINAL), finish(answer=FINAL)],
+                         turn_script=[finish(silent=True, answer=NOTE)])
+    words = json.dumps(root.inputs, ensure_ascii=False)
+    assert "One more thing." in words, "my human's message reached the root"
+    assert "owner_reply_owed" not in words and RECORD_NOTE in words
+    assert root.stored["result"] == FINAL and root.stored["metadata"]["presence_outcome"] == "silent"
 
 
 @pytest.mark.parametrize("case", ["held", "unbound", "live"])
@@ -920,6 +1019,56 @@ def test_a_promoted_place_root_speaks_a_new_final_after_an_interim_send_or_stays
         assert root.stored["metadata"]["presence_outcome"] == "message"
         assert room.transport.texts()[len(before):] == ["The compiled report is attached above."]
     assert not room.transport.work
+
+
+@pytest.mark.parametrize("silent", [True, False], ids=["silent", "speech"])
+def test_a_retained_roots_finish_keeps_its_choice_when_the_place_store_breaks_after_validation(room, monkeypatch,
+                                                                                               silent):
+    """Review round 4 (Astra): a retained legacy root's finish is validated while the place store is readable, then the
+    store cannot be read through the result write, so its selection resolves no carrier. An accepted silent finish is
+    never words all the same: the result is quiet with no outward body, and polls after the repair deliver nothing.
+    A non-silent finish of that doorless root with an empty carrier is still its speech, as on the target."""
+    import sys
+
+    from ouroboros import places
+    from ouroboros.tools import control_runtime
+    private, public = "The private notebook entry selected as silent.", "The compiled report, for the room."
+    path, root_id, checks = places.places_path(room.data), "promoted-place-root", []
+    original, read_row, validate = path.read_bytes(), load_task_result, control_runtime.completion_request
+
+    def legacy_source(root, task_id):  # the source turn's bytes from before the migration name only the old binding
+        stored = read_row(root, task_id)
+        if task_id != root_id and stored and "place_id" in stored.get("metadata", {}).get("presence", {}):
+            stored = json.loads(json.dumps(stored))
+            presence = stored["metadata"]["presence"]
+            presence["binding_id"] = presence.pop("place_id")
+        return stored
+
+    def validate_then_lose_store(ctx, arguments):
+        request, error = validate(ctx, arguments)
+        if ctx.task_id == root_id and not checks:
+            checks.append("accepted" if request and not error else "refused")
+            path.write_bytes(b"{")  # unreadable until the root's result is written
+        return request, error
+
+    monkeypatch.setattr(sys.modules[__name__], "load_task_result", legacy_source)  # what promoted_root reads
+    monkeypatch.setattr(control_runtime, "completion_request", validate_then_lose_store)
+    try:
+        root = promoted_root(room, monkeypatch, [finish(silent=True, answer=private) if silent else finish(answer=public)])
+    finally:
+        path.write_bytes(original)
+    metadata = root.stored["metadata"]
+    assert checks == ["accepted"] and "binding_id" in metadata["presence"] and "place_id" not in metadata["presence"]
+    for _ in range(2):  # the store is readable again: the connector polls the root's work
+        room.transport.work[root.id] = "chat:a:1"
+        room.transport.poll()
+    if silent:
+        assert private not in room.transport.texts(), "an explicitly silent finish is never words"
+        assert root.stored.get("wake_silent") is True and len(root.inputs) == 1
+        assert (metadata["presence_outcome"], metadata["presence_result_text"]) == ("silent", "")
+    else:
+        assert (metadata["presence_outcome"], metadata["presence_result_text"]) == ("message", public)
+        assert room.transport.texts().count(public) == 1
 
 
 def test_a_refused_place_root_is_never_told_the_frozen_completion_names(room, monkeypatch):

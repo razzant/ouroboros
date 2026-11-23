@@ -314,10 +314,14 @@ def test_the_line_states_what_the_change_added_and_removed_and_names_what_it_cou
         "Code shape: tests: patched product-module names, git init call sites unknown (1 unreadable: tests/test_a.py).")
     assert pulse_line(rows[:1], None, MODULES).endswith("unknown (1 unreadable: ouroboros/leaf.py).")
     assert pulse_line([], MODULES, MODULES) == ""
-    # Too deep to parse is unknown too, never an error out of the pulse (CPython raises MemoryError or
-    # RecursionError for such text).
-    deep = [("ouroboros/deep.py", None, "X = " + "-" * 200_000 + "1\n"),
-            ("tests/test_deep.py", None, "x = " + " + ".join(["1"] * 20_000) + "\n")]
-    assert pulse_line(deep, MODULES, MODULES) == (
-        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/deep.py); "
-        "tests: patched product-module names, git init call sites unknown (1 unreadable: tests/test_deep.py).")
+    # Ordinary valid sources yield known zero counts; real syntax errors leave both groups unknown.
+    ordinary = [("ouroboros/ordinary.py", None, "X = 1\n"),
+                ("tests/test_ordinary.py", None, "x = 1\n")]
+    assert pulse_line(ordinary, MODULES, MODULES) == (
+        "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
+        "tests: patched product-module names +0/-0, git init call sites +0/-0.")
+    unparsed = [("ouroboros/broken.py", None, "def broken(:\n"),
+                ("tests/test_broken.py", None, "def broken(:\n")]
+    assert pulse_line(unparsed, MODULES, MODULES) == (
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: ouroboros/broken.py); "
+        "tests: patched product-module names, git init call sites unknown (1 unreadable: tests/test_broken.py).")

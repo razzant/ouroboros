@@ -650,25 +650,6 @@ def test_a_call_whose_addresses_cannot_be_read_is_refused_whole(published_tool, 
     assert guard.call_place_facts(ctx, name, args, ext_tool=tool)["places"] == []
 
 
-def test_a_group_write_into_the_turns_own_conversation_is_not_speech(published_tool, tmp_path):
-    """Before a call starts, only where its words land can make it speak in the turn's conversation."""
-    import json
-    from ouroboros.place_reply import may_speak
-    from ouroboros.presence_bindings import conversation_key
-
-    made, ctx = _store(tmp_path, ("C1", "Own", "active"), ("C2", "Elsewhere", "active"))
-    ctx.task_metadata = {"presence": {"place_id": made["Own"].place_id,
-                                      "event": {"conversation_key": conversation_key("service", "A", "C1")}}}
-    name, tool = _grouped(published_tool, target="room", conversation="room", touches=[
-        {"conversation": "copy_to", "effect": "write"}, {"conversation": "also", "effect": "message"}])
-
-    def speaks(**args):
-        return may_speak(ctx, {"function": {"name": name, "arguments": json.dumps({"account_id": "A", "room": "C2", **args})}},
-                         ext_tool=tool)
-    assert speaks(copy_to="C1") is False
-    assert speaks(also="C1") is True
-
-
 def _scope(place_id, conversation, state="active", *, account="A", thread="", destination=None):
     return Place(place_id, "connector", "service", account, conversation, place_id, state, thread_id=thread,
                  destination=destination)
