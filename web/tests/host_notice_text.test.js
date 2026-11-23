@@ -210,7 +210,7 @@ test('a live notice row says its line, Copy keeps that line and its raw details 
     try {
         await f.instance.refreshHistory({ revision: 1 });
         const step = { code: 'budget_exhausted', step: 'raise_total_budget',
-            line: 'The total budget is spent, so this turn did not start. Raise Total budget in Settings → Costs.' };
+            line: 'The total budget is spent, so this turn did not start. Raise Total budget in Dashboard → Costs.' };
         f.emit({ role: 'system', system_type: 'task_error', content: 'This turn stopped on an unexpected error.',
             text: 'This turn stopped on an unexpected error.', notice: NOTICE });
         f.emit({ role: 'system', system_type: 'task_not_started', ts: '2026-10-10T12:00:01Z',
@@ -224,7 +224,7 @@ test('a live notice row says its line, Copy keeps that line and its raw details 
         assert.equal(details.children[1].textContent, 'ValueError: boom');
         assert.doesNotMatch(error.querySelector('.message').innerHTML, /ValueError/, 'the raw error is not in the main line');
         assert.equal(await copied(error), NOTICE.line);
-        assert.match(budget.innerHTML, /Raise Total budget in Settings → Costs\./, 'the step follows the phrase');
+        assert.match(budget.innerHTML, /Raise Total budget in Dashboard → Costs\./, 'the step follows the phrase');
         assert.equal(budget.children.find((child) => child.tagName === 'DETAILS'), undefined, 'no details, no disclosure');
         assert.equal(await copied(budget), step.line);
     } finally { f.close(); }

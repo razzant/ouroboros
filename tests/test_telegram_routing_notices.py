@@ -596,9 +596,9 @@ def test_a_host_notice_reaches_the_phone_as_its_one_line_each_part_translated_fi
         assert phone.sent()[-1]["text"] == f"{phrase} {STEPS['raise_total_budget']}", "English: the phrase, then its step"
         monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
         _seed(phone.data, "ru", {phrase: {"text": "Общий бюджет исчерпан, ход не начался."},
-                                 "code:notice.step.raise_total_budget": {"text": "Поднимите Total budget в Settings → Costs."}})
+                                 "code:notice.step.raise_total_budget": {"text": "Поднимите Total budget в Dashboard → Costs."}})
         asyncio.run(plugin._make_outbound(phone.api)(event))
-        assert phone.sent()[-1]["text"] == "Общий бюджет исчерпан, ход не начался. Поднимите Total budget в Settings → Costs."
+        assert phone.sent()[-1]["text"] == "Общий бюджет исчерпан, ход не начался. Поднимите Total budget в Dashboard → Costs."
         assert "12:00" not in phone.sent()[-1]["text"], "the details never ride the line"
     finally:
         plugin.telegram_i18n.configure(None)
