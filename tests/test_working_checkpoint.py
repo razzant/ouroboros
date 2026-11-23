@@ -53,6 +53,27 @@ def test_each_boundary_replaces_one_attempt_file_with_the_one_serializer(tmp_pat
     assert not list(_file(tmp_path).parent.glob("working_checkpoint-a*"))
 
 
+def test_checkpoint_for_fallback_exhaustion_keeps_one_selected_frame(tmp_path):
+    ctx, limit = _loop_ctx(tmp_path)
+    ctx.route_wait_on_primary = True
+    ctx.route_choice = {'kind': 'following', 'source': 'main'}
+    limit.tool_schemas = [{'function': {'name': 'primary_only'}}]
+    rows = [{'role': 'system', 'content': 'nano'}, {'role': 'user', 'content': 'Reply was length limited.'}]
+    schemas = [{'function': {'name': 'nano_only'}}]
+    call = SimpleNamespace(messages=rows, tool_schemas=schemas, model_role='fallback:0', active_model='alternate',
+        active_use_local=False, active_context_mode='nano', fallback_is_primary=False,
+        fallback_entry_failure={'failure_code': 'quota_exhausted'})
+    with wc.model_call_scope(limit):
+        wc.save_model_call(model_call=call)
+    saved = wc.read_working(tmp_path, 'pause-task', 1)[1]
+    route = saved['route']
+    assert saved['messages'] == rows and saved['tool_schemas'] == schemas
+    assert saved['context_model_role'] == route['_lead_role'] == 'fallback:0'
+    assert route['active_context_mode'] == 'nano' and route['active_model'] == 'alternate'
+    assert not route['route_wait_on_primary'] and route['route_choice']['source'] == 'fallback'
+    assert ctx.route_wait_on_primary and limit.tool_schemas == [{'function': {'name': 'primary_only'}}]
+
+
 def test_a_failed_pre_effect_write_holds_visibly_and_only_the_task_controls_end_it(tmp_path, monkeypatch):
     _ctx, limit_ctx = _loop_ctx(tmp_path)
     monkeypatch.setattr(budget_pause, "_HOLD_POLL_SEC", 0.01)

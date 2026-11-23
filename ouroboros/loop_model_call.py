@@ -5,7 +5,7 @@ split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content
+from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content, reclaim_low_water_margin
 from ouroboros.context_assembly_trace import bind_contribution_input
 
 from ouroboros.config import runtime_setting
@@ -37,6 +37,7 @@ from ouroboros.primary_route_observation import failed_attempt_facts, tell_faile
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.transcript_prefix import forget_attempt_prefix, remember_attempt_prefix, rewrite_epoch, rewrite_view, with_attempt_prefix
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
+from ouroboros.window_learning import fit_route_tool_ceiling as _fit_route_tool_ceiling, route_schema_trials
 
 
 log = logging.getLogger("ouroboros.loop")
@@ -119,31 +120,28 @@ def observe_authoring_response(tool_ctx: Any, model: str, *, forced: bool = Fals
                                tool_calls_at_handover=len(trace.get("tool_calls") or []))
 
 
-def _adopt_fallback_route(
-    ctx: Any,
-    tools: ToolRegistry,
-    fallback_model: str,
-    fallback_use_local: bool,
-    messages: List[Dict[str, Any]],
-    fallback_messages: List[Dict[str, Any]],
-    context_fit_plan: Any,
-    active_context_mode: str,
-    tool_schemas: List[Dict[str, Any]],
-    accumulated_usage: Dict[str, Any],
-) -> tuple:
-    """Round-4 C1.1: adopt a cross-family fallback (usable, or its reply allowance spent) for the rest of the loop with its
-    sanitized transcript, so a later round never replays THIS fallback's reasoning to the primary family unsanitized; the caller already
-    rebound the context-fit plan to this route. Returns ``(active_model, active_use_local, context_fit_plan, context_mode)``."""
-    ctx.active_model = fallback_model
-    ctx.active_use_local = fallback_use_local
-    messages[:] = fallback_messages
-    if context_fit_plan is not None:
-        tools._ctx.context_fit_plan = context_fit_plan
-        tools._ctx.messages = messages
-        tools._ctx.active_context_mode = active_context_mode
-        # _call_round_model already recorded the accepted candidate's complete
-        # same-basis fit facts. Do not replace them with a raw char estimate.
-    return fallback_model, fallback_use_local, context_fit_plan, active_context_mode
+def _adopt_fallback_route(ctx: Any, candidate: _RoundModelCallContext, messages: list, tool_schemas: list, mode: str) -> tuple:
+    """An answered fallback adopts its sanitized transcript, measured plan and priced schema list together.
+
+    The loop and discovery still hold the resident list by reference. The accepted call already recorded the
+    measured facts; never replace them with a raw estimate or replay its reasoning to another family unsanitized."""
+    ctx.active_model, ctx.active_use_local = candidate.active_model, candidate.active_use_local
+    messages[:] = candidate.messages
+    if tool_schemas is not None:
+        tool_schemas[:] = candidate.tool_schemas
+    plan, slot = candidate.context_fit_plan, candidate.tools._ctx
+    slot.active_model, slot.active_use_local = candidate.active_model, candidate.active_use_local
+    if plan is not None:
+        slot.context_fit_plan, slot.messages, slot.active_context_mode = plan, messages, mode
+        _adopt_view_facts(slot, plan, mode)
+    return ctx.active_model, ctx.active_use_local, plan, mode
+
+
+def _fallback_rows(source, model):
+    """Copy the acting frame; no route may inherit another trial's narrowing, even in the same family."""
+    plan, messages, schemas, mode, acting = source
+    rows = LLMClient.sanitize_reasoning_on_model_switch(messages, acting, model)
+    return plan, copy.deepcopy(messages) if rows is messages else rows, None if schemas is None else list(schemas), mode
 
 
 def _route_candidates(tool_ctx: Any, active_model: str, active_use_local: bool, acting_role: str,
@@ -220,7 +218,66 @@ def _run_cross_model_fallback_chain(
     # A primary resource refusal returned here, not waited: the configured routes come
     # first, and the owner question is that refusal's own wait, asked after them.
     deferred, tools._ctx._deferred_resource_refusal = getattr(tools._ctx, "_deferred_resource_refusal", None), None
+    slot = tools._ctx
+    source = context_fit_plan, messages, tool_schemas, active_context_mode, active_model
     deferred_candidate = None  # The route that actually refused; never replay an unrelated primary.
+    held_fields = ("_route_left_out_tool_names", "_primary_view", "_pending_handover_reason", "route_choice")
+    acting_fields = {key: getattr(slot, key) for key in held_fields if hasattr(slot, key)}
+
+    def restore_acting_view():
+        slot.context_fit_plan, slot.messages, slot.active_context_mode = context_fit_plan, messages, active_context_mode
+        slot.active_model, slot.active_use_local = active_model, active_use_local
+        for key in held_fields:
+            if key in acting_fields:
+                setattr(slot, key, acting_fields[key])
+            elif hasattr(slot, key):
+                delattr(slot, key)
+        if context_fit_plan is not None:
+            _adopt_view_facts(slot, context_fit_plan, active_context_mode)
+        _restore_context_fit_usage(accumulated_usage, primary_context_usage)
+
+    def prepare(model, use_local, role, is_primary, predecessor, *, account=None, defer=True):
+        basis, rows, schemas, mode = _fallback_rows(source, model)
+        if is_primary is not None:
+            tell_failed_attempt(rows, predecessor, fallback_route_words(slot, model, use_local, role, waiter, pin_note=True))
+        plan, mode = _loop()._rebind_context_fit_plan(basis, tools, rows, model=model, use_local=use_local,
+            start_mode=mode, tool_schemas=schemas, model_role=role, model_route={}, credential_profile_id=account,
+            publish=is_primary is None)
+        if is_primary is None:  # an already acting route retries in its own canonical lists
+            messages[:] = rows
+            if tool_schemas is not None:
+                tool_schemas[:] = schemas
+            rows, schemas = messages, tool_schemas
+        slot.context_fit_plan, slot.messages, slot.active_context_mode = plan, rows, mode
+        return _loop()._RoundModelCallContext(llm=llm, messages=rows, tools=tools, context_fit_plan=plan,
+            active_model=model, tool_schemas=schemas, active_effort=active_effort, max_retries=max_retries,
+            drive_logs=drive_logs, task_id=task_id, round_idx=round_idx, event_queue=event_queue,
+            accumulated_usage=accumulated_usage, task_type=task_type, active_use_local=use_local,
+            active_context_mode=mode, drive_root=pathlib.Path(drive_logs).parent,
+            attempt_cap=1 if recovering_output else attempt_cap, model_role=role, emit_progress=emit_progress,
+            defer_resource_wait=defer, output_recovery_fallback=recovering_output,
+            fallback_is_primary=is_primary, fallback_source=source if is_primary is not None else None,
+            fallback_predecessor=predecessor, fallback_entry_failure=entry_failure)
+
+    def adopt(call, mode, own_call, *, answered, fresh=True):
+        from ouroboros.lead_fact import adopt_fallback
+
+        shown = messages[0] if messages else None
+        model, local, plan, mode = _adopt_fallback_route(ctx, call, messages, tool_schemas, mode)
+        if plan is not None:
+            publish_rebound_view(tools, plan, mode, messages, tool_schemas, source[3], shown)
+        role = getattr(plan, "model_role", None) or call.model_role
+        is_primary = call.fallback_is_primary
+        slot._route_facts_pending = "" if is_primary else route_facts_text(slot, model=model, use_local=local, role=role,
+            failed_model=entry_model, failure=entry_failure, waiter=waiter, usage=accumulated_usage,
+            round_idx=round_idx, answered=answered, own_call=own_call)
+        if not is_primary:
+            slot.route_wait_on_primary = False
+        adopt_fallback(slot, is_primary, entry_failure, role)
+        emit_progress(fallback_adoption_text(slot, model, local, role, waiter, accumulated_usage,
+                                             answered=answered, own_call=own_call, fresh=fresh))
+        return model, local, plan, mode
+
     rows = _route_candidates(tools._ctx, active_model, active_use_local,
                              str(getattr(context_fit_plan, "model_role", "") or ""), waiter)
     tried = []
@@ -231,7 +288,7 @@ def _run_cross_model_fallback_chain(
     msg, adopted, fresh = None, False, True  # fresh: the last call left a failure row of its own (fallback_reason_text)
     # ABI-4: typed ResolvedModelTarget rows cross to strings only at the transport boundary; every chain
     # row uses the single global USE_LOCAL_FALLBACK flag, the primary keeps its own locality.
-    for index, (fallback_model, fallback_role, fallback_use_local, is_primary) in enumerate(rows):
+    for fallback_model, fallback_role, fallback_use_local, is_primary in rows:
         binding = route_binding(fallback_model, fallback_use_local, fallback_role, overrides=waiter.overrides if waiter else None)
         if _fcd.is_cooling_down(*binding) or (recovering_output and not output_recovery.fallback_untried(accumulated_usage, binding)):
             continue  # a skipped route is not announced or prepared, and leaves the walk's facts as they were
@@ -245,60 +302,12 @@ def _run_cross_model_fallback_chain(
                       f"{fallback_reason_text(accumulated_usage, previous_model, previous_use_local, entry=not tried, fresh=fresh)}",  # the predecessor's class and own sentence
                       incident={"task_incident": "model_lane_attempt", "toast_once": f"{task_id}:model_lane_attempt:{round_idx}:{fallback_model}"})
         _disclose_unknown(messages, "The previous attempt ended without a usable answer; the host is trying a configured alternative.")
-        # Cross-FAMILY fallback must not replay the primary's
-        # provider-private reasoning to a different family (the GLM->Claude
-        # 400 "Invalid signature" death); the SSOT sanitizer no-ops same-family.
-        fallback_messages = LLMClient.sanitize_reasoning_on_model_switch(messages, active_model, fallback_model)
-        # Bind exact route evidence and choose its deterministic projection
-        # BEFORE physical dispatch: the fallback's first request must not
-        # inherit the failed primary route's Max projection/fingerprint. It
-        # then uses the ordinary single confirmed-overflow Low retry path.
-        candidate_plan, candidate_mode = _loop()._rebind_context_fit_plan(
-            context_fit_plan,
-            tools,
-            fallback_messages,
-            model=fallback_model,
-            use_local=fallback_use_local,
-            preferred_mode=str(
-                getattr(context_fit_plan, "preferred_mode", "") or active_context_mode
-            ),
-            tool_schemas=tool_schemas,
-            model_role=fallback_role,
-            model_route={},
-            start_mode=active_context_mode,  # the shown mode: a fallback may lower it; the primary row resumes its held view
-        )
-        candidate_call = _loop()._RoundModelCallContext(
-                llm=llm,
-                messages=fallback_messages,
-                tools=tools,
-                context_fit_plan=candidate_plan,
-                active_model=fallback_model,
-                tool_schemas=tool_schemas,
-                active_effort=active_effort,
-                max_retries=max_retries,
-                drive_logs=drive_logs,
-                task_id=task_id,
-                round_idx=round_idx,
-                event_queue=event_queue,
-                accumulated_usage=accumulated_usage,
-                task_type=task_type,
-                active_use_local=fallback_use_local,
-                active_context_mode=candidate_mode,
-                drive_root=pathlib.Path(drive_logs).parent,
-                attempt_cap=1 if recovering_output else attempt_cap,
-                model_role=fallback_role,
-                emit_progress=emit_progress,
-                defer_resource_wait=(recovering_output or task_type == "presence" or _asks_owner()
-                                     or _route_follows(rows[index + 1:])),
-                output_recovery_fallback=recovering_output,
-            )
+        candidate_call = prepare(fallback_model, fallback_use_local, fallback_role, is_primary, facts)
         if recovering_output and not output_recovery.fallback_untried(accumulated_usage, output_recovery.binding(candidate_call)):
+            restore_acting_view()
             continue  # preparation may outlive a change to an already-spent account; keep the existing late check
         tried.append(fallback_model)
-        resident = (None if tool_schemas is None else list(tool_schemas),
-                    getattr(tools._ctx, "_route_left_out_tool_names", None))
         failure_before, meta_before = accumulated_usage.get("_last_llm_failure"), accumulated_usage.get("_last_llm_call_meta")
-        told = tell_failed_attempt(fallback_messages, facts, asked)  # before this candidate's fit measurement and send
         tools._ctx._pending_handover_reason = reason or "fallback"
         msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
         previous_model, previous_use_local = candidate_call.active_model, candidate_call.active_use_local
@@ -312,49 +321,13 @@ def _run_cross_model_fallback_chain(
                 deferred_candidate = candidate_call
         if msg is not None or (not recovering_output and accumulated_usage.get("_last_llm_error_kind") == output_recovery.KIND
                                and not accumulated_usage.get("_pending_transport_outcome")):
-            (active_model, active_use_local, context_fit_plan, active_context_mode) = _adopt_fallback_route(
-                ctx,
-                tools,
-                candidate_call.active_model,
-                candidate_call.active_use_local,
-                messages,
-                fallback_messages,
-                candidate_call.context_fit_plan,
-                candidate_mode,
-                tool_schemas,
-                accumulated_usage,
-            )
             own_call = own_call_record(accumulated_usage, msg is not None, meta_before, failure_before)
-            tools._ctx._route_facts_pending = "" if is_primary else route_facts_text(
-                tools._ctx, model=active_model, use_local=active_use_local, role=fallback_role,
-                failed_model=entry_model, failure=entry_failure, waiter=waiter, usage=accumulated_usage,
-                round_idx=round_idx, answered=msg is not None, own_call=own_call)
-            from ouroboros.lead_fact import adopt_fallback
-            adopt_fallback(tools._ctx, is_primary, entry_failure, fallback_role)
-            if not is_primary:
-                tools._ctx.route_wait_on_primary = False  # a declared wait belonged to the primary route
+            active_model, active_use_local, context_fit_plan, active_context_mode = adopt(
+                candidate_call, candidate_mode, own_call, answered=msg is not None, fresh=fresh)
             adopted = True
-            emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, fallback_role, waiter,
-                                                 accumulated_usage, answered=msg is not None, own_call=own_call, fresh=fresh))
             break
-        if told is not None and fallback_messages is messages:  # a failed candidate leaves no row in a shared transcript
-            messages[:] = [row for row in messages if row != told]
         facts = failed_attempt_facts(accumulated_usage, previous_model, previous_use_local, fresh=fresh)  # before its fit facts leave
-        tools._ctx.context_fit_plan = context_fit_plan
-        tools._ctx.messages = messages
-        tools._ctx.active_context_mode = active_context_mode
-        if context_fit_plan is not None:  # a failed candidate's view leaves with it (the primary row's resumed one too)
-            if fallback_messages is messages:  # a same-family candidate rebound the shared transcript
-                messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
-                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
-            _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
-        _restore_context_fit_usage(accumulated_usage, primary_context_usage)
-        if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
-                and deferred_candidate is not candidate_call):
-            # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
-            # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
-            tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
-            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
+        restore_acting_view()
         if _walk_fenced(tools._ctx, accumulated_usage) or (not recovering_output and str(
                 accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"):
             break  # an exhausted candidate replied unusably: its outcome is the round's, no further route is dialed
@@ -373,47 +346,35 @@ def _run_cross_model_fallback_chain(
     if msg is None and _asks_owner() and not fenced:
         # Only the refused route is eligible to re-send after the owner wait;
         # the primary might have failed permanently before a fallback's quota refusal.
-        deferred.ask_owner(waiter)
-        retry_call = deferred_candidate or _loop()._RoundModelCallContext(
-            llm=llm, messages=messages, tools=tools, context_fit_plan=context_fit_plan,
-            active_model=active_model, tool_schemas=tool_schemas, active_effort=active_effort,
-            max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
-            event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
-            active_use_local=active_use_local, active_context_mode=active_context_mode,
-            drive_root=pathlib.Path(drive_logs).parent, emit_progress=emit_progress, defer_resource_wait=False)
-        retry_call.defer_resource_wait = False
-        if deferred_candidate is not None:
-            tools._ctx._pending_handover_reason = "owner_wait"
-        _disclose_unknown(retry_call.messages, "The previous attempt ended without a usable answer; "
-                                               "the host is preparing another request after the owner's answer.")
+        resumed = deferred.ask_owner(waiter) or {}
+        _disclose_unknown(messages, "The previous attempt ended without a usable answer; "
+                                    "the host is preparing another request after the owner's answer.")
         # An owner may select a DIFFERENT account on either the primary or a
         # fallback model. Rebind the retained call before measurement and physical
         # send; the pre-wait account's fingerprint/capacity is not evidence for B.
-        role, account = task_model_binding(
-            {"model_role": retry_call.model_role,
-             "task_metadata": getattr(tools._ctx, "task_metadata", {})},
-            context_fit_plan=retry_call.context_fit_plan, overrides=waiter.overrides)
-        retry_call.context_fit_plan, retry_call.active_context_mode = _loop()._rebind_context_fit_plan(
-            retry_call.context_fit_plan, tools, retry_call.messages,
-            model=retry_call.active_model, use_local=retry_call.active_use_local,
-            start_mode=retry_call.active_context_mode, tool_schemas=tool_schemas,
-            model_role=role, model_route={}, credential_profile_id=account)
+        failed = deferred_candidate
+        role, account = task_model_binding({"model_role": getattr(failed, "model_role", ""),
+            "task_metadata": getattr(slot, "task_metadata", {})}, context_fit_plan=context_fit_plan, overrides=waiter.overrides)
+        override = waiter.overrides.get(role, {})
+        model = resumed.get("model") or override.get("model") or getattr(failed, "active_model", active_model)
+        local = resumed.get("use_local", override.get("use_local", getattr(failed, "active_use_local", active_use_local)))
+        retry_call = prepare(model, local, role, getattr(failed, "fallback_is_primary", None),
+            getattr(failed, "fallback_predecessor", {}), account=account, defer=False)
+        slot._pending_handover_reason = "owner_wait"
         meta_before = accumulated_usage.get("_last_llm_call_meta")
-        msg, _cost, active_context_mode = _loop()._call_round_model(retry_call)
-        if msg is not None and deferred_candidate is not None:
-            own_call = own_call_record(accumulated_usage, True, meta_before, None)
-            active_model, active_use_local, context_fit_plan, active_context_mode = _adopt_fallback_route(
-                ctx, tools, retry_call.active_model, retry_call.active_use_local,
-                messages, retry_call.messages, retry_call.context_fit_plan, active_context_mode,
-                tool_schemas, accumulated_usage)
-            tools._ctx._route_facts_pending = route_facts_text(
-                tools._ctx, model=active_model, use_local=active_use_local, role=role, failed_model=entry_model,
-                failure=entry_failure, waiter=waiter, usage=accumulated_usage, round_idx=round_idx, own_call=own_call)
-            emit_progress(fallback_adoption_text(tools._ctx, active_model, active_use_local, role, waiter,
-                                                 accumulated_usage, answered=True, own_call=own_call))
+        msg, _cost, retry_mode = _loop()._call_round_model(retry_call)
+        answered = msg is not None
+        exhausted = (accumulated_usage.get("_last_llm_error_kind") == output_recovery.KIND
+                     and not accumulated_usage.get("_pending_transport_outcome"))
+        if deferred_candidate is not None and (answered or exhausted):
+            own_call = own_call_record(accumulated_usage, answered, meta_before, None)
+            active_model, active_use_local, context_fit_plan, active_context_mode = adopt(
+                retry_call, retry_mode, own_call, answered=answered)
+        elif deferred_candidate is not None:
+            restore_acting_view()
         else:
             active_model, active_use_local = retry_call.active_model, retry_call.active_use_local
-            context_fit_plan = retry_call.context_fit_plan
+            context_fit_plan, active_context_mode = retry_call.context_fit_plan, retry_mode
     elif (msg is None and deferred is not None and not own_wait
           and accumulated_usage.get("_last_llm_error_kind") != CODEX_CONTENT_POLICY_DENIED):
         accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
@@ -511,6 +472,8 @@ def _rebind_context_fit_plan(
     route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
     reasoning_effort: Optional[str] = None,  # the effort of the send this prepares; None: the acting one (``active_effort``)
     restoring_held: bool = False,
+    publish: bool = True,
+    schema_trials: Optional[Callable] = None,  # cold restore owns reconciliation and publication
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -526,6 +489,8 @@ def _rebind_context_fit_plan(
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
 
     role = model_role or getattr(plan, "model_role", "main")
+    shown_mode = start_mode or getattr(plan, "initial_mode", None)
+    previous = getattr(plan, "model", ""), getattr(plan, "provider", "")
     plan, start_mode = held_primary_view(tools._ctx, plan, start_mode, model=model, use_local=use_local, role=role)
     metadata = getattr(tools._ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -558,14 +523,20 @@ def _rebind_context_fit_plan(
     shape = {"provider": str(route.get("provider") or ""),  # the request as the next send shapes it, as a round measures it
              "reasoning_effort": str((getattr(tools._ctx, "active_effort", "") if reasoning_effort is None
                                       else reasoning_effort) or "")}
+    mode = start_mode or preferred
+    trials = schema_trials or (None if route_is_preference else route_schema_trials(
+        tools, messages, tool_schemas, shown_mode or mode, model, use_local, reselect=(not route_is_preference and (
+            (model, shape["provider"]) != previous or bool(shown_mode and shown_mode != mode)))))
+    schemas, note = trials(mode).price() if trials else (tool_schemas, [])
+    fit_rows = [*messages, *note] if note else messages
     ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
         None,  # canonical evidence root (one observation store)
         str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
-        min(estimate_context_prompt_tokens(messages, tool_schemas, **shape), window.usable or math.inf),
+        min(estimate_context_prompt_tokens(plan.reproject_transcript(fit_rows, mode), schemas, **shape), window.usable or math.inf),
         view_kind=plan.view_kind), None  # compared at the size that can be sent
     if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
         ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
-            plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, **shape))
+            plan.reproject_transcript(fit_rows, mode), schemas, **shape))
     rebound = replace(
         plan,
         preferred_mode=preferred,
@@ -583,11 +554,25 @@ def _rebind_context_fit_plan(
     ).reproject_for_route(  # the shown view kept while this route admits it (``WindowRecord.admitted``), else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
-        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"], restoring_held=restoring_held)
+        room_if_narrowed=True, telling_floor=True, reasoning_effort=shape["reasoning_effort"], restoring_held=restoring_held,
+        tool_frames=(lambda selected: trials(selected).price()) if trials else None)
     mode = rebound.initial_mode
-    projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas, **shape)
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
+    if trials and schema_trials is None:
+        trials(mode).adopt(tools._ctx, tool_schemas, messages, by="route_rebind")
+    if not publish and not route_is_preference:
+        # A configured trial's physical prefix still needs its rewrite stamp; its view fact is adopted only on response.
+        rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
+    if publish:
+        publish_rebound_view(tools, rebound, mode, messages, tool_schemas, start_mode, shown)
+    return rebound, mode
+
+
+def publish_rebound_view(tools, rebound, mode, messages, tool_schemas, start_mode, shown):
+    """Adopt and report the selected binding; a frozen continuation preview never reports here."""
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+
     rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
     tools._ctx.context_fit_plan = rebound
     tools._ctx.messages = messages
@@ -606,18 +591,19 @@ def _rebind_context_fit_plan(
                 "model": rebound.model,
                 "route_fp": rebound.route_fp,
                 "core_sha256": rebound.core_sha256,
-                "preferred_mode": preferred,
+                "preferred_mode": rebound.preferred_mode,
                 **_shown(rebound, mode),
                 "evidence_status": rebound.status,
                 "window_tokens": rebound.window_tokens,
-                "known_window": known_window,  # a floored window keeps its number, not its authority
-                "projected_prompt_tokens": projected_prompt_tokens,
+                "known_window": bool(rebound.window_record and rebound.window_record.usable is not None),
+                "projected_prompt_tokens": int(estimate_context_prompt_tokens(messages, tool_schemas,
+                    provider=rebound.provider, reasoning_effort=rebound.start_reasoning_effort)
+                                               * rebound.projection(mode).calibration_ratio),
                 "view_kept": messages[0] == shown,  # the system view sent before this rebind, byte for byte
             },
         )
     except Exception:
         log.debug("Failed to emit route-switch context-fit checkpoint", exc_info=True)
-    return rebound, mode
 
 
 def _adopt_view_facts(tool_ctx: Any, plan: Any, mode: str) -> None:
@@ -687,6 +673,10 @@ class _RoundModelCallContext:
     defer_resource_wait: Optional[bool] = None
     output_recovery_fallback: bool = False
     physical_send_claim: Optional[Callable[[Any], None]] = None
+    fallback_is_primary: Optional[bool] = None  # None: this is not a provisional configured-route frame
+    fallback_source: Optional[tuple] = None  # acting plan, rows, schemas, mode and model, before the route walk
+    fallback_predecessor: Optional[dict] = None
+    fallback_entry_failure: Optional[dict] = None
     refused_density: Optional[float] = None  # the size refusal in recovery: its own density, until the recovery sends
     refusal_policy: Optional[Dict[str, bool]] = None  # a refusal pass's bodies view: did a provider start the round (06.11)
 
@@ -875,7 +865,8 @@ def _dispatch_round_model(
     from ouroboros.capability_breakage import append_change_row
 
     _loop()._retire_main_reasoning(ctx)
-    changed = append_change_row(ctx)  # a capability that broke or recovered since this work was told: its own tail row
+    source = getattr(ctx, "fallback_source", None)
+    changed = append_change_row(ctx, carry_to=source[1] if source is not None else None)
     if append_context_facts(ctx) or changed:
         disposition = _loop()._measure_round_main_fit(
             ctx, automatic_pass_used=bool(getattr(disposition, "automatic_pass_used", False)))
@@ -967,7 +958,8 @@ def _dispatch_round_model(
             ctx.context_fit_plan, ctx.tools, ctx.messages, model=ctx.active_model,
             use_local=ctx.active_use_local, start_mode=ctx.active_context_mode,
             tool_schemas=ctx.tool_schemas, model_role=role, model_route=observed,
-            credential_profile_id=(waiter.overrides.get(role, {}).get("model_account_override") if waiter else None))
+            credential_profile_id=(waiter.overrides.get(role, {}).get("model_account_override") if waiter else None),
+            publish=getattr(ctx, "fallback_source", None) is None)
     emit_model_substitution(ctx.accumulated_usage, task_id=ctx.task_id,
                             emit_progress=getattr(ctx, "emit_progress", None))
     call = ctx.accumulated_usage.get("_last_llm_call_meta")
@@ -994,7 +986,17 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     native_reset = bool(observed and observed.pop("_native_reset", False))
     # Waiting kwargs can contain a caption/off projection. Keep the canonical
     # images, then build the newly selected route's physical view below.
-    prepared = LLMClient.sanitize_reasoning_on_model_switch(ctx.messages, ctx.active_model, model)
+    if getattr(ctx, "fallback_source", None) is not None:
+        from ouroboros.primary_route_observation import fallback_route_words
+
+        plan, prepared, schemas, mode = _fallback_rows(ctx.fallback_source, model)
+        if schemas is not None:
+            ctx.tool_schemas[:] = schemas
+        ctx.context_fit_plan, ctx.active_context_mode = plan, mode
+        tell_failed_attempt(prepared, ctx.fallback_predecessor, fallback_route_words(
+            ctx.tools._ctx, model, use_local, role, current_model_wait(), pin_note=True))
+    else:
+        prepared = LLMClient.sanitize_reasoning_on_model_switch(ctx.messages, ctx.active_model, model)
     if native_reset:
         from ouroboros.llm_messages import drop_source_native_messages, reset_native_messages
 
@@ -1008,16 +1010,16 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
         ctx.context_fit_plan, ctx.tools, ctx.messages, model=model, use_local=use_local,
         start_mode=ctx.active_context_mode, tool_schemas=ctx.tool_schemas,
         model_role=role, model_route=observed or {},
-        credential_profile_id=kwargs.get("model_account_override"))
-    ctx.active_model, ctx.active_use_local = model, use_local
+        credential_profile_id=kwargs.get("model_account_override"), publish=getattr(ctx, "fallback_source", None) is None)
+    ctx.active_model, ctx.active_use_local, ctx.model_role = model, use_local, role
     ctx.tools._ctx.active_model = model
     ctx.tools._ctx.active_use_local = use_local
     waiter = current_model_wait()
     if waiter is not None and waiter.overrides.get(role):  # the owner's card choice holds for the rest of the task
         from ouroboros.route_choice import explicit
         ctx.tools._ctx.route_choice = explicit("wait_card")
-    if _fit_route_tool_ceiling(ctx):  # an owner's switch may land on a route with a schema ceiling
-        kwargs["tools"] = ctx.tool_schemas
+    _fit_route_tool_ceiling(ctx)  # an owner's switch may land on a route with a schema ceiling
+    kwargs["tools"] = ctx.tool_schemas  # wait kwargs carried the previous candidate's schemas
     if model != previous_model:
         ctx.tools._ctx._pending_handover_reason = "model_wait"
     _project_wake_input(ctx)
@@ -1060,7 +1062,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())
 
 
-def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
+def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_save: bool = False) -> None:
     """Size recovery lowers Max's books; a smaller physical frame may require Nano.
 
     Low keeps the refused Max view's memory level, never its unsent startup view (``select_mode``)."""
@@ -1069,18 +1071,24 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
     plan = ctx.context_fit_plan
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
     window = fit.measurement.capacity_total_tokens
-    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan.reproject_for_route(
+    trials = (route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, "max", plan.model, plan.provider == "local")
+              if books_must_save and window is not None else None)
+    rebound = plan.reproject_for_route(
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
         tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
-        measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True,
+        tool_frames=(lambda selected: trials(selected).price()) if trials else None,
+        measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True, books_must_save=books_must_save,
         reasoning_effort=str(getattr(ctx, "active_effort", "") or ""))  # the shape the round measured
-    mode = ctx.context_fit_plan.initial_mode
-    ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
+    if (mode := rebound.initial_mode) == ctx.active_context_mode:
+        return  # a non-saving map trial is not a rewrite or a contribution from the books rung
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = rebound
+    ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
+    if trials:
+        trials(mode).adopt(ctx.tools._ctx, ctx.tool_schemas, ctx.messages, by="low_retry")
     rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry")
-    ctx.active_context_mode = mode
+    ctx.active_context_mode = ctx.tools._ctx.active_context_mode = mode
     ctx.tools._ctx.messages = ctx.messages
-    ctx.tools._ctx.active_context_mode = mode
     _adopt_view_facts(ctx.tools._ctx, ctx.context_fit_plan, mode)
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "checkpoint_kind": "context_fit_low_retry",
@@ -1286,34 +1294,6 @@ def _project_wake_input(ctx: _RoundModelCallContext, *, overflowed: bool = False
     return True
 
 
-def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
-    """Keep the resident schemas within the acting route's physical ceiling (OpenAI: 128).
-
-    In place, before measurement, so the fit, the priced candidate and the send carry
-    one list and discovery reports true residency. Names the actor loaded through
-    enable_tools in this run, and names left out earlier, stay; the newly left-out
-    names reach the actor as a fact.
-    Called by every Main round and by a wait's reprepare; True when the list changed.
-    """
-    from ouroboros.continuation_tools import history_tool_names
-    from ouroboros.provider_models import tool_schema_limit
-    from ouroboros.tool_policy import fit_tool_schemas_to_limit, route_tool_limit_notice, usable_selectors
-
-    schemas, limit = ctx.tool_schemas, tool_schema_limit(ctx.active_model, use_local=ctx.active_use_local)
-    if limit is None or schemas is None or len(schemas) <= limit:
-        return False
-    earlier = frozenset(getattr(ctx.tools._ctx, "_route_left_out_tool_names", ()) or ())
-    loaded = frozenset(getattr(ctx.tools._ctx, "_actor_loaded_tool_names", ()) or ())
-    before = list(schemas)
-    schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
-                                                     protect=history_tool_names(ctx.messages))
-    ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
-    rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
-    _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
-        ctx.active_model, limit, len(before), left_out, selectors=usable_selectors(ctx.tools, schemas), schemas=before))
-    return True
-
-
 def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
     from ouroboros.presence_continuation import covered_send  # only an answered send covers (``reply_anchor``)
     return covered_send(ctx.tools._ctx, lambda: output_recovery.call(ctx, _call_round_model_once))
@@ -1346,7 +1326,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     append_placement_notice(ctx.tools._ctx, ctx.messages)
     _project_wake_input(ctx)
     disposition = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
-    shown = ctx.messages[0] if ctx.messages else None  # the view this round sends: a rebind after a refusal may narrow it
+    shown, mode = (ctx.messages[0] if ctx.messages else None), ctx.active_context_mode  # the view this round sends
     msg, cost = _loop()._dispatch_round_model(
         ctx,
         disposition,
@@ -1385,8 +1365,8 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         learn_window_from_refusal(ctx, _loop(), failed_capture, _context_fit_round_id(ctx))
     # A wake's stored-source delivery, or the view the refusal's route rebind narrowed: model-free, already applied,
     # it earns the first retry (memory then keeps what that view kept unless this candidate is refused too).
-    prepared = (WAKE_DELIVERY_STEP if _project_wake_input(ctx, overflowed=True)
-                else REBOUND_VIEW_STEP if ctx.messages and ctx.messages[0] != shown else "")
+    rebound = ctx.active_context_mode != mode or (bool(ctx.messages) and ctx.messages[0] != shown)
+    prepared = (WAKE_DELIVERY_STEP if _project_wake_input(ctx, overflowed=True) else REBOUND_VIEW_STEP if rebound else "")
     return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared, sized=sized)
 
 
@@ -1408,10 +1388,9 @@ def _refusal_window(ctx: _RoundModelCallContext, fit: Any,
     refused request when it states one, or a local serving instance's exact window and input (``refused``:
     its pre-send ``context_window_tokens`` and ``input_tokens``), measure it; otherwise the estimate of the
     refused attempt's own bytes (``sent``: its capture's count, 0 without one), else the round's estimate,
-    stands. The slack is the owner's return-after-fold eighth (L33 2=A) of the stated window,
-    else of the known window, else of the larger of the reading and the largest input accepted here.
+    stands. The return-after-fold eighth (L33 2=A) uses the stated window, else the admitted frame, then the
+    reading or acceptance. ``_refusal_target`` uses the physical boundary once a numberless excess is measured.
     """
-    from ouroboros.context_fit import reclaim_low_water_margin
     from ouroboros.size_refusal import refusal_measure
 
     measurement = fit.measurement
@@ -1461,6 +1440,7 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None, 
     accepted = measurement.accepted_input_tokens
     if measurement.anchor_input_tokens is None or not accepted or size <= accepted:
         return None, slack
+    slack = reclaim_low_water_margin(None, getattr(measurement, "window_boundary_tokens", None)) or slack
     return max(0, size - accepted - shed) + slack, slack
 
 
@@ -1568,8 +1548,8 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
     pass still owes (all when unknown). The floor lowers memory's granularity for the rest and the slack, which
     only memory detail and ordinary host forms pay, a whole-or-outline section (``memory_floor``) only a measured
     excess: granularity changes, coverage stays (BIBLE P1). Unknown, it asks a known window's deficit, else that
-    window's slack, else memory detail alone; memory's rest after a further refusal asks everything. Its floor lowers
-    the books only where memory cannot make room; the books step waits for the second pass.
+    window's slack, else memory detail alone. A measured floor tries maps if tellings miss; the second pass's
+    books rung remains for an unmeasured first pass, and memory's rest can then ask everything.
     """
     slack = _refusal_window(ctx, fit)[2] if slack is None else slack
     if step in ("host_copies", "bodies", "unseen_bodies"):
@@ -1588,13 +1568,13 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
         return max(0, before - after.measurement.estimated_input_tokens) if after is not None else 0
 
     if step == "books":
-        mode = ctx.active_context_mode
-        _reproject_actual_overflow_low(ctx)
-        return shed_since_before() if ctx.active_context_mode != mode else None
+        _reproject_actual_overflow_low(ctx, books_must_save=target is not None)
+        return shed_since_before() if ctx.active_context_mode != "max" else None
     # The rest of the measured excess with the slack (a slack-only ask outlines nothing), else a known window's
     # deficit with it, else its slack alone (a probe, not a measured density), else memory detail alone, or after
     # a further refusal everything memory can give.
     deficit = fit.measurement.capacity_deficit_tokens
     excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
                      else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, slack or WHOLE_CATEGORY))
-    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked) else None
+    order = {"telling_floor": True} if step == "floor" and target is not None else {}
+    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked, **order) else None

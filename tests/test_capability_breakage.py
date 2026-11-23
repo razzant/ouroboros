@@ -459,40 +459,94 @@ def test_selecting_a_works_tools_again_never_adds_a_second_typed_notice(monkeypa
     assert registry._ctx._capability_breakage_told is told  # what the work was told stays its own
 
 
-def test_a_changed_registry_omission_reaches_a_live_call_when_its_tools_are_selected_again_and_only_then(
-        monkeypatch, tmp_path):
+@pytest.mark.parametrize('host_world', [('max', 1_000_000, 'estimator')], indirect=True)
+@pytest.mark.parametrize('restored', [False, True])
+def test_a_live_calls_record_holds_what_its_adopted_connection_told_beside_its_own_later_facts(
+        host_world, monkeypatch, restored):
+    """The production seam: each connection is fitted on a private copy (``realtime_setup.session_candidate``), which
+    tells a changed registry when another mode selects its tools anew; only adoption makes that the call's record."""
+    import asyncio
     import os
+    from dataclasses import replace
 
-    from ouroboros import loop as loop_mod
-    from ouroboros.live_conversation import ConversationHost
-    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.contracts.live_conversation import LiveOptions
+    from ouroboros.realtime_setup import measure_session_wire
     from ouroboros.tools import github
-    from ouroboros.tools.registry import ToolRegistry
+    from tests._live_world import FakeSession
 
-    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh"))
+    class Session(FakeSession):  # catch-up rows reach an adopted connection as a context update
+        async def send(self, command):
+            self.__dict__.setdefault('sent', []).append(command)
+
+    monkeypatch.setitem(host_world.provider, 'session', lambda *args, **kw: Session(*args, **kw))
+    host, factory = host_world.host, host_world.provider['session']
+    monkeypatch.setenv("GH_CONFIG_DIR", str(host_world.env.drive_root / "gh"))
     monkeypatch.setattr(github, "github_cli_configured", lambda: bool(os.environ.get("GITHUB_TOKEN")))
     monkeypatch.setenv("GITHUB_TOKEN", "synthetic-test-fixture")
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_id = "test-call"
-    schemas = initial_tool_schemas(registry, context_mode="max")
-    rows = [{"role": "user", "content": "call"}]
-    loop_mod._setup_dynamic_tools(registry, schemas, rows)
-    starts = [dict(row) for row in rows if row.get("_host_context_kind") == breakage.START_KIND]
-    host = SimpleNamespace(tools=registry, ctx=registry._ctx, schemas=schemas, messages=rows, call_tools={},
-                           turn=SimpleNamespace(feature={}), _context_changed=lambda: None)
+    host.tools.schemas()
+    breakage.write_start_notice(host.tools, host.messages)  # the call holds the registry its credential leaves
+    manager = _manager(monkeypatch, ("demo", True))
+    told = getattr(host.ctx, breakage._TOLD)
+    starts = [dict(row) for row in host.messages if row.get("_host_context_kind") == breakage.START_KIND]
 
-    def changes():
-        return [row["content"] for row in rows if row.get("_host_context_kind") == breakage.CHANGE_KIND]
+    def changes(header):
+        return [row["content"] for row in host.messages
+                if row.get("_host_context_kind") == breakage.CHANGE_KIND and row["content"].startswith(header)]
 
-    ConversationHost._reselect_tools(host, "low")
-    assert changes() == []  # the same omissions: nothing to tell
-    monkeypatch.delenv("GITHUB_TOKEN")  # the credential is revoked during the call
-    ConversationHost._reselect_tools(host, "low")
-    [changed] = changes()
-    assert "submit_skill_to_hub" in changed and "missing_credential" in changed
-    ConversationHost._reselect_tools(host, "max")
-    assert len(changes()) == 1  # told once
-    assert [row for row in rows if row.get("_host_context_kind") == breakage.START_KIND] == starts  # never rebuilt
+    registry, facts = (f"{breakage.CHANGE_HEADER} What this work's tools leave out",
+                       f"{breakage.CHANGE_HEADER} Host facts changed")
+    base = len(changes(registry))
+
+    def missed_by(excess):  # the window the current view misses by ``excess``
+        _, request, _, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, LiveOptions())
+        window = request.prompt_tokens_estimate + request.physical_context.response_reserve_tokens - excess
+        host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=window))
+
+    async def consume(session):
+        return None
+
+    seen = {}
+
+    async def run():
+        from ouroboros.contracts.realtime import RealtimeSetupError
+        from tests._context_source_fixtures import _tool
+
+        await host.session(consume, LiveOptions())  # the call's first connection, in its start mode
+        assert host.plan.initial_mode == 'max' and host._session_opened
+        monkeypatch.delenv("GITHUB_TOKEN")  # revoked while the call goes on
+        missed_by(60_000)
+        discarded = await host.prepare_session(LiveOptions())  # its rows tell the revocation
+        host.messages.extend(_tool('done', invocation='inv-done', text='Completed once.'))  # a batch finished meanwhile
+        with pytest.raises(RealtimeSetupError, match='prepared_stale'):
+            await discarded.run(consume)
+        await discarded.close()
+        seen['discarded'] = dict(registry=list(told["registry"]), rows=len(changes(registry)) - base)
+        lease = await host.prepare_session(LiveOptions())  # fitted privately and opened, not yet serving
+        _call(manager, "demo", TimeoutError("slow"))
+        assert breakage.append_change_row(host)  # meanwhile the serving connection's round hears a break
+        await lease.run(consume)
+        await lease.close()
+        assert host.plan.initial_mode == 'low'
+        seen['adopted'] = dict(registry=list(told["registry"]), facts=sorted(told["facts"]),
+                               own=getattr(host.ctx, breakage._TOLD) is told)
+        if restored:
+            monkeypatch.setenv("GITHUB_TOKEN", "synthetic-test-fixture")
+        missed_by(60_000)
+        await host.session(consume, LiveOptions())  # the next mode selects its tools anew
+        assert host.plan.initial_mode == 'nano'
+        await host.session(consume, LiveOptions())  # another adoption in the same mode
+        seen['retold'] = breakage.append_change_row(host)
+
+    asyncio.run(run())
+    told_rows = changes(registry)[base:]
+    print(f'registry rows after adoption: {[("submit_skill_to_hub" in text) for text in told_rows]} {seen}')
+    assert seen['discarded']['rows'] == 0 and not any(  # a fit the call never adopted told it nothing
+        "submit_skill_to_hub" in line for line in seen['discarded']['registry'])
+    assert seen['adopted']['own'] and "mcp:demo" in seen['adopted']['facts']  # the call keeps its own later fact
+    assert any("submit_skill_to_hub" in line for line in seen['adopted']['registry'])  # and what was delivered
+    assert ["submit_skill_to_hub" in text for text in told_rows] == [True, *([False] if restored else [])]
+    assert len(changes(facts)) == 1 and not seen['retold']  # nothing the call was told is told again
+    assert [row for row in host.messages if row.get("_host_context_kind") == breakage.START_KIND] == starts
 
 
 def test_a_registry_omission_that_is_gone_is_said_to_be_gone_once():

@@ -294,9 +294,16 @@ def _provider_card_cases():
     (the parts that panel reads), without a compatible server and with one whose key the bootstrap only marks as set."""
     from ouroboros import config, store
     from ouroboros.gateway import onboarding_host
+    from ouroboros.provider_models import PROVIDER_KINDS
 
-    documents = {"closed": {}, "saved": {"OPENAI_COMPATIBLE_BASE_URL": "https://llm.example.test/v1",
-                                         "OPENAI_COMPATIBLE_API_KEY": "sk-gallery-not-a-key"}}
+    compatible = PROVIDER_KINDS["openai-compatible"]
+    documents = {
+        "closed": {},
+        "saved": {
+            compatible.flat_key("base_url"): "https://llm.example.test/v1",
+            compatible.flat_key("api_key"): "sk-gallery-not-a-key",
+        },
+    }
     cases = {}
     with TemporaryDirectory(prefix="card-gallery-providers-") as temporary, ExitStack() as restore:
         root = Path(temporary)

@@ -119,7 +119,7 @@ def _first_round(tmp_path, monkeypatch, task, *, wire=False):
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "low")
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True, raising=False)
     monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda self: None)
-    fitted = []  # the effort the start fit sized the request with (``context_fit._request_shapes``)
+    fitted = []  # the effort the start fit sized the request with (``context_measurement._request_shapes``)
     monkeypatch.setattr("ouroboros.agent.build_llm_messages",
                         lambda **kw: fitted.append(kw["reasoning_effort"]) or ([{"role": "user", "content": "go"}], {}))
     captured = []

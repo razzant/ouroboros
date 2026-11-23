@@ -170,17 +170,22 @@ def _session_density(host, plan, estimate):
             if host.model.facts.basis == "provider" else (1.0, "cold_estimate"))
 
 
-def measure_session_wire(host, plan, messages, schemas, factory, options, *, _room_fact=True, fresh=None, canonical_rows=None):
+def measure_session_wire(host, plan, messages, schemas, factory, options, *, _room_fact=True, fresh=None,
+                         canonical_rows=None, opening_allowance_tokens=None):
     """Seal and price one complete candidate, without selecting a view or opening a socket.
 
     Admission and authored-view receipts use this same envelope measurement.
-    Instantiating a provider session is inert; only its host-owned open starts I/O.
+    A provider session's constructor builds the wire. Only its host-owned open starts I/O or claims resume state.
+    Catch-up prices the allowance already sent in setup, not what a new setup could negotiate.
     """
     import math
     from dataclasses import asdict, replace
+    from ouroboros.context_budget import reply_allowance_tokens
     from ouroboros.context_fit import estimate_context_prompt_tokens, measure_main_fit
+    from ouroboros.context_measurement import reclaim_low_water_margin, required_book_addition
     from ouroboros.context_window import resolve_window
     from ouroboros.context_view_facts import window_projection
+    from ouroboros.llm_attempt import main_context_response_reserve
     from ouroboros.loop_model_call import _main_context_profile, _physical_context_for_fit
     from ouroboros.usage_accounting import AttemptRequest
 
@@ -200,13 +205,15 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
         from ouroboros.context_view_facts import memory_facts
         from ouroboros.loop_messages import _context_components
         from types import SimpleNamespace
-        _, _, measured, _ = measure_session_wire(host, plan, messages, schemas, factory, options, _room_fact=False)
+        _, _, measured, _ = measure_session_wire(host, plan, messages, schemas, factory, options, _room_fact=False,
+                                                 opening_allowance_tokens=opening_allowance_tokens)
         parts = _context_components(SimpleNamespace(messages=messages, tool_schemas=schemas,
             accumulated_usage={'_context_measurement_density': measured['fit']['measurement']['measurement_density']},
             context_fit_plan=plan), measured=True)
         rows = [*messages, room_fact(measured['fit']['measurement'], parts, source=source,
             memory=memory_facts(plan, plan.initial_mode, messages))]
-        session, request, evidence, window = measure_session_wire(host, plan, rows, schemas, factory, options, _room_fact=False)
+        session, request, evidence, window = measure_session_wire(host, plan, rows, schemas, factory, options,
+            _room_fact=False, opening_allowance_tokens=opening_allowance_tokens)
         if canonical_rows is not None:
             canonical_rows[:] = rows
         return session, request, evidence, window
@@ -218,44 +225,65 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
     rows = [*messages, *([{"role": "system", "content": options.instructions}] if options.instructions else [])]
     fit = measure_main_fit(plan, rows, schemas, profile=_main_context_profile(plan, plan.initial_mode),
         rendered_mode=plan.initial_mode, round_id=host.ctx.task_id + ":call", reasoning_effort=host.effort)
+    ceiling = min(plan.output_reserve_tokens, options.model_output_bound_tokens or plan.output_reserve_tokens)
     selected = input_from_context_plan(plan, model=host.turn.native_model, selected_tools=schemas,
-        output_allowance_tokens=fit.measurement.reply_allowance_tokens, messages=messages)
-    session = factory(selected, options, observe=host.observe)
-    bound = session.output_bound_tokens
-    if bound is not None and (type(bound) is not int or bound < 1):
-        raise RealtimeSetupError("output_bound", "provider output bound must be positive or unknown")
+        output_allowance_tokens=opening_allowance_tokens or min(ceiling, fit.measurement.reply_allowance_tokens), messages=messages)
+    canonical = estimate_context_prompt_tokens(rows, schemas)
+    raw_book = required_book_addition(plan, plan.initial_mode)
+    price_reply = plan.initial_mode == 'nano' and opening_allowance_tokens is None
+    while True:
+        session = factory(selected, options, observe=host.observe)
+        bound = session.output_bound_tokens
+        if bound is not None and (type(bound) is not int or bound < 1):
+            raise RealtimeSetupError("output_bound", "provider output bound must be positive or unknown")
+        raw = max(canonical, estimate_context_prompt_tokens([session.wire]))
+        ratio, basis = _session_density(host, plan, raw)
+        measured, book = math.ceil(raw * ratio), math.ceil(raw_book * ratio)
+        working = max(facts.working_reserve_tokens or plan.output_reserve_tokens, bound or 0)
+        request = AttemptRequest(model=host.turn.model, provider=host.turn.route.accounting_provider,
+            drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, source="agent.live_conversation",
+            prompt_tokens_estimate=measured, prompt_tokens_bounded_estimate=raw,
+            max_completion_tokens=bound or selected.output_allowance_tokens, working_reserve_tokens=working,
+            allow_live_fetch=False, candidate_measurement_kind="canonical_json_v1",
+            physical_context=replace(_physical_context_for_fit(fit), response_reserve_tokens=working))
+        reserve = main_context_response_reserve(request)
+        window = resolve_window(plan, reserve, root=host.ctx.drive_root, bound=plan.window_witness_bound)
+        if not price_reply or window.usable is None:
+            break
+        # The provider's archive may escape the transcript again. Rebuild once with the reply that the
+        # measured wire leaves, then measure those final bytes and the adapter's effective bound again.
+        reply = reply_allowance_tokens(caller_max_tokens=ceiling, nano=True,
+            owner_nano=plan.preferred_mode == 'nano', input_tokens=measured - book,
+            raw_input_tokens=raw - raw_book, window_record=window)
+        if reply == selected.output_allowance_tokens:
+            break
+        selected = replace(selected, output_allowance_tokens=reply)
+        price_reply = False
     wire = canonical_json(session.wire)
-    raw = max(estimate_context_prompt_tokens(rows, schemas), estimate_context_prompt_tokens([session.wire]))
-    ratio, basis = _session_density(host, plan, raw)
-    measured = math.ceil(raw * ratio)
-    working = max(facts.working_reserve_tokens or plan.output_reserve_tokens, bound or 0)
-    window = resolve_window(plan, working, root=host.ctx.drive_root, bound=plan.window_witness_bound)
     capacity = window.total_equivalent if window.usable is not None else None
-    deficit = max(0, measured + working - capacity) if capacity is not None else None
-    from ouroboros.context_measurement import reclaim_low_water_margin
+    deficit = max(0, measured + reserve - capacity) if capacity is not None else None
     target = fit.measurement.target_total_tokens
-    target_deficit = max(0, measured + working - target) if target is not None else None
+    target_deficit = max(0, measured + reserve - target) if target is not None else None
     largest_deficit = max(target_deficit or 0, deficit or 0)
-    margin = reclaim_low_water_margin(target, capacity) if largest_deficit else 0
+    margin = reclaim_low_water_margin(target, window.boundary) if largest_deficit else 0
     measurement = replace(fit.measurement, estimated_input_tokens=measured, raw_input_tokens=raw,
-        measurement_density=ratio, measurement_basis=basis, response_reserve_tokens=working,
-        window=window_projection(window), capacity_total_tokens=capacity, capacity_deficit_tokens=deficit,
+        measurement_density=ratio, measurement_basis=basis, response_reserve_tokens=reserve,
+        window=window_projection(window), window_boundary_tokens=window.boundary, window_record=replace(window, floor=None),
+        capacity_total_tokens=capacity, capacity_deficit_tokens=deficit,
+        required_book_tokens=book, reply_allowance_tokens=selected.output_allowance_tokens,
         target_deficit_tokens=target_deficit, low_water_margin_tokens=margin, reclaim_goal_tokens=largest_deficit + margin)
     fit = replace(fit, measurement=measurement, predicted_capacity_miss=bool(deficit),
                   action='send_target_miss' if target_deficit else 'send')
-    request = AttemptRequest(model=host.turn.model, provider=host.turn.route.accounting_provider,
-        drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, source="agent.live_conversation",
-        prompt_tokens_estimate=measured, prompt_tokens_bounded_estimate=raw,
-        max_completion_tokens=bound or selected.output_allowance_tokens, working_reserve_tokens=working,
-        allow_live_fetch=False, candidate_raw_sha256=sha256(wire), candidate_raw_size_bytes=len(wire.encode()),
-        candidate_context_sha256=selected.sha256, candidate_context_size_bytes=len(selected.messages_json.encode()),
-        candidate_measurement_kind="canonical_json_v1", physical_context=_physical_context_for_fit(fit))
+    request = replace(request, physical_context=_physical_context_for_fit(fit),
+        candidate_raw_sha256=sha256(wire), candidate_raw_size_bytes=len(wire.encode()),
+        candidate_context_sha256=selected.sha256, candidate_context_size_bytes=len(selected.messages_json.encode()))
     evidence = {"fit": asdict(fit), "route_facts": asdict(facts), "tool_count": len(schemas),
-                "input_sha256": selected.sha256, "wire_sha256": sha256(wire), "units": facts.basis}
+                "input_sha256": request.candidate_context_sha256, "wire_sha256": request.candidate_raw_sha256,
+                "units": facts.basis}
     return session, request, evidence, window
 
 
-def _publish_room_reader(host, plan, prior, rows, factory, options, evidence):
+def _publish_room_reader(host, plan, prior, rows, schemas, factory, options, evidence):
     """Publish the exact reader only for the selected send."""
     from ouroboros.context_source_view import fresh_room_rows
     from ouroboros.context_budget import bound_host_row
@@ -266,8 +294,12 @@ def _publish_room_reader(host, plan, prior, rows, factory, options, evidence):
     _, placeholder = fresh_room_rows(current, drive_root=host.ctx.drive_root, task_id=host.ctx.task_id)
     _, reader = fresh_room_rows(current, drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, persist=True)
     rows[-1] = bound_host_row('ouroboros_context_facts', rows[-1]['content'].replace(placeholder, reader))
-    session, request, sealed, window = measure_session_wire(host, plan, rows, host.schemas, factory, options, _room_fact=False)
-    sealed.update({key: evidence[key] for key in ('work_room', 'recovery')})
+    session, request, sealed, window = measure_session_wire(host, plan, rows, schemas, factory, options, _room_fact=False)
+    room = evidence['work_room']
+    remaining = (window.usable - sealed['fit']['measurement']['estimated_input_tokens']
+                 if window.usable is not None else None)
+    sealed.update(recovery=evidence['recovery'], work_room={**room, 'remaining_tokens': remaining,
+        'deficit_tokens': max(0, room['requested_tokens'] - remaining) if remaining is not None else 0})
     sealed['fit']['automatic_pass_used'] = evidence['fit']['automatic_pass_used']
     return session, request, sealed, window
 
@@ -290,6 +322,20 @@ def _accept_session_candidate(host, plan, rows, options, physical_window, raw):
     host.ctx.active_context_mode = plan.initial_mode
 
 
+def _reply_room(plan, measurement, floor):
+    """The part of a candidate's reserve that is its own reply above its mode's least reserve.
+
+    Nano's reply takes what its input leaves beside the estimate slack (``context_budget.reply_allowance_tokens``) and
+    shrinks before the window refuses, so a running call can grow into that part; folding memory only lengthens the
+    reply. A native bound and a reply at its floor are fixed: none of their reserve counts.
+    """
+    from ouroboros.context_budget import context_mode_limits
+    reserve, reply = measurement['response_reserve_tokens'], measurement['reply_allowance_tokens']
+    least = context_mode_limits(plan.initial_mode, plan.preferred_mode, plan.output_reserve_tokens,
+                                working_reserve_tokens=floor)[1]
+    return max(0, reserve - least) if reserve == reply else 0
+
+
 def session_candidate(host, factory, options, *, observation_fp=None):
     """Refit current canonical rows through the ordinary window ladder, then seal.
 
@@ -297,10 +343,12 @@ def session_candidate(host, factory, options, *, observation_fp=None):
     fit. The physical guard checks the provider's final envelope. A failed fit
     asks the existing ladder for that measured deficit; unchanged bytes refuse.
     """
+    import copy
     import math
     from dataclasses import replace
     from ouroboros.context_budget import RECLAIM_LOW_WATER_DIVISOR, bound_host_row
     from ouroboros.context_fit import estimate_context_prompt_tokens
+    from ouroboros.context_measurement import reclaim_low_water_margin
     from ouroboros.context_window import WindowLimit, WindowRecord, resolve_window
     from ouroboros.llm_attempt import main_context_fit_refusal
 
@@ -325,28 +373,66 @@ def session_candidate(host, factory, options, *, observation_fp=None):
     from ouroboros.context_budget import ContextReclaimRequest, REFUSAL_PASSES
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
     from ouroboros.context_renewal import renewal_view, physical_window_cut
+    from ouroboros.capability_breakage import _TOLD, write_start_notice
+    from ouroboros.tools.tool_discovery import update_resident_notice
+
     current = list(host.messages)
-    if options.resume_handle:
-        raw = estimate_context_prompt_tokens([*current, *extra], host.schemas)
+    schema_mode = host._schemas_mode
+    loaded = host.ctx._actor_loaded_tool_names - host.call_tools.keys()
+    schemas = [current_schema for schema in host.schemas if (current_schema := (
+        host.tools.get_schema_by_name(schema['function']['name']) if schema['function']['name'] in loaded else schema)) is not None]
+    if schemas != host.schemas:
+        update_resident_notice(host.tools, schemas, current)
+    told = getattr(host.ctx, _TOLD, None)
+
+    selected_by_mode = {schema_mode: schemas}
+
+    def schemas_for(mode):
+        if mode not in selected_by_mode:
+            selected_by_mode[mode] = host._tool_schemas_for_mode(mode)
+        return selected_by_mode[mode]
+
+    trial_catalogs = dict(low_tools=lambda: schemas_for('low'), nano_tools=lambda: schemas_for('nano'))
+
+    def project(rebound):
+        rows = rebound.reproject_transcript(current, rebound.initial_mode)
+        if rebound.initial_mode == schema_mode:
+            return rows, schemas, told
+        selected = schemas_for(rebound.initial_mode)
+        trial = copy.copy(host.ctx)
+        trial.is_direct_chat = False  # this trial cannot publish Main's capability facts
+        setattr(trial, _TOLD, copy.deepcopy(told))
+        write_start_notice(host.tools.copy_for(trial), rows)
+        update_resident_notice(host.tools, selected, rows)
+        return rows, selected, getattr(trial, _TOLD, None)
+
+    running = known and not start_work
+    ordered = (running and plan.initial_mode == plan.preferred_mode == "max"
+               and plan.core and not plan.core.compact_reference_docs)
+    if options.resume_handle and not running:
+        raw = estimate_context_prompt_tokens([*current, *extra], schemas)
         ratio, _ = _session_density(host, plan, raw)
         plan = plan.reproject_for_route(window_tokens=window, known_window=known, ratio=ratio,
-            output_reserve=plan.output_reserve_tokens, tool_schemas=host.schemas, start_mode=plan.initial_mode,
-            current_messages=[*current, *extra], start_work=start_work)
-        current = plan.reproject_transcript(current, plan.initial_mode)
+            output_reserve=plan.output_reserve_tokens, tool_schemas=schemas, start_mode=plan.initial_mode,
+            current_messages=[*current, *extra], start_work=start_work, **trial_catalogs)
+        current, schemas, told = project(plan)
+        schema_mode = plan.initial_mode
     steps = iter(("floor",) if options.resume_handle else (*REFUSAL_PASSES[0], *(step for step in REFUSAL_PASSES[1] if step != "books"), "seed", "physical_cut"))
     receipts = []
     room_attempted = False
     room_facts = not options.resume_handle
+    return_room, floor_attempted = 0, False
     while True:
         rows = [*current, *extra]
         sent_rows = list(current)
         session, request, evidence, physical_window = measure_session_wire(
-            host, plan, current, host.schemas, factory, options, canonical_rows=sent_rows, _room_fact=room_facts)
+            host, plan, current, schemas, factory, options, canonical_rows=sent_rows, _room_fact=room_facts)
         measurement = evidence['fit']['measurement']
         measured, raw = measurement['estimated_input_tokens'], measurement['raw_input_tokens']
         ratio = measurement['measurement_density']
-        available = physical_window.total_equivalent - measured - physical_window.reserve if known else None
-        wanted = math.ceil(physical_window.boundary / RECLAIM_LOW_WATER_DIVISOR) if start_work and known else 0
+        usable = physical_window.usable
+        available = usable - measured if usable is not None else None
+        wanted = math.ceil(physical_window.boundary / RECLAIM_LOW_WATER_DIVISOR) if start_work and usable is not None else 0
         shortage = max(0, wanted - available) if available is not None else 0
         evidence['work_room'] = dict(first_send=start_work, requested_tokens=wanted,
             remaining_tokens=available, deficit_tokens=shortage)
@@ -357,14 +443,11 @@ def session_candidate(host, factory, options, *, observation_fp=None):
             room_attempted = True
             # Soft start room uses the ordinary memory walk; it never removes delivered rows.
             rebound = plan.reproject_for_route(window_tokens=window, known_window=known, ratio=ratio,
-                output_reserve=plan.output_reserve_tokens, tool_schemas=host.schemas, start_mode=plan.initial_mode,
-                current_messages=rows, refused_tokens=shortage, measured_input_tokens=raw, start_work=start_work)
-            changed = rebound.reproject_transcript(current, rebound.initial_mode)
-            plan, current = rebound, changed
-            if plan.initial_mode != host._schemas_mode:
-                host.messages[:] = current
-                host._reselect_tools(plan.initial_mode)
-                current = list(host.messages)
+                output_reserve=plan.output_reserve_tokens, tool_schemas=schemas, start_mode=plan.initial_mode,
+                current_messages=rows, refused_tokens=shortage, measured_input_tokens=raw, start_work=start_work,
+                **trial_catalogs)
+            current, schemas, told = project(rebound)
+            plan, schema_mode = rebound, rebound.initial_mode
             continue
         if refusal is None and shortage:
             detail = ('Start room is smaller than requested: the complete input and reply/working reserve '
@@ -372,47 +455,77 @@ def session_candidate(host, factory, options, *, observation_fp=None):
             evidence['work_room'].update(reason='start_room_shortfall', detail=detail)
             if not any(row.get('_host_context_kind') == 'context_start_room' for row in current):
                 notice = bound_host_row('context_start_room', detail)
-                _, with_notice, _, _ = measure_session_wire(host, plan, [*current, notice], host.schemas, factory, options, _room_fact=room_facts)
+                _, with_notice, _, _ = measure_session_wire(host, plan, [*current, notice], schemas, factory, options, _room_fact=room_facts)
                 if main_context_fit_refusal(with_notice) is None:
                     current.append(notice)
                     continue
-        if refusal is None:
+        book = measurement['required_book_tokens']
+        book_only = bool(refusal and book and 0 < -refusal['free_tokens'] <= book)
+        if refusal and not book_only and not return_room:
+            return_room = reclaim_low_water_margin(None, physical_window.boundary)
+        ordinary_free = available + book + _reply_room(plan, measurement, reserve) if available is not None else None
+        top_up = (refusal is None and not start_work and not floor_attempted
+                  and ordinary_free is not None and ordinary_free < return_room)
+        if refusal is None and not top_up:
             if room_facts:
-                published = _publish_room_reader(host, plan, current, sent_rows, factory, options, evidence)
+                published = _publish_room_reader(host, plan, current, sent_rows, schemas, factory, options, evidence)
                 session, request, evidence, physical_window = published
+            if schema_mode != host._schemas_mode or schemas != host.schemas:
+                host._reselect_tools(schema_mode, selected=schemas)
+                if told is not None:
+                    setattr(host.ctx, _TOLD, told)
             _accept_session_candidate(host, plan, sent_rows, options, physical_window, evidence['fit']['measurement']['raw_input_tokens'])
             return session, request, evidence
-        rung = next(steps, None)
+        rung = None if book_only else "floor" if top_up else next(steps, None)
         if rung is not None:
             def measure(candidate):
-                return measure_session_wire(host, plan, candidate, host.schemas, factory, options, _room_fact=room_facts)[2]['fit']['measurement']['estimated_input_tokens']
-            usable = physical_window.total_equivalent - physical_window.reserve
-            slack = math.ceil(physical_window.boundary / RECLAIM_LOW_WATER_DIVISOR)  # the return-after-fold eighth
-            goal = max(0, measured - usable) + slack
+                return measure_session_wire(host, plan, candidate, schemas, factory, options, _room_fact=room_facts)[2]['fit']['measurement']['estimated_input_tokens']
+            usable += book  # transcript and memory recovery cannot pay for a directly required handbook
+            goal = max(0, return_room - ordinary_free)
+            if rung == "bodies" and not start_work:  # visible bodies pay only the physical excess
+                goal = max(0, -ordinary_free)
+                if not goal:
+                    continue
             before = measured
             if rung == "floor":
+                floor_attempted = True
                 # The same memory + book walk as text, after exposed tool bodies.
                 # Each iteration must shrink the complete provider envelope; the slack never outlines.
                 while True:
-                    rebound = plan.reproject_for_route(window_tokens=window, known_window=known, ratio=ratio,
-                        output_reserve=plan.output_reserve_tokens, tool_schemas=host.schemas, start_mode=plan.initial_mode,
-                        current_messages=[*current, *extra], refused_tokens=goal - slack, slack_tokens=slack,
-                        measured_input_tokens=raw, start_work=False, select_mode="low" if plan.initial_mode == "max" else None)
-                    candidate = rebound.reproject_transcript(current, rebound.initial_mode)
-                    old_plan = plan
-                    plan = rebound
-                    after = measure(candidate)
-                    if after >= before:
-                        plan = old_plan
+                    # The wire's reserve is this mode's reply (or native bound), a ceiling for this fit only; the
+                    # route's working floor stays the floor, so a Nano trial is priced at its own reserve. The
+                    # plan's allowance then goes into the next complete candidate.
+                    basis = replace(plan, window_record=physical_window, working_reserve_tokens=reserve) if running else plan
+                    room = min(return_room, goal)
+                    rebound = basis.reproject_for_route(window_tokens=physical_window.total_equivalent if running else window,
+                        known_window=known, ratio=ratio, output_reserve=physical_window.reserve if running else plan.output_reserve_tokens,
+                        tool_schemas=schemas, start_mode=plan.initial_mode,
+                        current_messages=[*(sent_rows if running else current), *extra], refused_tokens=goal - room,
+                        slack_tokens=room, measured_input_tokens=raw, start_work=False, telling_floor=bool(ordered),
+                        select_mode="low" if not ordered and plan.initial_mode == "max" else None, **trial_catalogs)
+                    if running:
+                        rebound = replace(rebound, output_reserve_tokens=plan.output_reserve_tokens,
+                                          working_reserve_tokens=plan.working_reserve_tokens)
+                    candidate, selected, trial_told = project(rebound)
+                    trial_rows = list(candidate)
+                    _, trial, next_fit, next_window = measure_session_wire(host, rebound, candidate, selected,
+                        factory, options, canonical_rows=trial_rows, _room_fact=room_facts)
+                    next_measurement = next_fit['fit']['measurement']
+                    after = next_measurement['estimated_input_tokens']
+                    next_free = (next_window.usable - after + next_measurement['required_book_tokens']
+                                 + _reply_room(rebound, next_measurement, reserve))
+                    if next_free <= ordinary_free or top_up and main_context_fit_refusal(trial) is not None:
                         break
-                    current, before = candidate, after
-                    if plan.initial_mode != host._schemas_mode:
-                        host.messages[:] = current
-                        host._reselect_tools(plan.initial_mode)
-                        current = list(host.messages)
-                    if after <= usable:
+                    receipts.append({'rung': rung, 'before_tokens': before, 'after_tokens': after})
+                    plan, current, schemas, told = rebound, candidate, selected, trial_told
+                    schema_mode = rebound.initial_mode
+                    physical_window, sent_rows = next_window, trial_rows
+                    ordinary_free, before = next_free, after
+                    raw, ratio = next_measurement['raw_input_tokens'], next_measurement['measurement_density']
+                    goal = max(0, return_room - ordinary_free)
+                    if not goal or ordinary_free >= 0 and (not running or after > physical_window.usable):
                         break
-                    raw = estimate_context_prompt_tokens([*current, *extra], host.schemas)
+                continue
             elif rung == "seed":
                 current, receipt = renewal_view(current,
                     observation=getattr(host.ctx, '_last_context_observation', None),
@@ -438,6 +551,12 @@ def session_candidate(host, factory, options, *, observation_fp=None):
             room_facts = False  # refusal evidence names no unpublished prior-view reader
             continue
         from ouroboros.observability import persist_physical_candidate
+        detail = CONTEXT_CAPACITY_DETAIL
+        if book_only:
+            from ouroboros.context_view_facts import required_book_fact
+            detail = required_book_fact({}, {"book": book, "capacity": measurement['capacity_total_tokens'],
+                "reserve": measurement['response_reserve_tokens'], "tokens": measured}).strip()
+            evidence['detail'] = detail
         evidence.update(reason="context_capacity", refusal=refusal,
                         deficit_tokens=max(1, -refusal["free_tokens"] + 1))
         receipt = persist_physical_candidate(host.ctx.drive_root, task_id=host.ctx.task_id,
@@ -446,4 +565,4 @@ def session_candidate(host, factory, options, *, observation_fp=None):
         event = {"type": "call.fit_refused", **evidence, "manifest_ref": receipt["manifest_ref"]}
         host.trace["fit_refusal"] = event
         host.observe("host", canonical_json(event))
-        raise RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+        raise RealtimeSetupError("context_capacity", detail)

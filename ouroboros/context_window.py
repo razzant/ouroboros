@@ -55,9 +55,7 @@ class WindowRecord:
     @property
     def usable(self) -> Optional[int]:
         """The input a start is sized to: a total always leaves the whole reply reserve."""
-        limits = ([self.input.tokens] if self.input else []) + (
-            [max(0, self.total.tokens - self.reserve)] if self.total else [])
-        return min(limits) if limits else None
+        return self.input_room()
 
     @property
     def admitted(self) -> Optional[int]:
@@ -67,9 +65,19 @@ class WindowRecord:
         own request reads this one line (the pre-send check, the room a tool result is shown in, whether a view is
         kept, what a pass leaves), so nothing is cut on the guess that the reply is inside. A provider that counts
         the reply refuses such a request once, and that refusal proves the total."""
-        proven = self.floor is None or (self.total is not None and self.total.source in _REPLY_INSIDE)
-        limits = ([self.input.tokens] if self.input else []) + ([max(0, self.total.tokens - (
-            self.reserve if proven else min(self.reserve, self.floor)))] if self.total else [])
+        return self.input_room(under_way=True)
+
+    def input_room(self, reply: int = 0, *, under_way: bool = False) -> Optional[int]:
+        """Compare the input limit whole, and charge any extra wire reserve only to a total.
+
+        A total with unknown reply semantics keeps its existing under-way floor: a larger
+        actual reply costs only what the admitting frame didn't already reserve.
+        """
+        limits = [self.input.tokens] if self.input else []
+        if self.total:
+            floor = (min(self.reserve, self.floor) if under_way and self.floor is not None
+                     and self.total.source not in _REPLY_INSIDE else self.reserve)
+            limits.append(max(0, self.total.tokens - floor) - max(0, reply - self.reserve))
         return min(limits) if limits else None
 
     @property

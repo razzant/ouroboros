@@ -445,7 +445,7 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
     return "\n".join(lines)
 
 
-def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, window, mode, work, lowered,
+def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, window, window_record, mode, work, lowered,
                       note_window, admit, optional_map):
     """Price the book and its note beside the same ordinary memory; its only retry takes optional maps.
 
@@ -466,10 +466,12 @@ def fit_required_book(shown, *, book, fixed, ratio, reserve, output_reserve, win
         if not admit:
             return presented, note_tokens, None
         reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano",
-            owner_nano=False, input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
+            owner_nano=False, input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary,
+            window_tokens=window, window_record=window_record)
         memory = story_tokens + view_tokens(presented)
         held = max(reserve, reply)
-        if math.ceil((fixed + book + memory) * ratio) + held <= window:
+        input_room = window_record.input_room(reply) if window_record else None
+        if math.ceil((fixed + book + memory) * ratio) <= (window - held if input_room is None else input_room):
             return presented, note_tokens, None
         if retry:
             return presented, note_tokens, {"fixed_tokens": fixed + book, "memory_tokens": memory, "reserve_tokens": held}
@@ -866,7 +868,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None, stated_window_tokens: Optional[int] = None,
                          shortest: bool = False, level: Optional[mv.FloorLevel] = None,
-                         report_nano_miss: bool = False, start_saving: int = 0, telling_only: bool = False) -> ViewFit:
+                         report_nano_miss: bool = False, start_saving: int = 0, telling_only: bool = False,
+                         telling_floor: bool = False, request_limit: Optional[int] = None) -> ViewFit:
     """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -879,10 +882,12 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
-    ``level`` prices an existing level without walking. ``telling_only`` walks only authored tellings, starting from
-    that level if supplied, without taking another emergency form or uncovering owner words.
+    ``level`` prices an existing level without walking. ``telling_only`` prices ordinary forms from that level
+    if supplied, without taking another emergency form or uncovering owner words.
     A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
     the two memory texts of a whole request (by default their own tokens).
+    ``request_limit`` is a measured running input goal after crediting host forms and books. The optional
+    ``start_saving`` is separate advice: it folds to tellings only, after the ordinary view was chosen.
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -895,13 +900,13 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
     # Owner 15.11.2026 (3A, 4A): Low's target never takes memory below my shortest telling of the whole horizon and
-    # never takes this room, and a Max start keeping whole books never goes below it either; only the window's own
+    # never takes this room, and Max on the telling rung never goes below it either; only the window's own
     # start bound may. A miss of the target is its own fact. Nano's number still governs all memory (owner 11.10, 13.10).
     binds = kept is None and target is not None and owner_mode == "low" and (window is None or target < window)
     reports_miss = binds or (report_nano_miss and kept is None and mode == owner_mode == "nano"
                              and target is not None and (window is None or target < window))
     floor, keeps = ((TARGET_FLOOR, TARGET_KEEPS) if binds else (TELLING_STAGES, frozenset())  # the one order (4A)
-                    if mode == "max" and (kept is None or start_work) else (None, frozenset()))
+                    if telling_floor or mode == "max" and (kept is None or start_work) else (None, frozenset()))
     size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     room_bound = allowances["window"] if binds else allowances["margin"]  # a target's miss is its own fact, below
     uncovered = uncovered_owner_rows(snapshot)
@@ -942,6 +947,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
         level = fit_memory_view(snapshot, {**allowances, "physical": None}, saving=math.inf,
                                 **{**walk, **({} if binds else {"floor": None, "keeps": frozenset()})})
     elif level is None:
+        if request_limit is not None:
+            saving = max(0, non_memory_tokens + measure(walk['kept']) - request_limit)
         level = fit_memory_view(snapshot, allowances, saving=saving, **walk)
     if start_saving:
         # Another chat's refusal is not physical pressure: only memory with an in-view telling can pay this ask.
@@ -988,10 +995,10 @@ OPTIONAL_STEPS = ("design_bible",)
 
 
 def optional_excerpt_fits(bound, refused, before, measure, tellings):
-    """Only the physical bound or a refusal can shorten an optional reference excerpt.
+    """Price lawful tellings beside an optional excerpt in the same request before giving it up.
 
-    Price lawful tellings in the same request before giving up the excerpt. An owner's mode target alone and
-    slack requested beyond the refusal do not count as pressure on it.
+    A start passes its own physical bound and a refusal may pass a saving; a measured running recovery passes
+    its full input goal, including its return room. Neither an owner's mode target alone nor a healthy view asks it.
     """
     if bound is None and refused <= 0:
         return True
@@ -1104,8 +1111,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     and the request still exceeds ``held_bound``; then one at a time. So where a start misses its own bound while the
     physical window holds the whole index, neither yields: that start has less work room, as a start without heads
     has there. A target, a soft frame or a requested saving shortens no head. Optional reference sections check
-    ``optional_fits`` beside lawful tellings and the physical departure bound, including a refusal without a numeric
-    limit. An unknown window without a refusal offers no reason to shorten them. Where Nano's budget frames the start,
+    ``optional_fits`` beside lawful tellings and the physical bound or measured running goal. A refusal can have
+    no numeric limit; an unknown window without a refusal offers no reason to shorten them. Where Nano's budget frames the start,
     price the whole excerpt also beside the map's own memory level and lawful tellings. Its existing cuts are not
     new losses for the excerpt. If this fits the window but the whole-excerpt walk needs extra untold forms for the
     target, the map is the budget's (``start_room``), not the window's.

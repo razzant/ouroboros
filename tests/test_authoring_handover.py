@@ -36,16 +36,9 @@ def test_fallback_records_authorship_only_when_it_answers(tmp_path):
     fallback_messages = list(messages)
 
     _adopt_fallback_route(
-        registry._ctx,
-        registry,
-        "claude-fable-5-1",
-        False,
-        messages,
-        fallback_messages,
-        None,
-        "max",
-        [],
-        usage,
+        registry._ctx, SimpleNamespace(active_model="claude-fable-5-1", active_use_local=False, tools=registry,
+                                      messages=fallback_messages, context_fit_plan=None, tool_schemas=[]),
+        messages, [], "max",
     )
     assert "authoring_handovers" not in usage
     state = json.loads(json.dumps(continuation_state(registry._ctx, messages, trace, usage, 2, [], set())))

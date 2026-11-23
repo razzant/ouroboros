@@ -1381,9 +1381,13 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     to the engine; without one the route's own question is asked once, and the rebind after tool reconciliation reuses
     that answer. Dates are read anew; an account the conversation names without a usable record is asked about."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
+    from ouroboros.loop_model_call import publish_rebound_view
     from ouroboros.held_notes import CAPTURE_KEY
     from ouroboros.memory_floor import MODES
-    from ouroboros.continuation_tools import reconcile_restored_tools
+    from functools import cache
+    from ouroboros.continuation_tools import frozen_tools_intact, reconcile_restored_tools, restore_omissions
+    from ouroboros.provider_models import tool_schema_limit
+    from ouroboros.window_learning import RouteSchemas
     from ouroboros.context_fit import restored_start
     from ouroboros.context_timing import timed
 
@@ -1399,14 +1403,33 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
         route_is_preference=True,
     )
-    plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, start_mode=restore_mode, **route)
-    before = len(messages)
-    schemas_changed = timed("restore.tools", reconcile_restored_tools, tools, state, messages, mode)
-    if schemas_changed or (restoring_held and len(messages) != before):
-        plan, mode = _rebind_context_fit_plan(plan, tools, messages, start_mode=restore_mode if restoring_held else mode,
-                                              **{**route, "model_route": getattr(plan, "model_route", {})})
-    if schemas_changed:
-        sanction_rewrite(ctx, "continuation_restored", scope="tools")
+    basis, frozen = ctx.context_fit_plan, state["tool_schemas"]
+    shown = messages[0] if messages else None
+    source = [*messages, *restore_omissions(tools)]
+    start = restore_mode or owner
+    held = RouteSchemas(frozen, [])
+    limit = tool_schema_limit(route["model"], use_local=route["use_local"])
+
+    @cache
+    def trial(mode):
+        return timed("restore.tools", reconcile_restored_tools, tools, state, source, mode,
+                     saved_mode=ran, model=route["model"], limit=limit)
+
+    preview = list(source)
+    plan, mode = _rebind_context_fit_plan(basis, tools, preview, start_mode=restore_mode, publish=False,
+        schema_trials=lambda mode: held if mode == start else trial(mode), **route)
+    if mode != ran or not frozen_tools_intact(tools, frozen, preview, mode, limit):
+        initial = trial(start)
+        if mode != start or initial.price() != held.price():
+            # Re-price from the source, never from a projection made solely to fit the frozen list.
+            preview = list(source)
+            plan, mode = _rebind_context_fit_plan(basis, tools, preview, start_mode=restore_mode, publish=False,
+                schema_trials=trial, **{**route, "tool_schemas": initial.fitted.schemas,
+                                        "model_route": getattr(plan, "model_route", {})})
+        trial(mode).adopt(tools, frozen, preview)
+    messages[:] = preview
+    if plan is not None:
+        publish_rebound_view(tools, plan, mode, messages, frozen, restore_mode, shown)
     # This process captured its context again: the restored system row names that, not a route change.
     sanction_rewrite(ctx, "continuation_restored", scope="system")
     return plan, mode

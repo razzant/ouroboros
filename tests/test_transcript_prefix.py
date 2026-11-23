@@ -222,6 +222,7 @@ def test_a_restored_continuation_names_its_system_row_and_tool_set(monkeypatch):
     send names that system-row change, and a reconciled tool list, instead of an unknown origin."""
     from ouroboros import continuation_tools, loop, owner_wait
     from ouroboros.transcript_prefix import history_change_origin
+    from ouroboros.window_learning import RouteSchemas
 
     slot = SimpleNamespace(task_metadata={}, context_fit_plan=None, active_model="m", active_use_local=False,
                            active_context_mode="max")
@@ -236,10 +237,13 @@ def test_a_restored_continuation_names_its_system_row_and_tool_set(monkeypatch):
     monkeypatch.setattr(owner_wait, "get_context_mode", lambda: "max", raising=False)
     monkeypatch.setattr(loop, "get_context_mode", lambda: "max")
     for reconciled in (False, True):
-        monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a, value=reconciled: value)
-        owner_wait.rebind_restored_route(SimpleNamespace(_ctx=slot), {"tool_schemas": []}, messages)
         tools = [{"function": {"name": "added"}}] if reconciled else []
-        fact = observe_send(slot, messages, round_idx=2, tools=tools)
+        frame = continuation_tools.RestoredTools(RouteSchemas(tools, []))
+        monkeypatch.setattr(continuation_tools, "reconcile_restored_tools", lambda *_a, **_kw: frame)
+        resident = {"tool_schemas": []}
+        owner_wait.rebind_restored_route(SimpleNamespace(_ctx=slot), resident, messages)
+        assert resident["tool_schemas"] == tools
+        fact = observe_send(slot, messages, round_idx=2, tools=resident["tool_schemas"])
         assert history_change_origin(fact) == ("tool set changed (continuation_restored)" if reconciled
                                                else "system view rebuilt (continuation_restored)")
         messages[0] = SYSTEM
