@@ -254,12 +254,18 @@ def test_the_kill_notice_leads_with_the_cause_and_keeps_the_typed_task_done(qenv
     })
     (chat_id, text, kw), = sent
     assert chat_id == 4
-    assert text == "The task reached its maximum running time; it was stopped after 10 s, and its worker restarted."
+    # The row leaves before any respawn attempt and the slot may not be replaced: it states what was
+    # observed — the cause, the seconds, the stop — never a restart that has not happened.
+    assert text == "The task reached its maximum running time; it was stopped after 10 s."
     assert "absolute_ceiling" not in text and "reap1" not in text
     assert kw["progress_meta"]["task_incident"] == "task_reaper_stopped"
-    # Its ids, the rail's code and which bound stopped it are the notice's details (DESIGN principle 7).
+    # Its ids, the rail's code and which bound stopped it are the notice's details (DESIGN principle 7);
+    # the cause rides the translatable template (a closed host table), the seconds are a value, put back
+    # as written and never translated.
     assert kw["progress_meta"]["notice"] == {"code": "task_reaper_stopped", "details": (
-        "task reap1, worker slot 0, absolute_ceiling. Absolute ceiling reached; task stopped.")}
+        "task reap1, worker slot 0, absolute_ceiling. Absolute ceiling reached; task stopped."),
+        "template": "The task reached its maximum running time; it was stopped after {seconds} s.",
+        "values": {"seconds": "10"}}
     (done,) = [e for e in events if e.get("type") == "task_done"]
     assert done["reason_code"] == "absolute_ceiling"
     assert done["outcome_axes"]["execution"]["reason_code"] == "absolute_ceiling"
