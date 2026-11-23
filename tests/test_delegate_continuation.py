@@ -388,7 +388,7 @@ def test_continuation_delivers_a_new_selection_only_in_the_current_prompt(tmp_pa
     address = resolve_knowledge_address(tmp_path, "handed-note", "global")
     address.path.parent.mkdir(parents=True)
     old, new = "# Old synthetic note\n\n## Details\nOLD_BODY\n", "# Current synthetic note\n\n## Details\nNEW_BODY\n"
-    address.path.write_text(old, encoding="utf-8")
+    address.path.write_bytes(old.encode("utf-8"))
 
     def start(run, **options):
         return _start(tmp_path, monkeypatch, acting=False, access="readonly", run_id=run,
@@ -396,7 +396,7 @@ def test_continuation_delivers_a_new_selection_only_in_the_current_prompt(tmp_pa
 
     first, initial = start("first-note-run", knowledge_notes=selection)
     assert initial["status"] == "started" and first["instructions"].count(old) == 1
-    address.path.write_text(new, encoding="utf-8")
+    address.path.write_bytes(new.encode("utf-8"))
     _settle(tmp_path, "first-note-run", "t-nanny-read")
     omitted, result = start("second-note-run", continue_from="first-note-run", continue_carrier=carrier)
     assert result["status"] == "started" and "named_notes" not in result
