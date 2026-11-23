@@ -23,7 +23,8 @@ def test_workflow_filters_cover_the_lane_and_request_builders():
                  "tests/fixtures/size_refusals/manifest.json", "tests/_window_history.py",
                  "tests/_first_contact_server.py", "scripts/context_gate.py", "ouroboros/deployment_policy.py",
                  "ouroboros/gateway/settings.py", "ouroboros/pricing.py", "tests/fixtures/llm_golden/aux_routes.json",
-                 "docs/inventories/FACADE_INVENTORY.md",
+                 "docs/inventories/UI_CONTROL_TEXT_INVENTORY.md", "docs/architecture/11-frozen-contracts-v1.md",
+                 "ouroboros/code_intelligence_architecture.py", "scripts/regenerate_inventories.py",
                  # the call start's seam (tests/test_live_call_start_fit.py): the agent hands nano_base to the fit
                  "ouroboros/agent.py", "ouroboros/live_conversation.py"):
         assert any(fnmatchcase(path, pattern) for pattern in paths), path

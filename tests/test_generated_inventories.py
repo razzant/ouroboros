@@ -1,28 +1,21 @@
-"""CPL-2 verify half (plan §7.2): the three generated inventories match a
-fresh regeneration and their resolution invariants hold — staleness = red.
+"""Source invariants for frozen contracts, the layout tree and facade bindings.
 
-The generator half is ``python scripts/regenerate_inventories.py``:
-
-- ``docs/inventories/FROZEN_CONTRACTS_INVENTORY.md`` — ARCHITECTURE §11.1 rows,
-  every referenced owner/anchor path resolved against the tree, plus the
-  ``ouroboros/contracts/`` package-coverage gap list (pinned here: growth of
-  the gap is red even after regeneration);
-- ``docs/inventories/DATA_LAYOUT_INVENTORY.md`` — the ARCHITECTURE "Data layout"
-  tree probed entry-by-entry against tracked paths / runtime source literals
-  (zero UNRESOLVED entries pinned here);
-- ``docs/inventories/FACADE_INVENTORY.md`` — the AST-derived ``noqa: F401``
-  re-export facade inventory over the domain manifest population.
-
-Synthetic tests prove the red branches (missing file, unresolvable entry,
-marker detection) actually fire.
+Only the UI control snapshot is pinned to a file. The other reports project
+current book and code sources; historical protected IDs now check those sources
+instead of comparing committed copies.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import pathlib
+import re
 import sys
+from collections import Counter
 
 import pytest
+
+from ouroboros.code_intelligence_architecture import reexported_names
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -44,11 +37,25 @@ def layout():
 
 @pytest.fixture(scope="module")
 def facades():
-    return inv.build_facade_inventory()
+    scan = inv.scan_facade_bindings
+    bindings = None
+
+    def capture(*args, **kwargs):
+        nonlocal bindings
+        assert bindings is None, "facade inventory must scan the sources once"
+        # Capture the full stream even if the renderer stops consuming it early.
+        bindings = list(scan(*args, **kwargs))
+        return iter(bindings)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inv, "scan_facade_bindings", capture)
+        report, findings = inv.build_facade_inventory()
+    assert bindings
+    return report, findings, Counter((facade, leaf) for facade, _, leaf in bindings)
 
 
 # ---------------------------------------------------------------------------
-# Byte-identity: regeneration must not change the committed inventories
+# The tracked UI snapshot and source-derived report invariants
 # ---------------------------------------------------------------------------
 
 def _assert_identical(out_path: pathlib.Path, rendered: str):
@@ -61,16 +68,49 @@ def _assert_identical(out_path: pathlib.Path, rendered: str):
         "owes its own regeneration.")
 
 
-def test_frozen_contracts_inventory_is_byte_identical(frozen):
-    _assert_identical(inv.FROZEN_OUT, frozen[0])
-
-
 def test_data_layout_inventory_is_byte_identical(layout):
-    _assert_identical(inv.LAYOUT_OUT, layout[0])
+    """Protected node: every live Data layout entry still resolves and is reported."""
+    view = inv.read_book_section(inv.load_reference_book(REPO_ROOT, "architecture"), inv.LAYOUT_SECTION)
+    entries = inv.parse_layout_entries(inv.layout_block(view.text))
+    report, findings = layout
+    assert not findings, f"Data layout probes no longer resolve: {findings}"
+    assert entries
+    assert [line.split("`", 2)[1] for line in report.splitlines() if line.startswith("| `")] == [
+        entry.replace("|", "\\|") for entry in entries]
+
+
+def _facade_facts(report):
+    facts = {}
+    for line in report.splitlines():
+        if not line.startswith("| `"):
+            continue
+        path, domain, bindings, cells = (item.strip() for item in line[1:-1].split("|"))
+        path = path.strip("`")
+        assert path not in facts, path
+        leaves = {}
+        for cell in cells.split("<br>"):
+            match = re.fullmatch(r"`([^`]+)` \(([1-9][0-9]*)(?: ✗(\S+))?\)", cell)
+            assert match, cell
+            leaf, count, cross_domain = match.groups()
+            assert leaf not in leaves, (path, leaf)
+            leaves[leaf] = (int(count), cross_domain)
+        facts[path] = (domain, int(bindings), leaves)
+    return facts
 
 
 def test_facade_inventory_is_byte_identical(facades):
-    _assert_identical(inv.FACADE_OUT, facades[0])
+    """Protected node: live report facts agree with source without rescanning all ASTs."""
+    report, findings, expected_counts = facades
+    assert not findings
+    facts = _facade_facts(report)
+    modules = inv.load_manifest(REPO_ROOT / "ouroboros/domains.toml").modules
+    assert {(path, leaf): count for path, (_, _, leaves) in facts.items()
+            for leaf, (count, _) in leaves.items()} == expected_counts
+    for path, (domain, bindings, leaves) in facts.items():
+        assert domain == modules[path], path
+        assert bindings == sum(count for count, _ in leaves.values()), path
+        for leaf, (_, cross_domain) in leaves.items():
+            assert cross_domain == (None if modules[leaf] == domain else modules[leaf]), (path, leaf)
 
 
 def test_ui_control_text_inventory_is_byte_identical():
@@ -145,15 +185,16 @@ def test_ui_control_scan_lists_a_modules_own_button_factory_by_its_literal_calls
 
 def test_every_frozen_contract_reference_resolves(frozen):
     assert frozen[1] == [], (
-        "ARCHITECTURE §11.1 references files that no longer exist — fix §11.1 "
-        f"(and regenerate): {frozen[1]}")
+        f"ARCHITECTURE §11.1 references files that no longer exist: {frozen[1]}")
 
 
 def test_frozen_table_is_nonempty_and_covers_known_owners(frozen):
     doc = frozen[0]
     assert "`ouroboros/contracts/tool_context.py` (ok)" in doc
     assert "`ouroboros/contracts/plugin_api.py` (ok)" in doc
-    assert "`ouroboros/gateway/contracts.py`" in doc
+    ws_http = next(line for line in doc.splitlines() if "| `gateway/contracts.py` |" in line)
+    for leaf in ("contracts", "ui_i18n_contracts", "client_contracts", "management_contracts", "health_contracts"):
+        assert f"`ouroboros/gateway/{leaf}.py` (ok)" in ws_http
 
 
 def test_contracts_package_coverage_gap_is_pinned(frozen):
@@ -167,12 +208,6 @@ def test_contracts_package_coverage_gap_is_pinned(frozen):
         "the §11.1 package-coverage gap changed: a new frozen-package module "
         "needs a §11.1 row (or an explicit owner decision recorded by updating "
         f"this pin). now-listed={sorted(listed)} pinned={sorted(known_gaps)}")
-
-
-def test_every_data_layout_entry_resolves(layout):
-    assert layout[1] == [], (
-        "ARCHITECTURE Data-layout tree entries no longer resolve against the "
-        f"tree/runtime sources — fix the tree (and regenerate): {layout[1]}")
 
 
 def test_data_layout_probes_key_durable_files(layout):
@@ -203,12 +238,10 @@ def test_frozen_row_parser_extracts_owner_and_anchor_paths():
         "|----------|------|-------------|\n"
         "| `Thing` — words | `ouroboros/contracts/tool_abi.py` | "
         "`tests/test_contracts.py::test_x` and `helper()` |\n")
-    rows = inv.parse_frozen_rows(section)
-    assert rows == [{
-        "label": "Thing",
-        "owners": ["ouroboros/contracts/tool_abi.py"],
-        "anchors": ["tests/test_contracts.py::test_x"],
-    }]
+    prose, (row,) = inv.parse_frozen_rows(section)
+    assert prose == ("ouroboros/gateway/contracts.py",)
+    assert (row.label, row.owners, row.anchors) == (
+        "Thing", ("ouroboros/contracts/tool_abi.py",), ("tests/test_contracts.py::test_x",))
 
 
 def test_frozen_row_parser_handles_escaped_pipes():
@@ -216,8 +249,8 @@ def test_frozen_row_parser_handles_escaped_pipes():
         "| Contract | File | Anchored by |\n"
         "|---|---|---|\n"
         "| `SkillManifest` (`a \\| b \\| c`) | `ouroboros/contracts/skill_manifest.py` | prose |\n")
-    rows = inv.parse_frozen_rows(section)
-    assert rows[0]["owners"] == ["ouroboros/contracts/skill_manifest.py"]
+    _, (row,) = inv.parse_frozen_rows(section)
+    assert row.owners == ("ouroboros/contracts/skill_manifest.py",)
 
 
 def test_layout_parser_extracts_entries_and_probe_tokens():
@@ -236,15 +269,35 @@ def test_layout_parser_extracts_entries_and_probe_tokens():
 
 
 def test_noqa_f401_marker_detection():
-    import ast
     src = ("from ouroboros import config  # noqa: F401\n"
            "from ouroboros import loop  # noqa: E501\n"
            "from ouroboros import llm  # noqa\n"
            "from ouroboros import agent\n")
-    lines = src.splitlines()
-    nodes = ast.parse(src).body
-    flags = [inv._statement_has_noqa_f401(lines, n) for n in nodes]
-    assert flags == [True, False, True, False]
+    bindings = reexported_names(ast.parse(src), src.splitlines(), "ouroboros/example.py")
+    assert [(base, alias.name) for base, alias in bindings] == [("ouroboros", "config"), ("ouroboros", "llm")]
+
+
+def test_facade_report_keeps_both_leaf_domains_and_shadowed_bindings(tmp_path, monkeypatch):
+    pkg = tmp_path / "ouroboros"
+    pkg.mkdir()
+    (pkg / "domains.toml").write_text(
+        '[domains]\nDA = "Alpha"\nDB = "Beta"\n[modules]\n'
+        '"ouroboros/facade.py" = "DA"\n"ouroboros/local.py" = "DA"\n"ouroboros/foreign.py" = "DB"\n',
+        encoding="utf-8",
+    )
+    (pkg / "facade.py").write_text(
+        "from .local import alpha, beta as chosen  # noqa: F401\n"
+        "from .foreign import gamma as chosen  # noqa: F401\n", encoding="utf-8",
+    )
+    (pkg / "local.py").write_text("alpha = 1\nbeta = 2\n", encoding="utf-8")
+    (pkg / "foreign.py").write_text("gamma = 3\n", encoding="utf-8")
+
+    monkeypatch.setattr(inv, "REPO_ROOT", tmp_path)
+    report, findings = inv.build_facade_inventory()
+    assert not findings
+    assert _facade_facts(report) == {
+        "ouroboros/facade.py": ("DA", 3, {"ouroboros/local.py": (2, None), "ouroboros/foreign.py": (1, "DB")})
+    }
 
 
 def _chapter_book():
@@ -298,12 +351,20 @@ def test_data_layout_cannot_borrow_a_fence_from_another_section():
         inv.layout_block("# Book\n\n## Data layout (`~/Ouroboros/`)\n\nMissing.\n\n## Other\n\n```\n├── wrong.json\n```\n")
 
 
+def test_data_layout_report_refuses_a_tree_without_entries():
+    text = "# Book\n\n## Data layout (`~/Ouroboros/`)\n\n```\n~/Ouroboros/\n```\n"
+    book = inv.load_reference_book(REPO_ROOT, "architecture", lambda _: text.encode())
+    with pytest.raises(ValueError, match="Data layout tree has no entries"):
+        inv.build_layout_inventory(book)
+
+
 def test_frozen_section_uses_markdown_headings_not_fenced_examples():
     text = (
         "# Book\n\n```md\n### 11.1 What is frozen\nFake content\n```\n\n"
         "## 11.1 What is frozen\n\nActual content\n\n## Next\n\nOutside\n"
     )
-    section = inv.frozen_section_text(text)
+    book = inv.load_reference_book(REPO_ROOT, "architecture", lambda _: text.encode())
+    section = inv.read_book_section(book, inv.FROZEN_SECTION).text
     assert "Actual content" in section
     assert "Fake content" not in section and "Outside" not in section
 

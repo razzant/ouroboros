@@ -39,7 +39,6 @@ except ImportError:  # pragma: no cover - the 3.10 venv ships tomli
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "ouroboros" / "domains.toml"
-DOMAIN_MAP_PATH = REPO_ROOT / "docs" / "DOMAIN_MAP.md"
 
 STRICT, TYPE_ONLY, LAZY, DYNAMIC = "strict", "type_checking", "lazy", "dynamic"
 # Executed at import time but failure-tolerant / entrypoint-only:

@@ -756,10 +756,10 @@ def lstat(path: Any) -> os.stat_result:
         return _final_lstat(directory, name)
 
 
-def read_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
+def read_bytes(path: Any, *, limit: Optional[int] = None, strict: bool = False) -> bytes:
     """A file's bytes. Any other path reads as before (``store.read_file_bytes``). A work file is opened through
-    the confined descent (regular files only, checked before and after the open); a link on its path, or a
-    permission only the work domain holds, makes it the work domain's own read (``read_in_work``)."""
+    the confined descent (regular files only, checked before and after the open). Unless ``strict`` is set, a
+    link on its path or a permission only the work domain holds makes it the work domain's own read."""
     spelling = work_spelling(path)
     if not spelling:
         from ouroboros import store
@@ -780,7 +780,7 @@ def read_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
                     raise OSError(errno.ELOOP, "replaced while opened", spelling)
                 return handle.read() if limit is None else handle.read(limit)
     except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.EACCES, errno.EPERM, errno.ENOTDIR):
+        if not strict and exc.errno in (errno.ELOOP, errno.EACCES, errno.EPERM, errno.ENOTDIR):
             return read_in_work(spelling, limit=limit)
         raise
 

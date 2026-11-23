@@ -404,19 +404,36 @@ def _query_code_read(
 
     try:
         if op == "architecture":
-            # Architecture facts (CPL-3) are defined over the Ouroboros repo's
-            # pinned inventories — the manifest/inventory carriers live in the
-            # code roots, never in a skill payload or an external target.
+            # Architecture facts use repository sources, not skill/user-files scopes.
             if normalized_root not in ("active_workspace", "system_repo"):
                 return (
                     "⚠️ TOOL_ARG_ERROR (query_code): op architecture requires "
                     "root=active_workspace or system_repo."
                 )
             from ouroboros.code_intelligence_architecture import ARCHITECTURE_LIMIT_MARKER, architecture_fact_rows
+            from ouroboros.tools.core_file_tools import read_admission
+
+            def read_book_bytes(member: str) -> bytes:
+                _, source, refusal = read_admission(ctx, binding.root, member)
+                unavailable = f"{member} is not admitted to this resource view"
+                if refusal is not None or source is None or source.base_path != repo_root:
+                    raise PermissionError(unavailable)
+                try:
+                    expected = work_domain.settle(repo_root / member)
+                except RuntimeError as exc:
+                    raise PermissionError(unavailable) from exc
+                if (source.target_path != expected or not expected.is_relative_to(repo_root)
+                        or block_reason_for_path(ctx, source.target_path, "static_introspection", source)):
+                    raise PermissionError(unavailable)
+                # Keep the reader on the admitted target. In the work domain a fallback
+                # would resolve the spelling again in the container, under different facts.
+                return work_domain.read_bytes(source.target_path, strict=True)
 
             try:
-                # A bare-symbol owner_of reads source through the same admission.
-                rows = architecture_fact_rows(repo_root, query, inventory=lambda: admitted_inventory(""))
+                rows = architecture_fact_rows(
+                    repo_root, query, inventory=lambda: admitted_inventory(""),
+                    read_book_bytes=read_book_bytes,
+                )
                 view.notes = ["method: pinned architecture carriers; scope: repository; path targets are in query"]
             except ValueError as exc:
                 return f"⚠️ TOOL_ARG_ERROR (query_code): {exc}"

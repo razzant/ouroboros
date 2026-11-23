@@ -11,7 +11,7 @@ are the CI pin that staleness = red:
 - lazy/dynamic classification drift is red;
 - a new cross-domain literal-copy function body is red (the banned "fix" of a
   dependency edge);
-- ``docs/DOMAIN_MAP.md`` not byte-identical to its regeneration is red.
+- the on-demand map shows the manifest's index, assignments, graph and copy baseline.
 
 Synthetic-tree tests prove the detection branches actually fire (a gate whose
 red path is unreachable is coverage in form only).
@@ -23,6 +23,7 @@ import hashlib
 import importlib.util
 import pathlib
 import textwrap
+from collections import Counter
 
 import pytest
 
@@ -123,12 +124,81 @@ def test_no_cross_domain_literal_copies_beyond_the_baseline(manifest):
         f"literal-copy baseline rows no longer observed — bank the shrink: {gone}")
 
 
-def test_domain_map_is_byte_identical_to_its_regeneration(manifest):
-    rendered = check_domains.render_domain_map(manifest)
-    on_disk = check_domains.DOMAIN_MAP_PATH.read_text(encoding="utf-8")
-    assert on_disk == rendered, (
-        "docs/DOMAIN_MAP.md is stale — regenerate with "
-        "`python scripts/check_domains.py --write`")
+def test_domain_map_is_byte_identical_to_its_regeneration(manifest, capsys):
+    """Protected stdout node: compare the map's data, not a stored Markdown copy."""
+    assert check_domains.main(["--map"]) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    report = captured.out
+    lines = report.splitlines()
+    assignments = {}
+    proposed = set()
+    for line in lines[lines.index("## Modules by domain") + 1:]:
+        if line.startswith("### "):
+            domain = line.split()[1]
+        elif line.startswith("- `"):
+            path, mark = line[3:].split("`", 1)
+            assert path not in assignments
+            assignments[path] = domain
+            if mark == " *":
+                proposed.add(path)
+    assert assignments == manifest.modules and proposed == manifest.proposed
+
+    header = next(i for i, line in enumerate(lines) if line.startswith("| ↓ imports → |"))
+    domains = sorted(manifest.domains)
+    assert [cell.strip() for cell in lines[header].split("|")[2:-1]] == domains
+    matrix = lines[header + 2:header + 2 + len(domains)]
+    expected = set(manifest.graph_allowed)
+    assert matrix == [f"| **{src}** | " + " | ".join(
+        "✓" if f"{src}->{dst}" in expected else "·" for dst in domains) + " |" for src in domains]
+    _assert_map_coupling(report, manifest)
+    _assert_map_index(report, manifest)
+    _assert_map_literal_copy_baseline(report, manifest)
+
+
+def _map_section(report, heading):
+    return report.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0].strip().splitlines()
+
+
+def _assert_map_index(report, manifest):
+    header, _, *rows, total = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in _map_section(report, "Index") if line.startswith("|")
+    ]
+    assert header == ["domain", "name", "modules", "proposed"]
+    modules = Counter(manifest.modules.values())
+    proposed = Counter(manifest.modules[path] for path in manifest.proposed)
+    assert rows == [
+        [domain, name, str(modules[domain]), str(proposed[domain])]
+        for domain, name in sorted(manifest.domains.items())
+    ]
+    assert [cell.strip("*") for cell in total] == [
+        "total", "", str(len(manifest.modules)), str(len(manifest.proposed)),
+    ]
+
+
+def _assert_map_literal_copy_baseline(report, manifest):
+    summary, *body = _map_section(report, "Literal-copy baseline")
+    expected = manifest.duplicates_allowed
+    assert summary.split(maxsplit=1)[0] == (str(len(expected)) if expected else "No")
+    # Compare the digest and location code spans, not their Markdown separators.
+    assert [line.split("`")[1:-1:2] for line in body if line.startswith("- ")] == [
+        row.split() for row in expected
+    ]
+
+
+def _assert_map_coupling(report, manifest):
+    cycles = _map_section(report, "Cycle status")
+    assert [line for line in cycles if line.startswith("- ")] == [
+        f"- group {i} ({len(group)} domains): {' ⇄ '.join(group)}"
+        for i, group in enumerate(manifest.cycle_groups, 1)
+    ]
+    assert any("**acyclic**" in line for line in cycles) == (not manifest.cycle_groups)
+
+    expected = []
+    for kind, pairs in (("lazy-only", manifest.lazy_only), ("dynamic-import", manifest.dynamic_pairs)):
+        expected.extend([f"- {kind} cross-domain pairs: **{len(pairs)}**", *(f"  - {p}" for p in pairs)])
+    assert _map_section(report, "Hidden coupling (classified out of the strict graph)") == expected
 
 
 def test_checker_cli_is_green_on_this_tree(capsys):
@@ -147,6 +217,13 @@ def _mini_manifest(tmp_path: pathlib.Path, modules: dict[str, str]) -> Manifest:
         domains={"DA": "Alpha", "DB": "Beta"},
         modules=modules, proposed=set(),
     )
+
+
+def test_domain_map_shows_resolved_dynamic_links_even_when_strict_graph_is_acyclic(tmp_path):
+    manifest = _mini_manifest(tmp_path, {"pkg/a.py": "DA", "pkg/b.py": "DB"})
+    manifest.lazy_only = ["DA->DB"]
+    manifest.dynamic_pairs = ["DB->DA"]
+    _assert_map_coupling(check_domains.render_domain_map(manifest), manifest)
 
 
 def test_strict_import_produces_a_cross_domain_pair(tmp_path):
