@@ -1,33 +1,31 @@
-"""Real quiz modules/styles, synthetic I/O; persistent browser close/reopen, not native app QA."""
+"""Real quiz modules/styles, synthetic I/O; persistent browser close/reopen, not native app QA.
+
+The page is the card gallery stand's bare document (tests/card_gallery_stand.py): the product's own head, with its
+``ouro-ui`` root and every sheet in index.html's order, and the question as its producer recorded it
+(tests/fixtures/card_gallery.json); only the answer transport and the detail read are this test's.
+"""
 from __future__ import annotations
 
-import functools
 import json
 import os
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from threading import Thread
 
 import pytest
 from tests._shared import producer_evidence_dir
+from tests.card_gallery_stand import CORPORA, GalleryServer
 
 pytestmark = [pytest.mark.ui_browser]
-WEB = Path(__file__).resolve().parents[1] / "web"
 
 
 def _evidence_dir(tmp_path):
     return producer_evidence_dir(tmp_path / "evidence", "quiz-response", env="QUIZ_BROWSER_EVIDENCE")
 
-BOOT = """async ({id, theme}) => {
-    document.documentElement.className='ouro-ui'; document.documentElement.dataset.theme=theme;
-    document.head.innerHTML='<meta charset="utf-8"><link rel="stylesheet" href="/ui.css"><link rel="stylesheet" href="/style.css">';
+BOOT = """async ({id, theme, recorded}) => {
+    document.documentElement.dataset.theme=theme;
     document.body.innerHTML='<main style="max-width:680px;margin:24px auto;padding:16px" id="quiz-host"></main>';
     document.body.style.overflow='auto';
-    const {createChatDecision}=await import('/modules/chat_decision.js');
+    const {createChatDecision}=await import('/static/modules/chat_decision.js');
     window.qaPosts=[]; window.qaReads=0; window.qaMode='hold';
-    window.qaQuiz={quiz_id:id,state:'open',question:'When should this change ship?',
-        options:[{label:'Ship after checks',detail:'Keep the answer and finish independent review.'},
-            {label:'Wait for more evidence',detail:'Keep the current release unchanged.'}]};
+    window.qaQuiz={question:recorded.question,options:recorded.options,quiz_id:id,state:'open'};
     window.qaDecision=createChatDecision({isMain:true,
         frameNode:(_msg,node)=>node,showToast:()=>{},
         apiFetch:(_url,init)=>{qaPosts.push(JSON.parse(init.body));
@@ -38,8 +36,15 @@ BOOT = """async ({id, theme}) => {
             question_rooms:{[id]:{state:'known',project_id:'',chat_id:1}},owner_quiz:{[id]:qaQuiz}};}});
     const card=qaDecision.buildQuizCard({...qaQuiz,task_id:'browser-quiz-task'});
     document.querySelector('#quiz-host').append(card);
-    await Promise.all([...document.querySelectorAll('link')].map(l=>l.sheet?null:new Promise(r=>l.onload=r)));
+    await Promise.all([...document.querySelectorAll('link[rel="stylesheet"]')].map(l=>l.sheet?null:new Promise(r=>l.onload=r)));
 }"""
+
+
+def _recorded_question():
+    """The answered scene's opening frame: a question with offered answers, as its producer sends it."""
+    frame = json.loads(CORPORA["card_gallery"].read_text(encoding="utf-8"))["quiz"]["answered"]["frames"][0]
+    assert frame["type"] == "quiz" and len(frame["options"]) >= 2, frame
+    return {"question": frame["question"], "options": frame["options"]}
 
 
 @pytest.mark.parametrize("engine,theme,width", [("chromium", "dark", 1146), ("webkit", "light", 390)])
@@ -47,19 +52,16 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("Set OUROBOROS_RUN_UI_SMOKE=1 for the browser proof")
     playwright = pytest.importorskip("playwright.sync_api")
-    class Handler(SimpleHTTPRequestHandler):
-        def log_message(self, *_):
-            pass
-    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(WEB)))
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    origin = f"http://127.0.0.1:{server.server_port}"
+    recorded = _recorded_question()
     profile = tmp_path / "browser-profile"
     evidence = _evidence_dir(tmp_path)
+    stand = GalleryServer()  # corpus and shells read here, port bound; nothing else runs yet
     context = None
     pw = None
     observations = {}
     try:
+        stand.__enter__()
+        bare = f"{stand.url}/?bare=1"
         pw = playwright.sync_playwright().start()
         browser = getattr(pw, engine)
         def launch():
@@ -67,8 +69,8 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
                 viewport={"width": width, "height": 844})
         def mount(context, quiz_id):
             page = context.new_page()
-            page.goto(origin + "/tests/fixtures/question_presentation_parity.json")
-            page.evaluate(BOOT, {"id": quiz_id, "theme": theme})
+            page.goto(bare)
+            page.evaluate(BOOT, {"id": quiz_id, "theme": theme, "recorded": recorded})
             return page
         context = launch()
         page = mount(context, "persistent")
@@ -109,9 +111,9 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
         # Restoring unsent words is programmatic: no input event or census may
         # be needed before the published quiet Close protects them.
         page = context.new_page()
-        page.goto(origin + '/tests/fixtures/question_presentation_parity.json')
+        page.goto(bare)
         page.evaluate("localStorage.setItem('ouro_quiz_reply_v1:'+JSON.stringify(['browser-quiz-task','draft-restore']), JSON.stringify({v:1,draft:'Restored unsent words',reason:'',attempt:null}))")
-        page.evaluate(BOOT, {"id": "draft-restore", "theme": theme})
+        page.evaluate(BOOT, {"id": "draft-restore", "theme": theme, "recorded": recorded})
         assert page.locator('.chat-quiz-comment').input_value() == 'Restored unsent words'
         assert page.locator('.chat-quiz-close').is_disabled()
         # No separate control clears a draft (owner 19.10, A): emptying the field by hand releases it.
@@ -147,8 +149,8 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
         other = context.new_page()
         other.add_init_script("""window.qaQueued=[]; window.qaHoldStorage=true;
             addEventListener('storage',e=>{if(qaHoldStorage){qaQueued.push(e);e.stopImmediatePropagation();}},true);""")
-        other.goto(origin + '/tests/fixtures/question_presentation_parity.json')
-        other.evaluate(BOOT, {"id": "two-windows", "theme": theme})
+        other.goto(bare)
+        other.evaluate(BOOT, {"id": "two-windows", "theme": theme, "recorded": recorded})
         sender = mount(context, 'two-windows')
         sender.locator('.chat-quiz-comment').fill('Frozen across windows')
         sender.locator('.chat-quiz-option').nth(1).click()
@@ -192,7 +194,5 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
             context.close()
         if pw is not None:
             pw.stop()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        stand.__exit__(None, None, None)
         (evidence / f"{engine}-{theme}.json").write_text(json.dumps(observations, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -335,13 +335,18 @@ export function taskSourceDownloadUrl(taskId, ref) {
 
 /**
  * Owner Resume can name a refusal's exact `acceptable_unknown` IDs with a reason. A delegated
- * start stays open for lookup and its original request cannot be sent again.
+ * start stays open for lookup and its original request cannot be sent again. The Panic selection
+ * names only the stop it chose (`expected_panic_hold_id`) and passes its lifetime's `signal`
+ * (`withinRequestLifetime`), which cancels the request, never an effect it may already have had.
  * @param {string} taskId
  * @param {import('./client_contract_types.js').TaskResumeRequest|null} [body]
+ * @param {{signal?: AbortSignal|null}} [options]
  */
-export async function resumeTask(taskId, body = null) {
+export async function resumeTask(taskId, body = null, { signal = null } = {}) {
     const url = `/api/tasks/${encodeURIComponent(taskId)}/resume`;
-    return body ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
+    const init = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+        : { method: 'POST' };
+    return fetchJson(url, signal ? { ...init, signal } : init);
 }
 
 /**

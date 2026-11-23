@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros import model_concurrency, working_checkpoint
-from ouroboros.llm_observability import persist_observed_call, host_step, round_receipt, emit_main_call_state as _emit_main_llm_call_state
+from ouroboros.llm_observability import SendRefusals, persist_observed_call, host_step, round_receipt, emit_main_call_state as _emit_main_llm_call_state
 from ouroboros.context_timing import timed
 from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
@@ -323,7 +323,7 @@ def _record_and_emit_empty_response(
     *, usage, msg, accumulated_usage, event_queue, drive_logs, task_id, execution_id,
     round_id, llm_call_id, round_idx, attempt, model, task_type, content, tool_calls,
     request_ref, response_ref, transient_budget, context_fit_event_fields,
-    task_attempt=None,
+    task_attempt=None, attempts=None,
 ) -> tuple:
     """Classify an empty / no-tool-call response, log + emit its events, and stamp
     accumulated_usage (last error / execution_status / reason_code / F1 cooldown kind).
@@ -332,6 +332,8 @@ def _record_and_emit_empty_response(
     finish_reason = response_finish_reason(usage, msg)[1]
     body_error = usage.get("provider_error") if isinstance(usage, dict) and isinstance(usage.get("provider_error"), dict) else {}
     event_type, is_provider_glitch, permanent = _classify_empty_response(usage, msg)
+    body_ids = (usage.get("ledger_attempt_ids") or ()) if event_type == "remote_context_overflow" else ()
+    refused_send = attempts.close(None, accumulated_usage, refused_body_ids=body_ids) if attempts is not None else None
     exhausted = event_type == "llm_empty_response" and permanent  # the classifier's output exhaustion
     refused = event_type == "provider_content_refusal"
     words = note_content_refusal(accumulated_usage, usage, msg) if refused else {}  # its own words, for its round's row
@@ -348,7 +350,8 @@ def _record_and_emit_empty_response(
               # naming only the MODEL cannot attribute a same-model provider incident.
               "response_provider": usage.get("response_provider"),
               "provider_error_kind": body_error.get("kind"),
-              **words, **context_fit_event_fields},
+              **words, **context_fit_event_fields, **({"refused_send": refused_send,
+                 "physical_attempt_id": refused_send["physical_attempt_id"]} if refused_send else {})},
         task_type=task_type,
         details={"content": content, "tool_calls": tool_calls,
                  "request_ref": request_ref, "response_ref": response_ref},
@@ -507,6 +510,7 @@ class _LlmErrorContext:
     use_local: Optional[bool] = None  # the asked route's locality, for its failure row
     configured_api_child: bool = False  # its parent chose this exact API actor (``TIMEOUT_REPEAT_KEY``)
     prior_attempt_id: Optional[str] = None  # the attempt last captured before this call began (``_own_capture``)
+    refused_send: Optional[Dict[str, Any]] = None  # the two counts of the refused send this error names (``SendRefusals.close``)
 
 
 @dataclass(frozen=True)
@@ -943,6 +947,7 @@ def _record_llm_call_error(
         **custody_fields, **({"operation_id": str(error.operation_id)} if getattr(error, "operation_id", "") else {}),
         **(ctx.context_fit_event_fields or {}), "ledger_attempt_ids": list(getattr(error, "ledger_attempt_ids", None) or []),
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
+        **({"refused_send": ctx.refused_send} if ctx.refused_send else {}),
     }
     if not append_jsonl(ctx.drive_logs / "events.jsonl", error_event) or not has_log_sink():
         emit_log_event(ctx.event_queue, error_event, log_label="LLM call error")
@@ -1352,6 +1357,13 @@ def call_llm_with_retry(
         prior = getattr(last_physical_attempt_capture(), "attempt_id", None)  # never this call's context
         call_ids = {"llm_call_id": llm_call_id, "execution_id": execution_id, "round_id": round_id,
                     "round": round_idx, "attempt": attempt + 1}  # this physical call in every record of it below
+        # This call's physical sends, its own retries included: each refused one's two counts, logged and told once.
+        attempts = SendRefusals(physical_send_claim, drive_logs, event_queue, {"task_id": task_id, **call_ids, **_scope_lineage(), "model": model}, usage=accumulated_usage)
+
+        def observed_dispatch(capture, tracker=attempts, identity=call_identity):
+            _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)
+            tracker.dispatched(capture)
+
         request_ref: Dict[str, Any] = {}
         try:
             _emit_llm_operation(event_queue, task_id, llm_call_id, "started", task_attempt, execution_id, round_id)
@@ -1423,8 +1435,8 @@ def call_llm_with_retry(
             if repeat: kwargs["wait_for_resources"] = False
             strict = single_physical_send(lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else contextlib.nullcontext()
             physical_context = refresh_attempt_prefix(physical_context, accumulated_usage, model, use_local)  # a retry after its own answer
-            with strict, track_physical_attempts(physical_send_claim), observe_dispatch(
-                    lambda capture, identity=call_identity: _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)):
+            attempts.prepared_messages(send_messages)
+            with strict, track_physical_attempts(attempts), observe_dispatch(observed_dispatch):
                 msg, usage = _send_main_candidate(
                     llm, kwargs, model=model, use_local=use_local, deadline_ts=deadline_ts,
                     physical_context=physical_context, candidate_predicate=candidate_predicate if attempt == 0 else None,
@@ -1486,7 +1498,7 @@ def call_llm_with_retry(
                     round_idx=round_idx, attempt=attempt, model=model, task_type=task_type,
                     content=content, tool_calls=tool_calls, request_ref=request_ref,
                     response_ref=response_ref, transient_budget=transient_budget,
-                    context_fit_event_fields=context_fit_event_fields, task_attempt=task_attempt)
+                    context_fit_event_fields=context_fit_event_fields, task_attempt=task_attempt, attempts=attempts)
                 _emit_main_llm_call_state(event_queue, call_identity, "failed")
                 if not permanent and attempt < transient_budget - 1 and accumulated_usage.keys().isdisjoint((TRANSPORT_DEATHS_KEY, TIMEOUT_REPEAT_KEY)):
                     if _sleep_within_deadline(min(2.0 ** attempt, _TRANSIENT_BACKOFF_CAP_SEC), deadline_ts):
@@ -1502,6 +1514,7 @@ def call_llm_with_retry(
                 if _empty_response_wall_spent(is_provider_glitch, permanent, usage):
                     accumulated_usage[RETRY_WALL_EXHAUSTED_KEY] = True
                 return None, cost
+            attempts.close(None, accumulated_usage)  # a refusal outlived by its own retry still has one row and fact
             for stale in ("execution_status", "result_status", "reason_code", RETRY_WALL_EXHAUSTED_KEY, RETRY_ATTEMPTS_SPENT_KEY,
                           TRANSPORT_DEATHS_KEY, TIMEOUT_REPEAT_KEY, "_pending_transport_outcome"):
                 accumulated_usage.pop(stale, None)  # a USABLE response closes the round's repeat records
@@ -1542,6 +1555,7 @@ def call_llm_with_retry(
                                       capture=_own_capture(last_physical_attempt_capture(), prior))
             return msg, cost
         except UsageAccountingError:
+            attempts.close(None, accumulated_usage)
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
@@ -1565,7 +1579,7 @@ def call_llm_with_retry(
                     stop_retry_check=stop_retry_check, owner_input_check=owner_input_check,
                     configured_api_child=configured_api_child,
                     requested_profile=host_route.get("credential_profile_id", model_account_override),
-                    prior_attempt_id=prior,
+                    prior_attempt_id=prior, refused_send=attempts.close(e, accumulated_usage),
                 ),
                 call_identity,
             ):

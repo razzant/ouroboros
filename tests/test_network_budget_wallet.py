@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from ouroboros import task_pacing, usage_accounting as accounting
+from ouroboros.host_notice import STEPS
 from ouroboros.loop_budget import _wrapup_global_remaining
 
 
@@ -105,7 +106,7 @@ def test_the_stop_sentence_opens_with_the_bound_that_binds():
     wallet = task_pacing.wrapup_last_fit_text(125.661, capped, 21.834)
     assert wallet.startswith("The shared Total budget is nearly used up: $21.83 left across all tasks.")
     assert "$125.66 of its own $400.00 cap, so the task cap is not what stopped it" in wallet
-    assert wallet.endswith("Raise Total budget in Settings for more room.")
+    assert wallet.endswith(f" {STEPS['raise_total_budget']}")
     cap = task_pacing.wrapup_last_fit_text(390.0, capped, 500.0)
     assert cap.startswith("This task's tree spent $390.00 of its own $400.00 cap; the shared Total budget still has $500.00.")
     assert "Raise Total budget" not in cap

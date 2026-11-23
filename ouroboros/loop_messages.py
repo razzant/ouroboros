@@ -1038,10 +1038,12 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     obsolete snapshots. The caller remeasures including this line before sending.
     """
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
+    from ouroboros.context_view_facts import append_refused_sends
     from ouroboros.subscription_census import quota_part
     from ouroboros.transcript_prefix import reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
+    refused_added = append_refused_sends(usage, ctx.messages)
     plan = ctx.context_fit_plan
     now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
     focus_identity, focus_fact = _own_focus_fact(ctx, now)
@@ -1057,7 +1059,7 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
                   for m in ctx.messages)
     if tuple(usage.get("_context_facts_key") or ()) == key and visible and quota is None:  # a due quota part is sent
-        return False
+        return refused_added
     measured = False
     if plan is not None:
         try:

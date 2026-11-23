@@ -891,10 +891,11 @@ class ScheduleActionRequest(TypedDict):
 
 
 class TaskResumeRequest(TypedDict, total=False):
-    """Resume this saved task with the opaque IDs offered in acceptable_unknown and a reason; never reconstruct an ID."""
+    """Resume one saved task. A Panic group selection sends only the observed hold ID."""
 
     accept_unknown: List[str]
     reason: str
+    expected_panic_hold_id: str
 
 
 class TaskResumeResponse(TypedDict, total=False):

@@ -55,12 +55,17 @@ def physical_attempt_tracker() -> Any:
     return _ATTEMPT_TRACKER.get()
 
 
-def report_attempt_end(capture: Any, error: Any) -> None:
-    """Hand the bound tracker one attempt's end, as ``_record_attempt_capture`` records it; the capture taken before
-    dispatch (``reserved``, no error) is not an end."""
+def report_attempt_end(capture: Any, error: Any, response_payload: Any = None) -> None:
+    """Report one attempt's end; a reserved capture without error is not an end.
+
+    Its optional observer sees the already retained wire dict, before another send can replace this capture.
+    Neither the existing tracker's claim nor the attempt's settlement depends on that observation.
+    """
     tracker = _ATTEMPT_TRACKER.get()
     if tracker is not None and (error is not None or capture.state != "reserved"):
         tracker.attempt_ended(capture, error)
+        if isinstance(response_payload, dict) and (observe := getattr(tracker, "returned_body_refusal", None)) is not None:
+            observe(capture, response_payload)
 
 
 class ProviderNotDispatched(RuntimeError):

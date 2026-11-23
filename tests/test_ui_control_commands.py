@@ -111,7 +111,7 @@ def test_the_objective_typed_into_evolution_stays_my_human_s_exact_words(host, m
 
     started: list = []
     monkeypatch.setattr("supervisor.events_runtime_controls.owner_evolution_start",
-                        lambda objective, **_kw: started.append(objective) or "")
+                        lambda objective, **_kw: started.append(objective) or {})  # the authorized start answers {} on success
     entered = "  Make the test suite faster —\nwithout skipping any check. "
     client = _app(Route("/api/command", control.api_command, methods=["POST"]))
     body = {"cmd": f"/evolve on {entered.strip()}", "ui_control": {"name": "evolution_start", "owner_text": entered}}

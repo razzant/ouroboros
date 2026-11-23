@@ -458,6 +458,49 @@ test('a complete census removes a message whose task no longer waits; an incompl
     assert.equal(main.shown(), null);
 });
 
+// The real mixed body after Panic: the same census names every Panic-held work in both projections
+// (state.py `_panic_recovery` lists it for the choice's message, and main_decisions.owner_actions offers its
+// Resume as a `budget_paused`, `can_resume` row), so one work arrives twice. Main's feed holds it once, in
+// the choice's one message, and the pill counts the message as one action (DESIGN "Project question
+// mirror") — while a list that cannot name a work leaves its individual card as the owner's only door here.
+test('a work the Panic choice names keeps no second card or second count; one it cannot name keeps its card', t => {
+    const main = mainPage(t);
+    main.feed.scrollTop = 100 * ROW;  // every card and message stays off screen: the pill counts
+    const held = id => ({ task_id: id, panic_hold_id: `hold-${id}` });
+    const panicHeld = id => action(id, { pause_cause: 'panic', attention_reason: 'resume' });
+    const every = [panicHeld('held-a'), panicHeld('held-b'), action('budget')];
+    const mixed = (rows, complete, actions = every) => ({ ...census({ actions }),
+        panic_recovery: rows, panic_recovery_complete: complete });
+    // A body with no list (an old server): every row keeps its own card, as before.
+    main.waiting.snapshot(census({ actions: every }));
+    const firstCard = main.actionNode('held-a');
+    assert.deepEqual(every.map(row => Boolean(main.actionNode(row.task_id))), [true, true, true]);
+    assert.equal(main.shown().text, '3 actions');
+    // The list that names the two works: each named card leaves on this read alone — even a card from before
+    // the list named it (the page outlived the Panic) — and the message is one action beside the budget card.
+    main.waiting.snapshot(mixed([held('held-a'), held('held-b')], true));
+    assert.ok(find(main.feed, node => node.classList?.contains('panic-recovery')), 'the choice\'s one message');
+    assert.equal(firstCard.isConnected, false, 'the card from before the list named its work leaves');
+    assert.deepEqual(['held-a', 'held-b', 'budget'].map(id => Boolean(main.actionNode(id))), [false, false, true]);
+    assert.equal(main.shown().text, '2 actions', 'never the same work twice: the message is its card and count');
+    // A named work's card leaves even when this read cannot prove the rest of the attention list, while an
+    // unnamed row is only withheld, as every incomplete read withholds it.
+    main.waiting.snapshot({ ...mixed([held('held-a'), held('held-b')], true, every.slice(0, 2)),
+        main_attention_complete: false });
+    assert.deepEqual(['held-a', 'held-b'].map(id => main.actionNode(id)), [null, null]);
+    const budgetCard = main.actionNode('budget');
+    assert.ok(budgetCard, 'an unnamed row keeps its message');
+    assert.equal(find(budgetCard, node => node.dataset.resumeRun === '1').disabled, true,
+        'withheld, exactly as any incomplete read withholds it');
+    // A partial list that cannot name a work (its hold unreadable) leaves that work's card as its only door
+    // here, and a row nothing can act on (no hold of its own) never covers one either.
+    main.waiting.snapshot(mixed([held('held-a')], false));
+    assert.deepEqual(['held-a', 'held-b', 'budget'].map(id => Boolean(main.actionNode(id))), [false, true, true]);
+    assert.equal(main.shown().text, '3 actions');
+    main.waiting.snapshot(mixed([held('held-a'), { task_id: 'held-b', task_name: 'Task held-b' }], false));
+    assert.deepEqual(['held-a', 'held-b', 'budget'].map(id => Boolean(main.actionNode(id))), [false, true, true]);
+});
+
 test('a lost connection withdraws every control and tells the question owner; only the next census restores them', async t => {
     const posts = [];
     const main = mainPage(t, { fetchImpl: async (url, init) => { posts.push({ url, init }); return { ok: true, json: async () => ({ ok: true }) }; } });

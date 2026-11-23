@@ -891,9 +891,8 @@ def _dispatch_round_model(
         context_fit_plan=plan, overrides=waiter.overrides if waiter else None)
     primary = getattr(ctx, "defer_resource_wait", None) is None
     if primary:
-        ctx.tools._ctx._deferred_resource_refusal = None
         ctx.accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
-    elif ctx.task_type == "presence":
+    if primary or ctx.task_type == "presence":
         ctx.tools._ctx._deferred_resource_refusal = None
     previous_call = ctx.accumulated_usage.get("_last_llm_call_meta")
     ctx.tools._ctx._usable_main_capture = None
@@ -1031,6 +1030,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     from ouroboros.send_clock import MainSendClock
     from ouroboros.loop_llm_call import _prepare_main_messages
     from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
+    from ouroboros.transport_custody import physical_attempt_tracker
 
     # Any vision work belongs to this actual reprepare, outside both the Main
     # fit probe and the failed attempt's physical precondition/measurement —
@@ -1045,6 +1045,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
             task_attempt=ctx.accumulated_usage.get("_task_attempt"),
             deadline_ts=_loop()._task_deadline_epoch(ctx.tools),
         )
+    if observe := getattr(physical_attempt_tracker(), "prepared_messages", None):
+        observe(kwargs["messages"])
     from ouroboros.llm_claudexor import cache_key_for_model
     from ouroboros.provider_models import provider_for_model
     kwargs["cache_affinity"] = "" if use_local else cache_key_for_model(model)
@@ -1477,8 +1479,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
         return _skipped("failed_candidate_not_comparable")
     done = _loop()._context_overflow_retries(ctx.tools._ctx)
     changed = _loop()._context_overflow_retries(ctx.tools._ctx, "_context_overflow_changed")  # owner 2A reads the round
-    fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
-    if fit is None:
+    if (fit := _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)) is None:
         return None, cost, ctx.active_context_mode
     target, slack = _refusal_target(ctx, fit, failed_capture, rebound=prepared == REBOUND_VIEW_STEP)
     fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=False) or fit) if ctx.refused_density else fit
@@ -1493,8 +1494,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
                 continue
             changed.add(fit.measurement.round_id)  # a fallback's re-entry of this round reads it too
         density, ctx.refused_density = ctx.refused_density, None  # the retry is measured and sent ordinarily
-        fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
-        if fit is None:
+        if (fit := _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)) is None:
             return None, cost, ctx.active_context_mode
         try:
             retry_msg, retry_cost = _loop()._dispatch_round_model(

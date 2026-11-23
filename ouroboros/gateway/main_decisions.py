@@ -161,13 +161,15 @@ OFFERED, ELSEWHERE, UNCONFIRMED = "offered", "elsewhere", "unconfirmed"
 
 def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: dict,
                             *, activities_complete: bool = True, bindings_complete: bool = True,
-                            verdicts: dict | None = None) -> dict:
+                            verdicts: dict | None = None, recovery_rooms: dict | None = None) -> dict:
     """Return complete current question forms and existing human recovery controls.
 
     ``verdicts`` is an out-parameter (as the census's ``decision_owners``): task id to what this measurement decided
     of that row's owner action, ``{"state": OFFERED, "room": <chat id>, "waits": {...}, "resume": bool}`` (the one
     address and availability ``main_attention`` carries), ``{"state": ELSEWHERE}`` or ``{"state": UNCONFIRMED}``. The
     work projection places its owner turn by it, so a room's amber and Main's pill never answer from two reads.
+    ``recovery_rooms`` maps requested Panic member IDs to optional room fields from the same authority;
+    an unresolved label never drops an already observed hold or supplies a Resume decision.
 
     Project lookup uses the complete registry, including archived/deleting rows;
     a sidebar display limit never changes destination or visibility authority.
@@ -259,17 +261,22 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
             questions_complete = False
             gaps.append({"reason": "question_source_unavailable", "task_id": task_id})
             log.debug("Main question source unavailable: %s", task_id, exc_info=True)
-    # The attention loop's room reads ride the questions' strict snapshot, warmed in ONE batch: a census
-    # names dozens of rows and a per-row lineage read is the N+1 the questions' warm exists to prevent.
-    # Only rows that can offer their owner something are worth the read (the rest never reach the rule).
+    def bound_chat(activity):
+        nonlocal rooms
+        if rooms is None:
+            rooms = RoomResolver(drive_root, strict=True, reserved=registry)
+        return rooms.bindings and rooms(activity["activity_id"], activity.get("parent_task_id"),
+                                        activity.get("root_task_id"))
+
+    # Warm the same strict snapshot for attention and the requested recovery labels, not every live row.
     if native_rooms_known:
-        offered = []
+        offered = set(recovery_rooms or ())
         for activity in activities:
             phase = activity.get("phase")
             parked = phase in {"budget_paused", "budget_pausing"}
             if str(activity.get("activity_id") or "") and phase != "unknown" and (
                     ({} if parked else activity.get("model_waits") or {}) or parked and activity.get("can_resume")):
-                offered.append(str(activity["activity_id"]))
+                offered.add(str(activity["activity_id"]))
         if offered:
             try:
                 if rooms is None:
@@ -285,6 +292,16 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         project = None
         if not task_id:
             continue
+        if native_rooms_known and recovery_rooms is not None and task_id in recovery_rooms:
+            try:
+                bound = bound_chat(activity)
+                actual = projects_by_chat[bound] if bound else projects_by_chat.get(chat_id)
+                if actual:
+                    recovery_rooms[task_id] = {"project_id": str(actual["id"]), "chat_id": actual["chat_id"]}
+                elif type(chat_id) is int:
+                    recovery_rooms[task_id] = {"chat_id": chat_id}  # an admitted chat never inherits its lease ID
+            except Exception:
+                log.debug("Panic recovery room unavailable for %s", task_id, exc_info=True)
         nested = bool({str(activity.get(key) or "") for key in ("parent_task_id", "root_task_id")} - {"", task_id})
         if scoped:
             if chat_id is not None and chat_id not in (WEB_UI_CHAT_ID, scoped.get("chat_id")):
@@ -334,10 +351,7 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         # bindings or ancestry, and a binding to a Project the registry lacks, stay a gap.
         if native_rooms_known and offers:
             try:
-                if rooms is None:
-                    rooms = RoomResolver(drive_root, strict=True, reserved=registry)
-                bound = rooms.bindings and rooms(task_id, activity.get("parent_task_id"), activity.get("root_task_id"))
-                if bound:
+                if bound := bound_chat(activity):
                     resolved = projects_by_chat[bound]
                     if resolved is not project or bound != chat_id:
                         placed = {"project_id": str(resolved["id"]), "chat_id": resolved["chat_id"]}

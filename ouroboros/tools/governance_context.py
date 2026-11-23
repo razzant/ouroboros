@@ -12,7 +12,8 @@ carry inline and which it reaches through a navigation map. Three tiers:
    commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
    change touches ``web/`` (its design bible alone when the whole book does not fit
-   the share), its design bible alone for changed words elsewhere;
+   the share), its design bible alone for changed words elsewhere, and its numbered
+   principles alone where the share cannot hold the whole bible;
    the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
@@ -74,6 +75,13 @@ CHECKLISTS_PATH = "docs/CHECKLISTS.md"
 SHARED_CHECKLIST_SECTION = "Shared Contract Ownership"
 CHECKLISTS_ARCHIVE_PATH = "docs/CHECKLISTS_ARCHIVE.md"
 DESIGN_PATH = "docs/DESIGN.md"
+_DESIGN_BIBLE_PATH = f"{DESIGN_PATH}#Design bible"
+_DESIGN_PRINCIPLES_PATH = f"{_DESIGN_BIBLE_PATH} principles"
+_DESIGN_REVIEW_MAP = {
+    DESIGN_PATH: "Navigation only: no DESIGN rules are inlined as governance.",
+    _DESIGN_BIBLE_PATH: "Inlined above: the whole design bible section; the rest is indexed only.",
+    _DESIGN_PRINCIPLES_PATH: "Inlined above: the design bible's opening and numbered principles only.",
+}
 DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
@@ -127,8 +135,8 @@ NAVIGATION_WORDS = {
         PACKET_DELIVERY: (
             "## Governance navigation (index of sources not inlined)",
             "The supplied rules and selected sections are the governance evidence this packet delivers. This row "
-            "has no repository tools: the map below identifies sources and ranges that were NOT delivered, not "
-            "additional evidence. State any resulting uncertainty; do not claim to have read the named sources."),
+            "has no repository tools: any ranges only indexed below were NOT delivered as governance. "
+            "State the uncertainty that remains after reading the supplied evidence."),
         RETRIEVING_DELIVERY: (
             "## Governance navigation (read on demand)",
             "The rules above are the ones this change activates. Available sources below remain complete on disk "
@@ -331,13 +339,17 @@ def _checklist_pointer(rules: bool, shared: bool) -> str:
 def navigation_material(layer: str, delivery: str) -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a layer's governance navigation
     as its renderer composes it for ``delivery``, over placeholders (the subject's documents, the sources a skill
-    owes). The documents it names, their maps and the guides' own text are not here."""
+    owes). The documents it names, their headings and the guides' own text are not here."""
+    from ouroboros.context_layout import design_navigation
     from ouroboros.tools.review_helpers import GOVERNANCE_OMISSION
 
     words = NAVIGATION_WORDS.get(layer, {})
     if layer != CORE_LAYER:
         pointers = [_checklist_pointer(rules, shared) for rules in (True, False) for shared in (True, False)]
         omissions = [text.format(rel_path="⟨path⟩", path="⟨path⟩", error="⟨error⟩") for text in GOVERNANCE_OMISSION.values()]
+        if layer == BODY_LAYER:
+            pointers.extend(design_navigation("", source="⟨source⟩", disclosure=note)
+                            for note in _DESIGN_REVIEW_MAP.values())
         return [*(text.format(required="⟨required⟩") for text in words.get(delivery, ())), *omissions,
                 *(pointers if layer == BODY_LAYER else ())]
     heading, with_rules, without_rules, subject_words = words["every"]
@@ -645,17 +657,29 @@ def governance_context(
     chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
     chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
-    # The design bible alone: its opening lines and numbered principles. The seed and
-    # component recipes follow the principles inside the same Markdown section: stop
-    # where the numbered list ends, not at H2.
-    bible_path = f"{DESIGN_PATH}#Design bible"
-    bible = None if design_missing else re.search(
-        r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+    # The design bible alone: its whole section, principles, seed table and recipes, the
+    # very slice its author carries (``context_layout.design_bible_section``).
+    from ouroboros.context_layout import design_bible_section, design_navigation
+
+    bible_path, principles_path = _DESIGN_BIBLE_PATH, _DESIGN_PRINCIPLES_PATH
+    bible = None if design_missing else design_bible_section(design_text)
+    principles = None
     if bible:
-        last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
-        bible_title = f"{bible_path} (excerpt: principles 1–{last})"
-        chapter_text[bible_path] = bible[0].strip()
-    bible_absent = "design bible excerpt unavailable; inspect the named source"
+        bible_title = f"{bible_path} (excerpt: the whole section)"
+        chapter_text[bible_path] = bible
+        # A share too small for the whole section still carries its opening and numbered principles, the slice
+        # reviewers had before (RV1), cut from that same section and labelled as only that.
+        listed = re.search(r"(?ms)\A.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", bible)
+        if listed and listed[0].strip() != bible:
+            last = re.findall(r"(?m)^(\d+)\. ", listed[0])[-1]
+            principles = f"{bible_path} (excerpt: principles 1–{last} only)"
+            chapter_text[principles_path] = listed[0].strip()
+    bible_absent = "design bible excerpt unavailable; the source has no design bible section"
+
+    def _admit_bible(reason: str) -> None:  # the whole section, else its principles alone
+        if not _admit(bible_path, bible_title, chapter_text[bible_path], 2, reason) and principles:
+            _admit(principles_path, principles, chapter_text[principles_path], 2,
+                   f"{reason}; the whole section does not fit the inline share, its principles only")
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
@@ -669,23 +693,23 @@ def governance_context(
         else:
             rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
-                         "full DESIGN remains on demand; only its bible is selected for source words"))
+                         "heading map for the whole book; only its bible is eligible for changed source words"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
                          "heading map only; no frontend path or changed source words"))
 
     for order, path, title, reason in sorted(candidates):
-        if _admit(path, title, chapter_text.get(path, ""), 2, reason) or path != DESIGN_PATH:
-            continue
-        # The whole book does not fit this reviewer's share. Its principles are what a
-        # change under web/ is judged by, so they are carried before any chapter chosen
-        # by a file name; the heading map still indexes the rest.
-        if bible:
-            _admit(bible_path, bible_title, chapter_text[bible_path], 2,
-                   "a touched path is under web/ and the whole book does not fit the inline share; "
-                   "design bible excerpt")
-        else:
-            rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
+        if path == bible_path:
+            _admit_bible(reason)
+        elif not _admit(path, title, chapter_text.get(path, ""), 2, reason) and path == DESIGN_PATH:
+            # The whole book does not fit this reviewer's share. Its bible is what a
+            # change under web/ is judged by, so it is carried before any chapter chosen
+            # by a file name; the heading map still indexes the rest.
+            if bible:
+                _admit_bible("a touched path is under web/ and the whole book does not fit the inline share; "
+                             "design bible excerpt")
+            else:
+                rows.append(_row(bible_path, 2, "navigation", 0, bible_absent))
 
     # --- tier 3: the map, never whole -------------------------------------
     arch_book, arch_problem = _load_book(root, ARCHITECTURE_BOOK_ID)
@@ -718,10 +742,11 @@ def governance_context(
     pointers = [_checklist_pointer(bool(checklist_text.strip()), shared_inline)]
     design_map = ""
     if DESIGN_PATH not in inline_texts:
-        from ouroboros.context_layout import design_navigation
-
+        delivered = next((row["path"] for row in rows if row["disposition"] == "inline"
+                          and row["path"] in (bible_path, principles_path)), DESIGN_PATH)
         design_map = design_navigation(
-            None if design_missing else design_text, source=str(root / DESIGN_PATH))
+            None if design_missing else design_text, source=str(root / DESIGN_PATH),
+            disclosure=_DESIGN_REVIEW_MAP[delivered])
     nav_heading, nav_words = NAVIGATION_WORDS[BODY_LAYER][PACKET_DELIVERY if packet else RETRIEVING_DELIVERY]
     navigation = _join([
         nav_heading, nav_words,

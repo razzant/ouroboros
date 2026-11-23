@@ -11,17 +11,20 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import budget_pause as bp, working_checkpoint as wc
-from ouroboros.control_actor import mind_control
+from ouroboros.control_actor import mind_control, owner_door
 from ouroboros.work_stop import SELECTION_KEY, reason_policy, stop_record
 from supervisor import events_budget as eb
 from supervisor.owner_pause_control import request_owner_pause
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
+from tests._queue_state import gateway as _gateway
 from tests.test_budget_pause_holds import _idle_worker
 from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_model_sleep import _cold_park
 from tests.test_restart_retention import _pool_events
 from tests.worker_pool_support import affirm_ready
 
+
+gateway = _gateway
 
 
 def _released_panic_running(root, monkeypatch):
@@ -39,7 +42,8 @@ def _released_panic_running(root, monkeypatch):
     flag.unlink()  # the boot consumer removes it after publishing its holds
     with mind_control("mind", "resume"):
         assert q.resume_budget_paused_task("sleeper")["error"] == "panic_requires_owner_resume"
-    resumed = q.resume_budget_paused_task("sleeper")
+    with owner_door("fixture"):
+        resumed = q.resume_budget_paused_task("sleeper")
     assert resumed["ok"] and resumed["released_hold"] == eb.HOLD_PANIC
     assert eb.BUDGET_HOLD_KEY not in task
     sent = []
@@ -53,6 +57,101 @@ def _released_panic_running(root, monkeypatch):
     assert exact["state"] == bp.STATE_RESUMED and exact["grant"]["consumed_at"]
     wc.save_round(limit, "post_batch")
     return q, workers, exact
+
+
+@pytest.mark.parametrize("dispatch_room", [True, False], ids=["paid-slot", "money-gone-before-slot"])
+def test_owner_panic_selection_of_a_saved_checkpoint(gateway, monkeypatch, dispatch_room):
+    from ouroboros.owner_pause import launch_lock
+    from ouroboros.task_results import write_task_result
+    from ouroboros.work_stop import panic_hold_id
+    from supervisor import budget_resume
+    from supervisor.worker_assignment import needs_paid_admission
+    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
+
+    root = gateway.root
+    q, state, workers = _install_queue(root, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    task_id = "paid-exact"
+    selected = {"id": task_id, "root_task_id": task_id, "type": "task", "chat_id": 1, "_attempt": 1,
+                "execution_timeout_sec": 600, "metadata": {"model": "openrouter::openai/gpt-5.2"}}
+    write_task_result(root, task_id, "running", root_task_id=task_id, chat_id=1)
+    _, limit = _loop_ctx(root, task_id)
+    _fast_hold(monkeypatch, bp)
+    _quiet_external(monkeypatch, bp)
+    with pytest.raises(bp.BudgetPauseRequested) as parked:
+        bp.request_pause(limit, rail=bp.RAIL_BILLING_AUTHORITY, scope="task",
+                         reason_text="Fixture ledger was unavailable.")
+    bp.end_dispatch_fence(task_id)
+    # This queue represents a manual launch after Panic; no stop or boot runs in the test.
+    checkpoint = bp.set_budget_pause(root, task_id, {**parked.value.pause, "state": bp.STATE_PAUSED})
+    selected["_budget_pause"] = bp.exact_pause_marker(checkpoint)
+    eb.hold_budget_row(selected, reason=eb.HOLD_PANIC)
+    sibling = {"id": "other-hold", "root_task_id": "other-hold", "type": "task", "chat_id": 1, "_attempt": 1}
+    write_task_result(root, sibling["id"], "scheduled", root_task_id=sibling["id"], chat_id=1)
+    eb.hold_budget_row(sibling, reason=eb.HOLD_OWNER_RESTART)
+    q.PENDING.extend((selected, sibling))
+    saved_sibling = copy.deepcopy(sibling)
+    assert needs_paid_admission(selected)
+    token = panic_hold_id(selected)
+    assert token
+    reads = []
+
+    def observe_money(kind):
+        assert not q._queue_lock._is_owned()
+        with launch_lock(root, task_id, wait=False):
+            reads.append(kind)
+
+    def global_money(_state, *, strict, allow_stale):
+        assert strict and not allow_stale
+        observe_money("global")
+        return 5.0
+
+    def tree_money(disk, task, tree):
+        assert (disk, task["id"], tree) == (root, task_id, task_id)
+        observe_money("tree")
+        return None
+
+    url = f"/api/tasks/{task_id}/resume"
+    body = {"expected_panic_hold_id": token}
+    with monkeypatch.context() as press:
+        press.setattr(state, "budget_remaining", global_money)
+        press.setattr(budget_resume, "_root_money_refusal", tree_money)
+        response = gateway.client.post(url, json=body)
+        assert response.status_code == 200 and response.json()["exact_continuation"], response.text
+        assert sorted(reads) == ["global", "tree"]
+        assert not workers.RUNNING and sibling == saved_sibling
+        current = bp.budget_pause_row(root, task_id)
+        grant = current["grant"]
+        assert current["state"] == bp.STATE_RESUME_GRANTED and grant["single_use"]
+        assert grant["by"]["actor"] == "owner" and grant["by"]["door"] == "api_task_resume"
+        assert grant["grant_id"] == response.json()["grant_id"]
+        handoff = selected["_budget_pause_resume"]
+        for key in ("pause_id", "pause_generation", "task_attempt", "source_ref", "resume_point", "started_at"):
+            assert handoff[key] == checkpoint[key] == current[key]
+        assert selected["execution_timeout_sec"] == 600 and eb.BUDGET_HOLD_KEY not in selected
+        repeated = gateway.client.post(url, json=body)
+        assert repeated.status_code == 409 and repeated.json()["error"] == "panic_selection_changed"
+        assert bp.budget_pause_row(root, task_id)["grant"] == grant
+        assert sorted(reads) == ["global", "tree"]
+
+    # Worker assignment runs its own paid gate; the owner's grant is not a reservation.
+    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 5.0 if dispatch_room else 0.0)
+    sent = []
+    _idle_worker(workers, sent)
+    workers.assign_tasks()
+    assert sibling in q.PENDING and eb.budget_hold_fact(sibling) == eb.budget_hold_fact(saved_sibling)
+    if dispatch_room:
+        assert [row["id"] for row in sent] == [task_id]
+        ctx, _ = _loop_ctx(root, task_id, attempt=workers.RUNNING[task_id]["attempt"])
+        saved = bp.load_budget_pause(ctx, sent[0]["_budget_pause_resume"])
+        assert saved["pause_id"] == checkpoint["pause_id"] and saved["messages"] == limit.messages
+    else:
+        assert not sent and not workers.RUNNING
+        restored = bp.budget_pause_row(root, task_id)
+        assert restored["state"] == bp.STATE_PAUSED and restored["source_ref"] == checkpoint["source_ref"]
+        assert restored["grant"]["revoke_reason"] == "budget_exhausted_before_dispatch"
+        assert selected["_budget_pause"]["checkpoint"]["pause_id"] == checkpoint["pause_id"]
+        assert "_budget_pause_resume" not in selected
 
 
 @pytest.mark.parametrize("actor", ["owner", "mind"])
@@ -177,11 +276,13 @@ def test_panic_sleep_child_after_two_root_resumes_keeps_its_own_pause(tmp_path, 
     flag.unlink()
     child = next(row for row in q.PENDING if row["id"] == "child")
     assert eb.budget_hold_fact(child)["reason"] == eb.HOLD_PANIC
-    assert q.resume_budget_paused_task("child")["ok"]
+    with owner_door("fixture"):
+        assert q.resume_budget_paused_task("child")["ok"]
     assert eb.BUDGET_HOLD_KEY not in child
     # Quit before the child's dispatch revokes that unused exact grant.
     assert _stop_and_boot(q, workers) == 2
-    assert q.resume_budget_paused_task("root")["ok"]
+    with owner_door("fixture"):
+        assert q.resume_budget_paused_task("root")["ok"]
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()

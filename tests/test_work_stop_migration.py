@@ -111,7 +111,11 @@ def test_ghost_shapes_are_addressable_but_never_selected_or_terminally_revived()
     assert documents == before
     assert {c["task_id"] for c in changes if c["action"] == "queue_locator_restored"} == {"saved", "orphan", "sleep"}
     for row in snapshot["pending"]:
-        assert current_stop(row["task"])["release"] == "resume"
+        stop = current_stop(row["task"])
+        if row["id"] == "saved":
+            assert stop["cause"] == "panic" and stop["release"] == "owner"
+        else:
+            assert stop["release"] == "resume"
         assert SELECTION_KEY not in row["task"] and "_budget_pause_resume" not in row["task"]
         assert row["task"].get("admitted_dispatch") != "none"
 

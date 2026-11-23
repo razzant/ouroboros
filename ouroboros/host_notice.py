@@ -5,7 +5,7 @@ writes the row's ``text`` as one phrase in owner words, what happened, with no p
 one typed ``notice`` beside it in the row's ``progress_meta`` (``fields``):
 
 * ``code`` — the notice's stable code;
-* ``step`` — the owner's next step, a key of ``STEPS``: a control or a Settings place (a host that has scheduled the
+* ``step`` — the owner's next step, a key of ``STEPS``: a control or a place in the interface (a host that has scheduled the
   retry itself says so instead); absent when there is none;
 * ``details`` — the raw facts, behind Details for the owner and beside the phrase for the mind;
 * ``instruction`` — one line the owner acts on, as written: the exact command a step sends him to (a Git command);
@@ -33,12 +33,12 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 log = logging.getLogger(__name__)
 
 # The owner's next steps, one sentence each, said after the phrase. The translation generator fills them by code
-# (``ui_translation`` catalog ``notice.step``); a step names a control or a Settings place by its shown name. A row
+# (``ui_translation`` catalog ``notice.step``); a step uses the displayed name of a control or destination. A row
 # whose host has scheduled its own retry gets a ``retry_self`` step with the first producer that schedules one.
 STEPS: Dict[str, str] = {
     "restart": "Restart Ouroboros to recover.",
     "send_after_restart": "Send it again after Restart.",
-    "raise_total_budget": "Raise Total budget in Settings → Costs.",
+    "raise_total_budget": "Raise Total budget in Dashboard → Costs.",
     "choose_reviewer": "Run /review with a row this install can pay: any enabled row in Settings → Agents, or the Main model.",
     "evolution_start": "/evolve start resumes it.",
     "press_again": "You can press it again.",

@@ -1402,10 +1402,15 @@ async def api_task_resume(request: Request) -> JSONResponse:
         return json_error(str(exc), 400)
     body = await request_json_or(request, {})
     named = body.get("accept_unknown", []) if isinstance(body, dict) else None
-    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason"}
+    expected_panic = body.get("expected_panic_hold_id") if isinstance(body, dict) else None
+    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason", "expected_panic_hold_id"}
             or not all(isinstance(value, str) for value in named)):
-        return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
+        return json_error("Unexpected Resume fields or invalid accept_unknown.", 400, task_id=task_id,
                           reason_code="unexpected_fields")
+    if "expected_panic_hold_id" in body and (set(body) != {"expected_panic_hold_id"}
+                                             or not isinstance(expected_panic, str) or not expected_panic.strip()):
+        return json_error("A Panic selection requires only its current hold ID.", 400, task_id=task_id,
+                          reason_code="invalid_panic_selection")
     if any(value.startswith("delegate_start:") for value in named) and not (
             isinstance(body.get("reason"), str) and body["reason"].strip()):
         return json_error("Give a reason for accepting the delegated start risk.", 400, task_id=task_id,
@@ -1416,7 +1421,8 @@ async def api_task_resume(request: Request) -> JSONResponse:
 
         # Bound on the worker thread itself: the grant decisions read these where the call runs.
         with owner_door("api_task_resume"), accepting_unknown(named, str(body.get("reason") or "")):
-            return resume_budget_paused_task(task_id)
+            return (resume_budget_paused_task(task_id, expected_panic_hold_id=expected_panic) if expected_panic
+                    else resume_budget_paused_task(task_id))
 
     try:
         result = await asyncio.to_thread(resume)  # its writes wait on Q and the disk, never on the web loop
