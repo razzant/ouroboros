@@ -747,13 +747,15 @@ export function openTaskControlMenu(anchor, {
  * the same request owners, never Resume (only a work's Resume control offers it). `stop` is the caller's own stop
  * path (a card keeps its optimistic chip); the Pause item reads its target from the anchor.
  */
-export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, canAct, stop }) {
+export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, actions = null, canAct, afterAction, stop }) {
     const id = String(taskId || '').trim();
     return openTaskControlMenu(anchor, {
+        actions,
         cancelPending,
         budgetPaused: activity?.phase === 'budget_paused',
         busy: taskControlBusy(id),
         canAct,
+        afterAction,
         onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(id) : stop(action)),
     });
 }

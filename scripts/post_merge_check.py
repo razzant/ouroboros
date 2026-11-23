@@ -16,13 +16,12 @@ together by the next one. A test that fails is run once more: passing then makes
 gates are FAILED with no retry: each finding of the release's lint gate (`ruff check --select F`,
 owner decision 2A, 2026-10-22) and each red test of its size check (`pytest -m size_ratchet`,
 measured against the check's base; the window's book-growth mode comes from the `growth` step).
-Confirmed repeat failures and deterministic findings are bisected over the first-parent commits
-since the base. A located pull request's author gets one comment and Ouroboros an issue labelled
-`post-merge-red` for that leg's system (scripts/post_merge_routing.py), which the check narrows as
-its tests pass and its findings go, and closes once none is left. It blocks nothing, reverts
-nothing, runs on no schedule and talks to GitHub only with the workflow's own GITHUB_TOKEN. Its
-subprocesses are git, ruff and `scripts/run_tests.py`; importing it needs only the stdlib, because
-the workflow's `window` job runs `base` on the runner's own python3.
+First-parent bisection needs comparable evidence for blame, not for RED. Historical probes omit
+the protected path if not comparable and take only fresh, coherent Python exports. Routing comments
+on culprit PRs at new or expanded filings, even if filing fails. It narrows or closes per-leg
+`post-merge-red` issues as IDs clear and files returning reds anew. No block, revert or schedule; GitHub uses only
+the job's GITHUB_TOKEN. The script imports only stdlib-based code (`base` runs on the bare `window`
+interpreter); Git, Ruff and test runners run as subprocesses.
 
 DIR is the evidence root of `scripts/run_tests.py --selected --keep-going --evidence-dir DIR`
 (selection.json, parallel/, serial/: tests/ci_evidence.py's results.json and events.jsonl). Each
@@ -54,6 +53,9 @@ if str(REPO_ROOT) not in sys.path:  # run as a script, only scripts/ is on sys.p
 from scripts.post_merge_routing import (  # noqa: E402
     BRANCH, LINT_PREFIX, NODE_LANE, SIZE_PREFIX, SYSTEMS, GitHub, _reason, route,
 )
+from scripts.post_merge_bisect import (  # noqa: E402
+    MAX_PROBES, PROTECTED, bisect, comparable, fresh_pytest_export, grep_names, node_blocker, probe_files, protected_projection,
+)
 from scripts.post_merge_window import (  # noqa: E402
     carried_records, choose_window, gap_text, listed_runs, merge_records, prior_window, read_handoff, records,
 )
@@ -65,7 +67,6 @@ LINT_ARGS = ("check", "--select", "F", "--output-format", "json", "--exit-zero")
 # A line that only mentions it (a fixture string, a comment) declares nothing. POSIX classes: git grep -E.
 SIZE_DECLARATIONS = (r"^[[:space:]]*@pytest\.mark\.size_ratchet([^[:alnum:]_]|$)",
                      r"^[[:space:]]*pytestmark[[:space:]]*[:=].*pytest\.mark\.size_ratchet([^[:alnum:]_]|$)")
-MAX_PROBES = 16
 ZERO_SHA = "0" * 40
 # Retry, probe and re-check sessions keep the per-test bound of both selected passes
 # (ouroboros/preflight_runner.py SERIAL_PASS_FLAGS). On Linux SIGALRM fails only the hung test;
@@ -405,13 +406,31 @@ def run_node_lane(cwd: Path | None = None) -> int:
         return 127
 
 
+def _confirmed_probe_session(session: dict | None) -> bool:
+    """Attribution needs normal, matching exits and the export's red observations must agree."""
+    return bool(session and session["final"] and session["exit"] in (0, 1)
+                and type(session.get("runner_exit")) is int and session["runner_exit"] == session["exit"]
+                and bool(candidates(session)) == (session["exit"] == 1))
+
+
 def check_ids(ids, directory: Path, *, read_source, run=run_pytest) -> dict[str, str]:
-    """`outcomes` of exactly `ids` after one session of the deepest node each still has."""
-    args, absent = container_args(ids, read_source)
-    result = {nodeid: "absent" for nodeid in absent}
+    """Historical outcomes: a missing module is absent; an unreadable one or an unconfirmed session is unknown."""
+    unreadable = set()
+
+    @cache
+    def source(path):
+        try:
+            return read_source(path)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            unreadable.add(path)
+            return None  # Keep it out of argv without treating it as a removal.
+
+    args, unrunnable = container_args(ids, source)
+    result = {nodeid: "unknown" if nodeid.split("::", 1)[0] in unreadable else "absent" for nodeid in unrunnable}
     if args:
-        run(args, directory)
-        result.update(outcomes(read_session(directory), [nodeid for nodeid in ids if nodeid not in absent]))
+        session = fresh_pytest_export(directory, lambda: run(args, directory), read_session)
+        pending = [nodeid for nodeid in ids if nodeid not in result]
+        result.update(outcomes(session, pending) if _confirmed_probe_session(session) else dict.fromkeys(pending, "unknown"))
     return result
 
 
@@ -568,50 +587,37 @@ def lint_findings(cwd: Path | None = None, paths=()) -> dict[str, str] | None:
     return found
 
 
-def size_modules(root: Path) -> list[str]:
-    """The test modules of the size check in the checkout `root`: those that declare a `size_ratchet` test.
+def size_modules(root: Path, *, rev: str = "", exclude=()) -> list[str] | None:
+    """The test modules of the size check in the checkout `root` (or in `rev`'s tree when it is named).
 
     The same tests as the release's `pytest tests/ -m size_ratchet`, without collecting the suite, and
     no module that merely mentions the marker: its collection is no business of the size check.
     """
+    args = ["grep", "-l", "-z", "-E", *(arg for pattern in SIZE_DECLARATIONS for arg in ("-e", pattern))]
+    args += [rev, "--", "tests"] if rev else ["--", "tests"]
+    args.extend(f":(exclude,literal){path}" for path in sorted(exclude))
     try:
-        listed = _git("grep", "-l", "-E", *(arg for pattern in SIZE_DECLARATIONS for arg in ("-e", pattern)),
-                      "--", "tests", cwd=Path(root))
-    except (OSError, subprocess.SubprocessError):
-        return []  # git grep exits 1 when nothing matches
-    return sorted(path for path in listed.splitlines() if Path(path).name.startswith("test_") and path.endswith(".py"))
+        listed = _git(*args, cwd=REPO_ROOT if rev else Path(root))
+    except (OSError, subprocess.SubprocessError) as error:
+        return [] if getattr(error, "returncode", None) == 1 else None  # no match is an answer; another failure is not
+    return None if (names := grep_names(rev, listed)) is None else sorted(
+        p for p in names if p not in exclude and Path(p).name.startswith("test_") and p.endswith(".py"))
 
 
 def size_session(directory: Path, *, base: str, mode: str = "block", cwd: Path | None = None,
-                 run=run_pytest) -> dict | None:
-    """The size check's fresh pytest export and separate wrapper exit, or None without that export."""
+                 run=run_pytest, modules=None) -> dict | None:
+    """The size check's fresh pytest export and separate wrapper exit, or None without that export.
+
+    `modules` names the lane to measure: None (the default) reads it from the checkout, an empty
+    list measures nothing.
+    """
     root = Path(cwd or REPO_ROOT)
-    modules = size_modules(root)
+    modules = size_modules(root) if modules is None else list(modules)
     if not modules:
         return None
-    result = Path(directory) / "results.json"
-
-    def stamp():
-        try:
-            stat = result.stat()
-        except FileNotFoundError:
-            return None
-        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size
-
-    try:
-        previous = stamp()
-    except OSError:
-        return None
-    code = run(["-m", "size_ratchet", *modules], directory, cwd=root,
-               env={"OURO_SIZE_RATCHET_BASE_REF": base, "OURO_BOOK_GROWTH_MODE": mode})
-    try:
-        current = stamp()
-    except OSError:
-        return None
-    if current is None or current == previous:
-        return None  # A reused directory's old export does not describe this invocation.
-    session = read_session(directory)
-    return {**session, "runner_exit": code} if session["final"] else None
+    return fresh_pytest_export(directory, lambda: run(
+        ["-m", "size_ratchet", *modules], directory, cwd=root,
+        env={"OURO_SIZE_RATCHET_BASE_REF": base, "OURO_BOOK_GROWTH_MODE": mode}), read_session)
 
 
 def size_status(session: dict | None, ids) -> dict[str, str]:
@@ -1014,105 +1020,91 @@ def command_classify(args) -> int:
 
 # --- attribute -------------------------------------------------------------------------------
 
-def bisect(chain: list[str], ids, probe, *, max_probes: int = MAX_PROBES) -> list[dict]:
-    """The first commit of `chain` at which each id fails; chain[0] is the base, chain[-1] the head.
-
-    Every id fails at the head. The base is probed first: an id failing there is pre-existing.
-    The others share bisection intervals, and a probe at a midpoint runs every unresolved id whose
-    interval contains it, so ids broken by one merge cost one bisection. `probe(sha, ids)` answers
-    {id: "fail" | "pass" | "error"}. Past `max_probes` probes the rest stays unattributed.
-    """
-    ids, verdicts, pending, used = sorted(set(ids)), {}, {}, 0
-    if len(chain) < 2:
-        return [{"id": nodeid, "verdict": "pre-existing", "why": "no commit since the base"} for nodeid in ids]
-    if ids:
-        used += 1
-        answers = probe(chain[0], ids)
-        for nodeid in ids:
-            answer = answers.get(nodeid, "error")
-            if answer == "fail":
-                verdicts[nodeid] = {"verdict": "pre-existing", "why": f"already fails at the base {chain[0][:12]}"}
-            elif answer == "pass":
-                pending[nodeid] = (0, len(chain) - 1)
-            else:
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe at {chain[0][:12]} could not run it"}
-    while pending:
-        for nodeid, (good, bad) in list(pending.items()):
-            if bad - good == 1:
-                verdicts[nodeid] = {"verdict": "culprit", "culprit": chain[bad], "last_good": chain[good]}
-                del pending[nodeid]
-        if pending and used >= max_probes:
-            for nodeid, (good, bad) in pending.items():
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe budget ({max_probes}) ran out; "
-                                    f"first bad after {chain[good][:12]}, at or before {chain[bad][:12]}"}
-            pending = {}
-        if not pending:
-            break
-        good, bad = min(pending.values(), key=lambda interval: (interval[0] - interval[1], interval))
-        middle = (good + bad) // 2
-        targets = sorted(nodeid for nodeid, (low, high) in pending.items() if low < middle < high)
-        used += 1
-        answers = probe(chain[middle], targets)
-        for nodeid in targets:
-            low, high = pending[nodeid]
-            answer = answers.get(nodeid, "error")
-            if answer in ("fail", "pass"):
-                pending[nodeid] = (low, middle) if answer == "fail" else (middle, high)
-            else:
-                verdicts[nodeid] = {"verdict": "unattributed", "why": f"the probe at {chain[middle][:12]} could not run it"}
-                del pending[nodeid]
-    return [{"id": nodeid, **verdicts[nodeid]} for nodeid in ids]
-
-
 class Prober:
-    """`probe(sha, ids)` for `bisect`: a detached worktree of `sha` runs the ids with its own runner.
+    """Detached probes use the revision's runner (CI installs dependencies, not the project).
 
-    post-merge.yml installs the dependencies but not the project, so every process of a probe
-    imports the worktree's tree; nothing can fall back to the head checkout's code. `size(tree,
-    directory)` answers one size session of the tree (`size_session`, against the check's base).
+    All lanes use the same projection; size measures allowed modules against the check's base.
     """
 
     def __init__(self, evidence: Path, work: Path, head: str, *, run=None, node=None, lint=None, size=None):
         self.evidence, self.work = Path(evidence), Path(work)
         self.run, self.node, self.lint = run or run_pytest, node or run_node_lane, lint or lint_findings
-        self.size = size or (lambda tree, directory: None)
-        self.lock, self.records = _blob(head, "uv.lock"), []
+        self.size = size or (lambda tree, directory, modules: None)
+        self.head, self.lock, self.records = head, _blob(head, "uv.lock"), []
 
-    def __call__(self, sha: str, ids) -> dict[str, str]:
+    def __call__(self, sha: str, ids) -> dict[str, str | tuple[str, str]]:
         label = f"{len(self.records) + 1:02d}-{sha[:12]}"
         record = {"sha": sha, "ids": sorted(ids), "dependencies_differ": _blob(sha, "uv.lock") != self.lock}
         self.records.append(record)
+        # What this revision may answer, decided before the worktree is built.
+        linted = [nodeid for nodeid in ids if nodeid.startswith(LINT_PREFIX)]
+        pairs = probe_files((nodeid for nodeid in ids if nodeid != NODE_LANE and not nodeid.startswith(LINT_PREFIX)),
+                            SIZE_PREFIX)
+        protection = protected_projection(self.head, sha, _git)
+        state, reason = protection
+        kept, excluded, family = comparable(pairs, revision=sha, protection=protection, git=_git)
+        node = NODE_LANE in ids
+        if node and reason and (problem := node_blocker(_git, sha, reason, family)):
+            excluded[NODE_LANE] = problem
+            node = False
+        sized = [nodeid for nodeid in kept if nodeid.startswith(SIZE_PREFIX)]
+        tests = [nodeid for nodeid in kept if not nodeid.startswith(SIZE_PREFIX)]
+        modules = size_modules(REPO_ROOT, rev=sha, exclude=family) if sized else []
+        if excluded:
+            record["incomparable"] = excluded
+        if not (kept or linted or node):
+            record["answers"] = dict.fromkeys(ids, "error")
+            return {nodeid: ("error", excluded.get(nodeid, "this revision could not answer it")) for nodeid in ids}
         tree = self.work / f"pmc-{label}"
+        partial = ("--no-checkout",) if reason else ()
+        added = False
         try:
-            _git("worktree", "add", "--detach", "--quiet", str(tree), sha)
+            _git("worktree", "add", "--detach", "--quiet", *partial, str(tree), sha)
+            added = True
+            if partial:
+                _git("read-tree", sha, cwd=tree)
+                _git("restore", f"--source={sha}", "--worktree", "--", ".", f":(exclude,literal){PROTECTED}", cwd=tree)
+                if omitted := _git("ls-files", "--", PROTECTED, cwd=tree):
+                    if omitted != PROTECTED:
+                        raise OSError(f"`{PROTECTED}` is not a single index entry")
+                    _git("update-index", "--skip-worktree", "--", PROTECTED, cwd=tree)
+                try:
+                    (tree / PROTECTED).lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise OSError(f"`{PROTECTED}` exists in the projected worktree")
         except (OSError, subprocess.SubprocessError) as error:
+            if added:
+                remove_worktree(tree)
             record["error"] = f"the worktree failed: {error}"
-            return {nodeid: "error" for nodeid in ids}
+            return dict.fromkeys(ids, "error")
         try:
-            answers = lint_answers(tree, [nodeid for nodeid in ids if nodeid.startswith(LINT_PREFIX)], self.lint)
-            sized = [nodeid for nodeid in ids if nodeid.startswith(SIZE_PREFIX)]
-            found = size_status(self.size(tree, self.evidence / "probes" / f"{label}-size"), sized) if sized else {}
-            tests = [nodeid for nodeid in ids if nodeid != NODE_LANE and not nodeid.startswith((LINT_PREFIX, SIZE_PREFIX))]
+            answers = lint_answers(tree, linted, self.lint, omitted=PROTECTED if reason and state != "absent" else "")
+            session = self.size(tree, self.evidence / "probes" / f"{label}-size", modules) if modules else None
+            found = size_status(session if _confirmed_probe_session(session) else None, sized)
             if tests:
                 found.update(check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
                                        run=lambda args, directory: self.run(args, directory, cwd=tree)))
             answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
                             for nodeid, value in found.items()})
-            if NODE_LANE in ids:
+            if node:
                 answers[NODE_LANE] = {0: "pass", 1: "fail"}.get(self.node(tree), "error")
-            record["answers"] = answers
+            answers.update({nodeid: ("error", why) for nodeid, why in excluded.items()})
+            record["answers"] = {nodeid: answer[0] if isinstance(answer, tuple) else answer
+                                 for nodeid, answer in answers.items()}
             return answers
         finally:
             remove_worktree(tree)
 
 
-def lint_answers(tree: Path, findings, lint) -> dict[str, str]:
-    """`probe` answers for lint findings: ruff over their files as `tree` has them (absent = pass)."""
-    if not findings:
-        return {}
-    paths = sorted({path for path in (finding.split(" ", 3)[2] for finding in findings) if (Path(tree) / path).is_file()})
+def lint_answers(tree: Path, findings, lint, *, omitted: str = "") -> dict[str, str]:
+    """Ruff over the revision's files. True absence is a pass; a deliberately omitted file is not evidence."""
+    files = {finding: finding.split(" ", 3)[2] for finding in findings}
+    paths = sorted({path for path in files.values() if path != omitted and (Path(tree) / path).is_file()})
     present = lint(tree, paths) if paths else {}
-    return {finding: "error" if present is None else "fail" if finding in present else "pass" for finding in findings}
+    return {finding: ("error" if path == omitted or (present is None and path in paths)
+                      else "fail" if present and finding in present else "pass") for finding, path in files.items()}
 
 
 def remove_worktree(tree: Path) -> None:
@@ -1144,8 +1136,9 @@ def command_attribute(args) -> int:
     chain = first_parent_chain(args.base, args.head)
     record["commits"] = chain[1:]
     work = Path(tempfile.mkdtemp(prefix="pmc-", dir=args.work_dir or os.environ.get("RUNNER_TEMP") or None))
-    prober = Prober(evidence, work, args.head, size=lambda tree, directory: size_session(
-        directory, base=sized.get("base") or args.base, mode=sized.get("mode") or "block", cwd=tree))
+    prober = Prober(evidence, work, args.head, size=lambda tree, directory, modules: size_session(
+        directory, base=sized.get("base") or args.base, mode=sized.get("mode") or "block", cwd=tree,
+        modules=modules))
     try:
         record["verdicts"] = unresolved + bisect(chain, ids, prober, max_probes=args.max_probes)
     finally:
