@@ -1,0 +1,87 @@
+name: Windows QA — named-note line endings
+
+on:
+  push:
+    branches:
+      - qa/named-note-line-endings-5ec5d67c
+
+permissions:
+  contents: read
+
+jobs:
+  named-notes:
+    if: ${{ github.repository == 'razzant/ouroboros' && !github.event.deleted }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CANDIDATE_SHA: 'cca74aae43c5739b63bd84c73a608a8202e693a0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Check out the verified parent of the workflow commit
+        shell: pwsh
+        run: |
+          $expected = $env:CANDIDATE_SHA
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') { throw 'Set CANDIDATE_SHA to the full lowercase SHA.' }
+          $parents = git show -s --format=%P $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0 -or $parents -cne $expected) { throw "Expected sole parent $expected; got $parents." }
+          git checkout --detach $expected
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate checkout failed.' }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $expected) { throw "Expected HEAD $expected; got $head." }
+          Write-Host "Candidate HEAD: $head"
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python
+          install-project: 'false'
+          profile: test
+
+      - name: Require five exact pytest passes
+        shell: pwsh
+        env:
+          PYTEST_ADDOPTS: ''
+        run: |
+          @'
+          import platform
+          import sys
+          from collections import Counter
+
+          import pytest
+
+          nodes = [
+              'tests/test_delegate_accepted_lookup.py::test_accepted_lookup_keeps_the_original_named_note_receipt_after_an_edit',
+              'tests/test_delegate_continuation.py::test_continuation_delivers_a_new_selection_only_in_the_current_prompt[auto]',
+              'tests/test_delegate_continuation.py::test_continuation_delivers_a_new_selection_only_in_the_current_prompt[packet]',
+              'tests/test_delegate_plan.py::test_plan_thread_clarification_carries_its_named_note_in_the_wire_turn_prompt',
+              'tests/test_external_work_order_owner_words.py::test_scheduling_does_not_claim_archived_or_malformed_notes_were_delivered',
+          ]
+
+          class Proof:
+              def __init__(self):
+                  self.reports = Counter()
+
+              def pytest_collection_finish(self, session):
+                  found = Counter(item.nodeid for item in session.items)
+                  if found != Counter(nodes):
+                      pytest.exit(f'Unexpected collection: {list(found.elements())}', returncode=1)
+
+              def pytest_runtest_logreport(self, report):
+                  passed = report.passed and not hasattr(report, 'wasxfail')
+                  self.reports[report.nodeid, report.when, passed] += 1
+
+          print(f'{platform.platform()} | Python {platform.python_version()}', flush=True)
+          proof = Proof()
+          status = pytest.main(['-o', 'addopts=', '-vv', '--tb=short', *nodes], plugins=[proof])
+          if status:
+              sys.exit(status)
+          expected = Counter((node, phase, True) for node in nodes for phase in ('setup', 'call', 'teardown'))
+          if proof.reports != expected:
+              sys.exit('Expected exactly five full passes; missing, extra, skipped or xfail/xpass reports are red.')
+          print('Verified: 5/5 exact cases passed.')
+          '@ | & .\.venv\Scripts\python.exe -
+          exit $LASTEXITCODE
