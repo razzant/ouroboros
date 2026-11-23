@@ -48,6 +48,7 @@ _APPARATUS = frozenset({
     "uv.lock", "requirements.txt", "requirements-runtime.lock",
     "web/package.json", "web/package-lock.json", "site/pnpm-lock.yaml",
     "ouroboros/preflight_runner.py", "ouroboros/preflight_probe.py", "ouroboros/preflight_node.py",
+    "ouroboros/preflight_case_facts.py", "ouroboros/preflight_diagnosis.py", "ouroboros/preflight_reading.py",
     "ouroboros/test_bytecode.py",
     "ouroboros/preflight_receipts.py", "ouroboros/commit_admission.py",
     "ouroboros/test_selection.py", "ouroboros/preflight_inventory.py",

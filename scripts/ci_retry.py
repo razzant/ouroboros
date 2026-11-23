@@ -57,7 +57,9 @@ if str(REPO) not in sys.path:  # -I leaves the checkout off sys.path.
     sys.path.insert(0, str(REPO))
 
 from tests import ci_accepted  # noqa: E402  -- stdlib only, as is:
-from tests.ci_verdicts import attempt_text, final, journal_rows, valid  # noqa: E402
+from tests.ci_verdicts import (  # noqa: E402
+    CRASH_FACTS, attempt_text, final, journal_rows, observed_outcomes as _outcomes, valid,
+)
 
 MAX_ROUNDS = 10  # A backstop below the step's own deadline: a pass that needs more ends red, naming the rest.
 _PASSING = frozenset({"green", "flaky", "accepted"})
@@ -75,16 +77,13 @@ _VALUED = frozenset({
     "--max-worker-restart", "--maxfail", "--durations", "--durations-min", "--timeout", "--timeout-method",
     "--session-timeout", "--capture", "--import-mode", "--log-level", "--log-file", "--default-suite-shard",
     "--ui-browser-shard", "--evidence-dir", "--temp-parent", "--base", "--extra-test",
-    "--test-reason",
+    "--test-reason", "--lane-pass",
 })
 # Whole-lane proofs refuse a subset of their lane (tests/default_lane.py, tests/browser_lane.py),
 # and a round's own deadline is the step's.
 _DROPPED = frozenset({"--default-suite-shard", "--ui-browser-shard", "--session-timeout",
                       "--default-suite-manifest", "--require-ui-browser"})
 _JUNIT = ("--junitxml", "--junit-xml")
-# A dead worker's own facts on its crash row (tests/ci_evidence.py): its gateway and, only for the record
-# that worker's pytest-timeout callback left, the timeout. An attempt carries them; nothing here infers one.
-_CRASH_FACTS = ("worker", "timeout_callback_seconds")
 
 
 def _say(line: str) -> None:
@@ -234,30 +233,6 @@ def _journal(directory: Path) -> tuple[list[dict], list[str], dict | None] | Non
     return reports, list(running), lane
 
 
-def _outcomes(rows) -> dict[str, dict]:
-    """Each executed node's outcome in one session: its first failure, else a skip, else a pass.
-
-    Executed is the lane guard's rule (tests/browser_lane.py LaneReconciliation, as
-    tests/ci_evidence.py applies it): a call phase, a crash, or any report that did not pass.
-    """
-    outcomes = {}
-    for row in rows:
-        if row["phase"] not in ("call", "crash") and row["outcome"] == "passed":
-            continue
-        node, held = row["nodeid"], outcomes.get(row["nodeid"])
-        if row["outcome"] == "failed":
-            if held is None or held["outcome"] != "failed":
-                outcomes[node] = {"outcome": "failed", "phase": row["phase"],
-                                  "error_type": str(row.get("error_type") or ""),
-                                  **{key: row[key] for key in _CRASH_FACTS if key in row}}
-        elif row["outcome"] == "skipped":
-            if held is None or held["outcome"] == "passed":
-                outcomes[node] = {"outcome": "skipped", "phase": row["phase"], "error_type": "Skipped"}
-        elif held is None:
-            outcomes[node] = {"outcome": "passed", "phase": row["phase"], "error_type": ""}
-    return outcomes
-
-
 def _evidence(directory: Path, *, aborted: bool = False) -> dict | None:
     """What one session's projection shows; None when it left neither results.json nor a journal.
 
@@ -336,7 +311,7 @@ def _accept(nodes: list[str], path: Path) -> list[dict]:
 
 def _shown(attempt: dict) -> dict:
     return {"phase": attempt["phase"], "error_type": attempt["error_type"],
-            **{key: attempt[key] for key in _CRASH_FACTS if key in attempt}}
+            **{key: attempt[key] for key in CRASH_FACTS if key in attempt}}
 
 
 def decide(directory: Path, rounds: list[dict], tries: dict[str, list], assigned, collection: set[str],

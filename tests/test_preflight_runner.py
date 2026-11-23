@@ -243,7 +243,7 @@ def test_default_addopts_carry_the_durations_report():
 
 
 def _ci_pytest_suite_commands(job: str) -> list[tuple[str, str]]:
-    """The `(markexpr, trailing_flags)` of ONE ci.yml job's full-suite pytest runs.
+    """The `(lane, trailing_args)` of ONE ci.yml job's full-suite pytest runs.
 
     Scoped to a single job on purpose. The gate's claim is "each CI job runs this
     split", and a whole-file substring search cannot see the difference between
@@ -256,43 +256,46 @@ def _ci_pytest_suite_commands(job: str) -> list[tuple[str, str]]:
         re.MULTILINE | re.DOTALL,
     )
     assert block, f"ci.yml has no `{job}:` job"
+    # A pass that spells its own `-m` over `tests/` would be a second copy of the split.
+    assert not re.findall(r'run: python (?:scripts/ci_retry\.py .*? -- python )?(?:-m pytest|scripts/run_tests\.py) '
+                          r'tests/ -m "', block.group(1)), f"{job} spells a pass's markexpr itself"
     # `tests/` only — the per-file guard steps run one file and are not the split.
-    # Each pass runs under the owned runner, which forwards its pytest arguments unchanged,
+    # Each pass runs under the owned runner, whose `--lane-pass` expands the gate's constants,
     # behind scripts/ci_retry.py (one retry per failed test, FLAKY recorded).
-    return re.findall(r'run: python (?:scripts/ci_retry\.py .*? -- python )?(?:-m pytest|scripts/run_tests\.py) '
-                      r'tests/ -m "([^"]+)"(.*)', block.group(1))
+    return re.findall(r'run: python scripts/ci_retry\.py .*? -- python scripts/run_tests\.py '
+                      r'--lane-pass (\S+) tests/ (.*)', block.group(1))
 
 
 @pytest.mark.parametrize("job", ["quick-test", "full-test-runs"])
 def test_each_ci_job_runs_the_same_split_the_gate_runs(job, monkeypatch):
     """The gate's whole promise is "what CI will do, before you push". Both jobs
-    must carry BOTH passes with the gate's own markexprs and the gate's own
-    parallel flag vector — checked per job, because a search of the whole
-    workflow file stays green while either job alone drifts, and it never
-    compared `PARALLEL_PASS_FLAGS` against any CI command at all."""
+    must carry BOTH passes, each the gate's own markexpr and flag vector — checked
+    per job, because a search of the whole workflow file stays green while either
+    job alone drifts. CI names the pass (`run_tests.py --lane-pass`); the runner
+    expands it from the gate's constants, compared here with the gate's own argv."""
+    import importlib.util
+
     from ouroboros import preflight_runner as pr
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     commands = _ci_pytest_suite_commands(job)
-    assert len(commands) == 2, f"{job} runs {len(commands)} full-suite passes, expected 2"
-    (ci_parallel_markexpr, ci_parallel_tail), (ci_serial_markexpr, ci_serial_tail) = commands
+    assert [lane for lane, _tail in commands] == ["parallel", "exclusive"], f"{job} runs {commands!r}"
+    spec = importlib.util.spec_from_file_location("run_tests_script", REPO_ROOT / "scripts" / "run_tests.py")
+    run_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_tests)
 
     gate_parallel, gate_serial = pr._preflight_pass_specs()
-    assert ci_parallel_markexpr == gate_parallel.args[2], f"{job} parallel markexpr drifted from the gate"
-    assert ci_serial_markexpr == gate_serial.args[2], f"{job} serial markexpr drifted from the gate"
-
-    # The exact flag VECTOR, contiguous and in order: `--dist loadscope` without
+    # The exact `-m` and flag VECTOR, contiguous and in order: `--dist loadscope` without
     # `--max-worker-restart=0` is a different gate, and so is the same set in an
     # order that separates a flag from its value.
-    assert " ".join(pr.PARALLEL_PASS_FLAGS) in ci_parallel_tail, (
-        f"{job}'s parallel pass no longer runs PARALLEL_PASS_FLAGS verbatim: {ci_parallel_tail!r}"
-    )
-    # ...and the serial pass carries the gate's serial flags and none of the xdist ones.
-    assert " ".join(pr.SERIAL_PASS_FLAGS) in ci_serial_tail, (
-        f"{job}'s serial pass no longer runs SERIAL_PASS_FLAGS verbatim: {ci_serial_tail!r}"
-    )
+    assert run_tests.lane_pass_args("parallel") == gate_parallel.args[1:3 + len(pr.PARALLEL_PASS_FLAGS)]
+    assert run_tests.lane_pass_args("exclusive") == gate_serial.args[1:3 + len(pr.SERIAL_PASS_FLAGS)]
+    # ...and the serial pass carries none of the xdist ones, neither expanded nor added by the step.
     for flag in set(pr.PARALLEL_PASS_FLAGS) - set(pr.SERIAL_PASS_FLAGS):
-        assert flag not in ci_serial_tail.split(), f"{job}'s serial pass carries {flag}"
+        assert flag not in run_tests.lane_pass_args("exclusive")
+    for _lane, tail in commands:
+        assert not set(tail.split()) & set(pr.PARALLEL_PASS_FLAGS + pr.SERIAL_PASS_FLAGS), (
+            f"{job} adds a pass flag beside --lane-pass: {tail!r}")
 
 
 def test_explicit_pytest_args_stay_single_pass():

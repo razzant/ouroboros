@@ -239,12 +239,12 @@ jobs:
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && matrix.shard == 1 }}
         run: python scripts/run_tests.py --node
-      # NOTE: a command-line `-m` REPLACES the pyproject `addopts` markexpr, so the default
-      # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
-      # the serial split. Both passes carry the gate's per-test timeout with pytest-timeout's
-      # default method: SIGALRM fails only the hung test on POSIX; on Windows the thread method
-      # stops the worker, and scripts/ci_retry.py continues the tests the stopped session never
-      # ran. Each producer step keeps a wall-clock ceiling well above its slowest observed shard;
+      # `--lane-pass` takes each pass's `-m` (the marker-lane exclusions ANDed with the serial
+      # split) and flags from the gate's constants (ouroboros/preflight_runner.py), as the local
+      # battery does; no step spells them. Both passes carry the gate's per-test timeout with
+      # pytest-timeout's default method: SIGALRM fails only the hung test on POSIX; on Windows
+      # the thread method stops the worker, and scripts/ci_retry.py continues the tests the
+      # stopped session never ran. Each producer step keeps a wall-clock ceiling well above its slowest observed shard;
       # its expiry fails that step without cancelling the job, so the evidence step below still
       # names the test. `scripts/run_tests.py` owns each pass (lifeline guardian, overload stop).
       - name: Run tests (parallel — one xdist pass with resource groups; everything but serial("exclusive"))
@@ -253,14 +253,14 @@ jobs:
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "not exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadgroup --max-worker-restart=0 --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/3
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass parallel tests/ -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/3
       - name: Run tests (serial — the serial("exclusive") tests alone, one process)
         id: tests_serial
         timeout-minutes: 90
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/3
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass exclusive tests/ -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/3
       # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
       # lane below blocks, warns or passes a grown book by this mode.
       - name: Decide the reference-book growth mode
@@ -329,13 +329,14 @@ jobs:
       # `devtools/benchmarks` as a directory IS the `devtools/benchmarks/**/test_*.py`
       # glob (pyproject `python_files`): no shell globstar, no list to maintain
       # when a bench adds a suite. The roots ride the STEP env: the `runner`
-      # context is step-only (the same shape as betterleaks-platform-smoke).
+      # context is step-only (the same shape as betterleaks-platform-smoke). No `-m`:
+      # pyproject `addopts` carries the marker-lane exclusions (pinned to LANE_EXCLUSION_EXPR).
       - name: Run benchmark methodology tests (tests/test_devtools_benchmarks.py + devtools/benchmarks/**/test_*.py)
         env:
           OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-benchmark-methodology
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-benchmark-methodology/data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-benchmark-methodology/data/settings.json
-        run: python -m pytest tests/test_devtools_benchmarks.py devtools/benchmarks -m "not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short
+        run: python -m pytest tests/test_devtools_benchmarks.py devtools/benchmarks --timeout=300 -q --tb=short
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 1.5: the SQLite floor. A store file written by the bundled engine must
@@ -447,9 +448,10 @@ jobs:
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard == 1 }}
         run: python scripts/run_tests.py --node
-      # Independent unsharded witnesses, in fresh processes on shard 1 of each OS.
-      # These and the two executed passes have identical marker expressions and read
-      # the same weight table.
+      # Independent unsharded witnesses, in fresh processes on shard 1 of each OS. They spell
+      # the two marker expressions on purpose: an oracle the `--lane-pass` shards are reconciled
+      # against (tests/ci_evidence.py reconcile-shards), not a second copy of what runs. Both
+      # read the same weight table; tests pin these strings to the gate's constants.
       - name: Collect the parallel manifest
         id: manifest_parallel
         timeout-minutes: 20
@@ -466,9 +468,8 @@ jobs:
           python -m pytest tests/ -m "exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet"
           --collect-only -q --default-suite-manifest
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/default-manifest/serial"
-      # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
-      # marker-lane exclusions and AND them with the pass split: one xdist pass in which a
-      # `serial("<resource>")` test takes turns per resource (tests/conftest.py), then
+      # `--lane-pass` takes each pass's `-m` and flags from the gate's constants: one xdist pass
+      # in which a `serial("<resource>")` test takes turns per resource (tests/conftest.py), then
       # `serial("exclusive")` alone in one process. Both passes carry the
       # gate's per-test timeout with pytest-timeout's default method (SIGALRM on POSIX fails
       # only the hung test; Windows' thread method stops the worker and scripts/ci_retry.py
@@ -480,14 +481,14 @@ jobs:
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "not exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadgroup --max-worker-restart=0 --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass parallel tests/ -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
       - name: Run tests (serial — the serial("exclusive") tests alone, one process)
         id: tests_serial
         timeout-minutes: 90
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass exclusive tests/ -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
       # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
       # lane below blocks, warns or passes a grown book by this mode.
       - name: Decide the reference-book growth mode
@@ -704,9 +705,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json --
-          python scripts/run_tests.py $(cat "$RUNNER_TEMP/journal_modules.txt")
-          -m "not exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet"
-          -n auto --dist loadgroup --max-worker-restart=0 --timeout=300 -q --tb=short
+          python scripts/run_tests.py --lane-pass parallel $(cat "$RUNNER_TEMP/journal_modules.txt") -q --tb=short
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel"
       - name: Run them (serial)
         id: tests_serial
@@ -717,8 +716,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json --
-          python scripts/run_tests.py $(cat "$RUNNER_TEMP/journal_modules.txt")
-          -m "exclusive and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short
+          python scripts/run_tests.py --lane-pass exclusive $(cat "$RUNNER_TEMP/journal_modules.txt") -q --tb=short
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
       - name: Publish test evidence
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}

@@ -18,7 +18,7 @@ from tests.test_preflight_runner import _make_repo
 WINDOWS_COMMAND_LINE = 32_767  # CreateProcess takes a command line shorter than this, terminator included
 # The fields the two plugins a run writes are filled from (``preflight_probe.WORKER_PROBE_SOURCE``,
 # ``preflight_inventory.SOURCE``). A path or a module name may spell any of them, and that is never a field.
-TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__SCOPE__", "__RESULT_PATH__")
+TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__COLLECTION_PATH__", "__SCOPE__", "__RESULT_PATH__")
 
 
 def plugin_values(argv, directory):
@@ -379,7 +379,7 @@ def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     for job in ("quick-test", "full-test-runs"):
         runs = [step.get("run", "") for step in WORKFLOW["jobs"][job]["steps"]]
         assert not any("--selected" in run for run in runs), job
-        assert sum("python scripts/run_tests.py tests/ -m " in run for run in runs) == 2, job
+        assert sum("python scripts/run_tests.py --lane-pass " in run for run in runs) == 2, job
 
 
 @pytest.mark.parametrize("tier", ["selected", "full"])

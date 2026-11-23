@@ -116,7 +116,8 @@ def test_reporter_import_keeps_supported_older_pytest_without_hiding_other_error
         assert failure.value.name == missing
         return
     loaded = runpy.run_path(str(path), run_name="ci_import_probe")
-    receiver = SimpleNamespace(reports=[], _event=lambda *args, **kwargs: None)
-    loaded["_Results"].pytest_runtest_logreport(receiver, SimpleNamespace(
+    # The class's own constructor, as an xdist worker holds it (no journal to start): its fields are never listed here.
+    receiver = loaded["_Results"](SimpleNamespace(option=SimpleNamespace(), workerinput={}))
+    receiver.pytest_runtest_logreport(SimpleNamespace(
         nodeid="test_sample.py::test_sample", when="call", outcome="passed", duration=0.1))
     assert receiver.reports[0]["is_subtest"] is False

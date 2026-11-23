@@ -1016,8 +1016,9 @@ def test_every_landed_test_producer_runs_under_the_owned_runner(job):
     assert len(producers) == 2
     for step_id, run in producers.items():
         label = step_id.removeprefix("tests_")
+        lane = "parallel" if label == "parallel" else "exclusive"
         assert run.startswith(f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/{label}" '
-                              "--accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "), run
+                              f"--accepted tests/accepted_failures.json -- python scripts/run_tests.py --lane-pass {lane} tests/ "), run
         assert f'--ci-evidence-dir="${{{{ runner.temp }}}}/ci-evidence/{label}"' in run
     assert node == ["python scripts/run_tests.py --node"]
 
