@@ -384,6 +384,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         'last_physical_attempt_capture',  # a usable wrap-up answers its own send's start hint (#3896)
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
+        "_append_or_merge_user_message",
         "_record_owner_directive",
         # context-attention 5A: the per-round facts line measures through the
         # loop's fit wrapper so the measurement is the one the round records.

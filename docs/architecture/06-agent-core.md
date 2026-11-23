@@ -791,11 +791,11 @@ Nonce binds the predecessor before effects: replay rejoins, drift refuses, anoth
 
 #### Saved working state and application stops
 
-`working_checkpoint.py` saves one `source_handles/working/` state per attempt via `owner_wait.continuation_state` (format: PERSISTENCE; save boundaries/atomicity: module docstring). `owner_wait.governing_continuation` selects owner wait, exact pause, then working recovery; invalid sources never fall through. Restore precedes startup receipt minus restored mail. Startup/tool wakes stage exposure before save (unsaved mail: the module docstring).
+`working_checkpoint.py` saves one `source_handles/working/` state per attempt (`owner_wait.continuation_state`; format: PERSISTENCE; boundaries, atomicity and unsaved mail: docstring). `owner_wait.governing_continuation`: owner wait, exact pause, then working recovery; invalid sources never fall through. Startup receipts omit restored mail; same-ID retries from scratch mark ACKed tree mail as history. Startup/tool wakes stage exposure before save.
 
 `owner_wait.rebind_restored_route` previews the frozen frame. `continuation_tools.py` prices permitted schemas and notices per mode on a changed prefix, cap, mode or gateway. Only the selected list and digest publish; recovered bytes stay frozen.
 
-`worker_health` (same-ID crash) and `workers.kill_workers` (planned successors) freeze `_working_recovery` before queueing; load retires the rolling file; failed freezes keep a gap. Invariant 31 binds replay. Delegated runs stay facts; saved candidates buy no generation. A `task_reaper` timeout queues no successor. Reads verify lineage bytes, own store first (PERSISTENCE).
+`worker_health` (same-ID crash) and `workers.kill_workers` (planned successors) freeze `_working_recovery` before queueing; failed freezes leave gaps. Load verifies lineage bytes (own store first; PERSISTENCE), then retires the rolling file. Invariant 31 binds replay: runs stay facts; saved candidates buy no generation. `task_reaper` timeouts queue no successor.
 
 Restart/updates name returns in `restart_retention.prepare_restart_returns` (§9; invariant 31); native waits keep carriers (age: §5). Updates save handoffs before stopping (failure blocks update); Rollback saves none. Refused returns emit `restart_return_refused`. Cold continuation keeps economics, deadlines/wait time and same-requester/attempt Restart intent, rereading cost authority (`task_pacing.restore_cost_ceiling`). `retained_for_boot` exempts update-stopped RUNNING from timeouts, never death checks. `recover_aborted_update` parks captures after confirmed teardown, saves PENDING before reopening writers/releasing dead project leases. Pool startup grants no return.
 
