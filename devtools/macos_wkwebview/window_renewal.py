@@ -36,7 +36,7 @@ from devtools.macos_wkwebview.launcher_evidence import OSLOG_RESULTS, Opening, l
 from devtools.macos_wkwebview.native_window import (  # noqa: E402
     CAPTURE_BRIDGE, RoomWindow, launcher_channel, public_reason, same_view, same_window, visible_key_view)
 
-SCHEMA = "ouroboros.macos-window-renewal/8"
+SCHEMA = "ouroboros.macos-window-renewal/9"
 EXIT_CODES = {"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 3, "UNSUPPORTED": 4}
 TRANSITIONS = ("restart", "update", "handoff")
 PROJECT_UPDATES = ("update", "handoff")
@@ -182,6 +182,15 @@ class Arm:
         self.settled = True
         self.checkpoint = checkpoint
         self.phase = "prepare"
+        self.deadline = None  # the monotonic end of a bounded run's waits (first_open.py); the full journey has none
+
+    def remaining(self, seconds: float) -> float:
+        """A wait's own bound, cut to what is left of a bounded run; teardown's waits never take this."""
+        return seconds if self.deadline is None else max(0.0, min(seconds, self.deadline - time.monotonic()))
+
+    def wait(self, read, seconds: float, interval: float = 0.5):
+        """The window's waits: past a bounded run's end each is one read, so the arm reaches its teardown."""
+        return wait_for(read, self.remaining(seconds), interval)
 
     def observe(self, name, read):
         try:
@@ -221,7 +230,7 @@ class Arm:
         other step, so no later transition, relaunch or log line can add to it."""
         channel, child, extra = launcher_channel(self.root, self.tree["src"] / "launcher.py",
                                                   self.app / "repo/launcher.py", self.out, self.tag)
-        self.win = RoomWindow(channel, wait_for, self.out, self.observe)
+        self.win = RoomWindow(channel, self.wait, self.out, self.observe)
         self.quit_requested = False
         opening = Opening(self.root, Path(extra["RENEWAL_STAGES"]), len(self.openings), len(self.servers))
         with child, opening.open_stderr() as stderr:  # a private regular file under this arm, never a pipe
@@ -265,7 +274,7 @@ class Arm:
             state = self.win.state()
             return state if state and state["loopback"] and state["port"] == self.generation["port"] else None
         return wait_for(lambda: (s := current()) and (not old or s["view"] != old["view"]) and s,
-                        25 if old else 75) or current()
+                        self.remaining(25 if old else 75)) or current()
 
     def reconcile_view(self, label, old, sampled, final, checks, measured):
         """A settle that ended on the still-observed old view is provisional until the final read confirms it.
@@ -307,7 +316,7 @@ class Arm:
 
     def wait_generation(self, previous) -> dict:
         """The launcher's next server: its own child with a new pid or birth, bound to its port and ready."""
-        deadline = time.monotonic() + 480
+        deadline = time.monotonic() + self.remaining(480)
         while time.monotonic() < deadline:
             if self.launcher.poll() is not None:
                 raise RuntimeError(f"the launcher exited {self.launcher.returncode} while its server was awaited")
@@ -324,7 +333,7 @@ class Arm:
         raise TimeoutError("no new server generation answered ready")
 
     def wait_gone(self, generation: dict, seconds: float = 300) -> bool:
-        if not wait_for(lambda: alive(generation) is False, seconds, 0.25):
+        if not wait_for(lambda: alive(generation) is False, self.remaining(seconds), 0.25):
             raise TimeoutError(f"the old server {generation['pid']} did not exit")
         return True
 
@@ -867,23 +876,27 @@ class Arm:
         except Exception as exc:
             self.gaps.append(f"{self.phase} stopped ({public_reason(exc)})")
         finally:
-            self.checkpoint()  # keep the observed cause even if closing a resource raises
-            if self.launcher is not None:
-                self.observe("final Quit", self.quit)  # quit owns the one-shot request
-                if not self.settled and self.launcher.poll() is not None:
-                    self.settled = bool(self.servers and self.observe("server exits", self.servers_gone))
-            if not self.settled:
-                from ouroboros.test_environment import retain_tree
-                retained = retain_tree(self.root, "fixture exit not confirmed")
-                self.gaps.append("fixture exit not confirmed; " + ("directory retained by safe_test" if retained else "retention marker unavailable"))
-            if self.win:
-                self.observe("observer close", self.win.channel.conn.close)
-            if self.model:
-                for release in self.model.release.values():
-                    release.set()
-                self.model.__exit__(None, None, None)  # an uncertain shutdown stops the second arm
-            if self.settled:
-                self.observe("cleanup", lambda: shutil.rmtree(self.root))
+            self.teardown()
+
+    def teardown(self):
+        """The arm's one ordinary end, whatever stopped it: Quit, confirmed server exits, then removal or retention."""
+        self.checkpoint()  # keep the observed cause even if closing a resource raises
+        if self.launcher is not None:
+            self.observe("final Quit", self.quit)  # quit owns the one-shot request
+            if not self.settled and self.launcher.poll() is not None:
+                self.settled = bool(self.servers and self.observe("server exits", self.servers_gone))
+        if not self.settled:
+            from ouroboros.test_environment import retain_tree
+            retained = retain_tree(self.root, "fixture exit not confirmed")
+            self.gaps.append("fixture exit not confirmed; " + ("directory retained by safe_test" if retained else "retention marker unavailable"))
+        if self.win:
+            self.observe("observer close", self.win.channel.conn.close)
+        if self.model:
+            for release in self.model.release.values():
+                release.set()
+            self.model.__exit__(None, None, None)  # an uncertain shutdown stops the second arm
+        if self.settled:
+            self.observe("cleanup", lambda: shutil.rmtree(self.root))
         self.checkpoint()
 
     def result(self):

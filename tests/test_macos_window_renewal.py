@@ -7,22 +7,26 @@ never reads as one, the Project Send ledger keeps missing and false apart across
 to a generation only by its measured parent chain, one native AppKit Return drives an ordinary Send with no
 substitution or retry, a restored quote is compared in its complete stored shape, and the UI anchors and the dispatch-only
 workflow it relies on still exist. The arm's source and managed mirror are built here with real Git, so a wrong seed
-or offer cannot first appear on the one hosted Mac.
+or offer cannot first appear on the one hosted Mac. The first opening alone sends its one Restart only to a usable
+window, and its stages and classes name where a launch got, from closed lists, without copying any text.
 """
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from devtools.macos_wkwebview import arm_source, native_window, typing_evidence
+from devtools.macos_wkwebview import arm_source, first_open, native_window, typing_evidence
 from devtools.macos_wkwebview import launcher_evidence as evidence
 from devtools.macos_wkwebview import journey_model as journeys
 from devtools.macos_wkwebview import window_renewal as renewal
@@ -1024,7 +1028,7 @@ def _settling(monkeypatch, renews_at):
     clock = [0.0]
     monkeypatch.setattr(renewal, "time", SimpleNamespace(
         monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
-    arm.generation, arm.gaps, arm.facts = {"port": 5001}, [], {}
+    arm.generation, arm.gaps, arm.facts, arm.deadline = {"port": 5001}, [], {}, None  # the full journey's own bounds
     arm.win = SimpleNamespace(state=lambda: _view(view="a" if clock[0] < renews_at else "b", loopback=True, port=5001))
     return arm, clock
 
@@ -1358,7 +1362,7 @@ def test_an_early_launcher_exit_keeps_its_signal_stages_and_known_fatal_class_wi
     assert record["stages"] == ["spawned", "observer_loaded", "webview_imported", "launcher_log_opened", "pid_lock_held",
                                 "server_spawn_logged"]  # nothing past the server spawn was recorded: not a claim about why
     assert record["error_classes"] == ["objc_exception:NSInvalidArgumentException", "python_fatal_error"]
-    assert record["evidence"] == {"launcher_log": "present", "stderr": "present"}
+    assert record["evidence"] == {"launcher_log": "present", "stderr": "present", "markers": "present"}
     assert SECRET not in json.dumps(record) and "reason" not in json.dumps(record)
 
 
@@ -1389,7 +1393,8 @@ def test_normal_progress_records_every_stage_the_launcher_and_driver_observed(tm
 def test_missing_or_unusable_evidence_is_unavailable_never_a_negative_finding(tmp_path):
     record = _launch(tmp_path, code=1).record(0)
     assert record["exit"] == {"code": 1} and record["stages"] == ["spawned"] and record["error_classes"] == []
-    assert record["evidence"] == {"launcher_log": "absent", "stderr": "absent"}
+    assert record["evidence"] == {"launcher_log": "absent", "stderr": "absent", "markers": "absent"}
+    assert record["inferred"] == {"last_window_stage": None, "next_window_stage": "window_created"}
     (tmp_path / "arm/launcher-7.stderr").mkdir()  # not a regular file
     blocked = evidence.Opening(tmp_path / "arm", tmp_path / "arm/stages-0", 7, 0)
     blocked.launcher = SimpleNamespace(pid=1, poll=lambda: None)
@@ -1474,6 +1479,142 @@ def test_the_observer_marks_only_inside_its_own_launch_directory_and_never_raise
         for channel, child, _ in made:  # both ends of every channel
             child.close()
             channel.conn.close()
+
+
+WINDOW_TRAIL = ("observer_loaded", "webview_imported", "window_created", "window_before_show", "observer_hook_completed",
+                "product_setup_entered", "product_setup_completed", "window_shown", "first_navigation_entered",
+                "first_navigation_requested")
+
+
+def test_the_window_stages_name_where_the_first_document_got_and_classes_only_from_closed_lists(tmp_path):
+    secret_marks = ("raised.window_setup.SecretError", "raised.secret_operation.KeyError", "raised.window_setup.other",
+                    "raised.document_request.AttributeError")
+    opening = _launch(tmp_path, code=-6, pid_file="4242", stages=WINDOW_TRAIL + secret_marks, log=[
+        "WebKit room session registration failed (AttributeError); keeping this document",
+        "WebKit navigation_error stage=provisional domain=NSURLErrorDomain code=-1004 observed_at=1795000000.125",
+        "WebKit navigation_error stage=committed domain=SecretDomain code=unavailable observed_at=1795000001.000",
+        f"WebKit navigation_error stage=provisional domain={SECRET} code=1 observed_at=1795000002.000"],
+        stderr=(f"*** Terminating app due to uncaught exception 'OC_PythonException', reason: '<class 'AttributeError'>: "
+                f"{SECRET}'\n").encode())
+    record = opening.record(0)
+    assert record["exit"] == {"signal": 6}
+    assert record["stages"] == ["spawned", "observer_loaded", "webview_imported", "launcher_log_opened", "pid_lock_held",
+                                "window_created", "window_before_show", "observer_hook_completed", "product_setup_entered",
+                                "session_registration_failed_logged", "product_setup_completed", "window_shown",
+                                "first_navigation_entered", "first_navigation_requested"]
+    # where the observed window stages end, and the next one, which may still have happened unobserved: never a cause
+    assert record["inferred"] == {"last_window_stage": "first_navigation_requested",
+                                  "next_window_stage": "first_document_committed"}
+    assert record["error_classes"] == ["objc_exception:OC_PythonException", "python_exception:AttributeError"]
+    assert record["raised"] == [{"operation": "window_setup", "class": "other", "seen_by": "observer"},
+                                {"operation": "document_request", "class": "AttributeError", "seen_by": "observer"},
+                                {"operation": "session_registration", "class": "AttributeError", "seen_by": "launcher_log"}]
+    assert record["navigation_errors"] == [{"stage": "provisional", "domain": "NSURLErrorDomain", "code": -1004},
+                                           {"stage": "committed", "domain": "other", "code": "unavailable"}]
+    text = json.dumps(record)
+    assert not any(word in text for word in (SECRET, "SecretError", "secret_operation", "SecretDomain", "reason"))
+    unlisted = _launch(tmp_path, ordinal=1, code=-6, stages=("window_created", "first_navigation_entered"), stderr=(
+        "*** Terminating app due to uncaught exception 'OC_PythonException', reason: '<class 'ouroboros.Private'>: x'\n"
+        ).encode()).record(0)
+    assert unlisted["error_classes"] == ["objc_exception:OC_PythonException"] and "Private" not in json.dumps(unlisted)
+    # the product entered its request, but no native return with a navigation was observed
+    assert unlisted["inferred"] == {"last_window_stage": "first_navigation_entered",
+                                    "next_window_stage": "first_navigation_requested"}
+
+
+class _Event(list):
+    """pywebview's event: ``+=`` appends a handler, and ``set`` calls each handler that takes no argument."""
+
+    def __iadd__(self, handler):
+        self.append(handler)
+        return self
+
+    def set(self):
+        for handler in self:
+            assert not inspect.signature(handler).parameters
+            handler()
+
+
+def _product(monkeypatch):
+    """A stand-in ``ouroboros.launcher_webkit`` whose renderer follows the real one's first-document flags."""
+    class MainRenderer:
+        fail, refused = None, False
+
+        def __init__(self):
+            self.first, self.installed, self.navigation, self.view = False, False, None, object()
+
+        def _before_show(self):
+            if self.fail:
+                raise self.fail
+            self.first, self.installed, self.navigation = True, True, SimpleNamespace(generation=None)
+            return "registered"
+
+        def _first_document(self):
+            if self.fail:
+                raise self.fail
+            if self.first and self.navigation.generation is None and not self.refused:  # a bound request is on its way
+                self.navigation.generation = ("child", 5001, "key")  # WebKit's loadRequest returned a navigation
+
+        def document_left(self):
+            self.first = False
+
+        def navigation_failed(self, view, nav, provisional):
+            return provisional
+
+    monkeypatch.setitem(sys.modules, "ouroboros.launcher_webkit", SimpleNamespace(MainRenderer=MainRenderer))
+    return MainRenderer
+
+
+def _window():
+    return SimpleNamespace(events=SimpleNamespace(shown=_Event(), before_load=_Event()))
+
+
+def test_the_setup_witness_hands_every_call_through_and_marks_only_what_happened(monkeypatch):
+    renderer, marks, window = _product(monkeypatch), [], _window()
+    evidence.witness_setup(window, marks.append)
+    evidence.witness_setup(_window(), marks.append)  # a second image of the launcher wraps nothing twice
+    product = renderer()
+    assert not inspect.signature(product._before_show).parameters  # pywebview still calls it with no argument
+    assert product._before_show() == "registered"
+    product.refused = True
+    product._first_document()  # entered, but the native request returned no navigation
+    product.refused = False
+    product._first_document()
+    product._first_document()  # its request was already taken: no second witness
+    assert marks == ["product_setup_entered", "product_setup_completed", "product_session_registered",
+                     "first_navigation_entered", "first_navigation_entered", "first_navigation_requested"]
+    del marks[:]
+    assert product.navigation_failed(product.view, None, True) is True  # the call's own result, whatever is marked
+    product.navigation_failed(object(), None, False)  # another view's failure is not the window's own first load
+    product.document_left()
+    product.document_left()  # a later commit is not the first document's
+    product.navigation_failed(product.view, None, True)
+    window.events.shown.set()
+    window.events.before_load.set()
+    assert marks == ["first_navigation_failed", "first_document_committed", "window_shown", "first_document_finished"]
+
+
+def test_an_exception_crossing_a_witnessed_operation_is_raised_unchanged_and_named_only_from_the_list(monkeypatch):
+    renderer, marks = _product(monkeypatch), []
+    evidence.witness_setup(_window(), marks.append)
+    product = renderer()
+    product.fail = error = KeyError(SECRET)
+    with pytest.raises(KeyError) as raised:
+        product._before_show()
+    assert raised.value is error and marks == ["product_setup_entered", "raised.window_setup.KeyError"]
+    product.fail = type("PrivateFailure", (Exception,), {})(SECRET)
+    with pytest.raises(Exception, match="private-path-token"):
+        product._first_document()
+    assert marks[-1] == "raised.document_request.other" and set(marks) <= {*evidence.STAGES, *evidence._RAISED}
+
+    def broken(stage):  # a witness that cannot write leaves the product's call exactly as it was
+        raise OSError("disk full")
+
+    quiet = _product(monkeypatch)
+    evidence.witness_setup(_window(), broken)
+    assert quiet()._before_show() == "registered"
+    monkeypatch.delitem(sys.modules, "ouroboros.launcher_webkit")
+    evidence.witness_setup(SimpleNamespace(events=None), broken)  # an older arm or another window: nothing to wrap
 
 
 class _Child:
@@ -1633,6 +1774,9 @@ def test_the_staged_observer_imports_with_the_page_probe_it_reads_at_import(tmp_
     assert pathlib.Path(module.__file__).resolve() == staged.resolve()  # the arm's own copy, not the source tree
     assert module.BUBBLE_PROBE == native_window.BUBBLE_PROBE  # the probe every page-side bubble read sends
     assert (hooks / "composer_clearance.py").is_file() and (hooks / "macos_capture.py").is_file()
+    witness = _import_staged(hooks / "launcher_evidence.py", "staged_launcher_evidence")  # imported inside the launcher
+    assert callable(witness.witness_setup) and witness.STAGES == evidence.STAGES  # it writes what the driver reads
+    assert witness._RAISED == evidence._RAISED
     (hooks / "bubble_probe.js").unlink()  # the former copy set left that resource in the source tree
     with pytest.raises(FileNotFoundError):
         _import_staged(staged, "staged_observer_without_the_probe")
@@ -1643,16 +1787,19 @@ def test_the_macos_job_runs_only_on_request_and_the_windows_job_keeps_its_trigge
     triggers = workflow.get("on") or workflow.get(True)
     assert triggers["push"] == {"tags": ["v*"]}
     assert triggers["workflow_dispatch"]["inputs"]["macos_window_renewal"]["default"] is False
-    assert workflow["jobs"]["native-window"]["if"] == "${{ !inputs.macos_window_renewal }}"
+    assert triggers["workflow_dispatch"]["inputs"]["macos_first_open"]["default"] is False
+    assert workflow["jobs"]["native-window"]["if"] == "${{ !inputs.macos_window_renewal && !inputs.macos_first_open }}"
     job = workflow["jobs"]["macos-window-renewal"]
-    assert job["if"] == "${{ github.event_name == 'workflow_dispatch' && inputs.macos_window_renewal }}"
+    assert job["if"] == ("${{ github.event_name == 'workflow_dispatch' && inputs.macos_window_renewal "
+                         "&& !inputs.macos_first_open }}")  # the narrower first opening takes precedence
     text = yaml.safe_dump(job)
     assert job["runs-on"] == "macos-latest" and "window_renewal.py" in text and "safe_test.py" in text
     assert "secrets." not in text and job["steps"][0]["with"]["persist-credentials"] is False
     assert job["env"] == {"BASELINE_SHA": "${{ inputs.baseline_sha }}", "CANDIDATE_SHA": "${{ inputs.candidate_sha }}"}
     inputs = triggers["workflow_dispatch"]["inputs"]
     assert "default" not in inputs["baseline_sha"] and "default" not in inputs["candidate_sha"]  # chosen per run
-    assert set(workflow["jobs"]) == {"native-window", "macos-window-renewal"} and "matrix" not in text
+    assert set(workflow["jobs"]) == {"native-window", "macos-window-renewal", "macos-first-open"} and "matrix" not in text
+    assert "macos-first-open" in workflow["concurrency"]["group"]  # a first opening never cancels another mode's run
     for name in ("test_desktop_room_session.py", "test_launcher_webkit.py", "test_launcher_webkit_diagnostics.py",
                  "test_macos_source_entry.py", "test_macos_window_renewal.py", "desktop_room_session.test.js"):
         assert name in text
@@ -1756,3 +1903,264 @@ def test_prepare_builds_the_arms_source_an_isolated_environment_and_a_keyless_lo
     finally:
         if case.model is not None:
             case.model.__exit__(None, None, None)
+
+
+# --- the first opening alone (first_open.py) ---------------------------------------------------------------------------
+
+def _first_report(**values):
+    checks = {phase: dict.fromkeys(names, True) for phase, names in first_open.CHECKS.items()}
+    for key, value in values.items():
+        phase, name = key.split(".")
+        checks[phase][name] = value
+    return {"candidate": {"checks": checks, "gaps": []}}
+
+
+def test_the_first_opening_verdict_keeps_demonstrated_missing_and_uncalibrated_apart():
+    assert first_open.judge(_first_report())["verdict"] == "PASS"
+    for key in ("first_open.window_usable", "restart.view_new", "restart.installed", "restart.main_active_after",
+                "restart.typed", "restart.window_typed_pixels"):
+        judged = first_open.judge(_first_report(**{key: False}))
+        assert judged["verdict"] == "FAIL" and judged["failures"] == [f"{key} is false"], key
+    for name in first_open.TYPING:  # unless the first window's own probe held, a false probe proves nothing
+        blind = first_open.judge(_first_report(**{f"first_open.{name}": False, f"restart.{name}": False}))
+        assert blind["verdict"] == "INCONCLUSIVE" and not blind["failures"], name
+    assert first_open.judge(_first_report(**{"restart.document_ready": None}))["verdict"] == "INCONCLUSIVE"
+    stopped = _first_report()
+    stopped["candidate"]["gaps"] = ["restart stopped (TimeoutError)"]
+    assert first_open.judge(stopped)["verdict"] == "INCONCLUSIVE"
+    assert first_open.judge({"candidate": None})["verdict"] == "INCONCLUSIVE"  # nothing observed is never a pass
+    assert first_open.judge({"unsupported": "requires macOS", "candidate": None})["verdict"] == "UNSUPPORTED"
+
+
+def _first_open_arm(tmp_path, monkeypatch, *, usable, code=None, budget=600.0, first_native=None):
+    """A FirstOpen arm whose launch, servers and window are inert; its run, evidence and Restart execute unchanged.
+    The old view "a" answers until the one Restart request, the new view "b" in the same window after it; the first
+    window's native typing results are positive unless ``first_native`` says otherwise."""
+    monkeypatch.setattr(first_open, "wait_for", lambda read, seconds, interval=0.5: read())  # no real exit wait
+    arm = object.__new__(first_open.FirstOpen)
+    arm.root, arm.phase, arm.deadline = tmp_path / "arm", "prepare", time.monotonic() + budget
+    arm.root.mkdir()
+    arm.checks = {phase: dict.fromkeys(names) for phase, names in first_open.CHECKS.items()}
+    arm.facts, arm.gaps, arm.openings, arm.servers, arm.tree = {}, [], [], [], {"src": tmp_path}
+    arm.generation, arm.launcher, arm.checkpoint = {"port": 5001}, None, lambda: None
+    seen, old, new = [], _view(loopback=True, port=5001), _view(view="b", loopback=True, port=5002)
+    shown = {"view": old}
+
+    def start(entry):
+        seen.append("first launch")
+        arm.launcher = _Launcher(4242, code)
+        arm.openings.append(SimpleNamespace(project=lambda servers: {"read_again": True}))
+        return usable
+
+    def capture(op, kind, name, target):
+        assert (op, kind, target) == ("capture", "window", shown["view"])
+        seen.append("image " + name)
+        return {"file": name + ".png", "source": "CoreGraphics"}
+
+    def typing(target, field, label, checks, facts):
+        assert field == "#chat-input" and target is shown["view"]
+        seen.append("type " + label)
+        checks.update(dict.fromkeys(first_open.TYPING, True), **(first_native if label == "first" and first_native else {}))
+
+    def request(phase):
+        seen.append("request " + phase)
+        arm.generation, shown["view"] = {"port": 5002}, new
+        arm.checks[phase]["generation_new"] = True
+
+    arm.win = SimpleNamespace(state=lambda: shown["view"], document=lambda port: {"origin": port}, call=capture,
+                              typing=typing, shows_room=lambda project, target, origin=None: project is None and origin == 5002)
+    arm.prepare, arm.start_session, arm.generation_step = (lambda: seen.append("prepare")), start, request
+    arm.settle = lambda before: shown["view"] if before is old else None
+    arm.teardown = lambda: seen.append("teardown")
+    for name in ("apply", "start_tasks", "seed_exchange", "pending", "create_project", "project_send", "transition",
+                 "stage", "relaunch", "fixture", "help", "presentation", "quit"):  # its own Quit lives in teardown
+        setattr(arm, name, lambda *args, _name=name, **kwargs: pytest.fail(_name + " ran in a first opening"))
+    return arm, seen, old, new
+
+
+def test_a_usable_first_window_gets_exactly_one_ordinary_restart_and_then_the_run_stops(tmp_path, monkeypatch):
+    arm, seen, old, new = _first_open_arm(tmp_path, monkeypatch, usable=True)
+    arm.run()
+    assert seen == ["prepare", "first launch", "image first-window", "type first", "request restart",
+                    "image restart-window", "type restart", "teardown"]
+    assert arm.gaps == [] and arm.facts["restart_window"] == {"before": old, "after": new, "final": new}
+    assert arm.facts["first_window"] is old and arm.facts["launch_at_end"] == {"read_again": True}
+    assert arm.facts["restart_diagnostics"]["process_log_lookup"] == "launcher_log_unavailable"  # fixed labels only
+    assert first_open.judge({"candidate": {"checks": arm.checks, "gaps": arm.gaps}})["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("code, usable", [(-6, False), (None, None)], ids=["launcher-ended", "launcher-running"])
+def test_no_restart_reaches_a_first_window_that_was_never_usable(tmp_path, monkeypatch, code, usable):
+    arm, seen, *_ = _first_open_arm(tmp_path, monkeypatch, usable=False, code=code)
+    arm.run()
+    assert seen == ["prepare", "first launch", "teardown"]  # no image, typing or request after it
+    assert arm.gaps == ["first launch stopped (RuntimeError: the first window was not usable; no Restart was sent)"]
+    assert arm.checks["first_open"]["window_usable"] is usable and not any(arm.checks["restart"].values())
+    assert arm.facts["launch_at_end"] == {"read_again": True}  # the same launch read where the scenario ended
+    judged = first_open.judge({"candidate": {"checks": arm.checks, "gaps": arm.gaps}})
+    assert judged["verdict"] == ("FAIL" if usable is False else "INCONCLUSIVE")
+
+
+def test_a_first_window_with_too_little_budget_left_gets_no_restart(tmp_path, monkeypatch):
+    arm, seen, *_ = _first_open_arm(tmp_path, monkeypatch, usable=True, budget=first_open.RESTART_RESERVE - 1)
+    arm.run()
+    assert seen == ["prepare", "first launch", "image first-window", "type first", "teardown"]
+    assert arm.gaps == ["first window stopped (RuntimeError: the budget left too little time to settle a Restart; "
+                        "none was sent)"]
+    assert arm.checks["first_open"]["window_usable"] is True and not any(arm.checks["restart"].values())
+
+
+@pytest.mark.parametrize("native", [
+    {"window_pixels": False},                              # the window's own image of a ready document reads dark
+    {"window_typed_pixels": False},                        # the field took the letters; the window never showed them
+    {"typed": False},                                      # the native keys never reached the field
+    {"window_pixels": None, "window_typed_pixels": None},  # no window image at all: no grant, or the capture failed
+    {"typed_pixels": None},                                # WebKit's own snapshot is missing
+], ids=["dark-image", "letters-unseen", "keys-lost", "no-window-image", "no-snapshot"])
+def test_a_visible_dom_without_positive_native_evidence_gets_no_restart(tmp_path, monkeypatch, native):
+    arm, seen, *_ = _first_open_arm(tmp_path, monkeypatch, usable=True, first_native=native)
+    arm.run()
+    assert seen == ["prepare", "first launch", "image first-window", "type first", "teardown"]  # no request
+    assert arm.gaps == ["first window stopped (RuntimeError: the first window gave no positive native readability "
+                        "and input evidence; no Restart was sent)"]
+    assert arm.checks["first_open"]["window_usable"] is True and not any(arm.checks["restart"].values())
+    judged = first_open.judge({"candidate": {"checks": arm.checks, "gaps": arm.gaps}})
+    assert judged["verdict"] == "INCONCLUSIVE" and not judged["failures"]  # a ready DOM alone is never a pass
+
+
+def _passive(monkeypatch, **changes):
+    """A first-opening arm whose window only answers reads: a usable chat document unless ``changes`` say otherwise."""
+    monkeypatch.setattr(renewal, "wait_for", lambda read, seconds, interval=0.5: read())  # one settle sample
+    facts = {"state": _view(loopback=True, port=5001, home=True, pid=4242), "document": {"origin": 7},
+             "room": True, "field": True, "socket": True, **changes}
+    reads = []
+
+    def answer(name, value):
+        reads.append(name)
+        return value
+
+    win = SimpleNamespace(
+        state=lambda: answer("state", facts["state"]),
+        document=lambda port: answer("document", facts["document"] if port == 5001 else None),
+        shows_room=lambda project, target, origin=None: answer("room", facts["room"] if project is None and origin == 7
+                                                               else None),
+        visible=lambda selector, editable=False: answer("field", facts["field"] if (selector, editable) == (
+            "#chat-input", True) else None),
+        page=lambda script: answer("socket", facts["socket"] if "isConnected()" in script else None),
+        until=lambda read, seconds=20: read())
+    for name in ("action", "click", "main", "open_project", "call", "key", "type", "typing"):
+        setattr(win, name, lambda *args, _name=name, **kwargs: pytest.fail(_name + " acted on the first window"))
+    arm = object.__new__(first_open.FirstOpen)
+    arm.win, arm.generation, arm.launcher, arm.deadline = win, {"port": 5001}, _Launcher(4242), None
+    return arm, reads
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({}, None),
+    ({"state": _view(loopback=True, port=5001, home=True, pid=4242, key=False)}, "visible, key and on screen"),
+    ({"state": _view(loopback=True, port=5001, home=True, pid=4242, on_screen=False)}, "visible, key and on screen"),
+    ({"state": _view(loopback=True, port=5001, home=True, pid=7)}, "visible, key and on screen"),
+    ({"state": _view(loopback=True, port=5001, home=False, pid=4242)}, "visible, key and on screen"),
+    ({"state": _view(loopback=True, port=5009, home=True, pid=4242)}, "visible, key and on screen"),
+    ({"document": None}, "not ready"),
+    ({"room": None}, "mounted, editable"),
+    ({"field": False}, "mounted, editable"),
+    ({"socket": False}, "WebSocket"),
+], ids=["usable", "not-key", "off-screen", "another-process", "off-root", "another-child", "no-document",
+        "other-room", "read-only", "no-socket"])
+def test_the_first_opening_only_reads_whether_its_window_shows_the_chat_document(monkeypatch, change, reason):
+    arm, reads = _passive(monkeypatch, **change)
+    if reason is None:
+        assert arm.open_main() is True and reads == ["state", "document", "room", "field", "socket"]
+    else:  # nothing was navigated, closed, reopened, clicked or typed to make it so
+        with pytest.raises(RuntimeError, match=reason):
+            arm.open_main()
+
+
+def test_a_restart_is_never_sent_to_a_hidden_window_and_a_kept_view_is_a_demonstrated_failure(tmp_path, monkeypatch):
+    arm, seen, old, _ = _first_open_arm(tmp_path, monkeypatch, usable=True)
+    arm.win.state = lambda: dict(old, key=False)
+    with pytest.raises(RuntimeError, match="no Restart was sent"):
+        arm.restart()
+    assert seen == []
+    stale = _view(loopback=True, port=5002)  # the old WKWebView, still installed, on the new server's port
+
+    def request(phase):
+        seen.append("request " + phase)
+        arm.generation = {"port": 5002}
+        arm.checks[phase]["generation_new"] = True
+
+    arm.win.state = lambda: stale if seen else old
+    arm.generation_step, arm.settle = request, lambda before: stale
+    arm.evidence = lambda label, target, checks: checks.update(dict.fromkeys(first_open.TYPING, True))
+    arm.restart()
+    assert seen == ["request restart"] and arm.gaps == []  # still the old view at the final read: confirmed
+    assert arm.checks["restart"]["view_new"] is False and arm.checks["restart"]["installed"] is True
+    judged = first_open.judge({"candidate": {"checks": {"first_open": dict.fromkeys(first_open.CHECKS["first_open"], True),
+                                                        "restart": arm.checks["restart"]}, "gaps": []}})
+    assert judged["verdict"] == "FAIL" and judged["failures"] == ["restart.view_new is false"]
+
+
+def test_the_first_opening_entry_takes_one_full_candidate_and_always_finishes_its_report(monkeypatch, tmp_path):
+    for argv in (["--candidate", "abc"], ["--candidate", "b" * 40, "--baseline", "a" * 40],
+                 ["--candidate", "b" * 40, "--budget", "5"]):
+        with pytest.raises(SystemExit):
+            first_open.main([*argv, "--out", str(tmp_path / "refused")])
+    assert not (tmp_path / "refused").exists()  # refused before anything is written
+    monkeypatch.setattr(sys, "platform", "linux")
+    out = tmp_path / "elsewhere"
+    assert first_open.main(["--candidate", "b" * 40, "--out", str(out)]) == renewal.EXIT_CODES["UNSUPPORTED"]
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["schema"] == first_open.SCHEMA and report["candidate"] is None and report["finished_at"]
+    monkeypatch.setitem(sys.modules, "tests.system_e2e.harness", None)
+    out = _driver_environment(monkeypatch, tmp_path)
+    assert first_open.main(["--candidate", "b" * 40, "--out", str(out)]) == renewal.EXIT_CODES["INCONCLUSIVE"]
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    arm = report["candidate"]
+    assert arm["phase"] == "prepare" and "prepare stopped (ModuleNotFoundError)" in arm["gaps"]
+    assert arm["checks"]["first_open"]["window_usable"] is None and "launch_at_end" not in arm["facts"]
+    assert report["judgement"]["verdict"] == "INCONCLUSIVE" and "first_open.py" in report["instrument"]
+    assert not list((tmp_path / "arms").iterdir())  # the settled arm's root is gone
+
+
+def test_the_first_opening_job_is_one_bounded_candidate_launch_that_keeps_only_its_report_and_images():
+    workflow = yaml.safe_load((REPO / ".github/workflows/desktop-window.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["macos-first-open"]
+    assert job["if"] == "${{ github.event_name == 'workflow_dispatch' && inputs.macos_first_open }}"
+    assert job["runs-on"] == "macos-latest" and job["timeout-minutes"] <= 30
+    assert job["env"] == {"CANDIDATE_SHA": "${{ inputs.candidate_sha }}"}  # one arm: no baseline
+    text = yaml.safe_dump(job)
+    assert "secrets." not in text and "matrix" not in text and job["steps"][0]["with"]["persist-credentials"] is False
+    assert "window_renewal.py" not in text and "pytest" not in text  # no fallback to the full run, no suites
+    setup = next(step for step in job["steps"] if step.get("id") == "prepared")
+    native = next(step for step in job["steps"] if "first_open.py" in step.get("run", ""))
+    assert native["run"].count("first_open.py") == 1 and "safe_test.py" in native["run"]  # one launch, never retried
+    hard = int(re.search(r"--timeout (\d+)", native["run"])[1])
+    budget = int(re.search(r"--budget (\d+)", native["run"])[1])
+    # the driver's waits end first; its Quit, cleanup and final report fit before safe_test's deadline; all in the job
+    assert first_open.RESTART_RESERVE < budget and budget + 180 <= hard < native["timeout-minutes"] * 60
+    assert setup["timeout-minutes"] + native["timeout-minutes"] + 2 <= job["timeout-minutes"]
+    paths = job["steps"][-1]["with"]["path"].splitlines()
+    assert [path.split("/report/")[1] for path in paths] == ["report.json", "candidate/*.png"]
+
+
+def test_a_bounded_run_ends_its_server_waits_at_its_budget_and_the_full_journey_keeps_its_own(monkeypatch):
+    arm = object.__new__(renewal.Arm)
+    arm.deadline = None
+    assert arm.remaining(480) == 480  # the full journey: unchanged bounds
+    clock = [100.0]
+    monkeypatch.setattr(renewal, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    arm.deadline = 130.0
+    assert arm.remaining(480) == 30 and arm.remaining(10) == 10
+    clock[0] = 200.0
+    arm.launcher, arm.read_generation = _Launcher(4242), lambda: None
+    assert arm.remaining(480) == 0
+    with pytest.raises(TimeoutError):
+        arm.wait_generation(None)  # nothing is left: it ends at once, never after its own 480 s
+    reads = []
+    assert arm.wait(lambda: reads.append("read"), 30) is None and reads == ["read"]  # a window wait: one read
+    arm.generation, arm.win = {"port": 5001}, SimpleNamespace(state=lambda: reads.append("state") or _view(
+        loopback=True, port=5001))
+    assert arm.settle(_view())["view"] == "a" and reads.count("state") == 2  # one sample, then the final read
+    assert clock[0] == 200.0

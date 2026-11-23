@@ -23,7 +23,7 @@ from pathlib import Path
 LIMIT = 64 * 1024
 HERE = Path(__file__).resolve().parent
 OWN_FILES = ("native_window.py", "window_renewal.py", "arm_source.py", "host_processes.py", "journey_model.py", "typing_evidence.py",
-             "launcher_evidence.py")
+             "launcher_evidence.py", "first_open.py")
 CAPTURE_BRIDGE = HERE.parents[1] / "skills/unix_computer_use/macos_capture.py"
 WINDOW_ID = ("shell", "pid", "window", "number")
 TYPING_WORD = "Window"
@@ -79,7 +79,7 @@ class Channel:
 
 
 # Everything the copied observer reads while its module body runs, not only what its calls later import.
-OBSERVER_RESOURCES = ("native_window.py", "composer_clearance.py", "bubble_probe.js")
+OBSERVER_RESOURCES = ("native_window.py", "composer_clearance.py", "bubble_probe.js", "launcher_evidence.py")
 
 
 def stage_observer(root):
@@ -131,7 +131,13 @@ def attach():
         if type(kwargs.get("js_api")).__name__ == "MainApi":
             mark("window_created")
             webview.create_window = create
-            window.events.before_show += install_send_counter
+            window.events.before_show += install_send_counter  # before the product attaches its own setup
+            try:
+                from launcher_evidence import witness_setup  # the copy staged beside this observer
+
+                witness_setup(window, mark)
+            except Exception:  # noqa: BLE001 - a missing witness leaves its stages unobserved, never the window unmade
+                pass
         return window
     webview.create_window = watched_window
 
@@ -165,6 +171,7 @@ def install_send_counter(window):
     controller = BrowserView.instances[window.uid].webview.configuration().userContentController()
     controller.addUserScript_(WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
         script, WebKit.WKUserScriptInjectionTimeAtDocumentStart, True))
+    mark("observer_hook_completed")  # the product's own before-show handlers, its window setup among them, follow
 
 
 def serve(conn):

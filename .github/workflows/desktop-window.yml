@@ -31,6 +31,12 @@
 # Restart and Update (what a verdict proves and leaves out: window_renewal.md beside it). No tag
 # or push ever starts it; it uses no secret and uploads only its report, synthetic screenshots and
 # numerical observations.
+#
+# MACOS FIRST OPENING (#2791): manually select the reviewed ref and supply its full candidate_sha
+# (baseline_sha is not used). One job of at most 30 minutes runs `devtools/macos_wkwebview/first_open.py`:
+# exactly one launch of that commit's launcher, and only when its window is usable on its chat document,
+# one ordinary Restart in the same session; then it stops. No Update, Panic, relaunch, second arm or
+# retry, and it never falls back to the full renewal run. Takes precedence over macos_window_renewal.
 name: Desktop window
 
 on:
@@ -42,25 +48,29 @@ on:
         description: 'Instead of the Windows fit: compare an ordinary Restart and Update in the real macOS launcher window (devtools/macos_wkwebview/window_renewal.md)'
         type: boolean
         default: false
+      macos_first_open:
+        description: 'Instead of the Windows fit: one launch of the candidate, its first opening and, only if usable, one ordinary Restart (devtools/macos_wkwebview/window_renewal.md "First opening only")'
+        type: boolean
+        default: false
       baseline_sha:
         description: 'macOS window renewal only (required there). Full 40-character commit without the change, an ancestor of the candidate.'
         type: string
       candidate_sha:
-        description: 'macOS window renewal only (required there). Full reviewed candidate SHA, identical to the selected workflow ref.'
+        description: 'macOS window renewal and first opening (required there). Full reviewed candidate SHA, identical to the selected workflow ref.'
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  # A renewal dispatch never cancels the Windows case of the same commit, nor the reverse.
-  group: desktop-window-${{ github.sha }}-${{ inputs.macos_window_renewal && 'macos-renewal' || 'windows-fit' }}
+  # A macOS dispatch never cancels the Windows case of the same commit, nor the reverse, nor the other macOS mode.
+  group: desktop-window-${{ github.sha }}-${{ inputs.macos_first_open && 'macos-first-open' || inputs.macos_window_renewal && 'macos-renewal' || 'windows-fit' }}
   cancel-in-progress: true
 
 jobs:
   native-window:
     name: native window fits its screen (Windows, 100 %)
-    if: ${{ !inputs.macos_window_renewal }}
+    if: ${{ !inputs.macos_window_renewal && !inputs.macos_first_open }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -101,7 +111,7 @@ jobs:
   # the owner's draft, reply, unconfirmed message, input and tasks. Never on a tag or a push.
   macos-window-renewal:
     name: macOS window renewal after Restart and Update (baseline beside candidate)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_window_renewal }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_window_renewal && !inputs.macos_first_open }}
     runs-on: macos-latest
     timeout-minutes: 120
     env:
@@ -201,5 +211,75 @@ jobs:
             ${{ runner.temp }}/window-renewal/report/report.json
             ${{ runner.temp }}/window-renewal/report/baseline/*.png
             ${{ runner.temp }}/window-renewal/report/candidate/*.png
+          if-no-files-found: error
+          retention-days: 7
+
+  # One launch of the dispatched commit (#2791): its first opening and, only when that window is usable on its chat
+  # document, one ordinary Restart in the same session. Never on a tag or a push; nothing is retried or widened.
+  macos-first-open:
+    name: macOS first opening and one Restart (candidate only)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_first_open }}
+    runs-on: macos-latest
+    timeout-minutes: 30  # the hard ceiling, setup and upload included
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Bind the launch to the reviewed commit
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::supply the full 40-character candidate_sha"; exit 1; }
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          test "$CANDIDATE_SHA" = "$(git rev-parse HEAD)"
+          mkdir -p "$RUNNER_TEMP/first-open/private"
+      - uses: ./.github/actions/setup-python-env
+        id: prepared
+        timeout-minutes: 9
+        with:
+          profile: build
+          interpreter: shipped
+          install-project: 'false'
+      # safe_test stops the whole tree at 15 minutes; the driver's own 10-minute budget ends its waits first, so its
+      # ordinary Quit, cleanup and final report fit inside that, and the upload inside the job's 30 minutes.
+      - name: Observe one candidate launch on this Mac
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        timeout-minutes: 16
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/first-open"
+          status=0
+          env -i "PATH=$PATH" "HOME=$out/private" python3 -I -S scripts/safe_test.py \
+            --temp-parent "$RUNNER_TEMP" --evidence-dir "$out/private/evidence" --timeout 900 -- \
+            "$GITHUB_WORKSPACE/.venv/bin/python" -I -B "$GITHUB_WORKSPACE/devtools/macos_wkwebview/first_open.py" \
+            --candidate "$CANDIDATE_SHA" --budget 600 --out "$out/report" > "$out/private/native" 2>&1 || status=$?
+          if [[ -f "$out/report/report.json" ]]; then
+            python3 -I -S - "$out/report/report.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as stream:
+              report = json.load(stream)
+          judgement, arm = report.get("judgement", {}), report.get("candidate") or {}
+          print("### macOS first opening", judgement.get("verdict", "unfinished"))
+          for opening in arm.get("opening", [])[:1]:
+              keys = ("exit", "stages", "error_classes", "raised", "navigation_errors", "inferred")
+              print("\n```json\n" + json.dumps({key: opening.get(key) for key in keys}, indent=1) + "\n```")
+          print("\n| Check | Value |\n|---|---|")
+          for phase, values in (arm.get("checks") or {}).items():
+              for name, value in values.items():
+                  print(f"| {phase}.{name} | {value} |")
+          for line in (judgement.get("failures", []) + judgement.get("gaps", []))[:30]:
+              print("-", line)
+          PY
+          fi
+          exit "$status"
+      - name: Preserve the report and the candidate's own window images
+        if: ${{ always() && steps.prepared.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-first-open-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/first-open/report/report.json
+            ${{ runner.temp }}/first-open/report/candidate/*.png
           if-no-files-found: error
           retention-days: 7
