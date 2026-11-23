@@ -280,13 +280,18 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         drive_root, task_bindings, direct_turns=direct_turns, availability=activity_availability,
         decision_owners=decision_owners, work_facts=work_facts,
     )
+    panic_recovery, panic_complete = _panic_recovery(decision_owners, work_facts)
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
     from ouroboros.gateway.state_publication import map_revision, wire_bindings
     sent_bindings = wire_bindings(task_bindings)  # what a reader receives; the census below keeps the named map
     verdicts = {}  # what this one measurement decided of each row's owner action (its address and availability)
+    recovery_rooms = {row["task_id"]: {} for row in panic_recovery}
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
-                                       bindings_complete=bindings_complete, verdicts=verdicts)
+                                       bindings_complete=bindings_complete, verdicts=verdicts,
+                                       recovery_rooms=recovery_rooms)
+    for row in panic_recovery:
+        row.update(recovery_rooms[row["task_id"]])
     from ouroboros.gateway.work_projection import works_snapshot
     publication_roots = set()
     publication_runs = {}
@@ -364,6 +369,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,
         "active_chat_activities_complete": activity_availability["complete"],
+        "panic_recovery": panic_recovery,
+        "panic_recovery_complete": panic_complete and activity_availability["complete"],
         **decisions,
         **works,
     }
@@ -563,13 +570,18 @@ def _finishing_reviews(drive_root: Any, row: Dict[str, Any], task_id: str) -> bo
         return False
 
 
-def _raw_work_facts(row: dict) -> dict:
-    """The queue facts a census row drops that the work projection reads (gateway/work_projection.py)."""
+def _raw_work_facts(row: dict, *, pending: bool = False) -> dict:
+    """Census omissions, including a pending row's own Panic hold, not a composed stop overlay."""
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
                                         "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
                                         "_presence_turn", "silence_attention", "lane_wait") if row.get(key)}
+    if pending:
+        from ouroboros.work_stop import hold_fact, panic_hold_id, record_policy
+
+        if (hold := hold_fact(row)) and record_policy(hold)["cause"] == "panic":
+            facts["panic_hold_id"] = panic_hold_id(row)  # empty identity is a coverage gap
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
     attempt = row.get("_queue_attempt", row.get("_attempt"))
     return {**facts, **({"queue_attempt": attempt} if type(attempt) is int and attempt >= 0 else {}),
@@ -782,27 +794,43 @@ def _mark_carried_presence(drive_root: Any, activities: list, bindings: dict, wo
             work_facts[task_id] = {"running": True, "cancel_pending": bool(cancel_pending(drive_root, task_id))}
 
 
+def _panic_recovery(activities, work_facts):
+    """Use own holds before room/root filters; verified room fields are joined separately."""
+    rows, complete = [], True
+    for activity in activities:
+        task_id = activity["activity_id"]
+        facts = work_facts.get(task_id) or {}
+        if "panic_hold_id" not in facts:
+            continue
+        token = facts["panic_hold_id"]
+        if not token:
+            complete = False  # a known Panic hold without durable occurrence identity
+            continue
+        rows.append({"task_id": task_id, "panic_hold_id": token,
+                     "task_name": str(activity.get("task_name") or activity.get("suggested_name")
+                                      or facts.get("title") or task_id),
+                     **({"root_task_id": activity["root_task_id"]} if activity.get("root_task_id") else {})})
+    rows.sort(key=lambda row: bool(row.get("root_task_id") and row["root_task_id"] != row["task_id"]))
+    return rows, complete
+
+
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
                               question_details=True, work_facts=None, presence_rows=()) -> list:
-    """Direct turns, ROOT managed queue tasks and live inline Presence turns as ONE activity list.
+    """Combine direct turns, managed roots and live inline Presence in one list.
 
-    Additive beside ``active_direct_turns`` (kept unchanged for compatibility):
-    the client hydrates managed-task visibility from the queue authority —
-    ``queued`` (PENDING), ``working`` (RUNNING), or ``finalizing`` (RUNNING
-    with an open post-task checkpoint) — instead of relying on transient
-    typing frames. ``task_bindings`` (the same projection the snapshot already
-    serves) re-homes direct and managed activities after a mid-run project
-    conversion, while their source records retain the original chat; an
-    ``origin_bound`` row is a convert-gate fact only and re-homes nothing. A
-    post-task wait keeps the task row's own ``_is_direct_chat`` fact as its
-    ``kind``, so a direct turn waiting for a model after its answer is never
-    relabelled a managed task. ``owners_only`` keeps the same owners and rooms
-    but skips every per-row phase, pause and question projection (each a store
-    read): a reader that needs only which work is current (one room's history)
-    must not pay for the whole census. ``question_details=False`` skips optional Project/question
-    enrichment but retains phases, fences, waits and current result facts. ``work_facts`` collects,
-    per activity, the queue facts the rows drop that the work projection reads (``_raw_work_facts``). Never raises.
+    Leave ``active_direct_turns`` unchanged for compatibility. The client gets managed phases
+    from the queue, not typing frames: ``queued`` (PENDING), ``working`` (RUNNING) or
+    ``finalizing`` (RUNNING with an open post-task checkpoint).
+
+    The published ``task_bindings`` place activities in their current rooms after conversion,
+    leaving source rows in their original chats. ``origin_bound`` only gates conversion. A post-task
+    wait uses the task row's own ``_is_direct_chat``, so an answered direct turn stays direct.
+
+    ``owners_only`` gives room history the same owners and rooms without per-row phase, pause
+    or question reads. ``question_details=False`` skips optional Project/question detail but keeps
+    phases, fences, waits and current result facts. ``work_facts`` gives the work projection each
+    row's omitted queue data (``_raw_work_facts``). Read failures leave gaps, not exceptions.
     """
     activities = [dict(row) if owners_only else _direct_activity_pause_projection(drive_root, row, availability)
                   for row in direct_rows]
@@ -896,15 +924,19 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if owners_only:
                     activities.append(_activity(task_id, row, "queued", _epoch_or_zero(row.get("queued_at")), root=root))
                     continue
-                control = queue_control(drive_root, row, fence_rows)  # the mind's readers read it alike
-                phase, interrupted = control["phase"], control["owner_resumed"]
-                resume = interrupted or (phase in {"budget_paused", "budget_pausing"} and _pending_resume_available(
-                    registries, row, owner_paused=(fence_rows.get(str(row.get("root_task_id") or task_id)) or {}).get(
-                        "cause") == "owner_pause" or owner_fence_state(drive_root, row, task_id) == "paused"))
-                activities.append(_activity(task_id, row, phase, _epoch_or_zero(row.get("queued_at")), root=root,
-                                            can_resume=resume, owner_resumed=interrupted, view=control["view"]))
                 if work_facts is not None:
-                    work_facts[task_id] = _raw_work_facts(row)
+                    work_facts[task_id] = _raw_work_facts(row, pending=True)
+                try:
+                    control = queue_control(drive_root, row, fence_rows)  # the mind's readers read it alike
+                    phase, interrupted, view = control["phase"], control["owner_resumed"], control["view"]
+                    resume = interrupted or (phase in {"budget_paused", "budget_pausing"} and _pending_resume_available(
+                        registries, row, owner_paused=(fence_rows.get(str(row.get("root_task_id") or task_id)) or {}).get(
+                            "cause") == "owner_pause" or owner_fence_state(drive_root, row, task_id) == "paused"))
+                except Exception:
+                    log.debug("Pending-activity controls unavailable for %s", task_id, exc_info=True)
+                    phase, interrupted, view, resume = "unknown", False, None, False
+                activities.append(_activity(task_id, row, phase, _epoch_or_zero(row.get("queued_at")), root=root,
+                                            can_resume=resume, owner_resumed=interrupted, view=view))
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
         from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
@@ -1104,7 +1136,7 @@ def _production(request: Request, direct: Optional[tuple]) -> Dict[str, Any]:
     snap = _state_snapshot(request, direct=direct)
     return {"fields": produced_fields(snap), "task_bindings": snap["task_bindings"],
             "task_bindings_revision": snap["task_bindings_revision"], "roots": snap["roots"], "jobs": snap["jobs"],
-            "member_run_activity": snap["member_run_activity"]}
+            "member_run_activity": snap["member_run_activity"], "panic_recovery_complete": snap["panic_recovery_complete"]}
 
 
 async def api_state(request: Request) -> Response:
@@ -1116,11 +1148,12 @@ async def api_state(request: Request) -> Response:
     from ouroboros.gateway.state_publication import AGE_HEADER, GENERATION_HEADER, live_fields, publisher, response_body
 
     try:
+        ready = _state_attr(request, "supervisor_ready_event")
         publication = await publisher(getattr(request.app, "state", None), request_drive_root(request)).current(
-            lambda direct: _production(request, direct))
+            lambda direct: _production(request, direct), tasks_ready=bool(ready is not None and ready.is_set()))
         since = str(request.query_params.get("bindings_since") or "")  # the revision of a map the client holds
         unchanged = bool(since) and since == publication.bindings_revision  # a failed read's "" never is
-        body = response_body(publication, live_fields(request, publication.jobs), bindings_unchanged=unchanged)
+        body = response_body(publication, live_fields(request, publication), bindings_unchanged=unchanged)
         response = Response(body, media_type="application/json", headers={
             GENERATION_HEADER: str(publication.generation),
             AGE_HEADER: f"{max(0.0, time.time() - publication.published_at):.3f}"})

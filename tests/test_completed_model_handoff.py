@@ -839,7 +839,7 @@ def test_a_panic_hold_on_a_held_continue_outlives_its_retired_sender(tmp_path, m
     """Without a Panic the held selection records the ended sender and starts the Continue once. A Panic
     replaces that wait (the restore's own rule): its sender's recorded end starts nothing, the mind's
     Resume is refused, and only the owner's Resume releases it."""
-    from ouroboros.control_actor import mind_control
+    from ouroboros.control_actor import mind_control, owner_door
     from ouroboros.local_custody_repair import reconcile_open_local_custody
     from ouroboros.work_stop import hold_fact
     from supervisor.continuation_admission import recheck_held_continuations
@@ -872,5 +872,9 @@ def test_a_panic_hold_on_a_held_continue_outlives_its_retired_sender(tmp_path, m
         refused = queue.resume_budget_paused_task(successor)
     assert refused["ok"] is False and refused["error"] == "panic_requires_owner_resume", refused
     assert held()["reason"] == HOLD_PANIC
-    resumed = queue.resume_budget_paused_task(successor)  # the owner's own Resume: the required path
+    unbound = queue.resume_budget_paused_task(successor)
+    assert unbound["ok"] is False and unbound["error"] == "panic_requires_owner_resume", unbound
+    assert held()["reason"] == HOLD_PANIC
+    with owner_door("fixture"):
+        resumed = queue.resume_budget_paused_task(successor)  # the owner's own Resume: the required path
     assert resumed["ok"] and not resumed.get("held") and held() is None, resumed

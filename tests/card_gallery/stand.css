@@ -1,0 +1,109 @@
+/* Card gallery test stand: the quiet chrome around the product frame. Product tokens only; nothing here styles a
+   card. The stage gives each family the column width it has in the app and lets the page scroll. */
+html.ouro-ui, .gallery-body {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+}
+.gallery-root {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: var(--space-4);
+    box-sizing: border-box;
+    color: var(--text-primary);
+}
+.gallery-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: var(--space-2) var(--space-4);
+}
+.gallery-title {
+    margin: 0 auto 0 0;
+    font-size: var(--type-section);
+    font-weight: 600;
+}
+.gallery-tag {
+    margin-left: var(--space-2);
+    font-size: var(--type-meta);
+    font-weight: 400;
+    color: var(--text-meta);
+}
+.gallery-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.gallery-field-label {
+    font-size: var(--type-meta);
+    color: var(--text-secondary);
+}
+.gallery-what {
+    margin: 0;
+    color: var(--text-secondary);
+}
+.gallery-source,
+.gallery-index {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+}
+.gallery-source > summary,
+.gallery-index > summary {
+    width: fit-content;
+    padding: 5px 0;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+.gallery-source > span {
+    display: block;
+    margin-top: 4px;
+    overflow-wrap: anywhere;
+}
+.gallery-index nav {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+}
+.gallery-index-family {
+    margin: 0;
+    color: var(--text-secondary);
+}
+.gallery-index a {
+    color: var(--text-primary);
+}
+.gallery-index a[aria-current="page"] {
+    color: var(--tone-crimson-word);
+    font-weight: 600;
+}
+.gallery-counter {
+    font-size: var(--type-meta);
+    color: var(--text-meta);
+}
+.gallery-stage {
+    position: relative;
+    min-width: 0;
+    max-width: 780px;
+    width: 100%;
+}
+/* A feed without the room around it: no reserve under a bar that is not there (style.css #chat-messages). */
+.gallery-stage #chat-messages.gallery-feed {
+    position: static;
+    height: auto;
+    overflow: visible;
+    padding: 0;
+}
+.gallery-stage .gallery-room {
+    position: relative;
+    min-height: 520px;
+}
+.gallery-stage#content {
+    max-width: none;
+}
+.gallery-fault {
+    color: var(--status-error-word);
+}

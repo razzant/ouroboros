@@ -105,8 +105,12 @@ def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_s
             invoked.append(task["id"])
             text, usage, trace = _terminal(data, current=current, task_id=task["id"])
             task["_skip_post_task_synthesis"] = True
-            ctx = SimpleNamespace(_presence_completion={"outcome": outcome, "message": "Typed Presence reply"},
-                                  _swarm_handoff_attempt={"status": "scheduled", "task_id": "next-task"})
+            ctx = SimpleNamespace(
+                drive_root=data, task_id=task["id"], task_metadata=dict(task["metadata"]),
+                task_contract=task["task_contract"],
+                _presence_completion={"outcome": outcome, "message": "Typed Presence reply"},
+                _swarm_handoff_attempt={"status": "scheduled", "task_id": "next-task"},
+            )
             pending = []
             pipeline.emit_task_results(SimpleNamespace(drive_root=data, repo_dir=repo), None, None,
                 pending, task, text, usage, trace, start_time=0.0, drive_logs=data / "logs", ctx=ctx)

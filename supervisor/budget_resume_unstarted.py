@@ -97,7 +97,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     refused = error if not safe and "_working_recovery" in task else ""
     evidence = {"refusal_basis": observation["refusal_basis"]} if refused and observation.get("refusal_basis") else {}
     if refusal := release_refusal(current_stop(task, {
-            "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
+            "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), resume_author()):
         return refusal
     writers = list(observation.get("blockers") or ())
     if writers:

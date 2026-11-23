@@ -361,19 +361,21 @@ def test_page_notices_keep_their_margin_inside_telegrams_side_insets(shell_ui, w
     page.close()
 
 
-# Each visible header control, and what a press at its centre reaches.
-HEADER_PRESSES = """() => [...document.querySelectorAll('#page-skills > .app-page-header :is(.app-tab, .app-page-toolbar button)')]
+# Each visible command of Extensions (the rows of its list, which the tabs were, and the actions that end the band of
+# the open page), and what a press at its centre reaches.
+PRESSES = """() => [...document.querySelectorAll('#page-skills [data-extensions-open], #page-skills > .app-page-header .app-page-toolbar button')]
     .filter(n => n.getClientRects().length).map(n => { const r = n.getBoundingClientRect();
         const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        return {name: n.textContent.trim(), reached: n === hit || n.contains(hit), left: r.left, right: r.right,
-                within: r.left >= 0 && r.right <= innerWidth}; })"""
+        return {name: (n.querySelector('.section-row-title') || n).textContent.trim(), reached: n === hit || n.contains(hit),
+                top: r.top, left: r.left, right: r.right, within: r.left >= 0 && r.right <= innerWidth}; })"""
 
 
 @pytest.mark.parametrize('root', [16, 24])
 def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_the_row(shell_ui, root):
     """Grok r2: at 320 px Skills' Update (prepended into its toolbar) and Refresh stood over the third tab, so Sources
-    could not be pressed. Below Telegram's row the tabs and the actions share lines in flow: an action that does not
-    fit beside the tabs starts the next line, at either root size."""
+    could not be pressed. Extensions (#3921) has no tabs: a phone shows its list alone, and the Skills row opens the page
+    whose band ends with Update and Refresh, on the line under the name below Telegram's row. A press at the centre of
+    each row, then of each action, reaches that control inside the screen, at either root size."""
     sdk = telegram_sdk(fullscreen='grant', insets={'top': 13}, content={'top': 46})
     page = telegram_page(shell_ui, 320, 700, sdk)
     page.route('**/api/extensions', lambda route: route.fulfill(json={'skills': [
@@ -385,10 +387,21 @@ def test_a_telegram_sections_tabs_stay_pressable_beside_every_action_that_left_t
     boot(page, shell_ui)
     page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'active'")
     open_nav(page, 'skills')
+    skills_row = page.locator('#page-skills [data-extensions-open="installed"]')
+    skills_row.wait_for()
+    rest(page)
+    rows = page.evaluate(PRESSES)
+    shot(page, f'telegram-extensions-list-320-{root}-{shell_ui["engine"]}')
+    skills_row.click()  # one column: the list stands first; the Skills row opens the page that holds Update and Refresh
     page.locator('#skills-update-all').wait_for()
     rest(page)
-    presses = page.evaluate(HEADER_PRESSES)
+    actions = page.evaluate(PRESSES)
+    name_bottom = page.evaluate("() => document.querySelector('#page-skills [data-extensions-lead-name]').getBoundingClientRect().bottom")
     shot(page, f'telegram-skills-header-320-{root}-{shell_ui["engine"]}')
-    assert [p['name'] for p in presses] == ['Installed', 'Browse', 'Sources', 'Update 2', 'Refresh'], presses
-    assert all(p['reached'] and p['within'] for p in presses), presses
+    facts(f'telegram-extensions-presses-320-{root}-{shell_ui["engine"]}',
+          {'list': rows, 'page': actions, 'nameBottom': name_bottom})
+    assert [p['name'] for p in rows] == ['Skills', 'MCP servers', 'Browse', 'Sources'], rows
+    assert [p['name'] for p in actions] == ['Update 2', 'Refresh'], actions
+    assert all(p['reached'] and p['within'] for p in rows + actions), (rows, actions)
+    assert all(p['top'] >= name_bottom for p in actions), f'an action starts on the line under the name: {name_bottom}, {actions}'
 

@@ -340,6 +340,51 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
         : KEPT_PAUSED;
 }
 
+/** An accepted Resume in the words every Resume door says it with: a press's toast, a Panic selection's row. */
+export function resumeAcceptedWords(ack) {
+    // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
+    // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
+    return ack?.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
+        heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
+        : ack?.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
+        : ack?.late_phase ? 'Resuming: the work left after the delivered answer continues.'
+        : 'Resuming: the task returns to the queue.';
+}
+
+/** A refused Resume: the server names it (replay_unsafe, fence missing, not budget-paused), said verbatim instead of a
+ *  generic failure, and a held Continue's observed blockers as facts (#1721). */
+export function resumeRefusalWords(exc) {
+    const facts = heldWorkFacts(exc?.body?.blockers);
+    const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
+    return facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
+        ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`;
+}
+
+/**
+ * A Resume whose requests another door sends itself (the Panic selection, panic_recovery.js): from `run`'s start
+ * until `settle` (the read that reconciles its answers) has settled, its tasks are pending to every Resume door, as
+ * a press of `resumeTaskAction` keeps its own (`resumePending`). Each task's request lease (`taskControlBusy`, which a
+ * menu's Stop reads) ends with its own answer: `run` is handed `answered(taskId)` to say so, so another task's slow
+ * answer never holds that Stop. Never sends anything itself.
+ */
+export async function holdResumes(taskIds, run, settle = null) {
+    const ids = [...new Set((taskIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+    const leases = new Map(ids.map((id) => [id, holdControl(id)]));
+    const answered = (taskId) => {
+        const id = String(taskId || '').trim();
+        const release = leases.get(id);
+        if (!release) return;
+        leases.delete(id);
+        resumeReads.add(id);  // pending to every Resume door before its lease ends: no moment between the two
+        release();
+    };
+    try { return await run(answered); }
+    finally {
+        ids.forEach(answered);
+        try { await settle?.(); } finally { ids.forEach((id) => resumeReads.delete(id)); }
+    }
+}
+
 /**
  * The Resume press, the one owner of its request. The task is PENDING from the press until the answer is known and
  * the read that reconciles it (`settle`, the door's own re-read of `/api/state`) has settled, applied or failed.
@@ -360,23 +405,11 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
-        // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
-        // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
-        toast(ack.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
-            heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
-            : ack.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
-            : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
-            : 'Resuming: the task returns to the queue.', 'info');
+        toast(resumeAcceptedWords(ack), 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
     } catch (exc) {
-        // The server names the refusal (replay_unsafe / fence missing /
-        // not budget-paused): show it verbatim instead of a generic failure,
-        // and a held Continue's observed blockers as facts (#1721).
         // Handled here, never rethrown: the menu callback is fire-and-forget.
-        const facts = heldWorkFacts(exc?.body?.blockers);
-        const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
-        toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : message || `Resume refused: ${exc?.message || exc}`, 'error');
+        toast(resumeRefusalWords(exc), 'error');
     } finally {
         release();
         resumeReads.add(id);
@@ -747,13 +780,15 @@ export function openTaskControlMenu(anchor, {
  * the same request owners, never Resume (only a work's Resume control offers it). `stop` is the caller's own stop
  * path (a card keeps its optimistic chip); the Pause item reads its target from the anchor.
  */
-export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, canAct, stop }) {
+export function openTaskControls(anchor, taskId, { activity = null, cancelPending = false, actions = null, canAct, afterAction, stop }) {
     const id = String(taskId || '').trim();
     return openTaskControlMenu(anchor, {
+        actions,
         cancelPending,
         budgetPaused: activity?.phase === 'budget_paused',
         busy: taskControlBusy(id),
         canAct,
+        afterAction,
         onAction: (action) => (action === ACTION_HURRY ? hurryTaskAction(id) : stop(action)),
     });
 }

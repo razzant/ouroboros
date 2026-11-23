@@ -1,4 +1,4 @@
-"""DESIGN orientation reaches real author/API projections, with source identity."""
+"""DESIGN reaches real author/API projections: its design bible whole, the rest by headings, with source identity."""
 
 import json
 from types import SimpleNamespace
@@ -9,15 +9,24 @@ from ouroboros import context
 from ouroboros.context_layout import task_design_navigation, task_design_source
 from tests.test_book_context_capture import _plan
 from tests.test_body_candidate import _registry, body as _body
-from tests.test_doc_context import _make_env_and_memory
+from tests.test_doc_context import _make_env_and_memory, foreign_tree
 
 body = _body
 
-DESIGN = "# Design\n## Attention\nBODY_RULE_NOT_DELIVERED\n```md\n## Fake\n```\n### Signals\nDETAIL_NOT_DELIVERED\n"
+# Lines 2-14 are the bible: a fenced heading inside it ends nothing, its seed table rides with its principles.
+BIBLE = ('## Design bible: "Airy dopamine"\nBIBLE_RULE_DELIVERED\n```md\n## Fake\n```\n### Principles\n'
+         "1. **The room is plain.** PRINCIPLE_DELIVERED\n\n**Seed (light | dark)**\n\n| Role | Light |\n| --- | --- |\n"
+         "| Room | SEED_DELIVERED |\n")
+DESIGN = "# Design\n" + BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n### Signals\nDETAIL_NOT_DELIVERED\n"
+
+
+def _in(fragment, text):
+    """``fragment`` as a JSON dump of the request carries it."""
+    return json.dumps(fragment, ensure_ascii=False)[1:-1] in text
 
 
 @pytest.mark.parametrize("role", ["main", "api", "declared_nanny"])
-def test_design_map_reaches_all_author_modes_and_keeps_common_prefix(tmp_path, role):
+def test_design_bible_reaches_all_author_modes_and_keeps_common_prefix(tmp_path, role):
     env, memory = _make_env_and_memory(tmp_path)
     path = env.repo_dir / "docs/DESIGN.md"
     path.write_text(DESIGN)
@@ -34,19 +43,55 @@ def test_design_map_reaches_all_author_modes_and_keeps_common_prefix(tmp_path, r
         messages = plan.messages_for(mode)
         text = json.dumps(messages, ensure_ascii=False)
         captured[mode] = text
-        assert "## DESIGN.md (navigation map)" in text
-        assert "- Attention — lines 2-8" in text
-        assert "- Signals — lines 7-8" in text
-        assert json.dumps(str(path), ensure_ascii=False)[1:-1] in text
+        assert _in(BIBLE.strip(), text)  # the whole section verbatim: principles, seed table and the fenced line
+        assert _in('- Design bible: "Airy dopamine" (whole above) — lines 2-14', text)
+        assert "- Attention — lines 15-18" in text and "  - Signals — lines 17-18" in text
+        assert "- Principles —" not in text and "- Fake" not in text  # inside the bible, inside a fence
+        assert _in(str(path), text)
         assert "BODY_RULE_NOT_DELIVERED" not in text and "DETAIL_NOT_DELIVERED" not in text
-        assert "- Fake" not in text
-        assert "availability is not evidence of reading or application" in text
+        assert "Inlined above: its design bible whole (lines 2-14)" in text and "Navigation only" not in text
+        assert "from its installed body" not in text  # the body's own book needs no word on whose interface it is
+        assert "availability is not evidence of reading or application" in text.lower()
         # A'/D/B remain reusable between task roots; source addresses ride C.
         blocks = plan.projection(mode).system_message()["content"]
-        assert all("DESIGN.md (navigation map)" not in block["text"]
+        assert all("BIBLE_RULE_DELIVERED" not in block["text"] and "DESIGN.md (navigation map)" not in block["text"]
                    for block in blocks if block.get("cache_control"))
+    assert "from its installed body" not in next(part for part in core.dynamic_head_sections
+                                                 if part.section_id == "design_bible").operative_view
     path.write_text("## Later source revision\n")
     assert {mode: json.dumps(plan.messages_for(mode), ensure_ascii=False) for mode in captured} == captured
+
+
+@pytest.mark.parametrize("owner_mode", ["max", "low", "nano"])
+def test_the_design_bible_rides_every_owner_mode(tmp_path, monkeypatch, owner_mode):
+    """The selected horizon captures the same exact excerpt in every mode, with a map for physical pressure."""
+    env, memory = _make_env_and_memory(tmp_path)
+    (env.repo_dir / "docs/DESIGN.md").write_text(DESIGN)
+    monkeypatch.setattr(context, "get_context_mode", lambda: owner_mode)
+    core = context._capture_context_core(env, memory, {"id": "owner-mode", "text": "Plan"}, None, None)
+    design = next(part for part in core.dynamic_head_sections if "DESIGN.md (navigation map)" in part)
+    assert design.section_id == "design_bible" and design.full_text.startswith(BIBLE.strip())
+    assert "BIBLE_RULE_DELIVERED" not in design.operative_view and "- Attention — lines 15-18" in design.operative_view
+    assert "Navigation only: DESIGN content is not inlined" in design.operative_view
+
+
+def test_the_author_view_keeps_its_bytes_while_the_file_does(tmp_path, monkeypatch):
+    """No time, counter or service state shapes the view: two captures at different instants carry the same bytes,
+    so the block it rides keeps them through a return; a changed file changes them."""
+    env, memory = _make_env_and_memory(tmp_path)
+    path = env.repo_dir / "docs/DESIGN.md"
+    path.write_text(DESIGN)
+
+    def captured(instant):
+        monkeypatch.setattr(context, "utc_now_iso", lambda: instant)
+        core = context._capture_context_core(env, memory, {"id": "stable", "text": "Plan"}, None, None)
+        return next(part for part in core.dynamic_head_sections if part.section_id == "design_bible")
+
+    first, later = captured("2026-11-21T10:00:00+00:00"), captured("2026-11-24T18:30:00+00:00")
+    assert (first.full_text, first.operative_view) == (later.full_text, later.operative_view)
+    assert "2026-11-2" not in first.full_text
+    path.write_text(DESIGN.replace("SEED_DELIVERED", "SEED_REVISED"))
+    assert "SEED_REVISED" in captured("2026-11-24T18:30:00+00:00").full_text
 
 
 def _ctx(env, **kwargs):
@@ -66,28 +111,60 @@ def test_selected_copy_bytes_win_and_default_false_cannot_hide_body(tmp_path):
     core = context._capture_context_core(env, memory, task, None, None)
     text = json.dumps(_plan(env, core, task, "max").messages_for("max"), ensure_ascii=False)
     assert json.dumps(str(copy / "docs/DESIGN.md"), ensure_ascii=False)[1:-1] in text and "- Attention" in text
+    assert _in(BIBLE.strip(), text)  # the copy's own bible: the contract's default false hides nothing
     assert "Installed heading" not in text
 
 
-@pytest.mark.parametrize("kind", ["ordinary", "foreign_copy", "folderless"])
-def test_foreign_and_nobody_sources_never_receive_body_design(tmp_path, kind):
-    env, memory = _make_env_and_memory(tmp_path)
-    (env.repo_dir / "docs/DESIGN.md").write_text("## Installed policy\n")
+# Who carries the installed bible (item 97, council C13 R2): the tree's identity, and a TRUE declaration beside it.
+# The contract writes false for silence (``task_contract``), so false or absent narrows nothing; proven-foreign work
+# without a true declaration carries none, and a foreign tree's own DESIGN never stands in for the body's.
+@pytest.mark.parametrize(("kind", "declared", "delivered"), [
+    ("proven_foreign", None, False), ("proven_foreign", False, False), ("proven_foreign", True, True),
+    ("foreign_copy", True, True), ("foreign_room", None, False), ("foreign_room", True, True),
+    ("unknown_folder", None, True), ("folderless", None, True), ("folderless", False, True),
+])
+def test_the_bible_follows_body_identity_and_a_true_declaration(tmp_path, kind, declared, delivered):
+    env, _memory = _make_env_and_memory(tmp_path)
+    (env.repo_dir / "docs/DESIGN.md").write_text(DESIGN)
     foreign = tmp_path / "another-project"
-    (foreign / "docs").mkdir(parents=True)
-    (foreign / "docs/DESIGN.md").write_text("## Foreign lookalike\n")
-    task = {"id": "foreign", "text": "Plan"}
+    if kind == "unknown_folder":  # no Git, no remote: its body is unknown, not proven foreign
+        foreign.mkdir()
+    elif kind != "folderless":
+        foreign_tree(foreign)
+    if kind != "folderless":
+        (foreign / "docs").mkdir()
+        (foreign / "docs/DESIGN.md").write_text("## Foreign lookalike\nFOREIGN_RULE\n")
+    ctx = {"proven_foreign": dict(workspace_root=foreign, workspace_mode="external", task_metadata={}),
+           "unknown_folder": dict(workspace_root=foreign, workspace_mode="external", task_metadata={}),
+           "foreign_copy": dict(workspace_root=foreign, workspace_mode="self_worktree", task_metadata={
+               "workspace_copy": {"execution_root": str(foreign), "source_is_system_repo": False}}),
+           "foreign_room": dict(is_direct_chat=True, project_id="room", task_metadata={"_project_room_dir": str(foreign)}),
+           "folderless": dict(project_id="project-without-folder", task_metadata={})}[kind]
+    task = {} if declared is None else {"task_contract": {"context_requires_self_body_docs": declared}}
+    view = task_design_navigation(_ctx(env, **ctx), task)
+    assert ("BIBLE_RULE_DELIVERED" in view) is delivered
+    # A tree not established as the body reads the installed book under a first line saying whose rules these are,
+    # in the whole form and in the map a short room leaves (RVD1, Fable N2).
+    assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body") is delivered
+    assert getattr(view, "operative_view", "").startswith(
+        "These are the interface rules of Ouroboros itself, from its installed body") is delivered
+    assert (str(env.repo_dir / "docs/DESIGN.md") in view) is delivered
+    assert "FOREIGN_RULE" not in view and "Foreign lookalike" not in view
+
+
+@pytest.mark.parametrize("kind", ["folderless", "proven_foreign"])
+def test_a_folderless_room_request_carries_the_bible_a_foreign_one_does_not(tmp_path, kind):
+    env, memory = _make_env_and_memory(tmp_path)
+    (env.repo_dir / "docs/DESIGN.md").write_text(DESIGN)
+    task = {"id": "room-work", "text": "Plan", "task_contract": {"context_requires_self_body_docs": False}}
     if kind == "folderless":
         task["project_id"] = "project-without-folder"
     else:
-        task.update(workspace_root=str(foreign), workspace_mode="external")
-    if kind == "foreign_copy":
-        task.update(workspace_mode="self_worktree", context_requires_self_body_docs=True,
-                    metadata={"workspace_copy": {"execution_root": str(foreign), "source_is_system_repo": False}})
+        task.update(workspace_root=str(foreign_tree(tmp_path / "another-project")), workspace_mode="external")
     core = context._capture_context_core(env, memory, task, None, None)
-    assert "DESIGN.md" not in core.dynamic_head_text
-    text = json.dumps(_plan(env, core, task, "max").messages_for("max"))
-    assert "Installed policy" not in text and "Foreign lookalike" not in text
+    text = json.dumps(_plan(env, core, task, "max").messages_for("max"), ensure_ascii=False)
+    assert _in(BIBLE.strip(), text) is (kind == "folderless")
+    assert _in(str(env.repo_dir / "docs/DESIGN.md"), text) is (kind == "folderless")
 
 
 def test_missing_design_is_a_visible_source_gap_in_actual_author_input(tmp_path):
@@ -106,17 +183,28 @@ def test_explicit_folderless_self_work_points_to_system_source(tmp_path):
     ctx = _ctx(env, project_id="folderless", task_metadata={})
     task = {"context_requires_self_body_docs": True}
     assert task_design_source(ctx, task) == env.repo_dir
-    assert "- Attention" in task_design_navigation(ctx, task)
+    view = task_design_navigation(ctx, task)
+    assert "- Attention" in view
+    # Declared folderless work reads the installed book; it says whose rules these are (RVD1, Astra 4).
+    assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body")
+    assert view.operative_view.startswith("These are the interface rules of Ouroboros itself")
 
 
-def test_explicit_flag_does_not_import_body_policy_into_ordinary_room_folder(tmp_path):
+def test_explicit_flag_brings_the_installed_bible_without_making_a_room_folder_the_body(tmp_path):
+    """A mockup of my own screen from a room with someone else's folder (item 97, council C13 R2): the declaration
+    brings the installed bible, never the folder's lookalike, and the folder stays foreign for plans and sessions."""
     env, _memory = _make_env_and_memory(tmp_path)
-    foreign = tmp_path / "room-folder"
+    (env.repo_dir / "docs/DESIGN.md").write_text(DESIGN)
+    foreign = foreign_tree(tmp_path / "room-folder")
     (foreign / "docs").mkdir(parents=True)
     (foreign / "docs/DESIGN.md").write_text("## Foreign rules\n")
     ctx = _ctx(env, is_direct_chat=True, project_id="room",
                task_metadata={"_project_room_dir": str(foreign)})
-    assert task_design_navigation(ctx, {"context_requires_self_body_docs": True}) == ""
+    declared = {"context_requires_self_body_docs": True}
+    view = task_design_navigation(ctx, declared)
+    assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body")
+    assert BIBLE.strip() in view and str(env.repo_dir / "docs/DESIGN.md") in view and "Foreign rules" not in view
+    assert task_design_source(ctx, declared) is None  # body identity, which plans and sessions read, is unchanged
 
 
 def test_folderless_prepared_candidate_survives_restore_in_author_and_session_delivery(body):
@@ -200,3 +288,360 @@ def test_isolated_copy_uses_body_identity_not_only_shared_git_directory(tmp_path
         assert str(execution / "docs/DESIGN.md") in nav and "- Attention" in nav
     else:
         assert nav == ""
+
+
+BIG_BIBLE = BIBLE + "\n" + "A principle of the room and its objects, told for both themes. " * 240 + "\n"
+
+
+def _fitting(tmp_path, monkeypatch, *, section_root=None, required_words=0, others=True, authored=False):
+    """Exercise the context assembly/first request with pinned route facts and no provider send."""
+    from ouroboros import context_fit as fit, memory_view
+    from ouroboros.reference_books import compose_book, load_reference_book
+    from ouroboros.section_floor import HostSection, capture_sections
+    from tests import _memory_view_synthetic as syn
+
+    monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **_kw: 8_192)
+    monkeypatch.setattr("ouroboros.capability_evidence.resolve_main_token_density",
+                        lambda *_a, **_kw: (1.0, "cold_estimate"))
+    repo = tmp_path / "repo"
+
+    def chapter(title, parts):
+        return f"# {title}\n\nHow it holds.\n\n" + "".join(
+            f"## Part {i}\n\n" + "A sentence of the mechanism and its why. " * 120 + "\n\n" for i in range(parts))
+
+    for path, text in {"docs/ARCHITECTURE.md": "# Body\n\nThe whole body map.\n\n## Chapters\n\n- [Runtime](architecture/runtime.md)\n",
+                       "docs/architecture/runtime.md": chapter("Runtime", 30),
+                       "docs/DEVELOPMENT.md": "# Engineering\n\nHow I change.\n\n## Chapters\n\n- [Change](development/change.md)\n",
+                       "docs/development/change.md": chapter("Change", 20 + required_words),
+                       "docs/DESIGN.md": "# Design\n" + BIG_BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n"}.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    books = tuple(load_reference_book(repo, book_id, lambda p: (repo / p).read_bytes())
+                  for book_id in ("architecture", "development"))
+    design = task_design_navigation(SimpleNamespace(repo_dir=repo, system_repo_dir=repo, drive_root=tmp_path / "data",
+                                                    task_metadata={}), {})
+    assert design.section_id == "design_bible"
+    index = HostSection("knowledge_index", "## Knowledge index\n\n" + "- a durable lesson told whole. " * 900,
+                        "## Knowledge index\n\n- every note by address.")
+    world = HostSection("world", "## My World\n\n" + "a fact of the machine. " * 900, "## My World\n\nIts headings.")
+    services = [HostSection(name, f"## {name}\n\n" + "an observed fact. " * 400, f"## {name}\n\nIts operative state.")
+                for name in ("runtime", "review_pool", "installed_skills")] if others else []
+    owner = syn.spoken(2, "human", 4_000)
+    owner["line"] += "\nOWNER_UNTOLD_WHOLE"
+    story = syn.pages(2, 12_000)
+    if authored:
+        story = [{**page, "lead_rule": 2, "text": f"{page['id']} MY_OWN_RECAP.\n\n{page['text']} SEALED_PAGE_TAIL"}
+                 for page in story]
+    snapshot = syn.snapshot(story=story, room_facts=syn.room("1", lane1=[syn.spoken(1, "ouroboros", 8_000), owner]),
+        conversations=[] if authored else [syn.conversation(i, words=10, word_chars=600) for i in range(30)])
+    head, dynamic = [index, design], [*services, world]
+    core = fit.ContextCore(
+        base_prompt="SYSTEM WHOLE", bible_md="BIBLE WHOLE", architecture_md=compose_book(books[0]),
+        development_md=compose_book(books[1]), docs_need_development=not required_words,
+        development_required=bool(required_words), reference_books=books, semi_stable_text="IDENTITY WHOLE",
+        dynamic_text="\n\n".join(dynamic), dynamic_head_text="\n\n".join(head),
+        user_content_json=json.dumps("WORDS THAT STARTED THE WORK"),
+        dynamic_sections=capture_sections(dynamic, prefix="dynamic"),
+        dynamic_head_sections=capture_sections(head, prefix="head"),
+        section_root=str(tmp_path) if section_root is None else section_root, section_task_id="task-1",
+        memory_view_json=memory_view.snapshot_json(snapshot))
+
+    def fitted(window, preferred, known=True, *, core=core):
+        evidence = SimpleNamespace(route_fp="route", status="confirmed" if known else "unprobeable", stale=False,
+                                   window_tokens=window, source="synthetic")
+        plan = fit.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core, {"id": "task-1"},
+            preferred_mode=preferred, route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "synthetic"},
+                                                                         evidence))
+        view = plan.projection(plan.initial_mode)
+        return plan, view, *_shown(view)
+
+    fitted.core = core  # a test asking the route question itself builds from the same capture
+    return design, fitted
+
+
+def _shown(view):
+    """A projection's host rows, memory steps and system text."""
+    rows = [row["section_id"] for row in view.memory_facts.get("host_sections_addressed", ())]
+    text = "\n\n".join(block["text"] for block in view.system_message()["content"])
+    return rows, (view.memory_facts.get("floor") or {}).get("steps") or {}, text
+
+
+@pytest.mark.parametrize("preferred", ["max", "low", "nano"])
+def test_a_short_room_keeps_the_whole_bible_beside_authored_tellings(tmp_path, monkeypatch, preferred):
+    import math
+
+    from ouroboros import context_budget
+
+    design, fitted = _fitting(tmp_path, monkeypatch, section_root="", authored=True)
+    plan, view, _, _, roomy = fitted(2_000_000, preferred)
+    reserve = context_budget.context_mode_limits(preferred, preferred, plan.output_reserve_tokens)[1]
+    levels = view.memory_facts["spec"]["work_room_levels"]
+    fraction = 1 - levels / context_budget.RECLAIM_LOW_WATER_DIVISOR
+    # The pressure comes from the same complete first-request shape in each mode, minus part of an authored page.
+    window = math.ceil((view.estimated_tokens + reserve - 2_000) / fraction)
+    plan, view, rows, steps, tight = fitted(window, preferred)
+    assert plan.initial_mode == preferred
+    assert not rows and steps.get("F5l") and design.full_text in tight
+    assert "SEALED_PAGE_TAIL" in roomy and tight.count("SEALED_PAGE_TAIL") < roomy.count("SEALED_PAGE_TAIL")
+    assert "MY_OWN_RECAP." in tight and "memory_read(node_id='page-" in tight
+    assert "OWNER_UNTOLD_WHOLE" in tight
+    assert all(s in tight for s in ("SYSTEM WHOLE", "BIBLE WHOLE", "IDENTITY WHOLE"))
+    assert "WORDS THAT STARTED THE WORK" in json.dumps(plan.messages_for(preferred))
+
+
+def test_a_nano_budget_takes_the_bible_to_its_map_before_it_cuts_what_i_have_not_told(tmp_path, monkeypatch):
+    """Nano's own number governs all my memory, below my tellings too: the end of a reply of mine (F2), a page cut to its
+    opening (F5). In a wide window the whole bible therefore stays at a first start where my retold forms alone hold it
+    in the start's own frame; where its weight is what makes the walk take such a form its map is the budget's
+    (``start_room``); where the walk takes the same forms beside the map, the bible is not their cause and stays."""
+    from ouroboros import context_budget, memory_floor as floor
+
+    design, fitted = _fitting(tmp_path, monkeypatch, authored=True, others=False)
+
+    def start(target):
+        monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", target)
+        plan, view, rows, steps, text = fitted(2_000_000, "nano")
+        return design.full_text in text, set(steps), view.memory_facts, text
+
+    low, high = 16_000, 60_000  # the smallest number at which a Nano start keeps the whole bible on my tellings alone
+    while high - low > 1:
+        middle = (low + high) // 2
+        whole, steps, *_ = start(middle)
+        low, high = (low, middle) if whole and steps == {"F5l"} else (middle, high)
+    whole, steps, facts, _ = start(high)
+    assert whole and steps == {"F5l"} and facts["floor"]["by_budget"] == sum(facts["floor"]["steps"].values())
+    whole, steps, facts, text = start(high - 1)  # one number below, only the budget's cuts of tellings, the map the budget's
+    assert not whole and steps == {"F5l"} and facts["floor"]["by_budget"] == sum(facts["floor"]["steps"].values())
+    assert {row["section_id"]: row.get("start_room") for row in facts["host_sections_addressed"]}["design_bible"] == "nano"
+    assert "the owner's Nano mode budget, not for the physical window" in text and design.operative_view in text
+    with monkeypatch.context() as patch:  # what the map spares: the same number, the bible kept whole by force
+        patch.setattr(floor, "untold_forms", lambda *_a: frozenset())
+        forced, steps, *_ = start(high - 1)
+    assert forced and "F2" in steps
+    whole, steps, *_ = start(low := 16_000)  # a number the walk takes F2 and F5 beside the map too: not the bible's doing
+    with monkeypatch.context() as patch:
+        patch.setattr(floor, "optional_excerpt_fits", lambda *_a, **_kw: False)
+        mapped = start(low)
+    assert whole and {"F2", "F5"} <= steps and not mapped[0] and mapped[1] == steps
+
+
+@pytest.mark.parametrize("window", [120_000, 200_000])
+@pytest.mark.parametrize("shape, needs_map", [((4, 3, 60_000), False), ((40, 10, 1_500), True)],
+                         ids=["same-cuts", "extra-untold-cuts"])
+def test_nano_prices_design_after_the_cuts_the_map_needs_anyway(tmp_path, monkeypatch, window, shape, needs_map):
+    """In both rooms the ordinary tellings overstate the physical need. Only one needs the map, for the target."""
+    from dataclasses import replace
+
+    from ouroboros import context_budget, context_fit as fit, memory_floor as floor, memory_view as mv
+    from ouroboros.section_floor import HostSection, predicted_section, relocated_text
+    from tests import _memory_view_synthetic as syn
+
+    monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 85_000)
+    design, fitted = _fitting(tmp_path, monkeypatch, authored=True, others=False)
+    rooms, words, chars = shape
+    conversations = [syn.conversation(i, words=words, word_chars=chars) for i in range(rooms)]
+    for conversation in conversations:
+        for n, word in enumerate(conversation["rooms"][0]["words"]):
+            word.update(rank=1, kind="ouroboros" if n < words // 2 else "human")  # considered, not retold
+    snapshot = replace(mv.snapshot_from_json(fitted.core.memory_view_json), conversations=tuple(conversations),
+                       owner_words="OPERATIVE_OWNER_WORDS")
+    core = replace(fitted.core, memory_view_json=mv.snapshot_json(snapshot))
+    map_text = relocated_text(design, predicted_section(design)["reader"], start_room="nano")
+
+    def start(part):
+        head = tuple(part if section.section_id == design.section_id else section for section in core.dynamic_head_sections)
+        plan, view, _, _, text = fitted(window, "nano", core=replace(core, dynamic_head_sections=head,
+                                                                     dynamic_head_text="\n\n".join(head)))
+        _, reserve = context_budget.context_mode_limits("nano", "nano", plan.output_reserve_tokens)
+        bound = floor.floor_allowances(window_tokens=window, output_reserve_tokens=reserve, non_memory_tokens=0,
+                                       work_room_levels=snapshot.spec.work_room_levels)["window"]
+        assert plan.initial_mode == "nano" and view.estimated_tokens <= bound
+        assert "OWNER_UNTOLD_WHOLE" in text and "OPERATIVE_OWNER_WORDS" in text
+        messages = plan.messages_for("nano")
+        assert "WORDS THAT STARTED THE WORK" in json.dumps(messages)
+        if part.full_text == map_text:
+            # Same legal memory and same books, assignment and reserve: only replace the map text with the excerpt.
+            block, = [block for block in messages[0]["content"] if map_text in block["text"]]
+            block["text"] = block["text"].replace(map_text, design.full_text, 1)
+            assert fit.estimate_context_prompt_tokens(messages, [], provider="test") <= bound
+        return view.memory_facts, text, floor.untold_forms(snapshot, floor.kept_level(snapshot, view.memory_facts))
+
+    # The two controls send the actual content of each form on the same frame, with the same receipt cost as the budget map.
+    _, _, mapped_cuts = start(HostSection(design.section_id, map_text))
+    _, _, whole_cuts = start(HostSection(design.section_id, design.full_text))
+    assert mapped_cuts and bool(whole_cuts - mapped_cuts) is needs_map
+    facts, text, chosen_cuts = start(design)
+    assert chosen_cuts == (mapped_cuts if needs_map else whole_cuts)
+    design_steps = [r.get("start_room") for r in facts["host_sections_addressed"] if r["section_id"] == design.section_id]
+    assert design_steps == (["nano"] if needs_map else [])
+    assert (design.full_text in text) is not needs_map
+    assert (map_text in text) is needs_map
+
+
+def test_the_guard_asks_again_where_only_the_window_took_the_bible_to_its_map_under_a_nano_budget(tmp_path, monkeypatch):
+    """Nano's number 85,000 and the handbook directly required: the smallest window that starts, above that number,
+    holds it only beside the bible's map, taken for the window. The early answer that sized it is asked again at the
+    usual point and the larger window walked: one repeat, the handbook and every word whole. The same window walks nothing
+    again, and a map the budget alone took asks nothing."""
+    from ouroboros import context_budget, context_fit as fit
+
+    design, fitted = _fitting(tmp_path, monkeypatch, authored=True, others=False, required_words=30)
+    monkeypatch.setattr(fit, "_context_route", lambda _task: ({"provider": "claudexor", "model": "fixture"}, {}))
+    walked, walk = [], fit._view_projections
+    monkeypatch.setattr(fit, "_view_projections", lambda *a, **kw: walked.append(kw["window_tokens"]) or walk(*a, **kw))
+
+    def build(core, *windows):
+        asked, walked[:] = [], []
+
+        def question(_task, **_kw):  # the early window first, the usual point's next
+            asked.append(windows[min(len(asked), len(windows) - 1)])
+            return ({"provider": "claudexor", "model": "fixture", "options": {"account_fingerprint": "fixture-fp"}},
+                    SimpleNamespace(route_fp="route", status="confirmed", stale=False, window_tokens=asked[-1],
+                                    source="synthetic"))
+        plan = fit.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core, {"id": "late", "chat_id": 1},
+                                          preferred_mode="nano", route_resolver=fit.RouteQuestion({"id": "late"}, question))
+        return plan, asked, plan.projection(plan.initial_mode)
+
+    def starts(window):
+        try:
+            return fitted(window, "nano")
+        except fit.MinimumViewUnfit:
+            return None
+
+    low, high = context_budget.OWNER_NANO_TARGET_TOKENS, 400_000
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (low, middle) if starts(middle) else (middle, high)
+    early, late = high, 2 * high
+    _, _, rows, _, text = starts(early)
+    assert rows == ["design_bible"] and design.operative_view in text  # the window's map, above the budget's number
+    plan, asked, view = build(fitted.core, early, late)
+    rows, steps, text = _shown(view)
+    assert asked == [early, late] and walked == [early, late] and plan.window_tokens == late
+    assert not rows and design.full_text in text and text.count("A sentence of the mechanism and its why.") == 50 * 120
+    assert "OWNER_UNTOLD_WHOLE" in text and "WORDS THAT STARTED THE WORK" in json.dumps(plan.messages_for("nano"))
+    plan, asked, view = build(fitted.core, early, early)  # the same window: asked once more, nothing walked again
+    assert asked == [early, early] and walked == [early] and _shown(view)[0] == ["design_bible"]
+    # The budget alone, the window wide: it takes host forms and the bible's map for itself (``start_room``), asks nothing.
+    monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 30_000)
+    mine, other = _fitting(tmp_path / "budget", monkeypatch, authored=True, others=True, required_words=30)
+    plan, asked, view = build(other.core, 300_000)
+    held = view.memory_facts["host_sections_addressed"]
+    assert asked == [300_000] and walked == [300_000] and mine.operative_view in _shown(view)[2]
+    assert {row["section_id"] for row in held} >= {"runtime", "design_bible"} and {row.get("start_room") for row in held} == {"nano"}
+
+
+def test_without_a_measured_window_only_a_refusal_past_tellings_takes_the_bible(tmp_path, monkeypatch):
+    """A refusal need not give a number for the window; the owner's target alone is not a refusal."""
+    from ouroboros import context_budget
+
+    design, fitted = _fitting(tmp_path, monkeypatch, authored=True)
+    plan, *_ = fitted(0, "max", known=False)
+    assert not _shown(plan.projection("max"))[0]  # nothing asks: the bible stays whole
+    asked = {}
+    for refused in (1_000, 7_500):
+        refit = plan.reproject_for_route(window_tokens=0, known_window=False, ratio=1.0, output_reserve=8_192,
+                                         tool_schemas=[], start_mode="max", refused_tokens=refused)
+        asked[refused] = _shown(refit.projection(refit.initial_mode))
+    rows, steps, text = asked[1_000]
+    assert not rows and steps.get("F5l") and design.full_text in text
+    rows, steps, text = asked[7_500]
+    assert rows == ["design_bible"] and steps.get("F5l") and "OWNER_UNTOLD_WHOLE" in text
+    assert "omitted for the physical window" in text and design.operative_view in text
+    monkeypatch.setattr(context_budget, "OWNER_NANO_TARGET_TOKENS", 19_000)
+    assert design.full_text in fitted(0, "nano", known=False)[-1]
+
+
+def test_an_actor_without_a_reader_gets_the_whole_bible_or_its_name_unavailable(tmp_path, monkeypatch):
+    """Only an accessible source may be named when the excerpt yields."""
+    design, fitted = _fitting(tmp_path, monkeypatch, section_root="")
+    plan, *_ = fitted(2_000_000, "max")
+    assert design.full_text in _shown(plan.projection("max"))[2]  # with room, the whole bible
+    total = plan.projection("max").estimated_tokens
+    window, seen = int(total * 1.6), None
+    while seen is None or not seen[0]:
+        seen, window = fitted(window, "max")[2:], int(window * 0.94)
+    rows, _steps, text = seen
+    assert rows == ["design_bible"]  # the other host forms stay whole for this actor
+    assert '## Design bible: "Airy dopamine"\n\n[Omitted for ' in text and "unavailable to this actor." in text
+    assert BIG_BIBLE.strip() not in text and "DESIGN.md (navigation map)" not in text
+    assert str(tmp_path / "repo/docs/DESIGN.md") not in text and "artifact_store" not in text
+    assert "Use this exact source path" not in text
+
+
+def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_path, monkeypatch):
+    """A task that directly requires the whole handbook near its route's limit (RV1, Astra 1): where the handbook fits
+    only beside the bible's map, the start takes the map and keeps the whole handbook; a window that cannot hold it
+    even so is refused by name, as before, and with room the bible stays whole."""
+    from ouroboros import context_fit as fit, memory_floor as floor
+
+    design, fitted = _fitting(tmp_path, monkeypatch, required_words=30, others=False)
+
+    refusals = {}
+
+    def starts(window):
+        try:
+            return fitted(window, "low")
+        except fit.MinimumViewUnfit as unfit:
+            refusals[window] = str(unfit)
+            return None
+
+    roomy = starts(2_000_000)
+    assert roomy and not roomy[2] and len([b for b in roomy[1].system_message()["content"]
+                                           if b["text"].startswith("## DEVELOPMENT.md\n")]) == 1
+    low, high = 1_000, 2_000_000  # the smallest start: refused below, started at or above
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (low, middle) if starts(middle) else (middle, high)
+    plan, view, rows, steps, text = starts(high)
+    assert rows == ["design_bible"] and design.operative_view in text and BIG_BIBLE.strip() not in text
+    assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in view.system_message()["content"])
+    assert starts(low) is None and "directly required handbook" in refusals[low]  # named, as before
+    # No larger window refuses: the one admission prices the handbook's note before it maps the bible (RVD1, Fable N1).
+    def whole(window):
+        shown = starts(window)
+        return bool(shown) and "design_bible" not in shown[2]
+
+    below, whole_from = high, 2_000_000
+    while whole_from - below > 1:
+        middle = (below + whole_from) // 2
+        below, whole_from = (below, middle) if whole(middle) else (middle, whole_from)
+    for window in range(whole_from - 64, whole_from):  # where the check without the note let the refusal through
+        assert starts(window), (window, refusals.get(window))
+    # The bible's map is what made the room: with its retention failing it stays whole and the same window refuses.
+    monkeypatch.setattr(floor, "retain_section", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("unavailable")))
+    assert starts(high) is None and "directly required handbook" in refusals[high]
+
+
+def test_the_installed_book_never_comes_from_a_candidate_the_context_is_bound_to(tmp_path):
+    """An installed-book fallback (a true declaration from a foreign tree) reads the serving checkout, not an unadopted
+    candidate the context is bound to (RV1, Astra 7); a recognized body still reads its own book."""
+    from ouroboros.context_layout import author_design_source
+
+    serving, candidate = tmp_path / "serving", tmp_path / "candidate"
+    for root, marker in ((serving, "SERVING_RULE"), (candidate, "CANDIDATE_RULE")):
+        (root / "docs").mkdir(parents=True)
+        (root / "docs/DESIGN.md").write_text(DESIGN.replace("BIBLE_RULE_DELIVERED", marker))
+    foreign = foreign_tree(tmp_path / "foreign")
+    ctx = SimpleNamespace(repo_dir=candidate, system_repo_dir=candidate, serving_repo_dir=serving,
+                          drive_root=tmp_path / "data", workspace_root=foreign, workspace_mode="external", task_metadata={})
+    declared = {"context_requires_self_body_docs": True}
+    assert author_design_source(ctx, declared) == (serving, True)
+    view = task_design_navigation(ctx, declared)
+    assert "SERVING_RULE" in view and "CANDIDATE_RULE" not in view
+    assert view.startswith("These are the interface rules of Ouroboros itself, from its installed body")
+
+
+def test_the_bible_is_the_heading_titled_so_not_a_lookalike(tmp_path):
+    """Only a heading titled exactly "Design bible" (a subtitle after ": ") starts the section (RV1, Carbon 1.3); the
+    slice reads the same whatever line endings the file was written with (RV1, Astra 4)."""
+    from ouroboros.context_layout import design_bible_section, design_bible_view
+
+    lookalikes = "# Design\n## Design bible history\nOLD_NOTES\n## Design bible-archive\nARCHIVED\n"
+    text = lookalikes + BIBLE + "## Attention\nBODY_RULE_NOT_DELIVERED\n"
+    assert design_bible_section(text) == BIBLE.strip()
+    assert design_bible_section(lookalikes) is None
+    crlf = text.replace("\n", "\r\n")
+    assert design_bible_section(crlf) == BIBLE.strip()
+    assert design_bible_view(crlf, source="`x`") == design_bible_view(text, source="`x`")

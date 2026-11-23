@@ -16,10 +16,11 @@ import { haptic } from './haptics.js';
 import { tr } from './i18n.js';
 import { isStackLayout, onLayoutChange } from './layout.js';
 import { bindMenu } from './ui_interactions.js';
-import { ACTION_PAUSE, pauseTaskAction } from './task_control_menu.js';
+import { ACTION_PAUSE, ACTION_RESUME, pauseTaskAction } from './task_control_menu.js';
 import { copyTextWithToast } from './ui_helpers.js';
 import { fullText } from './text_fit.js';
 import { getMessageActions, messageRow, presentAction, runMessageAction } from './message_actions.js';
+import { cardControlGuard } from './work_status.js';
 
 const LONG_PRESS_MS = 450;
 const HOLD_MS = 150;  // a still finger this long starts the sink, so a tap or a scroll never shows it
@@ -32,11 +33,11 @@ const shown = (node) => Boolean(node?.isConnected && !node.hidden && !node.disab
 
 /**
  * `feed` is the chat's transcript, `replies` its reply controller (chat_reply.js), `cardOf(taskId)` its root card
- * record, `actionsOf(record)` the items that card's own Stop… menu offers now (its work's controls),
+ * record, `readControls(record)` its current offer (the same facts as its Stop… menu and Resume button),
  * `afterAction()` the re-read once an action settled, `actions` the message-action registry (the page's own when
  * omitted). Returns `{ open, destroy }`.
  */
-export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterAction = () => {},
+export function createChatRowMenu({ feed, replies, cardOf, readControls, afterAction = () => {},
     actions = getMessageActions() }) {
     const doc = feed.ownerDocument;
     let current = null;  // { menu, binding, row }
@@ -80,14 +81,17 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         const words = [record.titleEl?.textContent, fullText(record.activityEl)].map((text) => String(text || '').trim());
         if (words.some(Boolean)) items.push(['copy', tr('code.copy', 'Copy'),
             () => copyTextWithToast(words.filter(Boolean).join('\n')), true]);
-        if (shown(record.resumeRunBtn)) items.push(['resume', tr('task.control.resume', 'Resume'), () => record.resumeRunBtn.click(), true]);
-        if (shown(record.cancelRunBtn)) {
-            // The card's own Stop… offers Pause on the same facts; its menu re-checks before any effect.
-            if (actionsOf(record).includes(ACTION_PAUSE)) {
+        const { resumeRunBtn: resume, cancelRunBtn: stop } = record;
+        const targetNow = cardControlGuard(record, readControls);
+        if (shown(resume)) items.push(['resume', tr('task.control.resume', 'Resume'), () => resume.click(), true,
+            () => shown(resume) && targetNow(ACTION_RESUME)]);
+        if (shown(stop)) {
+            const pause = targetNow(ACTION_PAUSE);
+            if (pause) {
                 items.push(['pause', tr('task.control.pause', 'Pause'),
-                    () => pauseTaskAction(record.groupId).finally(afterAction), true]);
+                    () => pauseTaskAction(pause).finally(afterAction), true, () => shown(stop) && targetNow(ACTION_PAUSE)]);
             }
-            items.push(['stop', record.cancelRunBtn.textContent, () => record.cancelRunBtn.click()]);
+            items.push(['stop', stop.textContent, () => stop.click(), false, () => shown(stop)]);
         }
         return items;
     }
@@ -137,7 +141,7 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
         menu.setAttribute('role', 'menu');
         menu.setAttribute('aria-label', row.matches('.chat-live-card') ? tr('chat.row.work_actions', 'Work actions')
             : tr('chat.row.message_actions', 'Message actions'));
-        for (const [kind, label, run, keepFocus] of items) {
+        for (const [kind, label, run, keepFocus, canRun] of items) {
             const item = doc.createElement('button');
             item.type = 'button';
             item.setAttribute('role', 'menuitem');
@@ -146,8 +150,13 @@ export function createChatRowMenu({ feed, replies, cardOf, actionsOf, afterActio
             item.addEventListener('click', (event) => {
                 event.stopPropagation();
                 // An item that moves focus on its own (Reply to the composer, Stop… into its menu) is not given it back.
-                close({ restoreFocus: Boolean(keepFocus), reason: 'action' });
-                run();
+                const available = !canRun || canRun();
+                close({ restoreFocus: !available || Boolean(keepFocus), reason: 'action' });
+                if (available) run();
+                else if (!anchor.isConnected && row.isConnected) {
+                    if (!row.hasAttribute('tabindex')) row.tabIndex = -1;
+                    row.focus({ preventScroll: true });
+                }
             });
             menu.append(item);
         }

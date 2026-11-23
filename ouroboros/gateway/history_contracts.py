@@ -366,7 +366,7 @@ class ChatSearchQuestion(TypedDict, total=False):
 class ChatSearchCandidate(HostNoticeField, total=False):
     """One saved message of the room as the fields the room's renderer draws its words from: the text history
     gives it (``system_type``, ``markdown``, ``narration``, ``source`` and the owner's ``attachments`` names choose
-    how) or a host notice's line (``notice``; its details are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
+    how) or a host notice's line (``notice``; its details, template and values are not searched), a photo, video or file's ``caption`` and a file's ``filename``, a links row's ``title`` and ``actions``, a
     question's ``quiz``, a Project lifecycle row's answer and ending (``completion_answer``, ``project_id``,
     ``project_name``, ``task_name``, ``completion_notice``). Whether its words contain the query is the client's
     reading of those words. ``history_id`` and ``row_address`` are the row's identity in ``GET /api/chat/history``, whose

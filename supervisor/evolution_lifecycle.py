@@ -1311,13 +1311,14 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
         from supervisor import queue
 
         commit_sha = str(tx.get("commit_sha") or "").strip()
-        # Only a landed row says how this commit's review ended (a FAIL or no verdict); nothing here may say PASS.
+        # The bounded landing list cannot establish a PASS, even when readable and empty.
         review = landed_outcome(queue.DRIVE_ROOT, commit_sha)
         msg = (
-            "An evolution cycle's change is live after a verified restart; "
-            + ("it landed over a failed or missing review." if review else
-               "whether it landed over a failed or missing review could not be read." if review is None
-               else "no landing over a failed or missing review is recorded for it.")
+            "After restart, the running version's history included the evolution commit; "
+            + ("it landed despite a failed review or check, or without a review verdict." if review else
+               "the recent landing records could not be read to check its review outcome." if review is None
+               else "it is not on the recent list of commits that landed despite a failed review or check, "
+                    "or without a review verdict.")
         )
         notice = fields("evolution_cycle_absorbed", step="reply_to_revert", details=f"commit {commit_sha[:12]}"
                         + (f"; review: {review}" if review else "") + f"; {objective}")

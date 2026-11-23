@@ -116,7 +116,11 @@ def reason_policy(reason: str) -> dict:
 
 def record_policy(record: dict | None) -> dict:
     record = record or {}
+    if record.get("reason") == "saved_work_hold" and record.get("door") == "panic":
+        return reason_policy("panic_hold")  # a working restore encoded its origin separately
     policy = reason_policy(str(record.get("reason") or ""))
+    if policy["cause"] == "panic":
+        return policy  # old records must not weaken owner-only authority
     if policy["cause"] != "refusal":
         policy["release"] = record.get("release", policy["release"])
     return policy
@@ -468,6 +472,14 @@ def _stop_identity(task: dict, stop: dict, tree: dict | None) -> str:
     return hashlib.sha256(json.dumps(shape, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
+def panic_hold_id(task: dict | None) -> str:
+    """Address a queue member's particular Panic hold, never a hint from activity or history."""
+    hold = hold_fact(task) or {}
+    if not (task and task.get("id") and hold.get("held_at") and record_policy(hold)["cause"] == "panic"):
+        return ""
+    return _stop_identity(task, hold, None)
+
+
 def task_current_stop(drive_root: Any, snapshot: dict, task_id: str) -> dict:
     """``current_stop`` beside a queued or parked task's status, read as the census reads its row.
 
@@ -540,9 +552,9 @@ def stop_for_reader(stop: dict, task: dict, reader_id: str) -> dict:
 
 
 def release_refusal(stop: dict | None, actor: dict | None) -> dict | None:
-    """Release permission, not readiness; empty actor means owner, mind doors must use ``mind_control``."""
+    """Release permission, not readiness. An unbound call is not the owner's door."""
     stop, actor = stop or {}, actor or {}
-    if stop.get("release") == "owner" and actor.get("actor", "owner") != "owner":
+    if stop.get("release") == "owner" and actor.get("actor") != "owner":
         return {"ok": False, "error": "panic_requires_owner_resume"}
     if stop.get("release") == "none":
         return {"ok": False, "error": "stop_not_resumable"}
@@ -649,7 +661,7 @@ def declare_stop(task: dict, record: dict) -> dict:
         return prior or current_stop(task)
     task.pop("_budget_pause_resume", None)
     selection, recovery = task.pop(SELECTION_KEY, None), task.get("_working_recovery")
-    if isinstance(recovery, dict) and policy["cause"] == "app_stop":
+    if isinstance(recovery, dict) and (policy["cause"] == "app_stop" or record.get("reason") == "saved_work_hold"):
         if isinstance(selection, dict) and recovery.get("source_task_id") == task.get("id"):
             task["_working_recovery"] = {**recovery, INTERRUPTED_SELECTION: {
                 **selection, "source_task_id": recovery["source_task_id"], "from_attempt": recovery.get("from_attempt")}}
@@ -674,7 +686,8 @@ def interrupted_selection(task: dict | None) -> dict:
 def stop_record(reason: str, *, held_at: str, detail: str = "", by: dict | None = None,
                 binding: dict | None = None) -> dict:
     """Build the current hold without conflating its name and the actor's text."""
-    return {**(binding or {}), "reason": reason, "release": reason_policy(reason)["release"],
+    record = {**(binding or {}), "reason": reason}
+    return {**record, "release": record_policy(record)["release"],
             "by": dict(by) if by else {"actor": "host", "task_id": "", "text": "", "at": held_at},
             "held_at": held_at, "detail": str(detail or "")[:300]}
 
@@ -787,6 +800,10 @@ def resume_outcome(outcome: dict) -> dict:
         outcome = {**outcome, "blockers": [{"kind": "delegated_run", **run} for run in outcome["runs"]]}
     error = str(outcome.get("error") or "")
     phrases = {"panic_requires_owner_resume": "Only the owner can release a Panic hold.",
+               "installation_panic_pending": "Panic is still in effect for this installation. No work was resumed.",
+               "panic_selection_changed": "The selected Panic hold changed or is no longer current. Read the list again.",
+               "selection_owner_held": "A separate stop still holds this task. This selection does not release it.",
+               "selection_authority_unavailable": "The current stop or permission to resume could not be verified. Try again later.",
                "update_in_progress": "An update is in progress; press Resume after the restart.",
                "root_still_paused": STOP_TEXT["awaiting_selection"],
                "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}

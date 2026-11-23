@@ -575,19 +575,23 @@ def interrupted_member_resume(root_drive: Any, root_task_id: str, task_id: str, 
 
 
 def complete_consumed_member_resume(root_drive: Any, root_task_id: str, task_id: str, consumed: Dict[str, str],
-                                    publish: Any, withdraw: Any) -> str:
+                                    publish: Any, withdraw: Any, *, locked_tree: tuple[pathlib.Path, str] | None = None) -> str:
     """Release one owner-selected member on its consumed Resume's fence; ``""`` or why not.
 
     The caller holds the queue lock, so the launch lock is never awaited: a busy
-    tree refuses. Under it the queue selection is published first (``publish``),
+    tree refuses. A conditional Panic selection already holds its exact tree's
+    launch lock and passes its scope. The queue selection is published first (``publish``),
     while this member's launch is still fenced, so a failed snapshot leaves the
     fence untouched; then ``select_member_resume`` re-checks the grant and fence and
     releases the member. A failed release withdraws the selection; a process lost
     in between leaves the member fenced, so nothing starts, and restore treats the
     row like any other selected, undispatched one.
     """
+    from contextlib import nullcontext
+
     try:
-        with launch_lock(root_drive, root_task_id, wait=False):
+        with (nullcontext() if locked_tree == (pathlib.Path(root_drive), root_task_id)
+              else launch_lock(root_drive, root_task_id, wait=False)):
             if not publish():
                 return "snapshot_not_persisted"
             try:

@@ -343,11 +343,24 @@ class WorkSummary(TypedDict):
     confirmed: bool
 
 
+class PanicRecoveryMember(TypedDict):
+    """One saved queue member with an opaque hold identity for explicit owner selection."""
+
+    task_id: str
+    task_name: str
+    panic_hold_id: str
+    project_id: NotRequired[str]
+    chat_id: NotRequired[int]
+    root_task_id: NotRequired[str]
+
+
 class WorkStateFields(TypedDict):
-    """The work projection's ``/api/state`` fields, inherited by ``contracts.StateResponse``."""
+    """Work and recovery fields of ``/api/state``, inherited by ``contracts.StateResponse``."""
 
     works: List[Work]
     rooms: Dict[str, RoomStatus]
     work_summary: WorkSummary
     works_complete: bool
     works_gaps: List[Dict[str, Any]]
+    panic_recovery: NotRequired[List[PanicRecoveryMember]]  # global pending members, not Main's attention filter
+    panic_recovery_complete: NotRequired[bool]  # complete post-readiness census with custody of the saved queue

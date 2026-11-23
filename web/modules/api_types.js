@@ -51,6 +51,8 @@
  * @property {Array<Object>=} main_attention Live human recovery owners, including children; the activity census stays root-only.
  * @property {boolean=} main_attention_complete False retains previously observed actions.
  * @property {Array<Object>=} main_attention_gaps Typed gaps in current action evidence.
+ * @property {Array<{task_id: string, task_name: string, panic_hold_id: string, project_id?: string, chat_id?: number, root_task_id?: string}>=} panic_recovery  // every room's work a Panic stop holds for the owner's Resume (panic_recovery.js)
+ * @property {boolean=} panic_recovery_complete  // true only when that list is the whole set; false or absent: never offer all
  * @property {import('./work_types.js').Work[]} works  // one row per work: a request with its Continue episodes and live members
  * @property {Object<string, import('./work_types.js').RoomStatus>} rooms  // one status per room (chat_id), from its works
  * @property {import('./work_types.js').WorkSummary} work_summary  // the tray's one line
@@ -224,6 +226,8 @@
  * @property {string=} step  // the owner's next step, a key of host_notice.STEPS; absent = no step
  * @property {string=} details  // the raw facts behind Details
  * @property {string=} instruction  // one line the owner acts on, as written (a Git command); a reader without Details says it under the line
+ * @property {string=} template  // a variable phrase's constant English with {name} slots; the template is what gets translated
+ * @property {Object.<string,string>=} values  // the words that fill the template's slots, inserted as written, never translated
  * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
  */
 /** @typedef {Object} ChatOutbound
@@ -255,7 +259,7 @@
  * @property {number=} answered_index
  * @property {string=} comment
  * @property {string=} host_facts
- * @property {HostNotice=} notice A host notice's code, step, raw details and assembled line.
+ * @property {HostNotice=} notice HostNotice for this System row.
  * @property {"chat"} type
  * @property {"user"|"assistant"|"system"} role
  * @property {string} content
