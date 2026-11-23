@@ -103,18 +103,29 @@ def test_a_capture_row_that_did_not_land_keeps_the_checkout(tmp_path, monkeypatc
     """The in-memory capture flag follows the durable row, and only a durable row releases."""
     target, ctx, handle = _CaptureFixture()._provisioned(tmp_path, monkeypatch)
     copy = pathlib.Path(handle.path)
-    (copy / "tracked.txt").write_text("one\ntwo\nkept\n", encoding="utf-8")
+    edited = "one\ntwo\nkept\n"
+    (copy / "tracked.txt").write_text(edited, encoding="utf-8")
     entry = _isolated_entry(ctx, target, handle)
+    drive = custody.custody_root(ctx)
     emit = custody.emit
     try:
         with monkeypatch.context() as broken:
             broken.setattr(custody, "emit", lambda drive, kind, payload: (
                 False if kind == custody.PATCH_CAPTURED else emit(drive, kind, payload)))
             capture = _capture_terminal_patch(ctx, entry)
-        assert capture["status"] == "ready_with_changes" and entry.patch_captured is False
+        assert capture["status"] == "failed" and capture["retry"] == "transient", capture
+        assert entry.patch_captured is False
         assert "checkout_released" not in capture and copy.is_dir()  # the only proof of capture did not land
+        assert (copy / "tracked.txt").read_text(encoding="utf-8") == edited
+        assert not any(row["type"] == custody.PATCH_CAPTURED for row in custody.custody_rows(drive))
+
         healthy = _capture_terminal_patch(ctx, entry)
+        assert healthy["status"] == "ready_with_changes", healthy
         assert entry.patch_captured is True and healthy["checkout_released"] is True and not copy.exists()
+        receipt, = [row for row in custody.custody_rows(drive) if row["type"] == custody.PATCH_CAPTURED]
+        assert receipt["run_id"] == entry.run_id and receipt["status"] == healthy["status"]
+        assert receipt["sha256"] == healthy["sha256"] == capture["sha256"]
+        assert _git(target, "show", f"{healthy['result_commit']}:tracked.txt").stdout == edited
     finally:
         custody._CUSTODY.clear()
 
