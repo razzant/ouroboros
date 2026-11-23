@@ -158,22 +158,26 @@ def test_window_opens_only_after_fenced_document_requests_rooms(isolated, wire):
     assert not report._window_lock.locked()
 
 
-@pytest.mark.parametrize('scenario', ['create_error', 'early_close', 'close_while_loading', 'blank_timeout',
-                                     'invoke_error', 'wrong_start', 'wrong_document', 'not_presented',
-                                     'close_after_navigation'])
-@pytest.mark.parametrize('destroy', ['closes', 'silent', 'raises'])
-def test_failed_window_releases_only_its_lease(isolated, scenario, destroy):
+@pytest.mark.parametrize(('scenario', 'destroy', 'destroy_calls'), [
+    ('create_error', 'closes', 0), ('early_close', 'closes', 0), ('close_while_loading', 'closes', 0),
+    ('close_after_navigation', 'closes', 0), ('blank_timeout', 'closes', 1), ('invoke_error', 'closes', 1),
+    ('wrong_start', 'closes', 1), ('wrong_document', 'closes', 1), ('not_presented', 'closes', 1),
+    ('not_presented', 'silent', 1), ('not_presented', 'raises', 1),
+])
+def test_failed_window_releases_only_its_lease(isolated, scenario, destroy, destroy_calls):
     root, html, _ = isolated
     failed = FakeWebview(scenario, destroy)
     assert report.open_local_report(failed, root, html) == {'state': 'unavailable'}
     assert not report._window_lock.locked()
+    assert len(failed.windows) == (0 if scenario == 'create_error' else 1)
     old = failed.windows[0] if failed.windows else None
     if old is not None:
         assert not old.api.rooms()['ok']
+        assert old.destroy_calls == destroy_calls
         if scenario in {'early_close', 'close_while_loading'}:
-            assert old.destroy_calls == 0 and old.core.html is None
-        if scenario in {'blank_timeout', 'invoke_error', 'wrong_start', 'wrong_document', 'not_presented'}:
-            assert old.destroy_calls == 1
+            assert old.core.html is None
+        if destroy != 'closes':
+            assert not old.events.closed.is_set()  # no native callback released this lease
         if scenario == 'wrong_document':
             assert old.core.events == [('data:text/plain;base64,QQ==', True)]
             assert old.core.start('about:blank')  # rejection also spent the one-shot navigation

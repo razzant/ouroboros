@@ -29,7 +29,7 @@ from ouroboros.context_measurement import (
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
 from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
-                                     _governance_blocks as _section_governance, _system_blocks)
+                                     _governance_blocks as _section_governance, _system_blocks, witnessed_system_blocks)
 from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
@@ -931,7 +931,6 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     from dataclasses import replace
     from functools import cache
     from ouroboros import memory_floor as floor
-    from ouroboros.context_assembly_trace import observe_layout
     from ouroboros.held_notes import HeldNoteSection, can_replay_frame, frame_key
     from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
@@ -969,11 +968,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     # One serialization per request shape, its schemas inside; a host section's shorter form and a memory text then add
     # or take only their own characters (JSON escapes per character, and these texts are embedded verbatim).
-    shapes, text_chars = {}, {}
-    def escaped(text):
-        if text not in text_chars:
-            text_chars[text] = json_chars(text)
-        return text_chars[text]
+    shapes, escaped = {}, cache(json_chars)
     def measure(selected, sent, addressed, story=0, room=0):  # ``story``, ``room``: the memory texts' characters
         key = (selected, sent.chosen, bool(story), bool(room))
         if key not in shapes:  # one-letter memory texts hold the shape; only presence changes separators and blocks
@@ -1199,12 +1194,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     contents = {}
     for m in floor.MODES:
         rows = host_receipts(m, receipts)
-        blocks, addressed = whole_governance[form[m]], section_views(sections[m], rows)
-        witnesses = []
-        trace = observe_layout(whole_core, blocks, addressed, rows, whole, shown, witnesses) if m == mode else None
-        system = _system_blocks(whole_core, blocks, story, room, m, addressed, whole, trace=trace)
+        system, witnesses = witnessed_system_blocks(whole_core, whole_governance[form[m]], story, room, m,
+            section_views(sections[m], rows), rows, whole, shown=shown if m == mode else None)
         facts = {**receipt, 'held_note_request_tokens': request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = system, {**facts, **({'host_sections_addressed': rows} if rows else {}), '_assembly_witnesses': tuple(witnesses)}
+        contents[m] = system, {**facts, **({'host_sections_addressed': rows} if rows else {}), '_assembly_witnesses': witnesses}
     return contents, mode
 
 

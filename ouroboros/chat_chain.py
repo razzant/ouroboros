@@ -14,6 +14,7 @@ import heapq
 import json
 import pathlib
 import re
+from functools import cache
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 from ouroboros import dialogue_store as ds, dialogue_positions as dp
@@ -383,10 +384,17 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
     from ouroboros.store import open_store, store_path
 
     chat = int(room_id)
-    projects = {int(project["chat_id"]) for project in list_reserved_projects(root, strict=strict)}
-    refs = source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None) if chat in projects else []
-    resolver = RoomResolver(root, strict=strict)
-    member = room_membership(chat, projects, refs, resolver)
+    registry = list_reserved_projects(root, strict=strict)
+    projects = {int(project["chat_id"]) for project in registry}
+
+    @cache
+    def origin_refs():
+        return (source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None)
+                if chat in projects else [])
+
+    refs = origin_refs() if include_origin_rows else []
+    resolver = RoomResolver(root, strict=strict, reserved={str(row["id"]): row for row in registry} if strict else None)
+    member = room_membership(chat, projects, refs if include_origin_rows else origin_refs, resolver)
     keys = [] if binding is not None else [("chat_id", chat)]
     identities = {}
     upper = ds.stream_end(root, stream) if upper is None else upper

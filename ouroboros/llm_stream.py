@@ -470,7 +470,7 @@ class AnthropicAccumulator(_Accumulator):
         self.body: dict = {}
         self.blocks: dict[int, dict] = {}
         self.open_blocks: set[int] = set()
-        self.usage_final = False  # message_delta folded its final counters into body["usage"]
+        self.usage_final = False  # message_delta closes the usage phase, even if no usage was reported
         self.inputs: dict[int, str] = {}
 
     def accept(self, event: str, data: str) -> None:
@@ -539,7 +539,8 @@ class AnthropicAccumulator(_Accumulator):
             if not self.body or self.open_blocks:
                 raise IncompleteProviderStream("Native message delta before blocks finished")
             _snapshot(self.body, chunk.get("delta") or {})
-            self.body["usage"] = merge_usage_reports(self.body.get("usage"), chunk.get("usage"))
+            if isinstance(delta_usage := chunk.get("usage"), dict):
+                self.body["usage"] = merge_usage_reports(self.body.get("usage"), delta_usage)
             self.usage_final = True
         elif kind == "message_stop":
             self.done = True

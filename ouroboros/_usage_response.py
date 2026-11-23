@@ -532,6 +532,18 @@ def _reported_token_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
     return reported
 
 
+def provider_token_counts(raw: Dict[str, Any]) -> dict:
+    """Bound the report's counters using this raw witness, not accounting projections."""
+    written, invalid = cache_write_total(raw, cache_write_split(raw))
+    return {key: value for key, value in {
+        "prompt_tokens": _reported_token_count(raw, "prompt_tokens"),
+        "input_tokens": _reported_token_count(raw, "input_tokens"),
+        "completion_tokens": _reported_token_count(raw, "completion_tokens", "output_tokens"),
+        "cached_tokens": cache_read_count(raw),
+        "cache_write_tokens": None if invalid else written,
+    }.items() if value is not None and value <= 2**53 - 1}
+
+
 _MEDIA_DETAIL_FIELDS = frozenset(_TOKEN_DETAIL_FIELDS) | {
     "input_token_details", "output_token_details", "cached_tokens_details",
     "promptTokensDetails", "responseTokensDetails", "response_tokens_details", "cacheTokensDetails", "cache_tokens_details",
@@ -1116,7 +1128,7 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
     body = reports[selected][0]
     usage, _, _ = usage_from_response(body, payload=body, provider=provider, provider_reported_cost_only=True)
     # Reports are newest first; the complete price and each cumulative counter are independent facts.
-    latest = {}
+    latest, witness = {}, None
     for index, (report, _, raw) in enumerate(reports):
         if isinstance(raw, dict) and raw:
             counts = usage if index == selected else usage_from_response(
@@ -1124,9 +1136,17 @@ def priced_failure_usage(error: BaseException, payload: Any, provider: str):
             for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
                 if counts[key] is not None:
                     latest.setdefault(key, counts[key])
+        if provider == "openrouter" and isinstance(raw, dict):
+            if witness is None:
+                witness = {}
+            # Resolve wire aliases within each snapshot so a newer top-level zero can beat an older detail.
+            for key, count in provider_token_counts(_reported_token_usage(raw)).items():
+                witness.setdefault(key, count)
     if usage.get("cache_write_tokens_invalid"):
         latest.pop("cache_write_tokens", None)  # A malformed reported total is not an absent report.
     usage.update(latest)
+    if witness is not None:
+        usage["_reported_token_usage"] = witness  # only the report reads this on OpenRouter; pinned tariffs are untouched
     usage.pop("cost_basis", None)  # Only the matching, complete wallet report supplies this basis.
     if basis:
         usage.update(cost=cost, cost_basis=basis)

@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from ouroboros._usage_response import (
-    _reported_token_count, cache_read_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
-    processing_receipt, provider_cost_value, text_token_counts,
+    _reported_token_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
+    processing_receipt, provider_cost_value, provider_token_counts, text_token_counts,
 )
 
 
@@ -202,16 +202,7 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
 def _provider_token_receipt(usage: Mapping[str, Any]) -> dict | None:
     """Read the response parser's pre-accounting witness, never the billing-shaped fallback."""
     raw = usage.get("_reported_token_usage")
-    if not isinstance(raw, dict):
-        return None
-    written, invalid = cache_write_total(raw, cache_write_split(raw))
-    return {key: value for key, value in {
-        "prompt_tokens": _reported_token_count(raw, "prompt_tokens"),
-        "input_tokens": _reported_token_count(raw, "input_tokens"),
-        "completion_tokens": _reported_token_count(raw, "completion_tokens", "output_tokens"),
-        "cached_tokens": cache_read_count(raw),
-        "cache_write_tokens": None if invalid else written,
-    }.items() if value is not None and value <= 2**53 - 1}
+    return provider_token_counts(raw) if isinstance(raw, dict) else None
 
 
 def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,

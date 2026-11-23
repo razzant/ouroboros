@@ -639,7 +639,8 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     authored restore with an advisory capacity deficit; dispatch fits it later.
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
-    from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
+    from ouroboros.context_fit import _governance_blocks, _request_tokens
+    from ouroboros.section_floor import witnessed_system_blocks
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -654,7 +655,6 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
                       lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot,
                       preference=old.get("preference"))
-    story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
     facts = view_facts(snapshot, level, window_tokens=old.get("window_tokens"), mode=mode,
                        allowances={"margin": old.get("allowance_tokens"), "physical": old.get("physical_allowance_tokens"),
                                    "budget": old.get("budget_allowance_tokens")},
@@ -669,12 +669,15 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     receipts = shown.memory_facts.get("host_sections_addressed", ())
     if receipts:
         facts["host_sections_addressed"] = receipts
-    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts), mv.story_is_whole(level))
+    selected = ViewFit(snapshot, level, note, facts)
+    story, room = selected.story, selected.room
+    system, witnesses = witnessed_system_blocks(plan.core, governance, story, room, mode,
+        section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected)
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
                             current_messages=plan.messages_for(mode))
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
         memory_facts=view_receipt(snapshot, story, room, facts), estimated_tokens=tokens,
-        calibrated_tokens=int(tokens * shown.calibration_ratio))
+        calibrated_tokens=int(tokens * shown.calibration_ratio), assembly_witnesses=witnesses)
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 

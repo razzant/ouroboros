@@ -144,7 +144,7 @@ def span_groups(parts):
 
 def section_fact(part, addressed, receipts, books):
     kind = part.section_id
-    family = 'held_note' if kind.startswith('held_note:') else kind
+    family = getattr(part, 'report_family', '') or ('held_note' if kind.startswith('held_note:') else kind)
     fact = {'family': family, 'form': 'shorter' if kind in addressed else 'rendered'}
     receipt = receipts.get(kind, {})
     if receipt:
@@ -153,7 +153,7 @@ def section_fact(part, addressed, receipts, books):
         path = ref.get('path')
         if family != 'held_note' and isinstance(path, str) and re.fullmatch(r'source_handles/context_checkpoints/host-[a-zA-Z0-9_.-]+\.md', path):
             fact['retained_source'] = {'path': path, 'sha256': ref.get('sha256')}
-    if book := books.get(kind.removesuffix('_map')):
+    if book := books.get(family.removesuffix('_map')):
         fact['family'] = book.book_id
         fact['form'] = ('chapter_links' if kind in addressed else 'chapter_map') if kind.endswith('_map') else 'whole_book'
         fact['sources'] = [{'path': source.source_path, 'sha256': source.sha256,

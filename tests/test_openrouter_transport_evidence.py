@@ -291,6 +291,52 @@ def test_clean_eof_after_finish_still_returns_received_answer(isolated):
     assert ledger_rows(isolated)[0]["cost_usd"] == 0.25
 
 
+@pytest.mark.parametrize("start_usage, delta_usage, expected", [
+    pytest.param(None, None, None, id="omitted"),
+    pytest.param({}, None, {}, id="empty-start"),
+    pytest.param(None, {}, {}, id="empty-delta"),
+    pytest.param({"input_tokens": 7}, {"output_tokens": 0},
+                 {"input_tokens": 7, "completion_tokens": 0}, id="merged-counters"),
+])
+def test_completed_anthropic_stream_keeps_missing_usage_distinct_from_empty(
+        isolated, start_usage, delta_usage, expected):
+    message = {"id": "msg-native", "type": "message", "role": "assistant", "content": [], "total_cost_usd": 0.25}
+    delta = {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+    for body, usage in ((message, start_usage), (delta, delta_usage)):
+        if usage is not None:
+            body["usage"] = usage
+    frames = [{"type": "message_start", "message": message}, delta, {"type": "message_stop"}]
+    wire = Wire([("data: " + json.dumps(frame_data) + "\n\n").encode() for frame_data in frames])
+    request = ua.AttemptRequest(model="anthropic::fixture", provider="anthropic", reservation_usd=2.0,
+                                drive_root=isolated)
+    ua.execute_physical_attempt(request, lambda: consume_stream(wire, native=True))
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    if expected is None:
+        assert "provider_token_receipt" not in row
+    else:
+        assert row["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_interrupted_openrouter_receipt_keeps_latest_counters_separate_from_price(isolated, asynchronous):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    failure = RuntimeError("synthetic read interrupted")
+    chunks = [frame(usage={"cost": 0.25, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}}),
+              frame(usage={"prompt_tokens": 7, "completion_tokens": 5}),
+              frame(usage={"cached_tokens": 0})]
+    with pytest.raises(RuntimeError) as caught:
+        run_driver(Wire(chunks, read_error=failure), asynchronous=asynchronous)
+    assert caught.value is failure
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    expected = {"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}
+    assert {key: row[key] for key in expected} == expected
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
 @pytest.mark.parametrize(("usage", "asynchronous"), [
     pytest.param({"prompt_tokens": 2}, False, id='usage0-False'),
     pytest.param({"cost": 0.125, "prompt_tokens": 2}, True, id='usage1-True'),

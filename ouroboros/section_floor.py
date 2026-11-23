@@ -43,9 +43,24 @@ class HostSection(str):
         return relocated_text(self, row["reader"], start_room=row.get("start_room", False))
 
 
+@dataclass(frozen=True, eq=False, repr=False, kw_only=True)
+class _ReportSection(HostSection):
+    """A report label on otherwise anonymous text; excluded from the captured core identity."""
+
+    report_family: str
+
+    def __new__(cls, section_id, full_text, operative_view=None, reader="", *, report_family=""):
+        return super().__new__(cls, section_id, full_text, operative_view, reader)
+
+
+def report_text(text: str, family: str) -> HostSection:
+    return _ReportSection("", text, report_family=family)
+
+
 def capture_sections(parts: Iterable[str], *, prefix: str) -> tuple[HostSection, ...]:
     """Keep structural section boundaries without guessing an unknown producer's meaning."""
-    return tuple(part if isinstance(part, HostSection) else HostSection(f"{prefix}_{i}", part)
+    return tuple(replace(part, section_id=f"{prefix}_{i}") if isinstance(part, _ReportSection) and not part.section_id
+                 else part if isinstance(part, HostSection) else HostSection(f"{prefix}_{i}", part)
                  for i, part in enumerate(parts))
 
 
@@ -141,7 +156,7 @@ def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callab
     # nav map in low; DEVELOPMENT inclusion is the caller's mode-independent
     # decision carried on the core (the former per-task force_low_docs lever is
     # gone: workspace binding no longer shapes the docs).
-    static_parts = [HostSection('system', core.base_prompt), HostSection('bible', "## BIBLE.md\n\n" + core.bible_md)]
+    static_parts = [report_text(core.base_prompt, "system"), report_text("## BIBLE.md\n\n" + core.bible_md, "bible")]
     sections, development = reference_docs(
         env,
         context_mode="low" if core.compact_reference_docs else mode,
@@ -187,3 +202,13 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     if trace is not None:
         trace((common, handbook, (semi, connections), story, head, room, dynamic, stable, changing))
     return blocks + [{"type": "text", "text": changing}]
+
+
+def witnessed_system_blocks(core, governance, story, room, mode, addressed, receipts, story_whole, *, shown=None):
+    """Render a projection and its host-only witness together, without reopening the view's sources."""
+    from ouroboros.context_assembly_trace import observe_layout
+
+    witnesses = []
+    trace = observe_layout(core, governance, addressed, receipts, story_whole, shown, witnesses) if shown is not None else None
+    system = _system_blocks(core, governance, story, room, mode, addressed, story_whole, trace=trace)
+    return system, tuple(witnesses)
