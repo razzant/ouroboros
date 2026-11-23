@@ -191,6 +191,6 @@ def test_memory_coarsening_uses_the_density_that_measured_the_saving(monkeypatch
     monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route",
                         lambda self, **kw: seen.append(kw) or self)
     ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="low", messages=plan.messages_for("low"),
-                          tool_schemas=[])
+                          tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[])  # a round's registry
     assert not loop_round_limits._coarsen_memory_view(ctx, fit, saving=30_000)
     assert seen[0]["ratio"] == 1.5 and seen[0]["refused_tokens"] == 30_000

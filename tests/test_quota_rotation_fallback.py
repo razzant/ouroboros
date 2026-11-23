@@ -409,8 +409,8 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
                 return {"role": "assistant", "content": "after owner wait"}, 0.0, "max"
             call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
                 fact={"reason": "quota", "reset_at": RESET},
-                ask_owner=lambda _waiter: (asked.append(_waiter), waiter.overrides.update(
-                    {"fallback:0": {"model_account_override": "account-b"}})),
+                ask_owner=lambda _waiter: (asked.append(_waiter), waiter.overrides.update(  # the wait's answer: a dict
+                    {"fallback:0": {"model_account_override": "account-b"}}), {})[-1],
                 terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
             call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
             return None, 0.0, "max"
@@ -431,6 +431,120 @@ def test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait(main_cal
     assert tools._ctx.active_model == "openai::one"
     assert rebounds[-1] == "account-b"
     assert RESOURCE_REFUSAL_KEY not in usage
+
+
+def _two_route_walk(ctx, owner, monkeypatch, overrides=None):
+    """Two configured routes with live waiting, every recovery read through the round's own caller."""
+    tools = _loop_tools(ctx, owner)
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
+    waiter = SimpleNamespace(waits_allowed=True, overrides=dict(overrides or {}))
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: waiter)
+    reconciled = []
+    monkeypatch.setattr(loop, "_reconcile_transport_wait",
+                        lambda episode, _ctx, **kw: reconciled.append(kw["error_kind"]) or episode)
+    return tools, waiter, reconciled
+
+
+def _recover(ctx, tools, entry):
+    ctx.accumulated_usage["_last_llm_error_kind"] = entry
+    return loop._recover_failed_round(ctx, tools, None, None, context_fit_plan=ctx.context_fit_plan,
+                                      active_context_mode="max", emit_progress=lambda *_a, **_kw: None)
+
+
+@pytest.mark.parametrize("entry", ["transport_unavailable", "bad_request"])
+def test_the_last_backup_keeps_its_quota_for_the_rounds_own_outage_wait(main_call, monkeypatch, entry):
+    """The round's own outage owns its wait: the last configured route's quota refusal is retained for it, never
+    waited on in that route's call, and the round goes back to its own transport wait with no owner question or
+    terminal refusal. A round without a wait of its own lets the last route wait on its quota in its call."""
+    ctx, _gateway, owner, _events, _decide, _observations = main_call
+    tools, _waiter, reconciled = _two_route_walk(ctx, owner, monkeypatch)
+    seen = []
+
+    def candidate(call):
+        seen.append((call.active_model, call.defer_resource_wait))
+        call.tools._ctx._deferred_resource_refusal = None
+        if call.active_model == "openai::one":
+            call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+            return None, 0.0, "max"
+        if not call.defer_resource_wait:  # its own call waits on its quota, then answers
+            return {"role": "assistant", "content": "after its own quota wait"}, 0.0, "max"
+        call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
+            fact={"reason": "quota", "reset_at": RESET},
+            ask_owner=lambda _waiter: pytest.fail("the round's own outage owns its wait"),
+            terminal=lambda **_fields: pytest.fail("a refusal kept for the round's own wait is no terminal"))
+        call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+        return None, 0.0, "max"
+
+    monkeypatch.setattr(loop, "_call_round_model", candidate)
+    message, model, *_rest = _recover(ctx, tools, entry)
+    if entry == "transport_unavailable":
+        assert message is None and model == ctx.active_model
+        assert seen == [("openai::one", True), ("openai::two", True)]
+        assert ctx.accumulated_usage["_last_llm_error_kind"] == entry and reconciled == [entry]
+        assert RESOURCE_REFUSAL_KEY not in ctx.accumulated_usage
+    else:
+        assert message["content"] == "after its own quota wait" and model == "openai::two"
+        assert seen == [("openai::one", True), ("openai::two", False)]
+
+
+@pytest.mark.parametrize("answer", ["switch", "retry", "earlier_switch", "reselect_same", "switch_in_its_call"])
+def test_an_owners_switch_stays_the_owners_choice_after_the_backup_answers(main_call, monkeypatch, answer):
+    """A configured route's quota refusal reaches the owner after the walk (or, for the last route, in its own
+    call). A Switch on that card is the owner's choice of the route and stays one when the route answers and is
+    adopted, even a Switch to the very binding an earlier card already chose. Retry of an earlier card's choice,
+    or of none, adopts the route as the configured fallback it is: no new owner choice is recorded."""
+    from ouroboros.route_choice import explicit
+
+    ctx, _gateway, owner, _events, _decide, _observations = main_call
+    picked = {"model": "openai::owner-pick", "use_local": False, "model_account_override": ""}
+    tools, waiter, _reconciled = _two_route_walk(
+        ctx, owner, monkeypatch, {"fallback:0": dict(picked)} if answer in {"earlier_switch", "reselect_same"} else None)
+    tools._ctx.primary_route = {"model": ctx.active_model, "use_local": False, "role": "main"}
+    tools._ctx.event_queue = leads = queue.Queue()
+    asked, sent = [], []
+
+    def ask_owner(_waiter):  # the wait's answer: the call's own values, a Switch's choice over them
+        asked.append(answer)
+        if answer in {"switch", "reselect_same"}:  # as ``TaskModelWait.wait`` applies a Switch: a new entry, same fields or not
+            waiter.overrides["fallback:0"] = dict(picked)
+        return {"model": "openai::one" if answer == "retry" else picked["model"], "use_local": False}
+
+    def candidate(call):
+        sent.append((call.active_model, call.model_role, call.defer_resource_wait))
+        call.tools._ctx._deferred_resource_refusal = None
+        if asked:
+            return {"role": "assistant", "content": "after the owner's answer"}, 0.0, "max"
+        if answer == "switch_in_its_call" and call.model_role == "fallback:1":
+            # The last route waits in its own call; the owner's Switch reprepares it there (``_reprepare_waiting_main``).
+            waiter.overrides["fallback:1"] = dict(picked)
+            call.tools._ctx.route_choice = explicit("wait_card")
+            call.active_model = picked["model"]
+            return {"role": "assistant", "content": "after the owner's answer"}, 0.0, "max"
+        if call.model_role == "fallback:0" and answer != "switch_in_its_call":
+            call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
+                fact={"reason": "quota", "reset_at": RESET}, ask_owner=ask_owner,
+                terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
+            call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+        else:
+            call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+        return None, 0.0, "max"
+
+    monkeypatch.setattr(loop, "_call_round_model", candidate)
+    message, model, *_rest = _recover(ctx, tools, "bad_request")
+    expected = "openai::one" if answer == "retry" else picked["model"]
+    assert message["content"] == "after the owner's answer" and model == expected
+    if answer == "switch_in_its_call":  # its own call, not a deferral, held the card
+        assert asked == [] and sent[-1] == ("openai::two", "fallback:1", False)
+    else:
+        assert asked == [answer] and sent[-1] == (expected, "fallback:0", False)
+    lead = [row["lead"] for row in list(leads.queue) if row.get("type") == "work_lead"][-1]
+    assert lead["model"] == expected
+    if answer in {"switch", "reselect_same", "switch_in_its_call"}:
+        assert tools._ctx.route_choice == explicit("wait_card") and (lead["basis"], lead["cause"]) == ("owner", "wait_card")
+    else:
+        assert tools._ctx.route_choice == explicit("fallback") and lead["basis"] == "fallback" and lead["cause"] != "wait_card"
 
 
 def test_owner_selected_account_rebinds_fallback_before_physical_send(main_call, monkeypatch):

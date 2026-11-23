@@ -197,7 +197,8 @@ PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies+floor"), ("exec:round:
 def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
     from ouroboros import loop
 
-    candidate_plan = SimpleNamespace(route_fp="fallback-route")
+    candidate_plan = SimpleNamespace(route_fp="fallback-route", projection=lambda mode: SimpleNamespace(
+        memory_facts={"floor": {"mode": mode}, "blocks": {"story_tokens": 1}}))
     messages = [{"role": "user", "content": "primary"}]
     fallback_messages = [{"role": "user", "content": "fallback"}]
     inner = SimpleNamespace()
@@ -218,6 +219,7 @@ def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
     assert usage == expected
     assert messages == fallback_messages
     assert inner.context_fit_plan is candidate_plan
+    assert inner.memory_view_facts == {"floor": {"mode": "low"}}  # the adopted view's own trace fact
     assert resident == selected and resident is not selected
 
 

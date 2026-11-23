@@ -236,6 +236,7 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
     fails, or ends with an outcome nobody knows that still allows a new generation, then its retained send
     answers; the facts read that send's own call and the round's first failure. That re-send is told as the
     one route re-sent after the owner's answer, and the end row keeps an unknown outcome with its own attempt."""
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from ouroboros import fallback_cooldown, loop, loop_transport
@@ -248,7 +249,9 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
     tools._ctx.primary_route = {"model": ctx.active_model, "use_local": False, "role": "main"}
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
-    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
+    # As the real rebind does, the rebound plan carries the role it was rebound for (the adopted route's own role).
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan",
+                        lambda plan, *_a, **kw: (replace(plan, model_role=kw.get("model_role") or plan.model_role), "max"))
     if second == "unknown":  # an eligible unknown outcome does not fence the walk
         monkeypatch.setattr(loop_transport, "new_generation_after_unknown", lambda *_a, **_kw: True)
     asked, seen, resent = [], [], []

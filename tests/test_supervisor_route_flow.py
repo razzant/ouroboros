@@ -218,7 +218,7 @@ def test_worker_payload_validates_and_copies_the_whole_binding():
 
 @pytest.mark.parametrize("switch", ["none", "owner", "role"])
 def test_restart_restores_frozen_binding_and_later_switch(tmp_path, monkeypatch, switch):
-    from ouroboros import loop, owner_wait
+    from ouroboros import loop, loop_model_call, owner_wait
     from ouroboros.model_wait import TaskModelWait
     from tests.test_working_checkpoint import _registry
 
@@ -246,9 +246,12 @@ def test_restart_restores_frozen_binding_and_later_switch(tmp_path, monkeypatch,
     restored._ctx.model_wait_context = TaskModelWait(task={"id": "child"}, drive_root=tmp_path, event_queue=None, worker_slot_held=True)
     restored._ctx.model_wait_context.restore_continuation(saved["model_wait"], started_at=None)
     owner_wait.restore_continuation_state(restored, saved, [], {}, {}, set())
-    calls = []
+    calls, published = [], []
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **kw: calls.append(kw) or ("plan", "max"))
+    # The rebind only previews (``publish=False``); the restore publishes the binding it selected.
+    monkeypatch.setattr(loop_model_call, "publish_rebound_view", lambda _tools, plan, mode, *_a: published.append((plan, mode)))
     assert owner_wait.rebind_restored_route(restored, saved, []) == ("plan", "max")
+    assert published == [("plan", "max")] and calls[0]["publish"] is False
     call = calls[0]
     assert call["model"] == ctx.active_model and call["model_role"] == role
     assert call["credential_profile_id"] == ("owner-account" if switch == "owner" else None if switch == "role" else "account-a")

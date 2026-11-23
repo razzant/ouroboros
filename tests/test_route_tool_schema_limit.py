@@ -105,7 +105,9 @@ def test_main_fits_its_resident_list_in_place_and_names_what_it_left_out():
     assert "enable_tools" in str(notice)
     assert ctx.tools._ctx._route_left_out_tool_names == {left_out}
 
-    # The actor loads it again (enable_tools appends): it stays, another one goes, and one new notice names it.
+    # The actor loads it again (enable_tools appends and records the actor's choice, which the ceiling keeps):
+    # it stays, another one goes, and one new notice names it.
+    ctx.tools._ctx._actor_loaded_tool_names = {left_out}
     resident.append(_schema(left_out))
     rows = len(ctx.messages)
     loop_model_call._fit_route_tool_ceiling(ctx)
