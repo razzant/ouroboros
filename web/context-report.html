@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-QH2goG/sW8ZtmyOTnit3Pp3S34RnucU2ODajmvhlxh8='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qQUHW8mwU661D5V/xv7/P5IJ6ducAUU+QQuocdlhmTc='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -112,7 +112,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 <p id="explain"></p>
 <dl class="overview" id="overview"></dl>
 <details class="more" id="comparison"><summary>Compare with another report</summary>
-<p class="note">This compares the two saved copies with known secrets masked. Ledger token counts are shown separately and can contain normalized zeros.</p>
+<p class="note">This compares the two saved copies with known secrets masked. The ledger can record zero even if the provider gave no number.</p>
 <div class="open" id="comparison-opening"><span class="pick"><input type="file" id="comparison-file" accept=".json,application/json"><label class="button" for="comparison-file">Open second local report</label></span></div>
 <p class="note" id="comparison-status" role="status"></p><dl id="comparison-facts"></dl>
 <details id="comparison-technical" hidden><summary>Technical details of the comparison</summary><dl id="comparison-identities"></dl></details></details>
@@ -463,6 +463,9 @@ const tokenWords = (value) => knownCount(value) ? `${count(value)} tokens` : 'No
 const MODE_NAMES = new Map([['max', 'Max'], ['low', 'Low'], ['nano', 'Nano']]);
 // Older reports used a different name for the same normalized ledger counters.
 const ledgerUsage = (facts) => facts.ledger_usage ?? facts.reported_usage;
+const reportedUsage = (facts) => isRecord(facts.provider_token_receipt) ? facts.provider_token_receipt : null;
+const REPORTED_COUNTS = [['prompt_tokens', 'Prompt'], ['input_tokens', 'Native input field'],
+  ['completion_tokens', 'Output'], ['cached_tokens', 'Cache read'], ['cache_write_tokens', 'Cache write']];
 function showBuild(facts) {
   const write = (label, value) => add(label, value, build);
   const fit = isRecord(facts.context_fit) ? facts.context_fit : null;
@@ -499,6 +502,11 @@ function showBuild(facts) {
   if (split) write('Other text input', tokenWords(total - cached));
   write('Ledger cache write', tokenWords(usage?.cache_write_tokens));
   write('Ledger text output', tokenWords(usage?.completion_tokens));
+  const reported = reportedUsage(facts);
+  write('Provider token receipt', reported ? 'Recorded for this attempt' : 'Not recorded for this attempt');
+  if (reported) for (const [key, label] of REPORTED_COUNTS) {
+    if (knownCount(reported[key]) || key === 'cached_tokens') write(`Provider · ${label}`, tokenWords(reported[key]));
+  }
 }
 const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
   ['tools', 'Tools'], ['functions', 'Functions']];
@@ -868,6 +876,14 @@ function showComparison(second, parsed) {
     ['cache_write_tokens', 'Ledger cache write']]) {
     write(`${label}: first → second`, `${tokenWords(ledgerUsage(firstReport.facts)?.[key])} → ${tokenWords(ledgerUsage(facts)?.[key])}`);
   }
+  const left = reportedUsage(firstReport.facts), right = reportedUsage(facts);
+  const status = (receipt) => receipt ? 'Recorded' : 'Not recorded';
+  write('Provider token receipt: first → second', `${status(left)} → ${status(right)}`);
+  for (const [key, label] of REPORTED_COUNTS) {
+    if (key === 'cached_tokens' || knownCount(left?.[key]) || knownCount(right?.[key])) {
+      write(`Provider ${label.toLowerCase()}: first → second`, `${tokenWords(left?.[key])} → ${tokenWords(right?.[key])}`);
+    }
+  }
 }
 async function decodeReport(file) {
   let decoded;
@@ -913,7 +929,7 @@ comparisonInput.addEventListener('change', async () => {
     const { report, parsed } = await decodeReport(file);
     if (epoch !== comparisonGeneration) return;
     showComparison(report, parsed);
-    comparisonStatus.textContent = 'Comparison below. The request body shown is from the first report.';
+    comparisonStatus.textContent = 'The request body shown is from the first report.';
   } catch (error) {
     if (epoch !== comparisonGeneration) return;
     comparisonFacts.replaceChildren();

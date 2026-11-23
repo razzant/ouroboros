@@ -412,7 +412,7 @@ def test_local_request_report_too_large_for_the_page_is_a_bounded_gap_whose_comm
     kept = {'task_id', 'attempt_id', 'ledger_state', 'provider_body', 'transport_observation', 'model', 'provider',
             'ts_reserved', 'ts_dispatched', 'ts_final', 'settle_reason', 'failure', 'file_trace', 'sha256',
             'redacted_ref', 'body', 'recorded_bytes', 'report_bytes', 'report_bytes_at_least', 'page_limit_bytes',
-            'retry_max_bytes', 'context_fit', 'authored_prefix', 'ledger_usage', 'prepared_inventory',
+            'retry_max_bytes', 'context_fit', 'authored_prefix', 'ledger_usage', 'provider_token_receipt', 'prepared_inventory',
             'assembly_source_map', 'assembly_trace', 'late_contributions'}
     args = ['--data-root', str(data_root), 'page-reader-test', '--attempt']
     small_body = _manifest(small)['redacted_projection_ref']['size']
@@ -1175,3 +1175,19 @@ def test_assembly_report_labels_normalized_attempt_counts_as_ledger_only():
 
     facts = _assembly_facts({'prompt_tokens': 0, 'cached_tokens': 0, 'cache_write_tokens': 0})
     assert facts == {'ledger_usage': {'prompt_tokens': 0, 'cached_tokens': 0, 'cache_write_tokens': 0}}
+
+
+@pytest.mark.parametrize('cache', [None, 0, 7])
+def test_selected_report_preserves_response_cache_observation(data_root, monkeypatch, cache):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    usage = {'prompt_tokens': 50, 'completion_tokens': 2, 'cost': 0.0}
+    if cache is not None:
+        usage['prompt_tokens_details'] = {'cached_tokens': cache}
+    monkeypatch.setattr(_Response, '_payload', {**_Response._payload, 'usage': usage})
+    row = _dispatch(data_root, 'response-cache')
+    facts, body = read_attempt(data_root, 'response-cache', row['attempt_id'], report_facts=True)
+    assert body is not None and facts['attempt_id'] == row['attempt_id']
+    assert facts['provider_token_receipt'] == {
+        'prompt_tokens': 50, 'completion_tokens': 2, **({'cached_tokens': cache} if cache is not None else {}),
+    }

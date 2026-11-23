@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from ouroboros._usage_response import (
-    _reported_token_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
+    _reported_token_count, cache_read_count, cache_write_split, cache_write_total, nontext_counts, observed_processing_mode,
     processing_receipt, provider_cost_value, text_token_counts,
 )
 
@@ -199,6 +199,21 @@ def frame_estimate_ttl(reservation, request, exc) -> Optional[str]:
     return ""
 
 
+def _provider_token_receipt(usage: Mapping[str, Any]) -> dict:
+    """Read the response parser's pre-accounting witness, never the billing-shaped fallback."""
+    raw = usage.get("_reported_token_usage")
+    if not isinstance(raw, dict):
+        return {}
+    written, invalid = cache_write_total(raw, cache_write_split(raw))
+    return {key: value for key, value in {
+        "prompt_tokens": _reported_token_count(raw, "prompt_tokens"),
+        "input_tokens": _reported_token_count(raw, "input_tokens"),
+        "completion_tokens": _reported_token_count(raw, "completion_tokens", "output_tokens"),
+        "cached_tokens": cache_read_count(raw),
+        "cache_write_tokens": None if invalid else written,
+    }.items() if value is not None and value <= 2**53 - 1}
+
+
 def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost_optional,
                       estimate_cache_ttl: Optional[str] = None) -> Dict[str, Any]:
     """Normalize reported usage before the monetary transaction; no live pricing I/O."""
@@ -279,6 +294,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
     if has_nontext_usage(normalized):
         evidence.setdefault("usage", copy.deepcopy({key: value for key, value in normalized.items()
                                                    if key != "cost_evidence"}))
+    token_receipt = _provider_token_receipt(normalized)
     return dict(
         cost_usd=cost,
         cost_final=bool(cost_final and cost is not None),
@@ -289,6 +305,7 @@ def settlement_fields(reservation, usage, cost_usd, cost_final, *, estimate_cost
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl=reported_ttl,
+        **({"provider_token_receipt": token_receipt} if token_receipt else {}),
         # ``response_provider``: the upstream that served the call, as the response named it (a cache is one
         # upstream's); ``cache_write_tokens_by_ttl``: the provider's own split of the writes by lifetime.
         **{key: copy.deepcopy(normalized[key]) for key in (

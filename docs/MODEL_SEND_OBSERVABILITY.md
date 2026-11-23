@@ -196,6 +196,13 @@ facts stores image bytes, caption text, schema bodies or underlying words.
 The report is private: source addresses and exact saved request previews are
 not anonymized, even when the existing request redactor masks credentials.
 
+`provider_token_receipt` is optional attempt-bound response evidence. It copies
+only numeric counters from the HTTP response parser's pre-accounting witness
+(which can represent assembled stream usage), never response text, a projected
+ledger zero, or a neighboring attempt. An omitted counter stays unknown, not
+zero. The native input field retains its provider-specific meaning. Legacy rows
+and paths without the witness (including engine-only accounting) have no receipt.
+
 ## 4. Typed exclusions (closed set)
 
 Anything not in this enum is IN the byte domain. Each exclusion instance is
