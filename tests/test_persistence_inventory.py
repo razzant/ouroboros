@@ -44,6 +44,10 @@ import functools
 import pathlib
 import re
 
+import pytest
+
+from tests._persistence_source_kinds import STORE, debt_findings, file_kinds, match_rows, source_scan, store_rows
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 DOC = REPO / "docs" / "PERSISTENCE.md"
 
@@ -1251,6 +1255,9 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
     # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
+    # The retired plan-review engine's author snapshots: no writer left (f468e560), while
+    # ``tools/plan_author_history.py`` still reads earlier author lineage (the same row).
+    "task_results/artifacts/*/source_handles/context_checkpoints/plan-author-*-*.json",
     # The row states no writer in this tree: the automatic post-task reflection and
     # its routed store (``ouroboros/reflection.py``) are gone. The history is still
     # read (``journal_read(source='reflections')``, ``read_file``), and server.py
@@ -1277,6 +1284,26 @@ def stale_rows(text: str, paths=None) -> list[str]:
     ]
 
 
+def _actor_sources(root=REPO):
+    from ouroboros.artifacts import _SOURCE_HANDLE_CATEGORIES
+
+    return source_scan(root, _SOURCE_HANDLE_CATEGORIES)
+
+
+def _inventory_stale_rows(text, paths, scan):
+    # Only for exact actor-source names: the generic path scan can keep them
+    # alive via another writer, a reader, or an unrelated sibling in the cell.
+    def actor_file(path):
+        folder, _, leaf = path.removeprefix(STORE + "/").partition("/")
+        return path.startswith(STORE + "/") and folder in scan.categories and leaf
+
+    _, named = store_rows(text, scan.categories)
+    backed, _ = match_rows(named, file_kinds(scan.writes))
+    return {path for path in stale_rows(text, paths) if not actor_file(path)} | {
+        f"{STORE}/{shape}" for shape in named - backed
+    }
+
+
 def test_every_inventory_row_is_still_real():
     """No row survives without a scanned path behind it.
 
@@ -1295,7 +1322,7 @@ def test_every_inventory_row_is_still_real():
     a scanned writer must leave those exemptions.
     """
     text = DOC.read_text(encoding="utf-8")
-    stale = stale_rows(text)
+    stale = _inventory_stale_rows(text, scan_data_paths(), _actor_sources())
     assert not set(stale) - STALE_ROW_EXEMPTIONS, (
         "PERSISTENCE.md rows no scanned writer path matches (stale?): "
         f"{sorted(set(stale) - STALE_ROW_EXEMPTIONS)}"
@@ -1320,9 +1347,10 @@ def test_a_fabricated_inventory_row_is_caught_as_stale():
     mutant = text + (
         f"\n| `{fabricated}` | fabricated writer | none | none | none |\n"
     )
-    assert set(stale_rows(mutant)) - STALE_ROW_EXEMPTIONS == {fabricated}
+    paths, scan = scan_data_paths(), _actor_sources()
+    assert _inventory_stale_rows(mutant, paths, scan) - STALE_ROW_EXEMPTIONS == {fabricated}
     # ... and the honest document adds nothing beyond its audited exemption.
-    assert not set(stale_rows(text)) - STALE_ROW_EXEMPTIONS
+    assert not _inventory_stale_rows(text, paths, scan) - STALE_ROW_EXEMPTIONS
 
 
 # --- red-first pins (stage-2 fix wave, lane persistence-inventory) ----------
@@ -1619,3 +1647,224 @@ def test_wait_and_pause_source_prefixes_have_lifetime_rows():
     for line in DOC.read_text(encoding="utf-8").splitlines():
         if "/context_checkpoints/" in line and ("owner-wait-" in line or "budget-pause-" in line):
             assert "prune_worked_copies" in line, "a saved state's row names the step that retires it"
+
+
+# Exact actor-source files and the coarse data-path scan answer different questions.
+# The latter still owns the population pin and storage planes outside the actor writer.
+# Structural descendants already described by their container row, not arbitrary files.
+_STORE_CONTAINER_GLOBS = {
+    "delegated_readonly_inputs/*": "delegated_readonly_inputs",
+    "working": "working/working_checkpoint-a*.json",
+    "working/*.json": "working/working_checkpoint-a*.json",
+}
+
+
+def _missing_store_paths(paths, planes, categories):
+    missing = set()
+    for path in paths:
+        if not path.startswith(STORE + "/"):
+            continue
+        relative = path.removeprefix(STORE + "/")
+        folder = relative.partition("/")[0]
+        if folder in categories or relative in {"*", "*/*.stream"}:
+            continue  # actor writers / the existing streaming scratch plane
+        if relative not in planes and _STORE_CONTAINER_GLOBS.get(relative) not in planes:
+            missing.add(relative)
+    return missing
+
+
+def test_actor_source_kinds_have_their_own_retention_row_or_known_debt():
+    from tests._persistence_source_kinds import UNROWED_SOURCE_KINDS
+
+    scan = _actor_sources()
+    planes, named = store_rows(DOC.read_text(encoding="utf-8"), scan.categories)
+    _, missing = match_rows(named, file_kinds(scan.writes))
+    findings = sorted(scan.findings) + debt_findings(missing, UNROWED_SOURCE_KINDS)
+    findings.extend(f"give {STORE}/{path} a store row (the task's catch-all is not a row for it)"
+                    for path in sorted(_missing_store_paths(scan_data_paths(), planes, scan.categories)))
+    assert not findings, "\n".join(findings)
+
+
+def _source_fixture(root, body, module="fixture"):
+    path = root / "ouroboros" / f"{module}.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if body is not None:
+        path.write_text("from ouroboros.artifacts import store_actor_source_bytes as put\n" + body, encoding="utf-8")
+    return _actor_sources(root)
+
+
+_STORE_TABLE = (
+    "| Path | Writer | Retention |\n|---|---|---|\n"
+    "| `task_results/artifacts/<task>/**` | tasks | [record] |\n"
+    "| `task_results/artifacts/<task>/source_handles/tool_results` | sources | [record] |\n"
+    "| `task_results/artifacts/<task>/source_handles/context_checkpoints` | sources | [record] |\n"
+)
+
+
+def _store_row(path, *, left="", right="", retention="[record]"):
+    return f"| {left}`{STORE}/{path}`{right} | fixture | {retention} |\n"
+
+
+@pytest.mark.parametrize(("folder", "name", "extension", "row", "wrong", "module", "function"), [
+    ("tool_results", "f'example-{key}-{artifact}'", "zip", "example-<key>-<artifact>-<sha256>.zip",
+     "example-<key>-<artifact>x-<sha256>.zip", "fixture", "produce"),
+    ("tool_results", "key + '.producer'", "txt", "<call>.producer-<sha256>.txt",
+     "<call>.producer-<sha256>.json", "fixture", "produce"),
+    ("context_checkpoints", "key", "json", "<receipt>-<sha256>.json",
+     "<digest>-<sha256>.json", "loop_round_limits", "_run_authored_context_view"),
+])
+def test_store_row_is_live_exactly_as_long_as_its_writer(tmp_path, folder, name, extension, row, wrong,
+                                                     module, function):
+    body = (f"def {function}(root, task, key, artifact):\n"
+            f"    put(root, task, category={folder!r}, source_id={name}, data=b'', extension={extension!r})\n")
+    scan = _source_fixture(tmp_path / "live", body, module)
+    kinds = file_kinds(scan.writes)
+    assert len(kinds) == 1 and not scan.findings
+    kind, producers = next(iter(kinds.items()))
+    debt = {(kind, producer) for producer in producers}
+    paths = {f"{STORE}/{folder}/unrelated-*.{extension}" for folder in scan.categories}
+    paths.add(f"{STORE}/{kind}")  # a retained reader may still spell the removed producer's name
+    _, bare = store_rows(_STORE_TABLE, scan.categories)
+    _, owing = match_rows(bare, kinds)
+    assert debt_findings(owing, frozenset()) and not debt_findings(owing, debt)
+    good = _STORE_TABLE + _store_row(f"{folder}/{row}", left="Retained: ")
+    assert not _inventory_stale_rows(good, paths, scan)
+    _, domains = store_rows(good, scan.categories)
+    _, paid = match_rows(domains, kinds)
+    assert not paid and not debt_findings(paid, frozenset())
+    assert debt_findings(paid, debt)[0].startswith("drop or update paid/retired debt")
+
+    # A valid sibling in the same cell doesn't justify the first, wrong filename.
+    bad = _STORE_TABLE + _store_row(f"{folder}/{wrong}", right=f" beside `{STORE}/{folder}/{row}`")
+    assert len(_inventory_stale_rows(bad, paths, scan)) == 1
+    gone = _source_fixture(tmp_path / "gone", "def read(target):\n    return target.read_bytes()\n", module)
+    assert _inventory_stale_rows(good, paths, gone) == {f"{STORE}/{kind}"}
+    assert not _inventory_stale_rows(_STORE_TABLE, paths, gone)
+    # A bare container's Writer cell names files only by their digest form, in both directions.
+    listed = _STORE_TABLE + f"| `{STORE}/{folder}` | `fixture.produce` writes its file: `{row}` | [record] |\n"
+    assert not _inventory_stale_rows(listed, paths, scan)
+    assert not match_rows(store_rows(listed, scan.categories)[1], kinds)[1]
+    assert _inventory_stale_rows(listed, paths, gone) == {f"{STORE}/{kind}"}
+    example = _STORE_TABLE + f"| `{STORE}/{folder}` | `fixture.produce`; for example `{row}` | [record] |\n"
+    assert match_rows(store_rows(example, scan.categories)[1], kinds)[1]  # an example certifies nothing
+    assert not _inventory_stale_rows(example, paths, gone)
+
+
+def test_store_scan_preserves_legacy_loop_pairs_and_actual_filenames(tmp_path):
+    from ouroboros.artifacts import actor_source_reference
+
+    scan = _source_fixture(tmp_path, '''
+SOURCES = (("blocks", "json"), ("meta", "json"), ("flat", "md"))
+def produce(root, task):
+    for name, extension in SOURCES:
+        put(root, task, category="context_checkpoints", source_id="legacy_" + name,
+            data=b"", extension=extension)
+    for name in ("unreadable", "cursor"):
+        print(name)
+''')
+    observed = {leaf for _, leaf, _ in scan.writes}
+    expected = {"legacy_blocks-*.json", "legacy_flat-*.md", "legacy_meta-*.json"}
+    assert observed == expected and not scan.findings
+    for shape in expected:
+        source_id, extension = shape.split("-*.")
+        ref = actor_source_reference(category="context_checkpoints", source_id=source_id, extension=extension,
+                                     data=b"", measured={"size": 0, "sha256": "0" * 64})
+        assert ref["path"].rsplit("/", 1)[-1] == shape.replace("*", "0" * 64)
+
+
+def test_store_rows_cannot_inherit_a_shorter_or_example_shape(tmp_path):
+    scan = _source_fixture(tmp_path, '''
+def produce(root, task, ident):
+    bundle = dict(category="context_checkpoints", source_id="owner-wait-" + ident, data=b"", extension="json")
+    bundle.update(data=b"payload only")
+    put(root, task, **bundle)
+    part = "export-" + ident
+    put(root, task, category="context_checkpoints", source_id="owner-wait-" + part, data=b"", extension="json")
+    name = "owner-wait-" + ident
+    name += "-later"
+    put(root, task, category="context_checkpoints", source_id=name, data=b"", extension="json")
+''')
+    kinds = file_kinds(scan.writes)
+    assert not scan.findings
+    good = _store_row("context_checkpoints/owner-wait-<id>-<sha256>.json")
+    not_a_row = ("\n| Example | Notes |\n|---|---|\n"
+                 f"| `{STORE}/context_checkpoints/owner-wait-export-<id>-<sha256>.json` | sample |\n")
+    _, names = store_rows(_STORE_TABLE + good + not_a_row, scan.categories)
+    _, missing = match_rows(names, kinds)
+    # An unmodelled rebinding is an unknown name, never the documented first binding.
+    assert set(missing) == {"context_checkpoints/owner-wait-export-*-*.json", "context_checkpoints/*-*.json"}
+    real = _store_row("context_checkpoints/owner-wait-export-<id>-<sha256>.json")
+    _, repaired = store_rows(_STORE_TABLE + good + real, scan.categories)
+    assert set(match_rows(repaired, kinds)[1]) == {"context_checkpoints/*-*.json"}
+    # A container for bundled inputs cannot certify an unrelated leaf.
+    raw = {f"{STORE}/delegated_readonly_inputs/another.bin"}
+    planes, _ = store_rows(_STORE_TABLE + _store_row("delegated_readonly_inputs"), scan.categories)
+    assert _missing_store_paths(raw, planes, scan.categories) == {"delegated_readonly_inputs/another.bin"}
+    planes, _ = store_rows(_STORE_TABLE + _store_row("delegated_readonly_inputs/another.bin"), scan.categories)
+    assert not _missing_store_paths(raw, planes, scan.categories)
+
+
+def test_a_populated_list_does_not_hide_a_write_with_a_fixed_id(tmp_path):
+    scan = _source_fixture(tmp_path, '''
+def produce(root, task, selected_name):
+    selected = []
+    selected.append(selected_name)
+    for name in selected:
+        put(root, task, category="tool_results", source_id="selected-item", data=b"", extension=name.suffix)
+''')
+    assert file_kinds(scan.writes) == {"tool_results/selected-item-*.*": {"ouroboros.fixture.produce"}}
+    _, narrow = store_rows(_STORE_TABLE + _store_row("tool_results/selected-item-<sha256>.json"), scan.categories)
+    assert match_rows(narrow, file_kinds(scan.writes))[1]
+    _, exact = store_rows(_STORE_TABLE + _store_row("tool_results/selected-item-<sha256>.<ext>"), scan.categories)
+    assert not match_rows(exact, file_kinds(scan.writes))[1]
+
+
+def test_a_relay_branch_on_its_own_parameter_is_decided_by_each_caller(tmp_path):
+    ledger = _source_fixture(tmp_path / "ledger", '''
+def retain_text_source(root, task, *, record_id, role, part=""):
+    put(root, task, category="context_checkpoints", data=b"", extension="txt",
+        source_id=f"ledger-{record_id}-{role}" + (f"-{part}" if part else ""))
+def produce(root, task, rid, parts):
+    retain_text_source(root, task, record_id=rid, role="rebuttal")
+    retain_text_source(root, task, record_id=rid, role="response", part="intention")
+    retain_text_source(root, task, record_id=rid, role="prompt", part=",".join(parts))
+''', "review_ledger")
+    assert {leaf for _, leaf, _ in ledger.writes} == {  # no separator without a part
+        "ledger-*-rebuttal-*.txt", "ledger-*-response-intention-*.txt", "ledger-*-prompt-*.txt", "ledger-*-prompt-*-*.txt"}
+    native = _source_fixture(tmp_path / "native", '''
+class NativeToolRoundReviewExecutor:
+    def _store_source(self, source_id, payload):
+        put(self.root, "t", category="context_checkpoints", source_id=f"call-{source_id}", data=b"",
+            extension="txt" if isinstance(payload, str) else "json")
+    def produce(self, rows):
+        self._store_source("history", {"rows": rows})
+        self._store_source("brief", "text")
+        self._store_source("rows", rows)
+''', "review_native_episode")
+    # The visible payload picks one extension; an unseen one stays opaque, not both.
+    assert {leaf for _, leaf, _ in native.writes} == {"call-history-*.json", "call-brief-*.txt", "call-rows-*.*"}
+    assert not ledger.findings and not native.findings
+
+
+@pytest.mark.parametrize(("store", "expected"), [
+    ('{"root": root, "source_id": f"{call}-session-reads"}', {"*-session-reads-*.json"}),
+    ('{"root": root}', {"session-reads-*.json"}),
+    ('{"root": root, "source_id": ""}', {"session-reads-*.json"}),
+    ('{"root": root, "source_id": None}', {"session-reads-*.json"}),
+    ('{"source_id": "incorrect"}', set()),
+    ('{"root": None, "source_id": "incorrect"}', set()),
+    ("None", set()),
+])
+def test_session_reads_are_named_by_the_store_each_caller_passes(tmp_path, store, expected):
+    scan = _source_fixture(tmp_path, f'''
+def _stored_read_history(store):
+    if not isinstance(store, dict) or store.get("root") is None:
+        return {{}}
+    return put(store["root"], "t", category="context_checkpoints", data=b"", extension="json",
+               source_id=str(store.get("source_id") or "session-reads"))
+def session_read_facts(run_dir, *, store=None):
+    return _stored_read_history(store)
+def settle(root, call):
+    return session_read_facts("run", store={store})
+''', "review_session_reads")
+    assert {leaf for _, leaf, _ in scan.writes} == expected and not scan.findings
