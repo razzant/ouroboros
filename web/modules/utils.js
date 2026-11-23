@@ -186,6 +186,22 @@ export function grantReady(entity) {
     return !entity?.grants || entity.grants.all_granted !== false;
 }
 
+/** The host's answer whether missing access stops the skill (a pending key does not by itself);
+ * an older host without the field answers by `all_granted`. */
+export function grantBlocks(entity) {
+    const grants = entity?.grants;
+    return !!grants && (typeof grants.blocked === 'boolean' ? grants.blocked : grants.all_granted === false);
+}
+
+/** What Enable asks the owner to grant first: a pending key stays a voluntary Grant access;
+ * an older host without `blocked` asks for everything missing. */
+export function blockingGrantItems(grants = {}) {
+    const keys = grants.missing_keys || grants.requested_keys || [];
+    const permissions = grants.missing_permissions || grants.requested_permissions || [];
+    if (typeof grants.blocked !== 'boolean') return [...keys, ...permissions];
+    return [...keys.filter((key) => !(grants.pending_keys || []).includes(key)), ...permissions];
+}
+
 export function isRateLimitError(message) {
     const text = String(message || '').toLowerCase();
     return text.includes('rate limit') || text.includes('too many requests') || text.includes('http 429');

@@ -299,6 +299,30 @@ def payload_digest(
                          declared_entries(manifest_entry, manifest_scripts), digest)
 
 
+def text_edit_release_hashes(skill: Any, changes: Iterable[Tuple[pathlib.Path, str, str]]) -> tuple[str, str] | None:
+    """The ordinary release digests before and after byte-exact text writes ``(target, text read, text written)``
+    of existing payload files the digest covers; ``None`` when a write touches the manifest or a declaration."""
+    root = pathlib.Path(skill.skill_dir).resolve()  # as ``payload_digest`` walks it
+    manifest = skill.manifest
+    files = dict(_payload_file_digests(root, manifest_entry=manifest.entry, manifest_scripts=manifest.scripts))
+    after = dict(files)
+    # The same manifest and dependency declaration must describe both inventories.
+    metadata = [root / name for name in (*_MANIFEST_NAMES, *_DECLARATION_SIDECARS)]
+    for target, original, replacement in changes:
+        target = pathlib.Path(target).resolve()  # a link out of the payload is no payload file
+        if not target.is_relative_to(root) or any(p.is_file() and target.samefile(p) for p in metadata):
+            return None
+        raw = target.read_bytes()
+        rel = target.relative_to(root).as_posix()
+        if (raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n") != original
+                or files.get(rel) != hashlib.sha256(raw).digest()):
+            return None
+        after[rel] = hashlib.sha256(replacement.encode("utf-8")).digest()  # write_text_atomic writes these bytes
+    declarations = release_declaration(root, manifest)
+    return (release_digest_from_file_digests(files.items(), declarations),
+            release_digest_from_file_digests(after.items(), declarations))
+
+
 def _legacy_reduce(file_digests: Iterable[Tuple[str, bytes]]) -> str:
     digest = hashlib.sha256()
     for rel, file_digest in file_digests:

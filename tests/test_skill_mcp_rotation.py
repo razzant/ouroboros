@@ -133,9 +133,10 @@ def test_rotation_does_not_relist_other_servers_or_unready_binding(installed, mo
         save_enabled(installed.data, "weather", False)
     elif gate == "mcp_disabled":
         value["MCP_ENABLED"] = False
-    elif gate == "revoked":
+    elif gate == "revoked":  # a decision naming the key and granting none of it (a later write merges, never revokes)
+        (installed.data / "state" / "skills" / "weather" / "grants.json").unlink()
         save_skill_grants(installed.data, "weather", [], content_hash=installed.revision,
-                          requested_keys=[])
+                          requested_keys=["WEATHER_API_KEY"])
     elif gate == "unreviewed":
         save_review_state(installed.data, "weather", SkillReviewState(status="pending", content_hash=installed.revision))
     _write(config.SETTINGS_PATH, {**value, "WEATHER_API_KEY": "key-two"})

@@ -240,12 +240,13 @@ _GATE_WORDS = {"load_state_unreadable": "the host could not read whether this ex
 def skill_status(row: Any) -> dict:
     """Whether one ``summarize_skills`` row can run now: ``{"ready", "reasons", "notes"}``.
 
-    The one ordered answer every reader that shows the mind a skill's state uses (the Installed Skills section,
-    ``list_skills``): readiness's blockers in their order, then what runs the files, each found on its own: a
+    Shared by the Installed Skills section, ``list_skills`` and finish diagnostics: readiness blockers first,
+    then what runs the files, each found on its own: a
     script's interpreter and declared entry file (``entry_gap``; a note instead when the skill brings its own MCP
     servers, which run apart from ``skill_exec``), an extension's load gate as configuration decides it
     (``desired_live``). Configuration only (installed set, switch, grants, review, dependencies, manifest), never
-    whether a process holds it now. ``notes`` are readiness's non-blocking remarks, then that script note."""
+    whether a process holds it now. ``notes`` include readiness's pending-key facts (names, not values), then that
+    script note. Neither is a blocker."""
     if row.get("collision_row_id"):
         return {"ready": False, "reasons": [str(row.get("load_error") or "skill name collision")], "notes": []}
     readiness = row.get("readiness") if isinstance(row.get("readiness"), dict) else {}

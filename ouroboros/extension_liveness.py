@@ -24,6 +24,7 @@ from ouroboros.skill_loader import (
     grant_status_for_skill,
     skill_conflict_status,
 )
+from ouroboros.skill_grant_follow import pending_fact
 from ouroboros.skill_peer_inventory import discover_conflict_peers
 
 log = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def _extension_runtime_state(
         "review_gate": review_gate,
         "executable_review": review_gate["executable_review"],
         "grant_status": grant_status,
+        "grant_note": pending_fact(grant_status),  # a key saved but not granted: it was not passed
         "conflict": conflict,
         "load_error": skill.load_error or (TRUST_SENTENCES[untrusted] if untrusted else None)
         or (load_failure.error if matched_failure and load_failure else None),

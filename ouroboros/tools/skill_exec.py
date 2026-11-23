@@ -33,6 +33,7 @@ from ouroboros.skill_loader import (
 from ouroboros.execution_domain import build_dir, current as current_execution_domain, skill_state_dir
 from ouroboros.work_skill_payloads import launch as work_launch  # managed: the reviewed payload's verified work copy
 from ouroboros.skill_readiness import grant_gap_sentence
+from ouroboros.skill_grant_follow import pending_fact
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.skill_review_status import executable_review_requirement, normalize_skill_review_status
@@ -993,16 +994,16 @@ def _extension_not_executable_message(loaded: Any, drive_root: pathlib.Path) -> 
 
 
 def _grant_refusal(skill_name: str, grants: Dict[str, Any]) -> str:
-    """The execution refusal while the owner has not granted the request for these bytes: what is
-    missing, and the plain-words cause when the grant belongs to an earlier version of the files
-    (``grant_gap_sentence``). Empty when nothing is missing."""
-    missing_core = list(grants.get("missing_keys") or [])
-    missing_permissions = list(grants.get("missing_permissions") or [])
+    """The refusal while the owner has not granted what blocks these bytes, with the cause when the grant is an earlier
+    version's (``grant_gap_sentence``); pending custom keys alone do not block."""
+    from ouroboros.skill_grant_follow import blocking_lists
+
+    missing_core, missing_permissions = blocking_lists(grants)
     if not (missing_core or missing_permissions):
         return ""
     requested = []
     if missing_core:
-        requested.append(f"core settings keys {missing_core}")
+        requested.append(f"Settings keys {missing_core}")
     if missing_permissions:
         requested.append(f"permissions {missing_permissions}")
     cause = grant_gap_sentence(grants)
@@ -1267,7 +1268,7 @@ def _handle_skill_exec(
             "runtime_phase": phase,
             "content_hash": spawn_hash,
             "exit_code": int(returncode),
-            "timeout_sec": timeout,
+            "timeout_sec": timeout, **({"not_passed": fact} if (fact := pending_fact(grants)) else {}),
         },
         stdout_bytes=stdout_bytes, stderr_bytes=stderr_bytes, overflowed=overflowed,
     )
@@ -1437,7 +1438,7 @@ _EXEC_SCHEMA = {
         "Cyber Pro, a current executable reviewer verdict or a qualified "
         "author acceptance of these exact bytes (the reviewer status "
         "may then still be pending or stale); Cyber Pro leaves it to "
-        "Ouroboros's judgment. Requested key/permission grants and isolated "
+        "Ouroboros's judgment. Blocking grants and isolated "
         "dependencies still apply. Only type=script "
         "skills execute via this substrate — type=instruction skills are "
         "catalogued + reviewable but have no executable payload by "
@@ -1487,8 +1488,9 @@ _TOGGLE_SCHEMA = {
         "skill_exec regardless of review status. Enabling requires the "
         "skill's review_gate to permit the current bytes (outside Cyber Pro: "
         "a current executable reviewer verdict or a qualified author "
-        "acceptance of these exact bytes), any requested key or "
-        "host-permission grants; enabling installs or refreshes the declared isolated dependencies "
+        "acceptance of these exact bytes) and all blocking grants: host permissions, protected core keys "
+        "and keys covered by the last grant decision. Pending custom keys are not supplied but do not block. "
+        "Enabling installs or refreshes the declared isolated dependencies "
         "itself (a review is never needed for packages) and repairs an enabled skill whose packages broke. "
         "For selected-skill development, interpret the real owner request: "
         "Repair and run authorizes enabling and leaving the repaired skill running. "

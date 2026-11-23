@@ -348,8 +348,13 @@ def preview_connect(drive_root: pathlib.Path, skill_name: str) -> Dict[str, Any]
         if why:
             blockers.append(f"server {decl['id']!r}: {why}")
     plan.pop("_rows")
+    from ouroboros.skill_loader import grant_status_for_skill
+
+    pending = grant_status_for_skill(drive_root, skill).get("pending_keys") or []
+    note = (f"Saved in Settings, not supplied by this skill: {', '.join(pending)}. "
+            "The server’s own settings can supply these values separately.") if pending else ""
     return {"ok": True, "skill": skill.name, "content_hash": skill.content_hash, "ready": not blockers,
-            "blockers": blockers, "settings_digest": digest,
+            "blockers": blockers, "settings_digest": digest, **({"grant_note": note} if note else {}),
             "next_action": "" if not blockers or domain_refusal else "Finish this skill's setup on its Skills "
                            "card (review, turn on, access, packages) before connecting its tools.", **plan}
 

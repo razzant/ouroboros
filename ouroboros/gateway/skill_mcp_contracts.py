@@ -53,6 +53,7 @@ class SkillMcpConnectPreviewResponse(TypedDict):
     changed: NotRequired[bool]
     conflict: NotRequired[bool]
     settings_digest: NotRequired[str]
+    grant_note: NotRequired[str]  # saved keys not supplied by the skill; the server's own settings are independent
     code: NotRequired[str]
     error: NotRequired[str]
     saved: NotRequired[bool]

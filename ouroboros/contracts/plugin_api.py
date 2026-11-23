@@ -46,7 +46,7 @@ PLUGIN_API_VERSION = "2.7"
 LEGACY_PLUGIN_API_GENERATION = "1.3"
 
 
-# Core settings keys require explicit content-hash-bound owner grants.
+# Core settings keys require grants for the exact payload digest; editing files does not issue a new grant.
 FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset({
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD",

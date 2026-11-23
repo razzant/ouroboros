@@ -39,17 +39,13 @@ effect. Publication needs fresh critic authority or a later actual independent-r
 outcome acknowledged through qualified author finish (see Publishing). The
 agent cannot self-attest (the marker is owner-state).
 
-**Accepted without a review.** A skill installed unchanged from a source the owner
-trusts runs on its install record's basis for exactly that
-release; an edit by the selected-skill task the owner's own request started is
-recorded as an owner edit and keeps running as Modified. Any other edit makes the
-skill "Not reviewed yet". For an owner-requested edit in an ordinary task,
-Ouroboros can carry out Skip through `skill_owner_action(action="attest")`, with
-the current `expected_content_hash` and `owner_source` recording the owner's
-words; its deterministic preflight and exact-byte owner
-attestation keep that edited copy running. This is the owner's authority, not
-an agent's claim that its own edit passed review. Blocker findings in a skill from a source that reviews
-each skill keep it off until the owner skips the review.
+**Accepted without a review.** A trusted source's install record admits exactly
+its unchanged release. In an owner-started Repair, a confirmed text edit can
+admit the exact resulting files as Modified, not grant access. An observation
+alone admits nothing (see "Repair task path scheme and edit tools"). For an owner-requested edit in an ordinary
+task, `skill_owner_action(action="attest")` can carry the owner's Skip for the
+exact revision (`expected_content_hash`, `owner_source`); preflight still runs.
+For blockers and other acceptance bases see the [Skill Review Checklist](CHECKLISTS.md#severity-rules-1).
 
 There are three skill types:
 
@@ -460,14 +456,13 @@ flowchart LR
   through import, handler waits and cleanup. The async form polls
   cooperatively, so it never blocks the ASGI loop; nested scopes and
   unwrapped child work remain unsupported rather than inheriting a lease.
-- **Enable** flips `enabled.json` after current executable-review authority + grants, installing
+- **Enable** flips `enabled.json` after the files are admitted and [blocking grants](#grants-for-protected-keys-and-host-permissions) are in place, installing
   the declared packages itself when they are missing, failed or stale (idempotent: Enable on an
   enabled skill repairs it; a refusal is typed, `code` + one sentence + `detail`). The
   Skills UI surfaces a toggle; agents can also call `toggle_skill`.
   An ordinary top-level task enables a skill whose review gate admits its
   bytes; a selected-skill (repair) task needs an owner message, answered quiz
-  or mailbox entry for that skill. Declared keys and host permissions follow
-  `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` or an owner grant.
+  or mailbox entry for that skill. Enable does not grant access.
 - **Execute**: `skill_exec` runs `type: script` skills as
   subprocess. `type: extension` skills without isolated deps normally run
   through the in-process loader; extensions with reviewed isolated deps are
@@ -575,7 +570,8 @@ crashes surface as tool errors, HTTP 502 responses, or WebSocket log messages;
 the server and WebSocket stay alive. Opaque native files shipped directly in the
 payload are still review-sensitive; if such a marker exists, the runtime also
 uses child dispatch defensively, but this guide does not make native payload
-binaries broadly acceptable.
+binaries broadly acceptable. At out-of-process registration, structured settings have only public rows where
+available; other lists and objects are omitted. This is separate from the runtime grant for a setting.
 Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTTP
 routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
 teardown; `send_ws_message` relays to the browser through the Host Service
@@ -589,10 +585,8 @@ call `POST /ui/ws-message` and connect to `WS /events`. A skill can read
 `get_runtime_info()["execution_mode"]` and `["capabilities"]` to adapt instead of
 calling an unavailable capability and aborting registration.
 
-Out-of-process caveats: (1) `register()` and `on_unload` run for **each per-call
-child** (every tool/route/WS dispatch and catalog), so `on_unload` fires per call,
-not once per disable — keep it cheap and idempotent and put durable/once-per-session
-teardown in a `companion_process` shutdown. (2) `send_ws_message` relays through the
+Out-of-process caveats: (1) `register()` and `on_unload` run per child (tool/route/WS and catalog),
+not once per enable/disable. Keep them cheap and idempotent; give once-per-session teardown to the companion. (2) `send_ws_message` relays through the
 loopback Host Service and is best-effort: the relay lane holds a 60-message burst
 reserve per skill that refills one message per second, the excess is refused (a 429
 with `retry_after_sec`; the host records each refused burst once with its dropped
@@ -731,7 +725,7 @@ Both lists use the same fields. Unknown keys or an ID repeated anywhere reject t
 - `task_session` and `browser_policy` control call lifetime (DEVELOPMENT §12).
   `browser_policy` requires `task_session: true`.
 
-When the skill is accepted for its current bytes, enabled, granted and its packages
+When the skill is accepted for its current bytes, enabled, has its blocking grants and its packages are
 ready, its card offers **Connect tools**. The owner confirms the listed servers and
 any others that turning MCP on would start. Connect sets `MCP_ENABLED` and writes
 one row per declaration (`id`, `name`, `enabled`, `transport: stdio`, `skill`, both flags).
@@ -740,11 +734,12 @@ For `skill_owner_action(action="connect_mcp")`, use `preview: true` first, then 
 owner's answer as `owner_source` with the preview's `settings_digest`.
 
 The row stores no command. Listing, Test and calls derive binary, entry, cwd and flags from the installed
-skill. Moving it or the runtime needs no reconnect. Servers receive scripts' granted
-settings and state folder. Managed domains stage verified Node scripts in containers
-and refuse extension servers. An off, missing or unaccepted skill, missing grants or
-packages, an absent declaration or a domain refusal leaves that row saved and inert
-(`MCP_SKILL_UNAVAILABLE`). An accepted update or changed granted value triggers a new
+skill. Moving it or the runtime needs no reconnect. The skill supplies granted settings
+and its state folder; it does not supply pending keys. An owner's selections on the
+MCP server's Settings row are independent. Managed domains stage verified Node
+scripts in containers and refuse extension servers. An off, missing or unaccepted skill,
+missing blocking grants or packages, an absent declaration or a domain refusal leaves
+the row saved and inert (`MCP_SKILL_UNAVAILABLE`). A new accepted version or changed granted value triggers a new
 listing and retires old task sessions. A disabled row stays off. Document any external
 steps such as a browser extension or sign-in in the skill.
 
@@ -801,8 +796,11 @@ tool capabilities. Payload-relative paths address the selected installation:
 The task retains ordinary shell, browser, search, delegation and execution tools.
 The installed payload is usually a normal directory; an isolated Git copy through
 delegation is optional. Selected payload operations check the known revision;
-after an opaque shell command the task records the observed revision without
-claiming every concurrent change as its own.
+a matching predicted and observed transition from `edit_text` (single or
+`edits`) or `edit_batch` of existing payload text, excluding manifests and
+install metadata, can record Modified. Other writes (including `write_file`,
+`apply_patch`, shell and delegated imports) only record observation; use the
+ordinary review for those bytes.
 
 Test the repaired installation through its real script, extension tool, HTTP
 route, widget or companion after the normal review, dependencies and permissions
@@ -1020,31 +1018,36 @@ Some settings keys are protected: the provider, GitHub and network keys of `FORB
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Accounts and keys
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
-until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
+until the owner grants it, while the skill keeps its other approvals for the same bytes. If the current files are
+accepted, a custom key the last grant decision did not cover is not passed and does not block by itself. Readiness
+names it in `notes`, shown in Installed Skills and `list_skills` without the value. A key the
+decision covered and did not grant still stops it, and so does a new key of a version awaiting its check (a built-in
+re-seed, an update before its review or Skip). A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
 a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
-`notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
-consent. The desktop launcher's owner-grant bridge records these grants.
+`notify_owner` and chat event subscriptions also require explicit owner consent for the accepted version. The
+desktop launcher's owner-grant bridge records these grants.
+
+Grants bind to exact bytes. A Repair started from Skills for the same local or Hub installation can keep
+explicitly granted, still-requested keys after a verified text edit and a clean or warnings review of those files.
+Revoked keys, host permissions, reinstalls and catalog updates do not inherit grants this way. Off stays Off.
+Old grants still cover their unchanged files. Without a proven link, use **Grant access** after review if auto-grants
+are off; no value needs re-entering. That explicit grant can follow the next verified Repair.
 
 One grant never becomes the operative value: `PYTHONIOENCODING` is replaced by the host's own
 UTF-8 stdio setting where the host starts the process itself — a Python script run and an
 extension's own Python process ("Manifest schema", script stdio).
 
-The Skills UI surfaces missing grants on the skill card. The agent
-can also call `toggle_skill enabled=true` only after grants are
-approved (the tool returns `SKILL_TOGGLE_ERROR` with `code: "grants"` and the sentence
-`Grant it the keys and permissions it asks for first.`). Self-authored markers alone
-do not authorize grants or enablement. Automatic grants and first enablement
-follow the setting below; an explicitly authorized task toggle remains separate.
+Missing host permissions, protected core keys and keys covered by the last grant decision block enablement
+(`toggle_skill` returns `SKILL_TOGGLE_ERROR`, `code: "grants"`). Pending fields described above do not. The
+Skills card offers **Grant access**; granting, enabling and recording who wrote the files are separate.
 
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
-(native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
-release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
-label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
-that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
-values are untouched.
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on (Settings → Permissions and checks). Executable review,
+qualified author finish, owner Skip or accepted install/update can issue grants for that exact digest under this
+policy; a recorded Repair edit alone cannot. When `grant_status_for_skill` reports `earlier_grant`, the skill
+card and readiness/refusals name that it does not cover the current files.
 
 Every review, grant and acceptance is bound to the skill's release digest: its
 payload files plus its declared dependencies, without per-install notes, so the
