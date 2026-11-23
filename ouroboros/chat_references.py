@@ -1,10 +1,9 @@
 """Host-owned message addresses and Reply facts, shared by every owner ingress.
 
-References describe what the sender pointed at. They do not select work or grant
-authority: only a confirmed Project Reply from the bundled owner Telegram bridge
-opens its own Project turn. Unresolved ordinary quotes do not block acceptance;
-a transient store error during the Telegram decision permits a safe retry.
-Selected passages require an authored source and remain sender-reported citations.
+References describe what the sender pointed at. Web ingress keeps the quoted row
+separate from a proven work address. The owner Telegram bridge resolves its own
+Project turn address; transient store errors there permit a safe retry. Selected
+passages require an authored source and remain sender-reported citations.
 """
 from __future__ import annotations
 
@@ -213,7 +212,7 @@ def reference_from_row(row: dict, root=None) -> dict:
     chose = owner_text(row) if kind == "quiz_answer" and quotable_owner_row(row) else ""
     kind = ("question" if kind == "quiz" else "completion" if kind in
             {"project_completion_summary", "task_summary"} else
-            "system" if row.get("direction") == "system" else "message")
+            "system" if "system" in (row.get("direction"), row.get("role")) else "message")
     role = reply_role(row)
     body = card_reply_display(root, row)  # the host's account of a card display, for its preview alone: the row is still its sender's
     from ouroboros.room_membership import reply_target_home
@@ -269,6 +268,70 @@ def resolve_reply(root, address: str, *, strict_transient: bool = False) -> dict
 
 class ReplyExcerptUnavailable(ValueError):
     """Fresh acceptance could not resolve the exact authored source of a selected passage."""
+
+
+def _reply_work(root, row: dict) -> str | None:
+    """Use only stamped work relationships and exact stored legacy web Reply links."""
+    # Resolving old dialogue must stay bounded on the ingress path. An incomplete
+    # chain is not the same fact as reaching an ordinary row with no work target.
+    seen = set()
+    while row.get("direction") == "in":
+        quote = row.get("reply_to")
+        if not isinstance(quote, dict):
+            return None
+        if "work_task_id" in quote:
+            return str(quote["work_task_id"] or "")
+        if row.get("source") != "web":
+            return None
+        address = quote.get("address")
+        if not isinstance(address, str) or quote.get("unresolved"):
+            return ""
+        if quote.get("kind") == "work_card" and address == f"task:{quote.get('task_id') or ''}":
+            return str(quote.get("task_id") or "")
+        if not address.startswith("row:") or address in seen or len(seen) >= _MAX_LEGACY_REPLY_HOPS:
+            return ""
+        seen.add(address)
+        parent, _ = resolve_history_row(root, address)
+        if parent is None:
+            return ""
+        row = parent
+    return _outgoing_reply_work(root, row)
+
+
+_MAX_LEGACY_REPLY_HOPS = 16
+
+
+def _outgoing_reply_work(root, row: dict) -> str | None:
+    from ouroboros.dialogue_provenance import row_provenance
+    from ouroboros.presence_owner_contact import private_main_row
+    from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES
+    from ouroboros.task_results import load_task_result
+
+    kind = row.get("type") or row.get("system_type") or ""
+    task_id = str(row.get("task_id") or "")
+    if (private_main_row(row) or row_provenance(row) == "place"
+            or kind in ORIGIN_ADDRESSED_NOTICE_TYPES - {"relay_reply"}):
+        return None
+    if linked := row.get("about_work_task_id"):
+        return linked
+    if not task_id:
+        return None
+    if row.get("card_row") or row.get("parent_task_id") or kind in {
+        "project_started", "project_handoff", "project_completion_summary", "task_summary",
+        "relay_entry", "relay_reply",
+    }:
+        return task_id
+    from ouroboros.projects_registry import project_binding_for_task
+
+    # A live direct author can move into a Project before saving any result.
+    if project_binding_for_task(root, task_id, strict=True):
+        return task_id
+    task = load_task_result(root, task_id, strict=True)
+    if not task:
+        return task_id if row.get("is_progress") else None
+    if not task.get("_is_direct_chat") or task.get("detached_at"):
+        return task_id
+    return None
 
 
 class ReplyExcerptNotAuthored(ValueError):
@@ -347,18 +410,28 @@ def excerpt_source_attachments(row: dict) -> list:
     return files
 
 
-def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_transient: bool = False) -> dict:
+def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_transient: bool = False,
+                  route_work: bool = False) -> dict:
     """Fresh selections require a real authored row. A duplicate compares with its original acceptance."""
     ref = reply_identity(metadata)
     if accepted is not None:
         return ref  # rejoin_or_refuse compares it before using the saved resolution
     address = ref.get("address", "")
-    if "excerpt" not in ref:
-        return resolve_reply(root, address, strict_transient=strict_transient)
+    selected = "excerpt" in ref
+    if not selected and (not route_work or not address or address.startswith("task:")):
+        resolved = resolve_reply(root, address, strict_transient=strict_transient)
+        return ({**resolved, "work_task_id": resolved.get("task_id", "")}
+                if route_work and address.startswith("task:") else resolved)
     try:
-        row, _ = resolve_row(root, address)
+        row, _ = (resolve_row(root, address) if selected else resolve_history_row(root, address))
     except (ValueError, StoreError, OSError) as exc:
-        raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.") from exc
+        if selected:
+            raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.") from exc
+        row = None
+    if not selected:
+        if not row:
+            return {"address": address, "unresolved": True, "work_task_id": ""}
+        return _with_reply_work(root, row, reference_from_row(row, root))
     if row is None:  # resolve_row checks the room, timestamp and every supplied digest digit
         raise ReplyExcerptUnavailable("The quoted message is unavailable. Retry or clear the quote.")
     authored = (row.get("direction") in {"in", "out"} and row.get("role") != "system"
@@ -373,8 +446,17 @@ def ingress_reply(root, metadata: dict, *, accepted: dict | None = None, strict_
     reference.pop("chars", None)
     source = excerpt_source_text(row)  # captured now, before the owner row is saved: delivery needs no later history read
     files = excerpt_source_attachments(row)
-    return {**reference, **_preview(source), "excerpt": ref["excerpt"], "text": source,
+    resolved = {**reference, **_preview(source), "excerpt": ref["excerpt"], "text": source,
             **({"attachments": files} if files else {})}
+    return _with_reply_work(root, row, resolved) if route_work else resolved
+
+
+def _with_reply_work(root, row, ref):
+    try:
+        work = _reply_work(root, row)
+    except (ValueError, StoreError, OSError):
+        work = ""
+    return {**ref, "work_task_id": work} if work is not None else ref
 
 
 _BINDING_SOURCES = (None, {})

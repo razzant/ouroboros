@@ -2030,8 +2030,7 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 Reply quotes a row for Ouroboros to interpret. In the owner’s bundled Telegram chat, a confirmed Project Reply
 opens a turn there; other ordinary Replies stay in the physical conversation (`skills/telegram/SKILL.md`).
-A Main reply to a Project row appears there at its time without waking work. Answers stay in Main
-(owner 28.10, A). Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
+A browser Reply to a proven work address goes to that work; a closed or uncertain address refuses. Its Project card shows the saved message inside, while a Main portal leaves it in the feed. A Reply quoting the room alone keeps its ordinary appearances. Saved bubbles offer Reply beside Copy and in the row menu; work cards use the
 menu, questions their own field. Select words in one message for **Reply to quote** beside them or
 in the native Mac menu alongside Copy and Look Up. On touch, **Select text** opens native handles.
 Selection alone leaves the draft intact. Reply stages a row or passage in the composer; × or Esc cancels and keeps typed words. Send fixes

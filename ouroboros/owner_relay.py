@@ -282,7 +282,8 @@ def retain_owner_message(ctx, row=None, *, client_message_id="", source_ref=None
     by its accepted ref is resolved exactly. An older delivery naming only a client id is looked up in the
     context's chat and the room the room rule names for its tree: a task
     bound to a Project after admission keeps its admitted chat (``control_relay._teller_room``). ``source_root``:
-    the data root the row was read from (a teller's, for a relayed row), kept beside it as ``_owner_source_root``."""
+    the data root the row was read from (a teller's, for a relayed row), kept beside it as ``_owner_source_root``.
+    New mailbox deliveries carry the ingress identity; an unavailable exact source is not a room lookup."""
     if ctx is None:
         return None
     if row is None and (source_ref is not None or client_message_id) and getattr(ctx, "drive_root", None):

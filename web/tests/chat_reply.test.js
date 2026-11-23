@@ -528,3 +528,44 @@ test('the registered message actions stand between Reply and Copy on the rows th
         assert.deepEqual(row(mine), ['chat-message-reply', 'chat-message-copy'], 'a destroyed room draws nothing more');
     } finally { f.restore(); }
 });
+
+
+test('a quote to an earlier in-card work reply lands visibly inside bounded Details, not just focused behind its clip', async () => {
+    const f = fixture();
+    try {
+        const target = f.bubble('user', 'Earlier task reply');
+        target.dataset.rowAddress = 'row:1@then#123456789abc';
+        const slot = f.el('div', { dataset: { liveWorkReplies: '' } }, target);
+        const details = f.el('div', { className: 'chat-live-details' }, slot);
+        const card = f.el('div', { className: 'chat-live-card', dataset: { expanded: '1', children: '1' } }, details);
+        f.feed.append(card);
+        f.feed.scrollTop = 0;
+        details.scrollTop = 250;
+        f.feed.getBoundingClientRect = () => ({ top: 0, bottom: 400 });
+        details.getBoundingClientRect = () => ({ top: 480 - f.feed.scrollTop, bottom: 580 - f.feed.scrollTop });
+        target.getBoundingClientRect = () => ({ top: 520 - f.feed.scrollTop - details.scrollTop, bottom: 540 - f.feed.scrollTop - details.scrollTop });
+        const result = await f.replies.reveal(target.dataset.rowAddress);
+        assert.equal(result.target, target);
+        assert.equal(f.doc.activeElement, target);
+        const line = target.getBoundingClientRect(), box = details.getBoundingClientRect();
+        assert.ok(line.top >= Math.max(box.top, 72) && line.bottom <= Math.min(box.bottom, 400),
+            'the target is visible in both the card Details viewport and the room reading band');
+    } finally { f.close(); }
+});
+
+test('System voice survives from the exact addressed timeline line to its staged and saved quote', () => {
+    const f = fixture();
+    try {
+        const address = 'row:1@then#123456789abc';
+        const systemRow = f.el('div', { className: 'chat-live-line', dataset: { workReplyRow: '1', rowAddress: address } },
+            f.el('span', { className: 'chat-live-line-title', text: 'Paused by the host' }));
+        f.feed.append(systemRow);
+        f.replies.start(f.replies.bubbleRef(systemRow));
+        assert.equal(f.strip().dataset.author, 'system');
+        assert.equal(f.strip().querySelector('.chat-quote-author').textContent, 'System');
+        const reloaded = f.bubble('user', 'Please leave it paused');
+        f.replies.decorate(reloaded, { reply_to: { address, kind: 'system', role: 'system', snippet: 'Paused by the host' } });
+        assert.equal(f.quote(reloaded).dataset.author, 'system');
+        assert.equal(f.quote(reloaded).querySelector('.chat-quote-author').textContent, 'System');
+    } finally { f.close(); }
+});

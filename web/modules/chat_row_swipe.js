@@ -27,7 +27,6 @@ export const SWIPE = Object.freeze({
     markGap: 12,      // px between the reply mark and the room's right edge
 });
 
-const ROW = '.chat-bubble, .chat-live-card:not(.subagent)';
 const MARK = 32;  // px, the reply mark (style.css)
 
 /** How far the row moves for `d` px of finger: 1:1 up to the reply point, then a rubber band. */
@@ -44,11 +43,11 @@ const touchIn = (list, id) => {
 };
 
 /**
- * `feed` is the room's transcript, `replyRef(row)` what its Reply would quote (null: the row offers none), and
- * `reply(ref)` that Reply. `icon` is the reply glyph's markup. Returns the disposer.
+ * `feed` is the room's transcript, `rowOf(target)` and `replyRef(row)` the row menu's own target and reference,
+ * and `reply(ref)` that Reply. `icon` is the reply glyph's markup. Returns the disposer.
  */
 export function createRowSwipe({
-    feed, replyRef, reply, icon = '',
+    feed, rowOf, replyRef, reply, icon = '',
     isStack = () => false, isCoarse = () => false,
     // The layout owner's change notification (layout.js onLayoutChange): returns its disposer.
     onLayout = () => () => {},
@@ -56,7 +55,7 @@ export function createRowSwipe({
     isBlocked = () => [...(doc?.querySelectorAll?.(BLOCKING_SELECTOR) || [])].some((el) => el.getClientRects?.().length),
     hasSelection = () => Boolean(String(win?.getSelection?.()?.toString?.() || '').length),
 } = {}) {
-    if (!feed || typeof replyRef !== 'function' || typeof reply !== 'function') return () => {};
+    if (!feed || typeof rowOf !== 'function' || typeof replyRef !== 'function' || typeof reply !== 'function') return () => {};
     let g = null;
     let mark = null;
     const tail = createGestureTail(doc);
@@ -131,7 +130,7 @@ export function createRowSwipe({
         if (count !== 1 || !isStack() || !isCoarse()) return;
         const touch = event.changedTouches?.[0] || event.touches?.[0];
         const target = event.target;
-        const row = target?.closest?.(ROW);
+        const row = rowOf(target);
         if (!touch || !eligible(target, row)) return;
         const ref = replyRef(row);
         if (!ref) return;

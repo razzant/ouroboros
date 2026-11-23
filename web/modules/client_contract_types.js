@@ -442,6 +442,7 @@
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
  * @property {(number|null)=} telegram_room_chat_id  // the owner bot's Reply only: its Project's turn, 0 its chat's own, null refused
+ * @property {string=} work_task_id  // addressed work, not the quoted author; empty means unresolved work
  * @property {boolean=} unresolved  // a missing source leaves only `{address, unresolved: true}`
  */
 

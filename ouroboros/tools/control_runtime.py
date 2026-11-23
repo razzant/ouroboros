@@ -556,7 +556,7 @@ def _main_notice_refusal(ctx: ToolContext, chat_id: object, *, asked_main: bool 
 
 
 def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destination: str = "current",
-                       reply_to_relay: str | None = None, request_id: str = "") -> str:
+                       reply_to_relay: str | None = None, request_id: str = "", about_work: str = "") -> str:
     """Send a separate owner reply without completing the ongoing task.
 
     ``destination="main"`` addresses the owner's main chat from an owner-visible
@@ -621,6 +621,12 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
 
     relay = {}
     reply_meta = {}
+    work = str(about_work or "").strip()
+    if work:
+        if reply_to_relay is not None or not _confirmed_handoff(ctx, work) or owner_contact_refusal(ctx, chat_id):
+            return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
+                "WORK_REPLY_TARGET_UNVERIFIED: choose a task this owner turn just started or told. Nothing was sent.")))
+        reply_meta["about_work_task_id"] = work
     if reply_to_relay is not None:
         from ouroboros.owner_relay import select_return
         from ouroboros.chat_references import resolve_reply
@@ -1069,11 +1075,18 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
                 "delegated — schedule_subagent(effort=…).")
 
 
+def _confirmed_handoff(ctx: ToolContext | None, work: str) -> bool:
+    from ouroboros.tools.control_routing import ISSUER_OWNER_TURN, _routing_issuer
+
+    return (work in getattr(ctx, "_confirmed_reply_works", ())
+            and _routing_issuer(ctx)["kind"] == ISSUER_OWNER_TURN)
+
+
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
                  silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
-                 fold_read: bool = False) -> str:
+                 fold_read: bool = False, about_work: str = "") -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
     without a Presence binding) may choose silence and may leave a gist for its human.
     A task that answers its own retained place conversation (its reply carrier: a promoted or
@@ -1081,7 +1094,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
-        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read,
+        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read, "about_work": about_work,
     })
     if error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
@@ -1134,6 +1147,12 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
                       "silent also on a task answering its own place conversation")
+    work = arguments.get("about_work")
+    if work is not None and not isinstance(work, str):
+        return None, "about_work must name a confirmed task"
+    work = (work or "").strip()
+    if work and (action != "finish" or silent or not _confirmed_handoff(ctx, work)):
+        return None, "about_work requires a visible finish and an exact task this owner turn confirmed starting or telling"
     if silent and answer is None and not selector:
         answer = ""  # silence needs no words; complete bytes given anyway stay an internal result
     return checked_completion_request(ctx, {
@@ -1142,6 +1161,7 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
         "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
         "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
+        "about_work_task_id": work or None,
     }, allow_empty=bool(silent))
 
 

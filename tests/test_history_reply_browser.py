@@ -664,6 +664,47 @@ def test_a_landed_card_answer_keeps_its_ring_in_light_reduced_motion(direct_serv
             browser.close()
 
 
+
+
+def test_explicit_reply_reuses_the_same_bubble_on_its_task_card_after_reload(direct_server_with_data, tmp_path):
+    from playwright.sync_api import expect, sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    task = "reply-work-card"
+    _result(root, task, chat_id=1)
+    now = datetime.now(timezone.utc)
+    ds.append(root, "progress", {"chat_id": 1, "task_id": task, "ts": (now - timedelta(seconds=5)).isoformat(),
+              "direction": "out", "type": "send_message", "is_progress": True, "narration": True,
+              "text": "Working on a work-specific note."})
+    source = ds.append(root, "chat", {"chat_id": 1, "task_id": task, "ts": (now - timedelta(seconds=3)).isoformat(),
+                       "direction": "out", "type": "proactive_message", "text": "A comment from the work."}).row
+    address = format_address(row_address(source))
+    card_selector = f'#chat-messages .chat-live-card[data-task-id="{task}"]'
+    words = "This reply belongs to that work."
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 850})
+        _open(page, direct_server_with_data["url"])
+        page.locator(f'#chat-messages [data-row-address={json.dumps(address)}] .chat-message-reply').click()
+        page.locator('#chat-input').fill(words)
+        page.locator('#chat-input').press('Enter')
+        for reload in (False, True):
+            if reload:
+                page.reload(wait_until="domcontentloaded")
+                _idle(page, '#chat-messages')
+            card = page.locator(card_selector)
+            expect(card).to_have_count(1)
+            line = card.locator('[data-live-work-replies] .chat-bubble.user').filter(has_text=words)
+            expect(line).to_have_count(1)
+            if card.get_attribute('data-expanded') != '1':
+                card.locator('[data-live-disclosure]').click()
+            expect(line).to_be_visible()
+            expect(line.locator('.chat-quote')).to_have_attribute('data-address', address)
+            expect(page.locator('#chat-messages .chat-bubble.user').filter(has_text=words)).to_have_count(1)
+        page.screenshot(path=str(tmp_path / 'work-reply-card.png'))
+        browser.close()
+
+
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("viewport", [(1280, 850), (1084, 724)], ids=["wide", "sender"])
 def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, browser_engine, viewport, tmp_path):

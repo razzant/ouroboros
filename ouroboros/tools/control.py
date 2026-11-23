@@ -282,6 +282,28 @@ _UPDATE_WORLD_DESCRIPTION = (
 )
 
 
+def _finish_task_entry() -> ToolEntry:
+    return ToolEntry("finish_task", {"name": "finish_task",
+        "description": GIST_RULE + "\n\n" + "Select the complete answer after considering the work. Use finish when nothing of this work is left for you. If you end while a step of it is still yours (a deadline, a budget or a round limit can end a turn first), use stop, with a rationale naming what remains and why you end. "
+            "A full window is not such a limit: after a real size refusal the host can renew this same task's view from its exact record, keeping its custody and budget; an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse. "
+            "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
+            "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
+            "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
+            "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
+            "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; for a finish with pending_review=finish (required there) or over reviewers' findings, why you accept it now. The owner reads it on the task row."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
+            }, "required": ["owner_source_sha256"]},
+            "pending_review": {"type": "string", "enum": ["wait", "finish"], "description": "For a finish while your result's review still runs: wait (the default) for its verdict, or, where offered, finish now with a rationale saying why; the result then shows Done with warnings and the reviewers' late verdict is kept for you. A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do not end; collect it with its review_reference, a $0 call that waits for seats still running in this process; after a restart it returns what is recorded, possibly still pending."},
+            "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
+            "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
+            "summary": {"type": "string", "default": "", "description": "The gist, as this tool's description says; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take its first sentence as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
+            "about_work": {"type": "string", "description": "For a final confirming handoff to a task this owner turn successfully started or told, select its exact id so a Reply addresses it. Omit for prose not about that handoff."},
+            "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this gist with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
+        }, "required": ["action"]}}, _finish_task)
+
+
 def get_tools() -> List[ToolEntry]:
     from ouroboros.native_task_wait import SLEEP_PARAMS
     from ouroboros.subagent_inspection import inspect_subagent_tool
@@ -296,24 +318,7 @@ def get_tools() -> List[ToolEntry]:
                 "request_kind": {"type": "string", "enum": ["text", "image"], "default": "text"},
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
-        ToolEntry("finish_task", {"name": "finish_task",
-            "description": GIST_RULE + "\n\n" + "Select the complete answer after considering the work. Use finish when nothing of this work is left for you. If you end while a step of it is still yours (a deadline, a budget or a round limit can end a turn first), use stop, with a rationale naming what remains and why you end. "
-                "A full window is not such a limit: after a real size refusal the host can renew this same task's view from its exact record, keeping its custody and budget; an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse. "
-                "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
-                "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
-                "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
-                "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; for a finish with pending_review=finish (required there) or over reviewers' findings, why you accept it now. The owner reads it on the task row."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
-                    "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
-                }, "required": ["owner_source_sha256"]},
-                "pending_review": {"type": "string", "enum": ["wait", "finish"], "description": "For a finish while your result's review still runs: wait (the default) for its verdict, or, where offered, finish now with a rationale saying why; the result then shows Done with warnings and the reviewers' late verdict is kept for you. A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do not end; collect it with its review_reference, a $0 call that waits for seats still running in this process; after a restart it returns what is recorded, possibly still pending."},
-                "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
-                "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "The gist, as this tool's description says; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take its first sentence as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
-                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this gist with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
-            }, "required": ["action"]}}, _finish_task),
+        _finish_task_entry(),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
             "description": (
@@ -455,6 +460,7 @@ def get_tools() -> List[ToolEntry]:
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},
                 "request_id": {"type": "string", "description": "Presence Main contact retry key (at most 128 characters). Reuse the same key and words after uncertain delivery; a new key permits a distinct identical report. Omitted: identical words from this work rejoin."},
+                "about_work": {"type": "string", "description": "For a handoff acknowledgment in an owner conversation: exact task this turn confirmed starting or telling. Reply to this message addresses that work, not the speaker. Omit for unrelated prose."},
                 "reply_to_relay": {"type": "string", "description": "Reply to a drained relay in its source room; this work's Project shows the same answer. Empty selects the single open relay; omit for an ordinary room message."},
                 "destination": {"type": "string", "enum": ["current", "main"], "default": "current",
                                 "description": _MESSAGE_DESTINATION_DESCRIPTION},
