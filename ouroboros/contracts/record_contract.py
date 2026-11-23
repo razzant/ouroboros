@@ -182,8 +182,9 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         nullable=_fields("status_code"),
         optional=_fields("root_task_id parent_task_id retry_same_request provider_code provider_message requested_profile observed_route "
                          "request_ref operation_id physical_attempt_id attempt_custody_state provider_error_type "
-                         "transport_cause_type stream_incomplete generation_id explicit_timeout model_output_received " + _CONTEXT_FIT),
-        content=_fields("error provider_message"), natural_key=("llm_call_id",),
+                         "transport_cause_type stream_incomplete generation_id explicit_timeout model_output_received "
+                         "refused_send " + _CONTEXT_FIT),
+        content=_fields("error provider_message refused_send"), natural_key=("llm_call_id",),
     ),
     AnchorRow(
         "tool_call_started", "tools", "both",
