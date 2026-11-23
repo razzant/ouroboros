@@ -479,9 +479,100 @@ function mountAbout(container) {
         </div></section>${foldCard('reset all data', settingsRow(rowById('computer:reset'), { custom }))}`;
     void loadVersion();  // utils.js fills `#about-version` from one health read
     const button = container.querySelector('[data-reset-all]');
-    const onReset = () => { void resetAllData(); };
+    const result = rowNode(container, 'computer:reset')?.querySelector('[data-setting-result]');
+    // The line is the outcome in a few words; what was removed, kept or went wrong waits behind Details.
+    const named = (label, names) => (names?.length ? label + names.join(', ') : '');
+    // What the row shows, and what it stands on: `receipt` is the outcome a later acceptance keeps beside itself;
+    // `accepted` the identity the durable write returned for the Reset this page asked for ('' when it named
+    // none): while it is set, this page speaks about that Reset and no other answer reaches the row; `settled`
+    // that the row shows what a Reset did rather than the request for it. `seq`/`ackSeq` order the reads: an
+    // answer sent before the acceptance can neither establish it nor replace it.
+    let receipt = '', accepted = '', settled = false, seq = 0, ackSeq = 0, painted = '', gone = false;
+    // One shape for a read's answer and for the accepted Reset an answer certifies: the same words either way.
+    const viewOf = (data) => {
+        if (data?.status === 'complete') {
+            const notes = data.projects_set_aside_path || '';
+            return { text: 'Reset complete.' + (notes ? ' Earlier Project notes are in this folder:' : ''), notes, settled: true,
+                details: [named('Removed: ', data.deleted), named('Kept for diagnostics: ', data.retained_logs)].filter(Boolean).join('\n') };
+        }
+        if (data?.status === 'interrupted') {
+            const moved = data.projects_set_aside_path
+                ? 'Project notes moved before the interruption are in ' + data.projects_set_aside_path : '';
+            return { text: 'Reset was interrupted. To finish, confirm Reset all data again.', tone: 'warn', settled: true,
+                details: [data.error, named('Already removed: ', data.deleted), moved].filter(Boolean).join('\n') };
+        }
+        if (data?.status === 'requested') return { text: 'Reset requested. Waiting for restart.', details: '' };
+        if (data?.status === 'unknown') return { text: 'The last Reset could not be confirmed.', tone: 'warn', settled: true, details: '' };
+        return null;  // none: nothing about a Reset is on record
+    };
+    const write = (text, tone, details, notes) => {
+        const same = [text, tone || '', notes || '', details || ''].join('\u0000');
+        if (same === painted) return;  // the same words already stand: a repaint would close an open Details
+        painted = same;
+        setResult(result, { text, tone, details });
+        if (notes && result) {
+            // A dot folder is hidden in a file manager: the owner copies the whole path and pastes it there.
+            const path = result.ownerDocument.createElement('pre');
+            path.className = 'ui-result-details';
+            path.setAttribute('data-reset-notes-path', '');
+            path.textContent = notes;
+            result.insertBefore(path, result.querySelector('details'));
+        }
+    };
+    // Only what a Reset did is an outcome to keep: the request line is the row's state, never a receipt to carry
+    // beside a later acceptance.
+    const showView = (view) => {
+        settled = view.settled === true;
+        if (settled) receipt = [view.text, view.notes, view.details].filter(Boolean).join('\n');
+        write(view.text, view.tone, view.details, view.notes);
+    };
+    const showNothing = () => { settled = false; receipt = ''; write('', '', '', ''); };
+    // The acceptance is what the durable write answered, known then and not when the dialog it shows is
+    // dismissed: the receipt this replaced stays in sight as the previous one, distinct from that Reset.
+    const showWaiting = () => {
+        settled = false;
+        write('Reset requested. Waiting for restart.', '', receipt ? 'Previous receipt:\n' + receipt : '', '');
+    };
+    // What a read may do to the row. The local acceptance binds it for as long as this page speaks about the Reset
+    // it asked for: only an answer naming that exact identity is about it, so another Reset's receipt, one whose
+    // witness is unreadable or absent, and a bare `none` can neither establish nor displace it — a matching
+    // `requested` included. A certified outcome is never replaced by a request line, and one still pending keeps
+    // what this page already stood on beside it.
+    const apply = (data) => {
+        if (accepted && String(data?.reset_id || '') !== accepted) return;
+        const view = viewOf(data);
+        if (!view) { if (!settled) showNothing(); return; }  // a real none: nothing about a Reset is on record
+        if (view.settled !== true && settled) return;
+        if (accepted && view.settled !== true) showWaiting(); else showView(view);
+    };
+    const read = async () => {
+        const token = ++seq;
+        let answer;
+        try {
+            const res = await apiFetch('/api/reset');
+            if (!res.ok) return;  // a refusal is no answer: the row keeps what it holds
+            answer = await res.json();
+        } catch { return; }  // a failed read never clears a receipt already shown
+        if (gone || token !== seq || token <= ackSeq) return;  // a newer read owns the row; nothing older than the acceptance acts
+        apply(answer);
+    };
+    const acceptedReset = (answer) => {
+        if (gone) return;
+        accepted = typeof answer?.reset_id === 'string' ? answer.reset_id : '';
+        ackSeq = ++seq;  // reads sent up to this acceptance can neither certify it nor replace it
+        showWaiting();
+        if (accepted) void read();  // one read after the acceptance: a matching answer establishes the outcome
+    };
+    const onReset = async () => { await resetAllData({ onAccepted: acceptedReset }); };
+    const onShown = (event) => { if (event.detail?.path === 'computer/about') void read(); };
+    void read();  // the page reads on opening, as it always has; the shown event reads it again
     button.addEventListener('click', onReset);
-    return { unmount() { button.removeEventListener('click', onReset); } };
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onShown);
+    return { unmount() {
+        gone = true;
+        button.removeEventListener('click', onReset);
+        globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onShown);
+    } };
 }
 
 registerSettingsPage('permissions', { title: 'Permissions and checks', mount: mountPermissions });
@@ -497,32 +588,45 @@ registerSettingsPage('computer/about', { title: 'About', mount: mountAbout });
 // the app starts, not when a page is opened: where an alert goes depends on them long before anyone opens Settings.
 if (globalThis.document) mountDesktopShell(null, (shell) => getNotifier().configure({ shell }));
 
-// Reset All Data (the Danger Zone's button): asks first, then deletes the runtime data and restarts.
-export async function resetAllData() {
+// Reset All Data (About's button): asks first, then requests the restart that clears the runtime data once the
+// running work has stopped. The answer to that request is never the outcome: the row reads it after the restart.
+// The answer IS the acceptance, and the page that asked receives it (`onAccepted`) at that moment, before the
+// informational dialog is dismissed: its identity is what a later read must name to be about this Reset.
+export async function resetAllData({ onAccepted } = {}) {
     const confirmedReset = await openConfirmDialog({
         title: 'Reset runtime data',
-        body: 'This will delete all runtime data (state, memory, logs, settings) and restart.\nThe repo (agent code) will be preserved.\nYou will need to re-enter your provider settings.\n\nContinue?',
+        body: 'This clears saved conversations, memory, runtime state, task results, uploads and settings. Some diagnostic logs may remain.\n'
+            + 'Earlier Project notes (knowledge, workpads and journals) are set aside in a separate folder inside the data folder. '
+            + 'New Projects start empty, even with the same name.\n'
+            + 'Your code repository and working folders are not touched. You will need to re-enter your provider settings.\n'
+            + 'Ouroboros restarts first: nothing is cleared until its running work has stopped.\n\nContinue?',
         confirmLabel: 'Delete and restart',
         danger: true,
     });
     if (!confirmedReset) return;
     try {
-        const res = await apiFetch('/api/reset', { method: 'POST' });
+        // R8/R9 have no such route and refuse this token; the legacy path and a bodyless POST do nothing here.
+        const res = await apiFetch('/api/reset/v1', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: 'reset_all_data:v1' }) });
         const data = await res.json();
-        if (data.status === 'ok') {
+        if (res.ok && data.status === 'requested') {
+            // Handed on at the network's own completion, not after the dialog below is dismissed.
+            onAccepted?.(data);
             await openConfirmDialog({
-                title: 'Reset complete',
-                body: 'Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...',
+                title: 'Reset requested',
+                body: 'Ouroboros is restarting. Nothing is cleared until its work has stopped; '
+                    + 'the result will appear in Settings → This computer → About.',
                 alert: true,
             });
+            return true;
         } else {
             await openConfirmDialog({
-                title: 'Reset failed',
-                body: 'Error: ' + (data.error || 'unknown'),
+                title: res.ok ? 'Reset could not be confirmed' : 'Reset did not start',
+                body: data.error || 'Check the result in Settings → This computer → About before trying again.',
                 alert: true,
             });
         }
     } catch (e) {
-        showToast('Reset failed: ' + e.message, 'error');
+        showToast('Reset was not confirmed. Check the app before trying again. ' + e.message, 'error');
     }
 }

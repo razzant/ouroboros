@@ -20,16 +20,18 @@ from functools import cache
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.chat_uploads import attachment_views
-from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_a2a_chat_id
+from ouroboros.project_registry_recovery import recovery_notice
+from ouroboros.room_archive import registry_reservations
 from ouroboros.gateway._helpers import coerce_int
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
 from ouroboros.gateway.history_paging import (
-    HistoryCursorError, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
+    HistoryCursorError, RegistryUnavailable, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page,
     latest_arrival, notes_stamp, parse_around,
     chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
@@ -141,7 +143,7 @@ _SKILL_REVIEW_BOOL_FIELDS = ("snapshot_revised",)
 
 def _stored_chat_id(value: Any, default: int = 1) -> int:
     """Coerce a stored route while preserving explicit panel chat zero."""
-    return coerce_int(value, default)
+    return coerce_int(value, int(default))
 
 
 def _project_history_context(
@@ -155,15 +157,18 @@ def _project_history_context(
     once per request; no per-row registry reads, no extra event-loop thread hops.
     ``strict`` (an exact row's destination) raises unreadable authority as StoreError.
     """
-    from ouroboros.projects_registry import reserved_project_chat_ids, readable_rooms, RoomResolver, all_task_bindings
+    from ouroboros.projects_registry import readable_rooms, RoomResolver, all_task_bindings
 
-    try:
-        project_chat_ids, classified = reserved_project_chat_ids(data_dir, strict=True), True
-    except Exception:  # the rooms its readable rows name are still Projects; any other is unknown
-        # One lenient read decides: unread or lost, Main's rows are unknown; the rooms it named stay Projects.
-        if strict or ((project_chat_ids := readable_rooms(data_dir)) is None and thread_id == 1):
-            raise StoreError("Project registry unavailable") from None
-        project_chat_ids, classified = project_chat_ids or set(), False
+    # The archive's own readiness answer: importing raises StoreMigrating, an unconfirmed profile StoreError.
+    reserved = registry_reservations(data_dir)
+    classified = reserved is not None
+    # Unclassified, the rooms its readable rows name are still Projects; any other is unknown.
+    project_chat_ids = reserved if classified else readable_rooms(data_dir) or set()  # logs a lost registry once
+    if not classified:
+        if thread_id == WEB_UI_CHAT_ID:  # Main needs the full set of reservations
+            raise RegistryUnavailable("Project registry unavailable")
+        if strict:
+            raise StoreError("Project registry unavailable")
     try:
         rooms = RoomResolver(data_dir, strict=strict)
     except ValueError:
@@ -1373,7 +1378,7 @@ def _assemble_history_response(
     thread_id: int,
     n_human: int,
     n_progress: int,
-    cursor: Optional[str] = None, around: Optional[str] = None,
+    cursor: Optional[str] = None, around: Optional[str] = None, profile_scope: str = "",
 ) -> bytes:
     """Select and project recent/archive history in the endpoint's one worker.
 
@@ -1450,10 +1455,10 @@ def _assemble_history_response(
         if row.get("historical_terminal"):
             ending_rows.setdefault(row["task_id"], []).append(row)
     result_cache[_READS].prefetch([*ending_rows, *(row.get("task_id") for row in combined)])
-    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # beside an invalid row Main reads on
+    named = thread_id in project_chat_ids or thread_id == WEB_UI_CHAT_ID  # an unclassifiable Main has already refused
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
         _load_terminal_result(data_dir, task_id, result_cache))) if named else (
-        {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
+        {} if classified else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,
          anchored_children) = _apply_window_quotas(
@@ -1516,6 +1521,9 @@ def _assemble_history_response(
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})
+    if not classified and not named:  # direct-address reads can miss rows a Project would inherit
+        for gaps in stream_gaps.values():
+            gaps.add("room_unclassified")
     if result_cache[_READS].failed or PROJECTION_FAILED in (stream_gaps["chat"] | stream_gaps["progress"]):
         tokens.pop("after_cursor", None)  # a read that failed part-way is read whole again, never continued
     window = _window_metadata(
@@ -1534,8 +1542,10 @@ def _assemble_history_response(
         "messages": [short_gist(message) for message in messages],
         "window": {**window, **arrival},
         "coverage": history_page_coverage(page, stream_gaps),
-        **tokens,
+        **tokens, **({"profile_scope": profile_scope} if profile_scope else {}),  # the generation's frozen scope (#3294)
     }
+    if thread_id == WEB_UI_CHAT_ID and not (cursor or around) and recovery_notice(data_dir):
+        payload["project_registry"] = "restored"
     # Encode the whole structured page off the loop, keeping local filename bytes as JSON escapes.
     return json_dumps_utf8(
         payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
@@ -1546,10 +1556,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
     async def api_chat_history(request: Request) -> Response:
         """Return recent chat, system, and progress messages merged chronologically."""
         def _int_param(name: str, default: int, cap: int) -> int:
-            try:
-                return max(0, min(int(request.query_params.get(name, default)), cap))
-            except (ValueError, TypeError):
-                return default
+            return max(0, min(coerce_int(request.query_params.get(name), default), cap))
 
         # Separate per-type quotas so a burst of progress/telemetry can never evict
         # the user's real conversation from a single combined tail. Defaults are
@@ -1566,18 +1573,21 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # ONE thread hop for the whole assembly (perf2 P3): reads, transforms,
         # slicing, annotation, and the JSON encode all run off the event loop.
         cursor, around = (request.query_params.get(name) for name in ("cursor", "around"))
+        served_ui = getattr(getattr(getattr(request, "app", None), "state", None), "served_ui", None)
+        profile_scope = served_ui.serving_profile_scope() if served_ui is not None else ""  # frozen at apply (#3294)
         try:
             body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress,
-                                           cursor, around)
+                                           cursor, around, profile_scope)
         except (HistoryCursorError, OSError, StoreError) as exc:
             reason = (exc.reason if isinstance(exc, HistoryCursorError) else
                       "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
-            return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
-                                                **({"detail": str(exc)} if type(exc) is StoreError else {}),
-                                                "next_cursor": cursor, "has_more": True,
-                                                "window": {"complete": False, "truncated_by": [reason]}}),
-                            status_code=exc.status if isinstance(exc, HistoryCursorError) else 503,
-                            media_type="application/json")
+            detail = {"detail": str(exc)} if type(exc) in (StoreError, RegistryUnavailable) else {}
+            if isinstance(exc, RegistryUnavailable):
+                detail.update(exc.fields)
+            return JSONResponse({"messages": [], "error": reason, "reason_code": reason, **detail,
+                                 "next_cursor": cursor, "has_more": True,
+                                 "window": {"complete": False, "truncated_by": [reason]}},
+                                status_code=exc.status if isinstance(exc, HistoryCursorError) else 503)
         return Response(content=body, media_type="application/json")
 
     return api_chat_history

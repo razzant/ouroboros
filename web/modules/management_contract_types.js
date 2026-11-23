@@ -1073,10 +1073,27 @@
  */
 
 /**
+ * The owner's explicitly versioned `POST /api/reset/v1` confirmation (`reset_all_data:v1`): any other body or the legacy path is refused and records nothing.
+ * @typedef {Object} ResetRequest
+ * @property {string} confirm
+ */
+
+/**
+ * POST acknowledges the request for a restart, never a deletion, and names the Reset it accepted (`reset_id`). GET
+ * reports status: `requested`, `complete` and `interrupted` carry that Reset's `reset_id`, while `none` and `unknown`
+ * name none. A complete read names what was removed, any kept open logs and where the previous profile's Project notes
+ * were set aside, relative to the data root and as a path on this computer: both null when no Project had notes to
+ * keep. An interrupted read carries its error, `deleted` once something was removed, and the pair only while that
+ * folder holds notes: a move that fails is undone and names none.
  * @typedef {Object} ResetResponse
  * @property {string} status
- * @property {string[]} deleted
- * @property {boolean} restarting
+ * @property {string=} reset_id
+ * @property {string[]=} deleted
+ * @property {string[]=} retained_logs
+ * @property {?string=} projects_set_aside
+ * @property {?string=} projects_set_aside_path
+ * @property {boolean=} restarting
+ * @property {string=} error
  */
 
 /**

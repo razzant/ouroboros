@@ -48,6 +48,9 @@ BASIS_ENV = "OUROBOROS_WORK_ROOT_BASIS"
 BASIS_KEY = "work_root_basis"  # the witness field
 HOME_BASIS, APP_ROOT_BASIS, UNKNOWN_BASIS = "home", "app_root", "unknown"
 BASES = (HOME_BASIS, APP_ROOT_BASIS, UNKNOWN_BASIS)
+RESETTING = "resetting"  # Reset intent, not an initialization or cleanup receipt
+RESET_PROTECTION_KEY = "reset_launch_protection"
+RESET_PROTECTION_MODES = ("local", "local_password", "network_password")
 
 WITNESS_REL = Path("state") / "state.initialized.json"
 STATE_COPIES = (Path("state") / "state.json", Path("state") / "state.last_good.json")
@@ -115,8 +118,17 @@ def witness_path(drive_root: Any) -> Path:
     return Path(drive_root) / WITNESS_REL
 
 
+def reset_receipt(witness: dict) -> dict:
+    receipt = witness.get("reset_receipt")
+    if (isinstance(receipt, dict) and receipt.get("initialization_id") == witness.get("initialization_id")
+            and all(isinstance(receipt.get(key), list) and all(isinstance(item, str) for item in receipt[key])
+                    for key in ("deleted", "retained_logs"))):
+        return receipt
+    return {}
+
+
 def read_witness(drive_root: Any) -> Tuple[str, Dict[str, Any]]:
-    """``("missing"|"ok"|"invalid"|"unreadable", witness)``; only proven absence is missing."""
+    """Only proven absence is missing. A Reset still cleaning up is not an ``ok`` witness."""
     try:
         try:
             raw = witness_path(drive_root).read_bytes()
@@ -129,10 +141,25 @@ def read_witness(drive_root: Any) -> Tuple[str, Dict[str, Any]]:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return "invalid", {}
-    if (not isinstance(data, dict) or data.get("phase") not in {"pending", "complete"}
-            or not str(data.get("initialization_id") or "")):
+    if not isinstance(data, dict) or not str(data.get("initialization_id") or ""):
         return "invalid", {}
-    return "ok", data
+    phase = data.get("phase")
+    if phase == "pending" and data.get("origin") == "owner_reset" and not reset_receipt(data):
+        # Older Reset wrote pending before its generation stopped. Neither that
+        # intent nor a projects.json beside it identifies a clean successor.
+        return RESETTING, data
+    if phase in ("pending", "complete"):
+        return "ok", data
+    if phase == RESETTING and data.get("origin") == "owner_reset" and data.get(BASIS_KEY) in BASES:
+        return RESETTING, data
+    return "invalid", {}
+
+
+def reset_handed_off(drive_root: Any) -> bool:
+    """Has a stopped generation handed an owner Reset to this root's next exclusive admission? That admission
+    clears the settings document, so a launcher starting it projects none (``launcher_bootstrap.launch_settings``)."""
+    status, witness = read_witness(drive_root)
+    return status == RESETTING and witness.get("phase") == RESETTING and witness.get("reset_handed_off") is True
 
 
 def history_evidence(drive_root: Any, *, store_chat: Callable[[Path], bool],
@@ -221,7 +248,7 @@ def durable_basis(drive_root: Any, *,
     store, whose rows only its reader can count, leaves the answer unknown."""
     root = Path(drive_root)
     status, witness = read_witness(root)
-    if status == "ok":
+    if status in ("ok", RESETTING):
         value = witness.get(BASIS_KEY, HOME_BASIS)
         return (value, "witness") if value in BASES else (UNKNOWN_BASIS, f"witness basis {value!r}")
     if status != "missing":

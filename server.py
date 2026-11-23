@@ -11,7 +11,7 @@ import time
 import uuid
 # Before any import resolves a path: the executing checkout is the implicit repository and the data root is
 # settled; an explicit value wins, and APP_ROOT alone never silently leaves historical memory (#1239).
-from ouroboros.launch_roots import enter_direct, same_location  # noqa: E402 — standard library only
+from ouroboros.launch_roots import enter_direct  # noqa: E402 — standard library only
 os.environ.update(enter_direct(os.path.dirname(os.path.abspath(__file__))))
 # Protect Python import diagnostics too. Only the forkserver's preload stays thread-free (it forks
 # every pool child); a spawned child, the event-bus manager's included, relays from here.
@@ -33,9 +33,9 @@ from ouroboros.server_auth import (
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
-from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root, bound_service_socket,
+from ouroboros.server_entrypoint import (ResetLaunch, ServerAdmissionRefused, admit_data_root, bound_service_socket,
                                          find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
-                                         shorten_switch_interval, write_port_file)
+                                         shorten_switch_interval, unisolated_test_root, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
 from ouroboros import body_adoption, consciousness_clock, host_notice, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import TEXT_COMPRESSION, ServedUI
@@ -127,11 +127,7 @@ if isinstance(sys.executable, str) and sys.executable:  # this host's interprete
 # Logging is configured in main(), not at import: a spawn/forkserver worker re-imports
 # this module as ``__mp_main__`` and configures itself in ``worker_main``
 # (ouroboros/process_logging.py), so importing the server never attaches handlers.
-_pytest_default_real_data_dir = (
-    "pytest" in sys.modules
-    and not os.environ.get("OUROBOROS_DATA_DIR")
-    and same_location(DATA_DIR, pathlib.Path.home() / "Ouroboros" / "data")
-)
+_pytest_default_real_data_dir = unisolated_test_root(DATA_DIR)
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
@@ -183,7 +179,7 @@ from ouroboros.server_runtime import (
     has_startup_ready_provider,
     needs_local_model_autostart,
     setup_remote_if_configured,
-    ws_heartbeat_loop,
+    start_ws_heartbeat,
 )
 
 _supervisor_ready = threading.Event()  # a live generation finished init: the API's `supervisor_ready`
@@ -1095,46 +1091,42 @@ async def lifespan(app):
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
     _dialogue_bridge = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
-    default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
-    pytest_default_real_data_dir = (
-        (bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules)
-        and same_location(lifespan_drive_root, default_real_data_dir)
-        and not os.environ.get("OUROBOROS_DATA_DIR")
-    )
-    if not pytest_default_real_data_dir:  # an imported ASGI app is admitted here; main() already was
+    pytest_default_real_data_dir = unisolated_test_root(lifespan_drive_root)
+    live = not pytest_default_real_data_dir  # a bare pytest run must not initialize the real data root
+    if live:  # an imported ASGI app is admitted here; main() already was
         admit_data_root(lifespan_drive_root)
         process_scope.initialize_installation_scope(lifespan_drive_root)  # idempotent after main(); first for an imported app
-    _event_loop = asyncio.get_running_loop()
-    _set_ws_event_loop(_event_loop)
-    ws_heartbeat_task = asyncio.create_task(
-        ws_heartbeat_loop(_has_ws_clients, broadcast_ws),
-        name="ws-heartbeat",
-    )
-
-    # Boot APPLIES the provider normalization in-process and persists none of it
-    # (mirror of launcher_onboarding.prepare_first_run_settings); its read does
-    # persist the two compatibility upgrades (``migrate=True``). Two
-    # normalizations, two re-derivations: the VOCABULARY one is the read seam
-    # every reader applies (config.normalize_settings_raw); the PROVIDER one is
-    # re-derived by every consumer that needs the route — the task-start
-    # projection, the settings GET and onboarding reads, the context-fit route
-    # resolver — so writing it at start would only make boot a second author.
-    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings(migrate=True))
+    held_reset = live and server_boot.hold_interrupted_reset(lifespan_drive_root, BOOT)
+    if held_reset:
+        settings, _, _ = apply_runtime_provider_defaults(load_settings())
+    else:
+        _event_loop = asyncio.get_running_loop()
+        ws_heartbeat_task = start_ws_heartbeat(_event_loop, _set_ws_event_loop, _has_ws_clients, broadcast_ws)
+        # Only an ordinary settings read persists the two compatibility upgrades. Boot
+        # applies the provider defaults in-process, as launcher_onboarding.prepare_first_run_settings does.
+        # The two normalizations are read-side: every reader applies the vocabulary
+        # through config.normalize_settings_raw; readers that need a route re-derive
+        # the provider defaults (task-start projection, Settings GET, onboarding and
+        # the context-fit route resolver). Boot must not be a second author of those defaults.
+        settings, _, _ = apply_runtime_provider_defaults(load_settings(migrate=True))
     _apply_settings_to_env(settings)
-    served_ui.apply(app, settings)  # this generation's main interface, before any request is served
+    served_ui.apply(app, settings)  # the saved UI choice and process-local restart facts, before serving
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
     initialize_runtime_mode_baseline()
+    if held_reset:
+        yield  # keep the owner controls available, with no store, old queue, supervisor or first-run setup
+        return
     has_local = needs_local_model_autostart(settings)
 
-    if not pytest_default_real_data_dir:
+    if live:
         store_switch.start(lifespan_drive_root, repo_dir=REPO_DIR, request_restart=_request_restart_exit)  # a pending switch, then the import owner off the ready path (P1)
 
     if not _exit_signalled.is_set():
         _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
     body_stop = threading.Event()  # lifespan ownership survives a cognitive supervisor revival; the boot coordinator's stop
-    start_body = (lambda: None) if pytest_default_real_data_dir else bind_body_lifespan(
-        lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set)
+    start_body = bind_body_lifespan(
+        lifespan_drive_root, body_stop, collection_ready=_supervisor_ready.is_set) if live else (lambda: None)
     # A provider-ready boot starts the supervisor once the store published and the extensions registered.
     startup_provider_ready = has_startup_ready_provider(settings)
     if not startup_provider_ready:  # readiness follows the store's publication (store_switch.when_ready below)
@@ -1146,20 +1138,17 @@ async def lifespan(app):
 
     # --- at the store's publication (on the import thread): the dialogue first, repairs after ---
     def _dialogue() -> None:
-        """Owner messages are accepted durably from here on (T2: a new chat before old repairs). A
-        providerless generation has no executor for them: its dialogue opens with the supervisor a
-        later settings save starts."""
-        if startup_provider_ready and not body_stop.is_set() and not pytest_default_real_data_dir:
+        """A surviving dialogue is cut over here even providerless (T2: reads before old repairs).
+        Only a provider-ready generation opens the owner bridge; providerless messages get no
+        executor, so its bridge opens with the supervisor a later settings save starts."""
+        from ouroboros import dialogue_store
+
+        has_dialogue = dialogue_store.present(lifespan_drive_root) or dialogue_store.holds_dialogue_files(lifespan_drive_root)
+        if (startup_provider_ready or has_dialogue) and not body_stop.is_set() and live:
             _dialogue_cutover(lifespan_drive_root)
+        if startup_provider_ready and not body_stop.is_set() and live:
             _open_dialogue(settings, stop_requested=lambda: any(
                 e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled)))
-
-    recovery = None
-    if not startup_provider_ready:  # after the store's publication: the recovery writes, then readiness (P1)
-        recovery = lambda: not body_stop.is_set() and _run_startup_task_recovery(  # noqa: E731
-            lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
-            prior_worker_pids=None if pytest_default_real_data_dir else _startup_worker_pids(lifespan_drive_root),
-        )
 
     def _after_extensions() -> None:
         """The body runtime and the supervisor (or the providerless recovery and readiness), only
@@ -1168,17 +1157,22 @@ async def lifespan(app):
         if body_stop.is_set() or not _await_extensions_ready(body_stop):
             return
         start_body()
-        if recovery is not None:
-            recovery()
-            _supervisor_ready.set()
+        if not startup_provider_ready:  # after the store's publication: recovery writes, then readiness (P1)
+            if not body_stop.is_set():
+                _run_startup_task_recovery(
+                    lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
+                    prior_worker_pids=_startup_worker_pids(lifespan_drive_root) if live else None,
+                )
+            if not body_stop.is_set():
+                if live:
+                    server_boot.recover_dialogue(lifespan_drive_root, REPO_DIR)
+                _supervisor_ready.set()
         else:
             _start_supervisor_if_needed(settings)
 
     store_switch.when_ready(lifespan_drive_root, _dialogue, _after_extensions)  # never on this thread: it starts the coordinator next
 
     # --- the boot coordinator's steps, in the order the lifespan ran them before it served ---
-    live = not pytest_default_real_data_dir  # the real data root: every step; a bare pytest run: none that touches it
-
     def _usage_store() -> None:  # the one journal import, on every door (providerless included)
         if not live:
             return
@@ -1433,10 +1427,10 @@ def main() -> int:
         configure_process_logging(drive_logs=None)
         log.critical("The previous server generation exited by Panic; its restart successor stops")
         return PANIC_EXIT_CODE
-    # Admission before any write: one server per actual data root (server_entrypoint).
+    reset_launch = ResetLaunch(REPO_DIR, _LAUNCHER_MANAGED) if not _pytest_default_real_data_dir else None
     if not _pytest_default_real_data_dir:
         try:
-            admit_data_root(DATA_DIR)
+            admit_data_root(DATA_DIR, reset_launch=reset_launch)
         except ServerAdmissionRefused as refusal:
             configure_process_logging(drive_logs=None)
             log.error("Server not started: %s", refusal)
@@ -1462,7 +1456,7 @@ def main() -> int:
     except Exception:
         saved_host = ""
     env_host = os.environ.get("OUROBOROS_SERVER_HOST", "").strip()
-    default_host = env_host or saved_host or DEFAULT_HOST
+    default_host = (reset_launch and reset_launch.boot_host) or env_host or saved_host or DEFAULT_HOST
     args = parse_server_args(default_host, DEFAULT_PORT)
     host_source = "cli" if args.host_explicit else (
         ("launcher" if _LAUNCHER_MANAGED else "environment") if env_host else "settings")
@@ -1522,8 +1516,12 @@ def main() -> int:
                         force_exit_timeout_sec)
         try:
             # Our listeners close on exit/exec; port sweeps add no ownership proof.
-            store_switch.switch_at_restart(DATA_DIR, REPO_DIR, _emergency_process_cleanup())  # the seam: after every reader is dead, before the exit
+            cleanup = _emergency_process_cleanup()
+            restart_drained = _uvicorn_exited.is_set() and not _exit_signalled.is_set() and not panic_termination_requested()
+            outcome = store_switch.switch_at_restart(DATA_DIR, REPO_DIR, cleanup, restart_drained=restart_drained)
             if not _LAUNCHER_MANAGED:
+                if reset_launch is not None:
+                    reset_launch.select_reset_reexec(outcome)
                 if _planned_delegate_restart_transaction_id:
                     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
 
@@ -1536,11 +1534,14 @@ def main() -> int:
 
     restart_thread = threading.Thread(target=_check_restart, daemon=True)
     restart_thread.start()
+    app.app.state.restart_consumer = restart_thread  # type: ignore[attr-defined]  # actual Reset consumer
 
     try:
         with bound_service_socket(DATA_DIR, "main", args.host, actual_port,
                                   server_host_source=host_source) as listener:
-            actual_port = listener.getsockname()[1]
+            bound_host, actual_port = listener.getsockname()[:2]
+            if reset_launch is not None:
+                app.app.state.reset_launch_protection = lambda root: reset_launch.approve(bound_host, root)
             write_port_file(PORT_FILE, actual_port)
             bind_fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR, cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # the fault door: main's return and its backstop
             log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)

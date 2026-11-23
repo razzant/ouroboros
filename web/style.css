@@ -11257,6 +11257,27 @@ html[data-layout="stack"] .project-panel {
     }
 }
 
+/* Saved messages while the project list can't be read (room_archive.js): the reader's chrome over plain words under
+   their speakers, one reading measure; rooms are the reader's view choice, its chosen one the views' wash. Nothing in
+   it is a control of the conversation: no row actions, no composer. */
+.room-archive-column { max-width: var(--document-reader-measure); margin: 0 auto; }
+.room-archive-rooms { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.room-archive-room { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-archive-room[aria-pressed="true"] { color: var(--tone-crimson-soft-ink); background: var(--tone-crimson-soft); }
+.room-archive-note { margin-block: var(--space-2) 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.room-archive-note[hidden], .room-archive-edge[hidden], .room-archive-status[hidden] { display: none; }
+.room-archive-edge { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding-block: var(--space-4) var(--space-2); }
+.room-archive-edge .room-archive-note { margin: 0; text-align: center; }
+.room-archive-feed { display: grid; gap: var(--space-4); margin-block: var(--space-3); padding: 0; list-style: none; }
+.room-archive-speaker { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.room-archive-text { color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-archive-row.is-system .room-archive-text { color: var(--text-secondary); font-size: var(--type-body); }
+.room-archive-files { margin-top: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.room-archive-status { display: grid; justify-items: start; gap: var(--space-2); margin-block: var(--space-3); color: var(--text-meta); }
+.room-archive-status p { margin: 0; }
+.room-archive-status [hidden] { display: none; }
+.room-archive-limit { margin-block: var(--space-3); }
+
 /* Share (message_share.js, DESIGN "Replies"): the reader's chrome around exactly what would leave, as tall as that
    and no taller; on a phone the reader's full sheet with the ways out at its foot. */
 .message-share[open] { display: flex; flex-direction: column; container: message-share / inline-size; }

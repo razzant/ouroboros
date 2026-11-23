@@ -134,6 +134,11 @@ def explicit_project_id_ok(raw: Any) -> bool:
     return bool(s) and s == s.strip() and s == sanitize_project_id(s)
 
 
+def can_be_workspace_shelf(project_id: str) -> bool:
+    """A legal ``proj_*`` facts shelf needs separate evidence to be a registered room."""
+    return project_id.startswith("proj_") and explicit_project_id_ok(project_id)
+
+
 def _normalized_workspace(workspace: str) -> str:
     """normcase(realpath) of a workspace path — the canonical key used for BOTH the
     derived-id hash and the registry-first match, so a folder maps to ONE identity on

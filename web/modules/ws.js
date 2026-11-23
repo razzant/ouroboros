@@ -1,5 +1,6 @@
 import { isPanicFrame, panicWithoutSocket } from './panic.js';
 import { openSignIn, readState } from './api_client.js';
+import { documentScope, provenScope, dropPaintedPreviews } from './chat_preview.js';
 /** WebSocket manager; connect after modules register listeners.
  *
  * Outbound messages sent while the socket is down are queued in memory (at most
@@ -8,6 +9,12 @@ import { openSignIn, readState } from './api_client.js';
  * every 10 s and closes a socket that has delivered no inbound message for 45 s,
  * which enters the normal reconnect path.
  * Panic returns `intercepted`: an emergency control, never a sent chat or queued submission.
+ *
+ * A scoped document names its own profile on chat frames. Its current socket's first
+ * outbox frame (`connection_profile`, gateway/ws.py) names the serving profile. Only a
+ * match admits ordinary frames and chat sends; a different scope drops the old queue
+ * and reloads. Control open and Panic remain independent. An unscoped document keeps
+ * the previous contract. Neither elapsed time nor a fresh HTML response proves this socket.
  */
 
 // Consecutive healthy /api/state probes tolerated while the socket stays down
@@ -119,6 +126,10 @@ export class WS {
         this._serverAnswers = false;
         this._pendingMessages = [];
         this._nextClientMessageId = 1;
+        // The data-profile scope this socket's server issued at accept ('' until it arrives),
+        // and the positive-mismatch flag it sets (#3294).
+        this._servingScope = '';
+        this._foreignProfile = false;
     }
 
     /** While the socket is down: the core answered its state read, and a socket attempt started after that
@@ -374,12 +385,47 @@ export class WS {
         }
     }
 
+    /** A scoped page waits for its own current socket; an unscoped page uses the old contract. */
+    _profileMatches() {
+        const docScope = documentScope(globalThis.document);
+        return !docScope || this._servingScope === docScope;
+    }
+
+    _flushPendingAfterProfileCheck(socket) {
+        if (this.ws === socket && this._profileMatches()) this._flushPendingMessages();
+    }
+
+    /** Accept one serving profile per socket. The proof precedes ordinary broadcast frames. */
+    _adoptServingScope(value) {
+        const scope = provenScope(value);
+        if (!scope || this._servingScope) return false;
+        this._servingScope = scope;
+        const docScope = documentScope(globalThis.document);
+        if (!docScope) return true;
+        if (scope === docScope) {
+            this._flushPendingMessages();
+            return true;
+        }
+        this._foreignProfile = true;
+        dropPaintedPreviews();
+        for (const queued of this._pendingMessages.splice(0)) {
+            this.emit('outbound_dropped', {
+                clientMessageId: queued.client_message_id || '',
+                type: queued.type || '',
+            });
+        }
+        this._refreshWindow('profile-change');
+        return true;
+    }
+
     connect() {
-        if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        if (this.foreignProfile() || (this.ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(this.ws.readyState))) {
             return;
         }
         const socket = new WebSocket(this._getUrl());
         this.ws = socket;
+        this._servingScope = '';
+        this._foreignProfile = false;
         const previouslyConnected = this._wasConnected;
         const attempt = ++this._attempts;
         let disconnected = false;
@@ -388,7 +434,12 @@ export class WS {
             if (disconnected) return;
             disconnected = true;
             // A newer socket owns its own retry; an older socket's late close leaves it alone.
-            if (this.ws === socket) { this.ws = null; this._clearPostOpenRetryTimer(); }
+            if (this.ws === socket) {
+                this.ws = null;
+                this._servingScope = '';
+                this._profileWasDisconnected = true;
+                this._clearPostOpenRetryTimer();
+            }
             this._clearWatchdogTimer();
             // Only an attempt begun after the core's answer counts (an open clears the answer).
             if (this._answeredAtAttempt !== null && attempt > this._answeredAtAttempt) this._setServerAnswers(true);
@@ -422,7 +473,7 @@ export class WS {
                 this.emit('open', { previouslyConnected });
             } finally {  // a throwing listener still surfaces; the version read and the queued frames do not wait on it
                 this._refreshStateAfterOpen(previouslyConnected);
-                this._flushPendingMessages();
+                this._flushPendingAfterProfileCheck(socket);
             }
         };
 
@@ -436,9 +487,16 @@ export class WS {
         };
 
         socket.onmessage = (e) => {
+            if (this.ws !== socket) return;
             this._lastMessageAt = Date.now();
             try {
                 const msg = JSON.parse(e.data);
+                if (msg.type === 'connection_profile') {
+                    if (!this._adoptServingScope(msg.profile_scope)) return;
+                } else if (!this._profileMatches()) {
+                    // The serving socket puts its proof first; nothing profile-bound is buffered here.
+                    return;
+                }
                 this.emit('message', msg);
                 if (msg.type) this.emit(msg.type, msg);
             } catch (err) {
@@ -458,7 +516,20 @@ export class WS {
         if (!payload.client_message_id && payload.type === 'chat') {
             payload.client_message_id = `msg-${Date.now()}-${this._nextClientMessageId++}`;
         }
-        if (this.ws?.readyState === WebSocket.OPEN) {
+        // The frame's data-profile claim: the digest this document's core-stamped meta proves.
+        // The host refuses a chat frame whose claim positively differs from the serving
+        // connection's own confirmed scope (#3294); absent means no proof, admitted as before.
+        if (payload.type === 'chat' && !payload.profile_scope) {
+            const scope = documentScope(globalThis.document);
+            if (scope) payload.profile_scope = scope;
+        }
+        if (payload.type === 'chat' && this.foreignProfile()) {
+            // A page that proves another profile never sends into this socket: the host would
+            // refuse the frame anyway (#3294), so fail locally instead of queueing it. Panic
+            // and the product controls never pass through this gate.
+            return { status: 'failed', clientMessageId: payload.client_message_id || '' };
+        }
+        if (this.ws?.readyState === WebSocket.OPEN && (payload.type !== 'chat' || this._profileMatches())) {
             try {
                 this.ws.send(JSON.stringify(payload));
                 this.emit('outbound_sent', {
@@ -496,6 +567,25 @@ export class WS {
     /** Whether a socket of this page has opened: the `previouslyConnected` its next open carries. */
     previouslyConnected() {
         return this._wasConnected;
+    }
+
+    /** The data-profile scope this socket's server issued at accept ('' when it proves none). */
+    servingProfileScope() {
+        return this._servingScope;
+    }
+
+    /** A fresh scoped document can paint its own preview; after disconnect only its current socket can confirm it. */
+    canShowSavedProfile() {
+        return !this.foreignProfile() && (!this._profileWasDisconnected || this._profileMatches());
+    }
+
+    /** True only on POSITIVE proof that this document belongs to another data profile than the one
+     *  the current socket serves (#3294); the room gates its history display on this. Unproven on
+     *  either side is no proof and returns false. */
+    foreignProfile() {
+        const docScope = documentScope(globalThis.document);
+        return Boolean(this._foreignProfile
+            || (this._servingScope && docScope && this._servingScope !== docScope));
     }
 
     // Every subscription returns its disposer (UI resource lifecycle, P3): a

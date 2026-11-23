@@ -199,6 +199,121 @@ def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_u
             setup_browser.capture(page, f"c2-permissions-end-stored-40-{width}x{height}-{theme}")
 
 
+@pytest.mark.parametrize("width,height,theme", [(1280, 800, "dark"), (390, 844, "light")])
+def test_reset_request_and_successor_receipt_are_shown_separately(subscription_ui, width, height, theme):
+    from playwright.sync_api import expect
+
+    page, _ = _page(subscription_ui, width, height, theme)
+    posts = []
+    unexpected = []
+    outcome = {"status": "none"}
+    notes = "/Users/example/Ouroboros/data/projects/.before-reset-20261119-0123abcd"  # an invented data folder
+    accepted_reset = "reset-4f2a1c"  # the durable write's own identity for the Reset this page asked for
+
+    def receipt(route):  # display only; this test never resets even the disposable server
+        request = route.request
+        url = urlparse(request.url)
+        address = (request.method, url.path)
+        if address == ("GET", "/api/reset") and not url.query and request.post_data is None:
+            route.fulfill(json=outcome)
+        elif address == ("POST", "/api/reset/v1") and not url.query:
+            posts.append((*address, request.post_data))
+            # The acknowledgement names the Reset it accepted; a display fixture, not the held-boot integration.
+            route.fulfill(json={"status": "requested", "restarting": True, "reset_id": accepted_reset})
+        elif url.path.startswith("/api/reset") or request.method not in ("GET", "HEAD"):
+            unexpected.append(address)
+            route.abort()
+        else:
+            route.fallback()
+
+    def announced():
+        """The shell's own signal for the page on screen — the window seen again, a reconnect — and its read."""
+        return page.expect_response(lambda response: urlparse(response.url).path == "/api/reset"
+                                    and response.request.method == "GET")
+
+    def reset_line():
+        return setting_row(page, "computer:reset").locator("[data-setting-result]").text_content() or ""
+
+    def fits(locator):  # inside the window, nothing cut or scrolled sideways
+        box = locator.bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box
+        assert page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
+
+    # Catch all writes and every reset path, including an unexpected version or method.
+    page.route("**/*", receipt)
+    open_settings(page, "computer/about")
+    about = _settled(page, "computer/about")
+    about.locator("[data-settings-fold] > summary").click()
+    expect(setting_row(page, "computer:reset")).to_contain_text(
+        "Earlier Project notes are set aside. Code and working folders stay.")
+    reset = about.locator("[data-reset-all]")
+    reset.click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog).to_contain_text("Open diagnostic logs may remain.")
+    # What happens to earlier Project notes is said before anything is deleted, in plain words.
+    expect(dialog).to_contain_text("Earlier Project notes (knowledge, workpads and journals) are set aside in a separate "
+                                   "folder inside the data folder. New Projects start empty, even with the same name.")
+    expect(dialog).to_contain_text("Your code repository and working folders are not touched.")
+    expect(dialog).to_contain_text("Ouroboros restarts first: nothing is cleared until its running work has stopped.")
+    fits(dialog)
+    setup_browser.capture(page, f"reset-confirmation-{width}x{height}-{theme}")
+    dialog.get_by_role("button", name="Cancel").click()
+    assert posts == []
+    assert unexpected == []
+    reset.click()
+    dialog.get_by_role("button", name="Delete and restart").click()
+    # The answer to the request is a restart request, never a deletion; the page names its confirmation.
+    expect(dialog).to_contain_text("Reset requested")
+    expect(dialog).to_contain_text("Nothing is cleared until its work has stopped")
+    assert [(method, path, json.loads(body)) for method, path, body in posts] == [
+        ("POST", "/api/reset/v1", {"confirm": "reset_all_data:v1"})]
+    dialog.get_by_role("button", name="OK").click()
+    expect(about).to_contain_text("Reset requested. Waiting for restart.")
+    expect(about).not_to_contain_text("Reset complete.")
+    # The page the owner asked from stays open: the shell announces it again when the window is seen again, and only
+    # an answer naming the Reset this page accepted may fill its row.
+    assert page.evaluate("() => !document.hidden"), "the announce needs the window on screen"
+    outcome = {"status": "interrupted", "error": "processes_unconfirmed:1", "deleted": [], "reset_id": "another-reset"}
+    with announced():
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+    landed = reset_line()
+    assert "Reset requested. Waiting for restart." in landed, landed
+    assert "interrupted" not in landed, landed
+    # An answer naming this Reset fills its row: no second click, no navigation.
+    outcome = {"status": "complete", "deleted": ["memory"], "retained_logs": ["agent_stdout.log"],
+               "projects_set_aside": "projects/.before-reset-20261119-0123abcd", "projects_set_aside_path": notes,
+               "reset_id": accepted_reset}
+    with announced():
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+    expect(about).to_contain_text("Reset complete. Earlier Project notes are in this folder:")
+    expect(setting_row(page, "computer:reset").locator("[data-setting-result] details")).to_contain_text("Removed: memory")
+    # An ordinary open of the page reads that same receipt, bound to no acceptance of its own.
+    open_settings(page, "computer")
+    open_settings(page, "computer/about")
+    about = _settled(page, "computer/about")
+    about.locator("[data-settings-fold] > summary").click()
+    # One short line; what was removed and kept waits behind Details.
+    expect(about).to_contain_text("Reset complete. Earlier Project notes are in this folder:")
+    behind = setting_row(page, "computer:reset").locator("[data-setting-result] details")
+    expect(behind).to_contain_text("Removed: memory")
+    expect(behind).to_contain_text("Kept for diagnostics: agent_stdout.log")
+    # The folder is a dot folder, hidden in a file manager: its whole path is on the page as text to select and copy.
+    shown = about.locator("[data-reset-notes-path]")
+    expect(shown).to_have_text(notes)
+    expect(shown).to_be_visible()
+    fits(shown)
+    setup_browser.capture(page, f"reset-result-{width}x{height}-{theme}")
+    assert shown.evaluate("""node => {
+        const selection = window.getSelection();
+        selection.selectAllChildren(node);
+        return [selection.toString(), getComputedStyle(node).userSelect, getComputedStyle(node).webkitUserSelect];
+    }""")[0] == notes
+    assert "none" not in shown.evaluate("node => [getComputedStyle(node).userSelect, getComputedStyle(node).webkitUserSelect]")
+    assert shown.evaluate("node => node.scrollWidth <= node.clientWidth"), "a long path wraps inside its block"
+    assert unexpected == []
+    assert len(posts) == 1  # Reading the successor receipt did not resend the request.
+
+
 def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
     page, server = _page(subscription_ui, 1087, 740)
     open_settings(page, "permissions")

@@ -354,6 +354,10 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
     be honest. Later writers keep getting ``settings_busy`` meanwhile.
     """
     from ouroboros.config import get_settings_document_lock_timeout_sec
+    from ouroboros.gateway.onboarding_host import _reset_interrupted_response
+
+    if (refusal := _reset_interrupted_response(context, settings_write=True)) is not None:
+        return refusal
 
     bound_sec = get_settings_document_lock_timeout_sec()
     # The body runs in its own task so a timeout of the WAIT can be told apart from a
@@ -920,6 +924,9 @@ async def api_onboarding(request: Request) -> Response:
     that ``/onboarding`` and ``/api/onboarding/bootstrap`` serve, so this body shows
     the consciousness control as the state does too."""
     from ouroboros.gateway import onboarding_host
+
+    if (refusal := onboarding_host._reset_interrupted_response(request)) is not None:
+        return refusal
 
     settings, bootstrap = onboarding_host._live_setup(request)
     if has_startup_ready_provider(settings):

@@ -16,7 +16,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     i18n.js, settings_language.js, ui_i18n_types.js — interface language: a DOM overlay over rendered chrome from the translation memory, translated at the producer; chat prose, logs, code and owner names are never walked (§3 Settings)
     page_header.js, ui_interactions.js, scroll_fade.js — header/tab strip and the segmented-choice generator; dialog, menu and popup binders; scroll-edge fade (§3 Navigation)
     chat_decision.js, question_presentation.js, secret_hitl.js, main_waiting.js, panic_recovery.js, chat_render_batch.js, task_phase_chip.js, task_activity_types.js — decisions, Project questions/Main mirrors, Panic recovery, keyed timeline patches, status/motion and census schema (§3)
-    chat_history.js, chat_history_reveal.js, chat_history_replay.js, chat_preview.js, chat_reading_position.js, layout_batch.js, chat_row_sleep.js, chat_row_placement.js — bounded pages, landing, replay, saved preview, reading intent, batched reads, row sleep, child words vs notices (§3 Timeline ownership)
+    chat_history.js, chat_history_reveal.js, chat_history_replay.js, chat_preview.js, chat_reading_position.js, layout_batch.js, chat_row_sleep.js, chat_row_placement.js, room_archive.js — bounded pages/landing/replay, saved preview, reading intent, batched reads, row sleep, child words vs notices; read-only archive (§3 Timeline ownership)
     delegated_activity.js — executor activity with preview gaps (§3); verification_presentation.js — recorded failed-check rows, live and replayed (§6 Tool capability and execution)
     welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; a notice's line (host_notice.py); older host rows without their pictograph (DESIGN principle 7)
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
@@ -181,7 +181,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_settlement.py — usage/price evidence projected outside the ledger transaction (§6 Budget tracking)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (USAGE_STORE.md)
   usage_origin.py — task usage scopes and immutable billing/cause attribution in the usage ledger (§6 Budget tracking; USAGE_STORE.md)
-  store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — shared SQLite core (USAGE_STORE.md): `state/current.sqlite` (atomic `meta.commit_seq`; boot import/reconcile §2, export before storeless switches §9), `state/dialog.sqlite` (chat/progress rows by chain coordinate, ordinals, import intervals; one `append` seam; cutover, archive import, rollback export; PERSISTENCE.md)
+  store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_history_evidence.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — SQLite core (USAGE_STORE.md): `state/current.sqlite` atomic `meta.commit_seq` (§2 boot/import, §9 export); `state/dialog.sqlite` chat/progress `append`, coordinates, ordinals, import intervals, archive/cutover/rollback export and first-Project evidence (PERSISTENCE.md, §3)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
   storage.py, storage_deleted.py, storage_free.py, storage_free_view.py, storage_removers.py, payload_release.py, payload_release_state.py — Storage counts, owner Free and artifact receipts (§3)
   delegate_custody.py, delegate_custody_reconcile.py, delegate_collection.py, delegate_state_sweep.py, delegate_custody_usage.py, delegate_capture_attempt.py, delegate_capture_job.py, delegate_named_evidence.py — run custody, observation, collection, child capture and usage; OWNED/FOREIGN/UNKNOWN (§6 Nanny, transport and custody)
@@ -226,10 +226,10 @@ ouroboros/ — agent core and shared runtime (§6)
   knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, held_notes.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6); heads of the active global notes whose recorded claims meet a focus's situation names (a helper's: those its scheduler carried), and of the active global notes those heads link (one hop), captured once per work (held_notes.py)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
-  projects_registry.py, project_admission.py, project_closure.py, project_folder.py — registry lifecycle, admission, reversible closure and the folder door (§6 Project registry and lease)
+  projects_registry.py, project_registry_recovery.py, project_admission.py, project_closure.py, project_folder.py — registry identity/lifecycle, exact recovery, admission, reversible closure, folder door (§6 Project registry and lease)
   project_handoff.py — the Main transfer receipt owed through the terminal outbox after a durable bind (§3 Project handoff receipts)
   project_dialogue.py — chat lens and refusal causes; chat_annotations.py — append-only routing receipts and picker claims (§3 Chat and Projects)
-  room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
+  room_membership.py, room_appearances.py, room_messages.py, room_archive.py — stored-row membership, derived facts, read-only history (§3)
   owner_words.py — a work's owner words, one dated verbatim set; schedule text as provenance; by value for roots, helpers, sessions, reviewers
   project_lease.py — one-writer lanes per Project and folder, held per tree (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
@@ -495,7 +495,7 @@ ouroboros/ — agent core and shared runtime (§6)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
     host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
-    history_paging.py, history_chronology.py, chat_search.py, recall.py — room pages/search of the dialogue store, Project `latest_arrival`, the neighbour door; no history copy (§3 History reads)
+    history_paging.py, history_chronology.py, chat_search.py, chat_archive.py, recall.py — dialogue pages/search/read-only archive, Project `latest_arrival`, neighbour door; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
     projects.py, project_folder_contracts.py — GET/POST /api/projects, /from-task, /update, /delete, /folder
     places_api.py — Owner place and circle choices; every write there is my human's (§12)
@@ -600,7 +600,7 @@ ouroboros/ — agent core and shared runtime (§6)
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
   owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
-  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py, host_memory.py — OS locks/processes/memory, native ABI, held targets and birth tokens (Platform substrate below)
+  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_file_rename.py, platform_process_target.py, process_identity.py, host_memory.py — OS locks/processes/memory, rename, native ABI, held targets and birth tokens (Platform substrate below)
   verified_download.py — exact-size/digest-verified atomic cached downloads
   node_runtime.py — Node health probes; own consumers' pinned Node (§6)
 
@@ -724,7 +724,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── update_letter.json     ← description, its range, check facts
 │   │   ├── update_material.json   ← checked range for its author
 │   │   ├── projects.json          ← Project registry; tombstones are durable
-│   │   ├── projects.json.committed ← commit witness: with it a missing registry is unavailable, not empty
+│   │   ├── projects.json.committed ← existence witness or exact copy; freshness: `projects.json.lock` (§6)
 │   │   ├── project_task_bindings.json ← root↔Project bindings with typed origin
 │   │   ├── ui_preferences.json    ← owner-local layout prefs and seen-revision ACKs
 │   │   ├── i18n/<tag>.json        ← translation memory per language, beside `<tag>.pending.json`

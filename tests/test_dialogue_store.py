@@ -535,7 +535,8 @@ def test_the_export_appends_through_a_binary_descriptor(tmp_path, monkeypatch):
     def recording_open(path, mode, *args, **kwargs):
         if pathlib.Path(path) == live:
             flags.append(mode)
-            mode = (mode & ~sentinel) | (real_binary if mode & sentinel else 0)
+        # Every binary open now carries the sentinel, the export's lock included.
+        mode = (mode & ~sentinel) | (real_binary if mode & sentinel else 0)
         return real_open(path, mode, *args, **kwargs)
 
     monkeypatch.setattr(os, "O_BINARY", sentinel, raising=False)

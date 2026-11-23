@@ -696,23 +696,17 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
                                  for item in catalog.get("items") or []]}
 
 
-async def _draft_body(request: Request):
-    try:
-        return await request.json()
-    except Exception:
-        return None
-
-
 async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     """List models for draft access (keys, connections and local model) while Main is still unchosen."""
     from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
     from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
-    body = await _draft_body(request)
-    if not isinstance(body, dict):
-        return unsaved_error("JSON body must be an object.", 400)
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
     provider_id = request.query_params.get("provider_id")
     if provider_id is not None and not provider_id.strip():
         return unsaved_error("provider_id must name one connection.", 400)
@@ -727,9 +721,11 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
-    body = await _draft_body(request)
-    if not isinstance(body, dict):
-        return unsaved_error("JSON body must be an object.", 400)
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
+
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
 
     owner_draft, draft_error = _configured_owner_draft(body, saved=True)
     if draft_error:
@@ -839,12 +835,15 @@ def _persist(request: Request, old_settings: Dict[str, Any], current: Dict[str, 
 async def api_onboarding_complete(request: Request) -> JSONResponse:
     """POST /api/onboarding/complete — finish onboarding in ONE transaction."""
     from ouroboros.config import get_runtime_mode, normalize_runtime_mode
+    from ouroboros.gateway.onboarding_host import read_onboarding_draft
     from supervisor.state_initialization import first_state_pending as first_state_due
 
-    body = await _draft_body(request)
+    body = await read_onboarding_draft(request)
+    if isinstance(body, JSONResponse):
+        return body
     attempt_id, attempt_error = parse_completion_attempt(body)
-    if not isinstance(body, dict) or attempt_error:
-        return unsaved_error(attempt_error or "JSON body must be an object.", 400)
+    if attempt_error:
+        return unsaved_error(attempt_error, 400)
     from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL, REVIEW_LANES_KEY, review_pool_save_judgement, _run_settings_writer
 
     allow_empty_pool = body.get(ALLOW_EMPTY_REVIEW_POOL) is True
@@ -950,6 +949,13 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
                 return post_commit_failure_response(exc, boundary)
             if isinstance(exc, SettingsDocumentUnreadable):
                 return unsaved_error(str(exc), 409, code="settings_unreadable")
+            from ouroboros.gateway.owner_settings import settings_write_refusal
+            from ouroboros.settings_integrity import SettingsPublicationRefused
+            if isinstance(exc, SettingsPublicationRefused):
+                # The physical publication boundary refused before any byte landed: reuse
+                # the owner writer's typed mapping (reset_interrupted / its own cause),
+                # never an untyped 500 and never a post-save step.
+                return settings_write_refusal(exc)
             if isinstance(exc, SettingsPreconditionFailed):
                 return unsaved_error(str(exc), 409, code="onboarding_state_changed")
             if isinstance(exc, SettingsLockUnavailable):

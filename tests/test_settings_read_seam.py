@@ -596,6 +596,10 @@ def test_every_settings_writer_puts_the_one_serializers_bytes_on_disk(isolated_s
         assert calls_function(node, "serialize_settings"), (
             f"{relpath}::{name} persists a settings document without calling the one "
             "serializer: its bytes agree with the others only while nobody changes either.")
+        assert calls_function(node, "settings_publication_boundary"), (
+            f"{relpath}::{name} persists a settings document without entering the physical "
+            "publication boundary: a write during an unfinished owner Reset would land on disk "
+            "instead of refusing with the typed no-save.")
         commits = re.findall(
             r"write_text_atomic\(|write_bytes_atomic\(|atomic_write_json\(|\.write_bytes\("
             r"|\.write_text\(|\.write\(|json\.dump\(|\bopen\(",
@@ -609,6 +613,165 @@ def test_every_settings_writer_puts_the_one_serializers_bytes_on_disk(isolated_s
     assert cfg.serialize_settings(document) == (
         '{\n  "TOTAL_BUDGET": 10.0,\n  "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "приоритет"\n}'
     ), "the one on-disk spelling changed: UTF-8 (ensure_ascii=False), two-space indent, no trailing newline"
+
+
+# What makes ``launch_roots.read_witness`` answer ``unreadable``: a directory where the
+# witness FILE belongs, so ``read_bytes`` raises. A fixture that left the witness absent
+# instead would be read as confirmed first use and prove nothing about the unreadable branch.
+_UNREADABLE_WITNESS = object()
+
+
+def _write_profile_witness(root: pathlib.Path, document) -> None:
+    """Seed a target profile's initialization witness, or its unreadable stand-in.
+
+    ``None`` is confirmed first use (the witness must not exist), ``bytes`` and a ``dict``
+    are the witness file's content, ``_UNREADABLE_WITNESS`` is a profile whose witness cannot
+    be read. Any other value is a broken fixture and is refused, so a stray argument can
+    never be read as a state the caller did not name."""
+    if document is None:
+        return  # first use: witness file must not exist
+    state = root / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    target = state / "state.initialized.json"
+    if document is _UNREADABLE_WITNESS:
+        target.mkdir()
+    elif isinstance(document, bytes):
+        target.write_bytes(document)
+    elif isinstance(document, dict):
+        target.write_text(json.dumps(document), encoding="utf-8")
+    else:
+        raise TypeError(f"witness fixture: unsupported {type(document).__name__}")
+
+
+def test_publication_boundary_publishes_first_use_and_ordinary_profile(tmp_path):
+    """A confirmed-missing (first use) and an ordinary ``ok`` profile both proceed: the
+    boundary yields so the caller commits its bytes. This is the positive protective case —
+    the gate must not refuse a profile that is not mid-Reset."""
+    from ouroboros.settings_integrity import settings_publication_boundary
+
+    cases = (("first-use", None),
+             ("ordinary", {"initialization_id": "x", "phase": "complete", "work_root_basis": "home"}))
+    for label, witness in cases:
+        root = tmp_path / label
+        root.mkdir()
+        _write_profile_witness(root, witness)
+        landed = False
+        with settings_publication_boundary(root):
+            landed = True
+        assert landed, f"{label} must publish (no Reset is in progress)"
+
+
+def test_publication_boundary_refuses_only_a_proven_unfinished_reset(tmp_path):
+    """Only a proven unfinished owner Reset maps to ``reset_interrupted`` (the same typed
+    no-save the boot witness already returns), and the commit never runs — no bytes, no
+    post-save action. Both the explicit ``resetting`` and the legacy ``pending`` Reset are
+    proven unfinished Resets in ``launch_roots.read_witness`` (lines 128-153)."""
+    from ouroboros.settings_integrity import SettingsPublicationRefused, settings_publication_boundary
+
+    explicit = {"initialization_id": "x", "phase": "resetting", "origin": "owner_reset",
+                "work_root_basis": "home"}
+    legacy = {"initialization_id": "x", "phase": "pending", "origin": "owner_reset"}  # no reset_receipt
+    for label, witness in (("explicit", explicit), ("legacy", legacy)):
+        root = tmp_path / label
+        root.mkdir()
+        _write_profile_witness(root, witness)
+        landed = False
+        with pytest.raises(SettingsPublicationRefused) as exc:
+            with settings_publication_boundary(root):
+                landed = True
+        assert exc.value.cause == "reset_interrupted", label
+        assert not landed, "a refused publication must not run the caller's commit"
+
+
+def test_publication_boundary_reports_an_unproved_witness_its_own_cause(tmp_path):
+    """An unproved witness (invalid or unreadable) refuses with its OWN cause and never
+    pretends a Reset was observed; the commit still does not run."""
+    from ouroboros.settings_integrity import SettingsPublicationRefused, settings_publication_boundary
+
+    cases = (("no-id", {"phase": "complete"}),
+             ("bad-utf8", b"\xffnot json"),
+             ("unreadable", _UNREADABLE_WITNESS))  # a directory where the witness belongs
+    for label, witness in cases:
+        root = tmp_path / label
+        root.mkdir()
+        _write_profile_witness(root, witness)
+        landed = False
+        with pytest.raises(SettingsPublicationRefused) as exc:
+            with settings_publication_boundary(root):
+                landed = True
+        assert exc.value.cause.startswith("witness_"), (label, exc.value.cause)
+        assert exc.value.cause != "reset_interrupted", f"{label} must not pretend a Reset"
+        assert not landed
+
+
+def test_an_unacquirable_state_lock_is_its_own_typed_no_save_never_the_callers_error(tmp_path):
+    """Two different failures, kept apart. An ``OSError`` raised while ACQUIRING the profile
+    state lock — here the real acquisition meeting a ``locks`` name that is not a directory,
+    the same class as a permission refusal — is the boundary's own typed
+    ``state_lock_unavailable`` no-save: nothing was read, the caller's commit never runs, and
+    its text carries no path or errno. An ``OSError`` raised by the CALLER's own commit inside
+    the section keeps its type and message — a failed write is never reported as a refused
+    save, and a refused save never hides a failed write."""
+    from ouroboros.gateway.owner_settings import settings_write_refusal
+    from ouroboros.settings_integrity import SettingsPublicationRefused, settings_publication_boundary
+
+    broken = tmp_path / "no-lock-dir"
+    broken.mkdir()
+    (broken / "locks").write_text("a file where the lock directory belongs", encoding="utf-8")
+    landed = False
+    with pytest.raises(SettingsPublicationRefused) as refused:
+        with settings_publication_boundary(broken):
+            landed = True
+    assert refused.value.cause == "state_lock_unavailable"
+    assert str(broken) not in str(refused.value) and "locks" not in str(refused.value)
+    assert not landed, "an unacquirable lock must not run the caller's commit"
+    # The owner writer answers it as its own typed refusal: one code, the cause as reason_code.
+    answer = settings_write_refusal(refused.value)
+    assert answer is not None and answer.status_code == 503
+    body = json.loads(answer.body)
+    assert body["saved"] is False and body["code"] == "settings_publication_refused"
+    assert body["reason_code"] == "state_lock_unavailable"
+
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    with pytest.raises(OSError) as writer_error:
+        with settings_publication_boundary(ordinary):
+            raise OSError("the settings document could not be replaced")
+    assert str(writer_error.value) == "the settings document could not be replaced"
+
+
+def test_the_real_settings_writer_publishes_an_ordinary_profile_and_refuses_a_proven_reset(
+        isolated_settings):
+    """The boundary seen through the writer that actually persists the owner's document, not
+    through a local list: ``config.save_settings`` on an ordinary profile leaves exactly the
+    serializer's bytes for what it persists, and on a profile whose witness proves an
+    unfinished owner Reset the SAME writer answers the typed no-save before its commit, the
+    file keeping the bytes the previous save left. Both profiles are synthetic corrected
+    witnesses; the two halves differ in one fact — the phase the Reset wrote."""
+    from ouroboros import config as cfg
+    from ouroboros.gateway.owner_settings import settings_write_refusal
+    from ouroboros.settings_integrity import SettingsPublicationRefused
+
+    profile = isolated_settings.parent  # the fixture's DATA_DIR: the boundary root this writer uses
+    _write_profile_witness(profile, {"initialization_id": "abc", "phase": "complete",
+                                     "work_root_basis": "home"})
+    document = {"TOTAL_BUDGET": 10.0}
+    expected = cfg.serialize_settings(cfg.prepare_settings_for_persist(dict(document))).encode("utf-8")
+
+    cfg.save_settings(dict(document))
+    landed = isolated_settings.read_bytes()
+    assert landed == expected, "the ordinary save did not land the serializer's bytes"
+    assert json.loads(landed)["TOTAL_BUDGET"] == 10.0
+
+    _write_profile_witness(profile, {"initialization_id": "abc", "phase": "resetting",
+                                     "origin": "owner_reset", "work_root_basis": "home"})
+    with pytest.raises(SettingsPublicationRefused) as refused:
+        cfg.save_settings({"TOTAL_BUDGET": 12.0})
+    assert refused.value.cause == "reset_interrupted"
+    answer = settings_write_refusal(refused.value)
+    assert answer is not None and answer.status_code == 409
+    assert json.loads(answer.body)["code"] == "reset_interrupted"
+    assert isolated_settings.read_bytes() == landed, "a refused save wrote its bytes"
 
 
 def test_the_packaged_bootstrap_writes_the_path_the_prologue_reads(isolated_settings, tmp_path,

@@ -99,8 +99,8 @@ function installDom({ coreOwned = false } = {}) {
         body,
         replaced,
         listeners,
-        async init() {
-            const dispose = await initOnboardingOverlay();
+        async init(options) {
+            const dispose = await initOnboardingOverlay(options);
             disposers.push(dispose);
             return dispose;
         },
@@ -175,7 +175,28 @@ test('retrying after a failure reaches the wizard once the probe answers', async
     }
 });
 
-test('only a verified 204 takes the blocking overlay down, and it never dims a configured app', async () => {
+test('an explicit Reset recovery response leaves Settings reachable, another conflict does not', async () => {
+    const previousError = console.error;
+    console.error = () => {};
+    try {
+        for (const reason_code of ['reset_interrupted', 'unrelated']) {
+            const dom = installDom();
+            try {
+                const readiness = [];
+                globalThis.fetch = async () => ({ status: 409, ok: false, json: async () => ({ reason_code }) });
+                await dom.init({ onReady: () => readiness.push(overlayIn(dom.body)) });
+                assert.equal(Boolean(overlayIn(dom.body)), reason_code === 'unrelated');
+                assert.deepEqual(readiness, reason_code === 'reset_interrupted' ? [null] : []);
+            } finally {
+                dom.restore();
+            }
+        }
+    } finally {
+        console.error = previousError;
+    }
+});
+
+test('a verified 204 takes the blocking overlay down, and it never dims a configured app', async () => {
     const dom = installDom();
     let scrimSeen = false;
     try {
@@ -189,10 +210,12 @@ test('only a verified 204 takes the blocking overlay down, and it never dims a c
             return { status: 204, ok: true };
         };
 
-        await dom.init();
+        const readiness = [];
+        await dom.init({ onReady: () => readiness.push(overlayIn(dom.body)) });
 
         assert.equal(scrimSeen, false);
         assert.equal(overlayIn(dom.body), null, '204 means configured: no overlay is due');
+        assert.deepEqual(readiness, [null], 'navigation can resume only after the overlay leaves');
     } finally {
         dom.restore();
     }

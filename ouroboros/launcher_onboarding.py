@@ -11,6 +11,7 @@ import logging
 import sys
 from collections.abc import Callable
 
+from ouroboros import config as _config
 from ouroboros.config import (
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
@@ -73,7 +74,12 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
     # normalization happens: every reader re-derives it (`/api/settings`, `/onboarding`,
     # the onboarding host, the plan-review script), and the completion save persists it.
     _apply_settings_to_env(settings)
-    return settings, not has_startup_ready_provider(settings)
+    from supervisor.state_initialization import reset_status
+
+    if has_startup_ready_provider(settings):
+        return settings, False
+    # Only where the wizard could be due: an interrupted Reset keeps recovery, not the replaced profile's setup.
+    return settings, reset_status(_config.DATA_DIR).get("status") != "interrupted"
 
 
 def present_first_run_onboarding(
