@@ -891,27 +891,56 @@ def test_a_contended_lock_leaves_the_pressure_refresh_for_a_later_slice(tree, mo
     assert lease.seen_max == 3 and num(lease.leaf / "memory.max") == 50 * GIB
 
 
-def test_every_process_of_the_largest_whole_command_outranks_any_other_and_scores_are_only_raised(tree, monkeypatch):
-    """Review witness: six 10 GiB processes of a 60 GiB build against a 34 GiB single process. Scored per process the
-    smaller command would die; every process of the largest command gets 1000 (a whole limit above anyone else), the
-    others their command's share of the parent limit. Never lowered, never below 0; an exited pid is skipped."""
-    host(monkeypatch, 40 * GIB)
+# What _bias ranks: a 60 GiB build of seven processes, a 34 GiB single process and an empty command.
+BIAS_LEAVES = (("cmd-1-aa", 60 * GIB, (101, 102, 103, 104, 105, 106, 107)), ("cmd-2-bb", 34 * GIB, (201,)),
+               ("cmd-3-cc", 0, (301,)))
+
+
+def bias_tree(tree):
+    """Everything ``_bias`` reads: the mount table, each leaf's charge and pids, the parent's 100 GiB limit."""
     (tree.proc / "self").mkdir()
     (tree.proc / "self" / "mountinfo").write_text("1 0 0:1 / / rw - cgroup2 cgroup rw\n")
-    for name, held, pids in (("cmd-1-aa", 60 * GIB, (101, 102, 103, 104, 105, 106, 107)), ("cmd-2-bb", 34 * GIB, (201,)),
-                             ("cmd-3-cc", 0, (301,))):
+    for name, held, pids in BIAS_LEAVES:
         leaf = tree.commands / name
         leaf.mkdir()
         (leaf / "memory.max").write_text("max")
         (leaf / "memory.current").write_text(str(held))
         (leaf / "cgroup.procs").write_text("".join(f"{pid}\n" for pid in pids))
+    (tree.commands / "memory.max").write_text(str(100 * GIB))
+
+
+def test_bias_proposes_1000_for_every_process_of_the_largest_command_and_a_share_for_the_others(tree, monkeypatch):
+    """The choice, on every platform: ``_bias`` over real files, its /proc reader replaced by a collector of the
+    (pid, group, score) it proposes. All seven pids of the build go to the build's group at 1000, 106 and 107 too
+    (whether a pid still belongs is the reader's call); the single process goes to its group at 340: its 34 GiB of
+    the parent's 100 GiB, in thousandths; the empty command gets none. Reaching a process needs POSIX dir_fd and runs
+    on Linux only: this is the algorithm, not a Windows capability (that contract is
+    ``test_non_linux_is_unavailable_and_silent``)."""
+    bias_tree(tree)
+    proposed = []
+    monkeypatch.setattr(cm, "_raise_member_score", lambda pid, cgroup, score: proposed.append((pid, cgroup, score)))
+    cm._bias(tree.commands)
+    build, single = pathlib.Path("/unit/commands/cmd-1-aa"), pathlib.Path("/unit/commands/cmd-2-bb")
+    assert sorted(proposed) == [(str(pid), build, 1000) for pid in range(101, 108)] + [("201", single, 340)]
+
+
+# The reader opens each pid's /proc directory and reads through that fd: POSIX dir_fd. Windows has none and never gets
+# here (begin() is None off Linux: test_non_linux_is_unavailable_and_silent); what _bias chooses is the test above.
+@pytest.mark.skipif(os.open not in os.supports_dir_fd,
+                    reason="POSIX dir_fd: the /proc reader opens each pid's directory and reads through it")
+def test_every_process_of_the_largest_whole_command_outranks_any_other_and_scores_are_only_raised(tree, monkeypatch):
+    """Review witness: six 10 GiB processes of a 60 GiB build against a 34 GiB single process. Scored per process the
+    smaller command would die; every process of the largest command gets 1000 (a whole limit above anyone else), the
+    others their command's share of the parent limit. Never lowered, never below 0; an exited pid is skipped."""
+    host(monkeypatch, 40 * GIB)
+    bias_tree(tree)
+    for name, _, pids in BIAS_LEAVES:
         for pid in pids:
             if pid != 106:  # 106 has exited: no /proc entry
                 (tree.proc / str(pid)).mkdir()
                 (tree.proc / str(pid) / "oom_score_adj").write_text("0")
                 membership = "/unit/runtime" if pid == 107 else f"/unit/commands/{name}"
                 (tree.proc / str(pid) / "cgroup").write_text(f"0::{membership}\n")
-    (tree.commands / "memory.max").write_text(str(100 * GIB))
     score = lambda pid: int((tree.proc / str(pid) / "oom_score_adj").read_text())
     cm._bias(tree.commands)
     assert [score(pid) for pid in (101, 102, 103, 104, 105)] == [1000] * 5
