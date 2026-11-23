@@ -13,7 +13,7 @@ import shutil
 from contextlib import nullcontext, suppress
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from ouroboros.artifact_storage import clone_file, temporary_sibling
 from ouroboros.utils import atomic_write_json, file_identity, read_json_dict, update_json_locked, write_bytes_atomic
@@ -828,6 +828,7 @@ def store_actor_source_bytes(
 
 def read_actor_source_bytes(
     drive_root: Union[pathlib.Path, str], task_id: str, ref: Any, *, retained: bool = True, anchor: Any = None,
+    admit_target: Optional[Callable[[pathlib.Path, pathlib.Path], None]] = None,
 ) -> bytes:
     """Verify a task source: loose, packed, then (unless disabled) retained; errors stay explicit."""
 
@@ -845,7 +846,8 @@ def read_actor_source_bytes(
     if anchor is not None:  # placement readers below receive the configured anchor
         spellings = root_spellings(anchor)
         root, placement = spellings[0], physical_path(spellings, placement.absolute())
-        target = task_artifact_dir_path(placement, task_id, create=False).joinpath(*rel.parts)
+        base = task_artifact_dir_path(placement, task_id, create=False)
+        target = base.joinpath(*rel.parts)
     else:  # Existing internal callers retain their placement-cache and scope/error contracts.
         base = task_artifact_dir_path(placement, task_id, create=False).resolve(strict=False)
         target = base.joinpath(*rel.parts)
@@ -854,6 +856,8 @@ def read_actor_source_bytes(
         target = target.resolve(strict=False)
         if not target.is_relative_to(base):
             raise ValueError("actor source ref escapes its task artifact root")
+    if admit_target is not None:
+        admit_target(base, target)
     from ouroboros.evidence_packs import handle_bytes
     from ouroboros.payload_release_state import check_source_release
     try:
@@ -870,7 +874,7 @@ def read_actor_source_bytes(
         if not retained:
             raise
         from ouroboros.source_retention import read_retained_task_source
-        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor)
+        raw = read_retained_task_source(placement, task_id, ref, anchor=anchor, admit_target=admit_target)
         check_source_release(placement, task_id, parts, anchor=anchor)
         return raw  # the alternate placement verified the same ref before returning
     try:

@@ -510,8 +510,10 @@ def test_a_rows_recorded_context_is_read_by_its_address_exactly_as_its_copy_held
     assert document == copy and stored["row_sha256"] == address["row_sha256"]  # its thread whole, byte for byte
     assert chat_chain.recorded_context(tmp_path, chat_chain.format_address(address))[1] == copy
     from ouroboros.tools.chronicle import _source_texts
+    from ouroboros.tools.tool_context import ToolContext
 
-    assert any(text.startswith("message 7: ") for text in _source_texts(tmp_path, address))  # a mark's quote finds it
+    reader = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)  # a quote check reads as its actor
+    assert any(text.startswith("message 7: ") for text in _source_texts(reader, tmp_path, address))  # a mark's quote finds it
     with pytest.raises(chat_chain.RowAddressError):
         chat_chain.recorded_context(tmp_path, {**address, "row_sha256": "0" * 64})
 

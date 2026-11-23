@@ -111,6 +111,15 @@ def runtime_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
     return roots
 
 
+def scoped_runtime_read_refusal(ctx: ToolContext, target: pathlib.Path, roots: list[pathlib.Path]) -> str:
+    """The original source keeps its reader policy under any generic file root."""
+    from ouroboros.tools.project_journal import journal_resource_read_refusal
+    from ouroboros.tools.recent_tasks import retained_focus_path_refusal
+
+    return (journal_resource_read_refusal(ctx, target, data_roots=roots)
+            or retained_focus_path_refusal(ctx, target, data_roots=roots))
+
+
 def is_runtime_secret_target(
     target: pathlib.Path, repo_root: pathlib.Path, *, data_root: pathlib.Path | None = None,
     ctx: ToolContext | None = None,

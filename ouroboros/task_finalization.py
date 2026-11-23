@@ -660,6 +660,15 @@ def completion_source_projection(
     return {**payload, **({"reason": reason} if reason else {})}
 
 
+# The store's own class marker for a retained focus answer (``source_handles/
+# context_checkpoints/focus_source_<reader>-<sha256>.md``): it only names WHICH
+# retained category a ref addresses — no right, reader or project is ever
+# derived from a name. One definition: the projection's glob and the admission
+# helper (``recent_tasks.retained_focus_source_refusal``) both read it.
+FOCUS_SOURCE_CATEGORY_DIR = "source_handles/context_checkpoints"
+FOCUS_SOURCE_NAME_PREFIX = "focus_source_"
+
+
 def focus_source_projection(
     drive_root: Any, task_id: str, result: Dict[str, Any], start_char: Any = None, end_char: Any = None,
     sha256: str = "",
@@ -684,14 +693,15 @@ def focus_source_projection(
         from fnmatch import fnmatch
         from ouroboros.evidence_packs import handle_info, packed_handle_names
         try:  # loose handles and this task's packed ones answer the same selector
-            store = task_artifact_dir_path(drive_root, str(task_id), create=False) / "source_handles" / "context_checkpoints"
-            matches = {p.name for p in store.glob(f"focus_source_*-{wanted}.md") if not p.is_symlink()}
-            matches.update(n for n in packed_handle_names(drive_root, str(task_id)) if fnmatch(n, f"focus_source_*-{wanted}.md"))
+            store = task_artifact_dir_path(drive_root, str(task_id), create=False) / FOCUS_SOURCE_CATEGORY_DIR
+            name_prefix = FOCUS_SOURCE_NAME_PREFIX
+            matches = {p.name for p in store.glob(f"{name_prefix}*-{wanted}.md") if not p.is_symlink()}
+            matches.update(n for n in packed_handle_names(drive_root, str(task_id)) if fnmatch(n, f"{name_prefix}*-{wanted}.md"))
         except (OSError, ValueError):
             matches = set()
         if len(matches) != 1:
             return {**unavailable, "reason": "source_unavailable", "requested_sha256": wanted}
-        selected_handle_path = f"source_handles/context_checkpoints/{matches.pop()}"
+        selected_handle_path = f"{FOCUS_SOURCE_CATEGORY_DIR}/{matches.pop()}"
         try:
             info = handle_info(drive_root, str(task_id), selected_handle_path) or {}
         except ValueError:
