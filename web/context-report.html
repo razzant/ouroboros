@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lOgMkp0AhNBnv6RTMdEshwMZIa/ocgDv8MnfAQZoRvE='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-QH2goG/sW8ZtmyOTnit3Pp3S34RnucU2ODajmvhlxh8='; style-src 'sha256-owpLIhOT1ZVeasxCJEOzpBSqN0EWFxx6qpzi/5m6Tj8='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -607,7 +607,7 @@ function show(facts, name, example = false) {
     : unread ? 'Sealed source record not read' : 'No source versions recorded', build);
   byId('source-limit').textContent = layout.length ? 'This map follows the captured assembly. The prepared request counts include later input, even when its origins were not traced. This is not a count of everything in the archives.'
     : trace.length || contributions.length ? 'Some sources have a recorded version. For the rest, this report cannot say why they were included or left out.'
-    : 'No initial assembly map was saved for this attempt. Later observations, when available, are listed below.';
+    : 'No initial assembly map is available in this report. Later observations, when available, are listed below.';
   byId('source-versions').textContent = (manifest ? preparedWords(manifest) + '\n\n' : '')
     + (layout.length ? layoutWords(layout) : sourceSummary(trace, unread, contributions))
     + (late ? '\n\n' + contributionWords(late) : '');

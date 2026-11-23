@@ -1139,8 +1139,8 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(facts).to_be_visible()
                 technical.click()
                 build = frame.locator("#build-facts")
-                value = lambda label: build.get_by_text(label, exact=True).locator("+ dd").inner_text()
-                assert value("Context mode") == "Low · chosen Max"
+                value = lambda label: build.get_by_text(label, exact=True).locator("+ dd").text_content().strip()
+                assert value("Context mode") == "Low · chosen Max", ascii(value("Context mode"))
                 assert value("Sizing basis") == "Calibrated on recent usage from this route"
                 assert value("Host prefix within this task") == "First change: system blocks · position 3 · shared understanding"
                 assert value("Ledger text input") == "50 tokens"
@@ -1181,7 +1181,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(frame.locator("#comparison-status")).to_contain_text("Cannot compare")
                 assert pair.text_content() == "" and stored_body.text_content() == stored
                 frame.locator("#comparison > summary").click()
-                assert "receipt not confirmed" in facts.inner_text() and second not in facts.inner_text()
+                assert "receipt not confirmed" in facts.text_content() and second not in facts.text_content()
                 assert "Request recorded" in frame.locator("#headline").inner_text()
                 assert "Private text can remain" in frame.locator("#privacy").text_content()
                 # The request is in the frame once, whole and literal; the overview names every message and
@@ -1199,7 +1199,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     expect(frame.locator("html")).to_have_attribute("data-theme", scheme)
                     host, inside = inks()
                     assert inside == host and host[0] == scheme, (scheme, host, inside)
-                    assert first in facts.inner_text() and stored_body.text_content() == stored and rows.count() == 4
+                    assert first in facts.text_content() and stored_body.text_content() == stored and rows.count() == 4
                     expect(frame.locator("#report-result")).to_be_visible()
                     # Its one pressable control stands on the rest shadow in either theme (DESIGN principle 4).
                     assert frame.locator("label[for='report-file']").evaluate("(node) => getComputedStyle(node).boxShadow") != "none"
@@ -1234,7 +1234,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 expect(pair).to_contain_text("temperature")
                 frame.locator("#comparison > summary").click()
                 assert value("Ledger cache read") == "Not recorded"
-                words = facts.inner_text()
+                words = facts.text_content()
                 assert "The send raised _Rejected · HTTP 400" in words and retried not in words
                 assert "Settled — the ledger closed this attempt’s accounting record without a receipt (abandoned)" in words
                 assert "Request recorded" in frame.locator("#headline").inner_text()
@@ -1243,15 +1243,15 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 for claim in ("final", "charge", "price", "cost", "$", "paid"):
                     assert claim not in shown.lower(), claim
                 choose(retried_report, retried, "#attempt-facts")
-                assert failed not in frame.locator("body").text_content() and "Failure" not in facts.inner_text()
-                assert "abandoned" not in facts.inner_text()
+                assert failed not in frame.locator("body").text_content() and "Failure" not in facts.text_content()
+                assert "abandoned" not in facts.text_content()
                 # An open record names only its open accounting; what the transport returned stays the Transport's.
                 for state, words_of_state in (
                         ("dispatched", "marked this send as started; its accounting record is still open"),
                         ("unresolved", "keeps this attempt’s accounting record open")):
                     choose(gap(body="not_linked", attempt_id=f"open-{state}", ledger_state=state,
                                transport_observation="error_reply_recorded"), f"open-{state}", "#attempt-facts")
-                    words = facts.inner_text()
+                    words = facts.text_content()
                     assert words_of_state in words and "Transport returned an error reply" in words
                     assert "no outcome" not in words and "does not know how" not in words
                 # An opened tool call shows its recorded input to the digit, as text or as an object (Anthropic's
@@ -1298,7 +1298,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 assert {"sha256", "size", "kind", "encoding"} <= set(record)
                 choose(gap(body="not_linked", file_trace="not_read"), "No saved request is linked", "#headline")
                 gap_reads_without_opening("links no saved request")
-                assert "earlier-attempt" in facts.inner_text()
+                assert "earlier-attempt" in facts.text_content()
                 assert "The sealed record was not read" in frame.locator("#source-versions").text_content()
                 # The first reader wrote `not_recorded` beside `not_linked` without opening any record: its versions are
                 # as unknown as when not read, and the report's own fields stay as written. A usage-reported attempt
@@ -1343,9 +1343,9 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     gap_reads_without_opening(words)
                     if facts_of_gap.get("task_id"):
                         assert "echo owned" not in frame.locator("#explain").inner_text()
-                        assert "x; echo owned" in facts.inner_text() and "-x|cat" in facts.inner_text()
-                assert "Ledger row" in facts.inner_text() and "subscription_session" in facts.inner_text()
-                assert "Ledger state" not in facts.inner_text() and "Transport" not in facts.inner_text()
+                        assert "x; echo owned" in facts.text_content() and "-x|cat" in facts.text_content()
+                assert "Ledger row" in facts.text_content() and "subscription_session" in facts.text_content()
+                assert "Ledger state" not in facts.text_content() and "Transport" not in facts.text_content()
                 # A gap keeps the failure's type and the file trace; a trace the reader did not open says so.
                 trace = [{"source_path": "prompts/SYSTEM.md", "source_sha256": "ab" * 32,
                           "contribution": "leading_system_prefix", "text_sha256": "cd" * 32}]
@@ -1353,8 +1353,8 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                            page_limit_bytes=50331648, retry_max_bytes=52428800, failure={
                                "stage": "raised_exception", "exception_type": "_Rejected", "provider_status_code": 400},
                            file_trace=trace), "larger than this page opens", "#headline")
-                assert "The send raised _Rejected · HTTP 400" in facts.inner_text()
-                assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md\nBase instructions")
+                assert "The send raised _Rejected · HTTP 400" in facts.text_content()
+                assert frame.locator("#source-versions").text_content().startswith("prompts/SYSTEM.md · Base instructions")
                 choose(gap(body="manifest_over_limit", recorded_bytes=2258277, max_bytes=2097152,
                            retry_max_bytes=2258277, file_trace="not_read"), "sealed record is larger", "#headline")
                 assert "The sealed record was not read" in frame.locator("#source-versions").text_content()
@@ -1374,7 +1374,7 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                     choose(content, words)
                     assert content is None or "Cannot read this Beautiful Context JSON report" in frame.locator(
                         "#report-status").inner_text()
-                    assert frame.locator("#report-result").is_hidden() and facts.inner_text() == ""
+                    assert frame.locator("#report-result").is_hidden() and facts.text_content() == ""
                     assert stored_body.text_content() == ""
                 assert unexpected_console_errors(errors, failed_loads) == [], errors
                 # Nothing left the frame: no message to its parent (a probe from the frame itself reaches the same
