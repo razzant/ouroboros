@@ -48,21 +48,18 @@ def _loop():
 
 
 def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, Any]) -> str:
-    names = _loop()._skill_names_touched_by_trace(llm_trace)
-    if not names:
-        return ""
     try:
-        from ouroboros.skill_loader import find_skill
-        from ouroboros.skill_readiness import skill_readiness_for_execution
+        from ouroboros.skill_readiness import observe_named_skills, skill_readiness_for_execution
+
+        subjects, peers = observe_named_skills(drive_root, _loop()._skill_names_touched_by_trace(llm_trace))
     except Exception:
         return ""
     blockers: List[str] = []
-    for name in names:
+    for skill in subjects.values():
         try:
-            skill = find_skill(pathlib.Path(drive_root), name)
-            if skill is None or not getattr(skill, "is_self_authored", False):
+            if not getattr(skill, "is_self_authored", False):
                 continue
-            readiness = skill_readiness_for_execution(pathlib.Path(drive_root), skill)
+            readiness = skill_readiness_for_execution(drive_root, skill, skills=peers)
             ready = readiness.ready
         except Exception:
             continue
@@ -77,10 +74,9 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     if not blockers:
         return ""
     return (
-        "⚠️ SKILL_NOT_FINALIZED: self-authored skills this task touched are not ready to "
-        "execute. A fresh review does not supply a missing owner grant or override an "
-        "intentional disablement, and an intentionally disabled skill may still satisfy the "
-        "task. Current facts, each with its available next actions: " + "; ".join(blockers)
+        "⚠️ SKILL_NOT_FINALIZED: self-authored skills named in this task are not ready to execute. Admitting "
+        "files alone grants nothing; see the grant-issuing operations in the next actions. An intentional Off "
+        "may satisfy the task. Current facts: " + "; ".join(blockers)
     )
 
 
@@ -948,17 +944,22 @@ def _maybe_inject_finalization_nudges(
 
     from ouroboros.tool_access import canonical_data_root
 
-    finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
-    if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
-        tools._ctx._skill_finalization_injected = True
-        return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
+    root = canonical_data_root(tools._ctx)
+    show_progress = not getattr(tools._ctx, "_nanny_route_dispatched", False)
+    if not getattr(tools._ctx, "_skill_finalization_injected", False):
+        if finalization_msg := _loop()._skill_finalization_message(root, llm_trace):
+            tools._ctx._skill_finalization_injected = True
+            return _inject(finalization_msg, finalization_msg, "skill_not_finalized", progress=show_progress)
+    from ouroboros.skill_readiness import changed_skills_notice
+
+    if changed := changed_skills_notice(root, llm_trace, tools._ctx):
+        return _inject(changed, "Skill status facts shown before final response.", "pre_delivery_notice", progress=show_progress)
     notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
     if notice:
         # A nanny's notice stays out of the owner chat's progress (owner 2026-08-15: nanny chat spam removed).
         cause = getattr(tools._ctx, "_completion_hold_cause", "") or "pre_delivery_notice"
         return _inject(notice, "A check that did not pass was shown before final response." if cause == RED_CHECK_NOTICE
-                       else "Pre-delivery facts shown before final response.", cause,
-                       progress=not getattr(tools._ctx, "_nanny_route_dispatched", False))
+                       else "Pre-delivery facts shown before final response.", cause, progress=show_progress)
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
     # the model its own calls.

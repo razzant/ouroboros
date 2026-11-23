@@ -14,8 +14,8 @@ from typing import Any, Callable, Dict
 
 from ouroboros.provider_models import PROVIDER_KINDS
 from ouroboros.secret_masking import (
-    MCP_RESPONSE_ONLY_FIELDS, looks_masked_mcp_secret, looks_masked_settings_secret, mask_mcp_url,
-    mask_prefixed_secret, mask_settings_secret, rehydrate_mcp_url,
+    MCP_RESPONSE_ONLY_FIELDS, looks_masked_mcp_secret, looks_masked_settings_secret,
+    mask_mcp_url, mask_prefixed_secret, mask_settings_secret, rehydrate_mcp_url,
 )
 
 
@@ -146,6 +146,24 @@ def mask_connections(rows: Any) -> list:
                     clone[field] = mask_settings_secret(flat, clone[field])
             out.append(clone)
     return out
+
+
+def public_rows(key: str, rows: Any) -> list | None:
+    """Registration sees only public identity/status fields, not the owner Settings editor's row shape."""
+    if not isinstance(rows, list):
+        return None
+    if key == "MCP_SERVERS":
+        return [
+            {**{field: row[field] for field in ("id", "name", "transport") if isinstance(row.get(field), str)},
+             **({"enabled": row["enabled"]} if isinstance(row.get("enabled"), bool) else {}),
+             "auth_configured": bool(str(row.get("auth_token") or "").strip())}
+            for row in rows if isinstance(row, dict)
+        ]
+    if key == "OUROBOROS_CONNECTIONS":
+        return [{"kind": row["kind"], "name": row["name"]} for row in rows if isinstance(row, dict)
+                and isinstance(row.get("kind"), str) and row["kind"] in PROVIDER_KINDS
+                and isinstance(row.get("name"), str)]
+    return None
 
 
 def typed_connection_secret_fields(rows: Any) -> set:

@@ -101,11 +101,10 @@ export function readerLine(row) {
     if (row.grant_unknown) grant = tr('secret.reader_grant_unknown', 'its grant could not be read');
     else if (row.unsupported) grant = tr('secret.reader_unsupported', 'this skill type receives no Settings keys');
     else {
+        // Grant facts only, as the host says them: whether the skill runs is its own readiness, never this card's.
         const missing = (row.reads || []).filter((key) => !(row.granted || []).includes(key));
-        grant = missing.length ? fmt('needs {keys} granted in Skills', { keys: list(missing) })
-            : tr('secret.reader_covered', 'its grant covers it');
-        if (missing.length && row.enabled)
-            grant += tr('secret.reader_blocked', '; after saving, this enabled skill cannot run until the keys are granted');
+        grant = missing.length ? fmt('its grant does not cover {keys}; use Grant access in Skills', { keys: list(missing) })
+            : tr('secret.reader_grant_covers_keys', 'its grant covers the listed keys');
     }
     return fmt('{name} · {state} · {grant}', { name: row.name, state, grant });
 }

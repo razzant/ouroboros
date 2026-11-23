@@ -9,6 +9,7 @@ import { tr } from './i18n.js';
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
+    grantBlocks,
     grantReady,
     preflightFailed,
     preflightFailedStale,
@@ -87,7 +88,7 @@ function secretConfigTray(skill) {
     const keys = (state) => fields.filter((field) => field?.state === state).map((field) => String(field.key || ''));
     const missing = keys('missing');
     const unknown = keys('unknown');
-    if (!skill.enabled || !grantReady(skill) || (!missing.length && !unknown.length)) return { tray: '', needs: false };
+    if (!skill.enabled || grantBlocks(skill) || (!missing.length && !unknown.length)) return { tray: '', needs: false };
     const sentence = missing.length
         ? `${escapeHtml(missing.join(', '))} ${missing.length > 1 ? 'are' : 'is'} not set.`
         : `Saved settings can’t be read now, so whether ${escapeHtml(unknown.join(', '))} ${unknown.length > 1 ? 'are' : 'is'} set is unknown.`;
@@ -100,7 +101,7 @@ function secretConfigTray(skill) {
 }
 
 function missingGrantLoadError(skill) {
-    return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
+    return grantBlocks(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
 
 // An ON skill whose packages are missing, failed or out of date: Enable installs them (it is
@@ -388,8 +389,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             actions: `${resume}${smallButton('Review', name, skill.review_stale ? 'rereview' : 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
         lockReason = 'Can’t turn on until it is reviewed.';
     } else if (!grantReady(skill)) {
-        if (!skill.lifecycle_pending) chip = chipHtml('Needs access', 'warn');
-        needs = true;
+        // A pending key alone does not block; missing host permissions do.
+        if (!skill.lifecycle_pending && grantBlocks(skill)) chip = chipHtml('Needs access', 'warn');
+        needs = grantBlocks(skill);
         const grants = skill.grants || {};
         const keys = grants.missing_keys || grants.requested_keys || [];
         const permissions = grants.missing_permissions || grants.requested_permissions || [];
@@ -399,7 +401,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         // The same fact the readiness line carries: the grant exists, for an earlier version of the files.
         const earlier = new Set(grants.earlier_grant ? [...(grants.earlier_grant.keys || []), ...(grants.earlier_grant.permissions || [])] : []);
         const share = [...keys, ...permissions].every((item) => earlier.has(item)) ? 'this' : 'some of this';
-        const note = earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '';
+        const saved = (grants.pending_keys || []).filter((key) => keys.includes(key));
+        const note = [earlier.size ? `You granted ${share} to an earlier version of the skill; its files changed since.` : '',
+            saved.length ? `${escapeHtml(saved.join(', '))} ${saved.length === 1 ? 'is' : 'are'} saved in Settings but not granted to this skill.` : ''].filter(Boolean).join(' ');
         trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.', note,
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }
@@ -414,7 +418,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     // Declared MCP servers: Connect is the owner's continuation once the skill itself is ready (DESIGN §4). A running
     // review or a pending update names the state above ahead of the current bytes' gate, access and start facts.
     const servers = Array.isArray(skill.mcp_servers) ? skill.mcp_servers : [];
-    const runnable = reviewReady(skill) && !preflightFailed(skill) && grantReady(skill) && !skill.load_error && !conflict;
+    const runnable = reviewReady(skill) && !preflightFailed(skill) && !grantBlocks(skill) && !skill.load_error && !conflict;
     if (skill.enabled && !needs && !skill.lifecycle_pending && !untrusted(skill) && runnable && servers.length) {
         const blocked = servers.find((server) => server.conflict);
         const failed = servers.find((server) => server.configured && server.error);

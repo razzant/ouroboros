@@ -152,7 +152,7 @@ test('Connect tools: one confirmation names what runs and the servers MCP starts
     const server = { id: 'chrome_browser', title: 'Chrome (shared tab)', change: 'add', conflict: '', task_session: true, browser_policy: true,
         executable: { command: '/opt/node', args: ['/skills/chrome/scripts/server.mjs'], cwd: '/skills/chrome' } };
     const preview = { ok: true, ready: true, changed: true, enables_mcp: true, content_hash: 'h', settings_digest: 'd', servers: [server],
-        other_servers: [{ id: 'github', name: 'GitHub' }] };
+        other_servers: [{ id: 'github', name: 'GitHub' }], grant_note: 'Saved keys are not supplied through the skill grant.' };
     for (const decision of [false, null, true]) {
         const sent = [];
         const result = await connectSkillTools({ name: 'chrome' }, {
@@ -162,7 +162,7 @@ test('Connect tools: one confirmation names what runs and the servers MCP starts
                 assert.equal(model.body, 'Ouroboros adds Chrome (shared tab) to MCP servers. It turns MCP on. Ouroboros starts the server to list its tools, then uses it for tool calls. '
                     + 'Turning MCP on also starts 1 server previously enabled in Settings: GitHub.');
                 assert.deepEqual(model.details.rows.map((row) => row.value), ['/opt/node /skills/chrome/scripts/server.mjs', '/skills/chrome',
-                    'one process per task; Ouroboros checks its browser requests']);
+                    'one process per task; Ouroboros checks its browser requests', preview.grant_note]);
                 assert.equal(model.confirmLabel, 'Connect tools');
                 return decision;
             },

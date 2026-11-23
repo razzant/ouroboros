@@ -26,7 +26,7 @@ from ouroboros.owner_source import resolve_owner_source as resolve_skill_owner_s
 from ouroboros.skill_lifecycle_queue import LifecycleJobOptions, run_lifecycle_job_blocking
 from ouroboros.skill_review_status import executable_review_requirement
 from ouroboros.skill_loader import (
-    discover_skills, find_skill, grant_status_for_skill, requested_core_setting_keys,
+    discover_skills, find_skill, grant_status_for_skill, load_skill_grants, requested_core_setting_keys,
     requested_skill_permissions, save_enabled, save_skill_grants, skill_conflict_status,
     skill_state_dir, skill_state_dir_path,
 )
@@ -144,7 +144,7 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         if not facts["executable_review"]:
             need = executable_review_requirement(facts["review_gate"], strict_review=_strict_review(skill))
             return _refusal("It turns on after a review passes.", code="acceptance", detail=need, **facts)
-        if not facts["grants"].get("all_granted", True):
+        if facts["grants"].get("blocked"):  # pending custom keys alone do not block
             return _refusal("Grant it the keys and permissions it asks for first.", code="grants",
                             detail=grant_gap_sentence(facts["grants"]), **facts)
         from ouroboros.skill_dependencies import dependency_sentence, ensure_skill_dependencies
@@ -283,14 +283,22 @@ def _saved_switch(drive_root: Path, name: str) -> bool | None:
 
 
 def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, progress: Any = None,
-           enable_after_grant: bool = False) -> dict:
+           enable_after_grant: bool = False, explicit_via: str = "") -> dict:
     request = prepare_skill_grant(skill, drive_root, items)
     if request.get("error"):
         return request
     keys, granted_permissions = request["keys"], request["permissions"]
+    # The decision covers the keys it sent and what an earlier decision covered: a key saved later that the card did
+    # not offer stays pending (B″), never covered and blocking (R2-A03).
+    earlier = load_skill_grants(drive_root, skill.name)
+    decided = {*keys, *(earlier.get("requested_keys") or []), *(earlier.get("granted_keys") or [])}
     save_skill_grants(drive_root, skill.name, keys, content_hash=skill.content_hash,
-                      requested_keys=request["allowed_keys"], granted_permissions=granted_permissions,
-                      requested_permissions=request["allowed_permissions"])
+                      requested_keys=[key for key in request["allowed_keys"] if key in decided],
+                      granted_permissions=granted_permissions, requested_permissions=request["allowed_permissions"])
+    if explicit_via and keys:  # the saved explicit grant only, never an automatic one (skill_grant_follow)
+        from ouroboros.skill_grant_follow import record_explicit_grant
+
+        record_explicit_grant(drive_root, skill, keys, via=explicit_via)
     if enable_after_grant:
         # The owner's explicit Enable survives an answered-pending grant, without another job or pip attempt.
         try:
@@ -451,8 +459,10 @@ def run_skill_action(
         if refusal:
             return refusal
         if action == "grant":
+            # Explicit: the Skills button (UI or CLI) for the revision it showed, or a verified owner source.
+            via = (_owner_actor if _owner_actor in {"owner_ui", "owner_cli"} else "owner_source" if source else "")
             return _grant(loaded, drive, repo_path, list(items or []), progress=_progress.set if _progress is not None else None,
-                          enable_after_grant=_enable_after_grant)
+                          enable_after_grant=_enable_after_grant, explicit_via=via if expected_content_hash else "")
         if action == "connect_mcp":
             from ouroboros.skill_mcp import connect
 

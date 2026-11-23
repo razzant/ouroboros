@@ -12,10 +12,12 @@ from ouroboros.skill_loader import discover_skills, save_enabled, summarize_skil
 
 
 def _skill(drive: pathlib.Path, name: str, *, kind: str = "instruction", enabled: bool = True,
-           reviewed: bool = True, actor: str = "owner_ui", script_file: bool = True) -> None:
+           reviewed: bool = True, actor: str = "owner_ui", script_file: bool = True, settings_key: str = "") -> None:
     folder = drive / "skills" / "external" / name
     folder.mkdir(parents=True)
     extra = "runtime: python3\nscripts:\n  - name: run.py\n" if kind == "script" else ""
+    if settings_key:
+        extra += f"env_from_settings: [{settings_key}]\n"
     (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Purpose of {name}.\nversion: '1'\n"
                                      f"type: {kind}\n{extra}when_to_use: When {name} applies.\n---\nBody.\n",
                                      encoding="utf-8")
@@ -115,18 +117,37 @@ def test_a_name_two_folders_claim_is_one_off_entry(tmp_path):
     assert [row["ready"] for row in list_skills_payload(summary, drive_root=tmp_path)["skills"]] == [False, False]
 
 
-def test_a_readiness_note_is_shown_in_both_forms_and_list_skills_and_none_without_one(tmp_path, monkeypatch):
-    rows = [_extension(name="noted", readiness={"ready": True, "blockers": [], "notes": ["works; key X is not granted"]}),
-            _extension(name="plain")]
-    monkeypatch.setattr("ouroboros.skill_loader.summarize_skills", lambda *_: {"skills": rows})
-    section = _build_installed_skills_section(SimpleNamespace(drive_root=tmp_path), skills=[])
+def test_a_saved_key_is_a_non_blocking_note_in_both_context_forms_and_list_skills(tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.tools.registry import ToolRegistry
+
+    drive, repo = tmp_path / "data", tmp_path / "repo"
+    repo.mkdir()
+    key, value = "DEMO_PENDING_KEY", "synthetic-value-not-for-listings"
+    monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", "")
+    _skill(drive, "noted", kind="script", settings_key=key)
+    _skill(drive, "plain", kind="script")
+    (drive / "settings.json").write_text(json.dumps({key: value}), encoding="utf-8")
+    note = f"key {key} is saved in Settings but not granted"
+    rows = {row["name"]: row for row in summarize_skills(drive)["skills"]}
+    status = skill_status(rows["noted"])
+    assert status["ready"] is True and status["reasons"] == [] and note in status["notes"][0]
+    section = _section(drive)
     for text in (section.full_text, section.operative_view):
         cards = {block.split(" ", 1)[0]: block for block in text.split("\n- ")[1:]}
-        assert "  Note: works; key X is not granted" in cards["noted"] and "Status:" not in cards["noted"]
+        assert f"  Note: {note}" in cards["noted"] and "Status:" not in cards["noted"]
         assert "Note:" not in cards["plain"] and "Status:" not in cards["plain"]
-    page = {row["name"]: row for row in list_skills_payload({"skills": rows})["skills"]}
-    assert page["noted"]["notes"] == "works; key X is not granted" and page["noted"]["ready"] is True
+        assert value not in text
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    page_text = registry.execute_result("list_skills", {}).text
+    full_text = registry.execute_result("list_skills", {"name": "noted"}).text
+    assert value not in page_text and value not in full_text
+    page = {row["name"]: row for row in json.loads(page_text)["skills"]}
+    assert note in page["noted"]["notes"] and page["noted"]["ready"] is True and "not_ready" not in page["noted"]
     assert "notes" not in page["plain"]
+    [named] = json.loads(full_text)["skills"]
+    assert named["ready"] is True and named["notes"] == status["notes"] and "not_ready" not in named
 
 
 def _extension(**over):

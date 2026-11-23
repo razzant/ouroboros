@@ -310,8 +310,9 @@ def _liveness_gap(state: dict) -> dict:
     if reason in _REVIEW_REASONS:
         return _gap("review", "It needs a review or your attestation of these exact bytes.")
     if reason == "missing_grants":
-        grants = state.get("grant_status") or {}
-        missing = [*(grants.get("missing_keys") or []), *(grants.get("missing_permissions") or [])]
+        from ouroboros.skill_grant_follow import blocking_lists
+
+        missing = [item for group in blocking_lists(state.get("grant_status") or {}) for item in group]
         return _gap("grants", "It needs your grant" + (f" for {', '.join(missing)}." if missing else "."))
     if reason == "skill_conflict":
         names = ", ".join((state.get("conflict") or {}).get("skills") or [])
@@ -361,7 +362,12 @@ def requirement_state(drive_root: Any, row: Any, *, skills: Optional[list] = Non
     if undeclared := _undeclared(row, skill.manifest):
         return {**base, **_gap("settings_undeclared", f"It does not read {', '.join(undeclared)}, which your "
                                                       "organization sets for it (env_from_settings).")}
-    return {**base, **_liveness_gap(runtime_state_for_loaded_skill(skill, root, skills=skills))}
+    state = runtime_state_for_loaded_skill(skill, root, skills=skills)
+    gap, grants = _liveness_gap(state), state.get("grant_status") or {}
+    pending = [key for key, _value in row.settings if key in (grants.get("pending_keys") or [])]
+    if gap["state"] == "met" and pending:  # running without a value the organization fixes for it is no requirement met
+        gap = _gap("grants", f"It needs your grant for {', '.join(pending)}.")
+    return {**base, **gap}
 
 
 def state_rows(drive_root: Any, *, skills: Optional[list] = None) -> list:

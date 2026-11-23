@@ -68,6 +68,7 @@ def env(tmp_path, monkeypatch, caplog):
     from ouroboros.tools import skill_exec
 
     root = tmp_path
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setattr(cfg, "DATA_DIR", root)
     monkeypatch.setattr(cfg, "SETTINGS_PATH", root / "settings.json")
     # Import the consumer before patching config: its from-import must not retain this fixture's lambda.
@@ -298,7 +299,8 @@ def test_save_writes_settings_only_and_delivers_metadata_only_secret_filled(env)
     [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
     assert 'secret_filled: {"pluginName": "fakeplug", "fields": ["botToken"]}' in mail["text"]
     assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"] and "do not ask for it here" in mail["text"]
-    assert "Saving is not a connection" in mail["text"] and "needs the owner's grant for FAKEPLUG_TOKEN" in mail["text"]
+    assert "Saving is not a connection" in mail["text"]
+    assert "its grant does not cover FAKEPLUG_TOKEN" in mail["text"]
     assert "Verbatim" not in mail["text"]
     block = _block(env, quiz_id)
     assert block["secret_outcome"]["event"] == "secret_filled" and "comment" not in block
@@ -371,6 +373,8 @@ def test_replace_while_readers_are_enabled_reports_them_and_grants_nothing(env):
     response = _save(env, quiz_id, {"botToken": CANARY})
     assert response.status_code == 200 and response.json()["secret_outcome"]["event"] == "secret_replaced"
     assert response.json()["secret_outcome"]["consumers"][0]["enabled"] is True
+    [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
+    assert "fakeplug (enabled; its grant covers the listed keys)" in mail["text"]
     after = grant_status_for_skill(env.root, find_skill(env.root, "fakeplug"))
     assert after["granted_keys"] == before["granted_keys"] and after["missing_keys"] == before["missing_keys"]
     _assert_absent(env, CANARY, texts=[response.text])

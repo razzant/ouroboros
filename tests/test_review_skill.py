@@ -86,6 +86,198 @@ def test_one_reviewer_with_a_reason_reviews_the_skill_and_the_same_bytes_reuse_t
     assert again.reused is True and again.record_id == first.record_id and len(harness.sends) == 1
 
 
+@pytest.mark.parametrize("case", ["continuous", "explicit_off", "action_permission", "external_editor",
+                                 "automatic_prior_grant", "without_revision", "revoked_before_review", "later_manifest"])
+def test_owner_repair_continues_only_explicit_local_keys_after_review(harness, case):
+    """Real local grant → edit/review → script use, with a simulated owner press and offline reviewer."""
+    from ouroboros import config
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+    from ouroboros.skill_repair_admission import record_repair_admission
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.skill_exec import _handle_skill_exec
+
+    h = harness
+    h.monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    h.monkeypatch.setenv("OUROBOROS_DATA_DIR", str(h.drive))
+    h.monkeypatch.setattr(config, "DATA_DIR", h.drive)
+    h.monkeypatch.setattr(config, "SETTINGS_PATH", h.drive / "settings.json")
+    settings = h.drive / "settings.json"
+    automatic = case == "automatic_prior_grant"
+    settings.write_text(json.dumps({"FIXTURE_KEY": "saved-example", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": automatic}))
+    manifest = h.skill_dir / "SKILL.md"
+    action = ["notify_owner"] if case == "action_permission" else []
+    manifest.write_text(manifest.read_text().replace("scripts:\n", (
+        f"permissions: {json.dumps(action)}\nenv_from_settings: [FIXTURE_KEY, LATER_FIXTURE_KEY]\nscripts:\n")))
+    script = h.skill_dir / "scripts" / "hello.py"
+    script.write_text("import os\nprint('v1', os.getenv('FIXTURE_KEY') == 'saved-example', 'LATER_FIXTURE_KEY' in os.environ)\n")
+    # A per-install note is not part of the version; the proof uses the ordinary release digest.
+    (h.skill_dir / ".self_authored.json").write_text("{}\n")
+    old = _review(h, reviewers=["t1"], reason="fixture payload")
+    assert old.status == "clean", old.error
+    if automatic:
+        assert old.auto_granted_keys == ["FIXTURE_KEY"]
+    else:
+        selection = "" if case == "without_revision" else old.content_hash
+        approved = run_skill_action(h.ctx, "weather", "grant", expected_content_hash=selection,
+                                    items=["FIXTURE_KEY", *action], _owner_actor="owner_ui")
+        assert approved["ok"] and approved["granted_keys"] == ["FIXTURE_KEY"], approved
+
+    def use():
+        return _handle_skill_exec(h.ctx, skill="weather", script="hello.py")
+
+    assert run_skill_action(h.ctx, "weather", "enable", _owner_actor="owner_ui")["ok"]
+    assert "v1 True False" in use()
+    settings.write_text(json.dumps({"FIXTURE_KEY": "saved-example", "LATER_FIXTURE_KEY": "ungranted-example",
+                                    **({"UNGRANTED_FIXTURE_KEY": "not-approved"} if case == "later_manifest" else {}),
+                                    "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": False}))
+    saved_values = settings.read_bytes()
+    grants_path = h.drive / "state" / "skills" / "weather" / "grants.json"
+    registry = ToolRegistry(repo_dir=h.system, drive_root=h.drive)
+    repair = registry._ctx
+    repair.system_repo_dir = h.system
+    repair.task_id = "weather-repair"
+    repair.task_constraint = TaskConstraint(skill_name="weather", payload_root="skills/external/weather")
+    repair.task_metadata = {"origin_suppressed": True, "ui_control": {"name": "skill_repair", "pressed_at": "2026-11-21T12:00:00Z"}}
+    record_repair_admission(h.drive, "weather", task_id=repair.task_id, base_content_hash=old.content_hash, owner_request=True)
+    if case == "external_editor":
+        script.write_text(script.read_text().replace("'v1'", "'v2'"))
+    else:
+        result = registry.execute("edit_text", {"root": "skill_payload", "path": "scripts/hello.py",
+                                               "old_str": "'v1'", "new_str": "'v2'"})
+        assert "Replaced" in result, result
+        assert "SKILL_EXEC_GRANT_REQUIRED" in use(), "owner_edit alone does not carry the old key"
+    if case == "revoked_before_review":
+        grants_path.unlink()
+    elif case == "later_manifest":
+        manifest.write_text(manifest.read_text().replace("LATER_FIXTURE_KEY]", "LATER_FIXTURE_KEY, UNGRANTED_FIXTURE_KEY]"))
+    if case == "explicit_off":
+        assert run_skill_action(h.ctx, "weather", "disable", _owner_actor="owner_ui")["ok"]
+
+    def review():
+        return run_skill_review_lifecycle_blocking(repair, "weather", reviewers=["t1"], reason="fixture payload")
+
+    fresh = find_skill(h.drive, "weather")
+    result = review()
+    assert (result["status"], result["content_hash"]) == ("clean", fresh.content_hash), result
+    assert fresh.content_hash != old.content_hash
+    grant = grant_status_for_skill(h.drive, find_skill(h.drive, "weather"))
+    assert grant["granted_permissions"] == []
+    if case in {"continuous", "explicit_off", "action_permission"}:
+        assert grant["granted_keys"] == ["FIXTURE_KEY"] and grant["pending_keys"] == ["LATER_FIXTURE_KEY"]
+    else:
+        assert grant["granted_keys"] == []
+        if case == "later_manifest":
+            assert "UNGRANTED_FIXTURE_KEY" in grant["pending_keys"]
+
+    if case == "continuous":
+        assert "v2 True False" in use()
+        grants_path.unlink()  # the same accepted bytes/settled review must not reissue a revoked grant
+        again = review()
+        assert again["status"] == "clean" and len(h.sends) == 2, again
+        assert not grants_path.exists() and "v2 False False" in use()
+    elif case == "explicit_off":
+        assert not load_enabled(h.drive, "weather") and "disabled" in use()
+    elif case == "action_permission":
+        assert "notify_owner" in use()
+    elif case == "revoked_before_review":
+        assert not grants_path.exists() and "v2 False False" in use()
+    else:
+        assert "SKILL_EXEC_GRANT_REQUIRED" in use()
+    assert settings.read_bytes() == saved_values
+
+
+@pytest.mark.parametrize("form", ["direct", "edits", "batch"])
+def test_an_earlier_grant_takes_one_click_then_repairs_keep_the_explicit_key(harness, form):
+    """A grant saved without the host's receipt does not follow a Repair: the owner grants the saved field once on the
+    repaired files, without entering it again. From then on two edit → review cycles and a separate next Repair keep
+    it. The direct edit_text, its edits[] series and edit_batch take the same predicted/observed transition."""
+    from ouroboros import config
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.skill_grant_follow import installation_of, load_receipt, receipt_tip
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, save_skill_grants
+    from ouroboros.skill_repair_admission import record_repair_admission
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.skill_exec import _handle_skill_exec
+
+    h = harness
+    # The first synthetic Repair needs one review before the grant and two after it.
+    # Its offline fake seat still exercises the real per-task review allowance.
+    h.monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "3")
+    h.monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    h.monkeypatch.setenv("OUROBOROS_DATA_DIR", str(h.drive))
+    h.monkeypatch.setattr(config, "DATA_DIR", h.drive)
+    h.monkeypatch.setattr(config, "SETTINGS_PATH", h.drive / "settings.json")
+    settings = h.drive / "settings.json"
+    settings.write_text(json.dumps({"FIXTURE_KEY": "saved-example", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": False}))
+    saved_values = settings.read_bytes()
+    manifest = h.skill_dir / "SKILL.md"
+    manifest.write_text(manifest.read_text().replace("scripts:\n", "env_from_settings: [FIXTURE_KEY]\nscripts:\n"))
+    script = h.skill_dir / "scripts" / "hello.py"
+    script.write_text("import os\nprint('v0', os.getenv('FIXTURE_KEY') == 'saved-example')\n")
+    first = _review(h, reviewers=["t1"], reason="fixture payload")
+    assert first.status == "clean", first.error
+    # A decision saved the way grants were saved before the host kept receipts: exact bytes, nothing more.
+    save_skill_grants(h.drive, "weather", ["FIXTURE_KEY"], content_hash=first.content_hash, requested_keys=["FIXTURE_KEY"])
+    assert run_skill_action(h.ctx, "weather", "enable", _owner_actor="owner_ui")["ok"]
+    registry = ToolRegistry(repo_dir=h.system, drive_root=h.drive)
+
+    def use():
+        return _handle_skill_exec(h.ctx, skill="weather", script="hello.py")
+
+    def repair(task_id):
+        ctx = registry._ctx
+        ctx.system_repo_dir, ctx.task_id = h.system, task_id
+        ctx.task_constraint = TaskConstraint(skill_name="weather", payload_root="skills/external/weather")
+        ctx.task_metadata = {"origin_suppressed": True,
+                             "ui_control": {"name": "skill_repair", "pressed_at": "2026-11-23T12:00:00Z"}}
+        record_repair_admission(h.drive, "weather", task_id=task_id, owner_request=True,
+                                base_content_hash=find_skill(h.drive, "weather").content_hash)
+        return ctx
+
+    def edit(version):
+        change = {"old_str": repr(f"v{version - 1}"), "new_str": repr(f"v{version}")}
+        if form == "batch":
+            result = registry.execute("edit_batch", {"root": "skill_payload",
+                                                     "edits": [{"path": "scripts/hello.py", **change}]})
+        else:
+            result = registry.execute("edit_text", {"root": "skill_payload", "path": "scripts/hello.py",
+                                                    **(change if form == "direct" else {"edits": [change]})})
+        assert "Replaced" in result or " applied 1 edit(s)" in result, result
+        current = find_skill(h.drive, "weather")
+        assert grant_status_for_skill(h.drive, current)["granted_keys"] == [], "an edit grants nothing"
+        return current.content_hash
+
+    def reviewed(ctx):
+        result = run_skill_review_lifecycle_blocking(ctx, "weather", reviewers=["t1"], reason="fixture payload")
+        assert result["status"] == "clean", result
+        return grant_status_for_skill(h.drive, find_skill(h.drive, "weather"))
+
+    ctx = repair("weather-repair-1")
+    edited = edit(1)
+    status = reviewed(ctx)
+    assert status["granted_keys"] == [] and status["earlier_grant"]["keys"] == ["FIXTURE_KEY"], "no receipt, no carry"
+    assert "SKILL_EXEC_GRANT_REQUIRED" in use() and load_receipt(h.drive, "weather") == {}
+    clicked = run_skill_action(h.ctx, "weather", "grant", expected_content_hash=edited, items=["FIXTURE_KEY"],
+                               _owner_actor="owner_ui")  # the one click
+    assert clicked["ok"] and clicked["granted_keys"] == ["FIXTURE_KEY"] and "v1 True" in use()
+    installation = installation_of(h.drive, "weather", find_skill(h.drive, "weather").skill_dir)
+    assert load_receipt(h.drive, "weather")["digest"] == edited
+    for version, task_id in ((2, "weather-repair-1"), (3, "weather-repair-1"), (4, "weather-repair-2")):
+        if task_id != ctx.task_id:
+            ctx = repair(task_id)  # a separate next Repair continues the same receipt
+        edited = edit(version)
+        assert receipt_tip(h.drive, "weather", installation) == edited, "predicted and observed"
+        assert reviewed(ctx)["granted_keys"] == ["FIXTURE_KEY"] and f"v{version} True" in use()
+        receipt = load_receipt(h.drive, "weather")
+        assert (receipt["digest"], receipt["keys"], "tip" in receipt) == (edited, ["FIXTURE_KEY"], False)
+    assert settings.read_bytes() == saved_values, "the saved value was never entered again"
+
+
 def test_the_checklist_rule_decides_what_is_a_blocker_and_a_blocker_does_not_stop_the_skill(harness):
     """A hard trust-boundary item is a blocker even when the seat called it advisory (the severity policy is
     applied before the verdict is read); the named seat alone is asked, and outside Cyber Pro the blocker is

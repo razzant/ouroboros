@@ -1121,9 +1121,9 @@ def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypa
 
 
 def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, monkeypatch):
-    """Audit 08.11 item 1: after the payload changed, the execution refusal and the toggle refusal say the
-    owner's grant belongs to an earlier version of the files; the toggle keeps its one sentence and carries
-    the fact in ``detail``."""
+    """Audit 08.11 item 1: when a grant of earlier files does not cover the current ones, the execution refusal and
+    the toggle refusal say the owner's grant belongs to an earlier version of the files; the toggle keeps its one
+    sentence and carries the fact in ``detail``."""
     from ouroboros.skill_loader import save_skill_grants
 
     skills_root = tmp_path / "skills"
@@ -1147,7 +1147,6 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
     _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
     save_skill_grants(ctx.drive_root, "alpha", [], content_hash="earlier-bytes", requested_keys=[],
                       granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
-
     ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
     assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
     assert "inject_chat was granted to an earlier version of this skill's files" in ran
@@ -1158,6 +1157,36 @@ def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, 
     assert toggled.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "grants"' in toggled, toggled
     assert '"error": "Grant it the keys and permissions it asks for first."' in toggled
     assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files' in toggled
+    save_skill_grants(ctx.drive_root, "alpha", [], content_hash=compute_content_hash(skill_dir), requested_keys=[],
+                      granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
+    save_enabled(ctx.drive_root, "alpha", True)
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["exit_code"] == 0
+
+
+def test_a_run_names_the_saved_key_it_did_not_pass(tmp_path, monkeypatch):
+    """F2: a key saved in Settings and not granted (B″) stops nothing; the run result says it was not passed, and says
+    nothing once the owner grants it."""
+    from ouroboros import config
+    from ouroboros.skill_loader import save_skill_grants
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"LATER_KEY": "saved later"}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    skills_root = tmp_path / "skills"
+    manifest = _valid_script_manifest("alpha").replace("timeout_sec: 30\n", "timeout_sec: 30\nenv_from_settings: [LATER_KEY]\n")
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest,
+                             script_body="import os\nprint('LATER_KEY' in os.environ)\n")
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["stdout"].strip() == "False"
+    assert ran["not_passed"] == "key LATER_KEY is saved in Settings but not granted to this skill; it was not passed"
+    save_skill_grants(ctx.drive_root, "alpha", ["LATER_KEY"], content_hash=compute_content_hash(skill_dir),
+                      requested_keys=["LATER_KEY"])
+    ran = json.loads(skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py"))
+    assert ran["stdout"].strip() == "True" and "not_passed" not in ran
 
 
 def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):
