@@ -697,3 +697,92 @@ def test_skill_injection_routes_the_accepted_reply_after_dequeue(tmp_path, monke
     else:
         assert "text" not in reply
     assert reply["address"] == body["reply_to"] and reply["excerpt"] == excerpt
+
+
+def test_telegram_failed_media_keeps_exact_row_opening_and_busy_reply(tmp_path, monkeypatch):
+    from queue import Queue
+    from types import SimpleNamespace
+
+    from starlette.testclient import TestClient
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.chat_uploads import attachment_views
+    from ouroboros.context import _first_user_content
+    from ouroboros.dialogue_provenance import render_row_text, quote_parts
+    from ouroboros.gateway.host_service import create_host_service_app
+    from ouroboros.loop_messages import owner_input_revision, owner_reply_owed
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.server_owner_routing import _stage_mailbox_attachments
+    from tests.test_host_service_api import _seed_token
+    import server
+
+    bridge = message_bus.LocalChatBridge()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    _seed_token(tmp_path, skill="telegram", permissions=["inject_chat"], bundled=True)
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=lambda: bridge))
+    headers = {"X-Skill-Token": "token"}
+    a_words, cap = "  Read A as written\n ", 10 * 1024 * 1024
+    media = {"name": "same-clip.mp4", "mime": "video/mp4", "size": 11 * 1024 * 1024,
+             "unavailable": "too_large", "limit_bytes": cap}
+
+    def body(number, words, fact=None):
+        return {"chat_id": 42, "user_id": 42, "client_message_id": f"tg:123:42:{number}", "text": words,
+                "image_caption": words if fact else "",
+                "transport": {"kind": "telegram", "conversation_id": "42", "bot_id": "123"},
+                **({"attachments": [fact]} if fact else {})}
+
+    def post(payload):
+        return client.post("/chat/inject", headers=headers, json=payload)
+
+    a = body(101, a_words, media)
+    first = post(a)
+    assert first.status_code == 202, first.text
+    assert post(a).json().get("rejoined") is True
+    [a_row] = chat_rows(tmp_path)
+    assert a_row["text"] == a_words and a_row.get("text_placeholder") is not True
+    a_address = format_address(row_address(a_row))
+    b_size = 8 * 1024 * 1024
+    b = body(102, "", {"name": media["name"], "mime": media["mime"], "size": b_size, "unavailable": "download_failed"})
+    assert post(b).status_code == 202
+    assert post({**body(103, "Try again"), "reply_to": a_address}).status_code == 202
+    assert len(chat_rows(tmp_path)) == 3
+
+    echoes, routed = [], []
+    bridge._broadcast_fn = echoes.append
+    monkeypatch.setattr(server, "_route_owner_message", lambda _bridge, _ctx, row: routed.append(row))
+    ctx = SimpleNamespace(load_state=lambda: {"owner_id": 1}, update_state=lambda mutate: mutate({"owner_id": 1}))
+    server._process_bridge_updates(bridge, 0, ctx)
+    assert [row["text"] for row in routed] == [a_words, "", "Try again"]
+    b_row = message_bus.accepted_chat_message(tmp_path, 42, b["client_message_id"])
+    assert b_row["text_placeholder"] and b_row["text"] == "(attachment unavailable)"
+    assert quote_parts(b_row) == () and "(attachment unavailable)" not in render_row_text(b_row)
+    assert quote_parts(a_row) == (a_words,) and "reason=too_large" in render_row_text(a_row)
+    [view] = attachment_views(b_row["attachments"], tmp_path)
+    assert view == {"name": media["name"], "kind": "file", "mime": "", "available": False,
+                    "size": b_size, "unavailable": "download_failed"}
+    b_echo = next(row for row in echoes if row["client_message_id"] == b["client_message_id"])
+    assert b_echo["attachments"] == [view] and b_echo["text_placeholder"] is True
+    assert not (tmp_path / "uploads").exists()
+
+    spool = SimpleNamespace(DRIVE_ROOT=tmp_path)
+    _, a_manifest, _ = _stage_mailbox_attachments(spool, tmp_path, "turn-a", routed[0]["task_metadata"])
+    opening = _first_user_content({"text": a_words, "attachment_manifest": list(a_manifest)}, SimpleNamespace(drive_root=tmp_path))
+    assert opening.startswith(a_words + "\n\n[Host fact: attachment delivery; not the owner's words]")
+    assert f"reason=too_large, mime=video/mp4, size={media['size']}, limit_bytes={cap}, ordinal=0" in opening
+    note, b_manifest, _ = _stage_mailbox_attachments(spool, tmp_path, "turn-a", routed[1]["task_metadata"])
+    assert not note and write_owner_message(tmp_path, routed[1]["text"], "turn-a", attachment_manifest=b_manifest,
+                                            client_message_id=b["client_message_id"], origin_message_ref=routed[1]["origin_message_ref"])
+    messages, seen = [], set()
+    actor = SimpleNamespace(drive_root=tmp_path, current_chat_id=42, task_id="turn-a", task_metadata={})
+    _drain_incoming_messages(messages, Queue(), tmp_path, "turn-a", None, seen, owner_ctx=actor)
+    assert owner_input_revision(actor) == 1 and owner_reply_owed(actor)
+    [owner_b] = actor._owner_directives
+    assert owner_b["content"] == "" and owner_b["attachments"][0]["unavailable"] == "download_failed"
+    assert write_owner_message(tmp_path, routed[2]["text"], "turn-a",
+                               reply_reference=routed[2]["task_metadata"]["reply_reference"])
+    _drain_incoming_messages(messages, Queue(), tmp_path, "turn-a", None, seen, owner_ctx=actor)
+    b_wire = next(row["content"] for row in messages if "reason=download_failed" in row["content"])
+    quote_wire = next(row["content"] for row in messages if row["content"].startswith("[Reply source from "))
+    assert b_wire.startswith("[Host fact:") and f"size={b_size}" in b_wire and "Message from my human" not in b_wire
+    assert a_address in quote_wire and a_words in quote_wire and "reason=too_large" in quote_wire
+    assert "download_failed" not in quote_wire and str(b_size) not in quote_wire

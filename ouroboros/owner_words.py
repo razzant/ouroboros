@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Mapping, Tuple
 from ouroboros.answer_facts import (OWNER_CARD_INPUT, OWNER_PRESS, answered_card, answered_card_reply,
                                     answered_card_source, carded as carded, is_answered_card)
 from ouroboros.chat_references import _same_selection as _same_selection, reply_target as reply_target, selected_reply_target
+from ouroboros.chat_uploads import retained_attachments_note as attachments_line
 
 log = logging.getLogger(__name__)
 
@@ -1537,20 +1538,6 @@ def project_words(drive_root: Any, room: int, *, open_rows: Any = (), indent: st
              "short": f"{words_stamp(row)} (words, {len(row['text'])} chars — read by address {row['address']})"}
             for row in _deduped(rows) if row.get("carrier") == "room" and row.get("source") != REPLY_TARGET
             and not {row["ref"], row["address"]} & held] + [{"line": line} for line in gaps]
-
-
-def attachments_line(files: Any) -> str:
-    """Files named by the host under the row's words: name, type, size, staged path or delivered download URL,
-    or the fact that the file was not given to this work. ``""`` for a row with none."""
-    named = []
-    for ref in files if isinstance(files, list) else []:
-        if isinstance(ref, Mapping):
-            facts = ([str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
-                     + [str(ref[key]) for key in ("staged", "download_url") if ref.get(key)])
-            if ref.get("unavailable"):
-                facts.append("unavailable")
-            named.append(str(ref.get("name") or "attachment") + (f" ({', '.join(facts)})" if facts else ""))
-    return f"[Host-retained attachments: {'; '.join(named)}]" if named else ""
 
 
 def unread_target(row: Mapping[str, Any]) -> str:

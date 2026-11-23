@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import json
 import sys
@@ -10,6 +11,9 @@ import uuid
 
 import pytest
 from pathlib import Path
+
+PDF = b"%PDF-1.4 bytes"
+PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4rkAAAAASUVORK5CYII="
 
 
 def _load_plugin():
@@ -65,15 +69,16 @@ class Client:
 
     async def download_file(self, file_id):
         self.downloads.append(file_id)
-        return b"%PDF-1.4 bytes"
+        return PDF
 
     async def download_photo(self, file_id):
-        raise AssertionError("documents never take the photo path")
+        self.downloads.append(file_id)
+        return PNG, "image/png"
 
 
-def _run(plugin, tmp_path, monkeypatch, message, *, seen_at_inject=None):
+def _run(plugin, tmp_path, monkeypatch, message, *, seen_at_inject=None, use_host=False, update_id=1):
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
-    Client.updates = [{"update_id": 1, "message": {
+    Client.updates = [{"update_id": update_id, "message": {
         "message_id": 5, "chat": {"id": 42, "type": "private"}, "from": {"id": 42, "first_name": "Anton"},
         **message,
     }}]
@@ -82,8 +87,8 @@ def _run(plugin, tmp_path, monkeypatch, message, *, seen_at_inject=None):
 
     async def fake_inject(_api, payload):
         for item in payload.get("attachments") or []:
-            path = Path(item["path"])
-            if seen_at_inject is not None:
+            if seen_at_inject is not None and "path" in item:
+                path = Path(item["path"])
                 seen_at_inject[str(path)] = path.read_bytes() if path.is_file() else None
         injected.append(payload)
 
@@ -91,7 +96,8 @@ def _run(plugin, tmp_path, monkeypatch, message, *, seen_at_inject=None):
         raise asyncio.CancelledError
 
     monkeypatch.setattr(plugin, "TelegramClient", Client)
-    monkeypatch.setattr(plugin, "_inject", fake_inject)
+    if not use_host:
+        monkeypatch.setattr(plugin, "_inject", fake_inject)
     monkeypatch.setattr(plugin.asyncio, "sleep", stop_sleep)
     api = Api(tmp_path)
     try:
@@ -106,7 +112,7 @@ def test_document_with_caption_is_parked_relayed_and_cleaned_up(tmp_path, monkey
     seen = {}
     injected, client, _api = _run(plugin, tmp_path, monkeypatch, {
         "caption": "please review",
-        "document": {"file_id": "f1", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 1234},
+        "document": {"file_id": "f1", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": len(PDF)},
     }, seen_at_inject=seen)
 
     assert client.downloads == ["f1"]
@@ -128,7 +134,7 @@ def test_document_with_caption_is_parked_relayed_and_cleaned_up(tmp_path, monkey
 def test_file_without_caption_is_a_text_less_message(tmp_path, monkeypatch):
     plugin = _load_plugin()
     injected, client, _api = _run(plugin, tmp_path, monkeypatch, {
-        "voice": {"file_id": "v1", "mime_type": "audio/ogg", "duration": 3, "file_size": 4000},
+        "voice": {"file_id": "v1", "mime_type": "audio/ogg", "duration": 3, "file_size": len(PDF)},
     })
     (payload,) = injected
     assert payload["text"] == ""
@@ -142,11 +148,12 @@ def test_parked_file_is_removed_even_when_the_host_refuses(tmp_path, monkeypatch
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
     Client.updates = [{"update_id": 1, "message": {
         "message_id": 5, "chat": {"id": 42, "type": "private"}, "from": {"id": 42},
-        "document": {"file_id": "f2", "file_name": "notes.txt", "mime_type": "text/plain", "file_size": 10},
+        "document": {"file_id": "f2", "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": len(PDF)},
     }}]
     Client.instances = []
 
     async def failing_inject(_api, payload):
+        assert Path(payload["attachments"][0]["path"]).read_bytes() == PDF
         raise RuntimeError("Host inject returned HTTP 413")
 
     async def stop_sleep(_delay):
@@ -161,19 +168,23 @@ def test_parked_file_is_removed_even_when_the_host_refuses(tmp_path, monkeypatch
     except asyncio.CancelledError:
         pass
     assert list((tmp_path / "inbox").iterdir()) == []
-    assert any("Could not deliver" in text for _chat, text in Client.instances[-1].sent)
+    assert len(Client.instances[-1].sent) == 1
+    assert "Could not confirm" in Client.instances[-1].sent[0][1]
 
 
-def test_oversize_file_is_refused_before_download(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    injected, client, _api = _run(plugin, tmp_path, monkeypatch, {
+@pytest.mark.parametrize("caption", ["  please review\n ", ""])
+def test_oversize_file_is_refused_before_download(tmp_path, monkeypatch, caption):
+    injected, client, _api = _run(_load_plugin(), tmp_path, monkeypatch, {
+        **({"caption": caption} if caption else {}),
         "document": {"file_id": "big", "file_name": "video.mov", "mime_type": "video/quicktime",
                      "file_size": 11 * 1024 * 1024},
     })
-    assert injected == []
+    (payload,) = injected
+    assert payload["text"] == payload["image_caption"] == caption
+    assert payload["attachments"] == [{"name": "video.mov", "mime": "video/quicktime", "size": 11 * 1024 * 1024,
+                                       "unavailable": "too_large", "limit_bytes": 10 * 1024 * 1024}]
     assert client.downloads == []
-    assert client.sent == [(42, "This file is 11.0 MiB; this integration accepts files up to 10 MiB. "
-                                "Send a smaller file or a link.")]
+    assert client.sent == []
     assert not (tmp_path / "inbox").exists()
 
 
@@ -187,25 +198,70 @@ def test_unsupported_kinds_get_an_explicit_notice(tmp_path, monkeypatch):
                                 "(document, video, audio, voice).")]
 
 
-def test_inbound_file_descriptor_shapes(tmp_path, monkeypatch):
-    plugin = _load_plugin()
-    inbound = plugin.telegram_inbound
-    from ouroboros import i18n_memory as memory
-
-    plugin.telegram_i18n.configure(tmp_path)
-    monkeypatch.setenv("OUROBOROS_UI_LANGUAGE", "ru")
-    memory.update_memory(tmp_path, "ru", lambda doc: (memory.apply_generated(doc, {
-        "code:tg.inbound.too_large": {"text": "Файл весит {size} МиБ; эта интеграция принимает файлы не больше 10 МиБ."}},
-        model="test"), doc)[1], create=True)
+def test_inbound_file_descriptor_shapes():
+    inbound = _load_plugin().telegram_inbound
     assert inbound.inbound_file({"text": "hi"}) is None
-    doc = inbound.inbound_file({"document": {"file_id": "f", "file_name": "../../evil.sh", "mime_type": "text/x-sh"}})
-    assert doc["name"] == "evil.sh" and doc["refusal"] == ""
+    doc = inbound.inbound_file({"document": {"file_id": "f", "file_name": "report.pdf", "mime_type": "application/pdf"}})
+    assert doc == {"kind": "document", "file_id": "f", "name": "report.pdf", "mime": "application/pdf", "size": None}
     note = inbound.inbound_file({"video_note": {"file_id": "abcdefgh12345678", "file_size": 5}})
     assert note["name"] == "video_note_12345678.mp4" and note["mime"] == "video/mp4"
     assert inbound.inbound_file({"audio": {"file_id": "", "file_name": "x.mp3"}}) is None
-    assert inbound.refusal_text({"size": 12 * 1024 * 1024}, "ru").startswith("Файл весит 12.0 МиБ")
-    assert inbound.refusal_text({"size": 12 * 1024 * 1024}, "").startswith("This file is 12.0 MiB")
-    plugin.telegram_i18n.configure(None)
+    assert inbound.photo_media({"file_id": "photo", "file_size": 10})["size"] == 10
+
+
+def test_photo_still_rides_inline(tmp_path, monkeypatch):
+    injected, client, _api = _run(_load_plugin(), tmp_path, monkeypatch, {
+        "caption": "  look here  ", "photo": [{"file_id": "small"}, {"file_id": "photo", "file_size": len(base64.b64decode(PNG))}],
+    })
+    (payload,) = injected
+    assert client.downloads == ["photo"] and not client.sent
+    assert payload["text"] == payload["image_caption"] == "  look here  "
+    assert payload["image_base64"] == PNG and payload["image_mime"] == "image/png"
+    assert "attachments" not in payload
+
+
+@pytest.mark.parametrize("known_size", [False, True])
+def test_failed_download_keeps_caption_and_only_the_facts_telegram_announced(tmp_path, monkeypatch, known_size):
+    plugin = _load_plugin()
+    size = {"file_size": len(PDF) + 2} if known_size else {}
+    if not known_size:
+        async def interrupted(self, file_id):
+            self.downloads.append(file_id)
+            raise RuntimeError("download interrupted")
+
+        monkeypatch.setattr(Client, "download_file", interrupted)
+    injected, client, _api = _run(plugin, tmp_path, monkeypatch, {
+        "caption": "  notes  ", "document": {"file_id": "doc", "file_name": "report.pdf", "mime_type": "application/pdf", **size},
+    })
+    (payload,) = injected
+    assert client.downloads == ["doc"] and not client.sent
+    assert payload["text"] == "  notes  "
+    assert payload["attachments"] == [{"name": "report.pdf", "mime": "application/pdf", "unavailable": "download_failed",
+                                       **({"size": size["file_size"]} if known_size else {})}]
+    assert not (tmp_path / "inbox").exists()
+
+
+@pytest.mark.parametrize("receipt_found", [True, False])
+def test_unknown_intake_reads_once_and_never_repeats_the_post(tmp_path, monkeypatch, receipt_found):
+    plugin = _load_plugin()
+    calls = []
+
+    async def host(_api, path, payload, *, method="POST"):
+        calls.append((method, path))
+        if method == "POST":
+            assert payload["text"] == "Read A"
+            raise TimeoutError("No reply observed")
+        return (200, {"ok": True, "status": "pending"}) if receipt_found else (404, {"ok": False})
+
+    monkeypatch.setattr(plugin, "_host_post", host)
+    _, client, _api = _run(plugin, tmp_path, monkeypatch, {"text": "Read A"}, use_host=True)
+    assert calls == [("POST", "/chat/inject"), ("GET", "/chat/operations/42:tg:42:5")]
+    assert client.sent == ([] if receipt_found else [(42, "Could not confirm that Ouroboros received that Telegram update.")])
+    # After a poller restart, Telegram can renumber the update, but this is
+    # still the same message and must not trigger another read or send.
+    _, replay_client, _api = _run(plugin, tmp_path, monkeypatch, {"text": "Read A"}, use_host=True, update_id=11)
+    assert calls == [("POST", "/chat/inject"), ("GET", "/chat/operations/42:tg:42:5")]
+    assert replay_client.sent == []
 
 
 @pytest.mark.parametrize("filename", [r"x\..\..\..\escape.txt", r"C:\outside\data.pdf", "report.pdf"])

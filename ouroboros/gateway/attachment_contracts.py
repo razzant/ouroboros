@@ -40,6 +40,7 @@ class AttachmentManifestEntry(TypedDict, total=False):
     size: int
     sha256: str
     rule: str
+    limit_bytes: int
 
 
 class ChatAttachmentView(TypedDict, total=False):
@@ -54,3 +55,5 @@ class ChatAttachmentView(TypedDict, total=False):
     size: Optional[int]
     available: bool
     url: str
+    unavailable: Literal["too_large", "download_failed"]
+    limit_bytes: int
