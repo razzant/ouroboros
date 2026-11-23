@@ -214,10 +214,9 @@ def test_recovery_continues_during_an_existing_primary_outage(data_root, tmp_pat
 ])
 def test_a_ceiling_routes_tool_fit_stays_only_where_its_notice_stays(data_root, tmp_path, monkeypatch, primary,
                                                                      ceiling_route_answers):
-    """A direct-OpenAI candidate fits the shared resident list and writes its notice into its transcript. A
-    cross-family candidate writes into its own copy: if it answers, both are adopted; if it fails, the copy goes
-    and the fit with it, so the next route sends the whole list and reads no notice. A same-family candidate
-    writes into the shared transcript, so its fit stays with its notice even when it fails."""
+    """A direct-OpenAI candidate fits its own copy of the acting list and writes its notice into its own transcript
+    copy (``loop_model_call._fallback_rows``): if it answers, both are adopted; if it fails, the copy goes and the fit
+    with it, in the same family too, so the next route sends the whole list and reads no notice."""
     from ouroboros import provider_models
 
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::fb-direct,fb/two")
@@ -237,10 +236,8 @@ def test_a_ceiling_routes_tool_fit_stays_only_where_its_notice_stays(data_root, 
     left_out = getattr(registry._ctx, "_route_left_out_tool_names", None) or set()
     if ceiling_route_answers:
         assert text == "answer from openai::fb-direct" and not rest and len(left_out) == whole - 100
-    elif primary == PRIMARY:
+    else:  # cross-family or same-family: no route inherits a failed trial's narrowing
         assert text == "answer from fb/two" and rest == [("fb/two", whole, False)] and not left_out
-    else:
-        assert text == "answer from fb/two" and rest == [("fb/two", 100, True)] and len(left_out) == whole - 100
 
 
 def test_non_unknown_candidate_failure_cannot_buy_a_forced_summary_after_unknown():

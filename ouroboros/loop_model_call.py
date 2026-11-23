@@ -188,6 +188,7 @@ def _run_cross_model_fallback_chain(
     from ouroboros.model_wait import current_model_wait
     from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS as _cooldown_kinds
     from ouroboros.primary_route_observation import failure_facts, fallback_adoption_text, fallback_route_words, own_call_record, route_facts_text
+    from ouroboros.route_choice import explicit
 
     def _cooled(model: str, use_local: bool, role: str) -> None:
         if str(accumulated_usage.get("_last_llm_error_kind") or "") in _cooldown_kinds:
@@ -203,7 +204,14 @@ def _run_cross_model_fallback_chain(
         return (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
                 and waiter is not None and waiter.waits_allowed)
 
+    def owner_switched(role: str) -> bool:  # a card's Switch during this walk; an earlier card's choice is no new one
+        # ``TaskModelWait.wait`` stores a NEW entry on every Switch, even one naming the held binding again; Retry and
+        # auto-continue leave the entry as it was. So identity, never equal fields, tells this walk's Switch.
+        entry = waiter.overrides.get(role) if waiter is not None else None
+        return bool(entry) and entry is not held_choices.get(role)
+
     waiter = current_model_wait()
+    held_choices = dict(waiter.overrides) if waiter is not None else {}  # the role entries themselves, not copies
     _cooled(active_model, active_use_local, str(getattr(context_fit_plan, "model_role", "") or "main"))
     primary_context_usage = _snapshot_context_fit_usage(accumulated_usage)
     attempt_cap = _fcd.attempts_per_model()
@@ -272,7 +280,7 @@ def _run_cross_model_fallback_chain(
             round_idx=round_idx, answered=answered, own_call=own_call)
         if not is_primary:
             slot.route_wait_on_primary = False
-        adopt_fallback(slot, is_primary, entry_failure, role)
+        adopt_fallback(slot, is_primary, entry_failure, role, explicit("wait_card") if owner_switched(call.model_role) else None)
         emit_progress(fallback_adoption_text(slot, model, local, role, waiter, accumulated_usage,
                                              answered=answered, own_call=own_call, fresh=fresh))
         return model, local, plan, mode
@@ -287,7 +295,7 @@ def _run_cross_model_fallback_chain(
     msg, adopted, fresh = None, False, True  # fresh: the last call left a failure row of its own (fallback_reason_text)
     # ABI-4: typed ResolvedModelTarget rows cross to strings only at the transport boundary; every chain
     # row uses the single global USE_LOCAL_FALLBACK flag, the primary keeps its own locality.
-    for fallback_model, fallback_role, fallback_use_local, is_primary in rows:
+    for index, (fallback_model, fallback_role, fallback_use_local, is_primary) in enumerate(rows):
         binding = route_binding(fallback_model, fallback_use_local, fallback_role, overrides=waiter.overrides if waiter else None)
         if _fcd.is_cooling_down(*binding) or (recovering_output and not output_recovery.fallback_untried(accumulated_usage, binding)):
             continue  # a skipped route is not announced or prepared, and leaves the walk's facts as they were
@@ -301,7 +309,9 @@ def _run_cross_model_fallback_chain(
                       f"{fallback_reason_text(accumulated_usage, previous_model, previous_use_local, entry=not tried, fresh=fresh)}",  # the predecessor's class and own sentence
                       incident={"task_incident": "model_lane_attempt", "toast_once": f"{task_id}:model_lane_attempt:{round_idx}:{fallback_model}"})
         _disclose_unknown(messages, "The previous attempt ended without a usable answer; the host is trying a configured alternative.")
-        candidate_call = prepare(fallback_model, fallback_use_local, fallback_role, is_primary, facts)
+        # A candidate defers its resource wait only while a later route, the owner question or the round's own wait follows.
+        defer = recovering_output or task_type == "presence" or own_wait or _asks_owner() or _route_follows(rows[index + 1:])
+        candidate_call = prepare(fallback_model, fallback_use_local, fallback_role, is_primary, facts, defer=defer)
         if recovering_output and not output_recovery.fallback_untried(accumulated_usage, output_recovery.binding(candidate_call)):
             restore_acting_view()
             continue  # preparation may outlive a change to an already-spent account; keep the existing late check
@@ -359,6 +369,8 @@ def _run_cross_model_fallback_chain(
         local = resumed.get("use_local", override.get("use_local", getattr(failed, "active_use_local", active_use_local)))
         retry_call = prepare(model, local, role, getattr(failed, "fallback_is_primary", None),
             getattr(failed, "fallback_predecessor", {}), account=account, defer=False)
+        if owner_switched(role):  # this card's Switch holds for the rest of the task, as ``_reprepare_waiting_main`` records it
+            slot.route_choice = explicit("wait_card")
         slot._pending_handover_reason = "owner_wait"
         meta_before = accumulated_usage.get("_last_llm_call_meta")
         msg, _cost, retry_mode = _loop()._call_round_model(retry_call)
