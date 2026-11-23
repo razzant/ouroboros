@@ -709,12 +709,6 @@
   },
   {
     "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
-    "path": "web/modules/log_events.js",
-    "kind": "contains",
-    "value": "lifecycleTerminal"
-  },
-  {
-    "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
     "path": "web/modules/chat_activity.js",
     "kind": "contains",
     "value": "Boolean(terminal) || ['done', 'lifecycle_error', 'cancelled'].includes(phase)"
