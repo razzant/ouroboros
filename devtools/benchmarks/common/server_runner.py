@@ -300,6 +300,7 @@ def seed_owner_state(data_root: pathlib.Path, *, evolution_enabled: bool = False
     The real boot completes this pending identity before admitting work. Defaults
     are valid here only because the existing initializer witnessed a fresh root.
     """
+    from ouroboros import own_time_seed
     from supervisor import state, state_initialization
 
     root = pathlib.Path(data_root)
@@ -315,7 +316,8 @@ def seed_owner_state(data_root: pathlib.Path, *, evolution_enabled: bool = False
         decision = state_initialization.initialization_decision(root, origin="isolated_benchmark")
         if not decision.get("create"):
             raise state.StateUnavailable(decision["reason"], str(decision.get("detail") or ""))
-        st = state.ensure_state_defaults({"initialization_id": decision["initialization_id"], "owner_chat_id": 1})
+        st = state.ensure_state_defaults({"initialization_id": decision["initialization_id"], "owner_chat_id": 1,
+                                          **own_time_seed.born(False)})  # a fresh root, never an older install
         if evolution_enabled:
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             state.atomic_write_text(root / "state/evolution_campaign.json", json.dumps({

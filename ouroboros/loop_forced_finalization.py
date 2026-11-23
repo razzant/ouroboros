@@ -970,6 +970,8 @@ def _call_forced_model_once(
         from ouroboros.transcript_prefix import count_accepted_send
         count_accepted_send(owner_ctx, ctx.messages, getattr(ctx, "tool_schemas", None),
                             round_idx=ctx.round_idx, usage=ctx.accumulated_usage)
+        from ouroboros.own_time_seed import spend_offer  # its own physical request spends a one-time fact, as a round's
+        spend_offer(owner_ctx, _loop().last_physical_attempt_capture())
     return str((final_msg or {}).get("content") or "").strip()
 
 

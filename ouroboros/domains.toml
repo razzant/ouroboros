@@ -234,6 +234,7 @@ D20 = "Presence"
 "ouroboros/consciousness_standing.py" = "D15"  # what stands in every wake: answerable cards, works that ended without success, the own clock
 "ouroboros/consciousness_transitions.py" = "D15"
 "ouroboros/consciousness_clock.py" = "D15"
+"ouroboros/own_time_seed.py" = "D15"  # the note claiming wake a fresh install's first accepted Start seeds once; an older install's one-time fact in Main
 "ouroboros/chat_annotations.py" = "D17"
 "ouroboros/chat_chain.py" = "D15"
 "ouroboros/chronicle_store.py" = "D15"

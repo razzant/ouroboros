@@ -158,13 +158,17 @@ def first_state(drive_root: Any, initialization_id: str) -> Dict[str, Any]:
     ``upgrade_notices.BORN_SETTLED_NOTICE_KEYS`` names are born marked; that stamp is not a
     delivery (no chat receipt exists for it), and the notices judged by facts stay owed.
     Consciousness is born on when this root's setup left its switch on (``setup_left_consciousness_on``),
-    and a state minted after a recorded setup owes the first meeting its Start opens (``supervisor.first_meeting``)."""
+    a state minted after a recorded setup owes the first meeting its Start opens (``supervisor.first_meeting``),
+    and every first state is eligible for the seed note a first accepted Start owes, which a switch born on
+    already accepted (``own_time_seed``)."""
+    from ouroboros import own_time_seed
     from ouroboros.upgrade_notices import BORN_SETTLED_NOTICE_KEYS  # D08 -> D11 is allowed only lazily
     from supervisor.first_meeting import FIRST_MEETING_KEY, owed
 
-    pressed_at = setup_pressed_start_at(drive_root)
-    return {"initialization_id": initialization_id, **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso()),
-            **({"bg_consciousness_enabled": True} if setup_left_consciousness_on(drive_root) else {}),
+    pressed_at, on = setup_pressed_start_at(drive_root), setup_left_consciousness_on(drive_root)
+    return {"initialization_id": initialization_id, **own_time_seed.born(on),
+            **dict.fromkeys(BORN_SETTLED_NOTICE_KEYS, utc_now_iso()),
+            **({"bg_consciousness_enabled": True} if on else {}),
             **({FIRST_MEETING_KEY: owed(pressed_at)} if pressed_at else {})}
 
 
