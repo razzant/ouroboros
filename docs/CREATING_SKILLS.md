@@ -159,6 +159,17 @@ execute. Python extensions may omit `runtime`: the loader imports `entry`, which
 must export `register(api)`. Companions still require their own runtime and command
 (see "Declaring a companion process").
 
+The host reads script stdout and stderr as UTF-8 and starts Python scripts with
+`PYTHONIOENCODING=utf-8:backslashreplace`; other runtimes, standalone runs and
+older hosts need their own UTF-8 stdio, and file I/O still needs explicit encodings.
+
+That value is the host's own, not a skill setting: a `PYTHONIOENCODING` saved in Settings and
+granted through `env_from_settings` does not change it for a script run ("Grants for protected
+keys and host permissions"). The policy covers the streams only — the codec `open()` uses
+without an explicit `encoding` stays the interpreter's own default — and a Python child that
+inherits the setting writes UTF-8 too, so read that child's pipe with `encoding="utf-8"`.
+A companion process is configured by its own declaration ("Declaring a companion process").
+
 Go scripts are compiled into a private temporary executable and then run with
 the caller's arguments unchanged, including arguments ending in `.go`. The
 compiler and program share the invocation timeout; `runtime_phase` distinguishes
@@ -1016,6 +1027,10 @@ its own model, account and review settings; a value your code already copied or 
 a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
 `notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
 consent. The desktop launcher's owner-grant bridge records these grants.
+
+One grant never becomes the operative value: `PYTHONIOENCODING` is replaced by the host's own
+UTF-8 stdio setting where the host starts the process itself — a Python script run and an
+extension's own Python process ("Manifest schema", script stdio).
 
 The Skills UI surfaces missing grants on the skill card. The agent
 can also call `toggle_skill enabled=true` only after grants are
