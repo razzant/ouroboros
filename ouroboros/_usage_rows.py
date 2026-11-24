@@ -388,27 +388,33 @@ def summary_delta(row: Dict[str, Any]) -> Bucket:
     every other row has weight 1. ``_summary``/``_breakdown_bucket`` fold these
     deltas, and the usage store maintains its summaries with the same deltas.
     """
-    delta = Bucket(rows=1, cash=cash_contribution(row))
-    kind = str(row.get("kind") or "")
-    state = str(row.get("state") or "")
+    delta = spend_delta(row)
     delta.processing = _processing_delta(row)
-    delta.physical = _physical_call_count(row)
     ttl = str(row.get("prompt_cache_ttl") or "").strip()
     if ttl:
         delta.ttls[ttl] = [delta.physical, 1]
     for name in _TOKEN_FIELDS:
         if row.get(name) is not None:
             delta.tokens[name] = [max(0, int(row[name])), 1]
+    if delta.sessions:
+        route = str(row.get("subscription_route") or "")
+        reset_at = str(row.get("subscription_reset_at") or "")
+        if route and reset_at:
+            delta.windows[route] = reset_at
+    return delta
+
+
+def spend_delta(row: Dict[str, Any]) -> Bucket:
+    """The canonical money and count contribution, without token, tariff or subscription-window work."""
+    delta = Bucket(rows=1, cash=cash_contribution(row), physical=_physical_call_count(row))
+    kind = str(row.get("kind") or "")
+    state = str(row.get("state") or "")
     if kind == "usage_baseline":
         # Compaction stamp header: pure provenance, no money, no counts.
         return delta
     weight = max(1, int(row.get("folded_attempt_count") or 1)) if kind == "usage_baseline_group" else 1
     if kind == "subscription_session":
         delta.sessions = 1
-        route = str(row.get("subscription_route") or "")
-        reset_at = str(row.get("subscription_reset_at") or "")
-        if route and reset_at:
-            delta.windows[route] = reset_at
     if kind == "legacy_metadata":
         delta.counts["metadata_only"] = max(1, int(row.get("ambiguous_call_count") or 1))
         return delta

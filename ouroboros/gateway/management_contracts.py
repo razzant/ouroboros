@@ -1420,11 +1420,49 @@ class ResetResponse(TypedDict):
     error: NotRequired[str]
 
 
+class _ProjectCostTotals(TypedDict):
+    """Day or span spend, aggregated before rounding; null means no settled price was recorded."""
+
+    settled_usd: Optional[float]
+    confirmed_usd: Optional[float]
+    estimated_usd: Optional[float]
+    price_basis: Literal["confirmed", "estimated", "mixed", "unknown"]  # presence, not the amount's magnitude
+    unknown_unmetered: int
+    non_final_rows: int
+    accounting_open_rows: int  # the ledger's open accounting: the two counts below and settled estimates
+    open_rows: int  # calls with no recorded outcome (reserved, dispatched)
+    unresolved_rows: int  # calls ended unreconciled (an answer may have arrived) or with an unknown outcome
+    physical_calls: int
+    subscription_sessions: int
+
+
+class ProjectDayCost(_ProjectCostTotals):
+    day: str
+
+
+class ProjectDaysView(TypedDict):
+    available: Literal[True]
+    selector: str
+    days: Literal[7, 30]
+    timezone: Literal["UTC"]
+    since: str
+    until: str
+    rows: List[ProjectDayCost]
+    total: _ProjectCostTotals
+    integrity_degraded: bool
+
+
+class ProjectDaysUnavailable(TypedDict):
+    available: Literal[False]
+    selector: str
+    error_code: Literal["unknown_selector", "unknown_days", "ledger_unavailable", "project_source_unavailable"]
+
+
 class CostBreakdownResponse(TypedDict, total=False):
     """``GET /api/cost-breakdown``: spend from the physical-attempt ledger. Table rows (``by_model``,
     ``by_api_key``, ``by_model_category``, ``by_task_category``) are ``{cost, calls, unknown_unmetered,
-    non_final_rows, cost_final, ...tokens}``; ``cost_final`` false means rows are still open. A 503
-    carries ``accounting.available: false`` (ledger_unavailable): unknown spend, never zero."""
+    non_final_rows, cost_final, ...tokens}``; ``cost_final`` false means rows are still open. A 503 is
+    ``CostBreakdownUnavailableResponse``."""
 
     total_cost: float
     total_calls: int
@@ -1446,6 +1484,30 @@ class CostBreakdownResponse(TypedDict, total=False):
     # [{class, detail, calls, write_tokens, write_cost, unshared_calls, shared_write_tokens (the tokens write_cost is
     # of)}]}``, or ``{available: false, period, error_code}`` (``unknown_period`` adds ``periods``).
     period: Dict[str, Any]
+    project_days: Union[ProjectDaysView, ProjectDaysUnavailable]  # ``?project_days=<selector>&days=7|30`` only
+
+
+class CostProjectDaysResponse(TypedDict):
+    """``GET /api/cost-breakdown?view=project_days``: the room view alone, without reading the page's totals;
+    its refusal answers 200 as in the combined response."""
+
+    project_days: Union[ProjectDaysView, ProjectDaysUnavailable]
+
+
+class CostAccountingUnavailable(TypedDict):
+    available: Literal[False]
+    authority: Literal["physical_attempt_ledger"]
+    cost_final: Literal[False]
+    error_code: Literal["ledger_unavailable"]
+
+
+class CostBreakdownUnavailableResponse(TypedDict):
+    """``GET /api/cost-breakdown`` 503: the ledger cannot be read, so spend is unknown, never zero; a requested
+    room view is refused with its own selector (``ledger_unavailable``), never dropped."""
+
+    error: str  # "Physical-attempt accounting unavailable"
+    accounting: CostAccountingUnavailable
+    project_days: NotRequired[ProjectDaysUnavailable]
 
 
 __all__ = [
@@ -1476,5 +1538,6 @@ __all__ = [
     "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
     "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
-    "ResetRequest", "ResetResponse", "CostBreakdownResponse",
+    "ResetRequest", "ResetResponse", "CostBreakdownResponse", "CostAccountingUnavailable", "CostBreakdownUnavailableResponse",
+    "CostProjectDaysResponse", "ProjectDayCost", "ProjectDaysView", "ProjectDaysUnavailable",
 ]

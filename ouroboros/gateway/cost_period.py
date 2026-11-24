@@ -1,16 +1,13 @@
-"""The Costs page's period view: what the model calls started in a period cost, by token class and by what
-each cache write followed (ARCHITECTURE 06 "Prompt caching").
+"""Read-only Costs views over the physical-attempt ledger, in short indexed reads for writer latency.
 
-The physical-attempt ledger is the one cost authority. A period is read by position
-(``usage_store.Txn.period_bounds``) in short range reads, so a display never holds a rollback-journal store's
-writers behind it, and membership is the reservation time alone. Money by class is an ALLOCATION: each call's
-RECORDED cost is shared out by what the route's tariff charges for each class of that call's own tokens, so
-only price ratios enter and the parts of a model, with the cost that could not be shared, add up to its
-recorded cost. The tariff is one a display may read without a fetch (``pricing.display_tariff``); a model it
-does not price keeps its tokens and its whole cost unshared, and so does a call whose row retains usage its
-text counts cannot carry (audio, image): no text price ratio says how that bill divides. Nothing is stored here,
-and no verdict, threshold or signal is derived. A consciousness wake reads the 24-hour view's cache writes as
-one fact row (``consciousness_view.cache_writes_text``).
+Rolling periods group calls by reservation time, token class and what each cache write followed
+(ARCHITECTURE §6). Passive tariff ratios allocate a call's recorded price, never reprice it. If no tariff
+or the row's text counts cannot account for the bill (including media), the spend stays unshared beside
+its tokens. Consciousness reads the 24-hour cache-write facts (``consciousness_view.cache_writes_text``).
+
+The room view projects dated spend by UTC calendar day from the same ledger and current root-to-room
+bindings. Undated history stays in all-time totals. Sum observed money before formatting, preserve the
+basis even at zero, and report count or attribution gaps rather than inventing prices or rooms.
 """
 
 from __future__ import annotations
@@ -19,11 +16,14 @@ import datetime as _dt
 import json
 import pathlib
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 PERIODS = {"24h": 24 * 3600, "7d": 7 * 24 * 3600, "30d": 30 * 24 * 3600}
 _CHUNK_ROWS = 20_000  # one short read per chunk of the ledger's tail
 _BUSY_TRIES = 8  # a display read gives way to the ledger's writers after its short wait; a chunk asks again this often
+_DAY_PAGE = 512  # short indexed address pages; only selected spend inputs leave the ledger
 _CLASSES = ("cache_write", "cache_read", "output", "uncached_input")
 
 
@@ -195,3 +195,142 @@ def cost_period(data_dir: pathlib.Path, period: str, *, now: Optional[float] = N
             # The date of the recorded catalogue when it, not this process's own tariffs, priced the shares.
             "tariff_observed_at": min((seen for _rows, seen in catalogs.values() if seen), default=""),
             "models": rows, "cache_writes": writes}
+
+
+def _dated_cost_pages(data_dir: pathlib.Path, since: float, until: float,
+                      room_matches: dict[str, bool]) -> Iterator[dict[str, tuple[str, str]]]:
+    """Yield starts in the window; one-shot rows have only their recording instant.
+
+    Skip already-resolved exclusions before parsing dates; unknown roots still qualify by date first.
+    A late settlement can move an already-seen address forward in the index; the consumer folds it once.
+    """
+    highest, categories = _read(data_dir, lambda txn: txn.daily_cost_bounds())
+    for category in categories:
+        after = (since, 0)
+        while True:
+            page = _read(data_dir, lambda txn: txn.daily_cost_addresses(category, highest, after, _DAY_PAGE))
+            if not page:
+                break
+            after = (page[-1][0], page[-1][1])
+            dated = {}
+            for recorded, _, attempt, root, kind, reserved, dispatched in page:
+                root = root or ""
+                if room_matches.get(root) is False:
+                    continue
+                start = _epoch(reserved) if not kind or kind == "attempt" else recorded
+                if start is None:
+                    start = _epoch(dispatched)
+                if start is not None and since <= start < until:
+                    day = _dt.datetime.fromtimestamp(start, _dt.timezone.utc).date().isoformat()
+                    dated[attempt] = (root, day)
+            if dated:
+                yield dated
+            if len(page) < _DAY_PAGE:
+                break
+
+
+def _cost_room(rooms, root: str) -> int:
+    """Project binding outranks the admitted chat. A missing root or chat is never Main."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
+    project_chat = rooms(root)
+    return project_chat or (WEB_UI_CHAT_ID if rooms.lineage(root).get("chat_id") == WEB_UI_CHAT_ID else 0)
+
+
+class ProjectDaysRoomUnavailable(RuntimeError):
+    """Cannot read the authority that assigns ledger rows to rooms, not a ledger failure."""
+
+
+@contextmanager
+def _room_source():
+    from ouroboros.project_admission import ProjectAdmissionError
+    from ouroboros.store import StoreError
+
+    try:
+        yield
+    except (ProjectAdmissionError, StoreError, OSError, ValueError) as exc:
+        raise ProjectDaysRoomUnavailable from exc
+
+
+def _render_day_totals(bucket, prices: set[str]) -> dict:
+    from ouroboros._usage_money import CASH_KEYS
+
+    # Unlike the compatibility totals, the daily view must preserve sub-microdollar amounts. ``open_rows`` are the
+    # calls with no recorded outcome (reserved, dispatched). ``unresolved_rows`` ended unreconciled: an answer may have
+    # arrived (``usage_accounting._account_response``) or its fate is unknown. A settled estimate is neither, although
+    # it keeps ``accounting_open_rows`` open: no call joins it, and nothing promises it an exact price later.
+    return {**{key: float(value) if prices else None for key, value in zip(CASH_KEYS[:3], bucket.cash)},
+            "price_basis": "mixed" if len(prices) > 1 else next(iter(prices), "unknown"),
+            "unknown_unmetered": bucket.unknown, "non_final_rows": bucket.non_final,
+            "accounting_open_rows": bucket.accounting_open, "physical_calls": bucket.physical,
+            "subscription_sessions": bucket.sessions,
+            "open_rows": bucket.counts.get("reserved", 0) + bucket.counts.get("dispatched", 0),
+            "unresolved_rows": bucket.counts.get("unresolved", 0)}
+
+
+def _project_day_totals(data_dir: pathlib.Path, rooms, target: int, since: float, until: float) -> tuple[list, dict]:
+    from ouroboros._usage_money import amount, cash_is_confirmed
+    from ouroboros._usage_rows import Bucket, spend_delta
+    from ouroboros.usage_store import decode_daily_cost_rows
+
+    totals = defaultdict(Bucket)
+    priced = defaultdict(set)
+    roots = {"": not target}
+    seen: set[str] = set()  # only selected attempts, not every attempt in the date window
+    for page in _dated_cost_pages(data_dir, since, until, roots):
+        unseen = {root for root, _ in page.values()} - roots.keys()
+        if unseen:
+            with _room_source():
+                if not rooms.warm(unseen):
+                    raise ProjectDaysRoomUnavailable("Task room lineage is unavailable")
+                roots.update((root, _cost_room(rooms, root) == target) for root in unseen)
+        matches = {attempt: day for attempt, (root, day) in page.items() if roots[root] and attempt not in seen}
+        if not matches:
+            continue
+        captured = _read(data_dir, lambda txn: txn.daily_cost_rows(tuple(matches)))
+        for row in decode_daily_cost_rows(captured):
+            attempt = row["attempt_id"]
+            seen.add(attempt)
+            delta = spend_delta(row)
+            if not (delta.physical or delta.sessions or delta.non_final):
+                continue  # an unsent, released reservation is no spend and no usage
+            day = matches[attempt]
+            if row.get("state") == "settled" and amount(row.get("cost_usd")) is not None:
+                priced[day].add("confirmed" if cash_is_confirmed(row) else "estimated")
+            totals[day].add(delta)
+    rows = []
+    total, prices = Bucket(), set()
+    for day, bucket in sorted(totals.items(), reverse=True):
+        rows.append({"day": day, **_render_day_totals(bucket, priced[day])})
+        total.add(bucket)
+        prices.update(priced[day])
+    return rows, _render_day_totals(total, prices)
+
+
+def project_days(data_dir: pathlib.Path, selector: str, days: str, *, now: Optional[float] = None) -> dict:
+    """One room's dated ledger contributions, by UTC calendar day. No history replay or persisted rollup.
+
+    Ownership means the physical attempt's root and its current durable room binding; converting
+    a root carries its history. The rest (including places) is not assigned to Main or a Project.
+    """
+    from ouroboros import usage_store
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.projects_registry import RoomResolver, list_reserved_projects
+
+    failure = {"available": False, "selector": selector}
+    if days not in ("7", "30"):
+        return {**failure, "error_code": "unknown_days"}
+    with _room_source():
+        projects = {row["id"]: row for row in list_reserved_projects(data_dir, strict=True)}
+    pid = selector.removeprefix("project:") if selector.startswith("project:") else ""
+    if selector not in ("main", "unassigned") and pid not in projects:
+        return {**failure, "error_code": "unknown_selector"}
+    target = WEB_UI_CHAT_ID if selector == "main" else projects[pid]["chat_id"] if pid else 0
+    end = _dt.datetime.fromtimestamp(time.time() if now is None else now, _dt.timezone.utc)
+    start = end.replace(hour=0, minute=0, second=0, microsecond=0) - _dt.timedelta(days=int(days) - 1)
+    with _room_source():
+        rooms = RoomResolver(data_dir, strict=True, reserved=projects)
+    rows, total = _project_day_totals(data_dir, rooms, target, start.timestamp(), end.timestamp())
+    return {"available": True, "selector": selector, "days": int(days), "timezone": "UTC",
+            "since": start.isoformat(), "until": end.isoformat(), "rows": rows, "total": total,
+            "integrity_degraded": usage_store.integrity_degraded(data_dir)}
