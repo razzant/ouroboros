@@ -46,7 +46,9 @@ import json
 import uuid
 from typing import Any, Dict, List
 
-from ouroboros.consciousness_authority import consciousness_origin_metadata, work_kind
+from ouroboros.consciousness_authority import (
+    WORK_KIND_CONSCIOUSNESS, consciousness_origin_metadata, declared_own_origin, is_own_work, work_kind,
+)
 from ouroboros.deadline_utils import naive_instant, parse_deadline_ts
 from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier, presence_root_relation
 from ouroboros.settings_scales import EFFORT_SCALE, requested_effort
@@ -63,6 +65,7 @@ def _manage_schedules(
     offset: int = 0, limit: int = 20, expected_hold_id: str = "", relation: str = "",
     name: str = "", objective: str = "", context: str = "", run_at: str = "",
     cron: str = "", timezone: str = "", reasoning_effort: str = "", owner_words: str = "",
+    mine: Any = None,
 ) -> str:
     """See, or apply one narrow audited change to, the rows already in the table.
 
@@ -100,6 +103,11 @@ def _manage_schedules(
             ),
         ))
     root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+    if mine not in (None, False) and (mine is not True or operation != "update" or not (
+            str(objective or "").strip() or str(context or "").strip()) or str(owner_words or "").strip()):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (manage_schedules): mine=true declares a NEW assignment your own: only an update that "
+            "replaces objective or context, without owner_words; other changes keep the recorded author. Nothing changed.")))
     try:
         from ouroboros.tool_capabilities import tool_result_limit
         result_limit = tool_result_limit("manage_schedules")
@@ -130,7 +138,8 @@ def _manage_schedules(
                                                          text=f"⚠️ OWNER_WORDS_UNVERIFIED (manage_schedules): {cite_error}"))
             return _update_schedule(ctx, root, schedule_id, reason, {
                 "name": name, "objective": objective, "context": context, "run_at": run_at,
-                "cron": cron, "timezone": timezone, "reasoning_effort": reasoning_effort}, owner_basis=owner_basis)
+                "cron": cron, "timezone": timezone, "reasoning_effort": reasoning_effort}, owner_basis=owner_basis,
+                mine=mine is True)
         if operation not in SCHEDULE_ACTIONS:
             return publish_no_effect(ctx, json.dumps({"ok": False, "status": "invalid_action",
                                "allowed": ["list", "get", "update", *sorted(SCHEDULE_ACTIONS)]}, sort_keys=True), tool_name="manage_schedules")
@@ -139,12 +148,12 @@ def _manage_schedules(
         if len(json.dumps(str(schedule_id or ""), ensure_ascii=False)) > result_limit - 2_000:
             return publish_no_effect(ctx, json.dumps({"ok": False, "changed": False, "status": "identity_too_large",
                                "audit": "not_written", "detail": "Schedule identity exceeds the tool result limit; nothing changed."}), tool_name="manage_schedules")
+        writer_kind, writer_metadata = _schedule_writer(ctx, root, schedule_id)
         outcome = mutate_scheduled_task(
             operation, schedule_id, reason=reason, actor="agent",
             task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
             expected_hold_id=expected_hold_id, relation=relation,
-            writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")},
+            writer_kind=writer_kind, writer_metadata=writer_metadata,
             owned_by=owned_by)
     except ScheduleRefused as exc:
         # Same typed marker the sibling refusals carry: the text channel is the
@@ -199,6 +208,33 @@ def _manage_schedules(
     return json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _schedule_writer(ctx: ToolContext, root: Any, schedule_id: str, *, mine: bool = False,
+                     assignment: bool = False) -> tuple[str, dict]:
+    """``(writer_kind, writer_metadata)`` of an agent's write to a schedule.
+
+    ``mine``: a new assignment the caller declared its own. Without it, a same-assignment change (a lifecycle step,
+    a timing or label edit) from an owner-kind turn keeps a recorded own-work author: the mind's own schedule
+    stays under its switch; any other write is the caller's, as before.
+    """
+    metadata = {**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")}
+    if mine:
+        return WORK_KIND_CONSCIOUSNESS, {**metadata, **declared_own_origin(metadata)}
+    kind = work_kind(getattr(ctx, "task_metadata", None))
+    if kind == WORK_KIND_CONSCIOUSNESS or assignment:
+        return kind, metadata
+    from supervisor.queue import ScheduleStoreUnreadable, load_schedule_store
+
+    try:
+        row = next((row for row in load_schedule_store(root)["tasks"]
+                    if str(row.get("id") or "") == str(schedule_id or "").strip()), None)
+    except ScheduleStoreUnreadable:
+        row = None  # the write itself reports the unreadable table
+    recorded = (row or {}).get("writer_origin")
+    if is_own_work(recorded):
+        return WORK_KIND_CONSCIOUSNESS, {**recorded, "task_id": metadata["task_id"]}
+    return kind, metadata
+
+
 def _stored_row(root: Any, audit_row: dict) -> dict:
     """The changed row as stored now: the audit row lacks the facts the view derives."""
     from supervisor.followup_policy import observed_store
@@ -221,7 +257,7 @@ def _schedule_definition_reply(row: dict, **facts) -> str:
 
 
 def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str, fields: dict,
-                     owner_basis: dict | None = None) -> str:
+                     owner_basis: dict | None = None, mine: bool = False) -> str:
     from supervisor.queue import patch_scheduled_task
 
     patch = {key: str(value).strip() for key, value in fields.items() if value is not None and str(value).strip()}
@@ -257,11 +293,12 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         carried = [row for row in carried_owner_corpus(ctx) if row.get("source") != SCHEDULE_TEXT] if assignment else []
         if words := [*carried, *([owner_basis] if owner_basis else [])]:
             patch["owner_corpus"] = words
+    writer_kind, writer_metadata = _schedule_writer(ctx, root, schedule_id, mine=mine,
+                                                    assignment=assignment or bool(owner_basis))
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
-                                   writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-                                   writer_metadata={**(getattr(ctx, "task_metadata", None) or {}),
-                                                    "task_id": str(getattr(ctx, "task_id", "") or ""),
+                                   writer_kind=writer_kind,
+                                   writer_metadata={**writer_metadata,
                                                     **({"owner_basis": owner_basis} if owner_basis else {})})
     if outcome.get("ok") is False:
         return publish_no_effect(ctx, json.dumps(outcome, ensure_ascii=False), tool_name="manage_schedules")
@@ -299,7 +336,7 @@ def _starting_effort(value: Any) -> tuple[str, str]:
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.tools.control import _OWNER_WORDS_PARAM
+    from ouroboros.tools.control import _MINE_PARAM, _OWNER_WORDS_PARAM
 
     return [
         ToolEntry(
@@ -371,6 +408,8 @@ def get_tools() -> List[ToolEntry]:
                                            "level and the result says so. Omit for that level.",
                         },
                         "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM},
+                        "mine": {"type": "boolean", "description": _MINE_PARAM + " Not with relation='related'; "
+                                 "stored while the switch is off, it fires only once it is on."},
                     },
                     "required": ["objective", "relation"],
                 },
@@ -418,6 +457,8 @@ def get_tools() -> List[ToolEntry]:
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based list offset."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Rows per list page (max 20; responses stay bounded)."},
                 "owner_words": {"type": "string", "description": "Update: " + _OWNER_WORDS_PARAM},
+                "mine": {"type": "boolean", "description": "Update replacing objective or context: " + _MINE_PARAM
+                         + " Other changes keep the recorded author."},
             }, "required": ["action"], "additionalProperties": False},
         }, _manage_schedules, timeout_sec=30),
     ]
@@ -588,10 +629,23 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED: {exc}")))
     from ouroboros.owner_words import cited_owner_basis
     from supervisor.followup_policy import resolve_relation
+    mine = params.get("mine")
+    if mine not in (None, False) and (mine is not True or str(params.get("owner_words") or "").strip()
+                                      or (not notify and params.get("relation") == "related")):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (schedule_followup): mine=true declares new independent work or a note your own; "
+            "owner_words makes it your human's and relation='related' continues this work on its money and deadline. "
+            "Choose one. Nothing was scheduled.")))
     owner_basis, cite_error = cited_owner_basis(ctx, params.get("owner_words"))
     if cite_error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (schedule_followup): {cite_error}"))
+    if mine is True:
+        from ouroboros.tools.control_routing import own_time_on
+
+        if not own_time_on(ctx):
+            timezone_note += (" It is your own and the consciousness switch is not on now: it is kept and will not "
+                              "fire until own time is on.")
     origin = {"task_id": task_id, "root_task_id": str(getattr(ctx, "root_task_id", "") or
               (getattr(ctx, "task_metadata", None) or {}).get("root_task_id") or task_id)}
     if notify and str(params.get("relation") or "") == "related":
@@ -614,11 +668,11 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
             if notify:
                 return _register_note(ctx, task_id, drive_root, objective, trigger, cron, timezone,
                                       timezone_note, origin, relation, name=str(params.get("name") or "").strip(),
-                                      owner_basis=owner_basis)
+                                      owner_basis=owner_basis, mine=mine is True)
             return _register_followup(ctx, task_id, drive_root, objective, context,
                                       trigger, cron, timezone, timezone_note, origin, relation,
                                       reasoning_effort=effort, name=str(params.get("name") or "").strip(),
-                                      owner_basis=owner_basis)
+                                      owner_basis=owner_basis, mine=mine is True)
     except ScheduleStoreUnreadable as exc:
         # A missed table lock (ScheduleLockTimeout) or an unparseable table: the
         # follow-up was NOT registered, and the refusal says so in the text ABI
@@ -649,7 +703,8 @@ def _pending_for_task(task_id: str, drive_root: Any) -> list:
 
 def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: str,
                    trigger: Dict[str, Any], cron: str, timezone: str, notes: str,
-                   origin: dict, relation: dict, *, name: str = "", owner_basis: dict | None = None) -> str:
+                   origin: dict, relation: dict, *, name: str = "", owner_basis: dict | None = None,
+                   mine: bool = False) -> str:
     """A note: the same table and lifecycle as a follow-up, but no task template.
 
     The row keeps the words and when they were written; the scheduler tick shows
@@ -666,12 +721,12 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         # My human's cited words live in the one home the lifecycle and Off read; a note's template holds only them.
         **({"task": {"metadata": {"owner_corpus": [owner_basis]}}} if owner_basis else {}),
     }
+    writer_kind, writer_metadata = _schedule_writer(ctx, drive_root, "", mine=mine, assignment=True)
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
-            writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or ""),
-                             **({"owner_basis": owner_basis} if owner_basis else {})},
+            writer_kind=writer_kind,
+            writer_metadata={**writer_metadata, **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"note registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation})
     except ScheduleRefused as exc:
@@ -701,7 +756,8 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
 def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
                        objective: str, context: str, trigger: Dict[str, Any], cron: str,
                        timezone: str, timezone_note: str, origin: dict, relation: dict,
-                       *, reasoning_effort: str = "", name: str = "", owner_basis: dict | None = None) -> str:
+                       *, reasoning_effort: str = "", name: str = "", owner_basis: dict | None = None,
+                       mine: bool = False) -> str:
     """The pending read, the record build and the write — all under the schedule lock."""
     from supervisor.queue import upsert_scheduled_task
 
@@ -745,7 +801,8 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     }
     # The host writer persists this origin separately; the template is not its
     # authority. Only independent work uses the root-start exception and cause.
-    record["task"]["metadata"].update(consciousness_origin_metadata(
+    writer_kind, writer_metadata = _schedule_writer(ctx, drive_root, "", mine=mine, assignment=True)
+    record["task"]["metadata"].update(declared_own_origin(writer_metadata) if mine else consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent",
         owner_basis=owner_basis if relation["kind"] == "independent" else None))
     from ouroboros.owner_words import carried_owner_corpus
@@ -781,9 +838,8 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
-            writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or ""),
-                             **({"owner_basis": owner_basis} if owner_basis else {})},
+            writer_kind=writer_kind,
+            writer_metadata={**writer_metadata, **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"follow-up registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation},
             # Host-authored provenance of a NAMED continuation (never payload/prose):

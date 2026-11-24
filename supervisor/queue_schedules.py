@@ -753,6 +753,16 @@ def _remove_withdrawn(data, root, cutoff_epoch, *, reads=None):
     return removals
 
 
+def own_time_waits(record: Dict[str, Any], root) -> bool:
+    """A due row declared the mind's own (``writer_origin``) waits, unconsumed, while Off or Panic holds own time."""
+    from ouroboros.consciousness_authority import OWN_DECLARED, is_own_work
+    from supervisor.consciousness_carriers import autonomous_work_enabled
+
+    origin = record.get("writer_origin")
+    return (is_own_work(origin) and origin.get(OWN_DECLARED) is True
+            and not autonomous_work_enabled({"metadata": origin}, root))
+
+
 def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     """Admit due cron/once schedules through the occurrence protocol.
 
@@ -923,6 +933,8 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 continue  # unknown queue state never licenses a duplicate firing
             if view.get("hold") or view["wait"] or record.get("followup_hold"):
                 continue
+            if own_time_waits(record, root):
+                continue  # the mind's own schedule stays due, unconsumed, until the switch is on again
             if notes.is_note(record):
                 # Notes publish here, unlike task claims whose admission rechecks
                 # controls later. Their final control fence must therefore be here.

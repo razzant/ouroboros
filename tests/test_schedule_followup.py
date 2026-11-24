@@ -901,3 +901,109 @@ def test_schedule_followup_registration_surfaces():
     # Reading the table is research; changing it is refused inside the tool.
     assert "manage_schedules" in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
     assert "manage_schedules" not in ACTING_SUBAGENT_TOOL_NAMES
+
+
+# ------------------------------------------------- own work declared own (mine)
+
+
+def _own_time(monkeypatch, switch):
+    """The switch as the dispatch hold reads it; ``switch["on"]`` flips it mid-test."""
+    from supervisor import queue, state
+
+    reader = lambda: {"bg_consciousness_enabled": switch["on"], "owner_chat_id": 1}  # noqa: E731
+    monkeypatch.setattr(state, "load_state", reader)
+    monkeypatch.setattr(queue, "load_state", reader)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
+    monkeypatch.setattr("ouroboros.consciousness_allowance.allowance_window", lambda root, now=None: {
+        "status": "available", "limit_usd": 20.0, "settled_usd": 0.0, "accounted_usd": 0.0, "remaining_usd": 20.0,
+        "unknown_unmetered": 0, "resets_at": ""})
+
+
+def _owner_turn(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.task_metadata["owner_ingress"] = True  # an owner turn: its uncited follow-ups are my human's
+    ctx.current_chat_id, ctx.is_direct_chat = 1, True
+    return ctx
+
+
+def _rows(root):
+    from supervisor import queue
+
+    return {row["id"]: row for row in queue.list_scheduled_tasks(root)["tasks"]}
+
+
+@pytest.mark.parametrize("notify", [False, True])
+def test_a_declared_schedule_stored_while_off_is_kept_unconsumed_and_fires_once_own_time_is_on(
+        tmp_path, monkeypatch, notify):
+    """``mine`` from an owner turn: stored while Off with a receipt that says so, never claimed, consumed or shown
+    while Off, fired when the switch is on; an undeclared follow-up of the same turn stays my human's and fires."""
+    from supervisor import queue, schedule_notes
+
+    switch, shown = {"on": False}, []
+    _own_time(monkeypatch, switch)
+    monkeypatch.setattr(schedule_notes, "deliver", lambda notes, root: shown.extend(notes))
+    root = tmp_path / "data"
+    ctx = _owner_turn(tmp_path)
+    queue.init(root)
+    pending: list = []
+    queue.init_queue_refs(pending, {}, {"value": 0})
+    out = _followup(ctx, mine=True, notify=notify, run_at="2000-01-01T00:00:00+00:00", objective="Tidy my notes")
+    assert out.startswith("FOLLOWUP_SCHEDULED") and "will not fire until own time is on" in out, out
+    [mine] = _rows(root).values()
+    assert mine["writer_kind"] == "consciousness" and mine["writer_origin"]["initiator"] == "consciousness"
+    assert mine["writer_origin"]["own_declared"] is True
+    if not notify:  # my human's follow-up of the same turn, beside it
+        assert "own time" not in _followup(ctx, run_at="2000-01-01T00:00:00+00:00", objective="Report to my human")
+    for _ in range(2):
+        queue.check_scheduled_tasks()
+    kept = _rows(root)[mine["id"]]
+    assert kept["enabled"] is True and not kept.get("completed_at") and "occurrence" not in kept
+    assert shown == [] and [task["metadata"]["work_kind"] for task in pending] == ([] if notify else ["owner"])
+    switch["on"] = True
+    queue.check_scheduled_tasks()
+    fired = _rows(root)[mine["id"]]
+    assert fired["completed_at"] or fired.get("last_run_at")
+    if notify:
+        assert [note["text"] for note in shown] == ["Tidy my notes"]
+    else:
+        own = [task for task in pending if task["metadata"]["work_kind"] == "consciousness"]
+        assert len(own) == 1 and own[0]["metadata"]["initiator"] == "consciousness"
+        assert queue.counts_as_consciousness_root(own[0])
+
+
+def test_a_declared_schedule_keeps_its_author_through_same_assignment_edits(tmp_path, monkeypatch):
+    """An owner turn's timing edit, disable and restore keep a declared schedule my own; replacing its assignment
+    without ``mine`` makes it my human's, with ``mine`` my own again. ``mine`` names a new assignment only."""
+    import json
+
+    from ouroboros.tools.followup import _manage_schedules
+
+    _own_time(monkeypatch, {"on": True})
+    root = tmp_path / "data"
+    ctx = _owner_turn(tmp_path)
+    assert _followup(ctx, mine=True).startswith("FOLLOWUP_SCHEDULED")
+    [sid] = _rows(root)
+
+    def writer():
+        row = _rows(root)[sid]
+        return row["writer_kind"], bool(row["writer_origin"].get("own_declared"))
+
+    moved = json.loads(_manage_schedules(ctx, action="update", schedule_id=sid, reason="Later", run_at="2031-01-01T00:00:00+00:00"))
+    assert moved["changed"] and writer() == ("consciousness", True)
+    for action in ("disable", "restore"):
+        assert json.loads(_manage_schedules(ctx, action=action, schedule_id=sid, reason="Pause and resume"))["changed"]
+        assert writer() == ("consciousness", True), action
+    refused = _manage_schedules(ctx, action="disable", schedule_id=sid, reason="x", mine=True)
+    assert "TOOL_ARG_ERROR" in refused and writer() == ("consciousness", True)
+    json.loads(_manage_schedules(ctx, action="update", schedule_id=sid, reason="They asked", objective="Their report"))
+    assert writer() == ("owner", False)
+    json.loads(_manage_schedules(ctx, action="update", schedule_id=sid, reason="Mine again", objective="My study", mine=True))
+    assert writer() == ("consciousness", True)
+
+
+@pytest.mark.parametrize("kwargs", [{"relation": "related"}, {"owner_words": "please"}, {"mine": "yes"}])
+def test_a_declared_schedule_refuses_what_makes_it_someone_elses(tmp_path, monkeypatch, kwargs):
+    _own_time(monkeypatch, {"on": True})
+    out = _followup(_owner_turn(tmp_path), **{"mine": True, **kwargs})
+    assert "TOOL_ARG_ERROR" in out and "Nothing was scheduled" in out, out
+    assert _rows(tmp_path / "data") == {}

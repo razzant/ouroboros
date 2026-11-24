@@ -443,3 +443,19 @@ def test_the_endpoint_index_names_the_switch_query():
 
     assert HTTP_SHAPES["GET /api/consciousness"].query == "switch"
 
+
+
+def test_off_ends_declared_own_work_and_keeps_only_my_humans(monkeypatch):
+    """A root an owner turn declared its own (``mine``) is among what Off stops, never among what it keeps running on
+    my human's words; the same start without ``mine`` is theirs and Off leaves it alone. The words are unchanged."""
+    from ouroboros.consciousness_authority import declared_own_origin
+    from supervisor import consciousness_carriers as carriers
+    from supervisor import queue
+
+    turn = {"owner_ingress": True, "task_id": "turn-1"}
+    declared = {"id": "mine-1", "metadata": declared_own_origin(turn)}
+    theirs = {"id": "theirs-1", "metadata": {"work_kind": "owner"}}
+    monkeypatch.setattr(queue, "PENDING", [declared, theirs])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    assert carriers.autonomous_tasks() == ["mine-1"] and carriers.cited_owner_roots() == []
+    assert "Its 1 own task is asked to stop now." in V.switch_preview("off", PLACES, running={"tasks_running": 1})["lines"]

@@ -159,6 +159,8 @@ def work_kind(metadata: Any) -> str:
 
 
 FOCUS_TRANSPORT_KEY = "focus_transport"
+# A run declared the work its own (``mine``); inherited with the consciousness stamp, never from a template.
+OWN_DECLARED = "own_declared"
 FOCUS_ROUTE_FIELDS = ("provider", "account_id", "conversation_id", "thread_id")
 
 
@@ -205,7 +207,28 @@ def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = 
         "initiator": CONSCIOUSNESS_INITIATOR,
         "usage_category": CONSCIOUSNESS_TASK_CATEGORY,
         "consciousness_autonomy": normalize_level(source.get("consciousness_autonomy")),
+        **({OWN_DECLARED: True} if source.get(OWN_DECLARED) is True else {}),
     }
+
+
+def declared_own_origin(caller_metadata: Any) -> Dict[str, Any]:
+    """The stamp of a root or schedule its caller declared its own (``mine: true``), from any caller.
+
+    The same stamp a consciousness-origin start carries: initiator, ``consciousness_task`` category,
+    ``started`` cause and a level (the caller's own inside a consciousness tree, else the installed one),
+    so the allowance, the own-task cap and the switch see it, plus ``own_declared`` (the scheduler keeps such
+    a schedule due while own time is off). A typed argument, never a text reading.
+    """
+    source = dict(caller_metadata) if isinstance(caller_metadata, Mapping) else {}
+    level = source.get("consciousness_autonomy") if is_consciousness_origin(source) else None
+    return consciousness_origin_metadata({**source, "work_kind": WORK_KIND_CONSCIOUSNESS, OWN_DECLARED: True,
+                                          "initiator": CONSCIOUSNESS_INITIATOR, "consciousness_autonomy": level},
+                                         started_root=True)
+
+
+def is_own_work(metadata: Any) -> bool:
+    """Work the mind started or declared its own (origin and kind together): what the switch governs."""
+    return is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
 
 
 def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
@@ -246,7 +269,7 @@ def stamp_scheduled_work(task: Dict[str, Any], record: Mapping[str, Any], raw_me
     from copy import deepcopy
     if "writer_origin" in record:
         for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause",
-                    "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY):
+                    "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY, OWN_DECLARED):
             task["metadata"].pop(key, None)
     task["metadata"].update(deepcopy(record.get("writer_origin") or {}))
     task["metadata"].update(work_kind=writer_kind, schedule_writer_kind=writer_kind)

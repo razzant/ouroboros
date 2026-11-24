@@ -1,8 +1,6 @@
 """Own-clock custody and the wider autonomous census across turn carriers."""
 
-from ouroboros.consciousness_authority import (
-    WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, is_own_clock_wake, work_kind,
-)
+from ouroboros.consciousness_authority import is_own_clock_wake, is_own_work, work_kind
 
 
 def queued_wakes(*, held_only: bool = False) -> list[str]:
@@ -21,7 +19,7 @@ def is_autonomous_work(metadata) -> bool:
     Unmarked work is checked at the consciousness Safety level, but it is not
     autonomous: Off must never stop system, owner or historical work.
     """
-    return is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+    return is_own_work(metadata)
 
 
 def autonomous_tasks() -> list[str]:

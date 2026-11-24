@@ -269,3 +269,99 @@ def test_turning_off_cancels_only_work_consciousness_started(monkeypatch):
     monkeypatch.setattr(queue, "PENDING", pending)
     monkeypatch.setattr(queue, "RUNNING", running)
     assert carriers.autonomous_tasks() == ["autonomous-job", "autonomous-child"]
+
+
+# --- own work is declared own (``mine``) -----------------------------------------
+
+@pytest.fixture
+def promote_root(tmp_path, monkeypatch):
+    """The real promote admission path (tool -> supervisor handler -> worker_promotion), as in the authority tests."""
+    import ouroboros.config as cfg
+    import supervisor.message_bus as mb
+    import supervisor.queue as queue_mod
+    from supervisor import workers
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue_mod, "DRIVE_ROOT", str(tmp_path))
+    monkeypatch.setattr(queue_mod, "ACCEPTANCE_FENCES", {})
+    monkeypatch.setattr(mb, "get_bridge", lambda: SimpleNamespace(broadcast=lambda payload: None))
+    monkeypatch.setattr(workers, "_announce_created_project", lambda *a, **kw: None)
+    monkeypatch.setattr("ouroboros.workspace_admission.bounded_workspace_preflight",
+                        lambda root: {"schema_version": 1, "workspace_root": str(root)})
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    return tmp_path
+
+
+OWNER_TURN = {"owner_ingress": True, "root_task_id": "turn-1"}
+
+
+def _own_time(monkeypatch, on):
+    from supervisor import state
+    monkeypatch.setattr(state, "load_state", lambda: {"bg_consciousness_enabled": on})
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
+
+
+def _owner_start(root, monkeypatch, **kwargs):
+    """``start_task`` from an owner turn through the real promote admission: (reply, emitted event, enqueued roots)."""
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.utils import append_jsonl
+    from supervisor.events_project_routing import _handle_promote_chat_to_task
+
+    enqueued, captured = [], {}
+    supervisor = SimpleNamespace(
+        DRIVE_ROOT=root, RUNNING={}, PENDING=[], WORKERS={0: SimpleNamespace()},
+        bridge=SimpleNamespace(send_routing_ack=lambda *a, **k: None, broadcast=lambda *a, **k: None),
+        enqueue_task=lambda task: enqueued.append(task) or dict(task),
+        persist_queue_snapshot=lambda **_k: True, load_state=lambda: {"owner_chat_id": 1}, append_jsonl=append_jsonl)
+    ctx = SimpleNamespace(
+        pending_events=[], current_chat_id=1, drive_root=root, budget_drive_root=str(root), task_id="turn-1",
+        is_direct_chat=True, last_owner_delivery=None, project_id="", task_metadata=dict(OWNER_TURN), task_contract={},
+        event_queue=SimpleNamespace(put_nowait=lambda event: (captured.update(event),
+                                                               _handle_promote_chat_to_task(event, supervisor))))
+    return _start_task(ctx, "tidy my own notes", title="Own notes", workspace="none", **kwargs), captured, enqueued
+
+
+def test_a_declared_start_from_an_owner_turn_is_my_own_counted_and_governed(promote_root, monkeypatch):
+    """``mine`` from an owner turn mints the consciousness stamp: the cap and allowance count it, Off holds it,
+    and its children inherit it; without ``mine`` the same start stays my human's and dispatches while Off."""
+    from ouroboros.consciousness_authority import OWN_DECLARED, consciousness_origin_metadata
+    from supervisor import queue
+    from supervisor.consciousness_carriers import autonomous_work_enabled
+
+    _own_time(monkeypatch, True)
+    out, event, [root] = _owner_start(promote_root, monkeypatch, mine=True)
+    assert out.startswith("OK: task") and "Started as your own work" in out, out
+    assert event["initiator"] == "consciousness" and event["work_kind"] == "consciousness"
+    meta = root["metadata"]
+    assert (meta["work_kind"], meta["initiator"], meta["usage_category"], meta["consciousness_cause"]) == (
+        "consciousness", "consciousness", "consciousness_task", "started")
+    assert meta["consciousness_autonomy"] == "act" and meta[OWN_DECLARED] is True and root["actor_id"] == "consciousness"
+    assert queue.counts_as_consciousness_root(root)  # the own-task cap and the allowance see it
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
+    assert queue._consciousness_admission_block(root)[0] == "consciousness_task_limit"
+    child = {**consciousness_origin_metadata({**meta, "task_id": root["id"]}), "delegation_role": "subagent"}
+    assert child["initiator"] == "consciousness" and child["work_kind"] == "consciousness" and child[OWN_DECLARED]
+    _own_time(monkeypatch, False)
+    assert autonomous_work_enabled(root, promote_root) is False  # the dispatch hold for a switch turned off later
+    assert autonomous_work_enabled({"metadata": child}, promote_root) is False
+
+    _own_time(monkeypatch, False)  # undeclared: my human's work, untouched by the switch, the cap and the allowance
+    out, event, [owner_root] = _owner_start(promote_root, monkeypatch)
+    assert out.startswith("OK: task") and "your own work" not in out, out
+    assert owner_root["metadata"]["work_kind"] == "owner" and "initiator" not in owner_root["metadata"]
+    assert not queue.counts_as_consciousness_root(owner_root) and queue._consciousness_admission_block(owner_root) is None
+    assert autonomous_work_enabled(owner_root, promote_root) is True
+
+
+@pytest.mark.parametrize(("kwargs", "words"), [
+    ({"mine": True}, "OWN_TIME_OFF"),
+    ({"mine": True, "owner_words": "please tidy"}, "make it your human's"),
+    ({"mine": True, "owner_source": "h-1"}, "make it your human's"),
+    ({"mine": "yes"}, "mine must be true"),
+])
+def test_a_declared_start_is_refused_typed_before_anything_is_staged(promote_root, monkeypatch, kwargs, words):
+    _own_time(monkeypatch, kwargs != {"mine": True})  # the contradictions are refused even while own time is on
+    out, event, enqueued = _owner_start(promote_root, monkeypatch, **kwargs)
+    assert words in out and "Nothing was" in out, out
+    assert event == {} and enqueued == []

@@ -446,6 +446,40 @@ def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: A
         return {}, refused.format(str(exc))
 
 
+def own_time_on(ctx: Any) -> bool:
+    """Whether the switch lets declared own work run now: the dispatch hold's own reading (Off or Panic hold it)."""
+    from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR, WORK_KIND_CONSCIOUSNESS
+    from supervisor.consciousness_carriers import autonomous_work_enabled
+
+    own = {"initiator": CONSCIOUSNESS_INITIATOR, "work_kind": WORK_KIND_CONSCIOUSNESS}
+    try:
+        return autonomous_work_enabled({"metadata": own}, canonical_data_root(ctx))
+    except Exception:
+        log.debug("own_time_on: the switch could not be read; it is not on", exc_info=True)
+        return False
+
+
+_MINE_NOTE = (" Started as your own work (consciousness kind): it draws on the consciousness allowance and own-task "
+              "cap, and the Off switch stops it.")
+
+
+def _mine_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source: Any, destination: Any) -> str:
+    """The published typed refusal of a ``mine`` declaration, read before any effect; ``""`` when it may proceed."""
+    if mine in (None, False):
+        return ""
+    if mine is not True or str(owner_words or "").strip() or str(owner_source or "").strip() or destination == "owner":
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (start_task): mine must be true or omitted. Nothing was scheduled." if mine is not True
+            else "⚠️ TOOL_ARG_ERROR (start_task): mine declares the work your own; owner_words, owner_source and "
+                 "destination='owner' make it your human's. Choose one. Nothing was scheduled.")))
+    if not own_time_on(ctx):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED", text=(
+            "⚠️ OWN_TIME_OFF (start_task): your own work runs only while your human's consciousness switch is on (and "
+            "no Panic holds); it is not on now. Nothing was staged or queued. Do it inside this work, or start it "
+            "without mine as your human's work if it serves their request.")))
+    return ""
+
+
 def _start_task(
     ctx: ToolContext,
     objective: str,
@@ -466,6 +500,7 @@ def _start_task(
     owner_words: str = "",
     review_answer: bool = False,
     owner_source: str = "",
+    mine: Optional[bool] = None,
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     from ouroboros.owner_words import cited_owner_basis
@@ -476,6 +511,8 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
+    if mine_error := _mine_refusal(ctx, mine, owner_words=owner_words, owner_source=owner_source, destination=destination):
+        return mine_error
     model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
     owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
@@ -646,11 +683,13 @@ def _start_task(
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style
     # stripping, the wake chooses project/workspace like any Main turn (В9').
-    from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
+    from ouroboros.consciousness_authority import consciousness_origin_metadata, declared_own_origin, is_focus_wake
 
     if not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
-        evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
-                                                 started_root=True, owner_basis=owner_basis))
+        caller = {**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}
+        # ``mine``: the mind's own work from any caller, stamped as a consciousness start (allowance, cap, switch).
+        evt.update(declared_own_origin(caller) if mine else
+                   consciousness_origin_metadata(caller, started_root=True, owner_basis=owner_basis))
         if source_row:  # the selected row opens the start in place of the run's own: its identity, files and surface
             evt.update(_selected_source_fields(ctx, source_row))
         else:
@@ -669,7 +708,9 @@ def _start_task(
     source_note = (_source_note(ctx, evt, selected if source_row else "") if isinstance(evt.get("source_ref"), dict)
                    and evt["source_ref"] and not private and not presence_carrier else "")
     kind_note += source_note
-    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
+    if mine:
+        kind_note += _MINE_NOTE
+    elif is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
         kind_note += (" Started as your human's work on their pressed choice." if owner_basis and owner_basis["source"] == "owner_press"
                       else " Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
