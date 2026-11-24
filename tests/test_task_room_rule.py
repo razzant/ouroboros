@@ -323,7 +323,9 @@ def test_converting_a_middle_task_moves_its_subtrees_earlier_rows_out_of_the_old
     assert [row["chat_id"] for row in _progress_rows(tmp_path)] == [a["chat_id"]] * 2, "before: both rows live in A"
     assert _history(tmp_path, a["chat_id"]) == ["root-1", "kid-1"]
 
-    response = asyncio.run(api_project_from_task(_request(tmp_path, {"task_id": "kid-1", "id": "task-kid-1"})))
+    response = asyncio.run(api_project_from_task(_request(
+        tmp_path, {"task_id": "kid-1", "id": "task-kid-1", "name": "Child's room"},
+    )))
     payload = json.loads(response.body)
     b = int(payload["project"]["chat_id"])
     assert response.status_code == 200 and payload["binding"]["project_id"] == payload["project"]["id"] and b != a["chat_id"]

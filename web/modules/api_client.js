@@ -742,7 +742,10 @@ export const apiClient = {
     /** One Project by its id while active or deleting; an empty list when it is neither.
      *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
     projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
-    projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
+    /** `id` and `name` are optional; the server owns the default destination (leave `id` out for it).
+     *  @param {string} taskId @param {string=} id @param {string=} name */
+    projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task',
+        { task_id: taskId, ...(id ? { id } : {}), ...(name ? { name } : {}) }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
     projectUpdate: (projectId, update) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`,

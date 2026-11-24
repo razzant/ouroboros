@@ -1020,7 +1020,7 @@
  */
 
 /**
- * `POST /api/projects/from-task`.
+ * `POST /api/projects/from-task`. Leave `id` out: the server owns the default destination and the work's room.
  * @typedef {Object} ProjectFromTaskRequest
  * @property {string} task_id
  * @property {string=} id

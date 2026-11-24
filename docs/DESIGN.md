@@ -2472,8 +2472,9 @@ attention or a bare outcome (owner 16.09: real work is a card, a greeting is
 nothing). Reviews, children, evidence, narration or tool errors give managed
 roots and direct turns the same card: a coined name or narration headline
 (`Task activity` when finished without either; untitled while Working), status,
-host-attested Stop, and `Turn into project` in Main unless already bound. Bound
-direct turns route later rows to their Project like `move_to_project`. The foot
+host-attested Stop, and `Turn into project` in Main unless bound. A naming refusal
+explains why and leaves the card and button for explicit retry. Bound turns route
+later rows like `move_to_project`. The foot
 holds metadata and one action row: [Reply], Turn into project, Resume, Stop…,
 one primary; on a root they share one band, the row right, wrapping whole
 (owner 30.10, B). Nested children stay inside their root, carry no root control,
