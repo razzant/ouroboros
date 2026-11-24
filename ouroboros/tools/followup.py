@@ -47,7 +47,7 @@ import uuid
 from typing import Any, Dict, List
 
 from ouroboros.consciousness_authority import (
-    WORK_KIND_CONSCIOUSNESS, consciousness_origin_metadata, declared_own_origin, work_kind,
+    consciousness_origin_metadata, declared_own_origin, is_declared_own, work_kind,
 )
 from ouroboros.tools.control_routing import OWN_TIME_WAIT_NOTE, own_time_on
 from ouroboros.deadline_utils import naive_instant, parse_deadline_ts
@@ -155,7 +155,10 @@ def _manage_schedules(
             task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
             expected_hold_id=expected_hold_id, relation=relation,
             writer_kind=writer_kind, writer_metadata=writer_metadata,
-            owned_by=owned_by, keep_declared=True)  # a declared author is kept, decided on the held row
+            owned_by=owned_by, agent=True)  # who the row belongs to is decided on the held row
+        if (outcome.get("changed") and isinstance(outcome.get("schedule"), dict)
+                and (note := _own_time_note(ctx, _stored_row(root, outcome["schedule"])))):
+            outcome["note"] = note.strip()
     except ScheduleRefused as exc:
         # Same typed marker the sibling refusals carry: the text channel is the
         # registered ABI, so a refusal must be legible there and not only in the
@@ -209,14 +212,18 @@ def _manage_schedules(
     return json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _schedule_writer(ctx: ToolContext, *, mine: bool = False) -> tuple[str, dict]:
-    """``(writer_kind, writer_metadata)`` of an agent's new schedule or write; ``mine``: declared its own.
-
-    Who an edit of an existing row belongs to is decided by the lifecycle writer on the row it holds."""
+def _schedule_writer(ctx: ToolContext) -> tuple[str, dict]:
+    """``(writer_kind, writer_metadata)`` of an agent's write. Who the row then belongs to (a ``mine``
+    declaration included) is the one author rule's decision, on the row the write holds
+    (``consciousness_authority.stamp_schedule_writer``)."""
     metadata = {**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")}
-    if mine:
-        return WORK_KIND_CONSCIOUSNESS, {**metadata, **declared_own_origin(metadata)}
     return work_kind(getattr(ctx, "task_metadata", None)), metadata
+
+
+def _own_time_note(ctx: ToolContext, row: Any) -> str:
+    """The waiting sentence for a write that leaves a declared row while own time is off; ``""`` otherwise."""
+    origin = row.get("writer_origin") if isinstance(row, dict) else None
+    return OWN_TIME_WAIT_NOTE if is_declared_own(origin) and not own_time_on(ctx) else ""
 
 
 def _mine_error(tool: str, mine: Any, owner_words: Any, *, other: bool = False, other_words: str = "") -> str:
@@ -297,9 +304,12 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
     if outcome.get("ok") is False:
         return publish_no_effect(ctx, json.dumps(outcome, ensure_ascii=False), tool_name="manage_schedules")
     facts = {key: outcome[key] for key in ("status", "changed_fields", "audit", "reconsidered_claim")}
+    author_changed = outcome.pop("author_changed", False)
     row = {key: value for key, value in outcome.items() if key not in facts}
-    if mine and not own_time_on(ctx):
-        notes += OWN_TIME_WAIT_NOTE
+    notes += _own_time_note(ctx, row)
+    if author_changed:
+        facts["author_changed"] = ("declared own work became your human's: it now runs while the consciousness switch "
+                                   "is off and outside the consciousness allowance and task cap")
     if notes:
         facts["argument_note"] = notes.strip()
     return _schedule_definition_reply(row, ok=outcome["audit"] == "recorded",
@@ -633,8 +643,6 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     if cite_error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (schedule_followup): {cite_error}"))
-    if mine is True and not own_time_on(ctx):
-        timezone_note += OWN_TIME_WAIT_NOTE
     origin = {"task_id": task_id, "root_task_id": str(getattr(ctx, "root_task_id", "") or
               (getattr(ctx, "task_metadata", None) or {}).get("root_task_id") or task_id)}
     if notify and str(params.get("relation") or "") == "related":
@@ -710,11 +718,11 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         # My human's cited words live in the one home the lifecycle and Off read; a note's template holds only them.
         **({"task": {"metadata": {"owner_corpus": [owner_basis]}}} if owner_basis else {}),
     }
-    writer_kind, writer_metadata = _schedule_writer(ctx, mine=mine)
+    writer_kind, writer_metadata = _schedule_writer(ctx)
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
-            writer_kind=writer_kind,
+            writer_kind=writer_kind, declare=mine,
             writer_metadata={**writer_metadata, **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"note registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation})
@@ -738,7 +746,7 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         "your objective verbatim in the owner's chat as a System row signed with when you wrote it and when "
         "it was due (after downtime, at the next start with both times). Pending follow-ups for this task: "
         f"{len(pending) + 1}; the owner can disable or delete it from the Schedules "
-        f"surface.{audit_note}{notes}"
+        f"surface.{audit_note}{notes}{_own_time_note(ctx, stored)}"
     )
 
 
@@ -790,7 +798,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     }
     # The host writer persists this origin separately; the template is not its
     # authority. Only independent work uses the root-start exception and cause.
-    writer_kind, writer_metadata = _schedule_writer(ctx, mine=mine)
+    writer_kind, writer_metadata = _schedule_writer(ctx)
     record["task"]["metadata"].update(declared_own_origin(writer_metadata) if mine else consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent",
         owner_basis=owner_basis if relation["kind"] == "independent" else None))
@@ -828,7 +836,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
-            writer_kind=writer_kind,
+            writer_kind=writer_kind, declare=mine,
             writer_metadata={**writer_metadata, **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"follow-up registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation},
@@ -866,5 +874,5 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
         f"record is durable in state/scheduled_tasks.json and {lifecycle}; the owner can "
         f"disable or delete it from the Schedules surface. Relationship: {relation['kind']}; "
         f"hold: {stored.get('followup_hold') or 'none'}; wait: {stored.get('followup_wait') or 'none'}."
-        f"{audit_note}{timezone_note}"
+        f"{audit_note}{timezone_note}{_own_time_note(ctx, stored)}"
     )

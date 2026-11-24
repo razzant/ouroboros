@@ -60,9 +60,12 @@ def test_a_template_cannot_declare_own_work_only_the_writer_can(q):
     record = q.queue.upsert_scheduled_task(forged, drive_root=q.root, writer_kind="owner", actor="owner:gateway")
     record["task"]["metadata"]["own_declared"] = True  # as a hand-edited table row would carry it
     assert "own_declared" not in _task_from_schedule(record)["metadata"]
+    legacy = {k: v for k, v in record.items() if k not in ("writer_kind", "writer_origin")}  # an origin-less row
+    legacy["task"]["metadata"].update(initiator="consciousness", own_declared=True)
+    assert "own_declared" not in _task_from_schedule(legacy)["metadata"]
     declared = declared_own_origin({"owner_ingress": True, "task_id": "turn-1"})
     record = q.queue.upsert_scheduled_task(row(), drive_root=q.root, writer_kind="consciousness", actor="agent",
-                                           writer_metadata=declared)
+                                           writer_metadata=declared, declare=True)
     assert _task_from_schedule(record)["metadata"]["own_declared"] is True
 
 

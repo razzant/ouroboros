@@ -217,11 +217,13 @@ def declared_own_origin(caller_metadata: Any) -> Dict[str, Any]:
     The same stamp a consciousness-origin start carries: initiator, ``consciousness_task`` category,
     ``started`` cause and a level (the caller's own inside a consciousness tree, else the installed one),
     so the allowance, the own-task cap and the switch see it, plus ``own_declared`` (the scheduler keeps such
-    a schedule due while own time is off). No owner schedule's writer kind rides along. A typed argument,
-    never a text reading.
+    a schedule due while own time is off). A time-born caller's scheduling fact rides on with the new author
+    (``schedule_writer_kind``: the room's decision for timed work still binds); its old writer kind does not.
+    A typed argument, never a text reading.
     """
-    source = {key: value for key, value in (caller_metadata.items() if isinstance(caller_metadata, Mapping) else ())
-              if key != "schedule_writer_kind"}
+    source = dict(caller_metadata) if isinstance(caller_metadata, Mapping) else {}
+    if source.get("schedule_writer_kind"):
+        source["schedule_writer_kind"] = WORK_KIND_CONSCIOUSNESS
     level = source.get("consciousness_autonomy") if is_consciousness_origin(source) else None
     return consciousness_origin_metadata({**source, "work_kind": WORK_KIND_CONSCIOUSNESS, OWN_DECLARED: True,
                                           "initiator": CONSCIOUSNESS_INITIATOR, "consciousness_autonomy": level},
@@ -234,16 +236,6 @@ def is_declared_own(metadata: Any) -> bool:
             and isinstance(metadata, Mapping) and metadata.get(OWN_DECLARED) is True)
 
 
-def kept_declared_writer(record: Mapping[str, Any], writer_kind: str, writer_metadata: Any) -> tuple:
-    """``(writer_kind, writer_metadata)`` of an agent's same-assignment write: a declared recorded author is kept
-    for any caller; every other row takes its writer, as before."""
-    recorded = record.get("writer_origin")
-    if not is_declared_own(recorded):
-        return writer_kind, writer_metadata
-    task_id = writer_metadata.get("task_id") if isinstance(writer_metadata, Mapping) else ""
-    return WORK_KIND_CONSCIOUSNESS, {**recorded, "task_id": task_id or ""}
-
-
 def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
     """The one durable home of a schedule's owner words: its next occurrence's ``task.metadata.owner_corpus`` (a
     note's template holds only that metadata). The lifecycle stamp and the Off disclosure read nothing else."""
@@ -252,8 +244,16 @@ def schedule_owner_corpus(record: Mapping[str, Any]) -> list:
 
 
 def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metadata: Any,
-                          *, started_root: bool, same_work: bool = False) -> None:
-    """Persist the next occurrence's origin from host writer facts, never the template.
+                          *, started_root: bool, same_work: bool = False, agent: bool = False,
+                          declare: bool = False) -> None:
+    """Persist the next occurrence's origin from host writer facts, never the template: the one rule of who a
+    schedule row belongs to, which every writer calls (``record`` still holds the row's prior origin).
+
+    Declared own work (``own_declared``): only ``declare`` (``mine``, at creation or re-assignment) declares a row,
+    with the stamp ``declared_own_origin`` builds alone and no ``continuation_of`` (its runs take a task slot). An
+    editor's inherited mark is never copied onto a row. A declared row stays declared through every write of an
+    agent tool (``agent``) until my human re-authors it: a verified cite, or a new assignment an owner-kind writer
+    makes; the owner's own door (not ``agent``) re-authors it as every row. Undeclared rows follow the rule below.
 
     Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
     unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
@@ -263,7 +263,17 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
     takes only the cite passed with that write, else the writer's kind: the host carries no old
     declaration onto new work. A related continuation keeps its caller's kind and cause.
     """
-    source = writer_metadata if isinstance(writer_metadata, Mapping) else {}
+    source = {key: value for key, value in (writer_metadata.items() if isinstance(writer_metadata, Mapping) else ())
+              if key != OWN_DECLARED}  # an editor's inherited mark is never copied onto a row
+    if declare:
+        record.pop("continuation_of", None)
+        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS, writer_origin=declared_own_origin(source))
+        return
+    recorded = record.get("writer_origin")
+    if agent and is_declared_own(recorded) and not source.get("owner_basis") and (
+            same_work or writer_kind != WORK_KIND_OWNER):
+        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS, writer_origin=dict(recorded))
+        return
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
     basis = source.get("owner_basis") if started_root else None
     if basis is None and same_work and started_root and record.get("writer_kind") == WORK_KIND_OWNER:
@@ -280,9 +290,10 @@ def stamp_scheduled_work(task: Dict[str, Any], record: Mapping[str, Any], raw_me
         legacy = {k: v for k, v in raw_metadata.items() if k not in RESERVED_TEMPLATE_FIELDS}
         writer_kind = work_kind({"owner_ingress": record.get("source") == "owner", **legacy})
     from copy import deepcopy
+    task["metadata"].pop(OWN_DECLARED, None)  # only the host writer's origin may declare the fired work
     if "writer_origin" in record:
         for key in ("initiator", "usage_category", "consciousness_autonomy", "consciousness_cause",
-                    "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY, OWN_DECLARED):
+                    "origin_wake_task_id", "focus", FOCUS_TRANSPORT_KEY):
             task["metadata"].pop(key, None)
     task["metadata"].update(deepcopy(record.get("writer_origin") or {}))
     task["metadata"].update(work_kind=writer_kind, schedule_writer_kind=writer_kind)

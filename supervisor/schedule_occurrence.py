@@ -797,7 +797,6 @@ def admit(prepared: List[Dict[str, Any]], *, stop: Optional[Callable[[], bool]] 
                     (data.get("followup_restart") or {}).get("control_id", "")):
                 record["followup_wait"] = "owner_restart_in_progress"
                 continue  # Retain the exact owed claim; re-prepare next pass, without a future hold.
-            from ouroboros.consciousness_authority import is_declared_own
             from supervisor.followup_policy import control_guard, refresh_policy
             from supervisor.queue_schedules import own_time_waits
             prepared_task, enqueued = item["task"], False
@@ -813,16 +812,23 @@ def admit(prepared: List[Dict[str, Any]], *, stop: Optional[Callable[[], bool]] 
                     if policy.get("busy"):
                         defer(item)
                         continue
-                    if (policy.get("hold") or policy["wait"] or record.get("followup_hold")
-                            or own_time_waits(record, q.DRIVE_ROOT)):  # unadmitted: stays due while own time is off
+                    if policy.get("hold") or policy["wait"] or record.get("followup_hold"):
+                        continue
+                    # Declared own work waits while own time is off, judged on what this occurrence froze if it has
+                    # a receipt: a fresh claim is dropped (the row stays due), an accepted one waits on a hold.
+                    frozen = item.get("stored_task")
+                    if own_time_waits({"writer_origin": (frozen.get("metadata") or {})} if frozen else record, q.DRIVE_ROOT):
+                        if fresh_claim:
+                            discard_claim(record)
+                        else:
+                            set_hold(record, "own_time_off", "declared own work waits while own time is off")
                         continue
                     current.pop("admission", None)  # retire the legacy refusal witness
                     with q.prepared_root_billing(prepared_task, resolved=billing[item["schedule_id"]]):
                         outcome = q.enqueue_task(prepared_task, consciousness_window=windows.get(item["schedule_id"]),
                                                  project_admission=item.get("project_admission"),
-                                                 continuation=not is_declared_own(record.get("writer_origin")) and bool(
-                                                     record.get("continuation_of") or
-                                                     (item.get("stored_task") or {}).get("_consciousness_continuation")))
+                                                 continuation=bool(record.get("continuation_of") or
+                                                                   (item.get("stored_task") or {}).get("_consciousness_continuation")))
                     block = str(outcome.get("_admission_blocked") or "") if isinstance(outcome, dict) else ""
                     if block and outcome.get("_admission_contention"):
                         defer(item)

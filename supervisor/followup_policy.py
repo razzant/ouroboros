@@ -473,7 +473,7 @@ def task_binding(root, record):
 
 
 def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, task_id, reason,
-                     writer_kind="consciousness", writer_metadata=None):
+                     writer_kind="consciousness", writer_metadata=None, agent=False):
     """Release precisely a durable, observed generation; never enable other holds."""
     from supervisor import queue_schedules as store
     with control_guard(root, current):
@@ -509,7 +509,7 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
             after["followup_origin"], after["followup_relation"] = resolved
         from ouroboros.consciousness_authority import stamp_schedule_writer
         stamp_schedule_writer(after, writer_kind, writer_metadata,  # a restore of the same work
-                              started_root=relation_kind(after) == "independent", same_work=True)
+                              started_root=relation_kind(after) == "independent", same_work=True, agent=agent)
         after["followup_released"] = {**(after.get("followup_released") or {}), **hold.get("controls", {})}
         after.pop("followup_hold", None)
         after["followup_wait"] = policy_view(root, data, after)["wait"]

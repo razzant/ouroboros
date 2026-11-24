@@ -310,7 +310,7 @@ def _own_time(monkeypatch, on):
     monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
 
 
-def _owner_start(root, monkeypatch, uploads=(), **kwargs):
+def _owner_start(root, monkeypatch, uploads=(), blocked="", **kwargs):
     """``start_task`` from an owner turn through the real promote admission: (reply, event, enqueued roots, ctx)."""
     from ouroboros.tools.control_routing import _start_task
     from ouroboros.utils import append_jsonl
@@ -320,7 +320,8 @@ def _owner_start(root, monkeypatch, uploads=(), **kwargs):
     supervisor = SimpleNamespace(
         DRIVE_ROOT=root, RUNNING={}, PENDING=[], WORKERS={0: SimpleNamespace()},
         bridge=SimpleNamespace(send_routing_ack=lambda *a, **k: None, broadcast=lambda *a, **k: None),
-        enqueue_task=lambda task: enqueued.append(task) or dict(task),
+        enqueue_task=lambda task: ({**task, "_admission_blocked": blocked} if blocked  # the queue's own refusal
+                                   else enqueued.append(task) or dict(task)),
         persist_queue_snapshot=lambda **_k: True, load_state=lambda: {"owner_chat_id": 1}, append_jsonl=append_jsonl)
     ctx = SimpleNamespace(
         pending_events=[], current_chat_id=1, drive_root=root, budget_drive_root=str(root), task_id="turn-1",
@@ -406,16 +407,33 @@ def test_a_declared_start_refused_by_the_cap_or_allowance_says_what_to_do_instea
     from ouroboros.tools.control_routing import MINE_WAY_FORWARD, _cause_words
 
     for code in ("consciousness_task_limit", "consciousness_allowance_exhausted"):
-        assert MINE_WAY_FORWARD in _cause_words(code, mine=True)
-        assert MINE_WAY_FORWARD not in _cause_words(code)
-    assert MINE_WAY_FORWARD not in _cause_words("worker_pool_unavailable", mine=True)
+        assert MINE_WAY_FORWARD.rstrip(".") in _cause_words(code, mine=True)
+        assert MINE_WAY_FORWARD.rstrip(".") not in _cause_words(code)
+    assert MINE_WAY_FORWARD.rstrip(".") not in _cause_words("worker_pool_unavailable", mine=True)
 
 
 def test_a_declared_stamp_carries_no_owner_schedules_writer_kind():
-    """Declared from my human's scheduled run, the stamp does not keep that schedule's writer kind (Safety would read
-    "owner work's schedule" for my own work); an undeclared start from it keeps the kind as before."""
+    """Declared from my human's scheduled run, the stamp keeps the scheduling fact with the new author, never the
+    owner's writer kind (Safety would read "owner work's schedule" for my own work); undeclared keeps it as before."""
     from ouroboros.consciousness_authority import consciousness_origin_metadata, declared_own_origin
 
     run = {"work_kind": "owner", "schedule_writer_kind": "owner", "task_id": "fired-1"}
-    assert "schedule_writer_kind" not in declared_own_origin(run)
+    assert declared_own_origin(run)["schedule_writer_kind"] == "consciousness"
     assert consciousness_origin_metadata(run, started_root=True)["schedule_writer_kind"] == "owner"
+
+
+@pytest.mark.parametrize("level", ["observe", "act"])
+def test_a_declared_start_names_its_level_and_a_cap_refusal_says_what_to_do(promote_root, monkeypatch, level):
+    """Through the real promote path: the receipt names the level the declared root runs at; a cap refusal names the
+    way forward once, in one sentence."""
+    from ouroboros import consciousness_authority
+    from ouroboros.tools.control_routing import MINE_WAY_FORWARD
+
+    _own_time(monkeypatch, True)
+    monkeypatch.setattr(consciousness_authority, "get_consciousness_autonomy", lambda: level)
+    out, _event, [root], _ = _owner_start(promote_root, monkeypatch, mine=True)
+    assert f"({level} autonomy)" in out or f"{level} autonomy)" in out, out
+    assert root["metadata"]["consciousness_autonomy"] == level
+    refused, _event, enqueued, _ = _owner_start(promote_root, monkeypatch, blocked="consciousness_task_limit", mine=True)
+    assert refused.startswith("⚠️ PROMOTE_REJECTED") and enqueued == [], refused
+    assert MINE_WAY_FORWARD.rstrip(".") in refused and ".." not in refused

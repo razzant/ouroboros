@@ -468,6 +468,14 @@ OWN_TIME_WAIT_NOTE = (" It is your own work and own time is off: it is kept and 
                       "is on. If your human asked for it, an update citing their words (owner_words) makes it theirs.")
 
 
+def _declare_own_start(ctx: ToolContext, evt: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+    """Declared own work (``mine``): the consciousness stamp, and nothing of my human's message or its files."""
+    from ouroboros.consciousness_authority import declared_own_origin
+
+    evt.update(declared_own_origin({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}),
+               client_message_id="", attachment_uploads=[])
+
+
 def _mine_refusal(ctx: ToolContext, mine: Any, *, owner_words: Any, owner_source: Any, destination: Any) -> str:
     """The published typed refusal of a ``mine`` declaration, read before any effect; ``""`` when it may proceed."""
     if mine is None or mine is False:
@@ -687,11 +695,10 @@ def _start_task(
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style
     # stripping, the wake chooses project/workspace like any Main turn (В9').
-    from ouroboros.consciousness_authority import consciousness_origin_metadata, declared_own_origin, is_focus_wake
+    from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
 
-    if mine and not private:  # declared own work: the consciousness stamp and nothing of my human's message or files
-        evt.update(declared_own_origin({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}),
-                   client_message_id="", attachment_uploads=[])
+    if mine and not private:
+        _declare_own_start(ctx, evt, metadata)
     elif not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
         evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
                                                  started_root=True, owner_basis=owner_basis))
@@ -968,7 +975,8 @@ def _cause_words(code: str, *, mine: bool = False) -> str:
 
     phrase = ROUTING_REFUSAL_CAUSES.get(str(code or "").strip(), "")
     if mine and str(code or "").startswith("consciousness_"):  # a declared start the cap or the allowance refused
-        phrase = f"{phrase}. {MINE_WAY_FORWARD}" if phrase else MINE_WAY_FORWARD
+        way = MINE_WAY_FORWARD.rstrip(".")  # the caller ends the sentence
+        phrase = f"{phrase}. {way}" if phrase else way
     return f": {phrase}" if phrase else ""
 
 
