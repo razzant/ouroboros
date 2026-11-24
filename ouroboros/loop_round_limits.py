@@ -1578,12 +1578,10 @@ def _shorten_book_map(ctx: Any) -> bool:
     Memory, mode, schemas and reserves stay as chosen; a view a reply read keeps its forms."""
     from ouroboros import memory_floor
 
-    if not book_yield_due(ctx):
+    if not book_yield_due(ctx):  # A helper's Low view never reaches the map step.
         return False
     mode = str(getattr(ctx, "active_context_mode", "") or "")
-    plan = ctx.context_fit_plan
-    allow_maps = mode == "low"  # the gate above already kept a helper's Low view out
-    if (stepped := memory_floor.step_book_map(plan, mode, maps=allow_maps)) is None:
+    if (stepped := memory_floor.step_book_map(ctx.context_fit_plan, mode)) is None:
         return False
     ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = stepped
     ctx.messages[:] = stepped.reproject_transcript(ctx.messages, mode)
