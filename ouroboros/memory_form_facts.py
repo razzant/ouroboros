@@ -349,6 +349,8 @@ def memory_composition(snapshot, level):
 
 
 def ordinary_composition(snapshot):
+    """``memory_composition`` of the ordinary level, on an explicit inspection; its retained digest reader
+    (``tools/compact_context``) survives issuer changes and cold restores."""
     from ouroboros.memory_floor import FORMS_VERSION, ordinary_level
 
     level = ordinary_level(snapshot)

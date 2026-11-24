@@ -519,14 +519,14 @@ def test_the_flow_line_names_its_comparison_capture_or_its_absence_and_states_fa
 
     snap = _flow_snapshot()
     line = flow_line(snap, {}, task_id="t002")  # this task is t002: the previous start of this room is t001
-    assert line.startswith("flow since this room's previous start (task t001, 2026-09-07T00:02:00+00:00): "
-                           "4 open rows arrived in 1 room; 0 retellings cover time after it; untold of what I read or "
-                           "said: ")
-    assert "4 of those rows dated after that start" in line and "pages no part or account holds: 4" in line
-    assert "Main: " in line and "oldest 2026-09-08" in line and "no telling there in my story" in line
+    assert line.startswith("flow since this room's previous start, task t001 at 2026-09-07 00:02: 4 rows arrived in 1 "
+                           "room; 0 retellings cover time after it; untold of what I read or said ")
+    assert "4 rows after that start" in line and line.endswith("; 4 pages no part or account holds")
+    assert "; Main " in line and "oldest 2026-09-08" in line and "no telling of it in my story" in line
+    assert not re.search(r"\d:\d\d:\d\d|\+00:00|undated|by me", line)  # captured minutes only, no clock, no filler
     first = flow_line(_flow_snapshot(lane2=0), {}, task_id="t000")
-    assert first.startswith("flow: no comparable capture (this capture holds no earlier start of this room); ")
-    assert "dated after that start" not in first
+    assert first.startswith("flow: no comparable capture (no earlier start of this room in this capture); ")
+    assert "after that start" not in first
     assert not _VERDICTS.search(line) and not _VERDICTS.search(first)
 
 
@@ -557,7 +557,7 @@ def test_the_flow_line_rides_the_facts_row_after_the_cache_marker_and_moves_no_p
     before = plan.max_projection.system_content_json
     line = memory_facts(plan, "max")
     head, flow = line.split(" | ", 1)
-    assert flow.startswith("flow since this room's previous start (task t002, ") and "flow" not in before
+    assert flow.startswith("flow since this room's previous start, task t002 at ") and "flow" not in before
     assert plan.max_projection.system_content_json == before
     monkeypatch.setattr(cvf, "flow_line", lambda *_a, **_k: "")
     assert memory_facts(plan, "max").split(" | ", 1)[0] == head and plan.max_projection.system_content_json == before

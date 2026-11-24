@@ -363,23 +363,24 @@ def flow_line(snapshot: mv.MemoryViewSnapshot, receipt: Mapping[str, Any], task_
             hold(str(place["room_id"]), str(place.get("label") or group.get("label")), [*kinds["untold"], *kinds["owner"]])
     tellings = [e for e in snapshot.story if e.get("kind") in ("page", "part", "account")]
     if since is None:
-        head = "flow: no comparable capture (this capture holds no earlier start of this room)"
+        head = "flow: no comparable capture (no earlier start of this room in this capture)"
     else:
         arrived = Counter(place for place, ts in _open_rows(snapshot, here) if ts > since["ts"])
         reach = [e for e in tellings if str((e.get("source_period") or {}).get("end") or "") > since["ts"]]
-        rooms = f"{len(arrived)} room{'' if len(arrived) == 1 else 's'}"
-        head = (f"flow since this room's previous start (task {since['task']}, {since['ts']}): "
-                f"{sum(arrived.values())} open rows arrived in {rooms}; {len(reach)} retellings cover time after it")
+        head = (f"flow since this room's previous start, task {since['task']} at {_minute(since['ts'])}: "
+                f"{sum(arrived.values())} rows arrived in {len(arrived)} room{'' if len(arrived) == 1 else 's'}; "
+                f"{len(reach)} retellings cover time after it")
     total = [sum(item[n] for item in untold.values()) for n in (1, 2, 4)]
-    parts = [head, f"untold of what I read or said: {total[0]:,} tokens in {total[1]} rows of {len(untold)} rooms"
-             + (f", {total[2]} of those rows dated after that start" if since else "")]
+    parts = [head, f"untold of what I read or said {total[0]:,} tokens, {total[1]} rows, {len(untold)} rooms"
+             + (f", {total[2]} rows after that start" if since else "")]
     for place, (label, tokens, rows, oldest, _new) in sorted(untold.items(), key=lambda kv: (-kv[1][1], kv[0]))[:3]:
         last = max((e for e in tellings if str(e.get("room_id")) == place),
                    key=lambda e: str((e.get("source_period") or {}).get("end") or ""), default=None)
-        told = (f"last telling there {str((last.get('source_period') or {}).get('end') or 'undated')[:10]} by "
-                f"{last.get('signer') or 'me'}") if last else "no telling there in my story"
-        parts.append(f"{label}: {tokens:,} tokens untold, {rows} rows, oldest {oldest[:10] or 'undated'}, {told}")
-    parts.append(f"pages no part or account holds: {floor.unfolded_pages(snapshot)['pages']}")
+        end = str(((last or {}).get("source_period") or {}).get("end") or "")[:10]
+        told = ("no telling of it in my story" if last is None else f"last telling to {end}" if end
+                else "last telling's period not recorded") + (f", draft by {last['signer']}" if last and last.get("signer") else "")
+        parts.append(f"{label} {tokens:,} tokens, {rows} rows, oldest {oldest[:10] or 'not recorded'}, {told}")
+    parts.append(f"{floor.unfolded_pages(snapshot)['pages']} pages no part or account holds")
     fact = receipt.get("max_room")
     if isinstance(fact, Mapping) and fact.get("cause") in ("crowded", "route"):
         parts.append(_books_out(fact))
@@ -401,6 +402,11 @@ def _books_out(fact: Mapping[str, Any]) -> str:
             f"{fact['zero_need']:,}; the Max room for memory {fact['allowance']:,} against my shortest telling "
             f"{fact.get('telling', 0):,}" + (f", of which my human's words, which only my own page folds, {owner:,}"
                                              if owner else ""))
+
+
+def _minute(ts: Any) -> str:
+    """A captured time to the minute, ``2026-09-07 00:02``: no seconds, fraction or offset."""
+    return str(ts or "")[:16].replace("T", " ") or "time not recorded"
 
 
 def _open_rows(snapshot: mv.MemoryViewSnapshot, here: str) -> List[Tuple[str, str]]:
