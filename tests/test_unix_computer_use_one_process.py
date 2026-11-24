@@ -904,3 +904,60 @@ def test_wait_rereads_transient_child_error_without_claiming_absence():
     out = native.wait_for_text(lambda: next(views), "loaded", deadline=0.5, now=clock,
                                pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
     assert out["until_text"] == {"status": "matched", "reads": 2, "node_id": 2, "field": "value"}
+
+
+@pytest.mark.parametrize("outcome", [0, TIMEOUT], ids=["completed", "unknown-input"])
+def test_ordered_desktop_batch_reads_after_one_action_without_reclassifying_it(tmp_path, monkeypatch, outcome):
+    """A model response, real batch/registry/skill handlers, fake OS: waiting reads repeat, the input never does.
+    This is composition evidence, not an agent speed measurement or a native desktop test.
+    """
+    from ouroboros.loop_tool_execution import execute_tool_batch
+    from ouroboros.tool_capabilities import call_segments
+    from ouroboros.tools.registry import ToolEntry, ToolRegistry
+
+    nodes, reads = deck(), []
+    nodes["field"]["value"] = "Loading"
+    ax = FakeAX(nodes, windows=["win"], focused="win", perform=lambda _el, _action: outcome)
+    multi = ax.multi
+
+    def delayed(el, attrs):
+        if ax.performed and el == "win" and attrs == native._WALK_ATTRS:
+            reads.append(el)
+            if len(reads) >= 3:
+                nodes["field"]["value"] = "Loaded result 731"
+        return multi(el, attrs)
+
+    ax.multi = delayed
+
+    def helper(args, _state):
+        if args[0] == "element":
+            return native.op_element(args[1], ax=ax, front=lambda: app_dict(SAFARI), settle=lambda _s: None)
+        assert args[0] == "observe"
+        return native.op_observe(args[1], ax=ax)
+
+    _module, api, state = mac(tmp_path / "skill", monkeypatch, helper=helper)
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    from tests._extension_dispatch_harness import supervisor
+    supervisor(monkeypatch)  # only the physical Safety-model call is a fixture; never contact a provider
+    names = ["fixture_desktop_act", "fixture_desktop_read"]
+    for name, short in zip(names, ("element_act", "ax_tree")):
+        handler = api.tools[short]
+        registry.register(ToolEntry(name=name, schema={"name": name, "parameters": api.meta[short]["schema"]},
+                                   handler=lambda _ctx, _handler=handler, **args: _handler(**args)))
+    # The production extension names take the same serial path, never an inert-read parallel segment.
+    assert call_segments(["ext_19_r_unix_computer_use_element_act", "ext_19_r_unix_computer_use_ax_tree"]) == [[0], [1]]
+    args = [{"app": "Keynote", "do": "press", "select": {"identifier": "toolbar.play"}},
+            {"app": "Keynote", "until_text": "Loaded result 731", "timeout_ms": 1000}]
+    calls = [{"id": str(i), "type": "function", "function": {"name": name, "arguments": json.dumps(value)}}
+             for i, (name, value) in enumerate(zip(names, args))]
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    rows, control = execute_tool_batch(calls, registry, logs, "desktop-composition", None, {})
+    assert control is None and len(rows) == 2, rows
+    assert all(str(row["result"]).startswith("{") for row in rows), [row["result"] for row in rows]
+    first, last = [json.loads(row["result"]) for row in rows]
+    assert first["action_outcome"] == ("completed" if outcome == 0 else "unknown"), first
+    assert last["until_text"]["status"] == "matched" and last["until_text"]["reads"] >= 2, last
+    assert any(row.get("value") == "Loaded result 731" for row in last["nodes"]), last
+    assert ax.performed == [("play", "AXPress")] and ax.balanced()
+    assert [item[0] for item in state["helper"]] == ["element", "observe"]

@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.9.0
+version: 0.9.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -213,8 +213,29 @@ cut off by the helper's timeout (`helper_stopped`) leaves the action's receipt
 as it was: the top-level outcome is always the action's. A helper stopped
 before that line, with or without `observe`, leaves no receipt: the outcome is
 unknown (the action may have run), as below. A call carries one
-action at most. Several independent calls in one response are admitted one by
-one; a step that depends on an earlier step's outcome belongs to the next round.
+action at most. Ordinary desktop tool calls in one response run in written
+order, not concurrently. When the target and arguments are already known,
+group a chosen action and the read of its result in that response instead of
+spending a model round merely to request the read. A **decision** that needs
+that result belongs to the next round; do not guess a newly appearing target
+or stack further inputs whose permission depends on an earlier result.
+Do not put dependent calls in an explicitly parallel batch.
+
+For a known semantic target, use `element_act(observe=true, until_text=...)`
+to act once and wait/read its window in one helper. After ordinary `key`,
+`click` or `type_text`, follow with `ax_tree(app=..., window=...,
+until_text=..., timeout_ms=...)` in the same response when the window is
+already known. Choose text specific to the result, not the search query
+already echoed in a field: an echo or a nonempty tree is not readiness.
+If no useful text predicate is known, a short bounded `wait(ms=...)` then
+`ax_tree` or `screenshot` in that response is available; inspect that result
+before choosing more input. Waiting alone does not prove the app finished.
+
+Each call still has its own receipt; this grouping is not a transaction and
+has no automatic conditional stop on the previous call's failure. A queued
+read may help resolve a refused or unknown action. Check **all** the receipts
+before continuing: neither a later read nor a matched predicate retroactively
+proves the earlier input succeeded. Never blindly repeat an uncertain input.
 
 With `observe=true`, `until_text="expected text"` polls only that observation;
 the action, target selection and AX exposure are each done once. The checkpoint
