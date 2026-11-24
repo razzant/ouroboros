@@ -42,16 +42,12 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-    env:
-      # uv's own cache stays in the runner's disposable temp: no Actions cache is written.
-      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Depth 2 keeps the branch head's parent, so the product delta can be proved
-          # against the real parent tree instead of a remembered commit id.
-          fetch-depth: 2
+          # Keep the earlier validation attempt and the unchanged product commit.
+          fetch-depth: 3
       # The delta proof comes FIRST: it needs only git and the stdlib, so a branch that is
       # not exactly this two-file addition fails before dependencies are installed and
       # before a single test is collected.
@@ -69,13 +65,14 @@ jobs:
               return done.stdout.strip()
 
           try:
-              parent = git("rev-parse", "HEAD^")
+              parent = git("rev-parse", "HEAD^^")
           except SystemExit:
-              sys.exit("the branch head has no parent in this checkout (fetch-depth must be 2): "
-                       "the product delta cannot be proved, and this job refuses to pretend it can")
+              sys.exit("the checkout is missing the product commit (fetch-depth must be 3)")
+          if parent != "d3d378cc24e518ee0a0f1d8e1a7fff89e3a79f1b":
+              sys.exit("this check is bound to the unchanged product commit")
           head = git("rev-parse", "HEAD")
           tree = git("rev-parse", "HEAD^{tree}")
-          delta = [line for line in git("diff", "--name-status", "HEAD^", "HEAD").splitlines() if line]
+          delta = [line for line in git("diff", "--name-status", parent, "HEAD").splitlines() if line]
           expected = {"A\ttests/test_socket_4093_candidate_witness.py",
                       "A\t.github/workflows/socket-4093-candidate-check.yml"}
           print("HEAD   ", head)
@@ -95,6 +92,8 @@ jobs:
           enable-cache: false
           activate-environment: true
       - name: Install the pinned test dependencies
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
         run: uv sync --locked --extra browser --group dev
       - name: Record the runner account's stable home before safe_test replaces HOME
         run: |
