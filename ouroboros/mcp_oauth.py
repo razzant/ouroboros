@@ -11,53 +11,46 @@ the owner is the mind's judgment. A sign-in is two explicit steps any process ma
 (discovery, the client, PKCE; the pending sign-in, with the issuer and endpoints it was made for, is
 saved in the server's file and a later begin replaces it) and ``complete`` (the provider's return, from
 the builtin return page or an address the owner pasted). One file per server holds everything:
-``state/mcp/oauth/server-<id>.json``, mode 0600 in a 0700 directory, removed by sign-out and by
-configuration cleanup; a draft of another address (Settings Test) never replaces it. Only public
-helpers of the MCP SDK are used: its ``OAuthClientProvider`` runs the interactive flow inside a call
-and forgets the expiry it learned.
+``state/mcp/oauth/server-<id>.json``, mode 0600 in a 0700 directory; sign-out drops its tokens and
+configuration cleanup removes it; a draft of another address (Settings Test) never replaces it. The
+OAuth client itself (the lock, refresh, the pending sign-in and its return, registration, revocation)
+is ``oauth_engine.py``; this module keeps what is MCP's: the server's file and its address binding, the
+draft rule, RFC 9728 resource metadata and the issuer it names, the choice of client, the transport's
+Bearer handling and ``MCPAuthRequired``. Only public helpers of the MCP SDK are used: its
+``OAuthClientProvider`` runs the interactive flow inside a call and forgets the expiry it learned.
 """
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import contextlib
 import contextvars
-import json
+import functools
 import logging
-import os
-import secrets
-import threading
-import time
 import urllib.parse
-import weakref
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import httpx
 
-from ouroboros import config
-from ouroboros.runtime_limits import MCP_OAUTH_HTTP_TIMEOUT_SEC, MCP_OAUTH_LOCK_WAIT_SEC
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros import config, oauth_engine
+from ouroboros.oauth_engine import SIGN_IN_REQUIRED, SIGNED_IN
+from ouroboros.oauth_engine import RETURN_PATH, parse_return  # noqa: F401 -- MCP's route, tool and tests read a paste here
+from ouroboros.utils import read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
-RETURN_PATH = "/onboarding/static/provider-return.html"
-SIGNED_IN, SIGN_IN_REQUIRED = "signed_in", "sign_in_required"
-_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
-
-class MCPAuthRequired(RuntimeError):
+class MCPAuthRequired(oauth_engine.SignInRequired):
     """The server needs the owner's sign-in; the server ran nothing for this request."""
 
     code = "MCP_AUTH_REQUIRED"
 
     def __init__(self, server_id: str, reason: str, detail: str = "") -> None:
-        self.server_id, self.reason, self.detail = server_id, reason, detail
-        super().__init__(
+        self.server_id = server_id
+        super().__init__(reason, detail, message=(
             f"MCP_AUTH_REQUIRED: server {server_id!r} needs the owner's sign-in ({reason}"
             f"{': ' + detail if detail else ''}). Nothing ran there. The owner can press Sign in on its card in "
             f"Extensions → MCP servers, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
-            "a sign-in link to give them.")
+            "a sign-in link to give them."))
 
 
 def applies(cfg: Any) -> bool:
@@ -72,20 +65,14 @@ def _path(server_id: str):
     return config.DATA_DIR / "state" / "mcp" / "oauth" / f"server-{server_id}.json"
 
 
-_FORMAT = 2  # v2: an open sign-in requirement's ``since`` is its start; a v1 writer moved it to every refusal
+_FORMAT = 2  # v1 writers moved an open requirement's start to each refusal
 
 
-def _load(cfg: Any) -> Dict[str, Any]:
-    """The server's sign-in file; a file written for another address of the same id is not its grant. Every reader
-    and writer comes through here: a v1 file's open requirement reads with its start unknown (``since: None``),
-    its grant, pending sign-in and other fields kept, and the next write stores the current format."""
-    doc = read_json_dict(_path(cfg.id)) or {}
-    if doc.get("url") != cfg.url:
-        return {}
+def _upgrade(doc: Dict[str, Any]) -> Dict[str, Any]:
     record = doc.get("sign_in") or {}
-    if doc.get("v") != _FORMAT and record.get("state") == SIGN_IN_REQUIRED:
-        doc = {**doc, "sign_in": {**record, "since": None}}
-    return {**doc, "v": _FORMAT}
+    if record.get("state") == SIGN_IN_REQUIRED:
+        return {**doc, "sign_in": {**record, "since": None}}
+    return doc
 
 
 _DRAFT: "contextvars.ContextVar[bool]" = contextvars.ContextVar("mcp_oauth_draft", default=False)
@@ -102,69 +89,37 @@ def drafting():
         _DRAFT.reset(token)
 
 
-def _save(cfg: Any, doc: Dict[str, Any]) -> None:
+def _grant(cfg: Any) -> oauth_engine.Grant:
+    """The server's file as the engine's grant: bound to the server's address (a file written for another
+    address of the same id is not its grant), refused with ``MCPAuthRequired``, and written unless a draft
+    would replace another address's grant (a saved address always writes: Save prunes)."""
     path = _path(cfg.id)
-    recorded = (read_json_dict(path) or {}).get("url")
-    if _DRAFT.get() and recorded and recorded != cfg.url:
-        return  # a draft never replaces another address's grant; a saved address always writes (Save prunes)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
-    atomic_write_json(path, {**doc, "v": _FORMAT, "url": cfg.url})
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+
+    def may_write(_doc: Dict[str, Any]) -> bool:
+        recorded = (read_json_dict(path) or {}).get("url") if _DRAFT.get() else None
+        return not recorded or recorded == cfg.url
+
+    return oauth_engine.Grant(path=path, lock=f"mcp/oauth/server-{cfg.id}.lock", binding={"url": cfg.url},
+                              refusal=functools.partial(MCPAuthRequired, cfg.id), may_write=may_write,
+                              format_version=_FORMAT, upgrade=_upgrade)
 
 
-# Per event loop, per server; a lock lives only while a coroutine holds or awaits it (a bound lock refers to
-# its loop, so a strongly held one would keep every closed loop alive).
-_LOOP_LOCKS: "weakref.WeakKeyDictionary[Any, weakref.WeakValueDictionary]" = weakref.WeakKeyDictionary()
-_LOOP_LOCKS_GUARD = threading.Lock()
+def _load(cfg: Any) -> Dict[str, Any]:
+    return oauth_engine.load(_grant(cfg))
 
 
-@contextlib.asynccontextmanager
-async def _locked(cfg: Any):
-    """One refresh or sign-in step at a time per server. Coroutines of one event loop (a session's GET and
-    POST) queue on an asyncio lock, so a waiter never blocks the loop that runs the holder's await; the
-    owner-aware file lock across threads and processes (``store.name_lock``) is then polled off it."""
-    from ouroboros import store
-
-    with _LOOP_LOCKS_GUARD:
-        locks = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), weakref.WeakValueDictionary())
-        lock = locks.get(cfg.id)
-        if lock is None:
-            lock = locks[cfg.id] = asyncio.Lock()
-    async with lock:
-        deadline = time.monotonic() + MCP_OAUTH_LOCK_WAIT_SEC
-        while True:
-            held = store.name_lock(config.DATA_DIR, f"mcp/oauth/server-{cfg.id}.lock", timeout_sec=0)
-            try:
-                held.__enter__()  # one attempt: a busy name never blocks this loop
-                break
-            except store.StoreBusy:
-                if time.monotonic() >= deadline:
-                    raise
-                await asyncio.sleep(0.05)
-        try:
-            yield
-        finally:
-            held.__exit__(None, None, None)
+def _save(cfg: Any, doc: Dict[str, Any]) -> None:
+    oauth_engine.save(_grant(cfg), doc)
 
 
-def _required_state(doc: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    """The one rule for a required sign-in record: an open requirement keeps its start (an unknown one stays
-    unknown); a requirement after a signed-in state starts now."""
-    prior = doc.get("sign_in") or {}
-    since = prior.get("since") if prior.get("state") == SIGN_IN_REQUIRED else utc_now_iso()
-    return {"state": SIGN_IN_REQUIRED, "reason": reason, "since": since}
+def _locked(cfg: Any):
+    """One refresh or sign-in step at a time per server (``oauth_engine.locked``)."""
+    return oauth_engine.locked(_grant(cfg))
 
 
 def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **facts: Any) -> MCPAuthRequired:
     """Record that sign-in is needed (with what the server said) and return the refusal to raise."""
-    doc = {**doc, **facts, "sign_in": _required_state(doc, reason)}
-    if reason in ("refresh_rejected", "token_rejected", "expired"):
-        doc.pop("tokens", None)  # a grant the provider no longer honours is not kept as if it were
-    _save(cfg, doc)
-    return MCPAuthRequired(cfg.id, reason, detail)
+    return oauth_engine.required(_grant(cfg), doc, reason, detail, **facts)
 
 
 def status(cfg: Any) -> Optional[Dict[str, Any]]:
@@ -190,26 +145,9 @@ def status(cfg: Any) -> Optional[Dict[str, Any]]:
     return out
 
 
-_SECRETS: Dict[str, Tuple[int, tuple]] = {}
-
-
 def secret_values(server_id: str) -> tuple:
     """This server's live sign-in secrets, for the masking of every text from or about it."""
-    path = _path(server_id)
-    try:
-        stamp = path.stat().st_mtime_ns
-    except OSError:
-        return ()
-    cached = _SECRETS.get(server_id)
-    if cached and cached[0] == stamp:
-        return cached[1]
-    doc = read_json_dict(path) or {}
-    pending = doc.get("pending") or {}
-    values = ((doc.get("tokens") or {}).get("access_token"), (doc.get("tokens") or {}).get("refresh_token"),
-              (doc.get("client") or {}).get("client_secret"), pending.get("code_verifier"),
-              (pending.get("client") or {}).get("client_secret"))
-    _SECRETS[server_id] = (stamp, tuple(value for value in values if value))
-    return _SECRETS[server_id][1]
+    return oauth_engine.secret_values(_path(server_id))
 
 
 def prune(configs: list) -> None:
@@ -225,100 +163,13 @@ def prune(configs: list) -> None:
                 path.unlink(missing_ok=True)
 
 
-# -- the authorization server -------------------------------------------------------------------
-
-
-def _client() -> httpx.AsyncClient:
-    """A short-lived client for the authorization server: never the transport's, never its headers."""
-    return httpx.AsyncClient(timeout=MCP_OAUTH_HTTP_TIMEOUT_SEC, follow_redirects=False)
-
-
-def _checked(url: str) -> str:
-    """An endpoint the (untrusted) MCP server named: HTTPS or loopback, and the address policy of servers."""
-    from ouroboros.mcp_client import _validate_url
-
-    text = _validate_url(str(url))
-    if urllib.parse.urlparse(text).scheme != "https" and (urllib.parse.urlparse(text).hostname or "") not in _LOOPBACK:
-        raise ValueError(f"authorization endpoint {text!r} is not HTTPS")
-    return text
-
-
-def _oauth_error(response: httpx.Response) -> str:
-    with contextlib.suppress(ValueError):
-        body = response.json()
-        if isinstance(body, dict) and body.get("error"):
-            return str(body["error"])
-    return f"HTTP {response.status_code}"
-
-
-async def _token_request(http: httpx.AsyncClient, endpoint: str, client: Dict[str, Any],
-                         data: Dict[str, str]) -> httpx.Response:
-    """A token-endpoint (or revocation) POST with the client's own authentication method."""
-    data, auth = {**data, "client_id": client.get("client_id", "")}, None
-    if client.get("client_secret"):
-        if client.get("token_endpoint_auth_method") == "client_secret_basic":
-            auth = httpx.BasicAuth(urllib.parse.quote(client["client_id"], safe=""),
-                                   urllib.parse.quote(client["client_secret"], safe=""))
-        else:
-            data["client_secret"] = client["client_secret"]
-    return await http.post(_checked(endpoint), data=data, auth=auth, headers={"Accept": "application/json"})
-
-
-def _tokens(token: Any, previous_refresh: Optional[str], previous_scope: Optional[str]) -> Dict[str, Any]:
-    """Absolute expiry (the SDK keeps only a relative one); the previous refresh token and scope when a
-    response omits them (RFC 6749 §5.1 and §6: then they are unchanged)."""
-    return {"access_token": token.access_token, "token_type": token.token_type or "Bearer",
-            "refresh_token": token.refresh_token or previous_refresh, "scope": token.scope or previous_scope,
-            "expires_at": time.time() + token.expires_in if token.expires_in else None}
-
-
-def _same_registration(one: Dict[str, Any], other: Dict[str, Any]) -> bool:
-    """One client registration: same issuer, id and authentication (a new secret is another registration)."""
-    keys = ("issuer", "client_id", "client_secret", "token_endpoint_auth_method")
-    return bool(one) and bool(other) and all(one.get(key) == other.get(key) for key in keys)
-
-
-def _fresh(tokens: Dict[str, Any], rejected: Optional[str]) -> bool:
-    return bool(tokens.get("access_token")) and tokens["access_token"] != rejected and (
-        tokens.get("expires_at") is None or time.time() < float(tokens["expires_at"]))
-
-
 async def current_token(cfg: Any, rejected: Optional[str] = None) -> str:
-    """A usable access token: the stored one, or one refresh under the lock (re-read first: another
-    process may already hold a newer token). Raises ``MCPAuthRequired`` when sign-in is needed."""
-    from mcp.shared.auth import OAuthToken
+    """A usable access token for the server (``oauth_engine.current_token``: the stored one, or one refresh
+    under the lock). Raises ``MCPAuthRequired`` when sign-in is needed."""
+    return await oauth_engine.current_token(_grant(cfg), rejected)
 
-    async with _locked(cfg):
-        doc = _load(cfg)
-        tokens = doc.get("tokens") or {}
-        if not tokens.get("access_token"):
-            raise MCPAuthRequired(cfg.id, (doc.get("sign_in") or {}).get("reason") or "not_signed_in")
-        if _fresh(tokens, rejected):
-            return tokens["access_token"]
-        if not tokens.get("refresh_token"):
-            raise _required(cfg, doc, "token_rejected" if rejected else "expired")
-        data = {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"],
-                **({"resource": doc["resource"]} if doc.get("resource") else {})}
-        async with _client() as http:
-            response = await _token_request(http, (doc.get("metadata") or {}).get("token_endpoint", ""),
-                                            doc.get("client") or {}, data)
-        if response.status_code in (400, 401):
-            error = _oauth_error(response)
-            if error == "invalid_request":  # a malformed request, not a refused grant: the grant stays
-                response.raise_for_status()
-            # invalid_grant (expired or revoked), invalid_client (the registration is gone: register again,
-            # so a pending sign-in made with the same registration goes too)
-            facts: Dict[str, Any] = {}
-            if error == "invalid_client":
-                facts["client"] = None
-                if _same_registration((doc.get("pending") or {}).get("client") or {}, doc.get("client") or {}):
-                    facts["pending"] = None
-            raise _required(cfg, doc, "refresh_rejected", error, **facts)
-        response.raise_for_status()  # an unreachable authorization server is a failure, not a lost sign-in
-        doc["tokens"] = _tokens(OAuthToken.model_validate_json(response.content), tokens.get("refresh_token"),
-                                tokens.get("scope"))
-        _save(cfg, doc)
-        return doc["tokens"]["access_token"]
+
+# -- the transport ------------------------------------------------------------------------------
 
 
 def _challenge(response: httpx.Response) -> Dict[str, Any]:
@@ -364,7 +215,7 @@ class StoredBearer(httpx.Auth):
         own = origin_of(request.url) == origin_of(self.cfg.url)
         tokens = (_load(self.cfg).get("tokens") or {}) if own else {}
         token = tokens.get("access_token")
-        if token and not _fresh(tokens, None):
+        if token and not oauth_engine.fresh(tokens, None):
             try:
                 token = await current_token(self.cfg)
             except MCPAuthRequired as exc:
@@ -394,108 +245,52 @@ class StoredBearer(httpx.Auth):
         if response.status_code == 403 and challenge.get("error") == "insufficient_scope":
             async with _locked(self.cfg):
                 doc = _load(self.cfg)
-                wanted = _union((doc.get("tokens") or {}).get("scope"), doc.get("required_scope"), challenge.get("scope"))
-                since = doc.get("required_scope_since") if doc.get("required_scope") else utc_now_iso()  # an open gap keeps it
+                wanted = oauth_engine.union((doc.get("tokens") or {}).get("scope"), doc.get("required_scope"),
+                                            challenge.get("scope"))
+                since = doc.get("required_scope_since") if doc.get("required_scope") else utc_now_iso()
                 _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted, "required_scope_since": since})
             raise await self._refused(MCPAuthRequired(self.cfg.id, "insufficient_scope", challenge.get("scope") or ""))
-
-
-def _union(*scopes: Optional[str]) -> Optional[str]:
-    words = [word for scope in scopes if scope for word in scope.split()]
-    return " ".join(dict.fromkeys(words)) or None
 
 
 # -- the two sign-in steps ----------------------------------------------------------------------
 
 
-def _server_port() -> int:
-    """The live main-server port (its port file), else the configured one."""
-    from ouroboros.config import AGENT_SERVER_PORT, resolve_port_file
-
-    with contextlib.suppress(OSError, ValueError):
-        port = int(resolve_port_file().read_text(encoding="utf-8").strip())
-        if port > 0:
-            return port
-    return int(os.environ.get("OUROBOROS_SERVER_PORT") or AGENT_SERVER_PORT)
-
-
 def redirect_uri(return_base: str = "") -> str:
     """The builtin return page under ``return_base`` when that is loopback or HTTPS (an MCP rule), else
     under this server's loopback address; a browser elsewhere then hands its address back by paste."""
-    base = (return_base or "").strip().rstrip("/")
-    parsed = urllib.parse.urlparse(base)
-    if not (parsed.scheme == "https" or (parsed.scheme == "http" and (parsed.hostname or "") in _LOOPBACK)):
-        base = f"http://127.0.0.1:{_server_port()}"
-    return base + RETURN_PATH
-
-
-def _state(server_id: str, nonce: str) -> str:
-    raw = json.dumps({"v": 1, "mcp": server_id, "nonce": nonce}, separators=(",", ":")).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _envelope(state: str) -> Dict[str, Any]:
-    try:
-        envelope = json.loads(base64.urlsafe_b64decode(str(state) + "=" * (-len(str(state)) % 4)).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ValueError("not an MCP sign-in return") from exc
-    if not isinstance(envelope, dict) or envelope.get("v") != 1 or not envelope.get("mcp"):
-        raise ValueError("not an MCP sign-in return")
-    return envelope
+    return oauth_engine.redirect_uri(return_base)
 
 
 def server_of(state: str) -> str:
     """The server a returned ``state`` names (route syntax only: ``complete`` checks the nonce)."""
-    return str(_envelope(state)["mcp"])
-
-
-def parse_return(address: str) -> Dict[str, str]:
-    """The provider's return parameters from the address its browser stopped on (a paste)."""
-    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(str(address or "").strip()).query))
-    if not query.get("state") or not (query.get("code") or query.get("error")):
-        raise ValueError("the address carries no complete sign-in return (state and code)")
-    return {key: query[key] for key in ("state", "code", "error", "error_description", "iss") if key in query}
+    try:
+        return str(oauth_engine.envelope(state, "mcp")["mcp"])
+    except ValueError as exc:
+        raise ValueError("not an MCP sign-in return") from exc
 
 
 async def _discover(cfg: Any, doc: Dict[str, Any], http: httpx.AsyncClient):
     """RFC 9728 resource metadata (the challenge's address first), then the authorization server's metadata,
     whose issuer must be the one the resource named (without resource metadata, the server's origin);
-    PKCE S256 must be offered. Returns ``(prm, metadata, raw, issuer)``: the raw document keeps what the SDK
-    model normalizes or drops (the issuer exactly as published; ``authorization_response_iss_parameter_supported``)."""
-    from mcp.client.auth.utils import (build_oauth_authorization_server_metadata_discovery_urls,
-                                       build_protected_resource_metadata_discovery_urls, create_oauth_metadata_request,
-                                       handle_auth_metadata_response, handle_protected_resource_response)
+    PKCE S256 must be offered (``oauth_engine.discover_issuer``). Returns ``(prm, metadata, endpoints, issuer)``."""
+    from mcp.client.auth.utils import (build_protected_resource_metadata_discovery_urls, create_oauth_metadata_request,
+                                       handle_protected_resource_response)
 
     prm = None
     for url in build_protected_resource_metadata_discovery_urls(
             (doc.get("challenge") or {}).get("resource_metadata"), cfg.url):
-        response = await http.send(create_oauth_metadata_request(_checked(url)))
+        response = await http.send(create_oauth_metadata_request(oauth_engine.checked(url)))
         if response.status_code == 429 or response.status_code >= 500:
             response.raise_for_status()  # a busy or failing server is not "no metadata": never another issuer
         prm = await handle_protected_resource_response(response)
         if prm:
             break
     named = str(prm.authorization_servers[0]) if prm and prm.authorization_servers else None
-    metadata, raw = None, {}
-    for url in build_oauth_authorization_server_metadata_discovery_urls(named, cfg.url):
-        response = await http.send(create_oauth_metadata_request(_checked(url)))
-        ok, metadata = await handle_auth_metadata_response(response)
-        if metadata:
-            with contextlib.suppress(ValueError):
-                raw = response.json()
-            raw = raw if isinstance(raw, dict) else {}
-        if metadata or not ok:
-            break
-    if metadata is None:
-        raise MCPAuthRequired(cfg.id, "no_oauth_metadata", "the server publishes no authorization metadata")
     parsed = urllib.parse.urlsplit(cfg.url)
-    expected = named or f"{parsed.scheme}://{parsed.netloc}"
-    if str(metadata.issuer).rstrip("/") != expected.rstrip("/"):
-        raise MCPAuthRequired(cfg.id, "issuer_mismatch", f"{metadata.issuer} is not {expected}")
-    if "S256" not in (metadata.code_challenge_methods_supported or []):
-        raise MCPAuthRequired(cfg.id, "no_pkce", "the authorization server does not offer PKCE S256")
-    issuer = raw.get("issuer") if isinstance(raw.get("issuer"), str) and raw.get("issuer") else str(metadata.issuer)
-    return prm, metadata, raw, issuer
+    metadata, endpoints, issuer = await oauth_engine.discover_issuer(
+        named, cfg.url, named or f"{parsed.scheme}://{parsed.netloc}", http,
+        refusal=functools.partial(MCPAuthRequired, cfg.id))
+    return prm, metadata, endpoints, issuer
 
 
 async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str, redirect: str,
@@ -503,9 +298,6 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str,
     """The owner's own registration if given, else the stored (or pending) client of this issuer and return
     address, else dynamic registration (deprecated in 2026-07-28 but offered by most servers), else a typed
     refusal naming the address to register."""
-    from mcp.client.auth.utils import handle_registration_response
-    from mcp.shared.auth import OAuthClientMetadata
-
     if client_id:
         methods = metadata.token_endpoint_auth_methods_supported or []
         method = "none" if not client_secret else (
@@ -521,93 +313,39 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str,
                               f"the provider registers no apps itself: register one there for the return address "
                               f"{redirect}, then enter its client ID (and secret) under Sign in on this server's card "
                               "in Extensions → MCP servers")
-    endpoint = _checked(str(metadata.registration_endpoint))
-    body = OAuthClientMetadata(client_name="Ouroboros", redirect_uris=[redirect], token_endpoint_auth_method="none",
-                               grant_types=["authorization_code", "refresh_token"], response_types=["code"]).model_dump(
-        mode="json", exclude_none=True)
-    body["application_type"] = "native" if urllib.parse.urlparse(redirect).hostname in _LOOPBACK else "web"
-    response = await http.post(endpoint, json=body)
-    if response.status_code not in (200, 201):
-        raise MCPAuthRequired(cfg.id, "registration_rejected", f"{_oauth_error(response)} from {endpoint}")
-    info = await handle_registration_response(response)
-    return {"client_id": info.client_id, "client_secret": info.client_secret,
-            "token_endpoint_auth_method": info.token_endpoint_auth_method or "none", "redirect_uri": redirect,
-            "issuer": issuer, "source": "registered"}
+    return await oauth_engine.register_client(metadata, redirect, http, issuer=issuer,
+                                              refusal=functools.partial(MCPAuthRequired, cfg.id))
 
 
 async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_secret: str = "") -> Dict[str, Any]:
     """Start one sign-in; returns ``{server, url, redirect_uri}`` — the provider page the owner opens."""
-    from mcp.client.auth.oauth2 import PKCEParameters
     from mcp.client.auth.utils import get_client_metadata_scopes
 
     doc = _load(cfg)
-    async with _client() as http:
-        prm, metadata, raw, issuer = await _discover(cfg, doc, http)
+    async with oauth_engine.http_client() as http:
+        prm, metadata, endpoints, issuer = await _discover(cfg, doc, http)
         stored = doc.get("client") or {}
         redirect = stored["redirect_uri"] if stored.get("source") == "owner" and not client_id else redirect_uri(return_base)
         client = await _client_for(cfg, doc, metadata, issuer, redirect, http, client_id, client_secret)
-    authorize = _checked(str(metadata.authorization_endpoint))
-    pkce, nonce = PKCEParameters.generate(), secrets.token_urlsafe(24)
     # A step-up keeps what the grant already allows and adds what the server asked for (MCP step-up flow).
-    scope = _union(get_client_metadata_scopes((doc.get("challenge") or {}).get("scope"), prm, metadata),
-                   (doc.get("tokens") or {}).get("scope"), doc.get("required_scope"))
+    scope = oauth_engine.union(get_client_metadata_scopes((doc.get("challenge") or {}).get("scope"), prm, metadata),
+                               (doc.get("tokens") or {}).get("scope"), doc.get("required_scope"))
     resource = str(prm.resource) if prm and prm.resource else None  # RFC 8707 where the server published PRM
-    params = {"response_type": "code", "client_id": client["client_id"], "redirect_uri": client["redirect_uri"],
-              "state": _state(cfg.id, nonce), "code_challenge": pkce.code_challenge, "code_challenge_method": "S256",
-              **({"scope": scope} if scope else {}), **({"resource": resource} if resource else {})}
-    facts = metadata.model_dump(mode="json", exclude_none=True)
-    kept = {key: facts[key] for key in ("authorization_endpoint", "token_endpoint", "registration_endpoint",
-                                         "revocation_endpoint") if key in facts}
-    kept["authorization_response_iss_parameter_supported"] = raw.get(
-        "authorization_response_iss_parameter_supported") is True
-    async with _locked(cfg):  # the current grant keeps its own issuer and endpoints until this sign-in completes
-        doc = _load(cfg)  # re-read: a call may have refreshed meanwhile
-        doc["pending"] = {"nonce": nonce, "code_verifier": pkce.code_verifier, "client": client, "scope": scope,
-                          "issuer": issuer, "resource": resource, "metadata": kept, "started": utc_now_iso()}
-        _save(cfg, doc)
-    return {"server": cfg.id, "url": f"{authorize}?{urllib.parse.urlencode(params)}",
-            "redirect_uri": client["redirect_uri"]}
+    url = await oauth_engine.authorize(_grant(cfg), endpoints, client, scope,
+                                       functools.partial(oauth_engine.state, "mcp", cfg.id), issuer=issuer,
+                                       resource=resource)
+    return {"server": cfg.id, "url": url, "redirect_uri": client["redirect_uri"]}
 
 
 async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] = None, error: str = "",
                    error_description: str = "") -> Dict[str, Any]:
     """Finish the pending sign-in from the provider's return; returns ``{ok, server, scope}``."""
-    from mcp.shared.auth import OAuthToken
-
-    nonce = _envelope(state).get("nonce", "")
-    doc = _load(cfg)
-    pending = doc.get("pending") or {}
-    if not pending or not nonce or not secrets.compare_digest(str(pending.get("nonce", "")), str(nonce)):
-        raise MCPAuthRequired(cfg.id, "sign_in_superseded", "this return belongs to an older or unknown sign-in")
-    issuer, metadata = pending.get("issuer") or "", pending.get("metadata") or {}
-    if iss is not None and iss != issuer:  # RFC 9207: exactly the issuer the verifier was made for
-        raise MCPAuthRequired(cfg.id, "issuer_mismatch", f"{iss} is not {issuer}")
-    if iss is None and metadata.get("authorization_response_iss_parameter_supported"):
-        raise MCPAuthRequired(cfg.id, "issuer_missing", "the provider promised an iss parameter and sent none")
-    if error:
-        raise MCPAuthRequired(cfg.id, "denied", error_description or error)
-    client = pending.get("client") or {}
-    data = {"grant_type": "authorization_code", "code": code, "redirect_uri": client.get("redirect_uri", ""),
-            "code_verifier": pending.get("code_verifier", ""),
-            **({"resource": pending["resource"]} if pending.get("resource") else {})}
-    async with _client() as http:
-        response = await _token_request(http, metadata.get("token_endpoint", ""), client, data)
-    if response.status_code != 200:
-        raise MCPAuthRequired(cfg.id, "exchange_rejected", _oauth_error(response))
-    token = OAuthToken.model_validate_json(response.content)
-    async with _locked(cfg):
-        doc = _load(cfg)
-        if (doc.get("pending") or {}).get("nonce") != pending.get("nonce"):
-            raise MCPAuthRequired(cfg.id, "sign_in_superseded", "a newer sign-in started meanwhile")
-        for key in ("pending", "challenge", "required_scope", "required_scope_since"):
-            doc.pop(key, None)
-        doc.update(issuer=issuer, resource=pending.get("resource"), metadata=metadata, client=client,
-                   tokens=_tokens(token, None, pending.get("scope")),
-                   sign_in={"state": SIGNED_IN, "since": utc_now_iso()})
-        _save(cfg, doc)
+    server_of(state)  # an MCP server's return (route syntax): another recipient's is refused before any read
+    doc = await oauth_engine.complete(_grant(cfg), {"state": state, "code": code, "iss": iss, "error": error,
+                                                    "error_description": error_description})
     from ouroboros import mcp_catalog  # after the sign-in lock: the two locks never nest
 
-    mcp_catalog.clear_sign_in_refusal(cfg)  # its calls were refused for the sign-in that just happened
+    mcp_catalog.clear_sign_in_refusal(cfg)
     return {"ok": True, "server": cfg.id, "scope": doc["tokens"]["scope"] or ""}
 
 
@@ -619,18 +357,8 @@ async def sign_out(cfg: Any) -> Dict[str, Any]:
         tokens = doc.pop("tokens", None) or {}
         doc.pop("pending", None)
         if doc:
-            doc["sign_in"] = _required_state(doc, "signed_out")
+            doc["sign_in"] = oauth_engine.required_state(doc, "signed_out")
             _save(cfg, doc)
-    endpoint, revoked = (doc.get("metadata") or {}).get("revocation_endpoint"), None
-    if endpoint and tokens:
-        revoked = True
-        async with _client() as http:
-            for kind in ("refresh_token", "access_token"):
-                if tokens.get(kind):
-                    try:
-                        response = await _token_request(http, endpoint, doc.get("client") or {},
-                                                         {"token": tokens[kind], "token_type_hint": kind})
-                        revoked = revoked and response.status_code == 200
-                    except (httpx.HTTPError, ValueError):
-                        revoked = False
+    revoked = await oauth_engine.revoke((doc.get("metadata") or {}).get("revocation_endpoint"),
+                                        doc.get("client") or {}, tokens)
     return {"ok": True, "server": cfg.id, "revoked": revoked}
