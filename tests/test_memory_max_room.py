@@ -242,7 +242,10 @@ def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(mon
     assert held.max_projection.memory_facts["floor"] == plain.max_projection.memory_facts["floor"]
     blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
     assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
-    assert "Start room is smaller than requested: this task's directly required handbook takes" in blocks[-1]
+    book = math.ceil(held.core.required_book_tokens("max") * held.max_projection.calibration_ratio)
+    assert book > 0 and (f"Start room at planning was smaller than the {_fact(held)['work']:,} tokens requested: "
+                         f"this task's directly required handbook takes {book:,} tokens.") in blocks[-1]
+    assert "requested remain." not in blocks[-1]
 
 
 WIDE = [{"type": "function", "function": {"name": "read_file", "description": "Read a fixture.", "parameters": {

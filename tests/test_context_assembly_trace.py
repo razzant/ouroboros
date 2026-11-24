@@ -394,3 +394,35 @@ def test_failing_room_observation_does_not_replace_rendered_text():
 
     assert _system_blocks(core, governance, '', room, 'max', trace=trace) == _system_blocks(core, governance, '', room, 'max')
     assert observed[-1]['groups'] == [{'family': 'room', 'form': 'rendered', 'start': 0, 'chars': len(room)}]
+
+
+def test_a_book_map_step_keeps_old_witnesses_off_the_changed_blocks():
+    """A map step (``memory_floor.step_book_map``'s yield, taken through ``_address_optional``) changes a selected
+    block's text. The stepped projection carries the witnesses of the bytes the producer actually rendered; the
+    sealed request viewer re-checks them, so the changed block's old witness names no position in the stepped
+    request while every block whose bytes survived stays located."""
+    from ouroboros.context_assembly_trace import verified_layout
+    from ouroboros.memory_floor import _address_optional
+
+    design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400,
+                          operative_view='## Design bible\n\nAiry.')
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
+                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
+                       dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
+    governance = _governance_blocks(None, core, mode='low')
+    system, captured = capture_system_projection(core, governance, 'Story', 'Room', 'low', {}, (), True,
+                                                  shown=None, facts={'floor': {'steps': {}}})
+    witnesses = projection_fields(system, captured)['assembly_witnesses']
+    receipts, addressed = [], {}
+    assert _address_optional(design, receipts, addressed, root='', task_id='') > 0  # the step's own change
+    stepped, _ = capture_system_projection(core, governance, 'Story', 'Room', 'low', addressed, receipts, True,
+                                            shown=None, facts={'floor': {'steps': {}}})
+    assert stepped[-1]['text'] != system[-1]['text']  # the yield changed the selected head block only
+    changed = [i for i in range(len(system)) if stepped[i]['text'] != system[i]['text']]
+    assert changed == [len(system) - 1]
+    carried = verified_layout({'messages': [{'role': 'system', 'content': stepped}]}, witnesses)
+    by_block = {block['block']: block['status'] for block in carried}
+    assert by_block[len(system) - 1] == 'position_unverified'  # the old witness names no position in the new text
+    assert all(by_block[i] == 'located' for i in range(len(system) - 1))
+    fresh = projection_fields(stepped, _)['assembly_witnesses']
+    assert [row['carrier_sha256'] for row in fresh] == [digest(block['text']) for block in stepped]

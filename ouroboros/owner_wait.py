@@ -1198,6 +1198,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     NOT restored: they died with the previous process and stay invalidated."""
     from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
     from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY  # a round's refusal record: this process's only
+    from ouroboros.context_view_facts import FRESH_FACTS_KEY  # so is a facts row's freshness: a cold return keeps the row
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
 
@@ -1217,7 +1218,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     if loaded is not None:
         loaded.update(state.get("actor_loaded_tool_names") or ())
     trace.update(state["trace"])
-    usage.update({key: value for key, value in state["usage"].items() if key != ROUND_REFUSALS_KEY})
+    usage.update({key: value for key, value in state["usage"].items() if key not in (ROUND_REFUSALS_KEY, FRESH_FACTS_KEY)})
     seen.update(state["seen"])
     ctx._loop_mailbox_seen_ids = seen
     ctx._sleep_interaction_seen = dict(state.get("sleep_interaction_seen") or {})
@@ -1372,6 +1373,23 @@ def context_start_route(ctx: Any, task: dict, state: dict, initial_effort: str, 
     return RouteQuestion(task, route_fields=route), effort
 
 
+def _restores_unsent_pause(state: dict) -> bool:
+    """True only when an exact live pause proved zero physical dispatches: missing answers or working checkpoints stay
+    unknown, never an unread start."""
+    pause = state.get("_pause_row")
+    if not isinstance(pause, dict) or type(pause.get("physical_calls")) is not int or pause["physical_calls"] != 0:
+        return False
+    point = pause.get("resume_point") or {}
+    observations = state.get("context_observations") or {}
+    usage = state.get("usage") or {}
+    return not (point.get("recovered_from_working") or point.get("abandoned_model_attempts")
+                or observations.get("_last_context_observation") or observations.get("_main_send_observations")
+                or usage.get("_pending_transport_outcome") or usage.get("_transport_deaths")
+                or usage.get("_prefix_answers")
+                or any(isinstance(row, dict) and row.get("role") == "assistant"
+                       for row in (state.get("messages") or ())))
+
+
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
@@ -1390,9 +1408,11 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     from ouroboros.window_learning import RouteSchemas
     from ouroboros.context_fit import restored_start
     from ouroboros.context_timing import timed
+    from ouroboros.loop_round_limits import COLD_RETURN_ATTR
 
     ctx = tools._ctx
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
+    setattr(ctx, COLD_RETURN_ATTR, not _restores_unsent_pause(state))  # unread only on a pause proven never sent
     selected, effort = _continuation_fit_route(ctx, state, messages)
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
     restore_mode = ran if owner in MODES and ran in MODES[MODES.index(owner):] else None

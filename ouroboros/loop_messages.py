@@ -5,10 +5,11 @@ Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 
 from __future__ import annotations
 
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
-from ouroboros.context_view_facts import CONTEXT_FACTS_NAME
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, bound_host_row
+from ouroboros.context_view_facts import CONTEXT_FACTS_NAME, FRESH_FACTS_KEY
 from ouroboros.config import runtime_setting
 
+import copy
 import hashlib
 import logging
 from contextlib import nullcontext
@@ -1080,6 +1081,22 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
+def _unsent_facts_row(messages: List[Dict[str, Any]], usage: Dict[str, Any], round_idx: Any) -> Optional[int]:
+    """Where this round's newest facts row stands while no candidate has carried it (``FRESH_FACTS_KEY``: written with
+    the row; ``loop_model_call._presend_context_fit`` clears it at each candidate's admission and at every end of a call
+    but a refusal before dispatch): the last facts row in view, exactly as written. None otherwise: a row a send may
+    have carried, an earlier round's and any words of another author stay where they are."""
+    from ouroboros.context_budget import host_row_intact
+
+    fresh = usage.get(FRESH_FACTS_KEY)
+    if not fresh or usage.get("_context_facts_round") != round_idx:
+        return None
+    at = max((i for i, row in enumerate(messages) if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME), default=None)
+    row = messages[at] if at is not None else {}
+    return at if (row.get("role") == "user" and host_row_intact(row) and row.get(HOST_TEXT_SHA_KEY) == fresh
+                  and row.get("content") == usage.get("_context_facts_line")) else None
+
+
 @timed_section("context_facts")
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:
     """Append facts for this round's current route and working view, before dispatch.
@@ -1088,7 +1105,11 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     sample instant. A fallback, owner switch or recovery rewrite gets fresh facts
     rather than inheriting another route's window and tariff. Sent history is never
     rewritten; the producer-labelled standalone rows let refusal recovery address
-    obsolete snapshots. The caller remeasures including this line before sending.
+    obsolete snapshots. A row of this round no candidate carried never left the process
+    (``_unsent_facts_row``): fresh facts, told against the view as sent, take its place
+    whenever its own facts no longer hold (its quota part included, by the census's own
+    reading), never as a superseded copy a refusal pass or a map pays for again (#3649).
+    The caller remeasures including this line before sending.
     """
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
     from ouroboros.context_view_facts import append_refused_sends
@@ -1099,9 +1120,12 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
     refused_added = append_refused_sends(usage, ctx.messages)
     plan = ctx.context_fit_plan
     now = time.time()  # the row's one sample instant: its clock segment and its focus line's age
-    focus_identity, focus_fact = _own_focus_fact(ctx, now)
+    pending = _unsent_facts_row(ctx.messages, usage, ctx.round_idx)
+    sent = copy.copy(ctx)  # the view as sent: what a new row tells is told against it
+    sent.messages = [row for i, row in enumerate(ctx.messages) if i != pending]
+    focus_identity, focus_fact = _own_focus_fact(sent, now)
     subagents_fact = subagents_fact_line()
-    quota, quota_term = quota_part(ctx)  # the census file alone, change-only against the latest part in view
+    quota, quota_term = quota_part(sent)  # the census file alone, change-only against the latest part in view
     source = [{k: v for k, v in m.items() if k != "cache_control"} for m in ctx.messages if m.get(HOST_CONTEXT_KIND_KEY) != CONTEXT_FACTS_NAME]
     source.append({"role": "system", "content": json.dumps(ctx.tool_schemas, ensure_ascii=False, sort_keys=True)})
     key = (ctx.round_idx, ctx.active_model, ctx.active_context_mode, ctx.active_effort,
@@ -1111,8 +1135,11 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
            quota_term)
     visible = any(m.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and m.get("content") == usage.get("_context_facts_line")
                   for m in ctx.messages)
-    if tuple(usage.get("_context_facts_key") or ()) == key and visible and quota is None:  # a due quota part is sent
+    due = quota if pending is None else quota_part(ctx)[0]  # an unsent row's part is current when nothing more is due
+    if tuple(usage.get("_context_facts_key") or ()) == key and visible and due is None:  # a due quota part is sent
         return refused_added
+    if pending is not None:
+        del ctx.messages[pending]  # before the measure and the superseded count this line states
     measured = False
     if plan is not None:
         try:
@@ -1136,7 +1163,8 @@ def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) ->
         money = {**money, "quota": quota}
     line = context_facts_line(ctx, money=money, measured=measured, focus_fact=focus_fact, subagents_fact=subagents_fact,
                               now=now)
-    ctx.messages.append(bound_host_row(CONTEXT_FACTS_NAME, line))
+    ctx.messages.append(row := bound_host_row(CONTEXT_FACTS_NAME, line))
+    usage[FRESH_FACTS_KEY] = row[HOST_TEXT_SHA_KEY]  # new: no candidate has carried it yet
     usage["_context_facts_round"] = ctx.round_idx
     usage["_context_facts_key"] = key
     usage["_context_facts_line"] = line

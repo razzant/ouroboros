@@ -27,11 +27,12 @@ from ouroboros import loop_output_exhaustion as output_recovery
 from ouroboros.context_anchor import (CONTEXT_REFUSAL_ROUND_KEY, _restore_context_fit_usage, _snapshot_context_fit_usage,
                                       cited_limit_refusal, main_input_anchor, measured_units, record_input_anchor,
                                       refused_request_density, reservation_refusal)
-from ouroboros.context_budget import WHOLE_CATEGORY
-from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
+from ouroboros.context_budget import BOOK_YIELD_PASSES, REFUSAL_PASSES, WHOLE_CATEGORY  # one rung order; dispatch stays in this driver
+from ouroboros.context_view_facts import FRESH_FACTS_KEY, SIZE_REFUSAL_KEY, remember_size_refusal
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import CODEX_CONTENT_POLICY_DENIED, REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
-from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
+from ouroboros.loop_round_limits import (_coarsen_memory_view, _record_presend_fit_refusal, _run_emergency_address_pass,
+                                         _shorten_book_map, book_yield_due, pre_admission_size_refusal, start_unread)
 from ouroboros.observability import new_execution_id
 from ouroboros.primary_route_observation import failed_attempt_facts, tell_failed_attempt, unasked_refusal_row, with_refusal_facts
 from ouroboros.tools.registry import ToolRegistry
@@ -572,7 +573,7 @@ def _rebind_context_fit_plan(
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
         room_if_narrowed=True, telling_floor=True, reasoning_effort=shape["reasoning_effort"], restoring_held=restoring_held,
-        tool_frames=(lambda selected: trials(selected).price()) if trials else None)
+        tool_frames=(lambda selected: trials(selected).price()) if trials else None, unsent_start=start_unread(tools._ctx))
     mode = rebound.initial_mode
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
@@ -737,8 +738,7 @@ def _shown(plan: Any, mode: str) -> Dict[str, str]:
     """A checkpoint's mode and books as every surface names them (``physical_attempt_context.shown_mode``)."""
     from ouroboros.physical_attempt_context import shown_mode
 
-    compact = bool(getattr(getattr(plan, "core", None), "compact_reference_docs", False))
-    effective, books = shown_mode(str(mode), compact=compact)
+    effective, books = shown_mode(str(mode), compact=bool(getattr(getattr(plan, "core", None), "compact_reference_docs", False)))
     return {"effective_mode": effective, "books": books}
 
 
@@ -839,30 +839,31 @@ def _presend_context_fit(ctx: _RoundModelCallContext | None = None, admitted: Op
     ``admitted`` keeps each admitted candidate's estimator count by its bytes, an exact local one's too."""
     from ouroboros.llm_attempt import main_context_fit_refusal
 
-    refused = None
+    refused, unsent, admitted_any = None, False, False
+    prior_capture = _loop().last_physical_attempt_capture()
+    prior_refused = ctx.accumulated_usage.get(REFUSED_CANDIDATE_KEY) if ctx is not None else None
 
     def admit(request):
-        nonlocal refused
-        if (refused := main_context_fit_refusal(request)) is None and admitted is not None and request.candidate_raw_sha256:
-            admitted[request.candidate_raw_sha256] = int(request.prompt_tokens_bounded_estimate or 0)
+        nonlocal refused, admitted_any
+        if (refused := main_context_fit_refusal(request)) is None:
+            admitted_any = True
+            if ctx is not None:  # it may leave now, with the round's facts row it carries: that row is history
+                ctx.accumulated_usage.pop(FRESH_FACTS_KEY, None)
+            if admitted is not None and request.candidate_raw_sha256:
+                admitted[request.candidate_raw_sha256] = int(request.prompt_tokens_bounded_estimate or 0)
         return refused is None
 
     try:
         yield admit
     except PhysicalAttemptPreconditionFailed:
+        unsent = True  # refused before dispatch: no admitted candidate carried a still-fresh facts row
         if refused is None or ctx is None:
             raise  # a failed strict-shrink or custody check is not a size prediction
-        ctx.accumulated_usage.update({
-            REFUSED_CANDIDATE_KEY: refused, "_last_llm_error_kind": "context_overflow", "reason_code": "context_overflow",
-            "_last_llm_error": "No result room in the final candidate; pre-send size recovery.",
-            "_last_llm_provider_message": "", "_last_llm_status_code": None, "_last_llm_provider_code": "",
-            "_last_llm_provider_fields": {}, "_last_llm_provider_answer": {}, "_last_llm_provider_message_cut": False, "_last_llm_size_refusal": None,
-        })
-        ctx.accumulated_usage["_last_llm_failure"] = {"model": ctx.active_model, "failure_code": "context_overflow",
-                                                    "error": ctx.accumulated_usage["_last_llm_error"]}
-        _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-            "checkpoint_kind": "context_fit_refused", "round": ctx.round_idx, **refused,
-        })
+        _record_presend_fit_refusal(ctx, refused)
+    finally:  # any other end, a send past admission too, may have carried it (``loop_messages._unsent_facts_row``)
+        if ctx is not None and not unsent and not pre_admission_size_refusal(
+                ctx.accumulated_usage, prior_refused, prior_capture, _loop().last_physical_attempt_capture(), admitted=admitted_any):
+            ctx.accumulated_usage.pop(FRESH_FACTS_KEY, None)
 
 
 def _dispatch_round_model(
@@ -874,12 +875,11 @@ def _dispatch_round_model(
     max_tokens: Optional[int] = None,  # the strict-shrink retry's ceiling: the failed attempt's sent allowance
 ) -> Tuple[Any, float]:
     from ouroboros.model_wait import current_model_wait
-    from ouroboros.loop_messages import _pending_owner_input_kinds
+    from ouroboros.loop_messages import _pending_owner_input_kinds, append_context_facts
     from ouroboros.loop_transport import emit_model_substitution, transport_repeat_stop_requested
     from ouroboros.owner_mailbox import OwnerMailboxPeek
     from ouroboros.send_clock import main_clock_policy
     from ouroboros.subagent_bootstrap import is_configured_api_child
-    from ouroboros.loop_messages import append_context_facts
     from ouroboros.capability_breakage import append_change_row
 
     _loop()._retire_main_reasoning(ctx)
@@ -1098,6 +1098,7 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext, *, books_must_sa
         tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
         tool_frames=(lambda selected: trials(selected).price()) if trials else None,
         measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True, books_must_save=books_must_save,
+        unsent_start=start_unread(ctx.tools._ctx, ctx.accumulated_usage),
         reasoning_effort=str(getattr(ctx, "active_effort", "") or ""))  # the shape the round measured
     if (mode := rebound.initial_mode) == ctx.active_context_mode:
         return  # a non-saving map trial is not a rewrite or a contribution from the books rung
@@ -1393,10 +1394,8 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
 # provider's typed size refusal starts the model-free passes of ``REFUSAL_PASSES`` (order and sizes there), each
 # earning one strictly smaller check/retry. Each runs once per round whatever the route, so a configured fallback
 # receives the view as applied and walks nothing again. The fallback chain and the end of the path follow in the caller.
-from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
 WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
 REBOUND_VIEW_STEP = "rebound_view"  # or the view the refusal's route rebind narrowed
-#: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 
 
 def _refusal_window(ctx: _RoundModelCallContext, fit: Any,
@@ -1468,7 +1467,8 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     """Run the refusal passes: each pass that changed the candidate earns one strictly smaller retry.
 
     ``prepared`` names a change the caller already applied without a model (a wake's stored-source
-    delivery, or the view a route rebind narrowed after the refusal): it is retried first, then the passes.
+    delivery, or the view a route rebind narrowed after the refusal): it is retried first, then the passes, then the
+    required handbook's yields (``BOOK_YIELD_PASSES``).
     """
     def _skipped(reason: str) -> Tuple[Any, float, str]:
         _emit_overflow_retry_skipped(ctx, reason)
@@ -1483,10 +1483,10 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     target, slack = _refusal_target(ctx, fit, failed_capture, rebound=prepared == REBOUND_VIEW_STEP)
     fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=False) or fit) if ctx.refused_density else fit
     real = getattr(failed_capture, "predicted_free_tokens", None) is None  # the round's start: a provider's, not an estimate
-    for steps in ((prepared,),) * bool(prepared) + REFUSAL_PASSES:
+    for steps in ((prepared,),) * bool(prepared) + REFUSAL_PASSES + BOOK_YIELD_PASSES:
         if steps != (prepared,):
             key = (fit.measurement.round_id, "+".join(steps))  # once per round, never re-armed for a route
-            if key in done:
+            if key in done or steps in BOOK_YIELD_PASSES and not book_yield_due(ctx):  # a yield: due on this view
                 continue
             done.add(key)
             if not _apply_refusal_pass(ctx, steps, fit, target, slack, real, earlier_change=fit.measurement.round_id in changed):
@@ -1536,7 +1536,8 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
     pays the rest before a just-chosen body, which goes last, only in a round a provider's refusal started
     (``refused``): for the measured target left, or against an unknown one when nothing in the round changed
     (``earlier_change``, owner 2A). No step pays for a directly required handbook (owner 1.11): an excess it alone
-    explains, or an unknown one beside it, stops the pass.
+    explains, or an unknown one beside it, stops the pass; an unread start yields one map for it (owner 23.11, 1).
+    A ``BOOK_YIELD_PASSES`` step changes nothing else.
     """
     changed, remaining, charged = False, target, 0
     ctx.refusal_policy = {"provider_refused": bool(refused)}  # a shown chosen read yields only to a provider
@@ -1545,9 +1546,9 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
             break
         if getattr(ctx.context_fit_plan, "window_record", None) is not None:
             fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
-        if book := getattr(fit.measurement, "required_book_tokens", 0) - charged:
+        if not (step == "books" and ctx.active_context_mode == "max") and (book := getattr(fit.measurement, "required_book_tokens", 0) - charged):
             if remaining is None or remaining - (slack or 0) <= book:
-                return changed
+                return changed or _shorten_book_map(ctx)
             remaining, charged = remaining - book, charged + book
         shed = _apply_refusal_step(ctx, step, fit, remaining, slack)
         if shed is not None:

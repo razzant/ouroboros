@@ -666,8 +666,9 @@ def test_an_actor_without_a_reader_gets_the_whole_bible_or_its_name_unavailable(
 
 def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_path, monkeypatch):
     """A task that directly requires the whole handbook near its route's limit (RV1, Astra 1): where the handbook fits
-    only beside the bible's map, the start takes the map and keeps the whole handbook; a window that cannot hold it
-    even so is refused by name, as before, and with room the bible stays whole."""
+    only beside the bible's map, the start takes the map and keeps the whole handbook; below that an integrating Low
+    start yields its handbook's own map, then ARCHITECTURE's (owner 23.11.2026, 1); a window that cannot hold it even
+    so is refused by name, as before, and with room the bible stays whole."""
     from ouroboros import context_fit as fit, memory_floor as floor
 
     design, fitted = _fitting(tmp_path, monkeypatch, required_words=30, others=False)
@@ -689,7 +690,7 @@ def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_pat
         middle = (low + high) // 2
         low, high = (low, middle) if starts(middle) else (middle, high)
     plan, view, rows, steps, text = starts(high)
-    assert rows == ["design_bible"] and design.operative_view in text and BIG_BIBLE.strip() not in text
+    assert rows == ["design_bible", *floor.BOOK_MAPS] and design.operative_view in text and BIG_BIBLE.strip() not in text
     assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in view.system_message()["content"])
     assert starts(low) is None and "directly required handbook" in refusals[low]  # named, as before
     # No larger window refuses: the one admission prices the handbook's note before it maps the bible (RVD1, Fable N1).
@@ -703,6 +704,7 @@ def test_a_required_handbook_start_takes_the_bible_map_before_it_refuses(tmp_pat
         below, whole_from = (below, middle) if whole(middle) else (middle, whole_from)
     for window in range(whole_from - 64, whole_from):  # where the check without the note let the refusal through
         assert starts(window), (window, refusals.get(window))
+    assert starts(whole_from - 1)[2] == ["design_bible"]  # the bible's map alone, where it is enough
     # The bible's map is what made the room: with its retention failing it stays whole and the same window refuses.
     monkeypatch.setattr(floor, "retain_section", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("unavailable")))
     assert starts(high) is None and "directly required handbook" in refusals[high]

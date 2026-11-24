@@ -342,6 +342,9 @@ def session_candidate(host, factory, options, *, observation_fp=None):
     Additional feature instructions and current schemas participate in the same
     fit. The physical guard checks the provider's final envelope. A failed fit
     asks the existing ladder for that measured deficit; unchanged bytes refuse.
+    The sealed raw input (``reproject_for_route(measured_input_tokens=...)``) is
+    supplied on a wire refusal or a first send's room shortage and discarded when
+    the mode or the tools change.
     """
     import copy
     import math
@@ -502,6 +505,7 @@ def session_candidate(host, factory, options, *, observation_fp=None):
                         tool_schemas=schemas, start_mode=plan.initial_mode,
                         current_messages=[*(sent_rows if running else current), *extra], refused_tokens=goal - room,
                         slack_tokens=room, measured_input_tokens=raw, start_work=False, telling_floor=bool(ordered),
+                        unsent_start=start_work,  # an unsent call start still spares its detailed book maps (#3649)
                         select_mode="low" if not ordered and plan.initial_mode == "max" else None, **trial_catalogs)
                     if running:
                         rebound = replace(rebound, output_reserve_tokens=plan.output_reserve_tokens,
