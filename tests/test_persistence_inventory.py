@@ -1773,16 +1773,32 @@ def produce(root, task):
 
 
 def test_store_rows_cannot_inherit_a_shorter_or_example_shape(tmp_path):
+    (tmp_path / "ouroboros").mkdir()
+    (tmp_path / "ouroboros" / "constants.py").write_text(
+        "from ouroboros.artifacts import store_actor_source_bytes\n"
+        'FOCUS_DIR = "source_handles/context_checkpoints"\n'
+        'FOCUS_PREFIX = "focus_source_"\n'
+        'REBOUND = "leaked-a"\nREBOUND = "leaked-b"\n'
+        'DYNAMIC = f"leaked-{unknown}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "ouroboros" / "unindexed.py").write_text('UNINDEXED = "leaked-unindexed"\n', encoding="utf-8")
     scan = _source_fixture(tmp_path, '''
+import pathlib
+from ouroboros.constants import DYNAMIC, FOCUS_DIR, FOCUS_PREFIX, REBOUND
+from ouroboros.unindexed import UNINDEXED
 def produce(root, task, ident):
     bundle = dict(category="context_checkpoints", source_id="owner-wait-" + ident, data=b"", extension="json")
     bundle.update(data=b"payload only")
     put(root, task, **bundle)
     part = "export-" + ident
     put(root, task, category="context_checkpoints", source_id="owner-wait-" + part, data=b"", extension="json")
+    put(root, task, category=pathlib.PurePosixPath(FOCUS_DIR).name,
+        source_id=f"{FOCUS_PREFIX}{ident}", data=b"", extension="md")
     name = "owner-wait-" + ident
     name += "-later"
-    put(root, task, category="context_checkpoints", source_id=name, data=b"", extension="json")
+    for opaque in (name, REBOUND, DYNAMIC, UNINDEXED, pathlib.PurePosixPath(ident).name):
+        put(root, task, category="context_checkpoints", source_id=opaque, data=b"", extension="json")
 ''')
     kinds = file_kinds(scan.writes)
     assert not scan.findings
@@ -1792,16 +1808,96 @@ def produce(root, task, ident):
     _, names = store_rows(_STORE_TABLE + good + not_a_row, scan.categories)
     _, missing = match_rows(names, kinds)
     # An unmodelled rebinding is an unknown name, never the documented first binding.
-    assert set(missing) == {"context_checkpoints/owner-wait-export-*-*.json", "context_checkpoints/*-*.json"}
-    real = _store_row("context_checkpoints/owner-wait-export-<id>-<sha256>.json")
+    assert set(missing) == {
+        "context_checkpoints/owner-wait-export-*-*.json",
+        "context_checkpoints/focus_source_*-*.md",
+        "context_checkpoints/*-*.json",
+    }
+    real = (
+        _store_row("context_checkpoints/owner-wait-export-<id>-<sha256>.json")
+        + _store_row("context_checkpoints/focus_source_<reader>-<sha256>.md")
+    )
     _, repaired = store_rows(_STORE_TABLE + good + real, scan.categories)
     assert set(match_rows(repaired, kinds)[1]) == {"context_checkpoints/*-*.json"}
+    bad = _source_fixture(
+        tmp_path / "bad",
+        "import pathlib\ndef f(r, t, d):\n"
+        "    put(r, t, category=pathlib.PurePosixPath(d).name, source_id='x', data=b'', extension='md')\n",
+    )
+    assert any("unknown source folder" in item for item in bad.findings)
     # A container for bundled inputs cannot certify an unrelated leaf.
     raw = {f"{STORE}/delegated_readonly_inputs/another.bin"}
     planes, _ = store_rows(_STORE_TABLE + _store_row("delegated_readonly_inputs"), scan.categories)
     assert _missing_store_paths(raw, planes, scan.categories) == {"delegated_readonly_inputs/another.bin"}
     planes, _ = store_rows(_STORE_TABLE + _store_row("delegated_readonly_inputs/another.bin"), scan.categories)
     assert not _missing_store_paths(raw, planes, scan.categories)
+
+
+def test_a_bare_relative_import_rebinds_a_writer_name_like_any_import(tmp_path):
+    """A top package's ``from . import other as put`` names no scanned module, yet it
+    replaces ``put`` like any import; the writer imported after it is called again."""
+    call = "def f(r, t):\n    put(r, t, category='context_checkpoints', source_id='kept', data=b'', extension='json')\n"
+    replaced = _source_fixture(tmp_path / "replaced", "from . import other as put\n" + call, "__init__")
+    assert not replaced.writes and not replaced.findings
+    restored = _source_fixture(tmp_path / "restored", "from . import other as put\n"
+                               "from ouroboros.artifacts import store_actor_source_bytes as put\n" + call, "__init__")
+    assert restored.writes == {("context_checkpoints", "kept-*.json", "ouroboros.f")} and not restored.findings
+
+
+def test_a_name_bound_again_names_no_imported_literal_or_folder(tmp_path):
+    """A single ``from`` import names the file, and ``import pathlib`` still gives the folder.
+    A plain ``import`` binds a module, never the package's string of that name, even beside a
+    ``from`` import. Unpacking a name (where it is used, where it is defined, or locally) or
+    importing it again as another object leaves its literal or ``pathlib.PurePosixPath`` unknown."""
+    (tmp_path / "ouroboros" / "parts").mkdir(parents=True)
+    (tmp_path / "ouroboros" / "constants.py").write_text(
+        "from ouroboros.artifacts import store_actor_source_bytes\n"
+        "FOLDER = 'source_handles/context_checkpoints'\nPREFIX = 'imported'\n"
+        "REBOUND = 'imported'\nREBOUND, _ = pair\n", encoding="utf-8")
+    (tmp_path / "ouroboros" / "parts" / "label.py").write_text("", encoding="utf-8")
+    (tmp_path / "ouroboros" / "parts" / "__init__.py").write_text(
+        "from ouroboros.artifacts import store_actor_source_bytes\nlabel = 'not-the-module'\n", encoding="utf-8")
+    scan = _source_fixture(tmp_path, '''
+import pathlib
+import ouroboros.parts.label as label
+from ouroboros.parts import label as mixed
+import ouroboros.parts.label as mixed
+import ouroboros.lookalike as paths
+import pathlib as paths
+from pathlib import PurePosixPath
+from ouroboros.lookalike import Path as Later
+from pathlib import PurePosixPath as Later
+from ouroboros.constants import FOLDER, PREFIX, REBOUND
+from ouroboros.constants import PREFIX as UNPACKED
+UNPACKED, _ = pair
+def single(r, t):
+    put(r, t, category=PurePosixPath(FOLDER).name, source_id=PREFIX, data=b"", extension="json")
+    put(r, t, category=pathlib.PurePosixPath(FOLDER).name, source_id="module", data=b"", extension="json")
+def unpacked_here(r, t):
+    put(r, t, category="context_checkpoints", source_id=UNPACKED, data=b"", extension="json")
+def unpacked_there(r, t):
+    put(r, t, category="context_checkpoints", source_id=REBOUND, data=b"", extension="json")
+def unpacked_locally(r, t, pair):
+    PREFIX, _ = pair
+    put(r, t, category="context_checkpoints", source_id=PREFIX, data=b"", extension="json")
+def plain_import(r, t):
+    put(r, t, category="context_checkpoints", source_id=f"{label}", data=b"", extension="json")
+def mixed_import(r, t):
+    put(r, t, category="context_checkpoints", source_id=mixed, data=b"", extension="json")
+def later(r, t):
+    put(r, t, category=Later(FOLDER).name, source_id="later", data=b"", extension="json")
+def later_module(r, t):
+    put(r, t, category=paths.PurePosixPath(FOLDER).name, source_id="later", data=b"", extension="json")
+''')
+    single = "ouroboros.fixture.single"
+    assert scan.writes == {
+        ("context_checkpoints", "imported-*.json", single), ("context_checkpoints", "module-*.json", single),
+        *(("context_checkpoints", "*-*.json", f"ouroboros.fixture.{name}") for name in (
+            "unpacked_here", "unpacked_there", "unpacked_locally", "plain_import", "mixed_import")),
+    }
+    assert sorted(item.split(":")[0] for item in scan.findings) == [
+        "ouroboros.fixture.later", "ouroboros.fixture.later_module"]
+    assert all("unknown source folder" in item for item in scan.findings)
 
 
 def test_a_populated_list_does_not_hide_a_write_with_a_fixed_id(tmp_path):
