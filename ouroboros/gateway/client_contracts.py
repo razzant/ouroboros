@@ -276,9 +276,9 @@ class SettingsDeploymentRequirement(TypedDict):
 
 
 class SettingsDeploymentExtensions(TypedDict):
-    """The policy's required extensions and what ordinary work does while one is not running ("" when none is);
-    with an execution domain, ``trusted`` lists the only packages ({name, path, content_hash}) whose code the
-    service runs."""
+    """Required extensions and how ordinary work responds when one is not ready, including when it cannot read a
+    fixed setting (``when_unmet`` is "" with no required extensions). With an execution domain, ``trusted`` lists
+    the only packages ({name, path, content_hash}) whose code the service runs."""
 
     when_unmet: Literal["hold", "warn", ""]
     required: List[SettingsDeploymentRequirement]

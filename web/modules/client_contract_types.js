@@ -283,8 +283,9 @@
  */
 
 /**
- * The policy's required extensions and what ordinary work does while one is not running ('' when none is); with an
- * execution domain, `trusted` lists the only packages whose code the service runs.
+ * Required extensions and how ordinary work responds when one is not ready, including when it cannot read a
+ * fixed setting (`when_unmet` is '' with no required extensions). With an execution domain, `trusted` lists
+ * the only packages whose code the service runs.
  * @typedef {Object} SettingsDeploymentExtensions
  * @property {"hold"|"warn"|""} when_unmet
  * @property {SettingsDeploymentRequirement[]} required

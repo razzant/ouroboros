@@ -1037,7 +1037,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 490 -> 494: ``service_sign_in`` names ``state/sign_in``, its ``clients.json``,
 # its ``grants`` directory and ``grants/*/*/*.json``. Pending and account files
 # share the latter spelling and its PERSISTENCE.md row.
-EXPECTED_SCAN_PATHS = 494
+# 494 -> 495: the host's grant-continuity receipt, ``state/skill_grant_receipts.json``
+# (``ouroboros/skill_grant_follow.py``); its own row beside the skill state rows.
+EXPECTED_SCAN_PATHS = 495
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

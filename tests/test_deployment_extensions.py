@@ -451,6 +451,44 @@ def test_a_fixed_setting_the_package_never_reads_is_one_gap_for_settings_the_car
 
 
 @pytest.mark.parametrize("mode", ["hold", "warn"])
+def test_required_fixed_grant_reaches_all_readiness_consumers(org, monkeypatch, mode):
+    """Projection only: the extension's registry and small controls are synthetic."""
+    from types import SimpleNamespace
+
+    from ouroboros import extension_liveness
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_reason, queue_held, state_rows, unmet_here
+    from ouroboros.extension_registry_state import _ExtensionRegistrations, _extensions
+    from ouroboros.skill_loader import find_skill
+
+    require(org, monkeypatch, mode=mode, settings={"ORG_DSN": SECRET})
+    skill = find_skill(org.data, NAME)
+    assert skill is not None
+    api = SimpleNamespace(_granted_upper=frozenset())
+    monkeypatch.setitem(_extensions, NAME, _ExtensionRegistrations(
+        content_hash=org.content_hash, skill_dir=str(skill.skill_dir.resolve()), loaded_skill=skill, api_instances=[api]))
+    monkeypatch.setattr("ouroboros.deployment_extensions._report", lambda *_args: None)
+    monkeypatch.setattr("ouroboros.deployment_extensions._process_fact", lambda: {"role": "server"})
+
+    def check(state, reason):
+        [view] = state_rows(org.data, skills=[skill])
+        assert (view["state"], view["reason"], view["settings"]) == (state, reason, ["ORG_DSN"])
+        assert SECRET not in json.dumps(view)
+        assert [gap["reason"] for gap in unmet_here(org.data)] == ([reason] if state == "unmet" else [])
+        waits = mode == "hold" and state == "unmet"
+        assert hold_reason(org.data) == (HOLD_REASON if waits else "")
+        with monkeypatch.context() as snapshot_only:
+            snapshot_only.setattr(extension_liveness, "_published_skill_readiness",
+                                  lambda *_args: pytest.fail("queue must use the publication"))
+            assert queue_held() is waits
+
+    check("unmet", "grants")
+    grant(org)
+    check("unmet", "not_loaded")
+    api._granted_upper = frozenset({"ORG_DSN"})
+    check("met", "running")
+
+
+@pytest.mark.parametrize("mode", ["hold", "warn"])
 def test_the_carrier_holds_or_warns_on_its_own_registry_and_records_a_change_once(org, monkeypatch, mode):
     from ouroboros.deployment_extensions import HOLD_REASON, hold_reason, hold_text, queue_held
 
@@ -544,7 +582,7 @@ def test_a_carrier_ends_a_held_task_itself_and_never_runs_its_body(org, monkeypa
     if mode == "hold":
         assert ran == [] and events == [{"type": "task_done", "task_id": "queued-1", "reason_code": HOLD_REASON}]
         [(text, usage, ctx)] = ended
-        assert text.startswith("🔒 Not started: your organization requires an extension skill that isn’t running")
+        assert text.startswith("🔒 Not started: your organization requires an extension skill that isn’t ready")
         assert (usage["terminal_origin"], ctx) == ("host_notice", None), "no other task's facts ride along"
     else:
         assert ran == ["queued-1"] and ended == []

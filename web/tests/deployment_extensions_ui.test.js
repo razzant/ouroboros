@@ -52,19 +52,19 @@ test('an unmet requirement says why first, and whether ordinary work waits or go
     const html = renderInstalledSkillCard(held);
     const trays = html.split('data-skill-trays>')[1];
     assert.ok(trays.indexOf('data-required-unmet') < trays.indexOf('Ouroboros hasn’t reviewed it yet'), 'the requirement comes first');
-    assert.match(trays, /Your organization requires it, and it isn’t running: It needs a review or your attestation/);
-    assert.match(trays, /Ordinary work waits until it runs\. Stop, Panic and Settings stay available\./);
+    assert.match(trays, /Your organization requires it: It needs a review or your attestation/);
+    assert.match(trays, /Ordinary work waits until it’s ready\. Stop, Panic and Settings stay available\./);
     assert.match(trays, /data-skill-action="review"/, 'the owner’s own next step stays offered');
     assert.equal(installedSkillModel(held).needs, true);
     const warned = renderInstalledSkillCard(skill({ deployment: { ...unmet, when_unmet: 'warn' } }));
-    assert.match(warned, /Work goes on while it isn’t running\./);
+    assert.match(warned, /Ordinary work can continue\./);
 });
 
 test('the list says every unmet requirement, a missing package included, and nothing when all run', () => {
     const deployment = { when_unmet: 'hold', required: [MET, { ...MET, name: 'audit_log', state: 'unmet', reason: 'missing',
         detail: 'No package named audit_log is installed.' }] };
     const notice = renderRequirementNotice(deployment);
-    assert.match(notice, /Your organization requires an extension skill that isn’t running here\./);
+    assert.match(notice, /Your organization requires an extension skill that isn’t ready here\./);
     assert.match(notice, /<li data-required-name="audit_log"><code data-i18n-authored>audit_log<\/code> · No package named audit_log is installed\.<\/li>/);
     assert.doesNotMatch(notice, /data-required-name="error_tracker"/, 'a running one is not listed');
     assert.match(notice, /Seen by the server process; each worker checks its own before it starts work\./);

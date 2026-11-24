@@ -45,12 +45,12 @@ binary files, so Ouroboros loads it in process.
 
 A deployment policy file can require this extension and fix its destination (`docs/DEPLOYMENT.md`,
 Deployment Policy File): name it, its directory and the `content_hash` Skills reports for it, and put
-`SENTRY_DSN` in its `settings`. It then reads as on and its card has no Off, removal or update; it still
-runs only after its review and the employee's grant of `SENTRY_DSN`, and while it does not run in a
-process (the SDK missing, a malformed DSN, no grant) Skills says why and the file's `when_unmet` decides
-whether ordinary work waits there (`hold`) or goes on (`warn`). Requiring it does not make the extension
-more trusted than its review and grants. That requirement status is Ouroboros's own; what the tracker
-delivers is this extension's widget, and neither stands in for the other.
+`SENTRY_DSN` in its `settings`. It reads as on, with no Off, removal or update. It can load before the
+employee grants that setting, but the requirement stays unmet until this process has the current
+grant. An environment destination does not grant the fixed value. Requiring it grants no review
+authority. A missing SDK or a malformed destination can also leave it unready. Skills reports the
+reason: `hold` makes ordinary work wait, and `warn` lets it go on. The tracker widget reports
+delivery, independently of readiness.
 
 ## What its widget shows
 

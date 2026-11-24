@@ -233,20 +233,20 @@ function problemCountText(skill) {
 
 const REQUIRED_LOCK = 'Required by your organization.';
 const REQUIRED_WAIT = {
-    hold: 'Ordinary work waits until it runs. Stop, Panic and Settings stay available.',
-    warn: 'Work goes on while it isn’t running.',
+    hold: 'Ordinary work waits until it’s ready. Stop, Panic and Settings stay available.',
+    warn: 'Ordinary work can continue.',
 };
 
 /** The organization's requirement that this package does not meet here, in its own words (no value, no secret). */
 function requiredTray(required) {
     return trayHtml({ tone: 'warn', attrs: 'data-required-unmet',
-        sentence: `Your organization requires it, and it isn’t running: ${escapeHtml(boundedText(required.detail || required.reason || '', 240))}`,
+        sentence: `Your organization requires it: ${escapeHtml(boundedText(required.detail || required.reason || '', 240))}`,
         note: escapeHtml(REQUIRED_WAIT[required.when_unmet] || '') });
 }
 
 /**
- * The organization's required extension skills (type extension; MCP servers are not under this policy) that are not running, above the list (``/api/extensions`` ``deployment``):
- * a missing package has no card, so its row is said here. '' when every requirement runs or nothing is required.
+ * Required extension skills that aren't ready, above the list (``/api/extensions`` ``deployment``; not MCP servers).
+ * A missing package has no card, so its row is said here. '' when all requirements are met or none are required.
  */
 export function renderRequirementNotice(deployment) {
     const rows = (deployment?.required || []).filter((row) => row?.state === 'unmet');
@@ -255,7 +255,7 @@ export function renderRequirementNotice(deployment) {
     const subject = rows.length === 1 ? 'an extension skill that isn’t' : `${rows.length} extension skills that aren’t`;
     const process = rows[0]?.process?.role ? `Seen by the ${escapeHtml(rows[0].process.role)} process; each worker checks its own before it starts work.` : '';
     return `<section class="skills-org-requirements" data-tone="warn" aria-label="Required by your organization" data-skills-org-requirements>
-        <p class="skills-org-requirements-lead">Your organization requires ${subject} running here.</p>
+        <p class="skills-org-requirements-lead">Your organization requires ${subject} ready here.</p>
         <ul class="skills-org-requirements-list">${items}</ul>
         <p class="skills-org-requirements-note">${escapeHtml(REQUIRED_WAIT[deployment.when_unmet] || '')} ${process}</p>
     </section>`;
