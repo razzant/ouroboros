@@ -252,7 +252,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "maintenance", "storage-count",
-                "storage-free",
+                "storage-free", "owned-work",
             }
             # The installation-scope census is one more independent request; this root planted no marker.
             assert diagnostics[0]["requests"]["scope-census"] == {"requested": False, "reason": "no installation marker planted"}
@@ -261,3 +261,35 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
                  "model": "local-model", "daemon": "daemon", "request-thread": "commands"}[fault]
         assert diagnostics[0]["requests"][owner]["requested"] is False
         assert "injected " + fault in diagnostics[0]["requests"][owner]["error"]
+
+
+@pytest.mark.parametrize("failure", ["stalled", "raises"])
+def test_indexed_stop_never_holds_panic_exit(monkeypatch, tmp_path, failure):
+    """An indexed stop is independent of the hard exit, just like other owners."""
+    release = threading.Event()
+    diagnostics = []
+
+    def indexed(_root):
+        if failure == "raises":
+            raise OSError("index unreadable")
+        assert release.wait(10), "Panic waited for indexed settlement before its own exit"
+        return {"state": "completed"}
+
+    def report_exit(_root):
+        # This callback runs before the hard exit; release only after inspecting the request.
+        release.set()
+
+    def configure():
+        monkeypatch.setattr("ouroboros.owned_shutdown.panic_owned_work", indexed)
+        monkeypatch.setattr("ouroboros.server_control._persist_panic_controls", report_exit)
+
+    try:
+        _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True,
+                   diagnostics=diagnostics, configure=configure)
+        request = diagnostics[0]["requests"]["owned-work"]
+        if failure == "raises":
+            assert request["requested"] is False and "index unreadable" in request["error"]
+        else:
+            assert release.is_set()  # persistence/exit was reached without waiting for this stop
+    finally:
+        release.set()

@@ -481,6 +481,10 @@ def execute_panic_stop(
         from ouroboros.process_scope import panic_scope_census
 
         attempt("scope-census", lambda: panic_scope_census(data_dir))
+        from ouroboros.owned_shutdown import panic_owned_work
+
+        # Reparented kept services may hide their markers (macOS platform binaries).
+        attempt("owned-work", lambda: panic_owned_work(data_dir))
         children = multiprocessing.active_children()
         for child in children:
             attempt(f"child-{child.pid}", lambda child=child: kill_worker_tree(

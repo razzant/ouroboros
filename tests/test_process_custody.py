@@ -1013,6 +1013,137 @@ def test_live_kept_service_pids_reports_only_live_session_services(tmp_path):
             p.wait(timeout=5)
 
 
+@_POSIX_ONLY
+@pytest.mark.parametrize("door", ["retirement", "shutdown", "panic", "panic_contended"])
+def test_forked_kept_service_lifetime_across_worker_exit(tmp_path, monkeypatch, door):
+    """Real signals: a fork's kept service survives idle retirement, not shutdown/Panic.
+
+    The task-scoped sibling dies in every case. The worker owns both starts;
+    only pool bookkeeping is supplied in-process, never the signal or lookup.
+    """
+    import queue as stdqueue
+    from types import SimpleNamespace
+    from ouroboros import config
+    from ouroboros.platform_layer import kill_pid_tree, pid_is_alive, subprocess_new_group_kwargs
+    from supervisor import queue, workers, worker_pool_lifecycle as lifecycle
+    from tests.test_claudexor_custody_lifetime import _DAEMON, _echoes, _wait_gone
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    fork = tmp_path / "state" / "headless_tasks" / "producer" / "data"
+    fork.mkdir(parents=True)
+    script = '''
+import json, os, pathlib, subprocess, sys, time
+from ouroboros.process_custody import spawn_supervised
+from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, SCOPE_VALUE, mint_marker
+rows = []
+from ouroboros.process_scope import installation_marker
+install = installation_marker(pathlib.Path(sys.argv[1]).parents[3])
+for scope in ('session', 'task'):
+    marker = mint_marker(LAUNCH_SCOPE_PREFIX)
+    p = spawn_supervised([sys.executable, '-u', '-c', sys.argv[2]],
+        drive_root=pathlib.Path(sys.argv[1]), purpose='service:' + scope,
+        scope=scope, owner_task_id='producer', scope_marker=marker,
+        env={**os.environ, marker: SCOPE_VALUE, install: SCOPE_VALUE}, stdout=subprocess.PIPE, text=True)
+    rows.append({'pid': p.pid, 'port': int(p.stdout.readline())})
+marker = mint_marker(LAUNCH_SCOPE_PREFIX)
+p = spawn_supervised(['/bin/sleep', '120'], drive_root=pathlib.Path(sys.argv[1]),
+    purpose='service:platform', scope='session', owner_task_id='producer', scope_marker=marker,
+    env={**os.environ, marker: SCOPE_VALUE, install: SCOPE_VALUE})
+rows.append({'pid': p.pid})
+print(json.dumps(rows), flush=True)
+time.sleep(120)
+'''
+    worker = subprocess.Popen([sys.executable, "-u", "-c", script, str(fork), _DAEMON],
+                              stdout=subprocess.PIPE, text=True, **subprocess_new_group_kwargs())
+    services = []
+    try:
+        services = json.loads(worker.stdout.readline())
+        kept, task, platform = services
+        assert _echoes(kept["port"]) and _echoes(task["port"])
+        assert process_custody._read_ledger(tmp_path) == []  # the reproducing distinction
+        assert len(process_custody._read_ledger(fork)) == 3
+        if door != "shutdown":
+            handle = SimpleNamespace(pid=worker.pid, is_alive=lambda: worker.poll() is None,
+                                     join=lambda timeout=None: worker.wait(timeout=timeout))
+            slot = workers.Worker(1, handle, stdqueue.Queue())
+            slot.retiring, slot.quiescence_token = True, "idle-ack"
+            monkeypatch.setattr(workers, "WORKERS", {0: object(), 1: slot})
+            monkeypatch.setattr(workers, "RUNNING", {})
+            monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
+            lifecycle.reap_idle_worker({"worker": slot, "token": "idle-ack",
+                                       "drive_root": str(tmp_path), "first_stop": True})
+            assert 1 not in workers.WORKERS
+        else:
+            lifecycle.kill_worker_tree(worker.pid)
+        worker.wait(timeout=10)
+        assert _wait_gone(task["pid"]), "task-scoped control escaped worker teardown"
+        if door != "shutdown":
+            assert _echoes(kept["port"]), "forked kept service died with its idle worker"
+            assert pid_is_alive(platform["pid"])
+            if door.startswith("panic"):
+                panic = '''
+import logging, pathlib, sys
+from ouroboros import config, server_control
+root = config.DATA_DIR = pathlib.Path(sys.argv[1])
+if sys.argv[2] == 'panic_contended':
+    from ouroboros import owned_shutdown
+    original = server_control._write_panic_flag
+    def observe(root):
+        rows = owned_shutdown.owned_records(root, strict=True)
+        (root / 'panic-named.json').write_text(__import__('json').dumps([
+            row['host_pid'] for row in rows if row.get('stop_requested_at')]))
+        return original(root)
+    server_control._write_panic_flag = observe
+server_control.execute_panic_stop(None, lambda **kw: None, data_dir=root,
+    panic_exit_code=99, log=logging.getLogger('panic-test'))
+'''
+                from ouroboros import owned_shutdown
+                from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+                from ouroboros.utils import jsonl_append_lock_path
+                lock = jsonl_append_lock_path(process_custody.ledger_path(tmp_path))
+                fd = acquire_exclusive_file_lock(lock) if door == "panic_contended" else None
+                if door == "panic_contended":
+                    assert fd is not None, "fixture must hold the canonical custody lock"
+                try:
+                    result = subprocess.run([sys.executable, "-c", panic, str(tmp_path), door],
+                                            capture_output=True, text=True, timeout=15)
+                    assert result.returncode == 99, result.stderr
+                    if fd is not None:
+                        # The real sweep lock cannot prevent publication before the hard exit.
+                        rows = owned_shutdown.owned_records(tmp_path, strict=True)
+                        named = {row["host_pid"] for row in rows if row.get("stop_requested_at")}
+                        assert platform["pid"] in named
+                        assert platform["pid"] in json.loads((tmp_path / "panic-named.json").read_text()), \
+                            "target must be named before bounded persistence, not rescued by a slow flag write"
+                finally:
+                    if fd is not None:
+                        release_exclusive_file_lock(lock, fd)
+                if fd is not None:
+                    # A subsequent process retries only the exact previously requested work.
+                    outcome = owned_shutdown.finish_unconfirmed_stops(tmp_path)
+                    assert outcome["retried"] >= 1 and outcome["unconfirmed"] == 0
+            else:
+                # The installation shutdown reaches the now-reparented services.
+                from ouroboros import owned_shutdown
+                monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
+                owned_shutdown.begin_owned_stop(tmp_path, cause="launcher_quit")
+                owned_shutdown.stop_owned_work(tmp_path)
+        assert _wait_gone(platform["pid"]), "indexed platform service escaped the stop"
+        assert _wait_gone(kept["pid"])
+        assert not _echoes(kept["port"])
+    finally:
+        if worker.poll() is None:
+            kill_pid_tree(worker.pid)
+        worker.wait(timeout=10)
+        worker.stdout.close()
+        for service in services:
+            if pid_is_alive(service["pid"]):
+                kill_pid_tree(service["pid"])
+            assert _wait_gone(service["pid"])
+
+
 def test_installed_skill_names_is_disk_derived_and_none_on_failure(monkeypatch):
     # The reaper's owner-set source: disk-derived, and None (keep-all) on failure
     # OR empty disk — never an empty set() that would look like "all uninstalled".

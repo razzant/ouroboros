@@ -725,11 +725,14 @@ def live_kept_service_pids(drive_root: pathlib.Path) -> "set[int]":
     services that are direct children of the worker: tree-killing the worker
     would otherwise destroy services a verifier still needs, even though the
     keep contract says they outlive the task. Only live, fingerprint-matching
-    session-scoped service entries are returned.
+    session-scoped service entries are returned across the installation's indexed
+    drives, using the same custody selection as kept-service observation and stop.
     """
+    from ouroboros.launch_custody import read_custody
+
     pids: set[int] = set()
     try:
-        for entry in _read_ledger(pathlib.Path(drive_root)):
+        for entry in read_custody(drive_root, strict=False, every_drive=True).rows:
             if str(entry.get("scope") or "") != "session":
                 continue
             # Both the in-process service path (purpose "service:<name>") and the

@@ -851,6 +851,19 @@ def begin_owned_stop(drive_root: Any = None, *, cause: str = "") -> None:
                     exc_info=True)
 
 
+def panic_owned_work(drive_root: Any) -> Dict[str, Any]:
+    """Request indexed stops without a lock wait; Panic's caller never joins past its deadline.
+
+    Stamp before signalling, independently of any ordinary shutdown already in flight.
+    The existing pending protocol names exact targets even while the custody sweep holds
+    the ledger lock; a hard exit leaves those targets for ``finish_unconfirmed_stops``.
+    """
+    root = installation_root(drive_root)
+    targets = _stamp(root, "stop_requested_at", _is_stop_target, timeout_sec=0.0)
+    remaining = _stop_records(root, targets, time.monotonic() + 0.2)
+    return {"state": "unconfirmed" if remaining else "completed", "unconfirmed": remaining}
+
+
 def stop_owned_work(drive_root: Any = None) -> Dict[str, Any]:
     """Start/join the one stop; completed evidence includes any subsequently registered targets."""
     if drive_root is None:
