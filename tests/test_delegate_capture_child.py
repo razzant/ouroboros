@@ -5,6 +5,9 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+import pytest
 
 from ouroboros import delegate_capture_job as job, delegate_collection as body, delegate_custody as custody
 from ouroboros import delegate_custody_current as current, maintenance
@@ -84,6 +87,129 @@ def test_capture_wake_follows_server_publication_and_lock_release(tmp_path, monk
     # The server accepted it: capture row and named evidence saved, so the checkout went (the record keeps C).
     assert not wakes and not area.exists()
     assert find_execution_snapshot(entry.snapshot_id)["result_sha"]
+
+
+def test_explicit_git_inspection_uses_the_ready_child_result_before_collection(tmp_path, monkeypatch):
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.subagent_integration import _integrate_delegated_patch
+    from tests.test_delegated_run_isolation import _git
+
+    root, entry, area = _queued(tmp_path, monkeypatch)
+    rid, target = entry.run_id, Path(entry.target_root)
+    repo = tmp_path / "host-repo"
+    repo.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=root, task_id=entry.task_id,
+                      workspace_root=target, workspace_mode="external")
+    (area / "check.py").unlink()
+    (area / "plain-note.txt").write_bytes(b"Plain capture product.\n")
+    evidence = area / EVIDENCE_DIRNAME
+    (evidence / "result.bin").unlink()
+    (evidence / "notes.txt").write_bytes(b"Plain named evidence.\n")
+    assert job.run(root, lambda: False)["items"] == 1
+    ready = current.run(root, rid)
+    child = body._read_source(root, ready, ready.capture_job["source"])
+    path = Path(child["manifest_artifact"])
+    saved = path.read_bytes()
+    assert ready.capture_job["state"] == "ready" and not ready.patch_captured
+
+    inspected = _integrate_delegated_patch(ctx, rid)
+    head, _, described = inspected.partition("\n")
+    assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in head, inspected
+    assert not (target / "plain-note.txt").exists()
+    # The inspection shows the receipt this call just published, not the row it read before publishing.
+    shown, published = json.loads(described), current.run(root, rid)
+    assert published.patch_captured and published.patch_manifest_sha == ready.capture_job["manifest_sha256"]
+    assert (shown["status"], shown["sha256"], shown["manifest_artifact"]) == (
+        "ready_with_changes", child["sha256"], str(path)), shown
+    assert "retry" not in shown and "disposition" not in shown and "NOT APPLIED" in shown["note"]
+    assert shown["named_evidence"]["status"] == "retained"
+    assert shown["named_evidence"]["evidence_dir"] == child["named_evidence"]["evidence_dir"]
+    assert [row["path"] for row in shown["named_evidence"]["files"]] == [f"{EVIDENCE_DIRNAME}/notes.txt"]
+    assert shown == json.loads(json.dumps(body.capture_projection(root, published, reader_task_id=entry.task_id)))
+    collected = body.collect_terminal(root, rid, background=True)
+    fresh = current.run(root, rid)
+    assert (path.read_bytes() == saved, collected["status"]) == (True, "collected"), collected
+    assert fresh.capture_job["id"] == ready.capture_job["id"] and fresh.capture_job["state"] == "consumed"
+    assert fresh.patch_manifest_sha == ready.capture_job["manifest_sha256"] and not fresh.patch_disposed
+    named = collected["workspace_capture"]["named_evidence"]
+    assert named["evidence_dir"] == child["named_evidence"]["evidence_dir"]
+
+    applied = _integrate_delegated_patch(ctx, rid)
+    assert "✅ Integrated" in applied, applied
+    assert _git(target, "show", ":plain-note.txt").stdout == "Plain capture product.\n"
+    assert path.read_bytes() == saved and not (target / EVIDENCE_DIRNAME).exists()
+    rows = custody.custody_rows(root)
+    assert sum(row["type"] == custody.PATCH_CAPTURED for row in rows) == 1
+    assert sum(row["type"] == custody.PATCH_DISPOSED for row in rows) == 1
+
+
+@pytest.mark.parametrize("lost", ["patch_receipt", "consume_receipt"])
+def test_unwritten_capture_publication_rejoins_prepared_bytes(tmp_path, monkeypatch, lost):
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.delegate_capture_attempt import collection_due
+    from tests.test_delegate_retry_consumers import call, retry_context
+
+    ctx = retry_context(tmp_path, monkeypatch, chain=("investigation", "retry-b"), split=True,
+                        fixed_ownership_clock=True)
+    root = custody.custody_root(ctx)
+    entry, area, _ = prepared(tmp_path, root, "investigation")
+    (area / "plain-note.txt").write_bytes(b"Plain retained output.\n")
+    wakes = []
+    monkeypatch.setattr(maintenance.child, "request", lambda: wakes.append(True))
+    body.collect_terminal(root, entry.run_id, detail=terminal(entry.run_id), background=True, generation="one")
+    assert job.run(root, lambda: False)["items"] == 1
+    waiting = current.run(root, entry.run_id)
+    emit = custody.emit
+
+    def fail(root, event, facts, **kwargs):
+        if (lost == "patch_receipt" and event == custody.PATCH_CAPTURED) or (lost == "consume_receipt"
+                and event == custody.CAPTURE_JOB_CHANGED and facts["outcome"]["state"] == "consumed"):
+            return False
+        return emit(root, event, facts, **kwargs)
+
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(custody, "emit", fail)
+        unavailable.setattr("ouroboros.claudexor_daemon.read_owned_gateway",
+                            lambda: pytest.fail("retained output or ready capture opened the engine"))
+        wakes.clear()
+        result = body.collect_terminal(root, entry.run_id, background=True, generation="one")
+        failed = current.run(root, entry.run_id)
+        assert result["status"] == "pending" and failed.output_complete and failed.settled
+        assert result["workspace_capture"]["status"] == (
+            "failed" if lost == "patch_receipt" else "ready_with_changes")
+        assert failed.capture_job == waiting.capture_job and not failed.patch_disposed and area.is_dir()
+        assert failed.patch_captured == (lost == "consume_receipt") and not wakes
+        assert not collection_due(failed, generation="one") and collection_due(failed, generation="two")
+        response = call(ctx, "delegate_wait", run_id=entry.run_id)
+        delivery = json.loads(response.text)
+        assert delivery["primary_output"]["text"] == "complete answer"
+        assert delivery["collection"]["status"] == "pending"
+        block = delivery["workspace_capture"]
+        assert block["status"] == result["workspace_capture"]["status"]
+        assert Path(block["patch_read"]["path"]).is_absolute()
+        read = call(ctx, "read_file", **block["patch_read"])
+        assert read.status == "ok" and "+Plain retained output." in read.text
+        saved_patch = Path(block["patch_read"]["path"]).read_bytes()
+        assert b"+Plain retained output.\n" in saved_patch
+
+    custody._CUSTODY.clear()
+    if lost == "patch_receipt":
+        final = body.collect_terminal(root, entry.run_id, background=True, generation="two")
+        assert final["status"] == "collected"
+    else:
+        final = call(ctx, "delegate_wait", run_id=entry.run_id)
+        assert json.loads(final.text)["collection"]["status"] == "retained"
+    settled = current.run(root, entry.run_id)
+    assert settled.patch_disposed == custody.EVIDENCE_RETAINED
+    assert settled.capture_job["id"] == waiting.capture_job["id"] and settled.capture_job["state"] == "consumed"
+    # A successor gets its own stage address, but the complete bytes never change.
+    assert settled.output_sha == waiting.output_sha and not area.exists() and not wakes
+    assert read_actor_source_bytes(root, settled.output_source["task_id"], settled.output_source) == (
+        read_actor_source_bytes(root, waiting.output_source["task_id"], waiting.output_source))
+    rows = [row for row in custody.custody_rows(root) if row["type"] == custody.PATCH_CAPTURED]
+    assert len(rows) == 1 and rows[0]["sha256"] == block["sha256"]
+    assert Path(block["patch_read"]["path"]).read_bytes() == saved_patch
 
 
 def test_transient_waits_for_another_child_generation_without_spawning_it(tmp_path, monkeypatch):
