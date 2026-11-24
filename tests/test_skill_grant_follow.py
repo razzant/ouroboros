@@ -456,6 +456,42 @@ def test_the_grant_receipt_is_the_hosts_and_follows_only_its_installation(root):
     assert load_receipt(root, "demo") == {}, "the installation ended with its folder"
 
 
+@pytest.mark.parametrize("perm,earlier,held", [("notify_owner", True, True), ("notify_owner", False, False),
+                                               ("page_module", True, False)],
+                         ids=["held-notice", "never-granted", "other-permission"])
+def test_verified_repairs_hold_only_a_use_checked_permission_the_earlier_files_had(root, perm, earlier, held):
+    """Two verified Repairs of an extension rebind the explicit key and grant no permission. A ``notify_owner`` the
+    first files had is held along the receipt's chain: it stops nothing and stays ungranted. One never granted, or
+    another permission, blocks as before; a withdrawn decision ends the hold."""
+    from ouroboros.skill_grant_follow import (
+        extend_verified_edit,
+        finish_local_edit_grants,
+        installation_of,
+        record_explicit_grant,
+    )
+
+    folder = root / "skills" / "ouroboroshub" / "demo"
+    payload(folder, perms=(perm,))
+    record(root, find_skill(root, "demo").content_hash)
+    before = grant(root, perms=(perm,) if earlier else ())
+    record_explicit_grant(root, before, ["FIXTURE_KEY"], via="owner_ui")
+    installation, before = installation_of(root, "demo", folder), before.content_hash
+    for text in ("first repair", "second repair"):
+        edit(folder, text)
+        after = find_skill(root, "demo").content_hash
+        assert extend_verified_edit(root, "demo", installation, before, after)
+        accept(root)
+        finish_local_edit_grants(root, find_skill(root, "demo"))
+        status, before = state(root), after
+        assert (status["granted_keys"], status["granted_permissions"]) == (["FIXTURE_KEY"], [])
+        assert (status["pending_permissions"], status["blocked"]) == (([perm], False) if held else ([], True))
+    record_explicit_grant(root, find_skill(root, "demo"), ["FIXTURE_KEY"], via="owner_ui")  # adds, withdraws nothing
+    assert state(root)["pending_permissions"] == ([perm] if held else [])
+    (root / "state" / "skills" / "demo" / "grants.json").unlink()  # the owner's decision withdrawn
+    withdrawn = state(root)
+    assert (withdrawn["granted_permissions"], withdrawn["pending_permissions"], withdrawn["blocked"]) == ([], [], True)
+
+
 def test_a_loaded_extension_reports_the_key_saved_but_not_granted(root):
     """F2: the extension's liveness carries the same neutral fact a run does, and nothing once the key is granted."""
     from ouroboros.extension_liveness import runtime_state_for_loaded_skill

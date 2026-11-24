@@ -304,7 +304,9 @@ def _choice(drive):
 
 @pytest.fixture
 def hub_calendar(drive, tmp_path, live_extensions, monkeypatch):
-    """A prepared local Hub snapshot; use real install, review and extension effects, no remote transport."""
+    """A prepared local Hub snapshot; use real install, review and extension effects, no remote transport. Like the
+    real calendar it declares ``notify_owner``, and its read tool returns the meetings of its own local store for the
+    calendars its granted fields name. All values are synthetic; nothing here sends a notice."""
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -328,16 +330,22 @@ def hub_calendar(drive, tmp_path, live_extensions, monkeypatch):
     monkeypatch.setattr(catalog, "checkout_at_commit", lambda *_a, **_k: root)
 
     def offer(label):
-        folder = _write_ext_skill(root, name, permissions=["tool", "read_settings"],
+        folder = _write_ext_skill(root, name, permissions=["tool", "read_settings", "notify_owner"],
                                   env_from_settings=[primary, other],
-                                  extra_frontmatter='plugin_api: "2.0"\ntools:\n  - name: status\n    effect: read\n',
+                                  extra_frontmatter='plugin_api: "2.0"\ntools:\n  - name: events\n    effect: read\n',
                                   plugin_body=(
+                                      "import json\nimport pathlib\n\n\n"
                                       "def register(api):\n"
-                                      "    def status(ctx):\n"
-                                      f"        fields = api.get_settings([{primary!r}, {other!r}])\n"
-                                      f"        return str(({label!r}, fields.get({primary!r}) is not None, "
-                                      f"fields.get({other!r}) is not None))\n"
-                                      "    api.register_tool('status', status, description='Read readiness', schema={})\n"))
+                                      "    def events(ctx):\n"
+                                      f"        keys = ({primary!r}, {other!r})\n"
+                                      "        fields = api.get_settings(list(keys))\n"
+                                      "        store = json.loads((pathlib.Path(api.get_state_dir()) / 'meetings.json')"
+                                      ".read_text(encoding='utf-8'))\n"
+                                      "        found = [m['start'] + ' ' + m['title'] for key in keys\n"
+                                      "                 for m in store.get(fields.get(key) or '', [])]\n"
+                                      f"        return str(({label!r}, found))\n"
+                                      "    api.register_tool('events', events, description='Read meetings',"
+                                      " schema={})\n"))
         digest = catalog.tree_release_digest(folder)
         snapshot.update(commit="1" * 40, entries=[{"name": name, "digest": digest, "version": "0.1.0",
                                                   "source": {"kind": "hosted", "path": name}}])
@@ -347,19 +355,24 @@ def hub_calendar(drive, tmp_path, live_extensions, monkeypatch):
     installed = installer.run_in_lane(drive, "install", name, lambda: installer.install_item(
         drive, f"{row['id']}/{name}", rows=[row], repo_dir=repo, turn_on_when_ready=False))
     assert installed["digest"] == initial and installed["acceptance"]["accepted"]
+    # The calendar's local data in its state folder, keyed by the calendar each fictitious field names.
+    (skill_state_dir(drive, name) / "meetings.json").write_text(json.dumps({
+        "example-primary": [{"start": "2026-11-25T10:00+03:00", "title": "Demo standup"}],
+        "example-secondary": [{"start": "2026-11-25T15:00+03:00", "title": "Demo review"}]}), encoding="utf-8")
     owner = ToolContext(repo_dir=repo, system_repo_dir=repo, drive_root=drive)
-    granted = run_skill_action(owner, name, "grant", expected_content_hash=initial, items=[primary],
+    granted = run_skill_action(owner, name, "grant", expected_content_hash=initial, items=[primary, "notify_owner"],
                                _owner_actor="owner_ui", _enable_after_grant=True)
     assert granted["ok"] and granted["granted_keys"] == [primary] and granted["enabled"]
+    assert granted["granted_permissions"] == ["notify_owner"]
 
-    def status():
-        tool_name = extension_loader.extension_surface_name(name, "status")
+    def events():
+        tool_name = extension_loader.extension_surface_name(name, "events")
         tool = extension_loader.get_tool(tool_name)
         assert tool is not None
         return dispatch_extension_tool(owner, tool_name, tool, {})
 
     return SimpleNamespace(name=name, primary=primary, other=other, initial=initial, drive=drive,
-                           status=status, offer=offer, repo=repo, row=row, owner=owner)
+                           events=events, offer=offer, repo=repo, row=row, owner=owner)
 
 
 @pytest.mark.parametrize("owner_off,kept", [(False, False), (True, False), (False, True)],
@@ -368,6 +381,7 @@ def test_hub_repair_keeps_only_the_explicit_field_at_the_final_reviewed_digest(h
                                                                                 kept):
     from ouroboros import extension_loader
     from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.gateway.host_service import HostServiceAuthError, HostServiceContext
     from ouroboros.skill_lifecycle_actions import run_skill_action
     from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
     from ouroboros.skill_repair_admission import record_repair_admission
@@ -377,7 +391,7 @@ def test_hub_repair_keeps_only_the_explicit_field_at_the_final_reviewed_digest(h
     from tests.test_skill_review_persist_guard import _clean_wave
 
     h = hub_calendar
-    assert h.status() == "('before', True, False)"
+    assert h.events() == "('before', ['2026-11-25T10:00+03:00 Demo standup'])"
     if kept:  # Keep skips the upstream release: the installation the receipt names stays
         upstream = h.offer("upstream replacement")
         installer.run_in_lane(h.drive, "update", h.name, lambda: installer.update_installed(
@@ -405,11 +419,21 @@ def test_hub_repair_keeps_only_the_explicit_field_at_the_final_reviewed_digest(h
     reviewed = run_skill_review_lifecycle_blocking(repair, h.name, reviewers=["t1"], reason="fixture extension")
     assert (reviewed["status"], reviewed["content_hash"]) == ("clean", hashes[-1]), reviewed
     assert len(sends) == 1 and not reviewed.get("auto_granted_keys")
-    assert grant_status_for_skill(h.drive, find_skill(h.drive, h.name))["granted_keys"] == [h.primary]
+    grants = grant_status_for_skill(h.drive, find_skill(h.drive, h.name))
+    assert (grants["granted_keys"], grants["granted_permissions"], grants["pending_permissions"]) == (
+        [h.primary], [], ["notify_owner"]) and not grants["blocked"], "the field follows; the notice is only held"
+    with pytest.raises(HostServiceAuthError, match="notify_owner"):  # the host's decision, no notice is sent
+        HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")
     if owner_off:
         assert not load_enabled(h.drive, h.name) and not extension_loader.is_extension_live(h.name, h.drive)
-    else:
-        assert h.status() == "('final', True, False)"
+    else:  # the repaired files read the granted field's meeting while the notice still waits for its own grant
+        assert h.events() == "('final', ['2026-11-25T10:00+03:00 Demo standup'])"
+        assert run_skill_action(h.owner, h.name, "grant", expected_content_hash=hashes[-1], items=["notify_owner"],
+                                _owner_actor="owner_ui")["ok"]
+        HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")  # its own grant admits it
+        (skill_state_dir(h.drive, h.name) / "grants.json").unlink()  # the owner's decision withdrawn
+        with pytest.raises(HostServiceAuthError, match="notify_owner"):
+            HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")
 
 
 @pytest.mark.parametrize("automatic", [False, True])
@@ -427,9 +451,12 @@ def test_hub_update_keeps_auto_grant_a_separate_decision(hub_calendar, monkeypat
     assert before["release"]["digest"] == h.initial != after["release"]["digest"] == digest
     expected = [h.primary, h.other] if automatic else []
     assert outcome["acceptance"]["accepted"] and outcome["acceptance"]["granted_keys"] == expected
-    assert grant_status_for_skill(h.drive, find_skill(h.drive, h.name))["granted_keys"] == expected
-    if automatic:
-        assert h.status() == "('upstream replacement', True, True)"
+    status = grant_status_for_skill(h.drive, find_skill(h.drive, h.name))
+    assert status["granted_keys"] == expected and status["pending_permissions"] == []  # a landing holds nothing
+    assert status["blocked"] is not automatic
+    if automatic:  # both fields granted by the policy: both local calendars are read
+        assert h.events() == ("('upstream replacement', ['2026-11-25T10:00+03:00 Demo standup', "
+                              "'2026-11-25T15:00+03:00 Demo review'])")
 
 
 def test_hub_keep_continues_the_grant_receipt_and_replace_ends_it(hub_calendar):

@@ -1033,6 +1033,8 @@ desktop launcher's owner-grant bridge records these grants.
 Grants bind to exact bytes. A Repair started from Skills for the same local or Hub installation can keep
 explicitly granted, still-requested keys after a verified text edit and a clean or warnings review of those files.
 Revoked keys, host permissions, reinstalls and catalog updates do not inherit grants this way. Off stays Off.
+An extension's `notify_owner` granted to the earlier files is only held: the extension loads with its keys, and
+`POST /notify` refuses until it is granted for the repaired files. A script's missing permission still refuses its run.
 Old grants still cover their unchanged files. Without a proven link, use **Grant access** after review if auto-grants
 are off; no value needs re-entering. That explicit grant can follow the next verified Repair.
 
@@ -1041,7 +1043,7 @@ UTF-8 stdio setting where the host starts the process itself — a Python script
 extension's own Python process ("Manifest schema", script stdio).
 
 Missing host permissions, protected core keys and keys covered by the last grant decision block enablement
-(`toggle_skill` returns `SKILL_TOGGLE_ERROR`, `code: "grants"`). Pending fields described above do not. The
+(`toggle_skill` returns `SKILL_TOGGLE_ERROR`, `code: "grants"`). Pending fields and a held `notify_owner` do not. The
 Skills card offers **Grant access**; granting, enabling and recording who wrote the files are separate.
 
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on (Settings → Permissions and checks). Executable review,

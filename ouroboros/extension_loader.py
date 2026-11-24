@@ -543,7 +543,7 @@ def ensure_companions_running(
     if grant_status.get("blocked"):
         from ouroboros.skill_grant_follow import blocking_lists
 
-        keys, permissions = blocking_lists(grant_status)  # excludes pending keys, not missing host permissions
+        keys, permissions = blocking_lists(grant_status)  # excludes pending keys and held permissions only
         return {"action": "missing_grants", "started": [], "missing": missing, "missing_keys": keys,
                 "missing_permissions": permissions}
 

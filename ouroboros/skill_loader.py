@@ -24,6 +24,7 @@ from ouroboros.skill_grant_follow import (
     REQUESTABLE_WHEN_ABSENT as REQUESTABLE_WHEN_ABSENT,
     SKILL_OWNER_STATE_SCHEMA_VERSION as SKILL_OWNER_STATE_SCHEMA_VERSION,
     grant_view,
+    held_use_permissions,
     load_skill_grants as load_skill_grants,
     requested_core_setting_keys as requested_core_setting_keys,
     requested_skill_permissions as requested_skill_permissions,
@@ -624,7 +625,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             "missing_permissions": [],
             "all_granted": True,
             "usable": False,
-            "blocked": False, "pending_keys": [],
+            "blocked": False, "pending_keys": [], "pending_permissions": [],
             "unsupported_for_skill_type": False,
             "content_hash": "",
             "updated_at": "",
@@ -637,9 +638,10 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     )
     grants = load_skill_grants(drive_root, skill.name)
     # A grant for other bytes is only a fact for the reader. A pending key for accepted files stays separate from
-    # blocking missing grants and is not passed.
+    # blocking missing grants and is not passed; a permission a Repair receipt holds stays ungranted the same way.
     gate = skill.review.gate_for(skill.content_hash)
-    view = grant_view(skill.content_hash, grants, requested, requested_permissions, gate)
+    view = grant_view(skill.content_hash, grants, requested, requested_permissions, gate,
+                      held_use_permissions(drive_root, skill, grants, requested_permissions))
     review_ready = gate["executable_review"]
     # Scripts receive core keys via _scrub_env; extensions via PluginAPI.
     # Instruction skills cannot receive core keys.

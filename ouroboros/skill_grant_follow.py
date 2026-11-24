@@ -4,7 +4,7 @@
 ordinary exact-byte decisions (``skill_loader.grant_status_for_skill`` reads them through ``grant_view``) and proves
 nothing about the owner. For accepted current files, a custom key outside the last decision is pending (B″): not
 passed, and not a blocker by itself. A requested but ungranted key the decision covered, a core key, or a missing
-permission blocks.
+permission blocks, except a held one (below), which is pending as well.
 
 Continuity across the owner's Repair is the host's own receipt (``state/skill_grant_receipts.json``, outside every
 skill's state directory). Only a real, successful explicit grant writes one (the Skills button, or a verified owner
@@ -12,9 +12,12 @@ source; never an automatic grant, an older decision or a log): this installation
 local or Hub payload), the digest the grant was saved for and the key names. A selected Repair's byte-exact text
 write extends its chain once the observed digest equals the predicted one; only the ordinary clean/warnings review of
 the chain's last digest rebinds the keys the earlier decision still grants and the manifest still requests (no
-permission, no new key). A new landing of the name (Replace, reinstall, another source), a local delete or an
-uninstall ends the receipt; Keep is no landing. Any other write leaves the ordinary grant. This guards the host's own
-grant and Repair paths; it is no OS boundary for code that runs as this user.
+permission, no new key). For an extension the receipt then holds each requested permission the host checks at every
+use that was granted to the earlier files (``notify_owner``): it stays ungranted, so the extension loads with its keys
+and the host refuses that use until the owner grants it for these files. A new landing of the name (Replace,
+reinstall, another source), a local delete or an uninstall ends the receipt; Keep is no landing. Any other write
+leaves the ordinary grant. This guards the host's own grant and Repair paths; it is no OS boundary for code that runs
+as this user.
 """
 
 from __future__ import annotations
@@ -71,6 +74,10 @@ _GRANTABLE_PERMISSIONS = ("inject_chat", "presence", "notify_owner", "page_modul
                           "live_conversation", "call_peer")
 _GRANTABLE_SKILL_PERMISSIONS = frozenset({*_GRANTABLE_PERMISSIONS, *(
     f"subscribe_event:chat.{topic}" for topic in ("outbound", "typing", "photo", "video"))})
+# Checked by the host at each use against the grant for the current files (``POST /notify``: ``require_permission``),
+# not only before a load; a Repair receipt may hold one for an extension, never grant it. Any other missing permission,
+# and any for a script, still blocks as before (for several the load gate is the only check).
+_USE_CHECKED_PERMISSIONS = frozenset({"notify_owner"})
 
 
 def requested_skill_permissions(
@@ -217,7 +224,8 @@ def record_explicit_grant(drive_root: pathlib.Path, skill: Any, keys: List[str],
     def change(current):
         same = current.get("installation") == installation and current.get("digest") == skill.content_hash
         return {"installation": installation, "digest": skill.content_hash,
-                "keys": sorted({*held, *(current["keys"] if same else ())}), "via": via, "recorded_at": utc_now_iso()}
+                "keys": sorted({*held, *(current["keys"] if same else ())}), "via": via, "recorded_at": utc_now_iso(),
+                **({"held_permissions": current["held_permissions"]} if same and "held_permissions" in current else {})}
 
     _change_receipt(drive_root, skill.name, change)
 
@@ -265,27 +273,51 @@ def finish_local_edit_grants(drive_root: pathlib.Path, skill: Any) -> None:
         return
     requested = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
     permissions = set(requested_skill_permissions(skill.manifest.permissions, skill.manifest.subscribe_events))
+    holdable = permissions & _USE_CHECKED_PERMISSIONS if skill.manifest.is_extension() else set()
 
     def rebind_receipt(current):
         if current != receipt:
             return None
 
         keys: List[str] = []
+        held: List[str] = []
 
         def rebind_grants(grants):
             keys.extend(_continuing_keys(current, grants, requested))
             if not keys:
                 return None
+            # What the earlier files had (their grant, or a hold carried to them) is held for these files, not granted.
+            held.extend(sorted(holdable & {
+                *_text_items(grants.get("granted_permissions")), *_text_items(current.get("held_permissions"))}))
             covered = set(_text_items(grants.get("requested_keys"), upper=True)) | set(keys)
             return _grant_decision(grants, skill.content_hash, keys, set(requested) & covered, [], permissions)
 
         # Receipt identity under its lock, and live grant/digest under its own lock.
         # Other writers finish their grant write before taking the receipt lock.
         update_json_locked(_grant_path(drive_root, skill.name), rebind_grants, strict_existing_dict=True)
-        return ({**{k: v for k, v in current.items() if k != "tip"}, "digest": skill.content_hash, "keys": sorted(keys)}
-                if keys else {})
+        rest = {k: v for k, v in current.items() if k not in {"tip", "held_permissions"}}
+        rest.update({"held_permissions": held} if held else {})
+        return {**rest, "digest": skill.content_hash, "keys": sorted(keys)} if keys else {}
 
     _change_receipt(drive_root, skill.name, rebind_receipt)
+
+
+def held_use_permissions(drive_root: pathlib.Path, skill: Any, grants: Dict[str, Any],
+                         requested_permissions: List[str]) -> List[str]:
+    """Requested use-checked permissions an extension's files lack that the receipt holds for exactly them in this
+    installation. Never a grant. Read only for such a gap; a decision for other files (or none) holds nothing, and a
+    script keeps its run gate as it was."""
+    if not skill.manifest.is_extension():
+        return []
+    lacking = [perm for perm in requested_permissions
+               if perm in _USE_CHECKED_PERMISSIONS and perm not in _text_items(grants.get("granted_permissions"))]
+    if not lacking or not skill.content_hash or grants.get("content_hash") != skill.content_hash:
+        return []
+    receipt = load_receipt(drive_root, skill.name)
+    if (receipt.get("digest") != skill.content_hash
+            or installation_of(drive_root, skill.name, skill.skill_dir) != receipt["installation"]):
+        return []
+    return [perm for perm in lacking if perm in _text_items(receipt.get("held_permissions"))]
 
 
 def files_accepted(gate: Dict[str, Any]) -> bool:
@@ -298,8 +330,9 @@ def files_accepted(gate: Dict[str, Any]) -> bool:
 
 
 def grant_view(content_hash: str, grants: Dict[str, Any], requested: List[str],
-               requested_permissions: List[str], gate: Dict[str, Any]) -> Dict[str, Any]:
-    """Exact grants, missing items, and pending custom keys for accepted current files."""
+               requested_permissions: List[str], gate: Dict[str, Any],
+               held_permissions: List[str] | Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """Exact grants, missing items, and pending custom keys and held permissions for accepted current files."""
     decided_for = grants.get("content_hash")
     same_bytes = bool(content_hash) and content_hash == decided_for
     keys, permissions = set(grants.get("granted_keys") or []), set(grants.get("granted_permissions") or [])
@@ -312,12 +345,13 @@ def grant_view(content_hash: str, grants: Dict[str, Any], requested: List[str],
                "permissions": [perm for perm in missing_permissions if perm in permissions]}
     always_requested = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS} | REQUESTABLE_WHEN_ABSENT
     covered = set(grants.get("requested_keys") or []) | keys
-    pending = ([key for key in missing if key not in always_requested and key not in covered]
-               if content_hash and files_accepted(gate) else [])
+    accepted = bool(content_hash) and files_accepted(gate)
+    pending = [key for key in missing if key not in always_requested and key not in covered] if accepted else []
+    held = [perm for perm in missing_permissions if perm in held_permissions] if accepted else []
     return {"granted_keys": granted, "missing_keys": missing, "granted_permissions": granted_permissions,
-            "missing_permissions": missing_permissions, "pending_keys": pending,
+            "missing_permissions": missing_permissions, "pending_keys": pending, "pending_permissions": held,
             "earlier_grant": earlier if decided_for and content_hash and not same_bytes and any(earlier.values()) else None,
-            "blocks": bool(set(missing) - set(pending) or missing_permissions)}
+            "blocks": bool(set(missing) - set(pending) or set(missing_permissions) - set(held))}
 
 
 def registration_view(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -344,10 +378,10 @@ def declared_catalog_settings(keys: List[str], settings: Dict[str, Any], grants:
 
 
 def blocking_lists(status: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """All missing permissions and all missing keys except pending ones."""
-    pending = set(status.get("pending_keys") or [])
+    """All missing keys and permissions except pending ones."""
+    pending, held = set(status.get("pending_keys") or []), set(status.get("pending_permissions") or [])
     return ([key for key in status.get("missing_keys") or [] if key not in pending],
-            list(status.get("missing_permissions") or []))
+            [perm for perm in status.get("missing_permissions") or [] if perm not in held])
 
 
 def blocking_items(status: Dict[str, Any]) -> str:
@@ -367,13 +401,17 @@ def pending_fact(status: Dict[str, Any]) -> str:
 
 
 def grant_notes(status: Dict[str, Any]) -> List[str]:
-    """Readiness notes about keys, not a claim that the skill runs or is enabled."""
-    return [f"key {key} is saved in Settings but not granted for these files; it is not passed and does not"
-            " by itself stop the skill" for key in status.get("pending_keys") or []]
+    """Readiness notes about pending keys and held permissions, not a claim that the skill runs or is enabled."""
+    return [*(f"key {key} is saved in Settings but not granted for these files; it is not passed and does not"
+              " by itself stop the skill" for key in status.get("pending_keys") or []),
+            *(f"permission {perm} is held from earlier files of this installation but not granted for these; the host"
+              " refuses each use until it is, and it does not by itself stop the skill"
+              for perm in status.get("pending_permissions") or [])]
 
 
 __all__ = [
     "RECEIPTS_FILENAME", "REQUESTABLE_WHEN_ABSENT", "blocking_items", "blocking_lists", "declared_catalog_settings",
     "end_receipt", "extend_verified_edit", "files_accepted", "finish_local_edit_grants", "grant_notes", "grant_view",
-    "installation_of", "load_receipt", "pending_fact", "receipt_tip", "record_explicit_grant", "registration_view",
+    "held_use_permissions", "installation_of", "load_receipt", "pending_fact", "receipt_tip", "record_explicit_grant",
+    "registration_view",
 ]
