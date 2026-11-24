@@ -13,11 +13,13 @@ Each attempt of a step is saved pending under its own id before dispatch; only a
 current attempt lets its owner's replacement (wire, image, context) follow, saved pending again.
 A saved pending claim is uncertain, never permission to repeat: a call that returned with no known
 end stays claimed, and only the execution that heard it return keeps the round's unknown-outcome
-rails. No response here teaches a context-window limit.
+rails. A configured route's trial saves only its claims: the walk's decision saves the rest of the
+step, with the route the work keeps (``trial_left``). No response here teaches a context-window limit.
 """
 from __future__ import annotations
 
 import copy
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,6 +41,13 @@ def _loop():
 def _save(ctx: Any) -> None:
     from ouroboros.working_checkpoint import save_model_call
     save_model_call(model_call=ctx)
+
+
+def _save_step(ctx: Any) -> None:
+    """Save a transition of this step with its call's view. A trial is no route of the work until the walk adopts
+    it, so only its claims are saved (``_save``: resumed, a claim ends unrepeated); the rest waits for the walk."""
+    if getattr(ctx, "fallback_is_primary", None) is None:
+        _save(ctx)
 
 
 def _owner_revision(ctx: Any) -> int:
@@ -219,7 +228,7 @@ def _invoke(ctx: Any, send: Any, step: str, key: str = KEY) -> Any:
                 record["stage"] = prior_stage
                 if step == "fallback":
                     record["tried"].remove(target)
-            _save(ctx)
+            _save_step(ctx)
     prior_cap, ctx.attempt_cap = ctx.attempt_cap, 1
     prior_claim, ctx.physical_send_claim = getattr(ctx, "physical_send_claim", None), attempts
     try:
@@ -271,18 +280,42 @@ def call(ctx: Any, ordinary_call: Any) -> tuple:
         return msg, cost, mode
     if usage.get("_last_llm_error_kind") != KIND or _loop().provider_no_call_source(usage, False)[0]:
         if claimed:
-            _save(ctx)
+            _save_step(ctx)
         return msg, cost, mode
     if record is None:
         usage[KEY] = {"stage": "informed", "owner_revision": _owner_revision(ctx),
                       "tried": [binding(ctx)], "first": dict(usage.get("_last_llm_output_exhausted") or {})}
         _loop()._append_or_merge_user_message(ctx.messages, _loop()._output_exhausted_notice(usage[KEY]["first"]))
-        _save(ctx)  # facts and allowance are one saved transition
+        _save_step(ctx)  # facts and allowance are one saved transition
         return msg, cost, mode
     if fallback:
-        _save(ctx)
+        _save_step(ctx)
         return msg, cost, mode
     return _smaller_request(ctx, cost)
+
+
+def trial_left(*, adopted: bool = False, answered: bool = False) -> None:
+    """The walk's decision on a trial, saved once from the work's live view with the claims as they stand (a known end
+    settled, an unknown one pending): its return to the acting view when the saved state is the trial's own claim, or
+    the trial's route it ``adopted`` without a reply (a claim's end, a new episode's facts and allowance). An
+    ``answered`` adoption saves nothing: the reply's own checkpoint follows, and until then recovery sees the claim."""
+    if not answered:
+        from ouroboros.working_checkpoint import save_model_call
+        save_model_call(trial_only=not adopted)
+
+
+def trial_call(call: Any, leave: Any) -> tuple:
+    """A route's call in the walk. A trial that raises (Stop, Pause, a deadline, any failure) is nobody's route:
+    ``leave`` returns the work to its acting view first, and the exception that ended the trial goes on unchanged."""
+    try:
+        return _loop()._call_round_model(call)
+    except Exception:
+        if getattr(call, "fallback_is_primary", None) is not None:
+            try:
+                leave()
+            except Exception:
+                logging.getLogger(__name__).warning("A trial's return to the acting view was not saved", exc_info=True)
+        raise
 
 
 def _smaller_request(ctx: Any, cost: Any) -> tuple:
@@ -295,7 +328,7 @@ def _smaller_request(ctx: Any, cost: Any) -> tuple:
     record["stage"] = "fallback"
     if fit is None or not _failed_capture_is_comparable(failed):
         record["reclaim"] = "comparison_unavailable"
-        _save(ctx)
+        _save_step(ctx)
         return None, cost, ctx.active_context_mode
     notice = ("Repeated empty length-limited replies: preparing a smaller request on the same model, "
               "if eligible sources can be addressed. Only superseded host facts and already exposed tool "
@@ -315,7 +348,7 @@ def _smaller_request(ctx: Any, cost: Any) -> tuple:
         record["stage"] = "smaller"
         if ctx.emit_progress:
             ctx.emit_progress(notice)
-    _save(ctx)
+    _save_step(ctx)
     return _send_smaller(ctx, cost) if changed else (None, cost, ctx.active_context_mode)
 
 
@@ -352,7 +385,7 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
                                  round_id=getattr(fit.measurement, "round_id", ""))
     if msg is not None:
         _answered(ctx, msg)
-    _save(ctx)
+    _save_step(ctx)
     return msg, float(cost or 0.0) + float(retry_cost or 0.0), ctx.active_context_mode
 
 

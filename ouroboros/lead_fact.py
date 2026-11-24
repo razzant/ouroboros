@@ -120,6 +120,43 @@ def publish_lead(ctx: Any, **route: Any) -> None:
     ctx._lead_last_request_id = request_id  # an applied act retires the host projection's pending route
 
 
+_NO_HELD_OVERRIDE = object()
+
+
+def _wait_card_override_changed(waiter: Any, role: str, held: Any) -> bool:
+    """True when ``waiter.overrides[role]`` is a fresh entry distinct from ``held`` (Switch, not Retry)."""
+    overrides = getattr(waiter, "overrides", None)
+    entry = overrides.get(role) if isinstance(overrides, Mapping) else None
+    return bool(entry) and entry is not held
+
+
+def wait_card_switched(model_call: Any, role: str, waiter: Any) -> bool:
+    """Whether ``role`` received a Switch on a wait card: ordinary main calls keep prior behavior,
+    while provisional fallback trials require a newer override object than ``fallback_held_override``."""
+    if getattr(model_call, "fallback_is_primary", None) is None:
+        return _wait_card_override_changed(waiter, role, None)
+    held = getattr(model_call, "fallback_held_override", _NO_HELD_OVERRIDE)
+    return held is not _NO_HELD_OVERRIDE and _wait_card_override_changed(waiter, role, held)
+
+
+def fallback_trial_choice(ctx: Any, model_call: Any, waiter: Any = None) -> dict:
+    """One route-choice resolution for a provisional fallback trial (checkpoint write and adoption).
+
+    ``TaskModelWait.wait`` stores a fresh dict in ``overrides[role]`` on every Switch (even to the
+    same binding) and leaves it untouched on Retry, so identity against ``fallback_held_override``
+    separates this trial's Switch from Retry and earlier overrides.
+    """
+    if waiter is None:
+        from ouroboros.model_wait import current_model_wait
+
+        waiter = current_model_wait() or getattr(ctx, "model_wait_context", None)
+    role = str(getattr(model_call, "model_role", "") or "")
+    held = getattr(model_call, "fallback_held_override", _NO_HELD_OVERRIDE)
+    if held is not _NO_HELD_OVERRIDE and _wait_card_override_changed(waiter, role, held):
+        return route_choice.explicit("wait_card")
+    return route_choice.after_fallback(ctx, bool(getattr(model_call, "fallback_is_primary", False)))
+
+
 def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str, choice: Mapping | None = None) -> None:
     """Publish after adoption, never while the chain is merely trying a row; an owner's ``choice`` stays the owner's."""
     ctx.route_choice = dict(choice) if choice else route_choice.after_fallback(ctx, is_primary)
