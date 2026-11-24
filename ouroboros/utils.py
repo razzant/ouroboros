@@ -244,7 +244,8 @@ def read_text_across_replace(path: pathlib.Path | str, *, encoding: str = "utf-8
             delay = min(delay * 2, _REPLACE_RETRY_MAX_DELAY_SEC)
 
 
-def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *, publication=None) -> None:
+def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None], *,
+                      publication=None, attest: bool = False) -> Optional[os.stat_result]:
     """Run ``write_temp`` against a sibling file, then atomically replace ``path``.
 
     A crash (SIGKILL / power loss) between the temp create and the replace leaves the
@@ -262,9 +263,7 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     THROUGH a symlink could escape the caller's allowed root — so the write always lands
     inside ``path``'s directory rather than wherever a link points.
 
-    Being that SSOT is also why the pytest live-data guard sits here rather than on each
-    writer: every full-file overwrite in the tree replaces through this seam, so the next
-    writer added is guarded by construction instead of by remembering (RES-14b)."""
+    The pytest live-data guard here covers every caller (RES-14b)."""
     path = pathlib.Path(path)
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,7 +278,12 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
         if existing_mode is not None:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, existing_mode)
+        staged = None
+        if attest:
+            with contextlib.suppress(OSError):
+                staged = tmp.lstat()
         replace_atomic(tmp, path, **({"publication": publication} if publication else {}))
+        return staged
     except Exception:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -303,12 +307,14 @@ def _write_fd_fully(fd: int, data: bytes, target: pathlib.Path) -> None:
         view = view[written:]
 
 
-def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False) -> None:
+def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False,
+                       attest: bool = False) -> Optional[os.stat_result]:
     """Atomically overwrite ``path`` with exact bytes.
 
     A crash leaves the complete old or new file; ``fsync`` is opt-in, so power-loss
     durability is not promised, and appends are a separate non-atomic contract.
-    Byte-exact: no newline translation on any platform.
+    No newline translation. With `attest`, return the staging stat if available.
+    Device, inode, size and mtime survive publication; rename can change ctime.
     """
 
     def _write(tmp: pathlib.Path) -> None:
@@ -323,7 +329,7 @@ def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = Fals
         finally:
             os.close(fd)
 
-    _atomic_overwrite(path, _write)
+    return _atomic_overwrite(path, _write, attest=attest)
 
 
 # What fsync of a folder's descriptor may answer where the filesystem cannot sync a folder at all (some

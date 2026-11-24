@@ -22,6 +22,10 @@ from tests._wizard_walk import past_quick_steps, rail_shows_its_steps, step_orde
 
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
+# What ouroboros.server_web stamps on the core's builtin index: the proven data profile's saved-preview scope
+# (web/modules/chat_preview.js). These synthetic documents stand in for that page, so they name the same fact
+# before the app's scripts run; a document without it is no profile proof and opens on the canonical history.
+PREVIEW_META = '<meta name="ouroboros-chat-preview-scope" content="0123456789abcdef">'
 
 
 def passive_status(status):
@@ -148,6 +152,14 @@ def subscription_ui():
                         self.send_header(key, response.headers[key])
                 self.end_headers()
                 self.wfile.write(response.content)
+                return
+            if self.path.split("?", 1)[0] in ("/", "/index.html"):
+                document = (WEB / "index.html").read_text(encoding="utf-8").replace(
+                    "<head>", "<head>" + PREVIEW_META, 1)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(document.encode())
                 return
             # The wizard loads the core's builtin tree from /onboarding/static, the SPA from /static.
             self.path = self.path.removeprefix("/onboarding").removeprefix("/static")

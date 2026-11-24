@@ -157,6 +157,14 @@ export function createChatHistoryPager({
     }
     const publish = () => { if (alive()) onState(getState()); };
 
+    function registryReadableAgain() {
+        if (failure?.error?.body?.project_registry !== 'unavailable') return;
+        // The old page still needs its own Retry. A newer successful read has answered only the
+        // availability question, so retain the earlier refusal as its cause, not a current archive offer.
+        failure = { ...failure, error: new Error('Some saved history could not be loaded.', { cause: failure.error }) };
+        publish();
+    }
+
     function release(entry) {
         cache.delete(entry.page.id);
         releasePage(entry.page);
@@ -230,7 +238,7 @@ export function createChatHistoryPager({
                 requestCursor: data.page_cursor, nextCursor: data.next_cursor ?? null,
                 hasMore: data.has_more, rows: messageCount, loaded: true, coverage: data.coverage ?? null });
         applyPage(data.messages, { ...page, direction, window: data.window ?? null,
-            recentVersion: data.recentVersion, page_cursor: data.page_cursor, ...extra });
+            recentVersion: data.recentVersion, page_cursor: data.page_cursor, project_registry: data.project_registry, ...extra });
         if (!alive()) return { status: 'disposed' };
         // Only a read of the present restarts the arrivals; a page around one place is not the present.
         if (newChain) {
@@ -335,6 +343,7 @@ export function createChatHistoryPager({
                 arrived += rowCount(data.messages);
                 landedArrivals += 1;
                 applyArrivals(data.messages, { window: data.window ?? null, fromReconnect: ask.fromReconnect });
+                registryReadableAgain();
                 return alive() ? { status: 'applied', messageCount: rowCount(data.messages) } : { status: 'disposed' };
             })
             .catch(error => {
@@ -404,6 +413,7 @@ export function createChatHistoryPager({
             }
             // The newest read answers a failed read of the present, the room's own or ↓'s (its Retry is ↓ again).
             if (!sourceError && (failure?.direction === 'recent' || failure?.direction === 'latest')) { failure = null; publish(); }
+            else if (!sourceError && data?.page_cursor) registryReadableAgain();
             if (pending || (pages.length && !rechain)) return { status: 'ignored' };
             try {
                 const result = pages.length ? land(data, { index: 0, direction: 'latest', newChain: true }, { ...rechain, rechained: true })

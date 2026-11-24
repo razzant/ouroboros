@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
+import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, walkCard } from './chat_dom_fixture.js';
 import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
@@ -17,7 +17,7 @@ const page = (messages, cursor = 'page:recent', next = null) => ({
 
 // `seed` runs on the fresh document before the room exists (this origin's saved preview); a response may be a promise
 // the test settles, or `{ httpStatus, body }` for a refused read.
-function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) {
+function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShowSavedProfile = () => true } = {}) {
     let response = initial, revision = 0;
     const calls = [], handlers = new Map();
     const { prior, mount } = installDom(async (url, init) => {
@@ -26,7 +26,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
             calls.push(cursor);
             const data = cursor && fetchPage ? await fetchPage(cursor, init) : await response;
             if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => data.body };
-            return { ok: true, json: async () => data };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
@@ -35,7 +35,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
     globalThis.WebSocket = { OPEN: 1 };
     const instance = createChatInstance({
         ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
-            isConnected: () => true, send() {} },
+            isConnected: () => true, canShowSavedProfile, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
@@ -112,8 +112,8 @@ function recordRenderedMarkup(t) {
     return markup;
 }
 
-// This room's rows in this origin's saved preview (chat_preview.js): Project chat 2, no appearance scope.
-const PREVIEW_ROOM = JSON.stringify(['', [2, '']]);
+// This room's rows in this origin's saved preview (chat_preview.js): Project chat 2 under the document's proven profile.
+const PREVIEW_ROOM = JSON.stringify([PREVIEW_SCOPE, [2, '']]);
 const savedTexts = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
     .find((entry) => entry.key === PREVIEW_ROOM)?.rows || []).map((item) => item.text);
 const settle = async (check = () => false) => {
@@ -641,6 +641,20 @@ test('history query construction remains portable when URLSearchParams.size is u
     assert.match(requested, /cursor=c/);
 });
 
+test('a scoped document can load history with its generation proof without waiting for a socket', async () => {
+    const { apiClient } = await import('../modules/api_client.js');
+    const priorFetch = globalThis.fetch, priorDoc = globalThis.document;
+    const scope = 'a'.repeat(16);
+    try {
+        globalThis.document = { querySelector: () => ({ content: scope }) };
+        globalThis.fetch = async () => ({ ok: true, json: async () => ({ messages: [], profile_scope: scope }) });
+        assert.equal((await apiClient.chatHistory({ chatId: 1 })).profile_scope, scope);
+    } finally {
+        globalThis.fetch = priorFetch;
+        globalThis.document = priorDoc;
+    }
+});
+
 
 for (const hydrated of [false, true]) test(`an unavailable archive keeps recent messages and a fresh retry (hydrated=${hydrated})`, async (t) => {
     const partial = { messages: [row('chat:10', 'Readable recent answer', {
@@ -1078,6 +1092,35 @@ test('a warm opening paints the saved text before its first read, grants it noth
     assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:6', 'chat:7']);
     assert.equal(f.instance.hasPaintedHistory(), true);
     assert.deepEqual(savedTexts(), ['Canonical answer', 'Fresh answer']);
+});
+
+test('matching history paints even while the room cannot show saved text', async (t) => {
+    const read = held();
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS), canShowSavedProfile: () => false });
+    await settle(() => f.calls.length === 1);
+    assert.deepEqual(f.calls, [null]);
+    assert.equal(previewNode(f), undefined, 'a room can fetch history without preview eligibility');
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    read.release(page([row('chat:10', 'Matching history')]));
+    await settle(() => f.instance.hasPaintedHistory());
+    assert.equal(f.instance.hasPaintedHistory(), true);
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:10']);
+});
+
+test('a confirmed different history profile retires painted text without erasing the saved room', async (t) => {
+    const read = held();
+    const f = fixture(t, read.promise, null, { seed: seedPreview(SAVED_ROWS) });
+    await settle(() => f.calls.length === 1);
+    assert.ok(previewNode(f), 'the currently eligible document shows its own saved preview');
+    const saved = localStorage.getItem(PREVIEW_KEY);
+    const otherScope = PREVIEW_SCOPE === '0'.repeat(16) ? '1'.repeat(16) : '0'.repeat(16);
+    read.release({ ...page([]), profile_scope: otherScope });
+    await settle(() => !previewNode(f));
+    assert.equal(previewNode(f), undefined);
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
+    await f.refresh(page([row('chat:20', 'Current history')]));
+    assert.deepEqual(f.bubbles().map(node => node.dataset.historyId), ['chat:20']);
 });
 
 for (const status of [500, 401]) test(`a warm opening whose first read fails with ${status} ${status === 401 ? 'discards the saved text at once' : 'keeps it, not current, beside Retry'}`, async (t) => {
@@ -2158,4 +2201,135 @@ test('a repeated physical down returns again after passive focus scrolling witho
     await drain();
     assert.equal(returned, true, 'every physical press moves immediately');
     assert.equal(f.calls.length, before, 'both presses share the one pending fetch');
+});
+
+
+// The archive door uses the same edge as a normal history failure; no read until its owner opens it.
+const REGISTRY_REFUSAL = { httpStatus: 503, body: { reason_code: 'history_source_unavailable',
+    project_registry: 'unavailable', detail: 'Project registry unavailable' } };
+
+function archiveRoom(t, initial, { asPanel = false, older = null, archive = null, onReadingLatest } = {}) {
+    let response = initial;
+    const calls = [], handlers = new Map();
+    const { prior, mount } = installDom(async (url, init = {}) => {
+        const address = new URL(String(url), 'http://local');
+        calls.push(address);
+        let body = {};
+        if (address.pathname === '/api/chat/history') body = await (address.searchParams.has('cursor') && older ? older() : response);
+        if (address.pathname === '/api/chat/archive') body = await archive?.(init);
+        if (body?.httpStatus) return { ok: false, status: body.httpStatus, json: async () => body.body };
+        return { ok: true, json: async () => address.pathname === '/api/chat/history'
+            ? { profile_scope: PREVIEW_SCOPE, ...body } : body };
+    });
+    const doc = globalThis.document;
+    const styleOf = globalThis.getComputedStyle;
+    doc.defaultView = Object.assign(globalThis.window, { getComputedStyle: node => ({ ...styleOf(node), visibility: 'visible' }) });
+    const priorSocket = globalThis.WebSocket;
+    globalThis.WebSocket = { OPEN: 1 };
+    const instance = createChatInstance({
+        ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); }, isConnected: () => true, send() {} },
+        state: { activePage: 'chat', projectChatIds: new Set(asPanel ? [2] : []), unreadCount: 0 },
+        updateUnreadBadge() {}, idPrefix: 'chat', mountEl: mount, chatId: asPanel ? 2 : 1, asPanel, onReadingLatest,
+        stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
+            isCurrent: () => true, apply() {}, fail() {}, latest: () => null },
+    });
+    t.after(() => { instance.destroy(); restoreDom(prior); globalThis.WebSocket = priorSocket; });
+    const edge = () => doc.byId.get('chat-messages').querySelector('.chat-load-older');
+    const dispatch = async (node) => { for (const handler of node.listeners.get('click')) await handler({ target: node }); };
+    return { instance, calls, edge, dispatch,
+        respond: next => { response = next; },
+        door: () => edge()?.querySelector('.chat-archive-door'),
+        reader: () => doc.body.children.find(node => node.classList.contains('room-archive')),
+        note: () => [instance.page, edge()].flatMap(node => node?.querySelectorAll('.chat-load-older-note') || [])
+            .map(node => node.textContent).join(' '),
+        restored: () => instance.page.querySelector('.chat-page-note')?.querySelector('.chat-registry-restored')?.textContent,
+        reconnect: () => handlers.get('open')({ previouslyConnected: true }),
+        disconnect: () => handlers.get('close')(),
+    };
+}
+
+test('a typed Main refusal explains the lost project list and offers the archive beside Retry without reading it', async (t) => {
+    const f = archiveRoom(t, REGISTRY_REFUSAL);
+    await f.instance.refreshHistory({ revision: 1 });
+    const retry = f.edge().querySelector('.chat-load-older-btn');
+    assert.match(f.note(), /The project list can’t be read, so Main’s saved history isn’t shown\./);
+    assert.equal(retry.textContent, 'Retry loading messages');
+    assert.equal(retry.nextElementSibling, f.door());
+    assert.equal(f.door().textContent, 'Read saved messages');
+    assert.equal(f.door().hidden, false);
+    assert.equal(f.calls.some(url => url.pathname === '/api/chat/archive'), false);
+    assert.equal(f.restored(), undefined);
+});
+
+for (const [title, pageOrRefusal, asPanel, note, restored] of [
+    ['another refusal', { httpStatus: 503, body: { reason_code: 'history_source_unavailable', detail: 'store busy' } },
+        false, /Some saved history could not be loaded\./],
+    ['a Project', REGISTRY_REFUSAL, true], ['healthy Main', page([]), false],
+    ['restored Main', { ...page([]), project_registry: 'restored' }, false, null, 'Project list restored from its saved copy.'],
+    ['restored Project', { ...page([]), project_registry: 'restored' }, true],
+]) {
+    test(`${title} keeps the ordinary history edge without an archive door`, async (t) => {
+        const f = archiveRoom(t, pageOrRefusal, { asPanel });
+        await f.instance.refreshHistory({ revision: 1 });
+        if (note) assert.match(f.note(), note);
+        assert.ok(f.door() == null);
+        assert.equal(f.restored(), restored);
+    });
+}
+
+test('Load more history and reconnect route a new registry refusal to Main’s archive door', async (t) => {
+    const f = archiveRoom(t, page([row('chat:1', 'painted')], 'page:recent', 'older-1'), { older: () => REGISTRY_REFUSAL });
+    await f.instance.refreshHistory({ revision: 1 });
+    assert.ok(f.door() == null);
+    await f.dispatch(f.edge().querySelector('.chat-load-older-btn'));
+    assert.equal(f.calls.some(url => url.searchParams.get('cursor') === 'older-1'), true);
+    assert.equal(f.door().hidden, false, 'Load more encountered the typed refusal');
+    f.disconnect();
+    f.respond(page([row('chat:2', 'fresh')], 'page:new'));
+    f.reconnect();
+    await drain();
+    assert.ok(f.door().hidden, 'a successful ordinary read retires the archive offer from the older page');
+    assert.doesNotMatch(f.note(), /project list can’t be read/);
+    f.disconnect();
+    f.respond(REGISTRY_REFUSAL);
+    const callsBefore = f.calls.length;
+    f.reconnect();
+    await drain();
+    assert.equal(f.calls.slice(callsBefore).some(url => url.pathname === '/api/chat/history' && !url.searchParams.has('cursor')), true);
+    assert.equal(f.door().hidden, false, 'reconnect encountered the typed refusal');
+});
+
+for (const action of ['closeTransient', 'destroy']) {
+    test(`${action} closes Main’s archive, cancels its read and drops late responses`, async (t) => {
+        let release, signal;
+        const f = archiveRoom(t, REGISTRY_REFUSAL, { archive: init => {
+            signal = init.signal;
+            return new Promise(resolve => { release = resolve; });
+        } });
+        await f.instance.refreshHistory({ revision: 1 });
+        await f.dispatch(f.door());
+        const reader = f.reader();
+        assert.ok(reader && signal && !signal.aborted);
+        f.instance[action]();
+        assert.equal(f.reader(), undefined);
+        assert.equal(signal.aborted, true);
+        release({ state: 'available', room: 'main', rooms: [], has_more: false, next_cursor: null,
+            messages: [{ id: 'archive:chat:1', role: 'user', text: 'late', ts: '' }] });
+        await drain();
+        assert.equal(reader.querySelectorAll('.room-archive-row').length, 0);
+    });
+}
+
+test('a successful Main history response under the archive carries no read receipt until Main is shown again', async (t) => {
+    const f = archiveRoom(t, REGISTRY_REFUSAL, { archive: () => ({ state: 'available', room: 'main', rooms: [], messages: [] }) });
+    await f.instance.refreshHistory({ revision: 1 });
+    await f.dispatch(f.door());
+    assert.equal(f.instance.archiveOpen(), true);
+    f.respond(page([row('chat:1', 'new standalone message')]));
+    const covered = await f.instance.refreshHistory({ revision: 2 });
+    assert.equal(f.instance.hasPaintedHistory(), true, 'the live history did update underneath');
+    assert.equal(covered.painted, false, 'that hidden paint is not a reading receipt');
+    f.instance.closeTransient();
+    assert.equal(f.instance.archiveOpen(), false);
+    assert.equal((await f.instance.refreshHistory({ revision: 2 })).painted, true);
 });

@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import pathlib
+from contextlib import nullcontext
 from typing import Any, Dict, NamedTuple, Tuple
 
 from ouroboros import dialogue_store as ds
@@ -141,6 +142,11 @@ class HistoryCursorError(ValueError):
     def __init__(self, reason: str, status: int = 409):
         super().__init__(reason)
         self.reason, self.status = reason, status
+
+
+class RegistryUnavailable(StoreError):
+    """Main's rows cannot be told from a Project's (a registry row's identity unreadable): its 503 offers ``room_archive``."""
+    fields = {"project_registry": "unavailable"}
 
 
 def parse_around(value):
@@ -338,11 +344,9 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
             "progress": RoomLens(tuple(keys))}
 
 
-def import_floor(root: pathlib.Path, source: str) -> int:
-    """The coordinate below which the archive import has not reached yet (0 when it has): the
-    end of the newest pending segment (segments never overlap), one seek of the ledger's state
-    index whatever the archive holds. Rows below it are "still importing", never absent."""
-    with ds.transaction(root, write=False) as conn:
+def import_floor(root: pathlib.Path, source: str, *, snapshot=None) -> int:
+    """One indexed seek for the newest pending segment's end (zero if none). Rows below it are still importing."""
+    with (nullcontext(snapshot) if snapshot is not None else ds.transaction(root, write=False)) as conn:
         record = conn.execute("SELECT base + size AS stop FROM import_ledger INDEXED BY ledger_state "
                               "WHERE stream=? AND state='pending' ORDER BY base DESC LIMIT 1", (source,)).fetchone()
     return int(record["stop"]) if record else 0

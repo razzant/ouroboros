@@ -908,12 +908,20 @@ def boot_notice(app_state: Any = None) -> str:
     """Plain words for a chat frame that found no bridge: why the message was not saved."""
     document = boot_document(None, app_state, jobs=False)
     if document["phase"] == "failed":
+        if reset_boot_failed(document):
+            return f"⚠️ {document['error']} This message was not saved."
         return ("⚠️ Startup failed before the chat could accept messages, so this message was not saved. "
                 f"Restart Ouroboros and send it again. ({document['error']})")
     if document["phase"] == "ready":
         return "⚠️ The chat is not accepting messages right now; this message was not saved. Send it again in a moment."
     return ("⚠️ The data store is still being prepared (a migration is running), so this message was not saved. "
             "Send it again once the chat is ready.")
+
+
+def reset_boot_failed(document: Dict[str, Any]) -> bool:
+    """An interrupted Reset is recoverable through Settings, not a normal restart or first-run setup."""
+    return document["phase"] == "failed" and any(
+        step["name"] == "reset" and step["state"] == "failed" for step in document["steps"])
 
 
 BootStep = Tuple[str, Callable[[], Any]]

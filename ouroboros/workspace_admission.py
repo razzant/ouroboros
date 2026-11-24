@@ -136,17 +136,26 @@ def kept_path(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
-    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
-    data drive, compared case-folded as tool access compares them, and as one physical folder however spelled
-    (``kept_path``: case, Unicode form, firmlink). Attach applies it before ``init_git`` writes anything."""
+def folders_overlap(folder: pathlib.Path, target: pathlib.Path) -> bool:
+    """Whether two paths name one folder or hold one another, in either direction: resolved,
+    compared case-folded as tool access compares spellings, and as one physical folder however
+    the volume keeps it (``kept_path``: case, Unicode form, firmlink). This is the geometry
+    ``protected_overlap`` applies to Ouroboros's own roots, as one predicate for any pair; a
+    spelling that agrees is never read as proof of an alias the volume does not confirm."""
     from ouroboros.tool_access import paths_overlap_casefold
 
-    kept = kept_path(root)
+    left = pathlib.Path(folder).expanduser().resolve(strict=False)
+    right = pathlib.Path(target).expanduser().resolve(strict=False)
+    kept, guard = kept_path(left), kept_path(right)
+    return paths_overlap_casefold(left, right) or kept.is_relative_to(guard) or guard.is_relative_to(kept)
+
+
+def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
+    data drive, by the one two-way geometry this module owns (``folders_overlap``: case-folded
+    spellings and the volume's kept spelling). Attach applies it before ``init_git`` writes anything."""
     for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
-        protected = pathlib.Path(value).resolve(strict=False)
-        guard = kept_path(protected)
-        if paths_overlap_casefold(root, protected) or kept.is_relative_to(guard) or guard.is_relative_to(kept):
+        if folders_overlap(root, value):
             return label
     return ""
 

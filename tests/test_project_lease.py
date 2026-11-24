@@ -274,6 +274,12 @@ def _store(drive_root, project_id):
     (drive_root / "projects" / project_id / "knowledge").mkdir(parents=True)
 
 
+def _empty_legacy_registry(drive_root):
+    from ouroboros.utils import atomic_write_json
+
+    atomic_write_json(drive_root / "state" / "projects.json", {"projects": []})
+
+
 def _write_bindings(drive_root, rows):
     """Write the durable task->project bindings file directly.
 
@@ -313,6 +319,7 @@ def test_reconcile_skips_workspace_derived_store_without_a_binding(tmp_path):
     project room: with no durable binding it must never become a sidebar row."""
     from ouroboros.projects_registry import list_projects, reconcile_projects
 
+    _empty_legacy_registry(tmp_path)
     _store(tmp_path, _GHOST_ID)
 
     assert reconcile_projects(tmp_path) == 0
@@ -323,10 +330,9 @@ def test_reconcile_skips_workspace_derived_store_without_a_binding(tmp_path):
 
 
 def test_reconcile_registers_workspace_derived_store_with_a_binding(tmp_path):
-    """A durable task binding is the proof of user ownership that admits the
-    store — the registry-row-lost recovery case."""
     from ouroboros.projects_registry import list_projects, reconcile_projects
 
+    _empty_legacy_registry(tmp_path)
     _store(tmp_path, _GHOST_ID)
     _write_bindings(tmp_path, {"t-1": _binding(_GHOST_ID)})
 
@@ -335,15 +341,26 @@ def test_reconcile_registers_workspace_derived_store_with_a_binding(tmp_path):
 
 
 def test_reconcile_still_registers_named_store_beside_a_skipped_ghost(tmp_path):
-    """The guard is prefix-scoped: an ordinary named store registers exactly as
-    before, even while an unbound proj_ store in the same scan is skipped."""
     from ouroboros.projects_registry import list_projects, reconcile_projects
 
+    _empty_legacy_registry(tmp_path)
     _store(tmp_path, "legacy-store")
     _store(tmp_path, _GHOST_ID)
 
     assert reconcile_projects(tmp_path) == 1
     assert {p["id"] for p in list_projects(tmp_path)} == {"legacy-store"}
+
+
+def test_bound_and_named_stores_do_not_recreate_a_lost_registry(tmp_path):
+    from ouroboros.projects_registry import _registry_path, list_projects, reconcile_projects
+
+    _store(tmp_path, _GHOST_ID)
+    _store(tmp_path, "legacy-store")
+    _write_bindings(tmp_path, {"t-1": _binding(_GHOST_ID)})
+    assert reconcile_projects(tmp_path) == 0
+    assert not _registry_path(tmp_path).exists() and list_projects(tmp_path) == []
+    assert _read_bindings(tmp_path)["t-1"] == _binding(_GHOST_ID)
+    assert (tmp_path / "projects" / "legacy-store" / "knowledge").is_dir()
 
 
 def test_reconcile_never_prunes_existing_rows_while_skipping_a_ghost(tmp_path):
@@ -361,10 +378,9 @@ def test_reconcile_never_prunes_existing_rows_while_skipping_a_ghost(tmp_path):
 
 
 def test_reconcile_survives_malformed_binding_rows(tmp_path):
-    """A malformed legacy binding row must fail closed for ITSELF only: the
-    reconcile completes, named stores still register, unbound ghosts stay out."""
     from ouroboros.projects_registry import list_projects, reconcile_projects
 
+    _empty_legacy_registry(tmp_path)
     _store(tmp_path, "legacy-store")
     _store(tmp_path, _GHOST_ID)
     _store(tmp_path, "proj_00000000cafe")
@@ -372,24 +388,17 @@ def test_reconcile_survives_malformed_binding_rows(tmp_path):
         "t-str": "not-a-dict",
         "t-noid": {"task_id": "t-noid", "bound_at": "2026-08-26T00:00:00Z"},
         "t-null": {"task_id": "t-null", "project_id": None},
-        # A LIST-valued project_id would sanitize through str() into a
-        # valid-looking id ("['proj_00000000cafe']" -> "proj_00000000cafe"),
-        # falsely vouching for that ghost — the type check must skip it.
+        # A list whose string spelling sanitizes to a real id cannot vouch for it.
         "t-list": {"task_id": "t-list", "project_id": ["proj_00000000cafe"]},
         "t-ok": _binding(_GHOST_ID, task_id="t-ok"),
     })
 
-    # legacy-store (named) + the ONE ghost a valid row vouches for; the
-    # list-vouched ghost stays out.
     assert reconcile_projects(tmp_path) == 2
     assert {p["id"] for p in list_projects(tmp_path)} == {"legacy-store", _GHOST_ID}
 
 
 def test_reconcile_leaves_a_tombstoned_workspace_store_tombstoned(tmp_path):
-    """Deletion PRESERVES bindings, so a tombstoned proj_ store still carries
-    the very binding this guard accepts as ownership proof — the guard alone
-    would re-admit it. The pre-existing `known` check runs FIRST and is what
-    keeps it dead: a tombstoned id is never resurrected as active."""
+    """A binding and the owner's store survive deletion alongside the registry tombstone."""
     from ouroboros.projects_registry import (
         PROJECT_TOMBSTONED,
         begin_project_deletion,
@@ -404,6 +413,8 @@ def test_reconcile_leaves_a_tombstoned_workspace_store_tombstoned(tmp_path):
     _store(tmp_path, _TOMB_ID)
     _write_bindings(tmp_path, {"t-tomb": _binding(_TOMB_ID, task_id="t-tomb")})
     begin_project_deletion(tmp_path, _TOMB_ID)
+    assert reconcile_projects(tmp_path) == 0
+    assert list_reserved_projects(tmp_path)[0]["lifecycle"] == "deleting"
     complete_project_deletion(tmp_path, _TOMB_ID)
 
     # The binding survived the deletion (nothing removed it).
@@ -415,15 +426,22 @@ def test_reconcile_leaves_a_tombstoned_workspace_store_tombstoned(tmp_path):
     assert reserved == {_TOMB_ID: PROJECT_TOMBSTONED}
 
 
-@pytest.mark.parametrize("witnessed", [False, True])
-def test_reconcile_recovers_a_marked_real_room_with_its_name(tmp_path, witnessed):
-    """The recovery case the binding gate alone cannot cover: a REAL room named in
-    Cyrillic hashes into the same proj_<hash> namespace as workspace stores (its id
-    carries no binding when the owner created it by name). Once a reconcile tick has
-    stamped the store's `.project.json`, losing the registry row is recoverable WITH
-    the room's display name — better than the pre-guard behavior, which resurrected
-    it under the machine name. Reconstruction creates a new execution incarnation;
-    neither a store marker nor the commit witness certifies the old assignment."""
+def test_legacy_store_cannot_take_a_reserved_chat_id(tmp_path):
+    from ouroboros import projects_registry as registry
+
+    registry._save(tmp_path, {"projects": [{
+        "id": "reserved", "chat_id": project_chat_id("legacy-store"), "lifecycle": "tombstoned", "cognition": {},
+    }]})
+    _store(tmp_path, "legacy-store")
+    path = registry._registry_path(tmp_path)
+    original = path.read_bytes()
+    assert registry.reconcile_projects(tmp_path) == 0
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("source", ["healthy_without_row", "exact_copy", "missing_copy"])
+def test_reconcile_recovers_a_marked_real_room_with_its_name(tmp_path, source):
+    """A legacy import gets a new incarnation. A certified whole-registry restore keeps the original."""
     from ouroboros import projects_registry as registry
     from ouroboros.project_facts import project_id_from_display_name
     from ouroboros.projects_registry import (
@@ -438,29 +456,34 @@ def test_reconcile_recovers_a_marked_real_room_with_its_name(tmp_path, witnessed
     assert reconcile_projects(tmp_path) == 0
     assert (tmp_path / "projects" / pid / ".project.json").is_file()
 
-    # Registry catastrophe: the rows are lost wholesale.
     prior = registry.project_admission_view(tmp_path, pid, frozen=True)
-    (tmp_path / "state" / "projects.json").unlink()
-    if not witnessed:
-        _registry_witness_path(tmp_path).unlink()  # a loss before any witness stamp
-
-    assert reconcile_projects(tmp_path) == 1
+    if source == "healthy_without_row":
+        registry._save(tmp_path, {"projects": []})
+        assert reconcile_projects(tmp_path) == 1
+    else:
+        registry._registry_path(tmp_path).unlink()
+        if source == "missing_copy":
+            _registry_witness_path(tmp_path).unlink()
+        assert reconcile_projects(tmp_path) == 0
+        if source == "missing_copy":
+            assert not registry._registry_path(tmp_path).exists()
+            with pytest.raises(FileNotFoundError):
+                registry.project_admission_view(tmp_path, pid)
+            return
     rows = list_projects(tmp_path)
     assert [p["id"] for p in rows] == [pid]
-    assert rows[0]["name"] == "динозавры"
-    assert rows[0]["origin"] == "owner"
-    assert rows[0]["created_at"] == born, "recovery restores provenance, not a fresh mint"
-    assert rows[0]["routing_incarnation"] != prior["project"]["routing_incarnation"]
-    with pytest.raises(registry.ProjectAdmissionError, match="changed"):
-        with registry.project_admission_guard(tmp_path, prior):
-            pytest.fail("Reconstruction must not authorize the old prepared work")
+    assert rows[0]["name"] == "динозавры" and rows[0]["origin"] == "owner" and rows[0]["created_at"] == born
+    if source == "exact_copy":
+        assert rows[0]["routing_incarnation"] == prior["project"]["routing_incarnation"]
+    else:
+        assert rows[0]["routing_incarnation"] != prior["project"]["routing_incarnation"]
+        with pytest.raises(registry.ProjectAdmissionError, match="changed"):
+            with registry.project_admission_guard(tmp_path, prior):
+                pytest.fail("A legacy import cannot authorize old prepared work")
 
 
 def test_marker_maintenance_never_mkdirs_and_skips_reconcile_origin(tmp_path):
-    """Two negative halves of the marker contract: a file-less room gets NO store
-    directory minted for it (the marker waits until the store materializes), and a
-    reconcile-originated row never mints recovery evidence for itself (else a
-    pre-guard ghost row would immortalize its ghost through the marker)."""
+    """Only a registered owner-created room with an existing store receives a historical marker."""
     from ouroboros.projects_registry import create_project, reconcile_projects
 
     create_project(tmp_path, "fileless", name="File-less room")
@@ -473,8 +496,7 @@ def test_marker_maintenance_never_mkdirs_and_skips_reconcile_origin(tmp_path):
 
 
 def test_marker_follows_a_rename_on_the_next_tick(tmp_path):
-    """update_project may rename a room; the maintenance half refreshes the stale
-    marker on the next tick so recovery restores the CURRENT name."""
+    """The registered room's existing store follows a rename on the next maintenance tick."""
     import json
 
     from ouroboros.projects_registry import create_project, reconcile_projects, update_project
@@ -492,10 +514,7 @@ def test_marker_follows_a_rename_on_the_next_tick(tmp_path):
 
 
 def test_deleted_room_stays_dead_even_after_registry_file_loss(tmp_path):
-    """Tombstoning removes the registry-authored `.project.json` (rows AND tombstones
-    live in the one projects.json, so a stale marker would resurrect the deleted room
-    as active in exactly the registry-loss scenario recovery exists for). The store
-    itself — the owner's memory — stays preserved."""
+    """The exact registry includes its tombstone, and the owner's memory survives deletion."""
     from ouroboros.projects_registry import (
         begin_project_deletion,
         complete_project_deletion,
@@ -520,8 +539,7 @@ def test_deleted_room_stays_dead_even_after_registry_file_loss(tmp_path):
 
 
 def test_one_unwritable_store_does_not_abort_the_reconcile(tmp_path):
-    """Per-row isolation: a store the marker cannot be written into keeps its own
-    marker pending for the next tick, while registrations still run."""
+    """One failed marker write leaves the next store eligible for registration."""
     import os
 
     from ouroboros.projects_registry import create_project, list_projects, reconcile_projects
@@ -612,9 +630,7 @@ def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, mo
 
 
 def test_stale_tombstone_marker_is_swept_by_the_next_reconcile_tick(tmp_path, monkeypatch):
-    """Convergence: if the marker unlink at tombstone time failed (or predates it),
-    the maintenance pass removes it on a later tick, so registry loss after that can
-    never resurrect the deleted room through the marker."""
+    """The next tick retries a failed tombstone marker removal, including for older readers."""
     from ouroboros.projects_registry import (
         begin_project_deletion,
         complete_project_deletion,

@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
-from ouroboros.gateway.reference_contracts import ChatReferenceFields, HostNoticeField, ReplyExcerpt, SharedRowFrame
+from ouroboros.gateway.reference_contracts import (  # noqa: F401 -- public contract facade
+    ChatInbound, ChatReferenceFields, ConnectionProfileOutbound, HostNoticeField, ReplyExcerpt, SharedRowFrame,
+)
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageCount, StorageCounting, StorageError, StoragePart, StoragePlace, StorageResponse, StorageRest,
     StorageVolume, StorageRemover,
@@ -72,23 +74,6 @@ class TaskReviewHistoryResponse(TypedDict):
     task_id: str
     review_projection: Dict[str, Any]
     next_offset: Optional[int]
-
-
-class ChatInbound(TypedDict):
-    """Inbound WS chat message. ``type`` and ``content`` are required."""
-
-    type: Literal["chat"]
-    content: str
-    sender_session_id: NotRequired[str]
-    client_message_id: NotRequired[str]
-    force_plan: NotRequired[bool]  # Deprecated for one release; accepted and ignored.
-    attachments: NotRequired[list]  # list[ChatAttachmentInbound] (additive, v6.26.0)
-    # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
-    chat_id: NotRequired[int]
-    project_id: NotRequired[str]
-    reply_excerpt: NotRequired[ReplyExcerpt]
-    reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
-    client_surface: NotRequired[dict]
 
 
 class TaskConstraintInbound(TypedDict, total=False):
@@ -1513,7 +1498,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
 
 __all__ = [
     "CostPresentation",
-    "ChatInbound", "TaskConstraintInbound", "CommandInbound", "PanicAcceptedOutbound", "ExtensionInbound",
+    "ChatInbound", "TaskConstraintInbound", "CommandInbound", "PanicAcceptedOutbound", "ConnectionProfileOutbound", "ExtensionInbound",
     "TransportMetadata",
     "ChatOutbound",
     "PhotoOutbound", "VideoOutbound", "DocumentOutbound",

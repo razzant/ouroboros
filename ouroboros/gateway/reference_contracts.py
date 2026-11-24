@@ -1,11 +1,50 @@
 """Additive stored-row identity shared by live chat and attachment frames."""
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
+
+try:
+    from typing import NotRequired, TypedDict
+except ImportError:  # Python 3.10
+    from typing_extensions import NotRequired, TypedDict
 
 
 class ReplyExcerpt(TypedDict):
     """Sender-reported rendered words and their zero-based UTF-16 position within the addressed body."""
     text: str
     start_utf16: int
+
+
+class ChatInbound(TypedDict):
+    """Inbound WS chat message. ``type`` and ``content`` are required."""
+
+    type: Literal["chat"]
+    content: str
+    sender_session_id: NotRequired[str]
+    client_message_id: NotRequired[str]
+    force_plan: NotRequired[bool]  # Deprecated for one release; accepted and ignored.
+    attachments: NotRequired[list]  # list[ChatAttachmentInbound] (additive, v6.26.0)
+    # Multi-project chat routing: the owner stays user_id 1; chat_id selects the thread, project_id scopes memory.
+    chat_id: NotRequired[int]
+    project_id: NotRequired[str]
+    reply_excerpt: NotRequired[ReplyExcerpt]
+    reply_to: NotRequired[str]  # Host resolves the selected row/card at acceptance.
+    client_surface: NotRequired[dict]
+    # The data-profile scope the serving document proves (server_web.data_profile_scope digest, stamped as the
+    # builtin index's ouroboros-chat-preview-scope meta and read by the browser from it). gateway/ws.py refuses a
+    # chat frame whose claim positively differs from the serving connection's own confirmed scope (#3294);
+    # absent or empty is no proof and is admitted, so legacy pages and unproven profiles keep working.
+    profile_scope: NotRequired[str]
+
+
+class ConnectionProfileOutbound(TypedDict):
+    """Issued once per socket at accept, before registration, when the serving connection proves a
+    data profile (server_web.data_profile_scope; gateway/ws.py sends it directly — never per frame,
+    poll or command). The browser adopts it before the generic emit and compares it with the profile
+    its document proves (#3294). A direct accept-time issuance, not a broadcast envelope, so it is
+    deliberately not in WS_MESSAGE_TYPES: publishing it in the frozen WS index belongs to the
+    endpoint-index owner."""
+
+    type: Literal["connection_profile"]
+    profile_scope: str
 
 
 class ChatReplyReference(TypedDict, total=False):

@@ -19,6 +19,7 @@ import pytest
 from ouroboros import dialogue_store
 from tests import _dialogue as dialogue_test
 from tests._shared import producer_evidence_dir
+from tests._room_archive_world import lost_registry
 from tests._store_shared import seed_result
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES, _emit_ws_frame
@@ -988,5 +989,181 @@ def test_history_page_layout_count_is_bounded_by_batches(direct_server_with_data
                 facts = (browser.version, kind, small, large)
                 assert max(small + large) <= 24, facts
                 assert all(big <= little + 4 for little, big in zip(small, large)), facts
+        finally:
+            browser.close()
+
+
+# --- The read-only archive while Main's history refuses for a lost Project registry (#3294) ----------------------
+# The server is already running when this world is staged: it is the old zero-byte commit witness with no registry
+# and no lock (tests._room_archive_world), never a modern registry, so no exact copy exists for storage to restore.
+_RECORD_FETCHES = """() => {
+    const fetch = window.fetch.bind(window);
+    window.__allFetches = [];
+    window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+        window.__allFetches.push({method: (init?.method || 'GET').toUpperCase(), path: url.pathname, query: url.search});
+        return fetch(input, init);
+    };
+}"""
+_ARCHIVE_MAIN = ["Can you summarize yesterday's meeting notes?", "Let's make the website relaunch its own project.",
+                 "Moved to Website relaunch", "Website relaunch: the staging link is ready.", "Quarterly report · Done"]
+_ARCHIVE_ROOM = ["Let's make the website relaunch its own project.", "I'll start by auditing the current pages.",
+                 "Please keep the old URLs working.", "Done: redirects are mapped for all 42 old URLs.",
+                 "Website relaunch: the staging link is ready."]
+
+
+def _lost_registry_world(root):
+    from ouroboros.contracts.chat_id_policy import project_chat_id
+    from tests._room_archive_world import binding, write_bindings
+
+    assert (root / "state" / "projects.json.committed").read_bytes() == b""
+    assert not (root / "state" / "projects.json").exists()
+    beta, alpha = project_chat_id("beta"), project_chat_id("alpha")
+    origin = "Let's make the website relaunch its own project."
+    owner, out, host = {"direction": "in", "task_id": ""}, {"direction": "out"}, {"direction": "out", "role": "system"}
+    for minute, row in enumerate([
+        {**owner, "chat_id": 1, "text": "Can you summarize yesterday's meeting notes?"},
+        {**out, "chat_id": 1, "task_id": "direct-1", "text": "Here is the summary of yesterday's meeting."},
+        {**owner, "chat_id": 1, "text": origin, "client_message_id": "cm-beta"},
+        {**host, "chat_id": 1, "task_id": "beta-task", "type": "project_handoff", "system_type": "project_handoff",
+         "project_id": "beta", "project_name": "Website relaunch", "text": "Website relaunch"},
+        {**out, "chat_id": 1, "task_id": "beta-task", "text": "I'll start by auditing the current pages."},
+        {**owner, "chat_id": beta, "text": "Please keep the old URLs working."},
+        {**out, "chat_id": beta, "task_id": "beta-task", "text": "Done: redirects are mapped for all 42 old URLs."},
+        {**out, "chat_id": 1, "task_id": "beta-task", "type": "main_notice",
+         "text": "Website relaunch: the staging link is ready."},
+        {**host, "chat_id": 1, "task_id": "alpha-task", "type": "project_completion_summary",
+         "system_type": "project_completion_summary", "project_id": "alpha", "project_name": "Quarterly report",
+         "text": "**Quarterly report** · Done"},
+        {**owner, "chat_id": alpha, "text": "Add the revenue chart to page 3."},
+        {**out, "chat_id": alpha, "task_id": "alpha-task", "text": "The chart is on page 3 now."},
+    ]):
+        dialogue_store.append(root, "chat", {**row, "ts": f"2026-11-17T09:{minute:02d}:00Z"})
+    write_bindings(root, [binding("beta-task", "beta", origin=origin, origin_id="cm-beta", origin_ts="2026-11-17T09:02:00Z")])
+
+
+def _archive_texts(page):
+    return page.locator(".room-archive .room-archive-text").all_inner_texts()
+
+
+@pytest.mark.parametrize("direct_server_with_data", [lost_registry], indirect=True, ids=["legacy"])
+@pytest.mark.parametrize(
+    "engine,width,height,theme",
+    [("chromium", 1280, 850, "dark"), ("webkit", 1280, 850, "dark"), ("webkit", 390, 844, "light")],
+    ids=["chromium-1280-dark", "webkit-1280-dark", "webkit-390-light"],
+)
+def test_main_offers_a_read_only_archive_of_what_evidence_places(direct_server_with_data, tmp_path, engine, width, height,
+                                                                  theme):
+    """Main says the project list cannot be read and offers `Read saved messages` beside Retry; the reader shows
+    Main's placed rows and a recognized room's, as plain words with no row control, and asks the server for nothing
+    but archive pages (no read credit, no write)."""
+    from playwright.sync_api import sync_playwright
+
+    root, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    _lost_registry_world(root)
+    tag = f"{engine}-{width}-{theme}"
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": height}, has_touch=width < 500)
+            page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+            page.add_init_script(f"({_RECORD_FETCHES})()")
+            _open(page, url)
+            page.wait_for_function("() => document.querySelector('.chat-page-note')?.textContent.includes('project list')")
+            note = page.locator(".chat-page-note").inner_text()
+            assert "The project list can’t be read, so Main’s saved history isn’t shown." in note
+            door = page.locator(f"{MAIN} .chat-archive-door")
+            assert door.is_visible() and door.inner_text() == "Read saved messages"
+            assert page.locator(f"{MAIN} .chat-load-older-btn").first.inner_text() == "Retry loading messages"
+            _screenshot(page, tmp_path, f"archive-door-{tag}")
+
+            before = page.evaluate("() => window.__allFetches.length")
+            page.locator(MAIN).focus()
+            door.click()
+            reader = page.locator("dialog.room-archive")
+            reader.wait_for(state="visible")
+            page.wait_for_function("() => document.querySelectorAll('.room-archive .room-archive-row').length >= 5")
+            assert _archive_texts(page) == _ARCHIVE_MAIN
+            assert reader.locator(".document-reader-meta").inner_text() == "Read-only · Main"
+            assert reader.locator(".room-archive-feed button, .room-archive-feed a, .room-archive-feed textarea").count() == 0
+            rooms = reader.locator("[data-archive-room]").all_inner_texts()
+            assert rooms[0] == "Main" and set(rooms[1:]) == {"Website relaunch", "Quarterly report"}
+            _screenshot(page, tmp_path, f"archive-main-{tag}")
+
+            pressed = "() => document.querySelector('.room-archive [data-archive-room][aria-pressed=\"true\"]')?.textContent"
+            relaunch = reader.get_by_role("button", name="Website relaunch")
+            relaunch.focus()
+            relaunch.press("Enter")
+            page.wait_for_function(f"() => ({pressed})() === 'Website relaunch' && document.querySelectorAll("
+                                   "'.room-archive .room-archive-row').length >= 5")
+            assert _archive_texts(page) == _ARCHIVE_ROOM
+            assert reader.locator(".document-reader-meta").inner_text() == "Read-only · Website relaunch"
+            assert relaunch.evaluate("node => document.activeElement === node"), "the room picker keeps keyboard focus"
+            _screenshot(page, tmp_path, f"archive-room-{tag}")
+
+            reader.locator("[data-archive-room]", has_text="Quarterly report").click()
+            page.wait_for_function(f"() => ({pressed})() === 'Quarterly report' && [...document.querySelectorAll("
+                                   "'.room-archive .room-archive-text')].map(node => node.textContent).join('|') === "
+                                   "'Add the revenue chart to page 3.'")
+            asked = page.evaluate("n => window.__allFetches.slice(n)", before)
+            archive = [request for request in asked if request["path"] == "/api/chat/archive"]
+            assert len(archive) == 3 and all(request["method"] == "GET" for request in archive)
+            writes = [request for request in asked if request["method"] != "GET"]
+            assert not writes, f"the archive writes and acknowledges nothing: {writes}"
+
+            page.keyboard.press("Escape")
+            reader.wait_for(state="detached")
+            focused = "node => document.activeElement === node"
+            assert door.evaluate(focused), "Escape returns to the visible button after a pointer opening"
+            page.keyboard.press("Enter")
+            reader.wait_for(state="visible")
+            assert reader.locator(".room-archive-body").evaluate(
+                "node => document.activeElement === node && getComputedStyle(node).outlineStyle === 'solid'"
+            ), "the keyboard reader opens with a visible focus ring"
+            reader.get_by_role("button", name="Close", exact=True).click()
+            reader.wait_for(state="detached")
+            assert door.evaluate(focused), "Close returns to the same button after a keyboard opening"
+            state = root / "state"
+            assert not (state / "projects.json").exists() and (state / "projects.json.committed").read_bytes() == b"", \
+                "the loss stays the old one: no registry was started by reading"
+        finally:
+            browser.close()
+
+
+def test_main_shows_the_restored_list_after_a_cold_start(direct_server_with_data, tmp_path):
+    """The server that saved the latest copy recovers the same fileless room. Main shows the fact
+    in its ordinary history; the archive is not offered and project speech stays in its own room."""
+    from playwright.sync_api import sync_playwright
+
+    server = direct_server_with_data
+    root, url = server["data_dir"], server["url"]
+    with sync_playwright() as pw:
+        browser = pw.webkit.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1100, "height": 750})
+            _open(page, url)
+            saved = page.request.post(url + "/api/projects", data={"id": "sketches", "name": "Sketches", "no_folder": True})
+            assert saved.ok, saved.text()
+            first = saved.json()["project"]
+            assert first["no_folder"] and first["routing_incarnation"]
+            page.close()
+            server["stop_server"]()
+            _append(root, "chat", [_human(1, text="Today's notebook"), _human(2, first["chat_id"], text="Blue pencil sketch")])
+            registry = root / "state" / "projects.json"
+            held = tmp_path / "original-registry"
+            registry.rename(held)  # preserve the complete original, outside the disposable installation
+            server["start_server"]()
+            page = browser.new_page(viewport={"width": 1100, "height": 750})
+            _open(page, url)
+            page.get_by_text("Project list restored from its saved copy.", exact=False).first.wait_for()
+            assert registry.read_bytes() == held.read_bytes()
+            assert "Today's notebook" in page.locator(MAIN).inner_text()
+            assert "Blue pencil sketch" not in page.locator(MAIN).inner_text()
+            assert not page.locator(f"{MAIN} .chat-archive-door").is_visible()
+            project = page.request.get(url + "/api/projects?id=sketches").json()["projects"][0]
+            assert project["chat_id"] == first["chat_id"]
+            messages = page.request.get(f"{url}/api/chat/history?chat_id={first['chat_id']}").json()["messages"]
+            assert "Blue pencil sketch" in [row.get("text") for row in messages]
+            _screenshot(page, tmp_path, "exact-list-restored-webkit")
         finally:
             browser.close()

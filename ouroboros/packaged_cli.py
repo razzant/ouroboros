@@ -212,7 +212,7 @@ def _bootstrap_runtime(runtime: PackagedRuntime) -> None:
         embedded_python=str(runtime.embedded_python),
         app_version=runtime.app_version,
         hidden_run=_hidden_run,
-        save_settings=lambda settings: _save_settings(runtime.settings_path, settings),
+        save_settings=lambda settings: _save_settings(runtime.settings_path, settings, drive_root=runtime.data_dir),
         log=_StdLogger(),
     )
     bootstrap_repo(context)
@@ -222,7 +222,7 @@ def _hidden_run(command: Sequence[str], **kwargs: object) -> subprocess.Complete
     return subprocess.run(list(command), **kwargs)  # type: ignore[arg-type]
 
 
-def _save_settings(path: pathlib.Path, settings: dict) -> None:
+def _save_settings(path: pathlib.Path, settings: dict, drive_root: pathlib.Path | None = None) -> None:
     """The packaged bootstrap's settings writer — same prologue, same bytes.
 
     It is a THIRD writer only in the sense that it owns its own path; what it persists
@@ -240,11 +240,16 @@ def _save_settings(path: pathlib.Path, settings: dict) -> None:
     refuse. Passing its own path is what keeps that honest while the disclosed override
     split above exists."""
     from ouroboros.config import prepare_settings_for_persist, serialize_settings
-    from ouroboros.settings_integrity import guard_live_settings_write
+    from ouroboros.settings_integrity import guard_live_settings_write, settings_publication_boundary
     from ouroboros.utils import write_text_atomic
 
     guard_live_settings_write(path, pathlib.Path.home())
-    write_text_atomic(path, serialize_settings(prepare_settings_for_persist(dict(settings))))
+    document = serialize_settings(prepare_settings_for_persist(dict(settings)))
+    # The publication boundary binds the packaged RUNTIME's data root, not the document
+    # path: even when the document is split from the Runtime root, its profile witness and
+    # ``state.lock`` live under the Runtime root (``drive_root``), so the gate is the right one.
+    with settings_publication_boundary(path.parent if drive_root is None else pathlib.Path(drive_root)):
+        write_text_atomic(path, document)
 
 
 def _run_inner_cli(runtime: PackagedRuntime, args: Sequence[str]) -> int:

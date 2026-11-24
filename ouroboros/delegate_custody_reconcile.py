@@ -290,6 +290,39 @@ def reconcile_orphaned_runs(
                            watched=watched, observe_pending=observe_pending)
 
 
+def observe_review_pending_starts(drive_root: Any) -> List[Dict[str, Any]]:
+    """Read the accepted work behind this profile's REVIEW-owned pending starts and bind each once (#3294).
+
+    The one Reset case the orphan sweep deliberately leaves alone (#1006): a review start whose POST the
+    engine may have accepted and whose START_REQUESTED row outlived its worker. The sweep leaves review
+    starts to their panel, and a panel is a RECOVERED seat's own rejoin
+    (``review_session_custody.rejoin_recorded_review``); the Reset's profile-work check runs once this
+    generation's own stops are confirmed, so no seat ever recovers and the start would stay pending
+    forever — holding the Reset as ``delegated_starts_unknown`` with nobody left to resolve it. This pass
+    is that resolution and only that: the SAME noncreating read the panel itself and the sweep's watched
+    lane use (``_observe_pending_invocation`` → ``delegate_accepted.recover``), grouped per engine,
+    attach-only. Nothing is POSTed, replayed, cancelled or settled here; no run, registration or pending
+    row of any other surface is touched (``_reconcile_engine`` with no runs, no pending and no
+    registrations: the watched observe lane alone). A miss, an unreachable engine, a foreign store, a
+    typed refusal or an unreadable request writes nothing: the start stays pending and the Reset stays
+    interrupted. A positively bound run is stopped by the caller's normal owner Stop (``stop_tree_runs``:
+    the one verdict that speaks for a review panel's run), never here.
+    """
+    records = [record for record in pending_invocations(drive_root)
+               if _custody().review_owned_source(record.get("source"))]
+    if not records:
+        return []
+    from ouroboros.execution_domain import engine_factory, engine_groups
+
+    outcomes: List[Dict[str, Any]] = []
+    for ref, (bound,) in engine_groups(records):
+        outcomes.extend(_reconcile_engine(
+            drive_root, [], engine_factory(ref, attach_only_gateway), None, [],
+            deliberate_terminal="", live_task_ids=None, recoverable_handles=(),
+            replay_pending=None, watched=bound, observe_pending=lambda: True))
+    return outcomes
+
+
 def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                     gateway_factory: Callable[[], Any],
                     pending: Optional[List[Dict[str, Any]]] = None,

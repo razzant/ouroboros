@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import dialogue_import, dialogue_store as ds
+from ouroboros import dialogue_import, dialogue_store as ds, store
 from ouroboros.gateway import history
 from ouroboros.gateway.history_paging import HistorySource, decode_cursor, encode_cursor
+from ouroboros.project_registry_recovery import initialize_new_root
 from ouroboros.store import StoreError
 from tests._store_shared import seed_result
 
@@ -791,8 +792,8 @@ def test_required_source_failure_retries_the_same_page(tmp_path, monkeypatch):
 def test_membership_drift_and_foreign_room_cursor_are_explicit(tmp_path):
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
-    write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(200)])
     project = create_project(tmp_path, "new-room", name="Room")
+    write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(200)])
     first = request(tmp_path)[1]
     status, foreign = request(tmp_path, chat_id=str(project["chat_id"]), cursor=first["next_cursor"])
     assert status == 409 and foreign["reason_code"] == "history_view_changed"
@@ -825,6 +826,7 @@ def test_a_torn_line_an_older_body_left_is_a_gap_outside_frozen_history(tmp_path
     """A store-unaware body appended after the cutover and did not finish its last line: the next
     cutover imports its rows at their place and records the torn line as a skipped interval -- a
     disclosed gap above the frozen page, never a row and never a change to that page."""
+    initialize_new_root(tmp_path)  # The room map is known independently of the torn line.
     path = tmp_path / "logs" / "chat.jsonl"
     write(path, [row(index) for index in range(200)])
     first = request(tmp_path)[1]
@@ -917,6 +919,7 @@ def test_archived_media_and_folded_review_attempts_use_the_same_projection(tmp_p
 
 
 def test_archive_parse_gap_and_zero_quota_are_not_a_cursor_loop(tmp_path):
+    initialize_new_root(tmp_path)  # The malformed archive tests page coverage with known rooms.
     for segment in range(4):
         write(tmp_path / "archive" / f"chat_20260901T00000{segment}.jsonl", [row(segment)])
     oldest = tmp_path / "archive" / "chat_20260901T000000.jsonl"
@@ -948,9 +951,11 @@ def test_a_closed_bounded_wait_reaches_the_replayed_card(tmp_path):
 def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_be_read(tmp_path, monkeypatch, caplog):
     """Main is "every room that is not a Project": decided from an empty set (a registry no row of
     which can be read) it would take the owner's rows typed in Project rooms (#3067's mechanism). It
-    answers the typed unavailable refusal instead. An invalid row beside readable ones is no such
-    case: the rooms the readable rows name are still Projects, and Main reads on. The refusal names its cause,
-    in its body and once in the server log, since nothing else would say why Main stays empty."""
+    answers the typed unavailable refusal instead, with the field that offers the read-only archive
+    (#3294). A row whose identity cannot be read beside readable ones is the same case: the room it
+    reserved would reach Main, so Main refuses; a Project room still reads with the rooms the readable
+    rows name. The refusal names its cause, in its body and once in the server log, since nothing else
+    would say why Main stays empty."""
     from ouroboros import projects_registry
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
@@ -978,12 +983,15 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     assert status == 503 and refused["reason_code"] == "history_source_unavailable"
     assert refused["has_more"] is True and refused["window"]["complete"] is False
     assert refused["detail"] == "Project registry unavailable", "the refusal names its cause"
+    assert refused["project_registry"] == "unavailable", "the refusal offers the read-only archive"
     assert said() == ["WARNING"] and request(tmp_path)[0] == 503 and said() == ["WARNING"], "once a cause"
 
     data = json.loads(intact)
     registry.write_text(json.dumps({**data, "projects": [*data["projects"], {"chat_id": 7}]}), encoding="utf-8")
     status, beside = request(tmp_path)
-    assert status == 200 and "main owner" in texts(beside) and not texts(beside) & room_rows
+    assert status == 503 and beside["project_registry"] == "unavailable" and not texts(beside) & room_rows
+    status, room = request(tmp_path, chat_id=rooms[1]["chat_id"])
+    assert status == 200 and texts(room) == {f"room owner {rooms[1]['chat_id']}"}, "a Project room reads on"
 
     for unknown in ("lost beside its commit witness", "only an invalid row"):  # neither is "no Projects"
         registry.unlink(missing_ok=True)
@@ -998,21 +1006,46 @@ def test_main_refuses_its_recent_read_while_no_row_of_the_project_registry_can_b
     assert "main owner" in {text for page in restored for text in texts(page)}
     assert not {text for page in restored for text in texts(page)} & room_rows
 
-    # One lenient read decides the request: the rooms it named stay Projects even when a second read would fail
-    # (an open that fails on and off), never "no Projects" within the same request.
+    # A strict read that fails (an open that fails on and off) refuses Main, whatever a lenient read would name;
+    # a Project room reads with the one lenient read of the request: the rooms it named stay Projects.
     from ouroboros.gateway import history as history_module
+    from ouroboros.gateway.history_paging import RegistryUnavailable
 
     named, lenient = projects_registry.readable_rooms(tmp_path), projects_registry.reserved_project_chat_ids
-    answers = iter([named])
+    answers = iter([named, named])  # one lenient read per request: Main's (it names the cause) and the room's
     monkeypatch.setattr(projects_registry, "reserved_project_chat_ids", lambda root, *, strict=False: (
         (_ for _ in ()).throw(OSError("too many open files")) if strict else lenient(root)))
     monkeypatch.setattr(projects_registry, "readable_rooms", lambda root: next(answers, None))
-    context = history_module._project_history_context(tmp_path, 1)
+    with pytest.raises(RegistryUnavailable):
+        history_module._project_history_context(tmp_path, 1)
+    context = history_module._project_history_context(tmp_path, rooms[0]["chat_id"])
     assert named and context[0] == named and context[-1] is False
 
+    # An already-open address still reads its own words when the map cannot identify it.
+    status, partial = request(tmp_path, chat_id=rooms[1]["chat_id"])
+    assert status == 200 and texts(partial) == {f"room owner {rooms[1]['chat_id']}"}
+    assert partial["window"]["complete"] is False
+    assert "chat_room_unclassified" in partial["window"]["truncated_by"]
+    assert "room_unclassified" in partial["coverage"]["spans"]["chat"]["gaps"]
 
-def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path):
+
+@pytest.mark.parametrize(("tier", "journal"), [
+    (store.TIER_ENFORCED, "WAL"), (store.TIER_ENFORCED, "PERSIST"), (store.TIER_NAME, "PERSIST"),
+])
+def test_main_reads_on_a_fresh_install_without_a_project_registry(tmp_path, monkeypatch, tier, journal):
+    monkeypatch.setattr(ds, "probed_tier", lambda root: tier)
+    monkeypatch.setattr(store, "_journal_mode",
+                        lambda path, lock_tier: journal if lock_tier == store.TIER_ENFORCED else "PERSIST")
     write(tmp_path / "logs" / "chat.jsonl", [row(0, text="main owner")])
-    assert not (tmp_path / "state" / "projects.json").exists()
-    status, payload = request(tmp_path)
-    assert status == 200 and [message["text"] for message in payload["messages"]] == ["main owner"]
+    imported(tmp_path)
+    registry = tmp_path / "state" / "projects.json"
+    assert not registry.exists()
+    assert ds.header_tier(tmp_path) == tier
+    with ds.transaction(tmp_path, write=False) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == journal.lower()
+    room = ds.room(tmp_path, 1)
+    response = asyncio.run(history.make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={})))
+    assert response.status_code == 200
+    assert [message["text"] for message in json.loads(response.body)["messages"]] == ["main owner"]
+    assert ds.room(tmp_path, 1) == room
+    assert not registry.exists()

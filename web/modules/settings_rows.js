@@ -206,7 +206,7 @@ export const ROWS = [
         control: { kind: 'text', empty: 'none' }, aliases: ['Extra CA bundle', 'Extra CA Certificates', 'PEM', 'certificate'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:reset', keys: [], page: 'computer/about', fold: true, name: 'Reset all data',
-        meta: 'Deletes state, memory, logs and settings, then restarts. The code stays.', more: '',
+        meta: 'Clears saved conversations, memory and settings. Earlier Project notes are set aside. Code and working folders stay.', more: '',
         control: { kind: 'custom' }, aliases: ['Danger Zone', 'Erase all data', 'Reset All Data'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
     // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the four doors of "Around it".

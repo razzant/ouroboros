@@ -1393,13 +1393,31 @@ class GitPromoteResponse(TypedDict):
     message: str
 
 
+class ResetRequest(TypedDict):
+    """The owner's explicitly versioned ``POST /api/reset/v1`` confirmation. Any other body or the legacy path is
+    refused (400 ``reset_confirmation_required``) and records nothing. R8/R9 have no such route and refuse this
+    token; a legacy bodyless POST performs no Reset here either."""
+
+    confirm: str  # "reset_all_data:v1"
+
+
 class ResetResponse(TypedDict):
-    """``POST /api/reset``: irreversible. The listed data folders and the settings were deleted and
-    a restart was requested; a dropped connection is an unknown outcome, never a reason to resend."""
+    """POST acknowledges the request for a restart, never a deletion, and names the Reset it accepted
+    (``reset_id``). GET reports ``none``, ``requested``, ``complete``, ``interrupted`` or ``unknown``: ``requested``,
+    ``complete`` and ``interrupted`` carry that Reset's ``reset_id``, while ``none`` and ``unknown`` name none. A
+    complete read names what was removed, any kept open logs and where the previous profile's Project notes were set
+    aside, relative to the data root and as a path on this computer: both ``None`` when no Project had notes to keep.
+    An interrupted read carries its ``error``, ``deleted`` once something was removed, and the pair only while that
+    folder holds notes: a move that fails is undone and names none."""
 
     status: str
-    deleted: List[str]
-    restarting: bool
+    reset_id: NotRequired[str]
+    deleted: NotRequired[List[str]]
+    retained_logs: NotRequired[List[str]]
+    projects_set_aside: NotRequired[Optional[str]]
+    projects_set_aside_path: NotRequired[Optional[str]]
+    restarting: NotRequired[bool]
+    error: NotRequired[str]
 
 
 class CostBreakdownResponse(TypedDict, total=False):
@@ -1458,5 +1476,5 @@ __all__ = [
     "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
     "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
-    "ResetResponse", "CostBreakdownResponse",
+    "ResetRequest", "ResetResponse", "CostBreakdownResponse",
 ]

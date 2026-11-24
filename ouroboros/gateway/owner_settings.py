@@ -201,7 +201,16 @@ def post_commit_failure_response(exc: BaseException, boundary: CommitBoundary) -
 def settings_write_refusal(exc: Exception) -> JSONResponse | None:
     """The same typed pre-commit refusals on generic and dedicated owner writers."""
     from ouroboros.deployment_policy import DeploymentPolicyRefusal
+    from ouroboros.settings_integrity import SettingsPublicationRefused
 
+    if isinstance(exc, SettingsPublicationRefused):
+        # The physical publication boundary refused before any byte landed. A proven
+        # unfinished Reset keeps the exact typed refusal the boot witness already returns;
+        # every other cause reports its own non-save reason, never a pretended Reset.
+        if exc.cause == "reset_interrupted":
+            return unsaved_error(str(exc), 409, code="reset_interrupted", reason_code="reset_interrupted")
+        status = 503 if exc.cause == "state_lock_unavailable" else 409
+        return unsaved_error(str(exc), status, code="settings_publication_refused", reason_code=exc.cause)
     for error, status, code in (
         (DeploymentPolicyRefusal, 403, MANAGED_BY_DEPLOYMENT),
         (BindingRefused, 400, "main_binding_invalid"),
@@ -770,6 +779,7 @@ def _owner_write_settings(
     expected_digest: str = "",
     if_unchanged: Optional[dict] = None,
     unset: Sequence[str] = (),
+    drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Write owner-controlled settings without applying the runtime-mode ratchet; returns the receipt.
 
@@ -796,6 +806,7 @@ def _owner_write_settings(
         precondition=precondition,
         boundary=boundary,
         whole_document=True, expected_digest=expected_digest, if_unchanged=if_unchanged, unset=unset,
+        drive_root=drive_root,
     )
 
 
@@ -819,6 +830,7 @@ def _owner_update_settings(
     unset: Sequence[str] = (),
     commit_if_current: Optional[Callable[[Callable[[], None]], bool]] = None,
     check_unchanged: Optional[Callable[[Dict[str, Any]], None]] = None,
+    drive_root: Optional[pathlib.Path] = None,
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
@@ -910,7 +922,10 @@ def _owner_update_settings(
             to_write.pop(key, None)
 
         def commit():
-            write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
+            with _config._settings_integrity.settings_publication_boundary(
+                drive_root if drive_root is not None else _config.DATA_DIR
+            ):
+                write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
             if boundary is not None:
                 boundary.commit()
 
