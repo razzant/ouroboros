@@ -215,18 +215,24 @@ def _record_owner_directive(
     stable_id = str(msg_id or "").strip()
     client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
     digest = (origin or {}).get("row_sha256")
+    from ouroboros.safety_evidence import trusted_mail_kind
+    direct_kind = trusted_mail_kind((origin or {}).get("mail_kind"), source=source) if not carried else ""
     for known in directives:
         if isinstance(known, dict) and (digest or known.get("row_sha256")):
             if digest != known.get("row_sha256"):
                 continue
             if not carried:
                 known.pop("carried", None)
+                if direct_kind and known.get("source") == "owner_mailbox":
+                    known["mail_kind"] = direct_kind
             return
         if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
                 client and str(known.get("client_message_id") or "") == client
                 and room in ("", str(known.get("chat_id") or room)))):
             if not carried:
                 known.pop("carried", None)
+                if direct_kind and known.get("source") == "owner_mailbox":
+                    known["mail_kind"] = direct_kind
             return
     try:
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
@@ -236,7 +242,15 @@ def _record_owner_directive(
            **({"words": words} if words is not None and words != frozen_content else {})}
     if stable_id:
         row["msg_id"] = stable_id
-    row.update({key: str(value) for key, value in (origin or {}).items() if value})
+    for key, value in (origin or {}).items():
+        if key == "mail_kind":
+            if trusted := trusted_mail_kind(value, source=row["source"]):
+                row["mail_kind"] = trusted
+        elif key == "delivered":  # what a delivered copy verified (``verified_delivery``), kept whole; a non-record is dropped
+            if isinstance(value, dict) and value:
+                row[key] = dict(value)
+        elif value:
+            row[key] = str(value)
     if reply_to:
         row["reply_to"] = dict(reply_to)
     if attachments:
@@ -322,7 +336,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     from ouroboros.answer_facts import answer_source, card_input
     from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
-    from ouroboros.owner_continue import ROW_IDS
+    from ouroboros.owner_continue import ROW_IDS, verified_delivery
     from ouroboros.owner_words import (
         OWNER_SOURCES, PLACE_CONFIRMED, SCHEDULE_ITEM_IDS, SCHEDULE_TEXT, answered_card_reply,
         place_confirmed_words, place_row_facts, reply_target, scheduled_text_items, task_schedule_items,
@@ -345,6 +359,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
+        from ouroboros.safety_evidence import trusted_mail_kind
         for index, row in enumerate(metadata.get("owner_corpus") or []):
             if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") in {PLACE_CONFIRMED, SCHEDULE_TEXT}):
                 # Continue seeded its original in slot zero, with the address on the task.
@@ -352,10 +367,13 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                     from ouroboros.owner_words import _opening, _opening_identity
                     if _opening(row, metadata.get("origin_message_ref") or {}, first=True):
                         row = {**row, **_opening_identity(ctx, read=True)}
+                mail_kind = trusted_mail_kind(row.get("mail_kind"), source=row.get("source"))
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
+                    origin={**{key: row[key] for key in (*ROW_IDS[1:], *SCHEDULE_ITEM_IDS, "ts", "received", "basis", "cited") if row.get(key)},
+                            **({"mail_kind": mail_kind} if mail_kind else {}),
+                            **({"delivered": delivered} if (delivered := verified_delivery(row)) else {})},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                     attachments=row.get("attachments"),
                 )
@@ -381,10 +399,13 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             # A late answer's head: my human's words with the card they answered, never the host's frame; a press
             # without words is their act, kept under the door's own message id and time.
             if stamped and (submitted := card_input(metadata, root, "initial_user")):
+                from ouroboros.safety_evidence import opening_card_mail_kind
                 door = metadata.get("origin_message_ref") or {}
+                opening_kind = opening_card_mail_kind(submitted)
                 _loop()._record_owner_directive(ctx, source=submitted["source"], content=submitted["content"],
                         reply_to=submitted.get("reply_to"), origin={**{key: door.get(key) for key in ("chat_id", "client_message_id", "ts", "row_sha256")},
-                                                                   **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")}})
+                                                                   **{key: submitted.get(key) for key in ("source_task_id", "quiz_id")},
+                                                                   **({"mail_kind": opening_kind} if opening_kind else {})})
                 break
             snapshot = (metadata.get("origin_message_snapshot") or {}) if stamped else {}
             content = message.get("content")

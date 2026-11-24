@@ -649,15 +649,21 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
     Continue whose terminal row retained an owner corpus. Now each branch obeys ONE
     identity rule: a msg_id names one text (a duplicate is skipped, a rival text is a
     gap), the run's first text never becomes a "later" owner message, a task's words
-    are context, and a row of unknown provenance is never promoted to owner text."""
-    from ouroboros.owner_continue import owner_sources
+    are context, and a row of unknown provenance is never promoted to owner text.
+    The exact mailbox row keeps the bytes and identity it always had, its entry's time in
+    ``ts`` named beside it as the mailbox's receipt; what its delivered copy verified (the
+    chat row's room, client id, digest and time) is shown beside it, never adopted."""
+    import json
+
+    from ouroboros.owner_continue import owner_sources, row_identity, work_order_text
     from ouroboros.task_results import load_task_result
 
     _install_queue(tmp_path, monkeypatch)
+    delivered = {"chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64, "ts": "2026-10-01T09:00:00+00:00"}
     _settled_with_corpus(
         tmp_path,
         {"source": "initial_user", "content": "Write the Friday report"},  # the original's projection
-        {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2"},  # captured twin
+        {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", **delivered},  # captured twin
         {"source": "direct_incoming", "content": "And a summary slide", "msg_id": "cm-9"},  # only here
         {"source": "direct_incoming", "content": "And a summary slide"},  # same words, no id
         {"source": "principal_task_message", "content": "parent: numbers attached", "msg_id": "t-1",
@@ -670,9 +676,76 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
     assert [(row["source"], row["content"]) for row in sources["later"]] == [
         ("owner_mailbox", "Also add the charts"), ("owner_mailbox", "Use last week's numbers"),
         ("direct_incoming", "And a summary slide")]
-    assert sources["later"][0]["exact_row"], "the exact mailbox row outranks its corpus projection"
+    charts, numbers = sources["later"][:2]
+    assert charts["exact_row"], "the exact mailbox row outranks its corpus projection"
+    for row, msg_id in ((charts, "owner-2"), (numbers, "owner-3")):
+        mailed = json.loads(row["exact_row"])["ts"]
+        assert {key: value for key, value in row.items() if key not in ("received", "delivered")} == {
+            "source": "owner_mailbox", "content": row["content"], "msg_id": msg_id, "ts": mailed,
+            "exact_row": row["exact_row"], "mail_kind": "owner_text"}, "the bytes the row always carried"
+        assert row_identity(row) == msg_id and row["received"] == mailed, "its identity, and its receipt named"
+    assert charts["delivered"] == delivered and "delivered" not in numbers, "the verified chat row, beside it"
+    order = work_order_text("pred-1", "cancelled", sources)
+    assert f"- {delivered['ts']} (received {charts['received']}) Also add the charts" in order
+    assert f"- received {numbers['received']} Use last week's numbers" in order
     assert [(row["source_task_id"], row["text"]) for row in sources["peer_context"]] == [
         ("", "peer says hi"), ("parent-x", "parent: numbers attached")]
+
+
+def test_a_delivered_copy_is_shown_only_beside_a_listed_row_whose_coordinates_agree(tmp_path, monkeypatch):
+    """A verified chat row joins a listed row of the same message (one delivery id) only beside it, and only when that
+    row names no other room or client id: a start corpus row carried under another client id keeps its own
+    coordinates and identity, and nothing is shown beside it."""
+    from ouroboros.owner_continue import owner_sources, row_identity
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _settled_with_corpus(tmp_path, {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2",
+                                    "chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64,
+                                    "ts": "2026-10-01T09:00:00+00:00"})
+    result = load_task_result(tmp_path, "pred-1")
+    listed = {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", "chat_id": "7",
+              "client_message_id": "cm-other"}
+    sources = owner_sources(tmp_path, {**result, "metadata": {**(result.get("metadata") or {}), "owner_corpus": [listed]}},
+                            "pred-1")
+
+    [charts] = [row for row in sources["later"] if row["msg_id"] == "owner-2"]
+    assert sources["gaps"] == [] and row_identity(charts) == "owner-2" and "delivered" not in charts
+    assert (charts["chat_id"], charts["client_message_id"]) == ("7", "cm-other") and "row_sha256" not in charts
+
+
+def test_a_successor_sees_where_and_when_a_delivered_reply_was_sent_beside_its_own_receipt(tmp_path, monkeypatch):
+    """The whole path to what the Safety check is shown (``owner_sources`` → ``owner_corpus_rows`` →
+    ``_initialize_owner_directives`` → ``safety._build_check_prompt``, whose ``occasion.sources`` it reads; no model is
+    called). A reply whose delivered copy verified its chat row (room 7, the time that room accepted it) shows that room
+    and time in ``delivered``, apart from its own id and the later time the mailbox received it, though the successor works
+    in another room (42); a reply with no verified copy shows none, and nothing is filled in."""
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros import safety
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    delivered = {"chat_id": "7", "client_message_id": "cm-2", "row_sha256": "c" * 64, "ts": "2026-10-01T09:00:00+00:00"}
+    _settled_with_corpus(tmp_path, {"source": "initial_user", "content": "Write the Friday report"},
+                         {"source": "owner_mailbox", "content": "Also add the charts", "msg_id": "owner-2", **delivered})
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    successor = SimpleNamespace(task_id="pred-1-c1", drive_root=tmp_path, current_chat_id=42, _owner_directives=[],
+                                task_metadata={"objective_author": {"kind": "continuation"},
+                                               "owner_corpus": owner_corpus_rows(sources)})
+    _initialize_owner_directives(successor, [])
+    prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, None, ctx=successor)
+    shown = {row["content"]: row for row in json.loads(
+        prompt.split("Host evidence (provenance is not consent):\n", 1)[1].split("\nProposed tool call:", 1)[0]
+    )["occasion"]["sources"]}
+
+    charts, numbers = shown["Also add the charts"], shown["Use last week's numbers"]
+    assert charts["msg_id"] == "owner-2" and charts["ts"] == charts["received"] != delivered["ts"], "its own id and receipt"
+    assert charts["delivered"] == {"chat_id": "7", "ts": delivered["ts"]}, "the room and time that room accepted it"
+    assert "delivered" not in numbers and "row_sha256" not in charts and "client_message_id" not in charts
 
 
 def test_continue_carries_my_humans_confirmed_place_words_citable_without_promoting_them(tmp_path, monkeypatch):
@@ -1065,15 +1138,18 @@ def test_equal_unidentified_owner_and_peer_words_keep_both_sources(tmp_path, mon
     assert continuation["peer_context"][0]["text"] == "same words"
 
 
-def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_is_kept(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sent_at", [None, "2025-12-01T08:30:00+00:00"], ids=["source_time_absent", "source_time_present"])
+def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_is_kept(tmp_path, monkeypatch, sent_at):
     """#2811: the drain records my human's mid-turn place words under the opening's id, never under their context
     mailbox row's id. One id is one text and one owner-ness, so Continue admits the predecessor while its mailbox is
-    still kept, and the successor carries their words."""
+    still kept, and the successor carries their words: with the provider identity of the message and the time the
+    work captured it (``received``), through completion's record and the Continue, beside the provider's send time
+    (``message.sent_at``) as ``ts`` when the connector recorded one, and no invented time when it did not."""
     import json
     from types import SimpleNamespace
 
-    from ouroboros.owner_continue import owner_sources
-    from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_mailbox import _mailbox_path, write_task_message
     from ouroboros.review_evidence_sections import _accept_owner_directives
     from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.continuation_admission import admit_continuation
@@ -1081,11 +1157,14 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
 
     _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
-    words = "Send the status to the leads"
+    words, provider = "Send the status to the leads", {"conversation_id": "C7", "message_id": "1793991999.000001"}
     assert write_task_message(tmp_path, json.dumps({"event": words}), "pred-1", source_task_id="presence-x",
                               provenance="place_event", msg_id="place-event:ident-1",
                               sender_origin={"place_id": "p1", "conversation_key": "chat:a:r"},
-                              place_arrival={"source_event_id": "e1", "message": {}, "wake": True, "owner_words": words})
+                              place_arrival={"source_event_id": "e1", "conversation_id": provider["conversation_id"],
+                                             "message": {"message_id": provider["message_id"],
+                                                         **({"sent_at": sent_at} if sent_at else {})},
+                                             "wake": True, "owner_words": words})
     reader = SimpleNamespace(task_id="pred-1", task_attempt=1, task_metadata={}, _loop_mailbox_seen_ids=set(),
                              _owner_directives=[{"source": "initial_user", "content": "Write the Friday report"}])
     _delivered(tmp_path, reader)
@@ -1095,6 +1174,15 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
     # A confirmed account's later place message is provenance the run may cite, never an owner directive of its own;
     # the Continue packet's owner rows therefore do not carry it (its words stay in the kept mailbox).
     assert sources["gaps"] == [] and sources["later"] == []
+    [arrival] = [json.loads(line) for line in _mailbox_path(tmp_path, "pred-1").read_text(encoding="utf-8").splitlines()]
+    [heard] = sources["confirmed_place"]
+    assert (heard["content"], {key: heard[key] for key in provider}) == (words, provider)
+    assert heard["received"] == arrival["ts"]  # when the work captured it
+    if sent_at:  # the provider's send time, beside the capture, never standing for it
+        assert heard["ts"] == sent_at != heard["received"]
+    else:  # the connector recorded none: no time stands in for it
+        assert "ts" not in heard
+    assert [row for row in owner_corpus_rows(sources) if row["source"] == "place_confirmed"] == [heard]
     assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
 
 
@@ -1710,3 +1798,88 @@ def test_continue_and_snapshot_gc_still_see_the_original_pending_writer(tmp_path
     assert release_settled_continuations("pred-1") == []
     assert len(_rows(tmp_path, custody.START_RISK_ACCEPTED)) == 1
     assert "retained-copy" in custody.open_snapshot_ids(tmp_path)
+
+
+def test_continue_and_owner_corpus_preserve_host_typed_closure_and_ignore_bad_mail_kind(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources, row_identity
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED, _mailbox_path, write_owner_message
+    from ouroboros.owner_words import safety_sources
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.safety_evidence import with_author
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    closure_text = (
+        "[Owner question closed without answer] quiz q-ink — closed 2026-11-20T10:00:00+00:00. "
+        "Reason: Wait until Tuesday\n"
+        "This closes the question; no option was chosen and no approval was given."
+    )
+    _interrupted(
+        tmp_path, task_id="ink-desk",
+        metadata={
+            "owner_corpus": [{"source": "owner_mailbox", "content": closure_text, "msg_id": "quiz_closed:q-ink"}],
+            "continuation": {"predecessor_task_id": "ink-0", "owner_sources": {
+                "original": {"source": "origin_message", "content": "Write the Friday report",
+                             "origin_message_ref": {"chat_id": 7, "client_message_id": "m-1"}},
+                "later": [
+                    {"source": "owner_mailbox", "content": "Check the wax seal", "msg_id": "chained-bad",
+                     "mail_kind": {"unexpected": True}},
+                    {"source": "owner_mailbox", "content": "Trim the parchment", "msg_id": "chained-unknown",
+                     "mail_kind": "invented"},
+                ],
+            }},
+        },
+        review_evidence={"task_inputs": {"owner_requirements_and_decisions": [
+            {"source": "owner_mailbox", "content": "Fold the inserts", "msg_id": "corpus-bad", "mail_kind": 123},
+        ]}},
+    )
+    assert write_owner_message(tmp_path, closure_text, "ink-desk", msg_id="quiz_closed:q-ink", kind=KIND_QUIZ_CLOSED)
+    with _mailbox_path(tmp_path, "ink-desk").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"msg_id": "legacy-ink-1", "text": "Keep the cream envelopes",
+                                 "ts": "2026-11-20T10:01:00+00:00"}) + "\n")
+
+    first = admit_continuation("ink-desk", action_nonce=NONCE)
+    assert first["ok"], first
+    [succ] = workers.PENDING
+    by_id = {row.get("msg_id"): row for row in succ["metadata"]["owner_corpus"]}
+    assert by_id["quiz_closed:q-ink"]["mail_kind"] == "quiz_closed"
+    assert row_identity(by_id["quiz_closed:q-ink"]) == row_identity(
+        {k: v for k, v in by_id["quiz_closed:q-ink"].items() if k != "mail_kind"})
+    for mid in ("legacy-ink-1", "chained-bad", "chained-unknown", "corpus-bad"):
+        assert by_id[mid]["source"] == "owner_mailbox" and "mail_kind" not in by_id[mid]
+    # The successor's work order keeps the closure the host's record and a legacy row of no recorded kind neither my
+    # human's words nor the host's; the mailbox's time is named a receipt, and the row keeps the ``ts`` it always had.
+    assert "Host record: " + closure_text in succ["text"] and "(verbatim): " + closure_text not in succ["text"]
+    assert ("- received 2026-11-20T10:01:00+00:00 Mail of an unrecorded kind (my human's words or the host's record of "
+            "an act of theirs): Keep the cream envelopes") in succ["text"]
+    assert "(verbatim): Keep the cream envelopes" not in succ["text"]
+    assert by_id["legacy-ink-1"]["received"] == by_id["legacy-ink-1"]["ts"] == "2026-11-20T10:01:00+00:00"
+
+    ctx = SimpleNamespace(task_id=succ["id"], task_metadata=succ["metadata"], drive_root=tmp_path)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": succ["text"]}])
+    rendered = {row.get("msg_id"): with_author(row, succ["metadata"]) for row in safety_sources(ctx)}
+    assert rendered["quiz_closed:q-ink"]["author"] == (
+        "the host's notice that the owner closed the question it names without an answer: no option was "
+        "chosen and nothing was approved. The notice's words are the host's; the reason it quotes is the "
+        "owner's own words or the host's standard sentence"
+    )
+    assert rendered["legacy-ink-1"]["author"] == (
+        "a record of owner input carried into this run; any host framing is not the owner's wording"
+    )
+    assert "without a retained kind" in with_author(
+        {k: v for k, v in rendered["legacy-ink-1"].items() if k != "carried"}, {})["author"]
+
+    # Retained review evidence and a chained Continue pass keep the typed closure without adding gaps.
+    accepted = _accept_owner_directives(ctx, tmp_path, succ["id"])
+    chained_record = {**load_task_result(tmp_path, succ["id"]), "owner_mailbox": {"read_complete": True, "rows": []},
+                      "review_evidence": {"task_inputs": {"owner_requirements_and_decisions": accepted}}}
+    hop2 = owner_sources(tmp_path, chained_record, succ["id"])
+    assert not hop2["gaps"]
+    by_id_2 = {row.get("msg_id"): row for row in owner_corpus_rows(hop2)}
+    assert by_id_2["quiz_closed:q-ink"]["mail_kind"] == "quiz_closed"
+    assert all("mail_kind" not in by_id_2[mid] for mid in ("legacy-ink-1", "chained-bad", "chained-unknown", "corpus-bad"))

@@ -49,7 +49,7 @@ import pathlib
 from typing import Any, Dict, List, Mapping, Tuple
 
 from ouroboros.answer_facts import (OWNER_CARD_INPUT, OWNER_PRESS, answered_card, answered_card_reply,
-                                    answered_card_source, carded as carded, is_answered_card)
+                                    answered_card_source, carded as carded, is_answered_card, qualify_reconstructed_card_reference)
 from ouroboros.chat_references import _same_selection as _same_selection, reply_target as reply_target, selected_reply_target
 from ouroboros.chat_uploads import retained_attachments_note as attachments_line
 
@@ -89,7 +89,6 @@ REPLY_TARGET = "reply_target"  # the message my human replied to: its author's w
 UNREAD_TARGET = "(its words are not carried here; this address reads them)"
 # A place connector names the replied message by its platform id alone: nothing the host stores answers to it.
 UNREAD_PLATFORM = "(its words are not carried: the connector named only its platform message id, no host address)"
-ROW_KEYS = ("text", "source", "carrier", "task_id", "ts", "ref", "author", "attachments", "reply_citation", "row_sha256")
 _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
 _ANNOTATED_STATUSES = frozenset({"scheduled", "delivered", "read"})
@@ -122,12 +121,14 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _row(text: Any, *, source: Any, carrier: str, task_id: Any = "", ts: Any = "", ref: Any = "",
-         author: Any = "", attachments: Any = None, row_sha256: Any = "") -> Dict[str, Any]:
+         author: Any = "", attachments: Any = None, row_sha256: Any = "", mail_kind: Any = "") -> Dict[str, Any]:
+    from ouroboros.safety_evidence import trusted_mail_kind
     files = [dict(ref_) for ref_ in (attachments if isinstance(attachments, list) else []) if isinstance(ref_, Mapping)]
+    kind = trusted_mail_kind(mail_kind, source=source)  # a writer's kind for labels: no identity reads it (_member_identity)
     return {"text": str(text or ""), "source": str(source or ""), "carrier": carrier,
             "task_id": str(task_id or ""), "ts": str(ts or ""), "ref": str(ref or ""),
             **({"author": str(author)} if author else {}), **({"attachments": files} if files else {}),
-            **({"row_sha256": row_sha256} if row_sha256 else {})}
+            **({"row_sha256": row_sha256} if row_sha256 else {}), **({"mail_kind": kind} if kind else {})}
 
 
 def _kept(row: Mapping[str, Any]) -> bool:
@@ -412,7 +413,7 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
                 ref: str = "", attachments: Any = None) -> List[Dict[str, Any]]:
     """One corpus item's rows: its words verbatim (images by reference), a press without words as the host's record
     of the act (``answer_facts.press_record``), under its typed identity (``row_ref``) and its time (``_item_time``),
-    then the message they reply to, under that message's own author."""
+    then the message they reply to, under that message's own author. A card field that was empty is never carried."""
     from ouroboros.answer_facts import press_record
     from ouroboros.review_evidence_sections import _owner_content_projection
 
@@ -422,7 +423,7 @@ def _words_rows(item: Mapping[str, Any], *, carrier: str, task_id: str, content:
         words = press_record(words, item.get("source_task_id") or answered_card_source(item)[1])
     rows = [_row(words, source=item["source"], carrier=carrier, task_id=task_id, ts=ts or _item_time(item),
                  ref=ref or row_ref(item), attachments=item.get("attachments") if attachments is None else attachments,
-                 row_sha256=item.get("row_sha256"))]
+                 row_sha256=item.get("row_sha256"), mail_kind=item.get("mail_kind"))]
     target = _mapping(item.get("reply_to"))
     if item["source"] in (OWNER_CARD_INPUT, OWNER_PRESS) or is_answered_card(target) or target.get("card_id"):
         rows[0]["answer_input"] = {**({"shown": shown} if item["source"] == OWNER_PRESS else {}),
@@ -619,7 +620,7 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "", *, source: Mapping[str
     only under the door's stamp (``initial_user``): an unstamped first turn (``initial_text``) is never owner words.
     ``source``: a held row the start selected (``start_task`` ``owner_source``) opens it instead, under its own room,
     client id and time (``_selected_rows``). The schedule text the run holds (``schedule_items``) rides after them
-    under its own label, never as theirs.
+    under its own label, never as theirs. A card body a held rebuilt quote proves a reference keeps that note.
     """
     from ouroboros.review_evidence_sections import _owner_content_projection
 
@@ -654,6 +655,9 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "", *, source: Mapping[str
     else:
         rows = [*([door] if door is not None and not source_text else []), *rest]
     rows = [{**row, "content": _owner_content_projection(row.get("content"))} for row in rows]
+    kept = {ref: row for row in rows for ref in source_refs(row)}  # each copy, by identity: never words or the run's record
+    for held in _mapping(getattr(ctx, "_held_owner_messages", None)).values():
+        qualify_reconstructed_card_reference(held, kept)
     return [row for row in rows if row["content"].strip() or row.get("attachments")] + schedule_items(ctx)
 
 
@@ -700,12 +704,15 @@ def _selected_rows(ctx: Any, door: Mapping[str, Any] | None, rest: List[Dict[str
                "chat_id": str(_row_chat_id({"chat_id": getattr(ctx, "current_chat_id", None)}))}
     for index, row in enumerate(prior):
         if row.get("source") == "initial_user" and not row.get("carried") or _opening(row, origin, first=index == 0):
+            from ouroboros.safety_evidence import trusted_mail_kind
             door_words = (row.get("source") == "initial_user" and isinstance(record, str) and record.strip()
                           and not _card_input_row(row)
                           and not _mapping(metadata.get("origin_message_snapshot")).get("placeholder_text"))
+            new_source = (row["source"] if _card_input_row(row) else "origin_message") if own else row["source"]
+            mail_kind = trusted_mail_kind(row.get("mail_kind"), source=new_source)
             row = ({key: row[key] for key in ("reply_to", "attachments", "source_task_id", "quiz_id") if row.get(key)}
-                   | ({**own, "source": row["source"] if _card_input_row(row) else "origin_message"}
-                      if own else {"source": row["source"], "carried": True})
+                   | ({"mail_kind": mail_kind} if mail_kind else {})
+                   | ({**own, "source": new_source} if own else {"source": new_source, "carried": True})
                    | {"content": record if door_words else row.get("content")})
         if selected(row):
             continue
@@ -728,15 +735,19 @@ def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
 
 def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None, *,
                     source: str = "") -> Dict[str, Any]:
-    """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address; with
-    ``source``, the exact reader of the event record that carried its words) and its provider identity
-    (``own_sends.message_identity``), so a later reader tells my own post through my human's account once that
-    post's receipt is known; ``origin``: the row's other typed ids."""
+    """A confirmed place event's corpus-row facts beside its words: the message it replies to (its provider address and
+    any words the connector carried, as context under its author; with ``source``, the exact reader of the event record
+    that carried its words), its provider identity (``own_sends.message_identity``), so a later reader tells my own post
+    through my human's account once that post's receipt is known, and its send time as ``ts`` (``message.sent_at`` no
+    later than the receipt ``origin`` names as ``received``, else none); ``origin``: the row's other typed ids."""
     from ouroboros.own_sends import message_identity
+    from ouroboros.presence_history import source_order_block
+    from ouroboros.presence_message_facts import reply_target as replied_message
 
     found = message_identity(conversation_id, message)
     identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
-    return {"reply_to": place_reply_target(message, source), "origin": {**(origin or {}), **identity}}
+    sent = (source_order_block(message, received=str((origin or {}).get("received") or "")) or {}).get("time")
+    return {"reply_to": replied_message(message, source=source), "origin": {**(origin or {}), **identity, **({"ts": sent} if sent else {})}}
 
 
 def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
@@ -813,13 +824,6 @@ def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) 
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded). Copy their exact words or the complete label they pressed, or "
                   "omit owner_words to start the work as your own.")
-
-
-def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:
-    """The replied message's provider address and any words the connector carried, as context under its author."""
-    from ouroboros.presence_message_facts import reply_target
-
-    return reply_target(message, source=source)
 
 
 def owner_words_contain(ctx: Any, text: Any) -> bool:
@@ -910,7 +914,7 @@ def task_governing_words(task: Mapping[str, Any], *, addressed: bool = False) ->
             continue
         row = _row(item.get("text"), source=item.get("source"), carrier=str(item.get("carrier") or ""),
                    task_id=item.get("task_id"), ts=item.get("ts"), ref=item.get("ref"), author=item.get("author"),
-                   attachments=item.get("attachments"), row_sha256=item.get("row_sha256"))
+                   attachments=item.get("attachments"), row_sha256=item.get("row_sha256"), mail_kind=item.get("mail_kind"))
         if _kept(row):
             for key in ("answer_input", "reply_citation"):
                 if isinstance(fact := item.get(key), Mapping):
@@ -1148,14 +1152,15 @@ def _listed_refs(row: Mapping[str, Any]) -> set:
 
 
 def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
-    """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``,
-    ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was
-    recorded): the corpus, the field it inherited (a reply target folded into its row), then the rows it holds that
-    reached this work; one row per source (``source_refs``), the first kept with the card and time a later copy
-    adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
-    permission my human gave another work is not this one's. ``_private`` (``safety_owner_ids``) keeps each row's exact
-    ``row_sha256`` for the identities; it is never part of what the check shows. Reads the context's attributes and writes nothing."""
-    from ouroboros.answer_facts import card_input, row_source
+    """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``, ``msg_id`` =
+    the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was recorded): the
+    corpus, the field it inherited (a reply target folded into its row; an answer's card by its own address, ``card_reference``),
+    then the rows it holds that reached this work (a rebuilt answer with the card it carries), both shown ``carried`` (this
+    copy's path, never whom my human wrote to); one row per source (``source_refs``), the first kept with the card and time
+    a later copy adds, the opening dated by its door (``_opening``). Never a room, context or marked row: a permission my
+    human gave another work is not this one's. ``_private`` (``safety_owner_ids``) keeps each row's exact ``row_sha256``
+    for the identities, never shown to the check. Reads the context's attributes and writes nothing."""
+    from ouroboros.answer_facts import card_input, card_reference, card_reference_view, merged_card_reply, row_source
     from ouroboros.chat_chain import _FULL_DIGEST, format_address
     from ouroboros.dialogue_provenance import excerpt_citation
     from ouroboros.owner_relay import owner_row_address, owner_row_identity, owner_text
@@ -1192,6 +1197,8 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
             rows.append(listed := dict(row))
             kept.update(dict.fromkeys(refs, listed))
         listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        if merged := merged_card_reply(listed.get("reply_to"), row.get("reply_to")):
+            listed["reply_to"] = merged
         if (row.get("reply_citation") and not listed.get("reply_citation") and target.get("address")
                 and _mapping(listed.get("reply_to")).get("address") == target["address"]):
             listed.update(reply_citation=row["reply_citation"], reply_to=row["reply_to"])
@@ -1203,7 +1210,7 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
             if _opening(item, origin) and origin.get("ts") and not listed.get("ts"):
                 listed["ts"] = str(origin["ts"])
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
-    bodies = _reply_bodies(fields)
+    bodies, came = _reply_bodies(fields), ({} if _private else {"carried": True})  # shown, never in an identity
     for row in fields:
         if row["source"] == REPLY_TARGET:
             if row.get("reply_view"):
@@ -1212,22 +1219,27 @@ def safety_sources(ctx: Any, *, _private: bool = False) -> List[Dict[str, Any]]:
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue
-        target = _carried_selection(row.get("reply_citation"), bodies)
-        last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"],
-                    **({"row_sha256": row["row_sha256"]} if row.get("row_sha256") else {}),
+        fact = _mapping(row.get("answer_input"))  # an answer's own card: its address and the body the field kept there
+        target = (_carried_selection(row.get("reply_citation"), bodies)
+                  or card_reference_view(card_reference(fact, bodies.get(_reply_body_key(fact.get("reply_address")), {}))))
+        last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"], **came,
+                    **{key: row[key] for key in ("row_sha256", "mail_kind") if row.get(key)},
                     **({"ts": row["ts"]} if row["ts"] else {}), **({"reply_to": target} if target else {})})
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if reaches(row):
             source_root = row.get("_owner_source_root") or root
             item = card_input(row, source_root)
-            replied = (item.get("reply_to") or answered_card_reply(*answered_card_source(row, source_root))
-                       or row.get("_owner_reply_target") or reply_target(
-                source_root, row.get("reply_to")))
+            carried_reply = _mapping(_mapping(row.get("corpus_answer")).get("reply_to"))
+            replied = (item.get("reply_to") or card_reference_view(carried_reply)
+                       or answered_card_reply(*answered_card_source(row, source_root))
+                       or row.get("_owner_reply_target") or reply_target(source_root, row.get("reply_to")))
             add({"source": item.get("source") or row_source(row, "owner_mailbox", source_root),
                  "content": item["content"] if item else owner_text(row), "msg_id": str(key),
-                 "row_sha256": owner_row_identity(row)["row_sha256"],
+                 "row_sha256": owner_row_identity(row)["row_sha256"], **came,
                  **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
+        if not _private:
+            qualify_reconstructed_card_reference(row, kept)
     return rows if _private else [{key: value for key, value in row.items() if key != "row_sha256"} for row in rows]
 
 
@@ -1425,7 +1437,7 @@ def mailbox_owner_input(drive_root: Any, entry: Mapping[str, Any]) -> dict:
 def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
     from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, drain_owner_entries
     from ouroboros.owner_relay import origin_files, quotable_owner_row
-
+    from ouroboros.safety_evidence import mailbox_mail_kind
     try:
         entries = drain_owner_entries(pathlib.Path(drive_root), task_id, include_acknowledged=True)
     except (OSError, ValueError):
@@ -1435,9 +1447,9 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
     for entry in entries:
         if entry.get("kind") not in (KIND_OWNER_TEXT, KIND_CARD_INPUT):
             continue
-        item = {**entry, **mailbox_owner_input(drive_root, entry)}
-        rows.extend(_words_rows(item, carrier="mailbox", task_id=task_id, ts=entry.get("ts"),
-                                ref=f"msg {entry.get('msg_id')}"))
+        item = {**entry, **mailbox_owner_input(drive_root, entry)}  # its writer's recorded kind rides with it, none when unrecorded
+        rows.extend(_words_rows({**item, "mail_kind": mailbox_mail_kind(entry, item)}, carrier="mailbox", task_id=task_id,
+                                ts=entry.get("ts"), ref=f"msg {entry.get('msg_id')}"))  # bytes as ever; the stamp names a receipt
     for entry in entries:
         if entry.get("kind") != "relay_entry":
             continue
@@ -1498,12 +1510,11 @@ def task_owner_words(drive_root: Any, task_id: str, *,
 
 
 def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_id: str = "", indent: str = "",
-                       gaps: Any = (), current: bool = True) -> str:
-    """One verbatim section for a child, a session, a reviewer, a plan review or the page writer. ``indent``
-    prefixes every line of the words (the memory view's two spaces), so a line of the owner's own that starts with
-    ``## `` never reads as a section of the request. A row's files are named on a host line under its words;
-    ``gaps`` (``work_words``) close the section. ``current=False``: a session order whose record predates
-    ``ROOM_FIELD`` keeps the literals it launched with (``_LAUNCHED_SESSION``)."""
+                       gaps: Any = (), current: bool = True, typed_stamps: bool = True) -> str:
+    """One verbatim section for a child, session, reviewer, plan review or page writer. ``indent`` prefixes every
+    line of the words so an owner line starting with ``## `` never reads as a section. Files follow on a host line;
+    ``gaps`` close the section. ``current=False`` keeps ``_LAUNCHED_SESSION``; ``typed_stamps=False`` keeps
+    pre-update stamp bytes for records predating ``TYPED_STAMPS_FACT``."""
     if audience not in _HEADINGS:
         raise ValueError(f"unknown owner-words audience {audience!r}; expected one of {sorted(_HEADINGS)}")
     rows = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, Mapping) and _kept(row)]
@@ -1513,10 +1524,10 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
         return "\n".join([*([none] if none else []), *gaps])
     origin = _ORIGIN.format(root=root_task_id) if root_task_id else ""
     heading, frame = _LAUNCHED_SESSION if audience == "session" and not current else (_HEADINGS[audience], _FRAMES[audience])
-    return f"{heading}\n{frame.format(origin=origin)}\n" + "\n\n".join([*(words_block(row, indent) for row in rows), *gaps])
+    return f"{heading}\n{frame.format(origin=origin)}\n" + "\n\n".join([*(words_block(row, indent, typed_stamps=typed_stamps) for row in rows), *gaps])
 
 
-def words_block(row: Mapping[str, Any], indent: str = "") -> str:
+def words_block(row: Mapping[str, Any], indent: str = "", *, typed_stamps: bool = True) -> str:
     """One row as every section prints it: its stamp, its words (a reply target's unread fact) and its files line."""
     text = str(row.get("text") or "") or (unread_target(row) if row.get("source") == REPLY_TARGET else "")
     from ouroboros.answer_facts import submitted_fields_line
@@ -1524,7 +1535,7 @@ def words_block(row: Mapping[str, Any], indent: str = "") -> str:
     text = "\n".join(part for part in (text, submitted_fields_line(_mapping(row.get("answer_input"))),
                                      attachments_line(row.get("attachments")),
                                      excerpt_citation(_mapping(row.get("reply_citation")))) if part)
-    return words_stamp(row) + "\n" + "\n".join(indent + line if line else line for line in text.split("\n"))
+    return words_stamp(row, typed_stamps=typed_stamps) + "\n" + "\n".join(indent + line if line else line for line in text.split("\n"))
 
 
 def project_words(drive_root: Any, room: int, *, open_rows: Any = (), indent: str = "") -> List[Dict[str, Any]]:
@@ -1546,7 +1557,7 @@ def unread_target(row: Mapping[str, Any]) -> str:
     return UNREAD_TARGET if str(row.get("ref") or "").startswith("row:") else UNREAD_PLATFORM
 
 
-def words_stamp(row: Mapping[str, Any]) -> str:
+def words_stamp(row: Mapping[str, Any], *, typed_stamps: bool = True) -> str:
     """One row's stamp in every form, whole or by reference: ``[ts · owner · source of task · ref]``; a row held as
     context adds where it went (``went to <task>``) before its reference, the last part (a room, origin or marked
     row's source names its carrier); a reply target's own author, never my human (``REPLY_TARGET``)."""
@@ -1558,9 +1569,10 @@ def words_stamp(row: Mapping[str, Any]) -> str:
     elif source == SCHEDULE_TEXT:  # the work's assignment under its recorded supplier: never my human's words
         stamp = [str(row.get("ts") or ""), ref, f"supplied by {row.get('author') or 'a supplier the host did not record'}",
                  "not my human's words"]
-    else:
-        stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source,
-                 carrier if carrier.startswith("went to ") else "", ref]
+    else:  # a host notice, or mail whose writer left no kind, never stands as "owner" (``safety_evidence.stamp_voice``)
+        from ouroboros.safety_evidence import stamp_voice, stamp_when
+        stamp = [stamp_when(row) if typed_stamps else str(row.get("ts") or ""), stamp_voice(row) if typed_stamps else "owner",
+                 f"{source} of task {task_id}" if task_id else source, carrier if carrier.startswith("went to ") else "", ref]
     return "[" + " · ".join(part for part in stamp if part) + "]"
 
 

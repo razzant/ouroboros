@@ -1155,6 +1155,49 @@ def test_history_of_a_relay_preserves_the_act_or_exact_words(tmp_path, comment):
         assert "Owner words quoted" not in frame
 
 
+@pytest.mark.parametrize("shape", ["captured", "reconstructed", "unnamed"])
+@pytest.mark.parametrize("entered", [True, False], ids=["words", "empty"])
+def test_history_of_a_relayed_form_keeps_its_words_fields_choice_and_card(tmp_path, shape, entered):
+    """A submitted form reads in history as the words my human entered (a press of its button when every field was left
+    empty), the fields by name with an empty one and a line break kept, the card they were entered on and the button
+    pressed. A card rejoined by its address says it is a reference and may carry another press's label, so the press's
+    own choice stands apart from it. An answer rebuilt where the corpus kept no field names (``unnamed``) still shows
+    its words, its card and its choice, and no field is made up for it. Each stands once."""
+    import json
+
+    from ouroboros.dialogue_provenance import relation_text
+    from ouroboros.owner_relay import owner_quote, relay_envelope
+
+    values = {"ink": "teal", "size": "", "note": "line one\nline two"} if entered else {"ink": "", "size": ""}
+    words, card_id = ("teal\nline one\nline two" if entered else "Apply"), "card_0123456789abcdef"
+    if shape == "captured":  # the press as its card's own snapshot recorded it
+        row = {"direction": "in", "chat_id": 1, "ts": "2040-03-01T09:00:00Z", "client_message_id": "ink-form",
+               "text": "Apply", "card_press": {"task_id": "designer", "card_id": card_id, "request_id": "ink-1", "submission": {
+                   "label": "Apply", "title": "Ink for the club flyer", "values": values}}}
+    else:  # the corpus row as the host rebuilds it, its card joined by address: the body's last line is another press's
+        card = {"address": f"card {card_id} of task designer", "author": "Ouroboros, task designer", "card_id": card_id,
+                "text": "Ink for the club flyer\nSave", "pressed_label": "Apply"}
+        row = {"direction": "in", "chat_id": 1, "ts": "2040-03-01T09:00:00Z", "text": words, "corpus_answer": {
+            "source": "owner_mailbox" if entered else "owner_press", "source_task_id": "designer",
+            "reply_to": card if shape == "unnamed" else {**card, "submitted_values": values}}}
+    history = relation_text({"relay": relay_envelope("ink-form", [owner_quote(tmp_path, row)], chat_id=1)})
+    head = "[Host record: submitted fields (JSON): "
+    fields = [json.loads(line[len(head):-1]) for line in history.split("\n") if line.startswith(head)]
+    assert fields == ([] if shape == "unnamed" else [values])  # only what the card retained: none is made up
+    assert ("[Owner words quoted from" in history) is entered and ("[Owner card answer from" in history) is not entered
+    if entered:
+        assert history.count(words) == 1  # verbatim, once: the JSON record escapes their line break
+    else:
+        assert "wrote no words" in history
+    assert "Ink for the club flyer" in history and "task designer" in history  # the card and the task that wrote it
+    assert ("[Host note: " in history) is (shape != "captured")  # only a reference says so
+    if shape == "captured" and entered:
+        assert "Ink for the club flyer\nApply" in history  # the snapshot closes on the label this press carried
+    else:
+        assert "pressed «Apply»" in history  # the choice itself, whatever label the reference carries
+    assert shape == "captured" or "Ink for the club flyer\nSave" in history  # a held reference, as it was held
+
+
 def test_relay_puts_last_local_words_on_each_press_and_excludes_carried_words(tmp_path):
     import queue
     from ouroboros.answer_facts import last_own_words

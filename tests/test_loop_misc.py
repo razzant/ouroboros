@@ -133,6 +133,7 @@ def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
         "content": "mailbox follow-up",
         "msg_id": "mail-1",
         "received": mail_entry["ts"],
+        "mail_kind": mail_entry["kind"],  # its writer's typed kind, beside the row
     }
     assert "deadline control" not in json.dumps(ctx._owner_directives)
 

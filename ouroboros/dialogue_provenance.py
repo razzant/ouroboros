@@ -716,7 +716,10 @@ def excerpt_citation(ref: Mapping[str, Any]) -> str:
 def relation_text(entry: Mapping[str, Any]) -> str:
     """The relations the host resolved for a row, as labelled lines after its words: what it
     replies to and, on a relay, the owner's words it quotes, complete, with where they were said
-    and what they replied to. History keeps these fields; every text reader shows them too."""
+    and what they replied to. A quoted form adds the card it was entered on and, where the card retained them, the
+    fields it was submitted with, by name. History keeps these fields; every text reader shows them too."""
+    from ouroboros.answer_facts import submitted_fields_line
+
     def reference(ref: Mapping[str, Any]) -> str:
         from ouroboros.chat_uploads import attachment_ref_delivery_block
 
@@ -737,14 +740,22 @@ def relation_text(entry: Mapping[str, Any]) -> str:
     for quote in relay_quotes(entry):
         place = _mapping(quote.get("source"))
         location = f"{_text(place.get('label')) or 'a chat'} {_text(place.get('address'))}"
-        text = str(quote.get("text") or "")
+        text, frame = str(quote.get("text") or ""), str(quote.get("question_frame") or "")
         # Older quiz envelopes kept the host question frame without a separate act/words type.
-        if quote.get("input_source") == "owner_press" or (quote.get("question_frame") and not quote.get("input_source")):
-            lines.append(f"[Owner card answer from {location}]\n{quote.get('question_frame') or text}")
+        if quote.get("input_source") == "owner_press" or (frame and not quote.get("input_source")):
+            lines.append(f"[Owner card answer from {location}]\n{frame or text}")
+            frame = ""  # shown above, as the act
         elif quote.get("input_source") == "owner_card_input":
             lines.append(f"[Owner card input from {location}]\n{text}")
         else:
             lines.append(f"[Owner words quoted from {location}]\n{text}")
+        # A quote that names its card is a submitted form: its words lose the field names and any empty field, so the
+        # fields (only where the card retained them) and then the card follow, each by its own fact. A quiz frame
+        # already quotes its answer's words, so it stands only as the act of a press.
+        if fields := submitted_fields_line(quote):
+            lines.append(fields)
+        if frame and quote.get("card_id"):
+            lines.append(f"[Host question frame]\n{frame}")
         if _mapping(quote.get("reply_to")):
             lines.append(reference(_mapping(quote.get("reply_to"))))
     return "".join("\n" + line for line in lines)

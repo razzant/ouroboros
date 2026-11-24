@@ -375,6 +375,7 @@ def test_a_selected_source_and_the_door_keep_their_own_identities_for_two_genera
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.owner_relay import owner_row_source
     from ouroboros.tools.tool_context import ToolContext
+    from tests.test_safety_focus_bundle import ORIGIN_AUTHOR, _sources
 
     a = _stored(tmp_path, "Draw a diagram of the garden beds", "msg-a", ts="2024-04-08T13:20:00+00:00")
     b = _stored(tmp_path, "Check the totals in the seed table", "msg-b", ts="2024-04-08T13:45:00+00:00")
@@ -407,6 +408,10 @@ def test_a_selected_source_and_the_door_keep_their_own_identities_for_two_genera
     _initialize_owner_directives(worker, [{"role": "user", "content": "Check the seed table totals"}])
     assert [(row["ref"], row["text"]) for row in ow.directive_owner_rows(worker)] == [
         ("chat 1 / msg-b", b["text"]), ("chat 1 / msg-a", a["text"])]
+    # Both messages are retained origins. Their labels cannot say that both opened the run that reads them.
+    assert _sources(worker)["occasion"]["sources"] == [
+        {"source": "origin_message", "content": row["text"], "carried": True, "author": ORIGIN_AUTHOR,
+         "chat_id": "1", "client_message_id": row["client_message_id"], "ts": row["ts"]} for row in (b, a)]
     inherited = ow.carried_owner_corpus(worker, words_b)
     assert [(row.get("client_message_id"), row["ts"], row["content"]) for row in inherited] == [
         ("msg-b", b["ts"], words_b), ("msg-a", a["ts"], a["text"])]

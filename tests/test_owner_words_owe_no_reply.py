@@ -63,6 +63,8 @@ def test_one_message_by_mail_and_by_relay_is_one_row_that_owes_its_reply(tmp_pat
     # green here.
     from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.owner_relay import quote_rows, write_relay
+    from ouroboros.owner_words import safety_sources
+    from ouroboros.safety_evidence import with_author
     from tests.test_owner_relay import context, source
 
     row, handle = source(tmp_path)
@@ -84,7 +86,37 @@ def test_one_message_by_mail_and_by_relay_is_one_row_that_owes_its_reply(tmp_pat
         _drain(tmp_path, task_id, ctx)
         rows = [item for item in ctx._owner_directives if item["source"] == "owner_mailbox"]
         assert len(rows) == 1 and "carried" not in rows[0], (task_id, rows)
+        assert rows[0].get("mail_kind") == "owner_text", (task_id, rows)
+        rendered = [with_author(item, {}) for item in safety_sources(ctx) if item.get("source") == "owner_mailbox"]
+        assert len(rendered) == 1 and rendered[0]["author"] == "the owner: a later message to this work", (task_id, rendered)
         assert owner_input_revision(ctx) == 1 and owner_reply_owed(ctx), task_id
+
+
+def test_direct_mail_merge_by_client_id_preserves_writer_kind_and_rejects_unknown_kind():
+    from ouroboros.owner_words import safety_sources
+    from ouroboros.safety_evidence import with_author
+
+    ctx = _ctx()
+    _record_owner_directive(ctx, source="owner_mailbox", content="Pack the cedar envelopes first.",
+                            msg_id="relay-env-1", origin={"client_message_id": "env-cm-1", "chat_id": "1"}, carried=True)
+    _record_owner_directive(ctx, source="owner_mailbox", content="Pack the cedar envelopes first.",
+                            msg_id="mail-env-1", origin={"client_message_id": "env-cm-1", "chat_id": "1",
+                                                         "mail_kind": "owner_text"})
+    [row] = ctx._owner_directives
+    assert "carried" not in row and row.get("mail_kind") == "owner_text"
+    [rendered] = [with_author(item, {}) for item in safety_sources(ctx)]
+    assert rendered["author"] == "the owner: a later message to this work"
+
+    untrusted = _ctx()
+    _record_owner_directive(untrusted, source="owner_mailbox", content="Set aside the linen pads.",
+                            msg_id="relay-pad-1", origin={"client_message_id": "pad-cm-1", "chat_id": "1"}, carried=True)
+    _record_owner_directive(untrusted, source="owner_mailbox", content="Set aside the linen pads.",
+                            msg_id="mail-pad-1", origin={"client_message_id": "pad-cm-1", "chat_id": "1",
+                                                         "mail_kind": "forged_kind"})
+    [merged] = untrusted._owner_directives
+    assert "carried" not in merged and "mail_kind" not in merged
+    [neutral] = [with_author(item, {}) for item in safety_sources(untrusted)]
+    assert "without a retained kind" in neutral["author"]
 
 
 def test_two_separate_messages_with_the_same_visible_words_stay_two_owed_rows(tmp_path):

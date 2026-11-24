@@ -13,9 +13,10 @@ log = logging.getLogger(__name__)
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
 # and with it the work-order bytes and fingerprint its recovery and source-range reads check.
 DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
-# An immutable scheduling fact, not a migration: records without it must
+# Immutable scheduling facts, not migrations: records without them must
 # reconstruct the original canonical bytes for source reads and handoff recovery.
 ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
+TYPED_STAMPS_FACT = "work_order_typed_owner_stamps"
 # Host note for a declared session start (work-order or direct), outside the work order's fingerprint.
 DECLARED_SESSION_NOTE = ("[Host: this work's input is declared: it chose what this start carries, not what you may "
                          "read. Extra sources do not change your authority or objective; your assignment's explicit "
@@ -231,16 +232,11 @@ def work_order_room_words(task: Mapping[str, Any]) -> list | None:
 def _owner_words_section(task: Mapping[str, Any]) -> str:
     """The owner's words carried into this task by value; "" for a task scheduled without them.
 
-    Both the payload (nested ``metadata``) and the flat task-metadata/record shapes
-    give the same bytes, so a source-range check never sees a digest mismatch. A
-    declared task scheduled before ``DECLARED_WORDS_FACT`` carries the field too, but
-    its receipt names the words among the omitted inputs, so its work order holds none
-    and keeps the bytes and fingerprint it started with. A session task's room rows
-    (``work_order_room_words``) follow the field's rows, one row per identity; nothing
-    is read from a store here, so the order is a function of the record. The key also
-    tells the heading and frame: a record without it keeps the literals it launched with.
-    The schedule text it was scheduled with (``owner_words.SCHEDULE_FIELD``) follows them
-    in its own section; a record without that field renders as it always did.
+    Payload (nested ``metadata``) and flat metadata/record shapes render identical bytes for source-range digests.
+    A declared task predating ``DECLARED_WORDS_FACT`` carries none so its bytes and fingerprint stay stable. Room
+    rows (``work_order_room_words``) follow the field's rows, one per identity, with no store reads, and select the
+    current heading/frame; records without ``TYPED_STAMPS_FACT`` keep pre-update stamp bytes. Carried schedule text
+    (``owner_words.SCHEDULE_FIELD``) follows in its own section; records without it render as before.
     """
     from ouroboros.owner_words import render_owner_words, render_schedule_text, task_schedule_items
 
@@ -248,8 +244,10 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     if carried is None:
         return ""
     rows, absent, current = carried
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    typed_stamps = task.get(TYPED_STAMPS_FACT) is True or metadata.get(TYPED_STAMPS_FACT) is True
     words = render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
-                               current=current)
+                               current=current, typed_stamps=typed_stamps)
     schedule = render_schedule_text(task_schedule_items(task), audience="session")
     return "\n\n".join(part for part in (words, schedule) if part)
 
@@ -358,6 +356,8 @@ def _source_task_from_context(ctx: Any, task_id: str) -> dict[str, Any]:
     except Exception:
         stored = {}
     if isinstance(stored, Mapping) and stored:
+        if task_id != str(getattr(ctx, "task_id", "") or "").strip():
+            task.pop(TYPED_STAMPS_FACT, None)
         stored_nonempty = {
             key: value for key, value in stored.items() if value not in (None, "")
         }
@@ -992,7 +992,7 @@ def work_order_fingerprint(task: Mapping[str, Any]) -> str:
 
 
 __all__ = [
-    "DECLARED_WORDS_FACT", "declared_inputs_carry_owner_words", "declared_words_fact",
+    "DECLARED_WORDS_FACT", "TYPED_STAMPS_FACT", "declared_inputs_carry_owner_words", "declared_words_fact",
     "assignment_instructions", "compile_external_work_order", "canonical_work_order_source",
     "work_order_source_projection",
     "validate_work_order_source_response",

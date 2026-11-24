@@ -58,7 +58,7 @@ def _root(tmp_path, *, metadata=None, owner_said=True):
     ctx.task_contract = build_task_contract({"id": "root", "type": "task", "text": ASKED})
     if owner_said:
         _initialize_owner_directives(ctx, [{"role": "user", "content": ASKED}])
-        _record_owner_directive(ctx, source="owner_mailbox", content=LATER, msg_id="mail-1")
+        _record_owner_directive(ctx, source="owner_mailbox", content=LATER, msg_id="mail-1", origin={"mail_kind": "owner_text"})
     return ctx
 
 

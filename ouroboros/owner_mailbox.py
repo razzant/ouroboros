@@ -759,6 +759,7 @@ def drain_owner_entries(
                 drained = {
                     "msg_id": mid, "text": text, "kind": kind,
                     "ts": str(entry.get("ts") or ""),
+                    **({} if entry.get("kind") else {"recorded_kind": ""}),  # routing's default is no writer's kind
                 }
                 if isinstance(entry.get("client_surface"), dict) and entry.get("client_surface"):
                     drained["client_surface"] = dict(entry["client_surface"])
