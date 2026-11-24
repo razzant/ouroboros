@@ -7,7 +7,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createChatPreview, clearChatPreviews, forgetProjectPreviews, previewsRefused, PREVIEW_KEY } from '../modules/chat_preview.js';
 import { senderLabel } from '../modules/chat_activity.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, restoreDom, PREVIEW_SCOPE } from './chat_dom_fixture.js';
+
+// A second proven data profile: its rooms are not this one's, though the installation is the same.
+const OTHER_PROFILE = '1234567890abcdef';
 
 function fixture(t) {
     const { prior, mount } = installDom();
@@ -15,7 +18,7 @@ function fixture(t) {
     const values = new Map();
     const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)),
         removeItem: key => values.delete(key) };
-    const make = ({ room = [1, ''], scope = '', kept = () => null } = {}) => createChatPreview({ feed: mount, room, scope,
+    const make = ({ room = [1, ''], scope = PREVIEW_SCOPE, kept = () => null } = {}) => createChatPreview({ feed: mount, room, scope,
         label: senderLabel, storage: () => storage, mutate: fn => fn(), kept });
     const record = () => JSON.parse(values.get(PREVIEW_KEY));
     const painted = () => mount.children.find(node => node.dataset.savedPreview === 'true');
@@ -65,13 +68,53 @@ test('speakers are frozen as the canonical bubble names them; words and names st
     fresh.destroy();
 });
 
-test('room, Project and installation scope never borrow each other\'s text', t => {
+test('room, Project and data profile never borrow each other\'s text', t => {
     const f = fixture(t);
     f.make().save([row('chat:1', 'Main words')]);
     assert.equal(f.make({ room: [2, ''] }).show(), false);
     assert.equal(f.make({ room: [1, 'other-project'] }).show(), false);
-    assert.equal(f.make({ scope: 'another-installation' }).show(), false);
+    assert.equal(f.make({ scope: OTHER_PROFILE }).show(), false);
     assert.equal(f.make().show(), true);
+});
+
+test('the document proves its data profile: its own rooms paint, another profile and a document proving none open cold', t => {
+    const f = fixture(t), doc = f.mount.ownerDocument;
+    const meta = (profile, appearance = 'fedcba9876543210') => (selector) => {
+        if (selector === 'meta[name="ouroboros-chat-preview-scope"]') return profile === null ? null : { content: profile };
+        if (selector === 'meta[name="ouroboros-appearance-scope"]') return appearance === null ? null : { content: appearance };
+        return null;
+    };
+    const open = () => createChatPreview({ feed: f.mount, room: [1, ''], label: senderLabel, mutate: fn => fn(),
+        storage: () => f.storage });
+    doc.querySelector = meta(PREVIEW_SCOPE);
+    const first = open();
+    first.save([row('chat:1', 'Profile words')]);
+    first.destroy();
+    const again = open();
+    assert.equal(again.show(), true, 'the same proven profile paints its room');
+    again.destroy();
+    doc.querySelector = meta(OTHER_PROFILE);
+    const other = open();
+    assert.equal(other.show(), false, 'another profile is not this room');
+    other.save([row('chat:2', 'Its own words')]);
+    other.destroy();
+    const rows = key => JSON.parse(f.values.get(PREVIEW_KEY)).rooms
+        .find(entry => entry.key === key)?.rows.map(item => item.text);
+    assert.deepEqual(rows(JSON.stringify([PREVIEW_SCOPE, [1, '']])), ['Profile words'], 'each profile keeps its own');
+    assert.deepEqual(rows(JSON.stringify([OTHER_PROFILE, [1, '']])), ['Its own words']);
+    // An installation scope, an older document and a malformed value are no profile proof: the room keeps to its
+    // canonical history and the record gains nothing from it.
+    const saved = f.values.get(PREVIEW_KEY);
+    for (const scope of [null, 'not-a-digest']) {
+        doc.querySelector = meta(scope);
+        const cold = open();
+        assert.equal(cold.show(), false, `no proof (${scope})`);
+        cold.save([row('chat:3', 'Never saved')]);
+        cold.append([row('chat:4', 'Never appended')]);
+        cold.destroy();
+    }
+    assert.equal(f.values.get(PREVIEW_KEY), saved, 'no proof writes nothing');
+    assert.doesNotMatch(saved, /Never saved|Never appended/);
 });
 
 test('only conversation rows with identity enter; refusals and unreadable streams keep the record; an empty read paints nothing', t => {
@@ -167,12 +210,12 @@ test('a Project the registry says is going away takes its saved text with it; ev
     const f = fixture(t);
     f.make({ room: [1, ''] }).save([row('chat:1', 'Main words')]);
     f.make({ room: [100, 'gate-0'] }).save([row('chat:1', 'Words of the deleted Project')]);
-    f.make({ room: [100, 'gate-0'], scope: 'another-installation' }).save([row('chat:1', 'Its words in another scope')]);
+    f.make({ room: [100, 'gate-0'], scope: OTHER_PROFILE }).save([row('chat:1', 'Its words in another profile')]);
     f.make({ room: [101, 'gate-1'] }).save([row('chat:1', 'Another Project keeps these')]);
     const others = f.record().rooms.filter(room => JSON.parse(room.key)[1][1] !== 'gate-0');
     forgetProjectPreviews(['gate-0'], f.storage);
     assert.deepEqual(f.record().rooms, others, 'the others keep their rows, order and bounds byte for byte');
-    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /deleted Project|another scope/);
+    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /deleted Project|another profile/);
     assert.equal(f.make({ room: [100, 'gate-0'] }).show(), false);
     assert.equal(f.make({ room: [101, 'gate-1'] }).show(), true);
     // Nothing to forget writes nothing; storage refused or a record unread changes nothing and throws nothing.
@@ -219,13 +262,13 @@ test('a refusal anywhere in this document takes the record and every painted cop
 test('storage refusal, corrupt data and unsupported versions open cold and leave the room working', t => {
     const f = fixture(t);
     for (const raw of ['{', '{"v":3,"rooms":[]}', `{"v":2,"rooms":[],"pad":"${'x'.repeat(200000)}"}`,
-        '{"v":1,"rooms":[{"key":"[\\"\\",[1,\\"\\"]]","rows":[{"id":"chat:1","role":"user","text":"x"}]}]}',
-        '{"v":2,"rooms":[{"key":"[\\"\\",[1,\\"\\"]]","rows":[{"id":"chat:1","role":"intruder","text":"x","speaker":"y"}]}]}']) {
+        `{"v":1,"rooms":[{"key":${JSON.stringify(JSON.stringify([PREVIEW_SCOPE, [1, '']]))},"rows":[{"id":"chat:1","role":"user","text":"x"}]}]}`,
+        `{"v":2,"rooms":[{"key":${JSON.stringify(JSON.stringify([PREVIEW_SCOPE, [1, '']]))},"rows":[{"id":"chat:1","role":"intruder","text":"x","speaker":"y"}]}]}`]) {
         f.values.set(PREVIEW_KEY, raw);
         assert.equal(f.make().show(), false, raw.slice(0, 40));
     }
-    const denied = createChatPreview({ feed: f.mount, room: [1, ''], label: senderLabel, mutate: fn => fn(),
-        storage: () => { throw new Error('denied'); } });
+    const denied = createChatPreview({ feed: f.mount, room: [1, ''], scope: PREVIEW_SCOPE, label: senderLabel,
+        mutate: fn => fn(), storage: () => { throw new Error('denied'); } });
     assert.equal(denied.show(), false);
     assert.doesNotThrow(() => denied.save([row('chat:1', 'x')]));
     assert.doesNotThrow(() => denied.failed({ status: 401 }));
@@ -238,7 +281,7 @@ test('the record stays under 200,000 characters and 8 rooms, keeps this room fir
         f.make({ room: [i + 1, ''] }).save(Array.from({ length: 100 }, (_, j) => row(`chat:${j}`, text, { role: 'user' })));
         const raw = f.values.get(PREVIEW_KEY), saved = JSON.parse(raw);
         assert.ok(raw.length <= 200000, `${raw.length} characters`);
-        assert.equal(saved.rooms[0].key, JSON.stringify(['', [i + 1, '']]), 'the room just read is kept first');
+        assert.equal(saved.rooms[0].key, JSON.stringify([PREVIEW_SCOPE, [i + 1, '']]), 'the room just read is kept first');
         assert.ok(saved.rooms.every(room => room.rows.length <= 80 && room.rows.every(item => item.text === text)));
         assert.equal(saved.rooms[0].rows.at(-1).id, 'chat:99', 'its newest rows stay');
     }

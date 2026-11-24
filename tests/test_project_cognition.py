@@ -108,7 +108,8 @@ def test_main_changes_seed_unopened_legacy_projects_before_new_default(room_sett
     assert projects.create_project(root, "new")["cognition"] == {**read_cognition(root), "context_mode": "max"}
 
 
-def test_reconcile_and_registry_recovery_retain_the_copied_cognition(room_settings):
+@pytest.mark.parametrize("loss", ["row", "file"])
+def test_reconcile_and_registry_recovery_retain_the_copied_cognition(room_settings, loss):
     root, client = room_settings
     _legacy_rows(root, "proj_saved")
     (root / "projects/proj_saved").mkdir(parents=True)
@@ -117,10 +118,14 @@ def test_reconcile_and_registry_recovery_retain_the_copied_cognition(room_settin
     assert client.post("/api/owner/context-mode", json={"mode": "low"}).status_code == 200
     projects.reconcile_projects(root)
     path = root / "state/projects.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["projects"] = []
-    path.write_text(json.dumps(data), encoding="utf-8")
-    assert projects.reconcile_projects(root) == 1
+    if loss == "row":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["projects"] = []
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert projects.reconcile_projects(root) == 1
+    else:
+        path.unlink()
+        assert projects.reconcile_projects(root) == 0
     assert read_cognition(root, "proj_saved") == expected
 
 

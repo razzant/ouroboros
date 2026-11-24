@@ -21,12 +21,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ouroboros.browser_boundary import CROSS_ORIGIN_CODE, browser_request_refused
 from ouroboros.config import load_settings
+from ouroboros.settings_integrity import NETWORK_PASSWORD_KEY
 from ouroboros.standalone_page import themed_page
 
 if TYPE_CHECKING:
     from ouroboros.server_web import ServedUI
 
-NETWORK_PASSWORD_KEY = "OUROBOROS_NETWORK_PASSWORD"
 AUTH_COOKIE_NAME = "ouroboros_auth"
 # The widget frame bridge is static host code a route page loads from its opaque frame, which carries no session.
 _PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout", "/api/widget-bridge.js"}

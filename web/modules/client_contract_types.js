@@ -28,6 +28,7 @@
  * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
  * @property {string=} project_id  // per-project memory scope (v6.32.0)
  * @property {Object=} client_surface  // raw sending-surface observables measured at send time (pywebview/ua/viewport/matchMedia/captured_at; optional IANA timezone)
+ * @property {string=} profile_scope  // data-profile digest of the serving document (ouroboros-chat-preview-scope meta); a proven mismatch with the serving connection's scope refuses the frame (#3294)
  */
 /**
  * @typedef {Object} CommandInbound
@@ -40,6 +41,14 @@
  * Emergency request accepted on this connection; does not prove process exit.
  * @typedef {Object} PanicAcceptedOutbound
  * @property {"panic_accepted"} type
+ */
+/**
+ * Issued once per socket at accept, before any broadcast, when the serving connection proves a
+ * data profile; the WS layer adopts it before the generic emit and compares it with the profile
+ * the document proves (#3294). Not a broadcast envelope.
+ * @typedef {Object} ConnectionProfileOutbound
+ * @property {"connection_profile"} type
+ * @property {string} profile_scope
  */
 /**
  * The main interface THIS server generation serves at `/` and `/static`: the applied selection (fixed until
@@ -210,7 +219,8 @@
  */
 
 /**
- * `GET /api/onboarding/bootstrap`: a read that writes nothing.
+ * `GET /api/onboarding/bootstrap`: a read that writes nothing. A boot held for an
+ * interrupted Reset answers 409 `reset_interrupted` instead and serves no setup.
  * @typedef {Object} OnboardingBootstrapResponse
  * @property {boolean} ready
  * @property {SetupBootstrap} bootstrap
@@ -683,6 +693,8 @@
  * @property {string=} error
  * @property {string=} reason_code
  * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
+ * @property {('unavailable'|'restored')=} project_registry  // Main only: its refusal, or the list back from its copy
+ * @property {string=} profile_scope  // the serving generation's frozen scope; a proven foreign value never paints (#3294)
  */
 
 /**
@@ -772,6 +784,41 @@
  * @property {ChatSearchSpan} searched
  * @property {string=} error
  * @property {string=} reason_code
+ */
+
+/**
+ * A room the archive reads: `main`, or a historical Project room the saved records name.
+ * @typedef {Object} ChatArchiveRoom
+ * @property {string} room
+ * @property {string} name
+ * @property {number=} chat_id
+ * @property {string=} project_id
+ * @property {string[]=} evidence
+ */
+
+/**
+ * One archive row as it is read; `id` is the archive's own key, never a row address.
+ * @typedef {Object} ChatArchiveMessage
+ * @property {string} id
+ * @property {'user'|'assistant'|'system'} role
+ * @property {string} text
+ * @property {string} ts
+ * @property {('project_started'|'project_handoff'|'project_completion_summary')=} kind
+ * @property {string[]=} attachments
+ */
+
+/**
+ * `GET /api/chat/archive`: while Main's history refuses for the Project registry, one page of a room's rows that
+ * positive evidence places there, oldest first; `complete` is always false and `limits` names what was left out.
+ * @typedef {Object} ChatArchiveResponse
+ * @property {'available'|'not_needed'} state
+ * @property {string=} room
+ * @property {ChatArchiveRoom[]=} rooms
+ * @property {ChatArchiveMessage[]=} messages
+ * @property {boolean=} has_more
+ * @property {?string=} next_cursor
+ * @property {boolean=} complete
+ * @property {string[]=} limits
  */
 
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { REVIEW_DETAIL_READS, REVIEW_DETAIL_SLOT_MS, createReviewHydrator } from '../modules/review_presentation.js';
 import { createChatHistoryPager } from '../modules/chat_history.js';
-import { ElementStub } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE } from './chat_dom_fixture.js';
 import { quiet, room, until } from './project_read_state_fixture.js';
 import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
@@ -639,7 +639,7 @@ test('the saved preview takes the newest page, then merges what arrived by ident
     const r = openRoom(t, s);
     await r.instance.refreshHistory({ revision: 1 });
     const saved = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
-        .find((entry) => entry.key === JSON.stringify(['', [2, 'room']]))?.rows || []).map((row) => row.text);
+        .find((entry) => entry.key === JSON.stringify([PREVIEW_SCOPE, [2, 'room']]))?.rows || []).map((row) => row.text);
     assert.deepEqual(saved(), ['answer 1']);
     s.work(2);
     s.say(3);

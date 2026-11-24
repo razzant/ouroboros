@@ -16,7 +16,9 @@ from typing import Iterator
 
 # Where the atomic writers place their temp siblings (the data root's own files aside): the
 # temp sweep walks only these, pruning trees with an owner of their own (a child drive goes
-# whole with its drive's GC; checkouts and runtimes are foreign). Never ``observability/``.
+# whole with its drive's GC; checkouts and runtimes are foreign). Never ``observability/``, and
+# never the Project shelves an owner Reset set aside (``projects/.before-reset-*``): they are the
+# owner's record now, no writer of ours works there and nothing automatic removes from them.
 ATOMIC_TEMP_DIRS = ("state", "logs", "memory", "projects", "task_results")
 _ATOMIC_TEMP_PRUNED = (("state", "headless_tasks"), ("state", "review_checkouts"), ("state", "cx"))
 
@@ -61,7 +63,8 @@ def _atomic_temp_candidates(root: pathlib.Path) -> Iterator[pathlib.Path]:
     for rel in ATOMIC_TEMP_DIRS:
         for current, dirs, files in os.walk(root / rel):  # never follows a symlinked directory
             here = pathlib.Path(current)
-            dirs[:] = [name for name in dirs if here / name not in pruned]
+            dirs[:] = [name for name in dirs if here / name not in pruned
+                       and not (rel == "projects" and here == root / rel and name.startswith(".before-reset-"))]
             yield from (here / name for name in files if name.startswith(".") and ".tmp." in name)
 
 

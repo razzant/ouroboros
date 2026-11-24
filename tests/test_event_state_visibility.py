@@ -91,8 +91,18 @@ def test_sweep_stale_temp_files(tmp_path):
     os.utime(old, (aged, aged))
     os.utime(userfile, (aged, aged))
 
+    # Project shelves an owner Reset set aside are the owner's record: nothing in them is swept,
+    # while the same leftover beside a live shelf still is.
+    kept = tmp_path / "projects/.before-reset-20260101-0123abcd/room/.workpad.md.tmp.123.456.abcd1234"
+    live = tmp_path / "projects/room/.workpad.md.tmp.123.456.abcd1234"
+    for leftover in (kept, live):
+        leftover.parent.mkdir(parents=True)
+        leftover.write_text("an invented leftover", encoding="utf-8")
+        os.utime(leftover, (aged, aged))
+
     removed = sweep_stale_temp_files(tmp_path, min_age_sec=3600)
-    assert removed == 1
+    assert removed == 2
+    assert kept.exists() and not live.exists()
     assert not old.exists()      # stale atomic temp reaped
     assert fresh.exists()        # too young — kept (may be an in-flight write)
     assert real.exists()         # not a temp file — untouched

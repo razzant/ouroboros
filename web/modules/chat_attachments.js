@@ -396,9 +396,11 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
     };
 }
 
-// What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
-// host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt'];
+// What a reload keeps of a sent frame: its words, identity, routing, its data-profile claim and the
+// refs of uploads the host already stores — never bytes, never the send-time client_surface (an
+// honest gap on resend). The claim stays the frame's own, so a frame kept under one profile is resent
+// with that profile and refused by a connection serving another (#3294), never re-scoped into it.
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to', 'reply_excerpt', 'profile_scope'];
 
 function draftUpload(raw) {
     const filename = String(raw?.filename || '');
