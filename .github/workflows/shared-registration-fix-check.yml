@@ -1,0 +1,118 @@
+name: shared-registration-fix-check
+
+on:
+  push:
+    branches: [qa/shared-registration-fix-check]
+
+permissions:
+  contents: read
+
+jobs:
+  listed-tests:
+    name: listed tests (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {label: ubuntu, runner: ubuntu-latest, interpreter: shipped}
+          - {label: windows, runner: windows-latest, interpreter: setup-python}
+    env:
+      PRODUCT_COMMIT: 'ca3bc1baaca47d440fd9a616eed82b3f1c319560'
+      PRODUCT_TREE: '998a41daf9a90d1c1eb80e68debd4f3e3a306718'
+      QA_NODEIDS: .github/qa/shared-registration-nodeids.txt
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify and check out the pinned product
+        shell: bash
+        run: |
+          die() { echo "::error::$*"; exit 1; }
+          [[ "$PRODUCT_COMMIT" =~ ^[0-9a-f]{40}$ && "$PRODUCT_TREE" =~ ^[0-9a-f]{40}$ ]] ||
+            die "Set the full product commit and tree SHAs"
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || die "Wrong QA tip"
+          [[ "$(git rev-parse --verify "$PRODUCT_COMMIT^{tree}")" == "$PRODUCT_TREE" ]] ||
+            die "Product commit missing or tree mismatch"
+          git merge-base --is-ancestor "$PRODUCT_COMMIT" HEAD || die "Product is not an ancestor of the QA tip"
+          changed=$(git diff --no-renames --name-only "$PRODUCT_COMMIT" HEAD) || die "Cannot compare product with QA tip"
+          while IFS= read -r path; do
+            case "$path" in
+              ''|.github/workflows/shared-registration-fix-check.yml|"$QA_NODEIDS") ;;
+              *) die "Unexpected path on QA tip: $path" ;;
+            esac
+          done <<< "$changed"
+          git switch --detach "$PRODUCT_COMMIT"
+          [[ "$(git rev-parse HEAD)" == "$PRODUCT_COMMIT" ]] || die "Wrong product checkout"
+          printf 'product=%s tree=%s qa_tip=%s\n' "$PRODUCT_COMMIT" "$PRODUCT_TREE" "$GITHUB_SHA"
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+
+      - name: Run the listed tests
+        id: pytest
+        shell: bash
+        run: |
+          list=$(git show "${GITHUB_SHA}:${QA_NODEIDS}")
+          mapfile -t ids < <(printf '%s\n' "$list" | tr -d '\r')
+          [[ ${#ids[@]} -eq 32 ]] || { echo '::error::Expected 32 node IDs'; exit 1; }
+          rc=0
+          python -m pytest -vv --tb=long -ra --color=no --junitxml=qa-junit.xml "${ids[@]}" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Report and verify each listed result
+        if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        shell: python
+        env:
+          QA_LABEL: ${{ matrix.label }}
+          QA_RC: ${{ steps.pytest.outputs.rc }}
+        run: |
+          import collections, os, subprocess, sys
+          import xml.etree.ElementTree as ET
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          label = os.environ["QA_LABEL"]
+          rc = os.environ.get("QA_RC") or "not recorded"
+          ref = os.environ["GITHUB_SHA"] + ":" + os.environ["QA_NODEIDS"]
+          want = subprocess.check_output(["git", "show", ref], encoding="utf-8").splitlines()
+          try:
+              cases = list(ET.parse("qa-junit.xml").getroot().iter("testcase"))
+          except (OSError, ET.ParseError) as exc:
+              cases = []
+              print(f"No readable JUnit report: {exc}")
+
+          seen = {}
+          for case in cases:
+              key = (case.get("classname"), case.get("name"))
+              detail = next((c for c in case if c.tag in {"error", "failure", "skipped"}), None)
+              if detail is None:
+                  seen.setdefault(key, "passed")
+              else:
+                  seen[key] = "xfail" if detail.get("type") == "pytest.xfail" else detail.tag
+
+          rows = []
+          for nid in want:
+              path, _, name = nid.partition("::")
+              key = (path.removesuffix(".py").replace("/", "."), name)
+              rows.append((nid, seen.get(key, "missing")))
+          tally = collections.Counter(outcome for _, outcome in rows)
+          counts = " ".join(f"{k}={tally[k]}" for k in
+                            ("passed", "failure", "error", "skipped", "xfail", "missing"))
+          head = f"{label}: expected=32 {counts} pytest_rc={rc}"
+          if not cases:
+              head += " — no test cases reported"
+          print(head)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"### {head}\n\n| Outcome | Test |\n|---|---|\n")
+              for nid, outcome in rows:
+                  print(f"{outcome.upper():8} {nid}")
+                  summary.write(f"| {outcome} | `{nid}` |\n")
+          if len(want) != 32 or len(set(want)) != 32 or tally["passed"] != 32 or rc != "0":
+              sys.exit(1)
