@@ -472,8 +472,8 @@ def skill_readiness_for_execution(
             blockers.append(msg)
             owner_action.append(msg)
             reason = ("Use skill_owner_action grant for items the owner actually approved. With automatic grants on, "
-                      "an executable review, qualified author finish, owner Skip, or accepted install/update can "
-                      "grant declared items for these files. A recorded Repair edit admits files but grants nothing.")
+                      "an executable review, qualified author finish, owner Skip, or accepted skill_install/skill_update "
+                      "can grant declared items for these files. A recorded Repair edit admits files but grants nothing.")
             if cause:
                 reason += " The grant for earlier files does not cover the current files. Settings values stay saved."
             next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})

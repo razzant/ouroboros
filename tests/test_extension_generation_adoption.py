@@ -624,6 +624,58 @@ def test_a_worker_adopts_the_disable_direction_too(tmp_path, monkeypatch):
     assert extension_loader.get_tool(surface) is None, "disabled surface survived the adopt"
 
 
+def test_worker_adopts_published_key_changes_without_new_payload(tmp_path, monkeypatch):
+    """The ordinary worker probe follows an exact-byte grant and later loss of a custom setting."""
+    from ouroboros import config
+    from ouroboros.extension_registry_state import _extensions
+    from tests.test_extension_freshness_cross_process import _in_another_process
+
+    name, key = "genprobe", "GENPROBE_FIXTURE_FIELD"
+    configured = {key: True}
+
+    def read_settings(**_kwargs):
+        return configured.copy()
+
+    monkeypatch.setattr(config, "load_settings", read_settings)
+    loaded, repo, root = _prepare_extension(tmp_path, name, _PROBE_PLUGIN, permissions=["tool"], env_from_settings=[key])
+    _as_server()
+    assert extension_loader.reconcile_extension(name, root, read_settings, repo_path=str(repo))["live_loaded"]
+    _as_worker()
+    assert _extensions[name].published_granted_keys == frozenset()
+
+    for give in (True, False):
+        previous = live_extension_fingerprint()
+        assert published_extension_generation(root) == previous
+        _in_another_process(
+            "import os, pathlib\n"
+            "from ouroboros import config, extension_loader\n"
+            "from ouroboros.extension_companion import init_server_process_pid\n"
+            "from ouroboros.skill_loader import save_skill_grants\n"
+            "root = pathlib.Path(drive)\n"
+            "configured = {key: True}\n"
+            "config.load_settings = lambda **_kw: configured.copy()\n"
+            "init_server_process_pid(os.getpid())\n"
+            "def reconcile():\n"
+            "    return extension_loader.reconcile_extension(name, root, config.load_settings, repo_path=repo)\n"
+            "assert reconcile()['live_loaded']\n"
+            "if give:\n"
+            "    save_skill_grants(root, name, [key], content_hash=digest, requested_keys=[key])\n"
+            "else:\n"
+            "    configured.clear()\n"
+            "assert reconcile()['live_loaded']\n",
+            drive=str(root), repo=str(repo), name=name, key=key, digest=loaded.content_hash, give="yes" if give else "",
+        )
+        if not give:
+            configured.clear()
+        adopted = adopt_published_extension_generation(root, read_settings, repo_path=str(repo))
+        assert (adopted["action"], adopted.get("converged")) == ("reloaded", True), adopted
+        assert _extensions[name].content_hash == loaded.content_hash
+        assert _extensions[name].published_granted_keys == ({key} if give else set())
+        assert adopt_published_extension_generation(root, read_settings, repo_path=str(repo)) == {
+            "action": "in_sync", "generation": adopted["generation"],
+        }
+
+
 # ---------------------------------------------------------------------------
 # The three properties that keep the mechanism cheaper than the defect.
 # ---------------------------------------------------------------------------
