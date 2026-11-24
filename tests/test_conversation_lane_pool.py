@@ -412,3 +412,107 @@ def test_a_stop_never_holds_q_while_a_carrier_spawn_holds_the_lifecycle_serializ
     assert not spawn_thread.is_alive() and not stop_thread.is_alive()
     assert failures == [] and spawned == [True] and stopped == [True]
     assert workers.WORKERS[5].lane == LANE_CONVERSATION and 0 not in workers.WORKERS  # the project stop spared the carrier
+
+
+def _host_negative_slot(wid=-2, busy="p-turn", alive=True):
+    proc = Process(None)
+    proc.alive = alive
+    slot = workers.Worker(wid, proc, InputQueue(), busy_task_id=busy, lane=LANE_CONVERSATION,
+                          executor=EXECUTOR_INLINE_DEGRADED)
+    slot.booting = slot.reaping = False
+    workers.WORKERS[wid] = slot
+    return slot
+
+
+class _GuardedTable(dict):
+    """A live ``WORKERS`` table whose Python iterations fail if read without Q."""
+
+    def __iter__(self):
+        assert queue._queue_lock._is_owned(), "live WORKERS iterated outside Q"
+        return super().__iter__()
+
+    def values(self):
+        assert queue._queue_lock._is_owned(), "live WORKERS.values() read outside Q"
+        return super().values()
+
+    def items(self):
+        assert queue._queue_lock._is_owned(), "live WORKERS.items() read outside Q"
+        return super().items()
+
+
+def test_host_negative_pseudo_slot_alone_is_not_a_started_pool(pool, monkeypatch):
+    """#3149: a negative Host pseudo-slot in ``WORKERS`` is never pool membership: availability stays ``no_workers``,
+    neither ``reconcile_conversation_lane`` nor ``reconcile_worker_capacity`` treats the pool as started, and live
+    membership/project reads take Q without holding Q across ``publish_awaiting_rows``."""
+    table = _GuardedTable()
+    monkeypatch.setattr(workers, "WORKERS", table)
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(table))
+    workers.RUNNING.clear()
+    _host_negative_slot(-2, busy="p-turn")
+    with queue._queue_lock:
+        waiting = conversation_lane.admit_turn(task("waiting", _is_direct_chat=True), chat_id=1, client_message_id="cm")
+    assert conversation_lane.publish_awaiting_rows()
+    workers.PENDING.append(task("queued"))
+
+    assert not lifecycle.provides_pool(-2) and lifecycle.provides_pool(0)
+    assert lifecycle.pool_member_count() == 0
+    state = lifecycle._worker_pool_execution_state()
+    assert state["available"] is False and state["disabled_reason"] == "no_workers" and state["worker_count"] == 0
+    assert lifecycle.pool_slot_counts()["lane_carrier_total"] == 0
+
+    conversation_lane.reconcile_conversation_lane()
+    lifecycle.reconcile_worker_capacity(lambda: 1, lifecycle.pool_admission.read())
+    with queue._queue_lock:
+        assert set(workers.WORKERS) == {-2}
+    assert pool.created == [] and waiting["worker_id"] is None and [row["id"] for row in workers.PENDING] == ["queued"]
+
+    spare = add_slot(0, lane=LANE_CONVERSATION)
+    real_publish, barrier_unlocked = conversation_lane.publish_awaiting_rows, []
+    monkeypatch.setattr(conversation_lane, "publish_awaiting_rows",
+                        lambda: barrier_unlocked.append(not queue._queue_lock._is_owned()) or real_publish())
+    conversation_lane.reconcile_conversation_lane()
+    assert barrier_unlocked == [True] and waiting["worker_id"] == 0 and spare.busy_task_id == "waiting"
+    assert 1 in workers.WORKERS  # replenished beside -2, with Q dropped across publish_awaiting_rows
+
+
+def test_sole_physical_worker_beside_a_host_negative_slot_keeps_last_member_protections(pool, monkeypatch):
+    """#3149: ``len(WORKERS) == 2`` with ``{0: worker, -2: host_slot}`` still has ``pool_member_count() == 1``, so
+    quiescence keeps the sole idle worker, critical memory pressure and missing readings hold rather than retire it,
+    and a noncritical reading replaces ``0`` in place while dead negative slots retire without spawning."""
+    import json
+    from ouroboros.host_memory import MemorySnapshot
+    from supervisor.pool_admission import Reading
+
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(4))
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", lambda: None)
+    workers.RUNNING.clear()
+    pool.original.busy_task_id = None
+    host = _host_negative_slot(-2, busy="p-turn")
+
+    lifecycle.reconcile_worker_capacity(lambda: 0)
+    assert pool.original.in_q.empty() and not pool.original.retiring  # sole physical member kept despite -2
+
+    pool.original.proc.alive = False
+    critical = Reading(MemorySnapshot(64 * 2 ** 30, 48 * 2 ** 30, pressure=True), "", "2026-11-24T00:00:00Z")
+    assert lifecycle._replacement_waits(0, pool.original, critical) is True
+    assert workers.WORKERS[0] is pool.original and pool.original.replacement_pressure_held is True
+    rows = [json.loads(line) for line in (pool.root / "logs" / "supervisor.jsonl").read_text().splitlines()]
+    assert rows[-1]["type"] == "worker_replacement_held" and rows[-1]["outcome"] == "kept_last_member"
+
+    dead_host = _host_negative_slot(-3, busy=None, alive=False)
+    assert lifecycle.retire_or_replace_worker(-3, dead_host) == "retired"
+    assert -3 not in workers.WORKERS and pool.created == []
+
+    pool.original.replacement_pressure_held = False
+    assert lifecycle.retire_or_replace_worker(0, pool.original) == ""  # no reading: last dead project member is held
+    assert workers.WORKERS[0] is pool.original and pool.created == []
+
+    reading = lifecycle.pool_admission.read()  # noncritical reading obtained outside Q
+    assert lifecycle.retire_or_replace_worker(0, pool.original, reading=reading) == "replaced"
+    assert len(pool.created) == 1 and workers.WORKERS[0] is not pool.original and workers.WORKERS[0].booting
+    assert workers.WORKERS[-2] is host
+
+    workers.WORKERS.clear()
+    lone_dead_host = _host_negative_slot(-4, busy=None, alive=False)
+    assert lifecycle.retire_or_replace_worker(-4, lone_dead_host) == "retired"
+    assert workers.WORKERS == {} and len(pool.created) == 1

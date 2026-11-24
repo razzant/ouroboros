@@ -211,7 +211,7 @@ def _report_failure(api, what: str, exc: Exception) -> None:
 
 
 _WAITING_FOR = {  # why the bridge has no token, by the binding's state
-    "missing": ("info", "Telegram bot token is not set; the bridge waits for it (Settings → Secrets)."),
+    "missing": ("info", "Telegram bot token is not set; the bridge waits for it (Settings → Accounts and keys)."),
     "unknown": ("warning", "Telegram settings could not be read; the bridge waits until it can read the saved token."),
 }
 

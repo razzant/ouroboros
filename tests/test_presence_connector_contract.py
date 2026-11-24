@@ -64,8 +64,10 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
 
     root, place, _admission, event = focus
     facts = [{"id": fact, "label": "Words you chose appear"}] if places.is_wake_signal(fact) else [fact]
+    # The declaration names the provider of the place it speaks for (``chat``), as a connected place's own does.
     clean, errors = validate_contributions(manifest(
-        [{**PLACE, "facts": facts, "wakes": [fact]}], kind="extension", permissions=["presence"]))
+        [{**PLACE, "destination": "vendor:Chat", "facts": facts, "wakes": [fact]}], kind="extension",
+        permissions=["presence"]))
     assert not errors and clean[0]["wakes"] == [fact]
     rows = project_contributions("bridge", clean, "reviewed")
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: rows)
@@ -89,6 +91,7 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)
     assert response.status_code == 200, response.text
+    first = copy.deepcopy(body)  # the event exactly as its connector sent it
     assert "addressed" not in tasks[0]["metadata"]["focus"]  # the fact reaches the frame; the host draws no verdict
     assert tasks[0]["metadata"]["focus"]["matched_wakes"] == [fact]
     assert not tasks[0]["metadata"]["focus"]["actor"]["owner_confirmed"]
@@ -107,6 +110,13 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
             refused = client.post("/presence/turn", json=body)
             assert refused.status_code == 400 and refused.json()["disposition"] == "rejected"
         assert len(tasks) == 1, "another connector or a stale declaration cannot vouch for a signal"
+        # Its first reply lost, the connector resends after its release retired the signal: the identical event
+        # equals the input the room retained, so it gets the answer its completed turn saved, without a second run.
+        again = client.post("/presence/turn", json=first)
+        assert again.status_code == 200, again.text
+        assert {key: again.json()[key] for key in ("outcome", "text", "turn_ref")} == {
+            key: response.json()[key] for key in ("outcome", "text", "turn_ref")}
+        assert len(tasks) == 1
 
 
 def test_original_late_child_and_continuing_outputs_keep_identity_across_restart(focus, client, monkeypatch):

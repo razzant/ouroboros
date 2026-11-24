@@ -98,7 +98,11 @@ def _resolve_preparation_once(monkeypatch, ctx, binding_id: str) -> None:
     """
     identity = ctx.authenticate_token_payload(TOKEN)
     ctx.require_permission(*identity, "presence")
-    admission = host_service._admit_presence(ctx, identity[0], binding_id)
+    event = _event("fixture")
+    admission = host_service._admit_presence(
+        ctx, identity[0], binding_id, persist_import=False,
+        provider=event["provider"], account_id=event["account_id"],
+        conversation_id=event["conversation_id"], thread_id=event["thread_id"])
     authenticate, require = ctx.authenticate_token_payload, ctx.require_permission
     monkeypatch.setattr(ctx, "authenticate_token_payload",
                         lambda raw: identity if raw == TOKEN else authenticate(raw))

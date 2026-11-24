@@ -271,7 +271,7 @@ def request_may_change_owner(request: Any) -> bool:
 
 # The exact keys the declarative Settings form owns: POST accepts only these and
 # the GET that hydrates the form returns only non-secret fields. The bot token
-# belongs to Secrets; the proxy is a masked, write-only skill setting.
+# belongs to Settings → Accounts and keys; the proxy is a masked, write-only skill setting.
 _SETTINGS_FORM_KEYS = (
     "TELEGRAM_CHAT_ID", "TELEGRAM_MAX_UPDATES_PER_POLL", "TELEGRAM_MIRROR_MODE",
     "TELEGRAM_COMMAND_MODE", "TELEGRAM_SILENT_MODE",
@@ -377,8 +377,8 @@ def make_settings_save(api):
         if owner_ignored:
             message += " Owner binding was left unchanged."
         if server_ignored:
-            message += (" The Bot API server settings were left unchanged: change them from the Settings"
-                        " page on the computer running Ouroboros.")
+            message += (" The Bot API server changes require local access. Open the Telegram skill's settings"
+                        " on the computer running Ouroboros.")
         return JSONResponse({"ok": True, "owner_ignored": owner_ignored, "server_ignored": server_ignored,
                              "message": message})
     return _settings_save

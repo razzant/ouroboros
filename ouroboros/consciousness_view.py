@@ -279,7 +279,8 @@ def read_switch_preview(drive_root, to: str, running=None) -> dict:
     from ouroboros.runtime_limits import get_consciousness_autonomy, get_consciousness_daily_usd
 
     try:
-        records = place_records(drive_root)
+        # A preview only reads: it projects an unimported legacy store in memory and never materializes the import.
+        records = place_records(drive_root, persist_import=False)
         places = list(records.places.values())
         circles = {p.place_id: str((records.circle_context(p.place_id) or {}).get("name") or "") for p in places}
     except Exception:
@@ -568,7 +569,7 @@ def place_views(drive_root, allowance=None) -> list[dict]:
     from ouroboros.place_projection import place_view
     from ouroboros.places import place_records
 
-    records = place_records(drive_root)
+    records = place_records(drive_root, persist_import=False)
     facts = place_facts(drive_root, records.places.values(), full=False)
     return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, facts=facts)
             for place in records.places.values()]

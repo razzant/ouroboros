@@ -1,4 +1,4 @@
-"""What the Telegram bridge is configured with and what actually runs: one status for Settings › Telegram.
+"""What the Telegram bridge is configured with and what actually runs, shown in the Telegram skill's settings.
 
 The bridge's state is the poller's record for the exact token generation in force (lib/telegram_token.py), so a
 saved token is configuration, never "ready" or "refused", until the poller tried that token in this load; the
@@ -143,7 +143,7 @@ def _make_status(api):
 
 _TOKEN_WORDS = {
     "configured": "Saved",
-    "missing": "Not set (Settings → Secrets)",
+    "missing": "Not set (Settings → Accounts and keys)",
     "unknown": "Can't read saved settings now",
 }
 _KEPT_TOKEN = "; the current token stays in use"
@@ -156,7 +156,7 @@ _BRIDGE_WORDS = {
 }
 # What stopped or slowed the bridge, by the reason it recorded, in the owner's words: a refused token, a
 # setting below, the network and an internal failure each name their own next step. Never the raw code.
-_TOKEN_REFUSED = "Stopped: Telegram refused this token; save a new one in Secrets"
+_TOKEN_REFUSED = "Stopped: Telegram refused this token; save a new one in Settings → Accounts and keys"
 _REASON_WORDS = {
     "telegram_rejected": _TOKEN_REFUSED,
     "telegram_startup_failed": _TOKEN_REFUSED,
@@ -201,7 +201,7 @@ _MINIAPP_REASONS = {
 
 
 def connection_components() -> list[dict[str, Any]]:
-    """The Connection form of Settings › Telegram: read-only fields ``_connection_fields`` fills."""
+    """The Connection form in the Telegram skill's settings, filled by ``_connection_fields``."""
     return [
         {"type": "markdown", "text": "Connection: the saved token and what actually runs now."},
         {
@@ -447,7 +447,7 @@ def register_connection(api) -> None:
 
 
 def _connection_fields(api) -> Dict[str, Any]:
-    """What is configured and what actually runs, as the Settings › Telegram Connection form shows it."""
+    """The current configuration and observed status for the Telegram skill's Connection form."""
     bridge = _bridge_status(api)
     mini_app = _read_status(api)
     binding = binding_for(api)
@@ -460,7 +460,10 @@ def _connection_fields(api) -> Dict[str, Any]:
     # Never the raw state: a state this module does not know shows the companion's sentence alone.
     mini_words = _MINIAPP_WORDS.get(mini_state) or (f"{lead}: {sentence}" if lead and sentence else lead
                                                      or sentence or "Unknown")
-    if cause := _MINIAPP_REASONS.get(str(mini_app.get("reason_code") or "")):
+    reason = str(mini_app.get("reason_code") or "")
+    if reason == "public_host_absent" and sentence:
+        mini_words = sentence  # The companion says whether it is rechecking or has begun reconnecting.
+    elif cause := _MINIAPP_REASONS.get(reason):
         at = int(mini_app.get("next_retry_at_epoch") or 0)
         mini_words = cause + (f"; next automatic attempt planned for {_when(at, time.time())}" if at else "")
     if binding.companion in {"retained", "stop_unconfirmed"}:

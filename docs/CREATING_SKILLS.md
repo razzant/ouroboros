@@ -1103,8 +1103,8 @@ tools:
 contributes:
   - id: place
     provides: place
-    label: Slack
-    destination: vendor:Slack
+    label: Slack               # display name; may change
+    destination: vendor:Slack  # stable provider identity (case-insensitive) for existing places, not display copy
     scope: account             # account | conversation
     wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]   # suggestions; the owner edits the list
     source: {route: status, refresh_s: 15}                               # optional status and Connect choices
@@ -1219,12 +1219,14 @@ Status `labels` can name core kinds in the connector's own words; they are safe 
 The sheet merges status labels over manifest labels. A runtime `/identity` check cannot negotiate a
 static manifest.
 
-Negotiate support through `/identity`: `presence_wake_signals: 1` advertises this seam. Older hosts may reject
-the `facts` manifest key, so do not publish signal declarations to a host without support. Intake accepts a
-signal only if the authenticated connector's current live place declaration lists it; another connector's
-declaration, a discovered-but-unloaded declaration, or arbitrary text cannot authorize it. Ordinary core fact
-intake remains compatible. New owner/tool signal choices likewise require that live declaration; existing
-choices remain readable and removable when the connector is off.
+Check `/identity` for `presence_wake_signals: 1` before declaring signals. Older hosts may reject `facts`.
+Intake uses live provider signals; new choices use the place's live declarations. Saved wakes stay removable offline.
+A resend of a settled event with the same payload (negotiated versions and staged file paths aside) gets its saved
+answer even after a release stops declaring a signal it carried; a new event with that signal is refused. On HTTP
+503 `places_unreadable`, resend the same event.
+An eligible unpublished signal retries before capture at any connected place. A proven pending import can
+also defer a core-only wake decision after capture. Retry the same event on HTTP 429 `wake_import_declarations_pending`.
+`/presence/turn` sends `disposition: retry` and `retry_after: 60` seconds. `/call/open` uses its call error envelope.
 
 Signal logic and its parameters belong to the connector's own settings. The host performs the existing fact
 membership matching, stores no new Place field, and does not match message text. A signal does not manufacture

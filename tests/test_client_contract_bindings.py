@@ -484,6 +484,10 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     quiet = {"cause": "off", "word": "Hears only · consciousness off", "note": "…", "door": "consciousness"}
     assert not validate_ingress({**place, "quiet": quiet}, contract_typed_dict("PlaceSummary"))
     assert validate_ingress({**place, "quiet": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
+    assert "wake_review" in _declared("PlaceSummary") and "wake_review" not in place
+    for state in ("pending", "ambiguous"):
+        assert not validate_ingress({**place, "wake_review": state}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "wake_review": "completed"}, contract_typed_dict("PlaceSummary"))
     assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
     assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
     assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))
