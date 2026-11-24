@@ -662,7 +662,8 @@ def test_pending_row_cannot_prove_the_engine_still_has_the_registration(w, path)
     from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
 
     w.engine.store_identity = ""
-    body = {"scope": {"kind": "project", "root": "/shared"}, "prompt": "old request"}
+    root = str(w.root / "shared")  # one native absolute folder: the claim resolves a fresh root before comparing it
+    body = {"scope": {"kind": "project", "root": root}, "prompt": "old request"}
     facts = dict(run_id="", task_id="t-a", idempotency_key="a", invocation_id="a", project_id="p", route="r",
                  request=body, project_owned=False)
     if path == "automatic-recovery":  # the store permits exact replay, but the registration is gone
@@ -670,6 +671,14 @@ def test_pending_row_cannot_prove_the_engine_still_has_the_registration(w, path)
     assert custody.record_start_requested(w.root, **facts)  # old row, no registry observation
     current.mark_removal(w.root, "p", {}, "custody")
     current.mark_removal(w.root, "p", {}, "")
+    # Control: while the engine still lists this folder as "p", the same comparison reads it (a fresh probe: nothing is
+    # recorded or sent); then the registration vanishes, so the refusal below can only be its absence.
+    w.engine.projects[root] = "p"
+    with policy.registration_held(w.root, w.engine, {"project_id": "p", "invocation_id": "probe", "request": body},
+                                  None) as refusal:
+        assert refusal == {}, refusal
+    del w.engine.projects[root]
+    w.engine.lookups.clear()  # the probe's own list read; the refusal below reads it once more
     if path == "automatic-recovery":
         result = _recover_pending_invocation(w.root, w.engine, custody.pending_invocations(w.root)[0])
         assert (result["action"], result["reason"]) == ("invocation_retained", "registration_replaced")
@@ -1133,8 +1142,8 @@ def test_an_ordinary_modern_adoption_records_one_post_and_no_registry_or_history
 def test_engine_confirmation_precedes_the_actor_lock_and_the_claim_holds_both(w, monkeypatch):
     from ouroboros.delegate_start_claims import claimed_start_request
 
-    held, observations = [], []
-    w.engine.projects["/shared"] = "p"
+    held, observations, shared = [], [], str(w.root / "shared")  # one native absolute folder: catalog and request
+    w.engine.projects[shared] = "p"
 
     def watch(module, name):
         real = getattr(module, name)
@@ -1162,7 +1171,7 @@ def test_engine_confirmation_precedes_the_actor_lock_and_the_claim_holds_both(w,
     w.engine.on_lookup = lambda: observations.append(tuple(held))
     assert claimed_start_request(w.root, gateway=w.engine, task_id="t-a", run_id="", invocation_id="a",
         idempotency_key="a", route="r", project_id="p",
-        request={"prompt": "review", "scope": {"kind": "project", "root": "/shared"}}) == (True, {})
+        request={"prompt": "review", "scope": {"kind": "project", "root": shared}}) == (True, {})
     assert observations == [("project_retirement_lock",), ("project_retirement_lock", "actor_decision_lock")]
 
 
