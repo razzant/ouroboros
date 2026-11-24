@@ -545,7 +545,7 @@ def provider_token_counts(raw: Dict[str, Any]) -> dict:
 
 
 class ChatUsageReceipt:
-    """Attempt-bound Chat SSE counters. None means no actual usage object arrived."""
+    """Attempt-bound counters of one Chat or native Messages SSE stream. None means no actual usage object arrived."""
 
     def __init__(self, attempt_id: str):
         self.attempt_id = attempt_id
@@ -556,6 +556,13 @@ class ChatUsageReceipt:
             if self.counts is None:
                 self.counts = {}
             self.counts.update(provider_token_counts(_reported_token_usage(usage)))
+
+    def observe_frame(self, frame: Any) -> None:
+        """One wire frame's usage objects in order: an error's own detail first, so the frame's own object wins."""
+        if isinstance(frame, dict):
+            if isinstance(frame.get("error"), dict):
+                self.observe(frame["error"].get("usage"))
+            self.observe(frame.get("usage"))
 
     def for_attempt(self, attempt_id: str) -> dict | None:
         return self.counts if self.attempt_id == attempt_id else None

@@ -197,13 +197,14 @@ The report is private: source addresses and exact saved request previews are
 not anonymized, even when the existing request redactor masks credentials.
 
 `provider_token_receipt` is optional response evidence from the HTTP parser,
-separate from accounting. Chat SSE resolves aliases in each actual usage frame
-and keeps the latest usable counters in arrival order, including on an unresolved
-attempt. An envelope price alone does not imply a usage frame. The receipt holds
-no text, projected ledger zeros or counters from a neighboring attempt. Missing
-counters stay unknown; an empty receipt means an observed usage object supplied no
-usable count. The native input field keeps its provider-specific meaning. Legacy
-rows and engine-only paths without a parser witness have no receipt.
+separate from accounting. Chat and native Messages SSE resolve aliases in each
+actual usage object and keep the latest usable counters in arrival order,
+including on an unresolved attempt. An envelope price alone does not imply a
+usage object. The receipt holds no text, projected ledger zeros or counters from
+a neighboring attempt. Missing counters stay unknown; an empty receipt means an
+observed usage object supplied no usable count. The native input field keeps its
+provider-specific meaning. Legacy rows and engine-only paths without a parser
+witness have no receipt.
 
 ## 4. Typed exclusions (closed set)
 

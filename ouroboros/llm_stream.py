@@ -313,9 +313,7 @@ class ChatAccumulator(_Accumulator):
             return
         if self.on_generation_id is not None:
             self.on_generation_id(chunk.get("id"))
-        if isinstance(chunk.get("error"), dict):
-            self.token_receipt.observe(chunk["error"].get("usage"))
-        self.token_receipt.observe(chunk.get("usage"))  # the frame's own object wins over its error detail
+        self.token_receipt.observe_frame(chunk)
         if isinstance(chunk.get("error"), dict):
             # The exception carries this frame's total verbatim. Keep the preceding envelope as a fallback.
             _snapshot(self.body, {key: value for key, value in chunk.items()
@@ -469,13 +467,14 @@ class ChatAccumulator(_Accumulator):
 
 
 class AnthropicAccumulator(_Accumulator):
-    def __init__(self):
+    def __init__(self, *, attempt_id: str = ""):
         super().__init__()
         self.body: dict = {}
         self.blocks: dict[int, dict] = {}
         self.open_blocks: set[int] = set()
         self.usage_final = False  # message_delta closes the usage phase, even if no usage was reported
         self.inputs: dict[int, str] = {}
+        self.token_receipt = ChatUsageReceipt(attempt_id)
 
     def accept(self, event: str, data: str) -> None:
         if self.done:
@@ -490,6 +489,11 @@ class AnthropicAccumulator(_Accumulator):
         kind = chunk.get("type")
         if event and event != kind:
             raise IncompleteProviderStream("Native SSE event differs from payload type")
+        if kind in {"error", "message_start", "message_delta"}:
+            # The receipt keeps each usage object the wire actually sent, in wire order, before its frame can raise:
+            # a lower-bound start and an error frame's own included. Money is settled apart from it: an envelope
+            # price is no usage object, and unfinished counters price nothing.
+            self.token_receipt.observe_frame(chunk.get("message") if kind == "message_start" else chunk)
         if kind == "error":
             # message_start's usage is a lower-bound snapshot (final output tokens
             # arrive in message_delta): an aborted native stream keeps its
@@ -698,9 +702,10 @@ class _StreamAssembly:
         self.conflicting_generation_id = ""
         self.generation_binding_error = ""
         self.generation_bound = False
-        self.accumulator = (AnthropicAccumulator() if native else ResponsesAccumulator() if responses else
-                            ChatAccumulator(expected_choices, self.observe_generation,
-                                            attempt_id=self.reservation.attempt_id if self.reservation else ""))
+        attempt_id = self.reservation.attempt_id if self.reservation else ""
+        self.accumulator = (AnthropicAccumulator(attempt_id=attempt_id) if native else
+                            ResponsesAccumulator() if responses else
+                            ChatAccumulator(expected_choices, self.observe_generation, attempt_id=attempt_id))
         self.frames = _SSEFrames()
         self.raw: list[bytes] = []
         headers = getattr(response, "headers", {})
@@ -737,10 +742,14 @@ class _StreamAssembly:
             # Evidence retention must not turn a usable answer into a retry.
             self.generation_binding_error = type(exc).__name__
 
+    def attach_token_receipt(self, carrier: Any) -> None:
+        """The attempt's observed counters ride its error or its reply, apart from any price (Chat, native Messages)."""
+        if (receipt := getattr(self.accumulator, "token_receipt", None)) is not None:
+            carrier._chat_usage_receipt = receipt
+
     def preserve_failure_usage(self, error: BaseException) -> None:
         """Money survives read/close/cancel errors independently of reply completeness."""
-        if isinstance(self.accumulator, ChatAccumulator):
-            error._chat_usage_receipt = self.accumulator.token_receipt
+        self.attach_token_receipt(error)
         usage = self.accumulator.body.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         complete_usage = (self.accumulator.usage_final if isinstance(self.accumulator, AnthropicAccumulator)
@@ -858,8 +867,7 @@ class _StreamAssembly:
     def completed_response(self, body: dict) -> AssembledResponse:
         body["_stream_receipt"] = self.retain(complete=True)
         response = AssembledResponse(body)
-        if isinstance(self.accumulator, ChatAccumulator):
-            response._chat_usage_receipt = self.accumulator.token_receipt
+        self.attach_token_receipt(response)
         return response
 
 
