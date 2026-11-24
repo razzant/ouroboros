@@ -104,7 +104,12 @@ def test_canonical_body_and_event_precede_dispatch(tmp_path, monkeypatch, reques
     else:
         row = _start_rows(tmp_path)[0]
         assert row["prompt_chars"] == len(prompt)
-        assert len(json.dumps(row).encode("utf-8")) < 2_000
+        # The budget weighs the row as its writer stored it (``append_jsonl``: one compact UTF-8 line, newline
+        # included), not a re-serialization with other separators; that one stored line, parsed, is this row.
+        lines = [raw for raw in custody.event_log_path(tmp_path).read_bytes().splitlines(keepends=True)
+                 if json.loads(raw).get("type") == custody.START_REQUESTED]
+        assert len(lines) == 1 and json.loads(lines[0]) == row
+        assert len(lines[0]) < 2_000
         assert order == ["blob", "event", "dispatch"]
 
 
