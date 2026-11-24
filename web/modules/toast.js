@@ -3,6 +3,8 @@ import { tr } from './i18n.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { normalizeTone } from './ui_helpers.js';
 
+const stackObservers = new WeakMap();
+
 function getStack(host = null) {
     let stack = host ? host.querySelector(':scope > .toast-stack--room') : document.getElementById('toast-stack');
     if (!stack) {
@@ -12,18 +14,61 @@ function getStack(host = null) {
         stack.setAttribute('aria-live', 'polite');
         stack.setAttribute('aria-relevant', 'additions');
         (host || document.body).appendChild(stack);
-        // A window that grows or shrinks cuts the column or releases it with no notice coming or going.
-        if (!host && typeof ResizeObserver === 'function') new ResizeObserver(() => markCut(stack)).observe(stack);
+    }
+    // A window that grows or shrinks cuts the column or releases it with no notice coming or going; as it
+    // scrolls, its edge moves over the words. A kept notice that grows or rewraps inside a capped column
+    // shifts every notice below it while the stack's own box stays fixed, so the same observer watches each
+    // global notice too.
+    if (!host && !stackObservers.has(stack) && typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(() => markCut(stack));
+        observer.observe(stack);
+        stackObservers.set(stack, observer);
+        stack.addEventListener('scroll', () => markCut(stack), { passive: true });
     }
     return stack;
 }
 
+const edged = new WeakSet();  // the columns whose words wear an edge now; one that fits has nothing to read or clear
+
+// Words the column's edge cuts fade there, as any scroller's content does (docs/DESIGN.md principle 9, the shared
+// `.scroll-fade-y` recipe in ui.css), and only they: the glass, the sticky close, its ring and the shadow stay whole.
+// What counts is a word actually hidden, never the padding that holds the last shadow. The shared mask is laid over
+// the column's window (style.css), so it ends at the screen's edge, not where the words end out of sight; the window
+// is read from layout places (a toast arriving or gliding is displaced by its own transform).
+function fadeCutWords(stack, scrolls) {
+    if (!scrolls && !edged.has(stack)) return;
+    const from = stack.scrollTop;
+    const to = from + stack.clientHeight;
+    let worn = false;
+    for (const toast of stack.children || []) {
+        const words = toast.firstElementChild;
+        if (!words?.classList?.contains('toast-words') || toast.classList.contains('is-hiding')) continue;
+        const box = words.getBoundingClientRect();
+        const top = toast.offsetTop + box.top - toast.getBoundingClientRect().top;
+        const bottom = top + box.height;
+        const above = scrolls && top < from - 1 && bottom > from;
+        const below = scrolls && bottom > to + 1 && top < to;
+        words.toggleAttribute('data-scroll-above', above);
+        words.toggleAttribute('data-scroll-below', below);
+        if (above || below) {
+            words.style.setProperty('--toast-view-top', `${from - top}px`);
+            words.style.setProperty('--toast-view-height', `${to - from}px`);
+            worn = true;
+        } else {
+            words.style.removeProperty('--toast-view-top');
+            words.style.removeProperty('--toast-view-height');
+        }
+    }
+    if (worn) edged.add(stack); else edged.delete(stack);
+}
+
 // The page's stack ends above the screen's bottom and scrolls past it (style.css); cut there, it is reached by
-// keyboard too, as a wide table is (docs/DESIGN.md). Measured when a notice comes or goes and when the column's box
-// changes size; room stacks keep their place.
+// keyboard too, as a wide table is (docs/DESIGN.md). Measured when a notice comes or goes, when the column's box
+// changes size and while it scrolls; room stacks keep their place.
 function markCut(stack) {
     if (stack.id !== 'toast-stack') return;
     const cut = stack.scrollHeight > stack.clientHeight;
+    fadeCutWords(stack, cut);
     if (cut === stack.hasAttribute('tabindex')) return;
     if (cut) {
         stack.tabIndex = 0;
@@ -44,17 +89,18 @@ function markCut(stack) {
  */
 export function showToast(message, tone = 'info', { ttl = 6000, action = null, haptic: felt = true, dismissLabel = '', host = null } = {}) {
     const stack = getStack(host);
+    const observer = host ? null : stackObservers.get(stack) || null;
     // A notice that cannot expire must always have a visible, keyboard-reachable way out.
-    // Timed acknowledgements keep their quiet single-node shape unless a caller names a close.
+    // Page notices give the shared edge a text box even when they have no close. Room notices keep their layout.
     const effectiveDismissLabel = dismissLabel || (ttl <= 0 ? tr('toast.dismiss', 'Dismiss notice') : '');
     const toast = document.createElement('div');
     const cleanTone = normalizeTone(tone || 'info', 'info');
     if (felt && cleanTone === 'danger') haptic('error');
     toast.className = `toast toast-${cleanTone}`;
     toast.setAttribute('role', cleanTone === 'danger' ? 'alert' : 'status');
-    const words = effectiveDismissLabel ? document.createElement('span') : toast;
+    const words = !host || effectiveDismissLabel ? document.createElement('span') : toast;
     if (words !== toast) {
-        words.className = 'toast-words';
+        words.className = 'toast-words scroll-fade-y';
         toast.append(words);
     }
     words.textContent = message || '';
@@ -62,11 +108,16 @@ export function showToast(message, tone = 'info', { ttl = 6000, action = null, h
     let removalTimer = 0;
     let hovered = false;
     let focused = false;
+    let observed = false;
     const clear = () => { if (timer) { clearTimeout(timer); timer = 0; } };
     const dispose = () => {
         clear();
         clearTimeout(removalTimer);
         globalThis.window?.removeEventListener?.('pagehide', dispose);
+        if (observed) {
+            observed = false;
+            observer.unobserve(toast);
+        }
         toast.remove();
         markCut(stack);
     };
@@ -119,6 +170,10 @@ export function showToast(message, tone = 'info', { ttl = 6000, action = null, h
         toast.append(close);
     }
     stack.appendChild(toast);
+    if (observer) {
+        observer.observe(toast);
+        observed = true;
+    }
     markCut(stack);
     if (ttl > 0) {
         toast.addEventListener('pointerenter', () => { hovered = true; clear(); });

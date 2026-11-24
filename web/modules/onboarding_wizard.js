@@ -13,6 +13,7 @@ import {
 } from './onboarding_agents_step.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindLanguageSettings, saveLanguageChoice } from './settings_language.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './ui_helpers.js';
 import { createModelRolesEditor, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, availableSubagentsEditorHost, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
@@ -121,6 +122,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     const asked = (slot) => ours(slot.stateKey) && previewed[slot.stateKey] === state[slot.stateKey];
     let connectionsEditor = null;
     let footerObserver = null;
+    let disposeErrorFade = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsStep({ offered: STEP_ORDER.includes('skills'), open: () => navigateStep('skills', { restorePosition: true }),
@@ -313,7 +315,11 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         const quick = document.getElementById('quick-start-btn');
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
-        if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+        if (error) {
+            const text = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+            if (error.firstElementChild.textContent !== text) error.firstElementChild.textContent = text;
+            error.toggleAttribute('data-empty', !text);
+        }
         const access = accessRowState({ connected: state.agentsConnected, sources: sourceRead.model_sources || [],
             read: catalogReadState(sourceRead), checking: discovery.pending, readErrors: summarizeReadErrors(sourceRead.errors),
             previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
@@ -933,6 +939,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
     }
 
     function render() {
+        disposeErrorFade?.();
         connectionsEditor?.destroy();
         connectionsEditor = null;
         resetSecretReveals(root);
@@ -953,7 +960,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
                     ${renderStepContent()}
                     ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
-                        <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
+                        <div class="wizard-error scroll-fade-y"${state.error ? '' : ' data-empty'}><div role="status">${escapeHtml(state.error)}</div></div>
                         <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
@@ -972,6 +979,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
             </div>
         `;
         bindEvents();
+        disposeErrorFade = bindScrollFade(root.querySelector('.wizard-error'), { region: 'Setup status' });
         starterSkills.mount(root.querySelector('[data-starter-skills]'));
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
@@ -1461,6 +1469,7 @@ import { checkerFieldsNote, checkerReads, checkerUses, deploymentNote } from './
         discovery.dispose();
         modelRoles.destroy();
         connectionsEditor?.destroy();
+        disposeErrorFade?.();
         footerObserver?.disconnect();
         resetSecretReveals(root);
         starterSkills.destroy();

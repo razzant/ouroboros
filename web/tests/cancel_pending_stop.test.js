@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { taskTerminalSummary } from '../modules/log_events.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, restoreDom, toastMessages, walkCard } from './chat_dom_fixture.js';
 
 // The flat fixture's querySelector does not descend; the card's Stop trigger
 // lives in its actions row.
@@ -95,7 +95,7 @@ async function stopNowAnsweredWith(taskId, cancelStatus, cancelBody, {
             await new Promise((resolve) => setTimeout(resolve, 0));
         }
         await new Promise((resolve) => setTimeout(resolve, 0));
-        const toasts = collect(body, (node) => node?.classList?.contains('toast')).map((node) => node.textContent);
+        const toasts = toastMessages(body);
         return {
             calls, toasts, readDetail: calls.includes(detailRead),
             triggerDisabled: trigger.disabled, disabledWrites,

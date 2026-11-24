@@ -18,7 +18,8 @@ description in a bounded region that scrolls to the text's last paragraph, keeps
 at the prose's size and ink (ordinary dialogs keep theirs) and every per-commit receipt inside collapsed
 Details, and cancels by Escape and by Cancel without applying; Rewrite waits in Details. The third test loads
 the whole SPA (app.js and its sidebar): the panel's Read all follows a description saved while the Dashboard
-is away and a window that narrows (#2934).
+is away and a window that narrows (#2934), and a link the keyboard holds that a column reflow folds away hands
+its focus to Read all.
 """
 import copy
 import json
@@ -369,7 +370,12 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 assert region.locator("li").count() >= 12
                 line = region.locator(".updates-letter-over")
                 assert line.inner_text() == OVER_LINE and line.get_attribute("data-tone") == "warn"
-                assert line.bounding_box()["y"] < region.locator(".updates-letter-body").bounding_box()["y"]
+                dialog_body = region.locator(".updates-letter-body")
+                assert line.bounding_box()["y"] < dialog_body.bounding_box()["y"]
+                assert dialog_body.evaluate(
+                    "el => !el.hasAttribute('data-fold-clipped') && !el.classList.contains('is-open')"
+                    " && getComputedStyle(el).maxHeight === 'none'"
+                ), "Apply dialog copy keeps no fold clamp or mask"
                 plain = dialog.locator(".ui-modal-body > p").inner_text()
                 for fact in ("Git applies this update directly", "Claudexor: 4.8.0 → 4.8.0", "forward-only"):
                     assert fact in plain, fact
@@ -388,8 +394,9 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 shot(page, "04-apply-large")
                 details.locator("summary").click()
                 rows = details.locator(".confirm-dialog-detail-row")
-                # Two rows lead them for this range: its own landed rows were not read, and 7 of its 17 commits carry a receipt.
-                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(attempts) + 1
+                # The range's Commits row leads, then two summary rows (landed rows not read, 7 of 17 receipts),
+                # each listed commit, GitHub checks, its runs, and the unobserved tail.
+                assert rows.count() == 1 + 2 + len(large["qualification"]["commits"]) + 1 + len(attempts) + 1
                 attempt_rows = []
                 for attempt, conclusion in ((2, "success"), (1, "failure")):
                     label = f"{rerun_sha[:8]} post-merge · run ID 42, attempt {attempt}"
@@ -403,8 +410,9 @@ def test_check_and_describe_then_apply_read_the_description_as_prose(engine, wid
                 assert kept.locator("dd").inner_text() == (
                     f"final outcome unknown, last seen in_progress (previously observed) {kept_url}/attempts/1")
                 attempt_rows.append(kept)
-                assert rows.nth(0).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
-                assert "7 of the 17 commits listed here carry one" in rows.nth(1).inner_text()
+                assert rows.nth(0).inner_text().replace("\n", " ") == f"Commits {large['key']['base_sha'][:8]} → {large['key']['target_sha'][:8]}"
+                assert rows.nth(1).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
+                assert "7 of the 17 commits listed here carry one" in rows.nth(2).inner_text()
                 assert "Merge pull request #2384" in details.inner_text() and "No matching run observed" in details.inner_text()
                 unobserved = rows.filter(has=page.get_by_text("No matching run observed", exact=True))
                 assert unobserved.count() == 1 and rerun_sha[:8] not in unobserved.locator("dd").inner_text(), (
@@ -883,7 +891,9 @@ LETTER = """() => {
     const body = document.querySelector('#updates-letter-body'), more = document.querySelector('#updates-letter-more');
     const box = body.getBoundingClientRect(), end = body.lastElementChild.getBoundingClientRect();
     return {height: body.clientHeight, content: body.scrollHeight, open: body.classList.contains('is-open'),
-            more: more.hidden ? null : more.textContent, last: body.lastElementChild.textContent,
+            clipped: body.hasAttribute('data-fold-clipped'), scrollTop: body.scrollTop,
+            more: more.hidden ? null : more.textContent, expanded: more.getAttribute('aria-expanded'),
+            controls: more.getAttribute('aria-controls'), last: body.lastElementChild.textContent,
             lastInView: end.top >= 0 && end.bottom <= Math.min(box.bottom + 1, innerHeight)};
 }"""
 SELECT_LAST = """() => {
@@ -909,20 +919,25 @@ def letter_ui(request, monkeypatch):
 
 
 def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter_ui, tmp_path):
-    """#2934 through app.js and its sidebar at the owner's window: the owner leaves Updates for Chat, the description
-    saved meanwhile arrives by the server's own frame and renders off-page, and the sidebar brings the Dashboard back
-    on Updates (announcing only the page). Read all is offered and opens the whole text to its last paragraph; a
-    passive refresh of the same text keeps the open DOM and the owner's selection; Show less folds it; the subtabs
-    still switch; a short text, read on entry or saved the same way, offers no button until a narrower window folds
-    some of it; on a phone a long text saved behind the Dashboard's list offers Read all once Updates is opened from
-    the list."""
+    """#2934 through app.js and its sidebar at the owner's window: covers away/return, Read all / Show less,
+    passive refresh keeping selection, viewport and column-only resizes, phone list return, straddling-table
+    and tall-child-resize keyboard focus isolation without inerting the preview, a focused link a column reflow
+    folds away handing its focus to Read all (no page scroll, no Enter on a hidden link), keyboard Enter refold
+    focus retention, and Recovery vertical scroll fades (#updates-commits, #updates-official-tags)."""
     ui, engine = letter_ui, letter_ui["engine"]
     output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
     large = FIXTURE["large"]
     # About four lines in the Updates page's column at the owner's width: with Dashboard's list beside the open page
     # (PR #3369) that column is narrower than the whole content area the first two paragraphs were sized for.
     short = FIXTURE["small"]["text"].split("\n\n")[0]
-    current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
+    commits = [
+        {"sha": f"{i:040x}", "short_sha": f"{i:08x}", "date": "2026-11-20 12:00:00 +0300",
+         "message": f"Recovery commit entry {i}"}
+        for i in range(1, 21)
+    ]
+    many_tags = [{"tag": f"v7.{i}.0", "sha": f"{i:040x}"} for i in range(1, 21)]
+    few_tags = many_tags[:2]
+    current = {"status": {**_status(large, {**_letter(large, "ready"), "text": short}), "official_tags": many_tags}}
     sockets = []
 
     def connect(socket):
@@ -933,6 +948,15 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.route_web_socket("**/ws", connect)
     page.route("**/api/update/status", lambda route: route.fulfill(content_type="application/json",
                                                                    body=json.dumps(current["status"])))
+    page.route("**/api/update/description", lambda route: route.fulfill(
+        content_type="application/json",
+        body=json.dumps({"status": "current", "key": large["key"], "checked_key": large["key"],
+                         "update": {**current["status"], "official_tags": few_tags}}),
+    ))
+    page.route("**/api/git/log", lambda route: route.fulfill(
+        content_type="application/json",
+        body=json.dumps({"branch": "ouroboros", "sha": "aaaa1111", "commits": commits, "tags": []}),
+    ))
     page.add_init_script(f"({COUNT_STATUS_READS})()")
 
     def shot(name):
@@ -968,13 +992,14 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.click('[data-dashboard-tab="updates"]')
     shows(short)
     page.evaluate(FRAMES)
-    assert letter("fresh-short")["more"] is None, "a short text read on entry offers no button"
+    fresh = letter("fresh-short")
+    assert fresh["more"] is None and not fresh["clipped"] and fresh["expanded"] == "false" and fresh["controls"] == "updates-letter-body", fresh
 
     # 1. The long description is saved while the owner is in Chat; the sidebar brings the Dashboard back on Updates.
     saved_while_away(large["text"])
     shot("01-returned")
     returned = letter("returned")
-    assert returned["more"] == "Read all" and returned["content"] > returned["height"] > 0, returned
+    assert returned["more"] == "Read all" and returned["clipped"] and returned["expanded"] == "false" and returned["scrollTop"] == 0 and returned["content"] > returned["height"] > 0, returned
 
     # 2. Read all opens the whole text in place, to its last paragraph.
     page.locator("#updates-letter-more").click()
@@ -982,7 +1007,7 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.evaluate(FRAMES)
     shot("02-read-all-end")
     opened = letter("read-all")
-    assert opened["open"] and opened["more"] == "Show less" and opened["content"] <= opened["height"] + 1, opened
+    assert opened["open"] and not opened["clipped"] and opened["more"] == "Show less" and opened["expanded"] == "true" and opened["content"] <= opened["height"] + 1, opened
     assert opened["last"] == large["text"].split("\n\n")[-1] and opened["lastInView"], opened
 
     # 3. A passive refresh of the same text keeps the open text's very nodes and the owner's selection in it.
@@ -993,24 +1018,26 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.wait_for_function(f"statusReads.read >= {read + 2} && {QUIET}")
     page.evaluate(FRAMES)
     assert page.evaluate(KEPT), "the refresh kept the open DOM and the selection"
-    assert letter("refreshed")["more"] == "Show less"
+    refreshed = letter("refreshed")
+    assert refreshed["more"] == "Show less" and not refreshed["clipped"] and refreshed["expanded"] == "true", refreshed
 
     # 4. Show less folds it; switching subtabs away and back keeps the offer.
     page.locator("#updates-letter-more").click()
     folded = letter("show-less")
-    assert not folded["open"] and folded["more"] == "Read all" and folded["content"] > folded["height"], folded
+    assert not folded["open"] and folded["clipped"] and folded["more"] == "Read all" and folded["expanded"] == "false" and folded["scrollTop"] == 0 and folded["content"] > folded["height"], folded
     page.click('[data-dashboard-tab="logs"]')
     assert page.locator("#dashboard-panel-logs").is_visible() and page.locator("#dashboard-panel-updates").is_hidden()
     page.click('[data-dashboard-tab="updates"]')
     page.wait_for_function(QUIET)  # the subtab re-reads the status; the same text keeps its nodes
     page.evaluate(FRAMES)
-    assert letter("subtabs")["more"] == "Read all"
+    subtabs = letter("subtabs")
+    assert subtabs["more"] == "Read all" and subtabs["clipped"], subtabs
 
     # 5. A short text saved the same way offers no button.
     saved_while_away(short)
     shot("03-short-returned")
     back = letter("short-returned")
-    assert back["more"] is None and back["content"] <= back["height"] + 1, back
+    assert back["more"] is None and not back["clipped"] and back["expanded"] == "false" and back["content"] <= back["height"] + 1, back
 
     # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
     # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
@@ -1024,10 +1051,113 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
         page.evaluate(FRAMES)
     shot("04-short-narrow")
     narrow = letter("short-narrow")
-    assert narrow["more"] == "Read all" and narrow["content"] > narrow["height"], narrow
+    assert narrow["more"] == "Read all" and narrow["clipped"] and narrow["expanded"] == "false" and narrow["content"] > narrow["height"], narrow
     page.set_viewport_size(OWNER_WINDOW)
     page.evaluate(FRAMES)
-    assert letter("short-owner-width")["more"] is None
+    owner_width = letter("short-owner-width")
+    assert owner_width["more"] is None and not owner_width["clipped"], owner_width
+
+    # 6b. Column resize WITHOUT viewport resize re-measures data-fold-clipped and Read all in both directions.
+    page.evaluate("() => { window.__resizes = 0; window.addEventListener('resize', () => { window.__resizes += 1; }); }")
+    page.evaluate("() => { document.querySelector('#updates-status-card').style.maxWidth = '200px'; }")
+    page.evaluate(FRAMES)
+    col_narrow = letter("column-narrow")
+    assert page.evaluate("window.__resizes") == 0 and col_narrow["more"] == "Read all" and col_narrow["clipped"], col_narrow
+    page.evaluate("() => { document.querySelector('#updates-status-card').style.maxWidth = ''; }")
+    page.evaluate(FRAMES)
+    col_wide = letter("column-wide")
+    assert page.evaluate("window.__resizes") == 0 and col_wide["more"] is None and not col_wide["clipped"], col_wide
+
+    # 6c. The same column reflow can fold away a link the keyboard holds. It hands its focus to Read all, in place (the
+    # page keeps its scroll), so Enter opens the text instead of following a link nobody can see; opening gives the
+    # authored order back. The window is short and scrolled so that Read all lies below the page's fold: a plain focus
+    # would scroll to it.
+    tab_key = "Alt+Tab" if engine == "webkit" else "Tab"
+    opening_link = '#updates-letter-body a[href="https://example.com/opening"]'
+    reflow_link = '#updates-letter-body a[href="https://example.com/reflow"]'
+    reflow_md = "\n\n".join([
+        "A short [opening link](https://example.com/opening) line.",
+        " ".join(f"reflow{i:02d}" for i in range(1, 41)),
+        "Then the [Reflowed link](https://example.com/reflow) and a few more words after it.",
+        *(f"Closing paragraph {i} keeps the text longer than its folded height." for i in range(1, 5)),
+    ])
+    current["status"] = _status(large, {**_letter(large, "ready"), "text": reflow_md})
+    sockets[-1].send(SAVED)
+    page.wait_for_function(f"document.querySelector('{reflow_link}') !== null")
+    page.set_viewport_size({"width": OWNER_WINDOW["width"], "height": 360})
+    page.add_style_tag(content="*, *::before, *::after { overflow-anchor: none !important; }")
+    page.evaluate(FRAMES)
+    # The page's own scroller: the nearest ancestor that scrolls, else the document.
+    outer_of = """(from) => {
+        for (let n = from.parentElement; n; n = n.parentElement) {
+            if (/(auto|scroll)/.test(getComputedStyle(n).overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+        }
+        return document.scrollingElement;
+    }"""
+    reflow_state = """() => {
+        const body = document.querySelector('#updates-letter-body'), link = body.querySelector('a[href="https://example.com/reflow"]');
+        const more = document.querySelector('#updates-letter-more'), end = body.getBoundingClientRect().bottom;
+        const outer = (__OUTER__)(body);
+        const view = outer === document.scrollingElement ? {top: 0, bottom: innerHeight} : outer.getBoundingClientRect();
+        const active = document.activeElement, rect = link.getBoundingClientRect();
+        return {clipped: body.hasAttribute('data-fold-clipped'), more: more.hidden ? null : more.textContent,
+                linkHidden: rect.top >= end - 1, linkBelow: Math.round(rect.top - end), linkInView: rect.top >= view.top && rect.bottom <= view.bottom,
+                moreBelowView: more.getBoundingClientRect().top >= view.bottom, stop: link.hasAttribute('data-fold-stop'),
+                tabindex: link.getAttribute('tabindex'), active: active.id || active.getAttribute('href') || active.tagName,
+                outerScrolls: outer.scrollHeight > outer.clientHeight + 1, scroll: outer.scrollTop, windowScroll: scrollY,
+                clicks: window.__linkClicks || 0};
+    }""".replace("__OUTER__", outer_of)
+    narrow = "() => { document.querySelector('#updates-status-card').style.maxWidth = '200px'; }"
+    widen = "() => { document.querySelector('#updates-status-card').style.maxWidth = ''; }"
+    page.evaluate("""() => {
+        window.__linkClicks = 0;
+        document.querySelector('#updates-letter-body a[href="https://example.com/reflow"]').addEventListener('click', (event) => {
+            window.__linkClicks += 1; event.preventDefault(); event.stopPropagation();
+        }, true);
+    }""")
+    # A link the reflow leaves in sight keeps the keyboard: only a control newly folded away hands its focus over.
+    page.locator(opening_link).evaluate("link => link.focus({preventScroll: true})")
+    page.evaluate(narrow)
+    page.wait_for_function(f"document.querySelector('{reflow_link}').hasAttribute('data-fold-stop')")
+    page.evaluate(FRAMES)
+    kept = page.evaluate(reflow_state)
+    assert kept["linkHidden"] and kept["stop"] and kept["active"] == "https://example.com/opening", ("a link still in sight keeps focus", kept)
+    page.evaluate(widen)
+    page.wait_for_function(f"!document.querySelector('{reflow_link}').hasAttribute('data-fold-stop')")
+    page.evaluate(FRAMES)
+    # The keyboard reaches the reflow link in order; the page is then scrolled to leave it just inside the visible
+    # bottom edge, with Read all out of view below it.
+    page.keyboard.press(tab_key)
+    page.evaluate("""() => {
+        const link = document.querySelector('#updates-letter-body a[href="https://example.com/reflow"]');
+        link.scrollIntoView({block: 'end'});
+        (__OUTER__)(link).scrollTop += 2;
+    }""".replace("__OUTER__", outer_of))
+    wide_link = page.evaluate(reflow_state)
+    print(f"UPDATE_DESCRIPTION_REFLOW {engine} wide {json.dumps(wide_link)}")
+    assert (wide_link["clipped"] and wide_link["more"] == "Read all" and not wide_link["linkHidden"] and wide_link["linkInView"]
+            and wide_link["moreBelowView"] and wide_link["outerScrolls"] and not wide_link["stop"] and wide_link["tabindex"] is None
+            and wide_link["active"] == "https://example.com/reflow"), wide_link
+    page.evaluate(narrow)
+    page.wait_for_function(f"document.querySelector('{reflow_link}').hasAttribute('data-fold-stop')")
+    page.evaluate(FRAMES)
+    folded_link = page.evaluate(reflow_state)
+    print(f"UPDATE_DESCRIPTION_REFLOW {engine} narrow {json.dumps(folded_link)}")
+    assert folded_link["linkHidden"] and folded_link["linkBelow"] > 100 and folded_link["stop"] and folded_link["tabindex"] == "-1", folded_link
+    assert folded_link["active"] == "updates-letter-more", ("focus left the folded-away link for Read all", folded_link)
+    assert (folded_link["scroll"], folded_link["windowScroll"]) == (wide_link["scroll"], wide_link["windowScroll"]), \
+        ("Read all took focus without scrolling the page", wide_link, folded_link)
+    page.evaluate("document.querySelector('#updates-letter-more').scrollIntoView({block: 'center'})")
+    shot("06-reflow-focus-on-read-all")
+    page.keyboard.press("Enter")
+    opened_link = page.evaluate(reflow_state)
+    assert opened_link["clicks"] == 0, ("Enter followed the link nobody could see", opened_link)
+    assert (opened_link["more"] == "Show less" and not opened_link["clipped"] and not opened_link["stop"]
+            and opened_link["tabindex"] is None and opened_link["active"] == "updates-letter-more"), opened_link
+    page.keyboard.press("Enter")
+    page.evaluate(widen)
+    page.set_viewport_size(OWNER_WINDOW)
+    page.evaluate(FRAMES)
 
     # 7. On a phone the Dashboard's list stands in place of its page. A long description saved while the list shows
     # is measured once the owner opens Updates from the list: pressing the row that is already chosen changes no tab
@@ -1047,7 +1177,189 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     page.evaluate(FRAMES)
     shot("05-long-from-list")
     from_list = letter("long-from-list")
-    assert from_list["more"] == "Read all" and from_list["content"] > from_list["height"] > 0, from_list
+    assert from_list["more"] == "Read all" and from_list["clipped"] and from_list["expanded"] == "false" and from_list["content"] > from_list["height"] > 0, from_list
+
+    # 8. Rich folded preview at owner's width: visible & straddling blocks stay interactive/selectable,
+    #    full text (including below the fold) stays accessible without inert holes, fully out-of-view
+    #    fragments are skipped in Tab order via data-fold-stop/tabindex="-1" with scrollTop === 0,
+    #    growing a child above a link inside the same clamped height reclassifies it, opening restores
+    #    keyboard stops and scroller tabindex, and keyboard Enter refold keeps focus on the toggle.
+    page.set_viewport_size(OWNER_WINDOW)
+    page.evaluate(FRAMES)
+    wide_code_line = " ".join(f"folded_wide_code_{i:02d}" for i in range(1, 16))
+    rich_md = "\n\n".join([
+        "Read [Top link](https://example.com/top) here.",
+        "Media host paragraph above the link.",
+        "Check [Shift link](https://example.com/shift) mid-preview.",
+        "\n".join([
+            "| Col A | Col B | Col C | Col D | Col E | Col F | Col G | Col H |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| [Table visible](https://example.com/tvis) | AlphaLong01 | BetaLong02 | GammaLong03 | DeltaLong04 | EpsilonLong05 | ZetaLong06 | EtaLong07 |",
+            *(f"| Row {i} | AlphaLong0{i} | BetaLong0{i} | GammaLong0{i} | DeltaLong0{i} | EpsilonLong0{i} | ZetaLong0{i} | EtaLong0{i} |" for i in range(2, 7)),
+            "| [Table hidden](https://example.com/thid) | AlphaLong07 | BetaLong07 | GammaLong07 | DeltaLong07 | EpsilonLong07 | ZetaLong07 | EtaLong07 |",
+        ]),
+        "Tail paragraph with [Hidden link](https://example.com/hidden).",
+        "```text\nfolded code block below the edge\n```",
+        f"```text\n{wide_code_line}\n```",
+        "| Tail A | Tail B | Tail C | Tail D | Tail E | Tail F | Tail G | Tail H |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| [Tail table link](https://example.com/ttail) | TailBeta02 | TailGamma03 | TailDelta04 | TailEpsilon05 | TailZeta06 | TailEta07 | TailTheta08 |",
+        "Final line below the fold stays accessible.",
+    ])
+    current["status"] = _status(large, {**_letter(large, "ready"), "text": rich_md})
+    sockets[-1].send(SAVED)
+    page.wait_for_function('document.querySelector(\'#updates-letter-body a[href="https://example.com/ttail"]\') !== null')
+    page.evaluate(FRAMES)
+    rich_state = """() => {
+        const b = document.querySelector('#updates-letter-body');
+        const tables = b.querySelectorAll('.md-table-wrap'), pres = b.querySelectorAll('pre');
+        const nodes = {
+            top: b.querySelector('a[href="https://example.com/top"]'),
+            shift: b.querySelector('a[href="https://example.com/shift"]'),
+            straddleTable: tables[0],
+            tableVis: b.querySelector('a[href="https://example.com/tvis"]'),
+            tableHid: b.querySelector('a[href="https://example.com/thid"]'),
+            hidden: b.querySelector('a[href="https://example.com/hidden"]'),
+            shortPre: pres[0], widePre: pres[1], tailTable: tables[1],
+            tailTableLink: b.querySelector('a[href="https://example.com/ttail"]'),
+        };
+        return {
+            bodyInert: b.inert,
+            inertCount: b.querySelectorAll('[inert], [data-fold-inert]').length,
+            stopped: Object.entries(nodes).filter(([, el]) => el.hasAttribute('data-fold-stop')).map(([k]) => k),
+            tabs: Object.fromEntries(Object.entries(nodes).map(([k, el]) => [k, el.getAttribute('tabindex')])),
+        };
+    }"""
+    closed = page.evaluate(rich_state)
+    assert not closed["bodyInert"] and closed["inertCount"] == 0
+    assert closed["stopped"] == ["tableHid", "hidden", "shortPre", "widePre", "tailTable", "tailTableLink"]
+    assert closed["tabs"] == {
+        "top": None, "shift": None, "straddleTable": "0", "tableVis": None,
+        "tableHid": "-1", "hidden": "-1", "shortPre": "-1", "widePre": "-1", "tailTable": "-1", "tailTableLink": "-1",
+    }
+    # Both visible straddling text and off-fold final text remain selectable/accessible (no inert holes);
+    # sequential Tab skips only stopped off-fold fragments and never scrolls the closed preview.
+    selected = page.evaluate("""() => {
+        const pick = (el) => {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            getSelection().removeAllRanges();
+            getSelection().addRange(range);
+            return getSelection().toString();
+        };
+        const cell = document.querySelector('#updates-letter-body .md-table-wrap td');
+        const finalLine = [...document.querySelectorAll('#updates-letter-body > p')].at(-1);
+        return { visible: pick(cell), finalLine: pick(finalLine), finalInert: finalLine.inert };
+    }""")
+    assert "Table visible" in selected["visible"]
+    assert selected["finalLine"] == "Final line below the fold stays accessible." and selected["finalInert"] is False
+    page.locator('#updates-letter-body a[href="https://example.com/top"]').focus()
+    for expected in (
+        "el => el?.getAttribute('href') === 'https://example.com/shift'",
+        "el => el?.classList.contains('md-table-wrap')",
+        "el => el?.getAttribute('href') === 'https://example.com/tvis'",
+        "el => el?.id === 'updates-letter-more'",
+    ):
+        page.keyboard.press(tab_key)
+        assert page.evaluate(f"({expected})(document.activeElement)"), expected
+    assert page.evaluate("document.querySelector('#updates-letter-body').scrollTop") == 0
+
+    # Growing an existing child above [Shift link] reclassifies it even though the clamped height stays identical.
+    clamped_h = page.evaluate("document.querySelector('#updates-letter-body').clientHeight")
+    page.evaluate("""() => {
+        const media = document.createElement('span');
+        media.style.display = 'block';
+        media.style.height = '140px';
+        document.querySelectorAll('#updates-letter-body > p')[1].appendChild(media);
+    }""")
+    page.evaluate(FRAMES)
+    assert page.evaluate("document.querySelector('#updates-letter-body').clientHeight") == clamped_h
+    shifted = page.evaluate(rich_state)
+    assert shifted["inertCount"] == 0 and "shift" in shifted["stopped"] and shifted["tabs"]["shift"] == "-1"
+
+    # Native pointer click opens all fragments and restores original/scroller tabindex; sequential Tab reaches
+    # previously stopped links and scrollers, and keyboard Enter on focused Show less refolds and keeps focus.
+    page.locator("#updates-letter-more").click()
+    page.evaluate(FRAMES)
+    opened_rich = letter("rich-open")
+    assert opened_rich["open"] and not opened_rich["clipped"] and opened_rich["expanded"] == "true", opened_rich
+    opened = page.evaluate(rich_state)
+    assert opened["inertCount"] == 0 and opened["stopped"] == []
+    assert opened["tabs"] == {
+        "top": None, "shift": None, "straddleTable": "0", "tableVis": None,
+        "tableHid": None, "hidden": None, "shortPre": None, "widePre": "0", "tailTable": "0", "tailTableLink": None,
+    }
+    page.locator('#updates-letter-body a[href="https://example.com/tvis"]').focus()
+    for expected in (
+        "el => el?.getAttribute('href') === 'https://example.com/thid'",
+        "el => el?.getAttribute('href') === 'https://example.com/hidden'",
+        "el => el?.tagName === 'PRE' && el.textContent.includes('folded_wide_code_01')",
+        "el => el?.classList.contains('md-table-wrap') && el.textContent.includes('Tail table link')",
+        "el => el?.getAttribute('href') === 'https://example.com/ttail'",
+        "el => el?.id === 'updates-letter-more'",
+    ):
+        page.keyboard.press(tab_key)
+        assert page.evaluate(f"({expected})(document.activeElement)"), expected
+    assert page.locator("#updates-letter-body > p").last.is_visible()
+    page.locator("#updates-letter-more").focus()
+    page.keyboard.press("Enter")
+    refolded_rich = letter("rich-refold")
+    assert not refolded_rich["open"] and refolded_rich["clipped"] and refolded_rich["expanded"] == "false" and refolded_rich["scrollTop"] == 0, refolded_rich
+    assert page.evaluate("document.activeElement === document.querySelector('#updates-letter-more')")
+    refolded = page.evaluate(rich_state)
+    assert refolded["inertCount"] == 0 and {"hidden", "widePre", "tailTable", "tailTableLink"} <= set(refolded["stopped"])
+    assert all(refolded["tabs"][k] == "-1" for k in ("hidden", "widePre", "tailTable", "tailTableLink"))
+
+    # 9. Recovery vertical scrollers (#updates-commits and #updates-official-tags) track shared scroll fades.
+    scroller_state = """sel => {
+        const el = document.querySelector(sel);
+        return {
+            fadeClass: el.classList.contains('scroll-fade-y'),
+            overflows: el.scrollHeight > el.clientHeight + 1,
+            above: el.hasAttribute('data-scroll-above'),
+            below: el.hasAttribute('data-scroll-below'),
+            tabindex: el.getAttribute('tabindex'),
+            role: el.getAttribute('role'),
+            label: el.getAttribute('aria-label'),
+        };
+    }"""
+    page.locator("details.updates-recovery > summary").click()
+    page.wait_for_function("document.querySelectorAll('#updates-commits .updates-restore-row').length === 20")
+    page.evaluate(FRAMES)
+    commits_short = page.evaluate(scroller_state, "#updates-commits")
+    assert commits_short["fadeClass"] and not commits_short["overflows"] and not commits_short["above"] and not commits_short["below"], commits_short
+    page.locator("#updates-commits-more").click()
+    page.evaluate(FRAMES)
+    commits_top = page.evaluate(scroller_state, "#updates-commits")
+    assert commits_top["overflows"] and not commits_top["above"] and commits_top["below"], commits_top
+    page.evaluate("() => { const el = document.querySelector('#updates-commits'); el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2); }")
+    page.evaluate(FRAMES)
+    assert page.evaluate(scroller_state, "#updates-commits")["above"] and page.evaluate(scroller_state, "#updates-commits")["below"]
+    page.evaluate("() => { const el = document.querySelector('#updates-commits'); el.scrollTop = el.scrollHeight; }")
+    page.evaluate(FRAMES)
+    commits_end = page.evaluate(scroller_state, "#updates-commits")
+    assert commits_end["above"] and not commits_end["below"], commits_end
+    page.locator("#updates-commits-more").click()
+    page.evaluate(FRAMES)
+    commits_collapsed = page.evaluate(scroller_state, "#updates-commits")
+    assert not commits_collapsed["overflows"] and not commits_collapsed["above"] and not commits_collapsed["below"], commits_collapsed
+
+    tags_top = page.evaluate(scroller_state, "#updates-official-tags")
+    assert (tags_top["fadeClass"] and tags_top["overflows"] and not tags_top["above"] and tags_top["below"]
+            and tags_top["tabindex"] == "0" and tags_top["role"] == "region" and tags_top["label"] == "Official releases"), tags_top
+    page.evaluate("() => { const el = document.querySelector('#updates-official-tags'); el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2); }")
+    page.evaluate(FRAMES)
+    assert page.evaluate(scroller_state, "#updates-official-tags")["above"] and page.evaluate(scroller_state, "#updates-official-tags")["below"]
+    page.evaluate("() => { const el = document.querySelector('#updates-official-tags'); el.scrollTop = el.scrollHeight; }")
+    page.evaluate(FRAMES)
+    tags_end = page.evaluate(scroller_state, "#updates-official-tags")
+    assert tags_end["above"] and not tags_end["below"], tags_end
+    page.locator("#updates-letter-action").click()
+    page.wait_for_function("document.querySelectorAll('#updates-official-tags .updates-restore-row').length === 2")
+    page.evaluate(FRAMES)
+    tags_short = page.evaluate(scroller_state, "#updates-official-tags")
+    assert (not tags_short["overflows"] and not tags_short["above"] and not tags_short["below"]
+            and tags_short["tabindex"] is None and tags_short["role"] is None and tags_short["label"] is None), tags_short
 
 
 @pytest.mark.parametrize("channel", ["stable", "qa", "development"])

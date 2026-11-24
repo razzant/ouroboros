@@ -7,6 +7,7 @@ mirror it; the tests read what the page asks for (method, address, body) and wha
 from __future__ import annotations
 
 import copy
+import re
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -766,6 +767,76 @@ def test_a_source_change_reads_the_installed_listing_again(skills_browser, brows
     finally:
         if skills:
             skills.close(browser)
+
+
+@pytest.mark.parametrize("browser_name,theme", [("chromium", "light"), ("webkit", "dark")])
+def test_browse_fades_only_clipped_prose_and_keeps_the_detail_door(skills_browser, browser_name, theme):
+    from playwright.sync_api import expect
+
+    browser = getattr(skills_browser, browser_name).launch(headless=True)
+    try:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        description = (
+            "Check the forecast before heading out. Compare the next few hours to find a dry stretch for a walk, "
+            "or look up the evening forecast in another town before catching a train. The daily view shows when "
+            "the chance of rain rises, while the hourly view helps decide whether to wait it out. See wind and "
+            "temperature alongside the rain forecast before heading to the coast. Ask for a second place to compare "
+            "conditions on either end of a longer trip. A morning summary puts the coldest hour and any change in "
+            "wind direction beside the day's high, so there's time to change plans before leaving the house. "
+            "Save those two places for the next trip."
+        )
+        catalog = copy.deepcopy(CATALOG)
+        catalog["starter"] = {}
+        catalog["items"] = [item for item in catalog["items"] if item["id"] in {"ouroboros/weather", "ouroboros/duckduckgo"}]
+        entry = next(item for item in catalog["items"] if item["id"] == "ouroboros/weather")
+        entry.update(description=description, signals={**entry["signals"], "votes": 50})
+        skills = _open(page, catalog=catalog)
+        page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+        path = "/api/skill-catalog/item/ouroboros/weather"
+        skills.answers[path] = {"about": "Full guide with a forecast example."}
+        _tab(page, "browse")
+        weather = _card(page, "ouroboros/weather")
+        long = weather.locator(".skills-card-purpose")
+        short = _card(page, "ouroboros/duckduckgo").locator(".skills-card-purpose")
+        opener = weather.locator(".skills-read-more")
+
+        expect(opener).to_be_visible()
+        expect(long).to_have_attribute("data-fold-clipped", "")
+        expect(long).to_have_text(description)
+        expect(short).to_be_visible()
+        assert short.evaluate("p => p.scrollHeight <= p.clientHeight && !p.hasAttribute('data-fold-clipped')")
+        expect(long).to_have_css("mask-image", re.compile("linear-gradient"))
+        expect(short).to_have_css("mask-image", "none")
+        expect(opener).to_have_css("mask-image", "none")
+        opener.scroll_into_view_if_needed()
+        capture(page, browser_name, 390, "browse-fold")
+        short.scroll_into_view_if_needed()
+        capture(page, browser_name, 390, "browse-short-control")
+
+        # Below the two-column layout, the same two cards get an entire wide column each.
+        page.set_viewport_size({"width": 620, "height": 844})
+        expect(long).not_to_have_attribute("data-fold-clipped", "")
+        expect(long).to_have_css("mask-image", "none")
+        assert long.evaluate("p => p.scrollHeight <= p.clientHeight")
+        # The catalog text now fits, but the detail has more than the catalog description.
+        expect(opener).to_be_visible()
+        opener.scroll_into_view_if_needed()
+        capture(page, browser_name, 620, "browse-unfolded")
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        expect(long).to_have_attribute("data-fold-clipped", "")
+        _tab(page, "installed")
+        _tab(page, "browse")
+        expect(long).to_have_attribute("data-fold-clipped", "")
+        opener.click()
+        sheet = page.locator(".skills-detail-sheet")
+        expect(sheet.locator(".skills-sheet-about")).to_have_text("Full guide with a forecast example.")
+        assert ("GET", path) in skills.requests
+        page.keyboard.press("Escape")
+        expect(sheet).to_have_count(0)
+        expect(opener).to_be_focused()
+    finally:
+        browser.close()
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1280), ("webkit", 390)])

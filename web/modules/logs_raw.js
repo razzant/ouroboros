@@ -1,4 +1,6 @@
 import { apiFetch, fetchJson } from './api_client.js';
+import { tr } from './i18n.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { downloadBlobViaHostBridge, shellBridgeApi } from './ui_helpers.js';
 import { machineWords } from './utils.js';
 
@@ -8,7 +10,7 @@ import { machineWords } from './utils.js';
 // The record is the last section of the event's one fold (logs.js): opening the fold reads it, closing it lets the
 // page go. Paging shows only for a record of more than one page. The tools are small neutral capsules, as every other
 // Retry is (UI_CONTROL_TEXT_INVENTORY.md).
-export const LOG_RAW_HTML = `<pre class="log-raw" hidden></pre>
+export const LOG_RAW_HTML = `<div class="scroll-fade-focus-frame"><pre class="log-raw scroll-fade-y" hidden></pre></div>
     <div class="log-raw-tools" hidden><div class="log-raw-status ui-status" role="status"></div>
         <div class="log-raw-pages"><button class="btn btn-default btn-sm" data-raw-action="first" type="button" hidden>First page</button>
         <button class="btn btn-default btn-sm" data-raw-action="next" type="button" hidden>Next page</button>
@@ -95,6 +97,7 @@ export function createLogRaw({ visible }) {
         view.shown = data.offset;
         view.pre.textContent = wholeText(data);
         view.pre.scrollTop = 0;
+        view.pre.scrollLeft = 0;
         view.first.disabled = data.offset === 0;
         view.nextButton.disabled = !data.has_more;
         view.first.hidden = view.nextButton.hidden = whole(data);
@@ -176,6 +179,7 @@ export function createLogRaw({ visible }) {
     }
     function close(view) {
         opened.delete(view); release(view);
+        view.disposeFade?.(); view.disposeFade = null;
         view.pre.hidden = true; view.pre.textContent = ''; view.tools.hidden = true;
     }
     async function download(view) {
@@ -214,7 +218,7 @@ export function createLogRaw({ visible }) {
                 status(view, 'This entry changed. Close and reopen its record to read its current source.');
             }
         },
-        remove(root) { for (const view of opened) if (root.contains(view.fold)) { opened.delete(view); release(view); } },
+        remove(root) { for (const view of opened) if (root.contains(view.fold)) { opened.delete(view); release(view); view.disposeFade?.(); view.disposeFade = null; } },
         exposure() {
             for (const view of opened) {
                 if (view.invalid) continue;
@@ -235,6 +239,7 @@ export function createLogRaw({ visible }) {
                 first: fold.querySelector('[data-raw-action="first"]'), nextButton: fold.querySelector('[data-raw-action="next"]'),
                 retry: fold.querySelector('[data-raw-action="retry"]'), download: fold.querySelector('.log-raw-download') };
             opened.add(view); view.pre.hidden = view.tools.hidden = false;
+            view.disposeFade = bindScrollFade(view.pre, { region: tr('logs.raw_record', 'Raw log record') });
             void read(view);
             return true;
         },

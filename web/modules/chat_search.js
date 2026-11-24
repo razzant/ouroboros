@@ -16,6 +16,7 @@ import { fmt, tr } from './i18n.js';
 import { SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { formatMsgTime } from './utils.js';
 import { candidateBox, findIn, queryWords, rangesIn, searchKey, shownRow, snippetOf, wordPieces, wordStream } from './chat_search_words.js';
+import { bindScrollFade, revealPastFade } from './scroll_fade.js';
 
 const DEBOUNCE_MS = 220;
 const PAGE_MATCHES = 20;
@@ -91,6 +92,7 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
     // The list draws each match once while a search reads (a page can hold thousands): `listed` is the matches it
     // draws, a new search's starting a new list, and `chosen` the one option marked selected.
     let listed = null, chosen = null, sizes = null, sized = 0;
+    let disposeListFade = null;
     const id = `chat-find-${++surfaces}`;
 
     function build() {
@@ -116,9 +118,10 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         newer = button('chat-find-newer', UP, 'Previous match, newer (Shift+Enter)');
         const close = button('chat-find-close', SHELL_ICONS.close, 'Close search (Esc)');
         bar.append(glyph, input, count, newer, older, close);
-        list = element('ul', 'chat-find-results', { id: `${id}-results`, role: 'listbox', 'aria-label': 'Matching messages',
+        list = element('ul', 'chat-find-results scroll-fade-y', { id: `${id}-results`, role: 'listbox', 'aria-label': 'Matching messages',
             'data-i18n-authored': '' });
         list.hidden = true;
+        disposeListFade = bindScrollFade(list);
         note = element('div', 'chat-find-note', { role: 'status', 'aria-live': 'polite', 'data-i18n-skip': '' });
         note.hidden = true;  // shown only with something to say (render): the field alone is the sheet's capsule
         root.append(bar, list, note);
@@ -454,7 +457,9 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
         input.setAttribute('aria-expanded', String(Boolean(total)));
         if (active >= 0) {
             input.setAttribute('aria-activedescendant', `${id}-${active}`);
-            list.children[active]?.scrollIntoView?.({ block: 'nearest' });
+            const option = list.children[active];
+            if (option && list.getBoundingClientRect && option.getBoundingClientRect) revealPastFade(list, option);
+            else option?.scrollIntoView?.({ block: 'nearest' });
         } else input.removeAttribute('aria-activedescendant');
         root.toggleAttribute('data-searching', reading);
         const text = noteText();
@@ -511,6 +516,8 @@ export function createChatSearch({ chatId, feed, reveal, present = () => true, a
             if (destroyed) return;
             closeSearch();
             destroyed = true;
+            disposeListFade?.();
+            disposeListFade = null;
             sizes?.disconnect();
             if (sized) cancelAnimationFrame(sized);
             root?.remove();

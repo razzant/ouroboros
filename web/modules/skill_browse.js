@@ -24,7 +24,7 @@ const HIDDEN_KEY = 'ouroboros.skills.recommendedHidden';
 // the Hub entry's), never a typed tag; a catalog category of the same id joins it.
 export const CONNECTORS = 'connectors';
 export const isConnector = (item) => connectsServices(item).length > 0 || (item?.category || []).includes(CONNECTORS);
-const CLAMP_CHARS = 600;
+const READ_MORE_CHARS = 600;
 
 function readHiddenShelf() {
     try { return String(globalThis.localStorage?.getItem(HIDDEN_KEY) || ''); } catch { return ''; }
@@ -168,7 +168,7 @@ export function browseCardState(item, { policy = installPolicy(item), installed 
 /** One Browse card: the shared head, the facts, and the consequence row. */
 export function renderBrowseCard(item, { state, categoryLabels = new Map(), showCategory = true } = {}) {
     const id = escapeHtml(item.id);
-    const long = String(item.description || '').length > CLAMP_CHARS;
+    const long = String(item.description || '').length > READ_MORE_CHARS;
     const marks = [
         item.source_id === 'builtin' ? chipHtml('Built in', 'neutral') : '',
         item.official ? officialMarkHtml() : '',  // explained from this entry (`officialSource`), never a source looked up by id
@@ -181,7 +181,7 @@ export function renderBrowseCard(item, { state, categoryLabels = new Map(), show
     const icon = connects ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(item.icon, 18)}</span>` : '';
     return `<article class="ui-card marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
         <div class="skills-head-title">${icon}<button type="button" class="skills-card-name ui-hit-area" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
-        <p class="skills-card-purpose"${long ? ' data-clamped' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
+        <p class="skills-card-purpose"${long ? ' data-browse-purpose-preview' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
         ${long ? `<button type="button" class="skills-read-more ui-hit-area" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
         <div class="skills-card-meta-lines">
             <div class="skills-card-who"><span data-i18n-authored>${escapeHtml(item.name)}</span> · ${catalogWhoHtml(item)}</div>
@@ -225,7 +225,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             <label class="ui-field-inline skills-browse-filter"><span>Sort</span><select class="ui-control" data-browse-sort aria-label="Sort"></select></label>
             <label class="skills-official-toggle"><span class="ui-switch"><input type="checkbox" role="switch" data-browse-official aria-checked="false"><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></span><span>Official only</span></label>
         </div>`;
-    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories" data-scroll-x></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div><div class="skills-browse-more" data-browse-more hidden><button type="button" class="btn btn-ghost btn-sm" data-browse-action="browse_more">Show more</button></div></div>';
+    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip scroll-fade-x" data-browse-categories role="group" aria-label="Categories" data-scroll-x></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div><div class="skills-browse-more" data-browse-more hidden><button type="button" class="btn btn-ghost btn-sm" data-browse-action="browse_more">Show more</button></div></div>';
     const searchInput = chrome.querySelector('[data-browse-search]');
     const sourceSelect = chrome.querySelector('[data-browse-source]');
     const sortSelect = chrome.querySelector('[data-browse-sort]');
@@ -363,8 +363,15 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         for (const grid of board.querySelectorAll('[data-browse-grid]')) {
             grid.setAttribute('data-masonry', '');
             const order = Array.from(grid.querySelectorAll(':scope > [data-item]')).map((node) => node.dataset.item);
+            const previews = Array.from(grid.querySelectorAll('[data-browse-purpose-preview]'));
             disposers.push(applyMasonry(grid, { itemSelector: ':scope > .marketplace-card', gap: 12, minColumnWidth: 380,
-                keyOf: (node) => node.dataset.item || '', order, onLayout }));
+                keyOf: (node) => node.dataset.item || '', order, onLayout: () => {
+                    // Measure after masonry has placed the cards at their current widths. The separate button can
+                    // still lead to more material in Details even if the catalog description fits here in full.
+                    const clipped = previews.map((node) => node.scrollHeight > node.clientHeight + 1);
+                    previews.forEach((node, idx) => node.toggleAttribute('data-fold-clipped', clipped[idx]));
+                    onLayout?.();
+                } }));
         }
     }
 

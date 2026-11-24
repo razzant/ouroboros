@@ -433,7 +433,7 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
                 range.setStart(text, 40); range.setEnd(text, 120);
                 getSelection().removeAllRanges(); getSelection().addRange(range);
                 window.rawText = text;
-                return {text: pre.textContent, top: pre.scrollTop, selected: getSelection().toString(), status: pre.parentElement.querySelector('.log-raw-status').textContent};
+                return {text: pre.textContent, top: pre.scrollTop, selected: getSelection().toString(), status: pre.closest('.log-fold').querySelector('.log-raw-status').textContent};
             }""")
             assert before["top"] == 200 and len(before["selected"]) == 80
             page.wait_for_timeout(200)
@@ -441,7 +441,7 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
             _nav(page, "dashboard")
             expect(download).to_be_visible()  # its download built again
             after = raw.evaluate("""pre => ({text: pre.textContent, top: pre.scrollTop, sameNode: pre.firstChild === window.rawText,
-                selected: getSelection().toString(), status: pre.parentElement.querySelector('.log-raw-status').textContent})""")
+                selected: getSelection().toString(), status: pre.closest('.log-fold').querySelector('.log-raw-status').textContent})""")
             assert after["text"] == before["text"] and after["sameNode"], "the page on screen is not written again"
             assert abs(after["top"] - before["top"]) <= 2, (before["top"], after["top"])
             assert after["selected"] == before["selected"], "the selection in it stays"

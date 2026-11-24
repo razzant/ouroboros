@@ -1,6 +1,7 @@
-import { fmtInto } from './i18n.js';
+import { fmtInto, tr } from './i18n.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindDialogFocus } from './ui_interactions.js';
+import { bindScrollFade } from './scroll_fade.js';
 
 let activeDialog = null;
 let activeClose = null;
@@ -63,7 +64,7 @@ export function openConfirmDialog({
                     <h3 id="confirm-dialog-title">${escapeHtml(title || 'Confirm action')}</h3>
                 </div>
                 <div class="ui-modal-body">
-                    ${content?.mount ? `<section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section>` : ''}
+                    ${content?.mount ? `<div class="confirm-dialog-content-frame"><section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section></div>` : ''}
                     <p>${escapeHtml(body || 'Continue?')}</p>
                     ${renderConfirmDialogDetails(details)}
                     ${!input ? '' : Array.isArray(choices)
@@ -79,6 +80,7 @@ export function openConfirmDialog({
         let settled = false;
         let disposeFocus = null;
         let disposeContent = null;
+        let disposeContentFade = null;
         const finish = (value) => {
             if (settled) return;
             settled = true;
@@ -86,6 +88,7 @@ export function openConfirmDialog({
             if (activeDialog === backdrop) activeDialog = null;
             if (activeClose === cancel) activeClose = null;
             disposeFocus?.();
+            disposeContentFade?.();
             try { disposeContent?.(); } catch { /* the dialog closes either way */ }
             backdrop.remove();
             resolve(value);
@@ -126,11 +129,19 @@ export function openConfirmDialog({
                 },
             });
             if (typeof disposer === 'function') disposeContent = disposer;
+            // The rendered prose scrolls inside its own bounded region (style.css .confirm-dialog-content); the cue
+            // follows its hidden words. The section keeps its own tabindex and label.
+            const contentEl = backdrop.querySelector('[data-confirm-content]');
+            if (contentEl) {
+                contentEl.classList.add('scroll-fade-y');
+                disposeContentFade = bindScrollFade(contentEl);
+            }
         }
         activeDialog = backdrop;
         activeClose = cancel;
         disposeFocus = bindDialogFocus(backdrop.querySelector('[role="dialog"]'), {
             initialFocus: backdrop.querySelector(input ? '[data-confirm-input]' : '[data-confirm-ok]'),
+            bodyRegion: !input && !details && !content?.mount ? tr('confirm.body_region', 'Confirmation text') : '',
             onEscape: cancel,
         });
         backdrop.querySelector('[data-confirm-input]')?.select?.();

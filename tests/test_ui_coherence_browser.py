@@ -5,10 +5,12 @@ The existing subscription fixture owns the static server, browser and cleanup.
 """
 from __future__ import annotations
 
+from io import BytesIO
 import json
 from urllib.parse import urlparse
 
 import pytest
+from PIL import Image
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import open_settings
@@ -150,38 +152,73 @@ def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_
 
 def test_scroll_fade_tracks_edges_late_content_and_stops_after_disposal(subscription_ui):
     page = open_app(subscription_ui)
-    # Mount only a bounded scroll region; its observer and mask are the production ones.
+    # A flat, high-contrast strip makes the mask's painted alpha measurable. This uses the shipped CSS and binder,
+    # not CSS.supports or computed values alone: some WebKit compositing errors parse but hide the whole box.
     page.evaluate("""async () => {
         const {bindScrollFade} = await import('/static/modules/scroll_fade.js');
-        const el = document.createElement('div');
-        el.id='shell-fade-probe'; el.className='scroll-fade-y';
-        el.style.cssText='position:fixed;z-index:100;left:20px;top:160px;width:300px;height:100px;overflow:auto;background:#17131a';
-        const child=document.createElement('div'); child.textContent='First visible line';
-        el.append(child); document.body.append(el);
-        window.shellFade={el,child,dispose:bindScrollFade(el)};
+        const host = document.createElement('div'), el = document.createElement('div');
+        host.id='shell-fade-probe'; host.style.cssText='position:fixed;z-index:100;left:20px;top:160px;width:100px;height:72px;background:white';
+        el.className='scroll-fade-y scroll-fade-x';
+        el.style.cssText='width:100%;height:100%;overflow:auto;scrollbar-width:none';
+        const child=document.createElement('div'); child.style.background='black';
+        el.append(child); host.append(el); document.body.append(host);
+        window.shellFade={host,el,child,dispose:bindScrollFade(el, {axis:'both',region:'Scroll proof'})};
     }""")
-    state = """() => {const e=shellFade.el;return [e.hasAttribute('data-scroll-above'),e.hasAttribute('data-scroll-below')]}"""
-    page.wait_for_function("""() => getComputedStyle(shellFade.el).getPropertyValue('--scroll-fade-top').trim()==='0px'""")
-    assert page.evaluate(state) == [False, False]
-    page.evaluate("shellFade.child.style.height='500px'")
-    page.wait_for_function("shellFade.el.hasAttribute('data-scroll-below')")
-    assert page.evaluate(state) == [False, True]
-    page.evaluate("shellFade.el.scrollTop=200")
-    page.wait_for_function("shellFade.el.hasAttribute('data-scroll-above')")
-    assert page.evaluate(state) == [True, True]
+    box = page.locator('#shell-fade-probe')
+    edges = """() => ['above', 'below', 'start', 'end'].map(key => shellFade.el.hasAttribute('data-scroll-' + key))"""
+
+    def wait_edges(values):
+        page.wait_for_function(f"values => JSON.stringify(({edges})()) === JSON.stringify(values)", arg=values)
+
+    def ink():
+        image = Image.open(BytesIO(box.screenshot(scale='css'))).convert('L')
+        # Middle, the four edge midpoints, and where the bottom and right masks intersect.
+        return [image.getpixel(point) for point in ((50, 36), (50, 2), (50, 69), (2, 36), (97, 36), (97, 69))]
+
+    wait_edges([False, False, False, False])
+    assert page.evaluate("getComputedStyle(shellFade.el).maskImage") == 'none'
+    assert not page.evaluate("shellFade.el.hasAttribute('tabindex')")
+    page.evaluate("Object.assign(shellFade.child.style,{height:'500px',width:'500px'})")
+    wait_edges([False, True, False, True])
+    center, top, bottom, left, right, corner = ink()
+    assert max(center, top, left) < 15 and min(bottom, right) > 175 and corner > max(bottom, right)
+    assert page.evaluate("shellFade.el.tabIndex === 0 && shellFade.el.getAttribute('aria-label') === 'Scroll proof'")
+    page.evaluate("() => shellFade.el.scrollTo(200, 200)")
+    wait_edges([True, True, True, True])
+    center, top, bottom, left, right, corner = ink()
+    assert center < 15 and min(top, bottom, left, right) > 175 and corner > max(bottom, right)
     setup_browser.capture(page, "shell-scroll-middle")
-    page.evaluate("shellFade.el.scrollTop=shellFade.el.scrollHeight")
-    page.wait_for_function("!shellFade.el.hasAttribute('data-scroll-below')")
-    assert page.evaluate(state) == [True, False]
+    page.evaluate("() => shellFade.el.scrollTo(900, 900)")
+    wait_edges([True, False, True, False])
+    center, top, bottom, left, right, corner = ink()
+    assert max(center, bottom, right, corner) < 15 and min(left, top) > 175
+    page.evaluate("""() => {shellFade.el.style.direction='rtl'; shellFade.el.scrollTo(0, 0);
+        shellFade.el.dispatchEvent(new Event('scroll'));}""")
+    wait_edges([False, True, False, True])
+    center, top, bottom, left, right, _ = ink()
+    assert max(center, top, right) < 15 and min(bottom, left) > 175, 'logical RTL end fades on the physical left'
     page.evaluate("shellFade.el.replaceChildren(document.createTextNode('New short content'))")
-    page.wait_for_function("!shellFade.el.hasAttribute('data-scroll-above')")
-    assert page.evaluate(state) == [False, False]
+    wait_edges([False, False, False, False])
+    assert not page.evaluate("shellFade.el.hasAttribute('tabindex')")
+    # The box stays the same size and a naked text node isn't an observed size. An in-place code rewrite can
+    # create and remove true horizontal overflow while leaving the viewport and its child list unchanged.
+    page.evaluate("shellFade.el.style.whiteSpace='pre'; shellFade.el.firstChild.data='literal code '.repeat(80)")
+    wait_edges([False, False, False, True])
+    page.evaluate("shellFade.el.firstChild.data='Short again'")
+    wait_edges([False, False, False, False])
     page.evaluate("""() => {shellFade.dispose();shellFade.el.append(shellFade.child);
         shellFade.child.style.height='1000px';shellFade.el.scrollTop=100;
         shellFade.el.dispatchEvent(new Event('scroll'));}""")
     page.wait_for_timeout(100)  # beyond the observer/rAF turns that would repaint without disposal
-    assert page.evaluate(state) == [False, False]
-    page.evaluate("shellFade.el.remove()")
+    assert page.evaluate(edges) == [False, False, False, False]
+
+    page.evaluate("""() => {const {el,child} = shellFade; el.className=''; el.style.overflow='clip';
+        el.replaceChildren(child); el.setAttribute('data-fold-clipped','');}""")
+    center, top, bottom, left, right, corner = ink()
+    assert max(center, top, left, right) < 15 and min(bottom, corner) > 175, 'a stationary fold fades only at its foot'
+    page.evaluate("shellFade.el.removeAttribute('data-fold-clipped')")
+    assert max(ink()) < 15, 'opening the fold leaves crisp text again, without JS scroll state'
+    page.evaluate("shellFade.host.remove()")
 
 
 @pytest.mark.parametrize("height", [260, 600])
@@ -1136,3 +1173,134 @@ def test_evolution_start_says_a_refused_send_and_returns_focus(subscription_ui):
     page.wait_for_function('() => document.activeElement === document.getElementById("evo-start")')
     assert held[0].request.post_data_json == {'cmd': '/evolve on', 'ui_control': {'name': 'evolution_start'}}
     setup_browser.capture(page, 'evolution-start-refused')
+
+
+# ---- The fade's shape: chrome stays whole, only text disappears (owner 22.11, the Read all lane) --------------------
+
+from ouroboros.test_evidence import diagnostic_directory
+
+@pytest.fixture(params=["chromium", "webkit"])
+def fade_shape_ui(request, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    return request.getfixturevalue("subscription_ui")
+
+
+def _fade_mask(locator):
+    return locator.evaluate("el => getComputedStyle(el).maskImage")
+
+
+FADE_WORDS = "dictated word " * 120
+
+
+def test_dictation_offer_transcript_is_a_keyboard_stop_only_while_overflowed(fade_shape_ui, tmp_path):
+    page = open_app(fade_shape_ui)
+    page.set_default_timeout(10_000)
+    page.evaluate("""async () => {
+        const src = [...document.scripts].find(s => s.type === 'module').src;
+        const mod = await import(new URL('modules/voice_controls.js', src).href);
+        const input = document.querySelector('#chat-input');
+        const slot = document.querySelector('[data-composer-voice]');
+        let capture = null;
+        const speech = {selected: () => ({available: true, key: 'fixture:stt', destinationLabel: 'On this computer'}),
+                        list: () => [], onChange: () => () => {}};
+        window.__voiceDispose = mod.bindVoiceControls({
+            composer: {voiceSlot: slot, input, insertAtCursor: value => { input.value = value; }},
+            speech,
+            makeDictation: callbacks => { capture = callbacks;
+                return {start: async () => {}, stop: async () => {}, cancel: () => {}, suspend: () => {}, destroy: () => {}}; },
+        });
+        window.__offer = text => capture.onTranscript({kind: 'offer', text});
+    }""")
+    page.evaluate("text => window.__offer(text)", FADE_WORDS)
+    words = page.locator(".voice-offer-text")
+    words.wait_for()
+    page.wait_for_function("el => el.hasAttribute('data-scroll-below')", arg=words.element_handle())
+    assert words.get_attribute("tabindex") == "0" and words.get_attribute("role") == "region"
+    assert words.get_attribute("aria-label") == "Dictated words"
+    assert "linear-gradient" in _fade_mask(words)
+    page.keyboard.press("Tab")
+    page.evaluate("() => document.activeElement.blur()")
+    box = words.bounding_box()
+    clip = {"x": box["x"] + 12, "y": box["y"] - 5, "width": box["width"] - 24, "height": 5}
+    before = page.screenshot(clip=clip, animations="disabled")
+    words.evaluate("el => el.focus({preventScroll: true})")
+    assert words.evaluate("el => el.matches(':focus-visible') && el.hasAttribute('data-scroll-below')")
+    after = page.screenshot(clip=clip, animations="disabled")
+    engine = page.context.browser.browser_type.name
+    frames = diagnostic_directory(tmp_path / "frames", "fade-shape", publish=True)
+    page.screenshot(path=str(frames / f"voice-focus-{engine}.png"), animations="disabled")
+    ink = words.evaluate("el => { const probe = document.createElement('span'); probe.style.color = 'var(--focus-accent-border)'; "
+                         "el.parentNode.append(probe); const color = getComputedStyle(probe).color; probe.remove(); return color; }")
+    rgb = tuple(int(part) for part in ink.removeprefix("rgb(").removesuffix(")").split(", "))
+    def ring_pixels(png):
+        return sum(count for count, color in Image.open(BytesIO(png)).convert("RGB").getcolors() if color == rgb)
+    assert ring_pixels(after) - ring_pixels(before) > 32, "the focus ring does not paint outside the dictated words"
+    assert "linear-gradient" in _fade_mask(words)
+    page.keyboard.press("PageDown")
+    page.wait_for_function("el => el.scrollTop > 0", arg=words.element_handle())
+    pre_tab = page.evaluate("""el => ({tab: el.getAttribute('tabindex'), role: el.getAttribute('role'),
+        focused: document.activeElement === el, over: el.scrollHeight - el.clientHeight})""", words.element_handle())
+    assert page.evaluate("""() => { const w = document.querySelector('.voice-offer-text');
+        const b = document.querySelector('.voice-offer-actions button');
+        return !!(w.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); }"""), \
+        "the transcript stop must precede Insert/Copy/Discard in tab order"
+    chain = []
+    for _ in range(4):
+        page.keyboard.press("Tab")
+        chain.append(page.evaluate("""() => { const a = document.activeElement;
+            return {inWords: a === document.querySelector('.voice-offer-text'),
+                    inActions: !!a?.closest?.('.voice-offer-actions'),
+                    text: (a?.textContent || '').trim().slice(0, 24)}; }"""))
+    if engine == "chromium":
+        assert chain[0]["inActions"] and chain[0]["text"] == "Insert", (pre_tab, chain)
+    else:
+        # Headless WebKit wraps from the region to the document start and passes over the offer's
+        # visible, enabled buttons on this fixture; the stop itself stays reachable by Tab, which is
+        # what the binder promises. Recorded, not papered over: see the handoff's WebKit note.
+        assert any(step["inWords"] for step in chain), (pre_tab, chain)
+    page.screenshot(path=str(frames / f"voice-offer-{engine}.png"))
+    page.evaluate("text => window.__offer(text)", "ok")
+    fitted = page.locator(".voice-offer-text")
+    fitted.wait_for()
+    page.wait_for_function(
+        "el => !el.hasAttribute('tabindex') && !el.hasAttribute('role') && !el.hasAttribute('data-scroll-below')",
+        arg=fitted.element_handle())
+    assert _fade_mask(fitted) == "none"
+    page.locator("#chat-input").focus()
+    short_walk = []
+    for _ in range(8):
+        page.keyboard.press("Tab")
+        short_walk.append(page.evaluate("() => !!document.activeElement?.closest?.('.voice-offer-actions')"))
+    print(f"FADE_SHORT_OFFER_TAB_HITS {engine} {short_walk}")
+    page.locator(".voice-offer-actions button").first.focus()
+    page.keyboard.press("Escape")
+    page.wait_for_selector(".voice-offer", state="detached")
+    page.evaluate("window.__voiceDispose()")
+
+
+# A page the app focuses so its keys scroll it (tabindex="-1") is a landing point, not a keyboard stop: its keys never
+# take its fade away (ui.css). Settings' page takes the focus of a click in it, and PageDown then scrolls it.
+_LANDING = """el => { const s = getComputedStyle(el);
+    return {focused: document.activeElement === el, keyboard: el.matches(':focus-visible'), top: el.scrollTop,
+            tabindex: el.getAttribute('tabindex'), above: el.hasAttribute('data-scroll-above'),
+            below: el.hasAttribute('data-scroll-below'), mask: s.maskImage !== 'none' ? s.maskImage : s.webkitMaskImage,
+            outline: s.outlineStyle}; }"""
+
+
+def test_settings_page_keeps_its_fade_when_a_click_then_page_down_scroll_it(fade_shape_ui, tmp_path):
+    page = open_app(fade_shape_ui, "/#settings")
+    page.set_viewport_size({"width": 1100, "height": 420})
+    level = open_settings(page, "permissions")
+    page.wait_for_function("el => el.hasAttribute('data-scroll-below')", arg=level.element_handle())
+    lead = level.locator(".settings-page-lead").first
+    lead.click()
+    page.keyboard.press("PageDown")
+    page.wait_for_function("el => el.scrollTop > 0 && el.hasAttribute('data-scroll-above')", arg=level.element_handle())
+    seen = level.evaluate(_LANDING)
+    engine = page.context.browser.browser_type.name
+    frames = diagnostic_directory(tmp_path / "frames", "fade-shape", publish=True)
+    page.screenshot(path=str(frames / f"settings-page-down-{engine}.png"), animations="disabled")
+    (frames / f"settings-page-down-{engine}.json").write_text(json.dumps(seen, indent=1), encoding="utf-8")
+    assert seen["focused"] and seen["tabindex"] == "-1", seen
+    assert "linear-gradient" in seen["mask"], ("the page's keys keep its fade", seen)
+    assert seen["outline"] == "none", seen

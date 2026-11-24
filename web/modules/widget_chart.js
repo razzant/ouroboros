@@ -195,7 +195,7 @@ export function renderChartDataTable(config, label, expanded) {
         const count = datasets.reduce((length, dataset) => Math.max(length, values(dataset).length), labels.length);
         rows = Array.from({ length: count }, (_, idx) => `<tr><th scope="row">${escapeHtml(labels[idx] ?? (unlabelledRadial ? idx + 1 : '—'))}</th>${datasets.map((dataset) => cell(dataset.label, chartRange(values(dataset)[idx]))).join('')}</tr>`).join('');
     }
-    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap scroll-fade-x" data-widget-scroll-region="${escapeHtml(label)}"><table class="widget-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
 function safeTableHref(value) {

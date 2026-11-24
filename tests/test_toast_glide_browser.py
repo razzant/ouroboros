@@ -1,17 +1,13 @@
-"""A dismissed toast fades where it stood while the toasts that stay glide into its place (docs/DESIGN.md §10
-"Motion"; the R2 board: the one below jumped 53 px in one frame). With reduced motion they take their place at once.
-Notices kept until dismissed stay reachable whole, however many the page's stack holds.
-Uses the static-server fixture; never starts the runtime or reads live data."""
+"""Toast motion (DESIGN "Motion") and the shared edge on cut words alone (principle 9).
+Uses the real UI on a static-server fixture; never starts the runtime or reads live data."""
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
-from tests.test_design_system_gate_browser import save_evidence, seed_page, settle
+from tests.test_design_system_gate_browser import rest, save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -23,6 +19,14 @@ def toast_ui(request, monkeypatch):
     ui = request.getfixturevalue('subscription_ui')
     ui['engine'] = request.param
     return ui
+
+
+def _open(ui, width, height, *, touch=False):
+    page = seed_page(ui, width, height, touch=touch)
+    page.goto(ui['url'] + '/')
+    page.wait_for_selector('#chat-input', state='attached')
+    settle(page)
+    return page
 
 
 # Three toasts, then the first dismissed: the top of the one that was second, frame by frame, until it rests.
@@ -43,14 +47,11 @@ GLIDE = """async () => {
 
 @pytest.mark.parametrize('reduce', [False, True], ids=['motion', 'reduced'])
 def test_a_dismissed_toast_leaves_and_the_one_below_glides_into_its_place(toast_ui, tmp_path, reduce):
-    page = seed_page(toast_ui, 1280, 800, touch=False)
+    page = _open(toast_ui, 1280, 800)
     if reduce:
         page.emulate_media(reduced_motion='reduce')
     facts = {'engine': toast_ui['engine'], 'reduce': reduce}
     try:
-        page.goto(toast_ui['url'] + '/')
-        page.wait_for_selector('#chat-input', state='attached')
-        settle(page)
         facts.update(page.evaluate(GLIDE))
     finally:
         save_evidence(tmp_path, f'toast-glide-{toast_ui["engine"]}-{"reduced" if reduce else "motion"}', facts)
@@ -69,163 +70,344 @@ def test_a_dismissed_toast_leaves_and_the_one_below_glides_into_its_place(toast_
         assert sum(1 for step in steps if step < -0.5) >= 3, ('it glides over several frames', steps)
 
 
-# Two Resumes of different tasks, each answered with a gap: the owner's own Resume door (its toasts, the real
-# stylesheet and theme); only the server's answers are given.
-TWO_GAPS = """async () => {
-    const { resumeTaskAction } = await import('/static/modules/task_control_menu.js');
-    const gaps = (id) => ({ count: 23, rows: Array.from({ length: 20 }, (_, n) => (
-        { task_id: `${id}-${String(n).padStart(2, '0')}-${'f'.repeat(24)}`, reason: 'body_unreadable' })) });
-    for (const id of ['gap-a', 'gap-b']) {
-        await resumeTaskAction(id, { resume: async () => ({ ok: true, membership_gaps: gaps(id) }) });
-    }
-}"""
-WARNINGS_ONLY = """() => {
-    const toasts = [...document.querySelectorAll('#toast-stack .toast')];
-    return toasts.length === 2 && toasts.every((el) => el.classList.contains('toast-warn'));
-}"""
-# The page's stack and each notice in it, where they are laid out now.
-REACH = """() => {
-    const stack = document.getElementById('toast-stack');
-    const rect = (el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
-    return {
-        stack: { ...rect(stack), scroll_top: stack.scrollTop, scroll_end: stack.scrollHeight - stack.clientHeight,
-                 role: stack.getAttribute('role'), label: stack.getAttribute('aria-label') },
-        toasts: [...stack.querySelectorAll('.toast')].map((el) => ({ ...rect(el), close: rect(el.querySelector('.toast-dismiss')) })),
-        focused_close: [...stack.querySelectorAll('.toast-dismiss')].indexOf(document.activeElement),
-        view: { width: innerWidth, height: innerHeight }, theme: document.documentElement.dataset.theme,
-    };
-}"""
-
-
-def _shown(box, facts):
-    """Wholly inside the window and inside the part of the page's stack it shows."""
-    view, stack = facts['view'], facts['stack']
-    return (max(0, stack['top']) - 0.5 <= box['top'] and box['bottom'] <= min(view['height'], stack['bottom']) + 0.5
-            and -0.5 <= box['left'] and box['right'] <= view['width'] + 0.5)
-
-
-SCROLL = """() => { const s = document.getElementById('toast-stack');
-    return { top: s.scrollTop, end: s.scrollHeight - s.clientHeight, focused: document.activeElement === s }; }"""
-
-
-def _key_scroll(page, key, to_end):
-    """Press ``key`` on the focused stack and read its smooth scroll until it rests where the key sends it."""
-    page.keyboard.press(key)
-    for _ in range(50):
-        page.wait_for_timeout(100)
-        state = page.evaluate(SCROLL)
-        if (state['top'] >= state['end'] - 1) if to_end else state['top'] == 0:
-            return state
-    raise AssertionError((key, 'the keyboard did not scroll the notices there', state))
-
-
-# The wide window has room for both warnings at the body type (14 px, #2886 4ace565ef), their shadow room included,
-# under a mouse or a finger (whose 44 px close button narrows their words).
+STACK = '#toast-stack'
+CLOSE = f'{STACK} .toast-dismiss'
+PHONE = (320, 568)
 WIDE = (1280, 1000)
+CLEAR, ABOVE, BELOW, BOTH = (False, False), (True, False), (False, True), (True, True)
 
 
-@pytest.mark.parametrize('width,height', [(320, 568), WIDE], ids=['phone', 'wide'])
+# Inspect actual boxes/paint together. The text may take a mask; its window, glass and controls must not.
+STACK_VIEW = """stack => {
+    const maskAxisY = (s, prop, fallback) => {
+        const raw = (s.getPropertyValue(prop) || s.getPropertyValue(fallback) || '').trim();
+        if (!raw) return '';
+        const parts = raw.split(/\\s+/);
+        return parts[1] ?? parts[0] ?? '';
+    };
+    const box = (el) => {
+        if (!el) return null;
+        const { top, bottom, left, right, height } = el.getBoundingClientRect();
+        return { top, bottom, left, right, height, mask: getComputedStyle(el).maskImage };
+    };
+    const stackBox = box(stack);
+    const stackCut = stackBox.top + stack.clientTop + stack.clientHeight;
+    const toasts = [...stack.querySelectorAll('.toast')].map(toast => {
+        const words = toast.querySelector('.toast-words');
+        const wordsBox = box(words);
+        if (wordsBox) {
+            const ws = getComputedStyle(words);
+            const posY = maskAxisY(ws, 'mask-position', '-webkit-mask-position')
+                || (ws.getPropertyValue('mask-position-y') || ws.getPropertyValue('-webkit-mask-position-y') || '').trim();
+            const sizeY = maskAxisY(ws, 'mask-size', '-webkit-mask-size');
+            wordsBox.mask_position_y = posY;
+            wordsBox.mask_size_y = sizeY;
+            wordsBox.mask_end = (posY.endsWith('px') || posY === '0') && sizeY.endsWith('px')
+                ? parseFloat(posY) + parseFloat(sizeY) : null;
+            wordsBox.measured_cut = stackCut - wordsBox.top;
+        }
+        return { ...box(toast), words: wordsBox, close: box(toast.querySelector('.toast-dismiss')),
+            action: box(toast.querySelector('.toast-action')),
+            above: words?.hasAttribute('data-scroll-above'), below: words?.hasAttribute('data-scroll-below') };
+    });
+    return { ...stackBox, client_height: stack.clientHeight,
+        scroll_top: stack.scrollTop, scroll_end: stack.scrollHeight - stack.clientHeight,
+        limit: parseFloat(getComputedStyle(stack).maxHeight), role: stack.getAttribute('role'),
+        label: stack.getAttribute('aria-label'), view_width: innerWidth, view_height: innerHeight, toasts,
+        focused_close: [...stack.querySelectorAll('.toast-dismiss')].indexOf(document.activeElement) };
+}"""
+
+
+def _read(page):
+    return page.locator(STACK).evaluate(STACK_VIEW)
+
+
+def _assert_edges(view, *edges):
+    toasts = view['toasts']
+    assert [(t['above'], t['below']) for t in toasts] == list(edges), view
+    assert view['mask'] == 'none', view
+    for toast, edge in zip(toasts, edges):
+        assert (toast['words']['mask'] != 'none') == any(edge), view
+        assert all(b['mask'] == 'none' for b in (toast, toast['close'], toast['action']) if b), view
+
+
+def _shown(box, view):
+    return (max(0, view['top']) - 0.5 <= box['top'] and box['bottom'] <= min(view['view_height'], view['bottom']) + 0.5
+            and -0.5 <= box['left'] and box['right'] <= view['view_width'] + 0.5)
+
+
+def _scroll(page, top):
+    page.locator(STACK).evaluate("(s, top) => s.scrollTo({ top, behavior: 'instant' })", top)
+    settle(page)
+
+
+def _wait_edge(page, end):
+    page.wait_for_function("""end => {
+        const s = document.getElementById('toast-stack');
+        return end ? s.scrollTop >= s.scrollHeight - s.clientHeight - 1 : s.scrollTop === 0;
+    }""", arg=end)
+    settle(page)
+
+
+def _two_kept_warnings(page):
+    # Two actual Resume results; only their server answers are supplied. The transient "Resuming" toasts expire.
+    page.evaluate("""async () => {
+        const { resumeTaskAction } = await import('/static/modules/task_control_menu.js');
+        for (const id of ['gap-a', 'gap-b']) {
+            const rows = Array.from({ length: 20 }, (_, n) => ({ task_id: `${id}-${n}-${'f'.repeat(24)}`,
+                reason: 'body_unreadable' }));
+            await resumeTaskAction(id, { resume: async () => ({ ok: true, membership_gaps: { count: 23, rows } }) });
+        }
+    }""")
+    page.wait_for_function("""() => {
+        const toasts = [...document.querySelectorAll('#toast-stack .toast')];
+        return toasts.length === 2 && toasts.every(el => el.classList.contains('toast-warn'));
+    }""", timeout=15_000)
+    rest(page)
+
+
+@pytest.mark.parametrize('width,height', [PHONE, WIDE], ids=['phone', 'wide'])
 def test_two_kept_warnings_are_reached_whole_by_wheel_and_keyboard(toast_ui, tmp_path, width, height):
-    """Once both "Resuming" lines time out, the two gap warnings stay. On a phone the page's stack ends above the
-    screen's bottom and scrolls: a wheel over a notice reaches the second close button and the last word, the keyboard
-    reaches them too, and scrolling dismisses nothing. A wide window has room for both: nothing there scrolls."""
-    page = seed_page(toast_ui, width, height)
-    evidence = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path)))
-    evidence.mkdir(parents=True, exist_ok=True)
+    page = _open(toast_ui, width, height, touch=True)
     name = f'toast-reach-{toast_ui["engine"]}-{width}x{height}'
-    facts = {'engine': toast_ui['engine']}
+    facts = {}
     try:
-        page.goto(toast_ui['url'] + '/')
-        page.wait_for_selector('#chat-input', state='attached')
-        settle(page)
-        page.evaluate(TWO_GAPS)
-        page.wait_for_function(WARNINGS_ONLY, timeout=15_000)
+        _two_kept_warnings(page)
+        wide = (width, height) == WIDE
         for theme in ('dark', 'light'):
             page.emulate_media(color_scheme=theme)
             page.wait_for_function('(t) => document.documentElement.dataset.theme === t', arg=theme)
-            settle(page)
-            facts[theme] = page.evaluate(REACH)
-            page.screenshot(path=str(evidence / f'{name}-{theme}.png'))
-        at_rest = facts['light']
-        assert abs(at_rest['toasts'][0]['top'] - 76) < 0.5, ('the first notice keeps its place under the header', at_rest)
-        if width > 720:  # room for both: nothing scrolls and both keep their place, 18 px from the right
-            assert at_rest['stack']['scroll_end'] <= 0 and at_rest['stack']['role'] is None, at_rest
-            assert all(abs(width - 18 - t['right']) < 0.5 for t in at_rest['toasts']), at_rest
-            assert all(_shown(t, at_rest) and _shown(t['close'], at_rest) for t in at_rest['toasts']), at_rest
+            rest(page)
+            facts[theme] = start = _read(page)
+            _assert_edges(start, CLEAR if wide else BELOW, CLEAR)
+            setup_browser.capture(page, f'{name}-{theme}')
+        first = start['toasts'][0]
+        assert abs(first['top'] - 76) < 0.5, start
+        if wide:
+            assert start['scroll_end'] == 0 and start['role'] is None, start
+            assert all(abs(width - 18 - t['right']) < 0.5 and _shown(t, start) and _shown(t['close'], start)
+                       for t in start['toasts']), start
             return
-        assert at_rest['stack']['bottom'] <= height - 18 + 0.5, ('the stack ends above the screen', at_rest)
-        assert at_rest['stack']['scroll_end'] > 0, at_rest
-        assert (at_rest['stack']['role'], at_rest['stack']['label']) == ('region', 'Scrollable notices'), at_rest
-        assert _shown(at_rest['toasts'][0]['close'], at_rest), ('the first close button is on screen', at_rest)
-        first = at_rest['toasts'][0]
-        scrolled = "(end) => { const s = document.getElementById('toast-stack'); " \
-                   "return end ? s.scrollTop >= s.scrollHeight - s.clientHeight - 1 : s.scrollTop === 0; }"
-        page.mouse.move((first['left'] + first['right']) / 2, (first['top'] + at_rest['stack']['bottom']) / 2)
-        for _ in range(40):
-            page.mouse.wheel(0, 300)
-            settle(page)
-        page.wait_for_function(scrolled, arg=True)
-        page.mouse.move(1, height / 2)  # the wheel at rest, off the notices: the keys below are the keyboard's alone
-        page.wait_for_timeout(300)
-        facts['wheel'] = wheeled = page.evaluate(REACH)
-        assert len(wheeled['toasts']) == 2, ('a scroll dismisses nothing', wheeled)
-        assert wheeled['stack']['scroll_top'] >= wheeled['stack']['scroll_end'] - 1, ('the wheel reached the end', wheeled)
-        assert _shown(wheeled['toasts'][1]['close'], wheeled), wheeled
-        assert wheeled['toasts'][1]['bottom'] <= wheeled['stack']['bottom'] + 0.5, ('the last word is shown', wheeled)
-        page.screenshot(path=str(evidence / f'{name}-wheel-end.png'))
-        page.locator('#toast-stack').focus()  # the region the keyboard reaches
-        facts['keys'] = [_key_scroll(page, 'Home', False), _key_scroll(page, 'End', True)]  # End: the last word
-        page.screenshot(path=str(evidence / f'{name}-region-end.png'))
-        facts['keys'].append(_key_scroll(page, 'Home', False))
-        page.locator('#toast-stack .toast-dismiss').first.focus()
-        # From the first notice's close button to the second's: Safari moves between buttons with Option-Tab.
+        assert start['bottom'] <= height - 18 + 0.5 and start['scroll_end'] > 0, start
+        assert (start['role'], start['label']) == ('region', 'Scrollable notices') and _shown(first['close'], start), start
+        page.mouse.move((first['left'] + first['right']) / 2, (first['top'] + start['bottom']) / 2)
+        page.mouse.wheel(0, start['scroll_end'] + height)
+        _wait_edge(page, True)
+        facts['wheel-end'] = end = _read(page)
+        _assert_edges(end, CLEAR, ABOVE)  # both notices remain; the last word and its close are in sight
+        assert end['toasts'][1]['words']['bottom'] <= end['bottom'] + 0.5 and _shown(end['toasts'][1]['close'], end), end
+        setup_browser.capture(page, f'{name}-wheel-end')
+        page.mouse.move(1, height / 2)
+        page.locator(STACK).focus()
+        for key, at_end in (('Home', False), ('End', True), ('Home', False)):
+            page.keyboard.press(key)
+            _wait_edge(page, at_end)
+        words = first['words']
+        both = (words['top'] + words['bottom'] - start['top'] - start['bottom']) / 2
+        for state, y, edges in (('middle', start['scroll_end'] / 2, (ABOVE, BELOW)), ('both', both, (BOTH, CLEAR))):
+            _scroll(page, y)
+            facts[state] = _read(page)
+            _assert_edges(facts[state], *edges)
+        _scroll(page, 0)
+        page.locator(CLOSE).first.focus()
+        # Safari moves between buttons with Option-Tab.
         page.keyboard.press('Alt+Tab' if toast_ui['engine'] == 'webkit' else 'Tab')
-        page.wait_for_timeout(500)
-        facts['focus'] = focused = page.evaluate(REACH)
+        rest(page)
+        facts['focus'] = focused = _read(page)
         assert focused['focused_close'] == 1 and _shown(focused['toasts'][1]['close'], focused), focused
-        page.screenshot(path=str(evidence / f'{name}-second-close-focused.png'))
+        assert focused['toasts'][1]['close']['mask'] == 'none', focused
         page.keyboard.press('Enter')
+        page.locator(CLOSE).last.wait_for(state='visible')
         page.wait_for_function("() => document.querySelectorAll('#toast-stack .toast').length === 1")
+        _scroll(page, 0)
+        facts['last'] = last = _read(page)
+        close = last['toasts'][0]['close']
+        assert _shown(close, last), last
+        page.mouse.click((close['left'] + close['right']) / 2, (close['top'] + close['bottom']) / 2)
+        page.locator(CLOSE).wait_for(state='detached')
     finally:
         save_evidence(tmp_path, name, facts)
         page.close()
 
 
-MARGIN_HIT = """([x, y]) => document.getElementById('toast-stack').contains(document.elementFromPoint(x, y))"""
-
-
 def test_the_kept_column_follows_the_window_and_scrolls_from_its_margin(toast_ui, tmp_path):
-    """On a phone the two kept warnings cut the column, and a wheel over its empty left margin scrolls it in every
-    engine. A window that grows releases the column with no notice coming or going, and its margin lets the page
-    through again; shrunk back, the column is cut again."""
-    page = seed_page(toast_ui, 320, 568)
-    facts = {'engine': toast_ui['engine']}
+    page = _open(toast_ui, *PHONE, touch=True)
+    facts = {}
     try:
-        page.goto(toast_ui['url'] + '/')
-        page.wait_for_selector('#chat-input', state='attached')
-        settle(page)
-        page.evaluate(TWO_GAPS)
-        page.wait_for_function(WARNINGS_ONLY, timeout=15_000)
-        settle(page)
-        facts['cut'] = cut = page.evaluate(REACH)
-        assert cut['stack']['role'] == 'region' and cut['stack']['scroll_end'] > 0, cut
-        first = cut['toasts'][0]
-        margin = ((cut['stack']['left'] + first['left']) / 2, (cut['stack']['top'] + cut['stack']['bottom']) / 2)
-        assert page.evaluate(MARGIN_HIT, list(margin)), ('the cut column takes the pointer in its margin', facts)
-        page.mouse.move(*margin)
-        for _ in range(10):
-            page.mouse.wheel(0, 300)
+        _two_kept_warnings(page)
+        for size, cut in ((PHONE, True), (WIDE, False), (PHONE, True)):
+            page.set_viewport_size(dict(zip(('width', 'height'), size)))
+            page.locator(f'{STACK}[role="region"]').wait_for(state='attached' if cut else 'detached')
             settle(page)
-        facts['margin_wheel'] = page.evaluate(SCROLL)
-        assert facts['margin_wheel']['top'] > 0, ('a wheel over the margin scrolls the cut column', facts)
-        page.set_viewport_size({'width': WIDE[0], 'height': WIDE[1]})
-        page.wait_for_function("() => !document.getElementById('toast-stack').hasAttribute('tabindex')")
-        facts['wide'] = wide = page.evaluate(REACH)
-        first = wide['toasts'][0]
-        margin = ((wide['stack']['left'] + first['left']) / 2, (wide['stack']['top'] + wide['stack']['bottom']) / 2)
-        assert not page.evaluate(MARGIN_HIT, list(margin)), ('the released column lets the page through', facts)
-        page.set_viewport_size({'width': 320, 'height': 568})
-        page.wait_for_function("() => document.getElementById('toast-stack').getAttribute('role') === 'region'")
+            view = _read(page)
+            facts[f'{size}-{len(facts)}'] = view
+            _assert_edges(view, BELOW if cut else CLEAR, CLEAR)
+            x = (view['left'] + view['toasts'][0]['left']) / 2
+            y = (view['top'] + view['bottom']) / 2
+            assert page.locator(STACK).evaluate('(s, [x, y]) => s.contains(document.elementFromPoint(x, y))', [x, y]) == cut
+            if cut and len(facts) == 1:
+                page.mouse.move(x, y)
+                page.mouse.wheel(0, 300)
+                page.wait_for_function("() => document.getElementById('toast-stack').scrollTop > 0")
     finally:
         save_evidence(tmp_path, f'toast-follow-{toast_ui["engine"]}', facts)
+        page.close()
+
+
+def test_padding_the_column_scrolls_into_cuts_no_word_and_shows_no_edge(toast_ui, tmp_path):
+    page = _open(toast_ui, *PHONE)
+    facts = {}
+    try:
+        page.evaluate("""async () => {
+            const { showToast } = await import('/static/modules/toast.js');
+            showToast('The record is still available. '.repeat(36), 'warn', { ttl: 0 });
+        }""")
+        # Measure once, then resize the window around this same notice. A word-count search confounds font metrics
+        # with the real distinction: the shadow reserve can overflow even though every word and control fits.
+        rest(page)
+        facts['initial'] = initial = _read(page)
+        content = initial['bottom'] - initial['top'] + initial['scroll_end']
+        padded_height = round(PHONE[1] + content - initial['limit'] - 6)
+        page.set_viewport_size({'width': PHONE[0], 'height': padded_height})
+        page.locator(f'{STACK}[role="region"]').wait_for(state='attached')
+        for edge, y in (('start', 0), ('end', 1e5)):
+            _scroll(page, y)
+            facts[edge] = padded = _read(page)
+            assert 0 < padded['scroll_end'] <= 11 and _shown(padded['toasts'][0]['words'], padded), padded
+            _assert_edges(padded, CLEAR)
+        # Shrink the window just past the bottom text line, without changing or replacing the warning.
+        word_bottom = initial['toasts'][0]['words']['bottom'] - initial['top']
+        page.set_viewport_size({'width': PHONE[0], 'height': round(PHONE[1] + word_bottom - initial['limit'] - 20)})
+        _scroll(page, 0)
+        page.wait_for_selector(f'{STACK} .toast-words[data-scroll-below]')
+        facts['cut'] = _read(page)
+        _assert_edges(facts['cut'], BELOW)
+        _scroll(page, 1e5)
+        facts['cut-end'] = _read(page)
+        _assert_edges(facts['cut-end'], ABOVE)
+        assert facts['cut-end']['toasts'][0]['words']['bottom'] <= facts['cut-end']['bottom'], facts
+    finally:
+        save_evidence(tmp_path, f'toast-padding-{toast_ui["engine"]}', facts)
+        page.close()
+
+
+def test_a_cut_notice_keeps_its_action_and_close_clear_and_operable(toast_ui, tmp_path):
+    page = _open(toast_ui, *PHONE)
+    name = f'toast-action-{toast_ui["engine"]}'
+    facts = {}
+    try:
+        page.evaluate("""async () => {
+            const { showToast } = await import('/static/modules/toast.js');
+            window.started = 0;
+            const text = 'The saved work can be started again. '.repeat(46);
+            showToast(text, 'warn', { ttl: 0, action: { label: 'Start it', run() { window.started += 1; } } });
+        }""")
+        rest(page)
+        for state, y, edge in (('start', 0, BELOW), ('end', 1e5, ABOVE)):
+            _scroll(page, y)
+            facts[state] = view = _read(page)
+            _assert_edges(view, edge)
+            assert _shown(view['toasts'][0]['close'], view), view
+        assert _shown(view['toasts'][0]['action'], view), view
+        setup_browser.capture(page, f'{name}-end')
+        page.get_by_role('button', name='Start it').click()
+        page.locator(f'{STACK} .toast').wait_for(state='detached')
+        assert page.evaluate('window.started') == 1
+    finally:
+        save_evidence(tmp_path, name, facts)
+        page.close()
+
+
+def test_a_timed_hurry_refusal_fades_only_where_its_words_are_cut(toast_ui, tmp_path):
+    """A real task-control refusal can fill the page's notice stack without adding a close button."""
+    page = _open(toast_ui, *PHONE)
+    name = f'toast-timed-{toast_ui["engine"]}'
+    facts = {}
+    reason = 'The task has not confirmed its current action. ' * 36 + 'Try again after confirmation.'
+    try:
+        page.route('**/api/tasks/timed-hurry/hurry', lambda route: route.fulfill(json={'ok': False, 'error': reason}))
+        assert page.evaluate("""async () => {
+            const { hurryTaskAction } = await import('/static/modules/task_control_menu.js');
+            return hurryTaskAction('timed-hurry');
+        }""") is False
+        toast = page.locator(f'{STACK} .toast')
+        rest(page)
+        assert toast.inner_text() == 'Hurry up: refused — ' + reason
+        assert toast.get_attribute('role') == 'alert' and not toast.get_by_role('button').count()
+        facts['cut'] = cut = _read(page)
+        setup_browser.capture(page, f'{name}-cut')
+        _assert_edges(cut, BELOW)
+        assert cut['role'] == 'region' and cut['toasts'][0]['words']['bottom'] > cut['bottom'], cut
+        toast.wait_for(state='detached', timeout=8000)
+        assert not page.locator(STACK).get_attribute('role'), 'expiry releases the scroll region'
+        page.evaluate("""async () => (await import('/static/modules/toast.js')).showToast('Saved.', 'ok') && true""")
+        rest(page)
+        facts['short'] = short = _read(page)
+        _assert_edges(short, CLEAR)
+        assert short['role'] is None and short['scroll_end'] == 0 and _shown(short['toasts'][0]['words'], short), short
+        assert not toast.get_by_role('button').count()
+        toast.click()
+        toast.wait_for(state='detached')
+    finally:
+        save_evidence(tmp_path, name, facts)
+        page.close()
+
+
+def test_resizing_a_kept_notice_moves_the_fade_with_the_cut_words_below(toast_ui, tmp_path):
+    """When the first of two kept global notices grows in a capped column, the second notice's
+    cut words shift while stack height stays fixed; their painted mask end must follow the real cut."""
+    page = _open(toast_ui, *PHONE)
+    name = f'toast-sibling-resize-{toast_ui["engine"]}'
+    facts = {}
+    short_first = 'First kept notice.'
+    longer_first = (
+        'First kept notice translated into longer prose that wraps onto several extra lines '
+        'and pushes the notice below it further past the edge.'
+    )
+    long_second = 'Second kept notice continues past the bottom of the column. ' * 14
+    try:
+        page.evaluate("""async ([firstText, secondText]) => {
+            const { showToast } = await import('/static/modules/toast.js');
+            showToast(firstText, 'warn', { ttl: 0 });
+            showToast(secondText, 'warn', { ttl: 0 });
+        }""", [short_first, long_second])
+        rest(page)
+        facts['before'] = before = _read(page)
+        setup_browser.capture(page, f'{name}-before')
+        assert before['scroll_end'] > 0, before
+        _assert_edges(before, CLEAR, BELOW)
+        before_second = before['toasts'][1]['words']
+        assert before_second['mask_end'] is not None, before
+        assert abs(before_second['mask_end'] - before_second['measured_cut']) <= 1.0, before
+
+        page.evaluate("""text => {
+            document.querySelector('#toast-stack .toast .toast-words').textContent = text;
+        }""", longer_first)
+        rest(page)
+        facts['after'] = after = _read(page)
+        setup_browser.capture(page, f'{name}-after')
+        assert abs(after['height'] - before['height']) < 0.5 and after['client_height'] == before['client_height'], facts
+        after_second = after['toasts'][1]['words']
+        shift = after_second['top'] - before_second['top']
+        facts['shift'] = shift
+        assert shift > 32, ('first notice growth must shift the second notice past the 32px fade', facts)
+        _assert_edges(after, CLEAR, BELOW)
+        assert after_second['mask_end'] is not None, facts
+        assert abs(after_second['mask_end'] - after_second['measured_cut']) <= 1.0, (
+            'relative painted mask end must match the measured cut after sibling resize', facts,
+        )
+
+        page.evaluate("""text => {
+            document.querySelector('#toast-stack .toast .toast-words').textContent = text;
+        }""", short_first)
+        rest(page)
+        facts['restored'] = restored = _read(page)
+        assert abs(restored['height'] - before['height']) < 0.5, facts
+        restored_second = restored['toasts'][1]['words']
+        assert abs(restored_second['top'] - before_second['top']) <= 1.0, facts
+        _assert_edges(restored, CLEAR, BELOW)
+        assert restored_second['mask_end'] is not None, facts
+        assert abs(restored_second['mask_end'] - restored_second['measured_cut']) <= 1.0, facts
+    finally:
+        save_evidence(tmp_path, name, facts)
         page.close()

@@ -3,7 +3,7 @@
 // Layout is not measured here (no engine); the structure, the roles, the words-as-text and the toggle are.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { clampWithToggle, createRelayQuote, createReplyQuote, normalizeReplyRef, replySnippet } from '../modules/chat_reply_quote.js';
+import { clampWithToggle, createRelayQuote, createReplyQuote, normalizeReplyRef, releaseClampFade, replySnippet } from '../modules/chat_reply_quote.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 function withDom(run) {
@@ -16,8 +16,11 @@ test('a sender selection names its source separately in the bubble and composer'
     for (const composer of [true, false]) {
         const panel = createReplyQuote({ address: 'row:1@a#1', role: 'assistant',
             excerpt: { text: 'North quay', start_utf16: 12 } }, { composer });
-        const main = panel.children[0];
-        const [head, words] = main.children;
+        const main = panel.querySelector('.chat-quote-main');
+        const head = main.querySelector('.chat-quote-head');
+        const words = panel.querySelector('.chat-quote-text');
+        assert.equal(main.tagName, 'BUTTON');
+        assert.equal(main.querySelector('.chat-quote-text'), null);
         assert.equal(head.children[0].textContent, 'Selected by sender · Source:');
         assert.equal(head.children[1].textContent, 'Ouroboros');
         assert.equal(words.textContent, 'North quay');
@@ -195,3 +198,23 @@ test('a quoted photo leads the panel with its thumbnail; only a safe upload URL 
 test('a snippet cut never ends in punctuation before its ellipsis', () => {
     assert.equal(replySnippet('Берём A: сохраняю нынешний пузырь. Старые и новые фразы', 36), 'Берём A: сохраняю нынешний пузырь…');
 });
+
+// The quote panel's one lifecycle: an expanded clamp wears the shared cue only while it hides text, and folding —
+// or the owner's own release (releaseClampFade) — drops it. The shared binding's mechanics and its disposal are
+// measured in scroll_fade.test.js.
+test('an expanded clamp wears the shared cue only while open, and the owner release drops it', () => withDom(() => {
+    const host = document.createElement('div');
+    const text = document.createElement('div');
+    const toggle = clampWithToggle(text, host, { fit: (_n, _t, _lines, onFit) => onFit(true), scrollRegion: 'Quotation' });
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'a folded clamp carries no cue');
+    toggle.click();  // open
+    assert.equal(text.dataset.expanded, '1');
+    assert.equal(text.classList.contains('scroll-fade-y'), true, 'the open quotation wears the cue');
+    toggle.click();  // fold
+    assert.equal(text.dataset.expanded, undefined);
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'folding releases the cue');
+    toggle.click();  // open again, then the owner removes the panel while it is open
+    assert.equal(text.classList.contains('scroll-fade-y'), true);
+    releaseClampFade(text);
+    assert.equal(text.classList.contains('scroll-fade-y'), false, 'the owner release drops the cue');
+}));

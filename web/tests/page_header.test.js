@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderBackControl, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { ClassList, installDom, restoreDom } from './chat_dom_fixture.js';
 
 test('Extensions keeps the shared section band; its own box decides, never the window', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
@@ -311,7 +311,6 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
     const doc = { activeElement: null, createComment: () => el('#comment') };
     function el(name, ...kids) {
         const node = { name, children: [], parentNode: null, attrs: new Set(), ownerDocument: doc, isConnected: true,
-            classList: { contains: (value) => node.name === value },
             get firstElementChild() { return node.children.find((child) => child.name !== '#comment') || null; },
             get nextElementSibling() {
                 const list = node.parentNode?.children || [];
@@ -337,6 +336,8 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
             },
             toggleAttribute(attr, on) { if (on) node.attrs.add(attr); else node.attrs.delete(attr); },
             focus() { doc.activeElement = node; } };
+        node.classList = new ClassList(node);
+        node.classList.add(name);
         kids.forEach((kid) => node.append(kid));
         return node;
     }
@@ -359,11 +360,13 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         assert.equal(strip.parentNode, lead, 'a desk: the tabs start the bar');
         assert.ok(header.attrs.has('data-lead'));
         assert.ok(header.attrs.has('data-scroll-x'), 'the one-row desk band owns its horizontal scroll');
+        assert.ok(header.classList.contains('scroll-fade-x'), 'the desk band uses the shared fade');
         assert.equal(doc.activeElement, tab, 'the owner\'s focus stays on the moved tab');
         layout('stack');
         assert.deepEqual([strip.parentNode, names(under), lead.children.length, header.attrs.has('data-lead')],
             [under, ['app-tab-strip'], 0, false], 'the stack layout: the same node back under the row');
         assert.ok(!header.attrs.has('data-scroll-x'), 'the phone header gives the horizontal strip back its ownership');
+        assert.equal(header.classList.contains('scroll-fade-x'), false, 'the stack header does not mask the returned strip');
         layout('docked');
         assert.equal(strip.parentNode, lead);
         dispose();

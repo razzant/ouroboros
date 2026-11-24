@@ -509,10 +509,27 @@ def test_a_320_px_phone_scrolls_the_strip_inside_the_control(direct_server_with_
             assert abs(opened["rowHeight"] - closed["rowHeight"]) <= 1, (opened, closed)
             assert opened["headWidth"] > 20, "the ring stays"
             _assert_strip_geometry(opened)
+            read_fade = f"""() => {{
+                const s = document.querySelector('{CONTROL} .chat-effort-strip');
+                const cs = getComputedStyle(s);
+                return {{
+                    shared: s.classList.contains('scroll-fade-x'),
+                    edge: cs.getPropertyValue('--scroll-fade-inline-edge').trim(),
+                    space3: cs.getPropertyValue('--space-3').trim(),
+                    mask: cs.maskImage !== 'none' ? cs.maskImage : cs.webkitMaskImage,
+                }};
+            }}"""
+            fade = page.evaluate(read_fade)
+            assert fade["shared"] and fade["space3"] == "12px" and fade["edge"] in ("12px", "var(--space-3)"), fade
+            assert "linear-gradient" in fade["mask"], fade
             _shot(page, tmp_path, f"composer-phone-320-open-{engine}")
             # The hidden end is reached by scrolling; a tap sets primary without moving bounds.
             page.evaluate(f"() => {{ const s = document.querySelector('{CONTROL} .chat-effort-strip'); s.scrollLeft = s.scrollWidth; }}")
             _wait(page, "el.querySelector('.chat-effort-strip').dataset.scroll === 'end'")
+            end_fade = page.evaluate(read_fade)
+            assert "linear-gradient" in end_fade["mask"], end_fade
+            if opened["stripScroll"] == "start":
+                assert end_fade["mask"] != fade["mask"], (fade, end_fade)
             x, y = _segment_center(page, "ultra")
             with page.expect_response(lambda r: r.url.endswith("/api/owner/effort-range"), timeout=30_000) as waited:
                 page.touchscreen.tap(x, y)

@@ -25,7 +25,8 @@ WEB = Path(__file__).resolve().parents[1] / "web"
 # What ouroboros.server_web stamps on the core's builtin index: the proven data profile's saved-preview scope
 # (web/modules/chat_preview.js). These synthetic documents stand in for that page, so they name the same fact
 # before the app's scripts run; a document without it is no profile proof and opens on the canonical history.
-PREVIEW_META = '<meta name="ouroboros-chat-preview-scope" content="0123456789abcdef">'
+PREVIEW_SCOPE = "0123456789abcdef"
+PREVIEW_META = f'<meta name="ouroboros-chat-preview-scope" content="{PREVIEW_SCOPE}">'
 
 
 def passive_status(status):

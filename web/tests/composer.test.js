@@ -300,11 +300,11 @@ test('later controls add labelled sections after Attach file; a disabled item is
         ]);
         f.button.click();
         assert.deepEqual(f.keys(), ['attach', 'templates:simpler', 'templates:off']);
-        const group = f.sheet().children[1];
+        const group = f.sheet().querySelector(':scope > .ui-popup-body').children[1];
         assert.deepEqual([group.getAttribute('role'), group.getAttribute('aria-label'), group.dataset.plusSection],
             ['group', 'Templates', 'templates']);
         assert.equal(group.children[0].textContent, 'Templates');
-        assert.equal(f.sheet().children.length, 2, 'the empty section is not drawn');
+        assert.equal(f.sheet().querySelector(':scope > .ui-popup-body').children.length, 2, 'the empty section is not drawn');
         const [attach, simpler, off] = f.items();
         assert.equal(simpler.title, 'Ask for a simpler answer');
         assert.equal(off.disabled, true);

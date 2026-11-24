@@ -38,7 +38,7 @@ const escaped = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;'
 
 test('a fenced block is the author text in both compact consumers', () => {
     const source = `Before\n\`\`\`md\n${FENCE_BODY}\n\`\`\`\n**after**`;
-    const expected = `Before\n<pre><code>${escaped(FENCE_BODY)}\n</code></pre>\n<strong>after</strong>`;
+    const expected = `Before\n<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>${escaped(FENCE_BODY)}\n</code></pre></div>\n<strong>after</strong>`;
     assert.equal(renderMarkdown(source), expected);
     assert.equal(renderMarkdown(source, { inlineHeadingBreaks: true }), expected);
 });
@@ -47,7 +47,7 @@ test('punctuation labels and normal fence whitespace preserve code and preview b
     for (const label of ['c++', 'c#', 'objective-c', 'shell-session', 'md-js', 'f#', 'asp.net']) {
         for (const ending of ['\n', '   \n', '\t\r\n']) {
             const source = '```' + label + ending + FENCE_BODY + '\n```';
-            assert.equal(renderMarkdown(source), `<pre><code>${escaped(FENCE_BODY)}\n</code></pre>`);
+            assert.equal(renderMarkdown(source), `<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>${escaped(FENCE_BODY)}\n</code></pre></div>`);
             assert.equal(renderMarkdown(source, { inlineHeadingBreaks: true }), renderMarkdown(source));
             assert.equal(projectMarkdownLines(source), '```' + label + '\n' + FENCE_BODY + '\n```');
         }
@@ -61,11 +61,11 @@ test('an inline backtick mention cannot steal the next fenced block', () => {
         'Mention ```<>&',
     ]) {
         const html = renderMarkdown(lead + '\n```python\nx = *a*\n```\n**after**');
-        assert.deepEqual([...html.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map((m) => m[1]), ['x = *a*\n']);
+        assert.deepEqual([...html.matchAll(/<pre\b[^>]*><code>([\s\S]*?)<\/code><\/pre>/g)].map((m) => m[1]), ['x = *a*\n']);
         assert.ok(html.endsWith('<strong>after</strong>'));
     }
     // Attributes remain outside the compact grammar; no claim of CommonMark parity.
-    assert.doesNotMatch(renderMarkdown('```python title=demo\n# prose\n```'), /<pre>/);
+    assert.doesNotMatch(renderMarkdown('```python title=demo\n# prose\n```'), /<pre\b/);
 });
 
 test('a later inline-code pass cannot hide an already parked fenced block', () => {
@@ -75,7 +75,7 @@ test('a later inline-code pass cannot hide an already parked fenced block', () =
             const html = renderMarkdown(ticks + label + '\nx = *a*\n' + ticks);
             // Longer fences keep the compact renderer's stray outer ticks, but
             // their code must not disappear into a nested internal placeholder.
-            assert.equal(html, '`'.repeat(size - 3) + '<pre><code>x = *a*\n</code></pre>' + '`'.repeat(size - 3));
+            assert.equal(html, '`'.repeat(size - 3) + '<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>x = *a*\n</code></pre></div>' + '`'.repeat(size - 3));
             assert.doesNotMatch(html, /OUROBOROSCODE/);
         }
     }
@@ -120,7 +120,7 @@ test('a hostile parking-token run stays literal and costs one scan', () => {
 test('the compact grammar the design names keeps its code literal', () => {
     // A fence with no language, closed mid-line, and a two-backtick span holding a
     // backtick: the edges of the grammar DESIGN.md promises for this renderer.
-    assert.equal(renderMarkdown('```\n**x** <b>\n``` after'), '<pre><code>**x** &lt;b&gt;\n</code></pre> after');
+    assert.equal(renderMarkdown('```\n**x** <b>\n``` after'), '<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>**x** &lt;b&gt;\n</code></pre></div> after');
     assert.equal(renderMarkdown('``a`**b**`` *c*'), '<code class="inline-code">a`**b**</code> <em>c</em>');
 });
 
@@ -150,7 +150,7 @@ test('code inside a link destination stays literal code and never reaches the at
     const fence = '[open](https://example.com/```\n" onclick="alert(1)" data-x="\n```)';
     assert.equal(
         renderMarkdown(fence),
-        '[open](https://example.com/<pre><code>" onclick="alert(1)" data-x="\n</code></pre>)',
+        '[open](https://example.com/<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>" onclick="alert(1)" data-x="\n</code></pre></div>)',
     );
     const span = '![pic](https://example.com/`x" onerror="alert(1)`) then [docs](https://example.com/d)';
     const rendered = renderMarkdown(span, { inlineHeadingBreaks: true });

@@ -124,7 +124,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads and menus. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10), and a room's feed carries no fade (owner 21.10).
+9. **A continuation fades at the edge.** Content fades past bars, strips, sheet heads and menus; long descriptions fade before disclosure (short names and excerpts keep ellipsis). One shared transparent fade, only where more waits; one float glass; the Widgets board (20.10) crisp, a room's feed (21.10) unmasked.
 
 **Seed (light | dark)**
 
@@ -1938,7 +1938,7 @@ the honest failure, and a control meant once locks after it counted. An app's
 frame reads the theme roles of the material it lies on (inside the dark Ouroboros voice, that voice's inks and
 surfaces), at mount and at every theme change. A frame in
 a message (an app, a skill's widget) is at least 120 px and at most 70 % of the window, with `Expand` / `Collapse`
-beyond; at most three run at once, started near the view, and a far one rests as its words with `Open`. A running
+beyond (a widget the host draws fades where the cap cuts it); at most three run at once, started near the view, and a far one rests as its words with `Open`. A running
 frame has `Close`, which leaves it as its words with `Open` on this device until the owner opens it again; a frame
 held after a start the page did not outlive rests the same way with its one line (Skills in the page). An app's
 script error, unhandled rejection or policy refusal shows on the status line (`App error: …`). What an app hands

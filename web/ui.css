@@ -884,6 +884,9 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      token on a scope (the lock above) and adds no tone or outline.
    - .app-tab .app-tab-pill .active .is-active — a view of one page, in the page's own strip: the chosen tab is the
      soft crimson, its count a neutral pill. A section's pages are never tabs.
+   - .scroll-fade-y .scroll-fade-x [data-fold-clipped] .scroll-fade-focus-frame .is-quiet-focus — transparent edges.
+     scroll_fade.js marks live edges; a preview marks its clipped body, not its door. The focus frame puts the ring
+     outside the mask; quiet focus omits the fade's ring.
    - .filter-chip — a quiet filter with no body; chosen (.active), the soft crimson.
    - .ui-segment-group .ui-segment .ui-segment-fill — one choice among a few short words (page_header.js
      renderSegmentedField; a lone .ui-segment stands as a capsule); the soft crimson travels to the chosen word
@@ -892,9 +895,10 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      control in the app and in setup.
    - .ui-card — an object on the room: one fill on the rest shadow; a group or row inside it is a tray, fills never
      stack. A page adds no edge, gradient or material of its own.
-   - .ui-field .ui-field-inline .ui-field-help .ui-control .ui-control-readonly .ui-control-code — a field: label,
-     control and help; focus wears the field's ring; invalid (aria-invalid), disabled, read-only (a whole, selectable
-     value). A page class on a field is a layout hook, never a second box.
+   - .ui-field .ui-field-inline .ui-field-help .ui-control .ui-control-readonly .ui-readonly-body .ui-control-code — a field:
+     label, control and help; focus wears the field's ring; invalid (aria-invalid), disabled, read-only (a whole, selectable
+     value: the box keeps its border and fill, the value's body inside scrolls and fades). A page class on a field is a
+     layout hook, never a second box.
    - .ui-source-field .ui-source-picker .ui-source-backing .ui-source-options — a model source: a live menu standing
      in for a hidden native select.
    - .ui-model-chooser .ui-model-options .ui-model-option .ui-model-option-name .ui-model-option-meta
@@ -927,14 +931,14 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      chip is the status; it lies flat, since a shadow says pressable. The two older names keep their own geometry.
    - .ui-status .settings-inline-status .wizard-runtime-status — a status sentence, .ui-status[data-tone]: a dot and
      words in the tone's ink, never a fill.
-   - .ui-popup .danger .files-context-item-danger — the floating sheet of a menu, a listbox or a popover: one backed
+   - .ui-popup .ui-popup-body .danger .files-context-item-danger — the floating sheet of a menu, a listbox or a popover: one backed
      material on the float shadow, placed by ui_interactions.js and mounted outside clipping. A role chooses its
      layout, never its paint; a menu's row keeps only its domain's meaning (danger).
    - .ui-modal-backdrop .ui-modal .ui-modal-head .ui-modal-body .ui-modal-actions — the shared dialog
      (confirm_dialog.js and the dialogs drawn on these classes): one veil, one backed box clear of the bars, a head, a
      scrolling body and a foot that is a primary slot. A dialog's own class sets its width and its body (the secret
      form keeps its opaque reading backing); a page never repaints the veil or the box.
-   - .ui-hint .ui-hint-line .ui-hint-rule .ui-hint-fact .ui-hint-word .ui-hint-action .ui-hint-host — what a control
+   - .ui-hint .ui-hint-body .ui-hint-line .ui-hint-rule .ui-hint-fact .ui-hint-word .ui-hint-action .ui-hint-host — what a control
      says about itself (ui_hint.js), above it and out of the flow, so showing, rewording or hiding it moves nothing.
    - .ui-hit-area — a small control's reach under a finger, out to the touch minimum: the shared control families have
      it by selector, and a page's own small control adds this class.
@@ -951,6 +955,79 @@ html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
      .app-page-header .app-page-title-block .app-page-title-row .app-page-lead .shell-back .settings-gauge — context,
      not parts: their owners' classes that recipes here read (the product documents' root, a phone keyboard's state,
      the voices' materials, a code block's hover, the page header a section list lays out, Back, the Settings gauge). */
+
+/* Content disappears into its backing, not under a new one. The limit leaves an opaque middle even in a short box;
+   scroll_fade.js reads these same geometry tokens to bring keyboard focus out from under the painted edge. */
+:where(.scroll-fade-y, .scroll-fade-x, [data-fold-clipped]) {
+    --scroll-fade-limit: 0.333333;
+    --scroll-fade-focus-outline: initial;
+    --scroll-fade-focus-mask: none;
+}
+:where(.scroll-fade-y, [data-fold-clipped]) {
+    --scroll-fade-edge: 32px;
+    --scroll-fade-top-clear: 0px;
+    --scroll-fade-inset: 0px;
+    --scroll-fade-top: 0px;
+    --scroll-fade-bottom: 0px;
+    --scroll-fade-y-depth: min(var(--scroll-fade-edge), max(0px, (100% - var(--scroll-fade-inset)) * var(--scroll-fade-limit)));
+    --scroll-fade-y-image: linear-gradient(to bottom, transparent var(--scroll-fade-inset), black var(--scroll-fade-top),
+        black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
+}
+:where(.scroll-fade-y[data-scroll-above]) {
+    --scroll-fade-inset: min(100%, var(--scroll-fade-top-clear));
+    --scroll-fade-top: calc(var(--scroll-fade-inset) + var(--scroll-fade-y-depth));
+}
+:where(.scroll-fade-y[data-scroll-below], [data-fold-clipped]) { --scroll-fade-bottom: var(--scroll-fade-y-depth); }
+:where(.scroll-fade-y:is([data-scroll-above], [data-scroll-below]), [data-fold-clipped]) {
+    -webkit-mask-image: var(--scroll-fade-y-image);
+    mask-image: var(--scroll-fade-y-image);
+}
+:where(.scroll-fade-x) {
+    --scroll-fade-inline-edge: var(--space-4);
+    --scroll-fade-x-depth: min(var(--scroll-fade-inline-edge), 100% * var(--scroll-fade-limit));
+    --scroll-fade-inline-to: right;
+    --scroll-fade-start: 0px;
+    --scroll-fade-end: 0px;
+    --scroll-fade-x-image: linear-gradient(to var(--scroll-fade-inline-to), transparent 0, black var(--scroll-fade-start),
+        black calc(100% - var(--scroll-fade-end)), transparent 100%);
+}
+:where(.scroll-fade-x[data-scroll-rtl]) { --scroll-fade-inline-to: left; }
+:where(.scroll-fade-x[data-scroll-start]) { --scroll-fade-start: var(--scroll-fade-x-depth); }
+:where(.scroll-fade-x[data-scroll-end]) { --scroll-fade-end: var(--scroll-fade-x-depth); }
+:where(.scroll-fade-x:is([data-scroll-start], [data-scroll-end])) {
+    -webkit-mask-image: var(--scroll-fade-x-image);
+    mask-image: var(--scroll-fade-x-image);
+}
+/* Intersect only when both axes have a live edge. Older WebKit draws the bottom layer over the empty backdrop. */
+:where(.scroll-fade-x:is([data-scroll-start], [data-scroll-end]).scroll-fade-y:is([data-scroll-above], [data-scroll-below])) {
+    -webkit-mask-image: var(--scroll-fade-x-image), var(--scroll-fade-y-image);
+    mask-image: var(--scroll-fade-x-image), var(--scroll-fade-y-image);
+    -webkit-mask-composite: source-in, source-over;
+    mask-composite: intersect;
+}
+/* A focused keyboard stop shows its whole ring, outside it where its mask would clip it (not its descendants': they
+   reveal past the edge). A landing point (tabindex="-1": a page or sheet focused so its keys scroll it) keeps its cue
+   and its own ring or none; a stop whose ring is inset names its fade as --scroll-fade-focus-mask; where the ring has
+   its own frame, the scrollport keeps fading its content throughout and quiet focus omits the frame's ring too. */
+:where(:is(.scroll-fade-y, .scroll-fade-x):focus-visible:not(.is-quiet-focus, [tabindex="-1"])) {
+    outline: var(--scroll-fade-focus-outline, 2px solid var(--focus-accent-border));
+    outline-offset: 2px;
+    -webkit-mask-image: var(--scroll-fade-focus-mask);
+    mask-image: var(--scroll-fade-focus-mask);
+}
+@supports selector(:has(*)) {
+    .scroll-fade-focus-frame {
+        --scroll-fade-focus-offset: 2px;
+    }
+    .scroll-fade-focus-frame > .scroll-fade-y { --scroll-fade-focus-outline: none; }
+    .scroll-fade-focus-frame > .scroll-fade-y:is([data-scroll-above], [data-scroll-below]) {
+        --scroll-fade-focus-mask: var(--scroll-fade-y-image);
+    }
+    .scroll-fade-focus-frame:has(> .scroll-fade-y:focus-visible:not(.is-quiet-focus)) {
+        outline: 2px solid var(--focus-accent-border);
+        outline-offset: var(--scroll-fade-focus-offset);
+    }
+}
 
 /* The action row: the trigger, then its result as the next sibling, 8px apart. The result keeps one meta line of
    height from the start (reserved, never display: none), so a late word never moves the control or its neighbours;
@@ -1479,17 +1556,46 @@ select.ui-source-backing {
     .ui-source-options [role="option"] { min-height: 44px; align-content: center; }
 }
 textarea.ui-control { resize: vertical; }
-/* A read-only multiline value (renderSafeField's output): whole and wrapped in the field's box, selectable, in the value's
-   ink; only a very long one scrolls inside, and its focus reaches that by keyboard. */
+/* A read-only multiline value (renderSafeField's output): the field's box keeps its border, fill and ring whole at every
+   scroll state; the value's own body inside is the scrollport the shared fade masks, so a waiting edge fades text only.
+   Selectable, in the value's ink; only a very long one scrolls, and its focus reaches that by keyboard. */
 .ui-control-readonly {
-    display: block;
+    display: flex;
+    flex-direction: column;
     max-height: 18em;
+    overflow: hidden;
+    cursor: text;
+}
+.ui-readonly-body {
+    display: block;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
     overflow-y: auto;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
     -webkit-user-select: text;
     user-select: text;
     cursor: text;
+}
+/* The one standard ring, flush inside the body; where :has() exists it frames the whole field, on keyboard focus only.
+   The ring owns the focus, so the scrollport names its fade and keeps fading text at a waiting edge while focused —
+   the same inset-ring-plus-kept-fade as the reader's body, never a cleared mask. */
+.ui-readonly-body:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+    --scroll-fade-focus-mask: var(--scroll-fade-y-image);
+}
+@supports selector(:has(*)) {
+    .ui-readonly-body:focus-visible { outline: none; }
+    .ui-control-readonly:has(> .ui-readonly-body:focus-visible) {
+        border-color: var(--focus-accent-border);
+        box-shadow: 0 0 0 3px var(--focus-accent-ring);
+    }
 }
 .ui-checkbox {
     box-sizing: border-box;
@@ -1588,6 +1694,21 @@ textarea.ui-control { resize: vertical; }
     box-shadow: var(--elev-float);
     -webkit-backdrop-filter: var(--glass);
     backdrop-filter: var(--glass);
+}
+/* Only the content scrolls and fades; the material, corners and shadow belong to its shell. Whatever its role, a shell
+   holding the body stacks it in one column and clips, so the body gets what the shell's bounded height leaves; a hidden
+   or closed popup stays hidden (below). A shell with its rows directly in it (a page with this sheet and no host
+   script, the author kit's) scrolls them itself. The body, a menu's too, is one grid column, which keeps its rows inside
+   its own scrollbar: WebKit runs a block or flex body's rows under it when the shell's width is capped. */
+.ui-popup:has(> .ui-popup-body) { display: flex; flex-direction: column; overflow: hidden; }
+.ui-popup-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 .ui-model-chooser { display: block; min-width: 0; }
 .ui-model-chooser > .ui-control { width: 100%; }
@@ -1776,7 +1897,10 @@ body.keyboard-open .ui-modal { margin-block: 0 auto; }
 }
 .ui-hint[hidden], .ui-hint [hidden] { display: none; }
 .ui-hint[data-side="below"] { bottom: auto; top: calc(100% + var(--space-2)); }
-.ui-hint[data-cramped="true"] { overflow-y: auto; overscroll-behavior: contain; }
+/* Only the words scroll and fade; the material, the frame and the shadow belong to the shell (ui_hint.js). */
+.ui-hint-body { display: block; }
+.ui-hint[data-cramped="true"] { display: flex; flex-direction: column; }
+.ui-hint[data-cramped="true"] > .ui-hint-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .ui-hint-line, .ui-hint-rule { margin: 0; }
 .ui-hint-word { margin-inline-end: var(--space-2); color: var(--text-primary); font-weight: 600; }
 .ui-hint-rule, .ui-hint-fact { margin-top: 2px; }

@@ -3,6 +3,7 @@
 import { safeExternalHrefAttr, safeExternalUrl } from './utils.js';
 import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
+import { isRestoringFocus, measureEdges, revealPastFade, syncFoldTabIndex } from './scroll_fade.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 
 const CHART_TYPES = new Set([
@@ -13,7 +14,6 @@ const MAX_CHART_POINTS = 500;
 const MAX_RICH_BLOCK_SOURCE_LENGTH = 32768;
 const MERMAID_SCRIPT_ID = 'chat-mermaid-library';
 const ROOT_STATE = new WeakMap();
-const TABLE_BINDINGS = new WeakMap();
 const CHART_AUTHORED = new WeakMap();
 const CHART_THEMED = new WeakMap();
 const writeDirectly = (mutate) => mutate();
@@ -372,6 +372,7 @@ function createCodeBlock(source, language = '') {
     copy.title = tr('code.copy_code', 'Copy code');
     copy.textContent = tr('code.copy', 'Copy');
     const pre = document.createElement('pre');
+    pre.className = 'scroll-fade-x';
     const code = document.createElement('code');
     code.className = `language-${language || 'plain'}`;
     code.textContent = String(source ?? '');
@@ -425,7 +426,7 @@ function transformRenderedMarkdown(fragment, literal) {
     fragment.querySelectorAll('table').forEach((table) => {
         table.classList.add('md-table');
         const wrap = document.createElement('div');
-        wrap.className = 'md-table-wrap';
+        wrap.className = 'md-table-wrap scroll-fade-x';
         table.replaceWith(wrap);
         wrap.appendChild(table);
     });
@@ -618,6 +619,7 @@ function resetMermaidNodes(root) {
     const nodes = Array.from(root.querySelectorAll?.('.md-mermaid[data-mermaid-source]') || []);
     if (root.matches?.('.md-mermaid[data-mermaid-source]')) nodes.unshift(root);
     for (const node of nodes) {
+        node.classList?.remove?.('is-rendered');
         node.textContent = node.dataset.mermaidSource;
         // Mermaid refuses to re-run a node it has already claimed.
         node.removeAttribute('data-processed');
@@ -642,15 +644,17 @@ async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) 
             nodes.push(node);
         }
     }
-    if (oversized.length) onDomWrite(() => {
-        let changed = false;
-        for (const { node, source } of oversized) {
-            if (node.isConnected === false) continue;
-            degradeMermaid(node, source, 'Diagram could not be rendered.');
-            changed = true;
-        }
-        return changed;
-    });
+    if (oversized.length) {
+        onDomWrite(() => {
+            let changed = false;
+            for (const { node, source } of oversized) {
+                if (node.isConnected === false) continue;
+                degradeMermaid(node, source, 'Diagram could not be rendered.');
+                changed = true;
+            }
+            return changed;
+        });
+    }
     if (!nodes.length) return;
     let api;
     try {
@@ -686,10 +690,7 @@ async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) 
             || node.closest?.('.message')?.getBoundingClientRect?.().width
             || root.getBoundingClientRect?.().width
             || 0;
-        stage.style.setProperty(
-            '--md-mermaid-stage-width',
-            `${Math.max(stageWidth, 320)}px`,
-        );
+        stage.style.setProperty('--md-mermaid-stage-width', `${Math.max(stageWidth, 320)}px`);
         stage.append(rendered);
         document.body.append(stage);
         try {
@@ -699,6 +700,13 @@ async function renderMermaidNodes(root, state, onDomWrite, epoch = state.epoch) 
             // A theme switch during this await already reset the node and started
             // a fresh pass; this SVG is in the old palette and must be dropped.
             if (stale() || node.isConnected === false) return;
+            if (rendered.childNodes?.length) {
+                const scroll = document.createElement('div');
+                scroll.className = 'md-mermaid-scroll scroll-fade-x';
+                scroll.append(...rendered.childNodes);
+                rendered.classList.add('is-rendered');
+                rendered.replaceChildren(scroll);
+            }
             onDomWrite(() => {
                 if (node.isConnected === false) return false;
                 node.replaceWith(rendered);
@@ -748,125 +756,154 @@ function renderChartNodes(root, state, onDomWrite) {
     }
 }
 
-/* A table scrolls sideways only when its columns cannot fit even wrapped. Its
-   edges follow the actually hidden columns, as `scroll_fade.js` does for the
-   vertical scroll bodies, and only while it scrolls is its wrapper a named
-   region the keyboard can focus and scroll. */
-function measureTableOverflow(wrap) {
-    if (!wrap || wrap.isConnected === false) return null;
-    return { wrap, hidden: wrap.scrollWidth - wrap.clientWidth, scrolled: Math.abs(wrap.scrollLeft) };
+const COMPACT_BINDINGS = new WeakMap();
+const RENDERED_BINDINGS = new WeakMap();
+const OWNED_REGIONS = new WeakMap();
+const SCROLL_ATTRS = ['tabindex', 'data-scroll-start', 'data-scroll-end', 'data-scroll-rtl'];
+const COMPACT_SELECTORS = ['.md-table-wrap', '.md-compact-code'];
+const RICH_SELECTORS = ['.md-table-wrap', '.scroll-fade-x'];
+
+function regionLabel(el) {
+    if (el.classList?.contains?.('md-table-wrap')) return tr('code.scrollable_table', 'Scrollable table');
+    if (el.classList?.contains?.('katex-display')) return tr('code.scrollable_formula', 'Scrollable formula');
+    if (el.classList?.contains?.('md-mermaid-scroll')) return tr('code.scrollable_diagram', 'Scrollable diagram');
+    return tr('code.scrollable_code', 'Scrollable code');
 }
-function markTableOverflow(wrap) {
-    const seen = measureTableOverflow(wrap);
-    if (seen) applyTableOverflow(seen);
+
+// Measured apart from the marks: a batch measures every scroller first, then
+// marks every one, so a write never makes the next scroller's read lay the page out again.
+function measureOverflow(el) {
+    if (!el || el.isConnected === false) return null;
+    const style = (el.ownerDocument?.defaultView || globalThis).getComputedStyle?.(el);
+    return { el, ...measureEdges(el, style, true) };
 }
-// Measured apart from the marks: a batch measures every table, then marks every one, so a write never makes the next
-// table's read lay the page out again.
-function applyTableOverflow({ wrap, hidden, scrolled }) {
-    const scrolls = hidden > 1;
-    wrap.toggleAttribute('data-scroll-start', scrolls && scrolled > 1);
-    wrap.toggleAttribute('data-scroll-end', scrolls && hidden - scrolled > 1);
-    // A late resize/Markdown write must not make clipped Main text a keyboard stop.
-    // Keep the region semantics and selection; its Project reference opens the full table.
-    const tabIndex = wrap.closest('.project-answer.is-folded') ? -1 : 0;
-    if (scrolls && wrap.hasAttribute('tabindex') && wrap.tabIndex === tabIndex) return;
-    if (scrolls) {
-        wrap.setAttribute('role', 'region');
-        wrap.setAttribute('aria-label', tr('code.scrollable_table', 'Scrollable table'));
-        wrap.tabIndex = tabIndex;
-    } else {
-        wrap.removeAttribute('role');
-        wrap.removeAttribute('aria-label');
-        wrap.removeAttribute('tabindex');
+
+function applyOverflow({ el, scrolls, start, end, rtl }) {
+    el.toggleAttribute?.('data-scroll-start', start);
+    el.toggleAttribute?.('data-scroll-end', end);
+    if (rtl || el.hasAttribute?.('data-scroll-rtl')) el.toggleAttribute?.('data-scroll-rtl', scrolls && rtl);
+    const folded = Boolean(el.closest?.('.project-answer.is-folded'));
+    let owned = OWNED_REGIONS.get(el);
+    const held = el.getAttribute?.('aria-label') ?? null;
+    if (!scrolls) {
+        if (!owned) return;
+        if (owned.role) el.removeAttribute?.('role');
+        if (held !== null && held === owned.label) el.removeAttribute?.('aria-label');
+        if (owned.tabindex) syncFoldTabIndex(el, null, { folded, owned: true });
+        OWNED_REGIONS.delete(el);
+        return;
     }
+    if (!owned) OWNED_REGIONS.set(el, owned = { role: !el.hasAttribute?.('role'), label: held === null ? '' : null, tabindex: undefined });
+    if (owned.role && !el.hasAttribute?.('role')) el.setAttribute?.('role', 'region');
+    // `owned.label` is what this wrote (null: a caller's name). It follows the node, which a keyed patch may reuse as another wrapper.
+    if (owned.label === null || (held !== null && held !== owned.label)) owned.label = null;
+    else if (held !== (owned.label = regionLabel(el))) el.setAttribute?.('aria-label', owned.label);
+    owned.tabindex = syncFoldTabIndex(el, '0', { folded, owned: owned.tabindex });
 }
 
-// The wrapper attributes `markTableOverflow` decides by. A keyed patch (a task
-// timeline row) keeps the wrapper but copies attributes from fresh markup, which
-// drops them while nothing resizes: their change re-marks the wrapper.
-const TABLE_STATE = ['tabindex', 'data-scroll-start', 'data-scroll-end'];
+const markOverflow = (el) => { const seen = measureOverflow(el); if (seen) applyOverflow(seen); };
+const hasAny = (rootEl, selectors) => selectors.some((sel) => Boolean(rootEl.matches?.(sel) || rootEl.querySelector?.(sel)));
 
-// The table wrappers at or under a node: a mutation may add the wrapper itself.
-function tableWraps(node) {
-    if (node?.nodeType !== 1) return [];
-    const nested = Array.from(node.querySelectorAll?.('.md-table-wrap') || []);
-    return node.matches?.('.md-table-wrap') ? [node, ...nested] : nested;
+function findScrollers(node, selectors) {
+    if (node?.nodeType !== 1 && typeof node?.querySelectorAll !== 'function') return [];
+    const found = new Set();
+    for (const sel of selectors) {
+        if (node.matches?.(sel)) found.add(node);
+        for (const item of node.querySelectorAll?.(sel) || []) found.add(item);
+    }
+    return [...found];
 }
 
-/**
- * Keep every Markdown table under `rootEl`, from either renderer and including
- * tables written into it later, a keyboard region with fading edges exactly
- * while it scrolls. Table-only: nothing else in the root is enhanced, so a
- * compact surface's literal code stays as rendered. Returns the disposer;
- * `destroyChatMarkdown` on the root or an ancestor releases it too, and binding
- * a bound root again returns its disposer.
- */
-export function bindMarkdownTables(rootEl) {
+function bindMarkdownScrollers(rootEl, selectors, bindings = null, marker = '') {
     if (!rootEl || typeof ResizeObserver !== 'function') return () => {};
-    const bound = TABLE_BINDINGS.get(rootEl);
-    if (bound) return bound;
-    // The wrapper resizes with its column; the table with its own content.
+    const existing = bindings?.get(rootEl);
+    if (existing) return existing;
+    const tracked = new Map();
+    const hostOf = (target) => tracked.has(target) ? target
+        : selectors.map((sel) => target?.closest?.(sel)).find((host) => host && tracked.has(host)) || null;
     const sizes = new ResizeObserver((entries) => {
-        const wraps = new Set(entries.map((entry) => entry.target.closest('.md-table-wrap')).filter(Boolean));
-        [...wraps].map(measureTableOverflow).filter(Boolean).forEach(applyTableOverflow);
+        const due = new Set(entries.map((entry) => hostOf(entry.target)).filter(Boolean));
+        [...due].map(measureOverflow).filter(Boolean).forEach(applyOverflow);
     });
-    const observe = (wrap) => {
-        sizes.observe(wrap);
-        if (wrap.firstElementChild) sizes.observe(wrap.firstElementChild);
+    const observe = (el) => {
+        const child = el.firstElementChild || null;
+        if (tracked.has(el)) {
+            const prior = tracked.get(el);
+            if (prior === child) return;
+            if (prior) sizes.unobserve(prior);
+        } else sizes.observe(el);
+        if (child) sizes.observe(child);
+        tracked.set(el, child);
     };
-    const release = (wrap) => {
-        sizes.unobserve(wrap);
-        if (wrap.firstElementChild) sizes.unobserve(wrap.firstElementChild);
+    const release = (el) => {
+        if (!tracked.has(el)) return;
+        const child = tracked.get(el);
+        tracked.delete(el); sizes.unobserve(el);
+        if (child) sizes.unobserve(child);
+        applyOverflow({ el, scrolls: false, start: false, end: false, rtl: false });
     };
-    for (const wrap of rootEl.querySelectorAll?.('.md-table-wrap') || []) observe(wrap);
-    // A surface that writes its Markdown later (a timeline row, a fetched review)
-    // is followed: a new table is observed, a removed one released. The DOM as it
-    // stands when the records arrive decides, so a moved table stays observed.
+    for (const el of findScrollers(rootEl, selectors)) observe(el);
+    const matchesScroller = (node) => selectors.some((sel) => node?.matches?.(sel));
     const writes = typeof MutationObserver === 'function' ? new MutationObserver((records) => {
         for (const record of records) {
-            if (record.type === 'attributes') {
-                if (record.target.classList?.contains('md-table-wrap')) markTableOverflow(record.target);
-                continue;
-            }
-            for (const node of record.removedNodes) {
-                for (const wrap of tableWraps(node)) if (!rootEl.contains(wrap)) release(wrap);
-            }
-            for (const node of record.addedNodes) {
-                for (const wrap of tableWraps(node)) if (rootEl.contains(wrap)) observe(wrap);
-            }
+            if (record.type === 'attributes') { if (tracked.has(record.target)) markOverflow(record.target); continue; }
+            // A keyed patch can reuse an outer div whose class becomes a scroller, or stop being one.
+            if (matchesScroller(record.target) && (!rootEl.contains || rootEl.contains(record.target))) observe(record.target);
+            else if (tracked.has(record.target)) release(record.target);
+            for (const node of record.removedNodes || []) for (const el of findScrollers(node, selectors)) if (!rootEl.contains?.(el)) release(el);
+            for (const node of record.addedNodes || []) for (const el of findScrollers(node, selectors)) if (!rootEl.contains || rootEl.contains(el)) observe(el);
         }
     }) : null;
-    writes?.observe(rootEl, { childList: true, subtree: true, attributeFilter: TABLE_STATE });
-    // Scroll events do not bubble; one capturing listener follows every wrapper.
-    const onScroll = (event) => {
-        if (event?.target?.classList?.contains('md-table-wrap')) markTableOverflow(event.target);
+    writes?.observe(rootEl, { childList: true, subtree: true, attributeFilter: SCROLL_ATTRS });
+    const onScroll = (event) => { if (tracked.has(event?.target)) markOverflow(event.target); };
+    let focusFrame = null;
+    const onFocus = (event) => {
+        const row = event.target;
+        const scroller = hostOf(row);
+        if (!scroller || row === scroller || isRestoringFocus(row) || !row.matches?.(':focus-visible')) return;
+        revealPastFade(scroller, row, { axis: 'x' });
+        // WebKit may finish its own focus scroll after focusin; settle clearance once that write lands.
+        if (typeof requestAnimationFrame !== 'function') return;
+        if (focusFrame !== null) cancelAnimationFrame(focusFrame);
+        focusFrame = requestAnimationFrame(() => {
+            focusFrame = null; if (tracked.has(scroller) && row.ownerDocument?.activeElement === row) revealPastFade(scroller, row, { axis: 'x' });
+        });
     };
     rootEl.addEventListener?.('scroll', onScroll, true);
+    rootEl.addEventListener?.('focusin', onFocus);
     const dispose = () => {
-        if (TABLE_BINDINGS.get(rootEl) !== dispose) return;
-        TABLE_BINDINGS.delete(rootEl);
-        sizes.disconnect();
-        writes?.disconnect();
+        if (bindings && bindings.get(rootEl) !== dispose) return;
+        bindings?.delete(rootEl); sizes.disconnect(); writes?.disconnect(); tracked.clear();
+        if (focusFrame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(focusFrame);
         rootEl.removeEventListener?.('scroll', onScroll, true);
-        rootEl.removeAttribute?.('data-md-tables');
+        rootEl.removeEventListener?.('focusin', onFocus);
+        if (marker) rootEl.removeAttribute?.(marker);
     };
-    TABLE_BINDINGS.set(rootEl, dispose);
-    // The marker lets `destroyChatMarkdown` find the binding from an ancestor.
-    rootEl.setAttribute?.('data-md-tables', '');
+    bindings?.set(rootEl, dispose);
+    if (marker) rootEl.setAttribute?.(marker, '');
     return dispose;
+}
+
+/** The chat column supplies overflow affordances to tables and compact fences,
+ * including later content. It does not enhance the author's literal code. */
+export function bindCompactMarkdown(rootEl) {
+    return bindMarkdownScrollers(rootEl, COMPACT_SELECTORS, COMPACT_BINDINGS, 'data-md-compact');
+}
+
+/** Bind horizontal overflow regions on render-only rich Markdown without executing diagrams or charts. */
+export function bindRenderedMarkdown(rootEl) {
+    if (!rootEl) return () => {};
+    RENDERED_BINDINGS.get(rootEl)?.();
+    return hasAny(rootEl, RICH_SELECTORS) ? bindMarkdownScrollers(rootEl, RICH_SELECTORS, RENDERED_BINDINGS, 'data-md-rendered') : () => {};
 }
 
 function cleanupState(root, state) {
     if (!state || state.destroyed) return;
     state.destroyed = true;
-    state.unsubscribeTheme?.();
-    state.unsubscribeTheme = null;
-    state.disposeTables?.();
-    state.disposeTables = null;
+    state.unsubscribeTheme?.(); state.unsubscribeTheme = null;
+    state.disposeScrollers?.(); state.disposeScrollers = null;
     root.removeEventListener('click', state.clickHandler);
-    for (const chart of state.charts) {
-        try { chart.destroy(); } catch {}
-    }
+    for (const chart of state.charts) { try { chart.destroy(); } catch {} }
     state.charts.clear();
     for (const timer of state.timers) clearTimeout(timer);
     state.timers.clear();
@@ -884,7 +921,7 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         charts: new Set(), timers: new Set(), clickHandler: null, frame: null, destroyed: false,
         // Bumped by every repaint so a diagram render still awaiting mermaid from
         // the previous palette discards its result instead of racing this one in.
-        epoch: 0, unsubscribeTheme: null, disposeTables: null,
+        epoch: 0, unsubscribeTheme: null, disposeScrollers: null,
     };
     state.clickHandler = async (event) => {
         const button = event.target?.closest?.('[data-code-copy]');
@@ -929,21 +966,21 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         onDomWrite(() => {
             highlightCodeIn(rootEl);
             renderLatexIn(rootEl);
+            rootEl.querySelectorAll?.('.katex-display').forEach((formula) => formula.classList?.add?.('scroll-fade-x'));
             return true;
         });
+        if (typeof ResizeObserver === 'function' && hasAny(rootEl, [...RICH_SELECTORS, '.md-mermaid'])) {
+            state.disposeScrollers = bindMarkdownScrollers(rootEl, RICH_SELECTORS);
+        }
         void renderMermaidNodes(rootEl, state, onDomWrite);
-        if (rootEl.querySelector?.('.md-table-wrap')) state.disposeTables = bindMarkdownTables(rootEl);
         const mountCharts = () => {
             state.frame = null;
             if (!state.destroyed && rootEl.isConnected !== false) {
                 renderChartNodes(rootEl, state, onDomWrite);
             }
         };
-        if (typeof requestAnimationFrame === 'function') {
-            state.frame = requestAnimationFrame(mountCharts);
-        } else {
-            mountCharts();
-        }
+        if (typeof requestAnimationFrame === 'function') state.frame = requestAnimationFrame(mountCharts);
+        else mountCharts();
     };
     if (rootEl.isConnected === false) queueMicrotask(start); else start();
     return () => cleanupState(rootEl, state);
@@ -952,14 +989,11 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
 /** Destroy markdown resources rooted at or below an element. */
 export function destroyChatMarkdown(rootEl) {
     if (!rootEl) return;
-    const roots = [];
-    if (ROOT_STATE.has(rootEl)) roots.push(rootEl);
-    roots.push(...(rootEl.querySelectorAll?.('[data-chat-markdown-enhanced]') || []));
-    for (const root of new Set(roots)) cleanupState(root, ROOT_STATE.get(root));
-    // A table-only binding (a compact surface) goes with the same node.
-    for (const root of [rootEl, ...(rootEl.querySelectorAll?.('[data-md-tables]') || [])]) {
-        TABLE_BINDINGS.get(root)?.();
+    for (const root of new Set([rootEl, ...(rootEl.querySelectorAll?.('[data-chat-markdown-enhanced]') || [])])) {
+        cleanupState(root, ROOT_STATE.get(root));
     }
+    for (const root of [rootEl, ...(rootEl.querySelectorAll?.('[data-md-rendered]') || [])]) RENDERED_BINDINGS.get(root)?.();
+    for (const root of [rootEl, ...(rootEl.querySelectorAll?.('[data-md-compact]') || [])]) COMPACT_BINDINGS.get(root)?.();
 }
 
 // Any future bubble-removal path in chat.js MUST call destroyChatMarkdown() or Chart

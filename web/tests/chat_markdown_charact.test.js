@@ -52,11 +52,11 @@ test('legacy renderMarkdown pins GFM-style pipe-table shape and quirks', () => {
     // The separator's colons are the author's alignment, written as marked writes it.
     assert.equal(
         renderMarkdown(source),
-        '<div class="md-table-wrap"><table class="md-table"><thead><tr><th align="left">First</th><th align="right">Second</th></tr></thead><tbody><tr><td align="left">one</td><td align="right">two</td></tr><tr><td align="left">three</td><td align="right">four</td></tr></tbody></table></div>',
+        '<div class="md-table-wrap scroll-fade-x"><table class="md-table"><thead><tr><th align="left">First</th><th align="right">Second</th></tr></thead><tbody><tr><td align="left">one</td><td align="right">two</td></tr><tr><td align="left">three</td><td align="right">four</td></tr></tbody></table></div>',
     );
     assert.equal(
         renderMarkdown('| a | b |\n| --- | :-: |\n| 1 | 2 |'),
-        '<div class="md-table-wrap"><table class="md-table"><thead><tr><th>a</th><th align="center">b</th></tr></thead><tbody><tr><td>1</td><td align="center">2</td></tr></tbody></table></div>',
+        '<div class="md-table-wrap scroll-fade-x"><table class="md-table"><thead><tr><th>a</th><th align="center">b</th></tr></thead><tbody><tr><td>1</td><td align="center">2</td></tr></tbody></table></div>',
     );
     assert.equal(renderMarkdown('| lone | row |'), '| lone | row |');
 });
@@ -97,7 +97,7 @@ test('legacy renderMarkdown keeps a marker-led paragraph as prose', () => {
 test('legacy renderMarkdown discards fenced-code language', () => {
     assert.equal(
         renderMarkdown('```javascript\nconst less = 1 < 2;\n```'),
-        '<pre><code>const less = 1 &lt; 2;\n</code></pre>',
+        '<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>const less = 1 &lt; 2;\n</code></pre></div>',
     );
 });
 
@@ -151,9 +151,9 @@ test('projectMarkdownLines follows the renderer heading rule, projects bullets a
     // Trailing blanks and CRLF are ordinary fence syntax; the plain preview
     // normalizes line endings and trailing whitespace while preserving the code markers.
     assert.equal(projectMarkdownLines('```md   \n## code\n```'), '```md\n## code\n```');
-    assert.match(renderMarkdown('```md   \n## code\n```'), /<pre>/);
+    assert.match(renderMarkdown('```md   \n## code\n```'), /<pre\b/);
     assert.equal(projectMarkdownLines('```md\r\n## code\r\n```'), '```md\n## code\n```');
-    assert.match(renderMarkdown('```md\r\n## code\r\n```'), /<pre>/);
+    assert.match(renderMarkdown('```md\r\n## code\r\n```'), /<pre\b/);
     // Linear on hostile brackets: 40k unmatched `[` inside one heading line.
     const brackets = Date.now(); projectMarkdownLines(`## ${'['.repeat(40000)}\nnext`);
     assert.ok(Date.now() - brackets < 500, 'link projection must stay linear');

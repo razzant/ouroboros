@@ -91,12 +91,14 @@ test('the chooser sheet says why a chosen engine cannot dictate and turns Browse
             notice: (text, tone) => notices.push([text, tone]) });
         const menu = doc.body.querySelector('.voice-chooser');
         assert.equal(menu.getAttribute('role'), 'menu');
-        assert.deepEqual(menu.children.slice(0, 2).map((node) => node.textContent),
+        const content = menu.querySelectorAll('.voice-menu-head, .voice-menu-note, [role^="menuitem"], [data-voice-option]');
+        assert.deepEqual(content.slice(0, 2).map((node) => node.textContent),
             ['Choose how to dictate', 'Your chosen engine cannot dictate here: Not here.']);
-        const options = menu.querySelectorAll('[data-voice-option]');
-        assert.deepEqual(options.map((node) => node.dataset.voiceOption), ['browser_speech:speech', 'hub:whisper-voice'],
+        const options = content.slice(2);
+        assert.deepEqual(options.map((node) => [node.getAttribute('role'), node.dataset.voiceOption]),
+            [['menuitem', 'browser_speech:speech'], ['menuitem', 'hub:whisper-voice']],
             'a failed Skills read still offers the Browse search');
-        options[0].click();
+        options.find((node) => node.dataset.voiceOption === 'browser_speech:speech').click();
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(speech.calls, [['enable', 'browser_speech']]);
         assert.deepEqual(notices, [['Browser speech is on. Press the mic to dictate.', 'ok']]);

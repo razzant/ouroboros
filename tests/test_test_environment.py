@@ -3,16 +3,20 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import test_environment
 from ouroboros.platform_layer import kill_process_tree
 from ouroboros.preflight_runner import _preflight_env
 from ouroboros.settings_defaults import settings_env_keys
 from ouroboros.test_environment import isolated_environment, settings_keys
+from tests._private_scratch import qualifying_home
 from tests.group_run import kill_survivors, run_in_group
 from concurrent.futures import ThreadPoolExecutor
 
@@ -43,6 +47,210 @@ def test_chromium_download_staging_uses_disposable_temp(tmp_path):
     assert env["MAC_CHROMIUM_TMPDIR"] == env["TMPDIR"]
     assert Path(env["MAC_CHROMIUM_TMPDIR"]).is_relative_to(tmp_path)
     assert Path(env["MAC_CHROMIUM_TMPDIR"]).is_dir()
+
+
+# ---- the private scratch home (#4093): host-side judgment on this test's own folders; no socket here ----
+
+POSIX = pytest.mark.skipif(os.name != "posix", reason="the private scratch home is a macOS and Linux path")
+
+
+@POSIX
+def test_the_os_ephemeral_families_are_refused_by_name_component_wise_and_through_aliases(tmp_path, monkeypatch):
+    """``ephemeral_ancestor``: every known OS-managed root and its component-wise containment (a ``/tmporary``
+    folder is no OS root) name the family, so does a symlink alias of one; a sibling outside them names none. Reads
+    only. Configured so the ambient ``/tmp`` (this run's own root) and temp variables can neither satisfy nor spoil it:
+    the variables are unset, and the alias and "outside" cases use a synthetic family below ``tmp_path``."""
+    for variable in test_environment.OS_TEMP_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    osfamilies = test_environment.OS_EPHEMERAL_ROOTS
+    assert osfamilies == (test_environment.Path("/tmp"), test_environment.Path("/var/tmp"),
+                          test_environment.Path("/run"), test_environment.Path("/var/run"),
+                          test_environment.Path("/var/folders"))
+    for root in osfamilies:
+        assert f"is under the OS-managed root {root}" in test_environment.ephemeral_ancestor(root / "home")
+        assert test_environment.ephemeral_ancestor(root.parent / (root.name + "orary")) == ""
+    family = tmp_path / "family"
+    family.mkdir()
+    monkeypatch.setattr(test_environment, "OS_EPHEMERAL_ROOTS", (family,))  # the real roots, ambient /tmp included, set aside
+    alias = tmp_path / "alias"
+    alias.symlink_to(family, target_is_directory=True)
+    found = test_environment.ephemeral_ancestor(alias / "home")
+    assert "is under the OS-managed root" in found and found.endswith("family")
+    assert "is the OS-managed root" in test_environment.ephemeral_ancestor(family)  # the folder itself, not only below it
+    assert test_environment.ephemeral_ancestor(tmp_path / "plain" / "home") == ""
+
+
+@POSIX
+def test_a_temp_variable_vetoes_only_its_own_absolute_folder_component_wise_and_never_slash(tmp_path, monkeypatch):
+    for variable in test_environment.OS_TEMP_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(test_environment, "OS_EPHEMERAL_ROOTS", ())  # the ambient /tmp can neither satisfy nor spoil a case
+    named, other = tmp_path / "named", tmp_path / "named-not"
+    named.mkdir()
+    other.mkdir()
+    for variable in test_environment.OS_TEMP_VARIABLES:
+        monkeypatch.setenv(variable, str(named))
+        assert f"is under ${variable} " in test_environment.ephemeral_ancestor(named / "home")
+        assert f"is ${variable} " in test_environment.ephemeral_ancestor(named)  # the folder itself
+        assert test_environment.ephemeral_ancestor(other / "home") == ""  # a sibling sharing its name prefix
+        for unfit in ("/", "relative/tmp", ""):  # ``/`` is every path's ancestor: no family; the others name no folder
+            monkeypatch.setenv(variable, unfit)
+            assert test_environment.ephemeral_ancestor(named / "home") == ""
+        monkeypatch.delenv(variable)
+
+
+@POSIX
+def test_an_issued_scratch_passes_the_posix_owner_mode_check_only_when_every_existing_component_through_w_was_read(tmp_path):
+    problem = test_environment.issued_scratch_problem
+    scratch = tmp_path / ".obs-abcdefgh" / "w"
+    scratch.mkdir(parents=True)
+    for folder in (scratch.parent, scratch):
+        os.chmod(folder, 0o700)
+    assert not problem(scratch) or not problem(scratch).startswith(str(tmp_path))  # at most what the OS keeps above
+    assert problem(scratch / "x") == f"{scratch / 'x'} does not exist"  # selection may allow a leaf not made yet; a fact may not
+    os.chmod(scratch, 0o770)
+    assert problem(scratch).startswith(str(scratch))  # ``w`` itself decides, nearest first
+    os.chmod(scratch, 0o700)
+    os.chmod(scratch.parent, 0o707)
+    assert problem(scratch).startswith(str(scratch.parent))  # then its container
+    os.chmod(scratch.parent, 0o700)
+    (tmp_path / "link").symlink_to(scratch, target_is_directory=True)
+    assert problem(tmp_path / "link").startswith(str(tmp_path / "link"))  # a link is no private directory
+    assert problem("relative/.obs-abcdefgh/w") == "relative/.obs-abcdefgh/w is not an absolute path"
+
+
+@POSIX
+def test_a_qualifying_home_is_judged_by_reading_only_and_elsewhere_nothing_changes(tmp_path, monkeypatch):
+    home = qualifying_home(tmp_path, monkeypatch)
+    assert test_environment.private_scratch_home() == home and test_environment.private_scratch_problem(home) == ""
+    assert list(home.iterdir()) == []  # a pure read makes nothing, not even a parent
+    monkeypatch.setattr(test_environment.sys, "platform", "win32")  # no such placement there: the platform default as before
+    assert test_environment.private_scratch_home() is None
+    assert test_environment.private_scratch_problem(None) == "no home directory"
+
+
+@POSIX
+@pytest.mark.parametrize("case", ["too-long-for-the-socket", "git-home", "group-writable-home", "root-directory",
+                                  "unreadable-git-probe"])
+def test_every_home_that_does_not_qualify_says_why_and_is_left_alone(tmp_path, monkeypatch, case):
+    home = qualifying_home(tmp_path, monkeypatch)
+    if case == "too-long-for-the-socket":
+        monkeypatch.setattr(test_environment, "SUN_PATH", 104)  # this synthetic home is far over the real 21 bytes
+        expected = "bytes, over the"
+    elif case == "git-home":
+        (home / ".git").mkdir()
+        expected = "inside the Git working tree"
+    elif case == "group-writable-home":
+        monkeypatch.undo()  # the real chain judgment, nearest first: this home decides before anything above it
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(test_environment, "SUN_PATH", 4096)
+        monkeypatch.setattr(test_environment, "ephemeral_ancestor", lambda _path: "")
+        os.chmod(home, 0o775)
+        expected = f"{home} is not a directory only root or you can write"
+    elif case == "root-directory":
+        home, expected = Path("/"), "no home directory"
+    else:
+        def unreadable(_path):  # Python 3.10 ``Path.exists`` raises PermissionError on an unreadable directory
+            raise PermissionError("unreadable")
+
+        monkeypatch.setattr(test_environment, "git_ancestor", unreadable)
+        expected = "cannot be read (PermissionError)"
+    assert expected in test_environment.private_scratch_problem(home)
+    if home != Path("/"):
+        assert [entry.name for entry in home.iterdir() if entry.name != ".git"] == []
+
+
+@POSIX
+@pytest.mark.parametrize("limit, room", [(104, 21), (108, 25)], ids=["macos", "linux"])
+def test_the_home_must_leave_the_deepest_nested_socket_its_bytes(monkeypatch, limit, room):
+    """82 bytes below the home (``SOCKET_LAYOUT``), the NUL included, counted in BYTES: a UTF-8 name is wider than its letters."""
+    monkeypatch.setattr(test_environment, "SUN_PATH", limit)
+    monkeypatch.setattr(test_environment, "git_ancestor", lambda _path: None)
+    monkeypatch.setattr(test_environment, "unsafe_ancestor", lambda _path: "")  # only the width is asked here
+    monkeypatch.setattr(test_environment, "ephemeral_ancestor", lambda _path: "")
+    problem = test_environment.private_scratch_problem
+    scratch_suffix = f"/{test_environment.PRIVATE_SCRATCH_PREFIX}12345678/{test_environment.SCRATCH_WORKSPACE}"
+    nested_tmpdir_suffix = "/ob-12345678.noindex/p12345678/tmp"
+    listener_suffix = "/pymp-12345678/listener-12345678"
+    assert test_environment.SOCKET_LAYOUT == scratch_suffix + nested_tmpdir_suffix + listener_suffix
+    assert len(os.fsencode(test_environment.SOCKET_LAYOUT)) == 82 == limit - 1 - room
+    assert problem(Path("/" + "a" * (room - 1))) == ""
+    assert f"is {room + 1} bytes, over the {room}" in problem(Path("/" + "a" * room))
+    wide = Path("/" + "é" * (room // 2 + 1))  # fewer letters than the room, more bytes than it
+    assert len(str(wide)) <= room and f"is {len(os.fsencode(str(wide)))} bytes" in problem(wide)
+
+
+@POSIX
+def test_ephemeral_ancestor_catches_case_insensitive_aliases_by_identity_and_preserves_distinct_dirs_and_io_fallback(
+    tmp_path, monkeypatch
+):
+    for variable in test_environment.OS_TEMP_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    base = tmp_path.resolve()
+    named_root, alias_root, other_root, broken_root = base / "Named", base / "named", base / "other", base / "broken"
+    meta = {
+        named_root: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=-1, st_ino=42),
+        alias_root: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=-1, st_ino=42),
+        other_root: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=-1, st_ino=43),
+    }
+    real_stat = os.stat
+
+    def fake_stat(target, *args, **kwargs):
+        if isinstance(target, (str, os.PathLike)):
+            candidate = Path(target)
+            if candidate == broken_root:
+                raise PermissionError("unreadable")
+            if candidate in meta:
+                return meta[candidate]
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(test_environment, "OS_EPHEMERAL_ROOTS", (named_root,))
+    assert f"is under the OS-managed root {named_root}" in test_environment.ephemeral_ancestor(alias_root / "home")
+    assert f"is the OS-managed root {named_root}" in test_environment.ephemeral_ancestor(alias_root)
+    assert test_environment.ephemeral_ancestor(other_root / "home") == ""
+    assert "cannot be read (PermissionError)" in test_environment.ephemeral_ancestor(broken_root / "home")
+    monkeypatch.setattr(test_environment, "OS_EPHEMERAL_ROOTS", (broken_root,))
+    assert "cannot be read (PermissionError)" in test_environment.ephemeral_ancestor(other_root / "home")
+    monkeypatch.setattr(test_environment, "OS_EPHEMERAL_ROOTS", ())
+    monkeypatch.setenv("TMPDIR", str(named_root))
+    assert f"is under $TMPDIR {named_root}" in test_environment.ephemeral_ancestor(alias_root / "home")
+
+
+@POSIX
+def test_non_utf8_home_is_ineligible_for_new_private_scratch_and_falls_back_to_shared_parent(tmp_path, monkeypatch):
+    from ouroboros.session_scratch_allocation import prepare_session_scratch
+
+    bad_home = Path("/u\udc80")
+    monkeypatch.setattr(test_environment, "SUN_PATH", 4096)
+    problem = test_environment.private_scratch_problem(bad_home)
+    assert "UTF-8" in problem and problem.encode("utf-8")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(test_environment, "private_scratch_home", lambda: bad_home)
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: shared)
+    record = tmp_path / "owner" / "scratch.json"
+    record.parent.mkdir()
+    workspace = prepare_session_scratch(record, tmp_path / "exec", private=True)
+    assert workspace.parent.parent == shared.resolve()
+    assert workspace.parent.name.startswith("obs-") and workspace.is_dir() and record.is_file()
+
+
+@POSIX
+def test_a_private_ancestor_is_closed_to_group_and_others_a_sticky_bit_does_not_excuse_it_and_the_nearest_decides(tmp_path):
+    inner = tmp_path / "a" / "b"
+    inner.mkdir(parents=True)
+    for folder in (tmp_path / "a", inner):
+        os.chmod(folder, 0o700)
+    unsafe = test_environment.unsafe_ancestor
+    for mode in (0o1777, 0o775, 0o757):  # anyone, sticky or not; group; others
+        os.chmod(inner.parent, mode)
+        assert str(inner.parent) in unsafe(inner / "not-yet")  # a missing leaf is skipped; this folder is the nearest
+    os.chmod(inner.parent, 0o700)
+    (tmp_path / "link").symlink_to(inner, target_is_directory=True)
+    assert str(tmp_path / "link") in unsafe(tmp_path / "link" / "not-yet")  # a link is no private directory
+    found = unsafe(inner)
+    assert not found or not found.startswith(str(tmp_path))  # at most what the OS keeps above this test's folders
 
 
 _WRITE_ROOTS = """

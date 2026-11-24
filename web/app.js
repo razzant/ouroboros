@@ -4,7 +4,7 @@ import { createWS } from './modules/ws.js';
 import { apiClient, apiFetch, fetchJson } from './modules/api_client.js';
 import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.js';
 import { loadVersion } from './modules/utils.js';
-import { bindScrollFade } from './modules/scroll_fade.js';
+import { bindScrollFade, replaceScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { bindChatSearchKeys } from './modules/chat_search.js';
 import { createStateSnapshotSequencer, heldProjectChatIds, readStateSnapshot } from './modules/state_snapshots.js';
@@ -1389,7 +1389,7 @@ const updateStatus = initUpdateStatus(ctx);
 // The interface size's one controller: the desktop keys work on every page, the slider lives in Settings.
 getInterfaceSize();
 
-const disposeScrollFades = Array.from(document.querySelectorAll('.scroll-fade-y'), bindScrollFade);
+const fadedScrollers = Array.from(document.querySelectorAll('.scroll-fade-y'), (el) => (bindScrollFade(el), el));
 // Inside Telegram the host's chrome follows the shell (host_telegram.js); a no-op elsewhere.
 const telegramHost = createTelegramHost({ layers });
 telegramHost.bind();
@@ -1399,7 +1399,7 @@ window.addEventListener('pagehide', (event) => {
     updateStatus.dispose();
     costs.destroy();
     disposeStorage?.destroy();
-    disposeScrollFades.forEach((dispose) => dispose());
+    fadedScrollers.forEach((el) => replaceScrollFade(el));  // what is live on each, not the binding made at start (Files swaps its preview's)
     telegramHost.dispose();
     releaseMobileKeyboardForDrawer.dispose?.();
     disposeDrawerDrag();

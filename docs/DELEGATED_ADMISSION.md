@@ -101,7 +101,8 @@ The host adds only these workspaces, never containers, markers or records, as
 `execution.auxiliaryWritableRoots`; the binding, a seat's checking text and the facts then
 name that scratch instead of the default parent (`workspace_preflight.session_service_directories`).
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
-sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
+sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`), or a reviewer seat's.
+For local in-place placement and binding notices, see [session scratch in PERSISTENCE](PERSISTENCE.md).
 The binding declares scratch disposable before use (`DISPOSABLE_SCRATCH`). Create one-off measurement
 snapshots there. Return the report, script, results, source and hash; explicitly return needed exact
 bytes as evidence. Scratch follows its seat or task and parent decision through Continue.

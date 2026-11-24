@@ -48,12 +48,11 @@ test('the section owns the filter rail and Clear; the list has no sticky chrome'
     assert.equal(tab, 'logs');
     assert.equal(mount.querySelector('#log-filters'), null);
     assert.ok(band.querySelector('#log-filters').classList.contains('app-tab-strip'));
+    assert.ok(band.querySelector('#log-filters').classList.contains('scroll-fade-x'), 'the rail uses the shared edge');
     assert.equal(band.querySelector('#btn-clear-logs').textContent, 'Clear');
     assert.ok(mount.querySelector('#log-entries'), 'the events stay in their scroller');
     assert.ok(band.querySelector('#btn-clear-logs').classList.contains('btn-default'));
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /\.logs-kinds\[data-scroll-end\] \{ --tab-fade-end: var\(--space-4\); \}/);
-    assert.match(css, /\.logs-kinds\[data-scroll-start\] \{ --tab-fade-start: var\(--space-4\); \}/);
     assert.match(css, /html\[data-layout="stack"\] #page-dashboard \.logs-kinds \{ grid-area: 2 \/ 1 \/ auto \/ -1; padding: var\(--space-2\) var\(--page-header-padding-x\);\s*margin: 0 calc\(-1 \* var\(--page-header-padding-x\)\); max-width: none; scroll-padding-inline: var\(--page-header-padding-x\); \}/,
         'a phone\'s rail runs to the page\'s edges, its chips starting at the column, so a hidden chip fades at the edge');
     const wide = css.indexOf('html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }');

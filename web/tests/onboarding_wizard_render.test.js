@@ -70,12 +70,16 @@ function inertDocument() {
         if (!byId.has(id)) byId.set(id, inertElement());
         return byId.get(id);
     };
+    const root = doc.getElementById('root');
+    const error = inertElement();
+    error.firstElementChild = inertElement(); // the mounted scrolling tray contains the live status text
+    root.querySelector = (selector) => selector === '.wizard-error' ? error : inertElement();
     const localModes = BOOTSTRAP.contract.localRoutingModes.map(({ value }) => {
         const button = inertElement();
         button.getAttribute = (key) => key === 'data-local-mode' ? value : null;
         return button;
     });
-    doc.getElementById('root').querySelectorAll = (selector) => selector === '[data-local-mode]' ? localModes : [];
+    root.querySelectorAll = (selector) => selector === '[data-local-mode]' ? localModes : [];
     doc.createElement = () => inertElement();
     doc.createTextNode = (text) => ({ textContent: String(text) });
     doc.createDocumentFragment = () => inertElement();
@@ -204,7 +208,8 @@ test('the Access step says what a Reviewer tick means under the chosen Access, r
     const prepare = (doc) => {
         const root = doc.getElementById('root');
         const others = root.querySelectorAll;
-        root.querySelector = (selector) => (selector === '[data-reviewers-note]' ? note : inertElement());
+        const query = root.querySelector;
+        root.querySelector = (selector) => (selector === '[data-reviewers-note]' ? note : query(selector));
         root.querySelectorAll = (selector) => ({ '[data-runtime-mode]': access }[selector] || others(selector));
     };
     await withWizard(bootstrap, 'reviewers-note', async ({ doc }) => {
@@ -667,7 +672,8 @@ test('starter skills or hub trust changed after a stored save are values its rec
         const host = inertElement();   // the Summary's starter row mounts here on every render
         const prepare = (doc) => {
             const root = doc.getElementById('root');
-            root.querySelector = (selector) => (selector === '[data-starter-skills]' ? host : inertElement());
+            const query = root.querySelector;
+            root.querySelector = (selector) => (selector === '[data-starter-skills]' ? host : query(selector));
         };
         await withWizard(SUMMARY_FIRST, `save=starter-${label}`, async ({ doc }) => {
             await settle();   // the starter list is read
@@ -1294,21 +1300,16 @@ test('an unsupported subscription Main is named by its record, never by its raw 
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
     };
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-    const error = { textContent: '' };   // the held footer line: the wizard rebinds it on every render
-    const prepare = (doc) => {
-        const root = doc.getElementById('root');
-        const others = root.querySelector;
-        root.querySelector = (selector) => (selector === '.wizard-error' ? error : others(selector));
-    };
     const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState,
         mainModel: 'claudexor::claude=studio-main', automaticModels: [] } };
     await withWizard(bootstrap, 'unsupported-main-name', async ({ doc }) => {
         await settle();
         doc.getElementById('next-btn').fire('click');   // Accounts → Models: the reason is drawn there
         await settle();
-        assert.equal(error.textContent, 'Main uses Studio models, which has no configured access in this setup.');
+        const status = doc.getElementById('root').querySelector('.wizard-error').firstElementChild;
+        assert.equal(status.textContent, 'Main uses Studio models, which has no configured access in this setup.');
         assert.equal(doc.getElementById('next-btn').disabled, true, 'the decision itself is unchanged: unsupported Main blocks Continue');
-    }, { fetch, prepare });
+    }, { fetch });
 });
 
 // PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only

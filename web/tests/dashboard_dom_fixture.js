@@ -53,6 +53,7 @@ export class NodeStub {
         return Boolean(force);
     }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3); }
+    get childNodes() { return this.children; }  // moving a popup's contents uses the existing append/remove path
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
     get nextElementSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1]; }

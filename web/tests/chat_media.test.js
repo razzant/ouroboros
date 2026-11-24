@@ -745,12 +745,11 @@ test('a live data: photo still hands the bridge the frame addresses', () => {
 test('a task-incident toast carries the frame tone; absent tone keeps the alarm (#628)', async () => {
     const { showTaskIncidentToast } = await import('../modules/chat_media.js');
     const priorDocument = globalThis.document;
-    const created = [];
     const tracker = { adds: 0, removes: 0 };
     const stack = new NodeStub('div', tracker);
     globalThis.document = {
         getElementById: () => stack,
-        createElement: (tag) => { const node = new NodeStub(tag, tracker); created.push(node); return node; },
+        createElement: (tag) => new NodeStub(tag, tracker),
         body: { appendChild() {} },
     };
     const priorTimeout = globalThis.setTimeout;
@@ -783,7 +782,7 @@ test('a task-incident toast carries the frame tone; absent tone keeps the alarm 
         assert.equal(showTaskIncidentToast({
             task_incident: 'network_wait', toast_once: 'eph:network_wait:recovered:1', toast_tone: 'ok', content: 'again',
         }), null);
-        assert.equal(created.length, 4);
+        assert.deepEqual(stack.querySelectorAll('.toast'), [recovered, waiting, fault, odd]);
     } finally {
         globalThis.document = priorDocument;
         globalThis.setTimeout = priorTimeout;

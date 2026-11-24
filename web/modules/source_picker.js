@@ -1,6 +1,7 @@
 // Engine/model source descriptors can arrive after a menu opens. The owner keeps its select/value/change
 // contract; the accessible face and the open, portalled list refer to exact source values throughout.
-import { bindOptionPress, bindPopoverPosition } from './ui_interactions.js';
+import { bindOptionPress, bindPopoverPosition, popupScrollBody } from './ui_interactions.js';
+import { bindScrollFade, revealPastFade } from './scroll_fade.js';
 
 let nextId = 0;
 
@@ -62,6 +63,7 @@ function bindSourcePicker(select) {
     list.id = 'source-options-' + ++nextId;
     list.className = 'ui-popup ui-source-options';
     list.setAttribute('role', 'listbox');
+    const body = popupScrollBody(list);
 
     const oldTabIndex = select.getAttribute('tabindex');
     const field = select.parentElement;
@@ -72,6 +74,7 @@ function bindSourcePicker(select) {
     select.before(button);
     let keyboardActive = false;
     let position = null, active = null, unbindPress = null, prefix = '', typedAt = 0;
+    let disposeFade = null;
     const rows = new Map();
     const enabled = () => [...select.options].filter(option => !option.disabled && !option.parentElement.disabled);
     const focus = () => button.focus({ preventScroll: true });
@@ -82,12 +85,7 @@ function bindSourcePicker(select) {
         if (row) {
             row.dataset.active = '';
             button.setAttribute('aria-activedescendant', row.id);
-            if (reveal) {
-                const bounds = row.getBoundingClientRect(), top = list.getBoundingClientRect().top + list.clientTop;
-                const bottom = top + list.clientHeight;
-                if (bounds.bottom > bottom) list.scrollTop += Math.ceil(bounds.bottom - bottom);
-                else if (bounds.top < top) list.scrollTop -= Math.ceil(top - bounds.top);
-            }
+            if (reveal) revealPastFade(body, row);
         } else button.removeAttribute('aria-activedescendant');
     }
     function redraw() {
@@ -100,7 +98,7 @@ function bindSourcePicker(select) {
         button.hidden = select.hidden;
         if (!list.isConnected) return;
         if (button.disabled || button.hidden) { close(); return; }
-        updateSourceRows(select, list, rows);
+        updateSourceRows(select, body, rows);
         position?.reposition();
         highlight(active, keyboardActive);
     }
@@ -110,6 +108,8 @@ function bindSourcePicker(select) {
     function close() {
         position?.destroy();
         position = null;
+        disposeFade?.();
+        disposeFade = null;
         unbindPress?.();
         unbindPress = null;
         doc.removeEventListener('pointerdown', outside, true);
@@ -129,6 +129,7 @@ function bindSourcePicker(select) {
         button.setAttribute('aria-controls', list.id);
         redraw();
         position = bindPopoverPosition(list, { anchor: button, field: button.closest('.ui-field') || button });
+        disposeFade = bindScrollFade(body);
         highlight(select.value);
         unbindPress = bindOptionPress(list, '[data-source-value]', row => choose(row.dataset.sourceValue));
         doc.addEventListener('pointerdown', outside, true);

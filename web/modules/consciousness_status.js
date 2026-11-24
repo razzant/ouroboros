@@ -107,12 +107,14 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
 
     // ---- the Shade: the room Shade's anchor and material under the bar
     const anchor = element('div', 'rw-shade-anchor cx-anchor');
-    const shade = element('div', 'rw-surface scroll-fade-y rw-shade cx-shade');
+    const shade = element('div', 'rw-surface rw-shade cx-shade');
     shade.id = `${uid}-shade`;
     shade.hidden = true;
     shade.tabIndex = -1;
     shade.setAttribute('role', 'dialog');
     shade.setAttribute('aria-label', 'Consciousness');
+    const scroll = element('div', 'rw-shade-body scroll-fade-y');
+    scroll.tabIndex = -1;  // where a pointer open lands: the inner scrollport, never a control
     const body = element('div', 'cx-body');
     const head = element('div', 'cx-head');
     const headWords = element('div', 'cx-head-words');
@@ -150,10 +152,11 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const evolutionDoor = door('Evolution ›', 'evolution');
     doors.append(dashboardDoor, costsDoor, evolutionDoor);
     body.append(head, coverageNote, ...groups.flatMap((group) => [group.heading, group.wakes, group.note]), doors);
-    shade.append(body);
+    scroll.append(body);
+    shade.append(scroll);
     anchor.append(shade);
     bar.append(anchor);
-    const disposeShadeFade = bindScrollFade(shade);
+    const disposeShadeFade = bindScrollFade(scroll);
 
     let view = null;
     let open = false;
@@ -288,9 +291,10 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         chip.dataset.open = '1';
         bar.setAttribute('data-cx-shade', '');  // Main's history note waits behind it (room_work.css)
         void readWakes();
-        // A pointer open lands on the Shade itself; a keyboard open enters its first control.
+        // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
+        // a keyboard open enters its first enabled control.
         const first = viaKeyboard ? [toggle, dashboardDoor].find((node) => !node.hidden && !node.disabled) : null;
-        (first || shade).focus({ preventScroll: true });
+        (first || scroll).focus({ preventScroll: true });
     }
 
     function close({ restoreFocus = true } = {}) {

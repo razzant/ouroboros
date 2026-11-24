@@ -112,6 +112,47 @@ def scratch_fact(*, launcher: bool = False, granted: str = "") -> str:
             + " outside every Git working tree")
 
 
+PRIVATE_SCRATCH_ANCESTRY = (" (POSIX owner/mode check: every directory down to it is owned by root or you and none has a "
+                            "group or other write bit; ACLs and mounts are not examined)")
+SHARED_SCRATCH_ANCESTRY = (" (shared temp placement; private ancestry is not established, so a program that requires "
+                           "private ancestors may refuse a socket here)")
+
+
+def scratch_ancestry(granted: str) -> str:
+    """What the host can truthfully add about an in-place run's own scratch GRANTED, "" when nothing. The home's
+    ``<home>/.obs-<id>/w`` is called private only if the chain that exists now, ``/`` through ``w`` with its container
+    (``issued_scratch_problem``), was read and passes the POSIX owner/mode check; a failed read claims nothing. The shared
+    temp parent is named as such from the name alone, its ancestry not established. Either only while the path is
+    still exactly what was issued (no component is a link now); any other place, a managed run or a non-macOS/Linux host,
+    nothing."""
+    from pathlib import Path
+
+    from ouroboros import work_domain
+    from ouroboros.session_scratch import private_home_child
+    from ouroboros.test_environment import (
+        _short_temp_platform,
+        default_temp_parent,
+        issued_scratch_problem,
+        private_scratch_home,
+        session_scratch_parent,
+    )
+
+    try:
+        if not _short_temp_platform() or work_domain.managed():  # a local macOS/Linux fact only; a managed path is not read here
+            return ""
+        path = Path(granted)
+        if os.path.realpath(granted) != granted:
+            return ""
+        parent, home = path.parent.parent, private_scratch_home()
+        if home is not None and parent == home and private_home_child(path.parent):
+            return "" if issued_scratch_problem(granted) else PRIVATE_SCRATCH_ANCESTRY
+        if parent in (session_scratch_parent().resolve(), default_temp_parent().resolve()):
+            return SHARED_SCRATCH_ANCESTRY
+    except (OSError, RuntimeError, ValueError):  # unknown is no claim
+        pass
+    return ""
+
+
 def disposable_state_instruction(evidence_root: str, *, investigation: bool = False, granted: str = "") -> str:
     """Where a session's own checks put scratch and evidence (#2070).
 
@@ -291,7 +332,7 @@ def in_place_binding_instruction(root: str, service: Any = None) -> str:
     what ``subagent_work_order.session_service_directories`` made for it: its disposable scratch,
     or the typed reason there is none."""
     scratch, why = getattr(service, "scratch", ""), getattr(service, "limitation", "")
-    place = (f"{scratch_fact(granted=scratch)}, {DISPOSABLE_SCRATCH}" if scratch else scratch_fact()
+    place = (f"{scratch_fact(granted=scratch)}{scratch_ancestry(scratch)}, {DISPOSABLE_SCRATCH}" if scratch else scratch_fact()
              + (f" (no disposable scratch could be made for this run: {why}; nothing owns or removes that place, "
                 "so report the gap)" if why else ""))
     return (

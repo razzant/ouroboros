@@ -12,7 +12,9 @@ Synthetic engines and isolated roots only: no live engine, provider, Settings or
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -20,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import delegate_custody as custody
-from ouroboros import session_scratch, test_environment, workspace_preflight
+from ouroboros import session_scratch, session_scratch_allocation, test_environment, workspace_preflight
 from ouroboros.delegate_start_instructions import scratch_fact
 from ouroboros.workspace_preflight import (
     PACKAGE_DOWNLOADS_DIRNAME,
@@ -28,6 +30,11 @@ from ouroboros.workspace_preflight import (
     ServiceDirectories,
     session_environment_facts,
     session_service_directories,
+)
+from tests._private_scratch import (  # noqa: F401 -- autouse fixture, also imported from here by older suites
+    _synthetic_temp_parent,
+    private_children,
+    qualifying_home,
 )
 from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transport fixture
     _owned_gateway_uses_each_test_transport,
@@ -37,15 +44,6 @@ from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transpo
 GRANTED = {"accessControl": {"auxiliaryWritableRoots": True}}
 CACHES = (("uv", "UV_CACHE_DIR"), ("pip", "PIP_CACHE_DIR"), ("npm", "npm_config_cache"))
 _PLATFORM_TEMP_PARENT = test_environment.session_scratch_parent
-
-
-@pytest.fixture(autouse=True)
-def _synthetic_temp_parent(tmp_path, monkeypatch):
-    # All ordinary cases remain below the safe_test-owned pytest root. Only the
-    # explicit real consumer test uses the platform's physically short parent.
-    parent = tmp_path / "temp"
-    parent.mkdir()
-    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: parent)
 
 
 def _scratch_for(data, task, key):
@@ -98,12 +96,12 @@ class _Catalog:
 
 
 def _prepare(tmp_path, gateway, *, access="workspace_write", mode="agent", task_id="task-1", key="snap-1",
-             execution=None):
+             execution=None, private=False):
     execution = execution or tmp_path / "copy"
     execution.mkdir(parents=True, exist_ok=True)
     return session_service_directories(gateway, "route", access=access, mode=mode, data_root=tmp_path / "data",
                                        drive_root=tmp_path / "data", task_id=task_id, key=key,
-                                       execution_root=execution)
+                                       execution_root=execution, private=private)
 
 
 def _symlink_or_skip(link, target):
@@ -197,6 +195,199 @@ def test_a_full_access_scratch_that_cannot_be_made_is_a_typed_gap(tmp_path):
     assert "no disposable scratch could be made for this run (scratch_unavailable:" in text
     assert f"({scratch_fact()}), where nothing owns or removes it, and report that gap" in text
     assert "your engine grants this run none" not in text
+
+
+POSIX = pytest.mark.skipif(os.name != "posix", reason="the private scratch home is a macOS and Linux path")
+
+
+@POSIX
+@pytest.mark.parametrize("mask", [0o002, 0o077], ids=["group-writable-default", "private"])
+def test_a_full_in_place_start_takes_one_new_home_child_and_every_other_start_keeps_the_shared_parent(tmp_path, monkeypatch, mask):
+    home = qualifying_home(tmp_path, monkeypatch)
+    old = os.umask(mask)  # a plain mkdir of ``w`` would be 0775 under the first mask
+    try:
+        owned = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    finally:
+        os.umask(old)
+    scratch = _scratch_for(tmp_path / "data", "task-1", "in-place-1")
+    assert owned == ServiceDirectories(roots=(), scratch=str(scratch))  # owned and named: no grant, no gap
+    assert scratch.parent.parent == home and private_children(home) == [scratch.parent.name]  # no shared parent anywhere
+    assert [stat.S_IMODE(folder.lstat().st_mode) for folder in (scratch.parent, scratch)] == [0o700, 0o700]
+    record = tmp_path / "data/task_drives/task-1" / SESSION_SCRATCH_DIRNAME / "in-place-1" / "scratch.json"
+    assert session_scratch.recorded_scratch(record) == scratch.parent  # the exact home child is nameable
+    for plain in (_prepare(tmp_path, _Catalog(GRANTED), key="snap-1"),  # a granted copy's scratch and a full copy's
+                  _prepare(tmp_path, _Catalog(GRANTED), access="full", key="snap-2")):  # keep the shared parent
+        assert pathlib.Path(plain.scratch).parent.parent == test_environment.session_scratch_parent().resolve()
+
+
+@POSIX
+@pytest.mark.parametrize("case", ["too-long", "unwritable-home", "execution-around-it", "unreadable-git-probe",
+                                  "marker-unwritable", "workspace-refused"])
+def test_a_private_choice_that_fails_before_the_record_removes_its_own_names_and_tries_the_shared_parent_once(
+        tmp_path, monkeypatch, case):
+    home = qualifying_home(tmp_path, monkeypatch)
+    execution = None
+    if case == "too-long":
+        monkeypatch.setattr(test_environment, "SUN_PATH", 104)
+    elif case == "unwritable-home":
+        if os.geteuid() == 0:
+            pytest.skip("root writes anywhere: no unwritable home to refuse")
+        os.chmod(home, 0o500)  # the decision still accepts it (it only reads); the allocator cannot make its child
+    elif case == "execution-around-it":
+        execution = home  # an execution root around the child would overlap it
+    elif case == "unreadable-git-probe":
+        real_probe = test_environment.git_ancestor
+
+        def unreadable(path):  # Python 3.10 ``Path.exists`` raises PermissionError on an unreadable home
+            if pathlib.Path(path) == home:
+                raise PermissionError("unreadable")
+            return real_probe(path)
+
+        monkeypatch.setattr(test_environment, "git_ancestor", unreadable)
+    elif case == "marker-unwritable":
+        original = test_environment.write_scratch_marker
+
+        def refuse_in_the_home(path, nonce):
+            if pathlib.Path(path).parent == home:
+                raise PermissionError("no marker")
+            return original(path, nonce)
+
+        monkeypatch.setattr(test_environment, "write_scratch_marker", refuse_in_the_home)
+    else:
+        real_workspace = session_scratch._workspace
+
+        def refuse_w(container, mode=0o777):
+            if container.parent == home:
+                raise PermissionError("no workspace")
+            return real_workspace(container, mode)
+
+        monkeypatch.setattr(session_scratch, "_workspace", refuse_w)
+    try:
+        shared = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True, execution=execution)
+    finally:
+        os.chmod(home, 0o700)
+    assert shared.scratch and shared.limitation == "" and shared.roots == ()
+    assert pathlib.Path(shared.scratch).parent.parent == test_environment.session_scratch_parent().resolve()
+    assert private_children(home) == []  # nothing of the private attempt is left
+
+
+@POSIX
+@pytest.mark.parametrize("failing", ["rollback", "record"])
+def test_a_failed_rollback_or_a_failed_record_never_turns_into_the_shared_fallback(tmp_path, monkeypatch, failing):
+    home = qualifying_home(tmp_path, monkeypatch)
+    if failing == "rollback":  # the private attempt fails AND its own names cannot be removed
+        def no_workspace(*_args, **_kwargs):
+            raise PermissionError("no w")
+
+        def no_removal(*_args):
+            raise session_scratch_allocation.ScratchRollbackFailed("cannot remove")
+
+        monkeypatch.setattr(session_scratch, "_workspace", no_workspace)
+        monkeypatch.setattr(session_scratch_allocation, "discard", no_removal)
+    else:  # the record write fails after a complete private container
+        def no_record(*_args, **_kwargs):
+            raise OSError("no record")
+
+        monkeypatch.setattr("ouroboros.utils.atomic_write_json", no_record)
+    owned = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    assert owned.scratch == "" and owned.limitation.startswith(workspace_preflight.SCRATCH_UNAVAILABLE)  # typed gap
+    assert not any(test_environment.session_scratch_parent().iterdir())  # the shared parent was never tried
+    assert len(private_children(home)) == (1 if failing == "rollback" else 0)  # a failed removal is left as it is
+
+
+@POSIX
+def test_an_unexpected_private_failure_is_not_a_placement_failure_and_never_falls_back(tmp_path, monkeypatch):
+    """Only ``OSError``/``ValueError`` (a filesystem or validation failure) after exact rollback may try the shared
+    parent; any other exception is a defect and propagates without touching it."""
+    qualifying_home(tmp_path, monkeypatch)
+
+    def defect(*_args, **_kwargs):
+        raise RuntimeError("a defect, not a placement failure")
+
+    monkeypatch.setattr(session_scratch, "_workspace", defect)
+    with pytest.raises(RuntimeError, match="a defect"):  # outside the typed-gap set too: nothing hides a defect
+        _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    assert not any(test_environment.session_scratch_parent().iterdir())  # the shared parent was never tried
+
+
+@POSIX
+@pytest.mark.parametrize("outcome", ["published", "unreadable"])
+def test_a_record_write_that_failed_after_publication_or_cannot_be_read_back_keeps_the_container(
+        tmp_path, monkeypatch, outcome):
+    """Cleanup runs only when the record is proven unpublished: a late fsync or unreadable readback keeps it."""
+    from ouroboros import utils
+
+    home = qualifying_home(tmp_path, monkeypatch)
+    real_write, real_read_text = utils.atomic_write_json, pathlib.Path.read_text
+
+    def write_then_fail(path, row, **kwargs):
+        if outcome == "published":
+            real_write(path, row, **kwargs)
+        raise OSError("late fsync failure")
+
+    def unreadable_record(self, *args, **kwargs):
+        if self.name == "scratch.json":
+            raise PermissionError("record unreadable")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(utils, "atomic_write_json", write_then_fail)
+    if outcome == "unreadable":
+        monkeypatch.setattr(pathlib.Path, "read_text", unreadable_record)
+    owned = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    assert owned.scratch == "" and owned.limitation.startswith(workspace_preflight.SCRATCH_UNAVAILABLE)
+    [kept] = private_children(home)
+    assert (home / kept / "w").is_dir() and not any(test_environment.session_scratch_parent().iterdir())
+
+
+@POSIX
+def test_an_unreadable_record_stat_keeps_the_prior_durable_record_and_allocates_nothing(tmp_path, monkeypatch):
+    """A generic ``lstat`` error on an existing ``scratch.json`` is never treated as absence."""
+    home = qualifying_home(tmp_path, monkeypatch)
+    first = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    assert first.scratch and pathlib.Path(first.scratch).parent.parent == home
+    record = (tmp_path / "data" / "task_drives" / "task-1" / SESSION_SCRATCH_DIRNAME / "in-place-1" / "scratch.json").resolve()
+    before, [original_child], real_lstat = record.read_bytes(), private_children(home), os.lstat
+
+    def fail_record_stat(path, *args, **kwargs):
+        if pathlib.Path(path) == record:
+            raise PermissionError("cannot stat durable record")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", fail_record_stat)
+    with pytest.raises(PermissionError, match="cannot stat durable record"):
+        session_scratch_allocation.prepare_session_scratch(record, tmp_path / "copy", private=True)
+    reopened = _prepare(tmp_path, _Catalog(GRANTED), access="full", key="in-place-1", private=True)
+    assert reopened.scratch == "" and reopened.limitation.startswith(workspace_preflight.SCRATCH_UNAVAILABLE)
+    assert "PermissionError" in reopened.limitation and record.read_bytes() == before
+    assert private_children(home) == [original_child] and not any(test_environment.session_scratch_parent().iterdir())
+
+
+def test_managed_discard_and_rollback_preserve_typed_work_domain_unsettled(tmp_path, monkeypatch):
+    """An unconfirmed managed removal propagates ``WorkDomainUnsettled`` intact, never wrapped as rollback failure."""
+    from ouroboros import work_domain
+
+    observed = subprocess.CompletedProcess(["rm"], None, b"", b"unsettled")
+    container = tmp_path / "staging" / "scratch" / "obs-12345678"
+
+    def unsettled_remove(_path):
+        raise work_domain.WorkDomainUnsettled("unconfirmed managed remove", observed)
+
+    monkeypatch.setattr(work_domain, "kind", lambda _path: "")
+    monkeypatch.setattr(work_domain, "remove", unsettled_remove)
+    with pytest.raises(work_domain.WorkDomainUnsettled) as direct:
+        session_scratch_allocation.discard(container, managed=True)
+    assert not isinstance(direct.value, session_scratch_allocation.ScratchRollbackFailed) and direct.value.result is observed
+
+    monkeypatch.setattr(work_domain, "managed", lambda: True)
+    monkeypatch.setattr(work_domain, "staging_path", lambda *parts: str(tmp_path.joinpath("staging", *parts)))
+    monkeypatch.setattr(session_scratch, "work_session_scratch", lambda _execution: container)
+    monkeypatch.setattr(work_domain, "write_file", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("marker fail")))
+    record = tmp_path / "owner" / "scratch.json"
+    record.parent.mkdir(parents=True)
+    with pytest.raises(work_domain.WorkDomainUnsettled) as rollback:
+        session_scratch_allocation.prepare_session_scratch(record, tmp_path / "execution", private=False)
+    assert not isinstance(rollback.value, session_scratch_allocation.ScratchRollbackFailed) and rollback.value.result is observed
+    assert not record.exists() and not any(test_environment.session_scratch_parent().iterdir())
 
 
 def test_an_unconfined_tool_policy_route_keeps_its_on_demand_behavior(tmp_path):

@@ -235,9 +235,13 @@ test('a card: name opens the sheet, Official only on endorsed entries, unknown p
     assert.match(builtin, /Built in<\/span>/);
     assert.equal((builtin.match(/data-official-mark/g) || []).length, 1);
     assert.match(builtin, /Comes with the app · updates with Ouroboros/);
-    const long = renderBrowseCard({ ...item('ouroboros/weather'), description: 'x '.repeat(400) }, { state: { status: '', action: '' } });
-    assert.match(long, /data-clamped/);
+    const description = `${'A practical description for rainy days. '.repeat(17)}END`;
+    const long = renderBrowseCard({ ...item('ouroboros/weather'), description }, { state: { status: '', action: '' } });
+    assert.match(long, /data-browse-purpose-preview/);
+    assert.doesNotMatch(long, /data-fold-clipped/, 'layout, not text length, decides whether content is clipped');
+    assert.ok(long.includes(`${description}</p>`), 'the card markup keeps the catalog text');
     assert.match(long, />Read more ›</);
+    assert.doesNotMatch(weather, /data-browse-purpose-preview|data-fold-clipped|Read more/);
 });
 
 test('a connector is known by its place declaration, never a typed tag: icon, «Connects …», the Connectors filter', () => {

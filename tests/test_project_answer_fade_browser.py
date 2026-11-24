@@ -296,3 +296,77 @@ def test_system_project_row_over_copy_keeps_the_answers_clearance(project_chat, 
         assert r['right'] <= c['left'] or r['left'] >= c['right'] or r['bottom'] <= c['top'] or r['top'] >= c['bottom'], found
     page.touchscreen.tap(reference['tap']['x'], reference['tap']['y'])
     assert page.evaluate('window.openedProject?.project') == {'id': 'alpha', 'name': name}
+
+
+@pytest.mark.parametrize("project_chat", [
+    ("webkit", "light", 1100), ("chromium", "light", 1100),
+], indirect=True)
+def test_folded_project_answer_stops_and_restores_keyboard_tabindex(project_chat):
+    """Mirrored project answers stop every keyboard focus/scroller target while folded without inert holes,
+    keep late overflow stops held while folded, and restore original/scroller tabindex on unfold."""
+    chat = project_chat
+    page = chat["page"]
+    page.set_viewport_size({"width": chat["width"], "height": 750})
+    wide_line = " ".join(f"project_wide_code_{i:02d}" for i in range(1, 16))
+    rich_answer = "\n\n".join([
+        "Project summary with [Project link](https://example.com/project).",
+        "```text\nshort code\n```",
+        "```text\ninitially short code\n```",
+        f"```text\n{wide_line}\n```",
+        "| Col A | Col B | Col C | Col D | Col E | Col F | Col G | Col H |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| [Table ref](https://example.com/tref) | Alpha01 | Beta02 | Gamma03 | Delta04 | Epsilon05 | Zeta06 | Eta07 |",
+        "Closing paragraph below the seven-line fold.",
+    ])
+    bubble = emit(page, "fade-keyboard", rich_answer)
+    # Add an authored tabindex target inside the message and refresh so the fold owner captures it cleanly.
+    bubble.evaluate("""b => {
+        const span = document.createElement('span');
+        span.className = 'authored-stop';
+        span.setAttribute('tabindex', '2');
+        span.textContent = 'Authored stop';
+        b.querySelector('.message').appendChild(span);
+    }""")
+    refresh(page, bubble)
+    state_js = """b => {
+        const m = b.querySelector('.message'), pres = m.querySelectorAll('pre');
+        const nodes = {
+            link: m.querySelector('a[href="https://example.com/project"]'),
+            tableLink: m.querySelector('a[href="https://example.com/tref"]'),
+            shortPre: pres[0], latePre: pres[1], widePre: pres[2],
+            tableWrap: m.querySelector('.md-table-wrap'),
+            authored: m.querySelector('.authored-stop'),
+        };
+        return {
+            folded: b.classList.contains('is-folded'),
+            inertCount: m.querySelectorAll('[inert], [data-fold-inert]').length,
+            stopped: Object.entries(nodes).filter(([, el]) => el.hasAttribute('data-fold-stop')).map(([k]) => k),
+            tabs: Object.fromEntries(Object.entries(nodes).map(([k, el]) => [k, el.getAttribute('tabindex')])),
+        };
+    }"""
+    all_keys = ["link", "tableLink", "shortPre", "latePre", "widePre", "tableWrap", "authored"]
+    all_stopped = {"folded": True, "inertCount": 0, "stopped": all_keys, "tabs": {k: "-1" for k in all_keys}}
+    assert bubble.evaluate(state_js) == all_stopped
+
+    # Overflow appearing while folded (real ResizeObserver via viewport change) must never leak tabindex="0",
+    # and must restore tabindex="0" once the fold lifts.
+    bubble.evaluate("(b, wide) => { b.querySelectorAll('.message pre code')[1].textContent = wide; }", wide_line)
+    page.set_viewport_size({"width": 420, "height": 750})
+    page.wait_for_function(
+        "b => b.querySelectorAll('.message pre')[1]?.getAttribute('role') === 'region'",
+        arg=bubble.element_handle(),
+    )
+    assert bubble.evaluate(state_js) == all_stopped
+
+    # Unfolding the same mounted answer restores original/scroller/authored tabindex verbatim.
+    bubble.evaluate("b => b.style.setProperty('--project-answer-lines', '80')")
+    refresh(page, bubble)
+    assert bubble.evaluate(state_js) == {
+        "folded": False, "inertCount": 0, "stopped": [],
+        "tabs": {"link": None, "tableLink": None, "shortPre": None, "latePre": "0", "widePre": "0", "tableWrap": "0", "authored": "2"},
+    }
+
+    # Refolding stops every target again without inert holes.
+    bubble.evaluate("b => b.style.removeProperty('--project-answer-lines')")
+    refresh(page, bubble)
+    assert bubble.evaluate(state_js) == all_stopped

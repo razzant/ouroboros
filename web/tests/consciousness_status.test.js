@@ -356,3 +356,41 @@ test('Shade keeps three own wakes and three place wakes, with independent empty 
         restoreDom(env.prior);
     }
 });
+
+test('keyboard opening skips a disabled or hidden toggle and lands on Dashboard', () => {
+    const env = installDom();
+    let status = null;
+    try {
+        const doc = globalThis.document;
+        const bar = doc.createElement('div');
+        env.mount.appendChild(bar);
+        let online = true;
+        status = createConsciousnessStatus({
+            bar,
+            ws: { send() {}, isConnected: () => online },
+            read: async () => normalizeConsciousness({ recent_wakes: [] }),
+        });
+        status.update(answer());
+        assert.equal(status.chip.isConnected, true);
+
+        // Offline: Turn off is disabled on open via paintShade(), so ArrowDown lands on Dashboard.
+        online = false;
+        status.update(answer());
+        for (const fn of status.chip.listeners.get('keydown') || []) fn({ target: status.chip, key: 'ArrowDown', preventDefault() {} });
+        assert.equal(status.isOpen(), true);
+        assert.equal(status.shade.querySelector('.cx-toggle').disabled, true);
+        assert.equal(doc.activeElement, status.shade.querySelector('.cx-door'), 'offline keyboard open skips disabled toggle');
+        status.close();
+
+        // Unknown enabled state: toggle is hidden, so Enter/Space (detail === 0) lands on Dashboard.
+        online = true;
+        status.update({ bg_consciousness_enabled: null, bg_consciousness_state: {} });
+        for (const fn of status.chip.listeners.get('click') || []) fn({ target: status.chip, detail: 0 });
+        assert.equal(status.isOpen(), true);
+        assert.equal(status.shade.querySelector('.cx-toggle').hidden, true);
+        assert.equal(doc.activeElement, status.shade.querySelector('.cx-door'), 'unknown-state keyboard open skips hidden toggle');
+    } finally {
+        status?.destroy();
+        restoreDom(env.prior);
+    }
+});

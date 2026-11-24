@@ -1,15 +1,16 @@
 // The quote panel (docs/DESIGN.md "Replies"): the one component that shows another message inside a bubble.
-// A reply shows one ellipsized line and is a button that jumps to the quoted message; with a cancel control it
+// A reply shows one ellipsized line and has a button that jumps to the quoted message; with a cancel control it
 // is the strip in the composer's field while the owner replies. A relay shows the owner's complete words (they ARE
 // the instruction) clamped to six lines, with a real `Show all` control in its head; inside a relay note card it
 // clamps to three lines and the card's `more`/`less` (chat_relay_deck.js) owns its expansion. The bar and the author
 // line wear the QUOTED author's ink; the bubble around keeps its own voice. Every string is set as text: the
 // quoted words are data, never markup.
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './chat_activity.js';
+import { formatMsgTime, selectionInside } from './chat_activity.js';
 import { attachmentViews } from './chat_attachments.js';
 import { validExcerpt } from './chat_reply_excerpt.js';
 import { ellipsize, fitText } from './text_fit.js';
+import { bindScrollFade, replaceScrollFade } from './scroll_fade.js';
 
 const ROLES = ['user', 'assistant', 'system'];
 // The referenced row's kind as the host names it (CONTRACTS K5); anything else reads as a message.
@@ -109,8 +110,12 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
 
     const main = node('button', 'chat-quote-main');
     main.type = 'button';
+    const excerptBody = ref.excerpt ? node('div', 'chat-quote-excerpt-body') : null;
+    const body = excerptBody || main;
+    const jump = () => onJump?.(ref);
     // Mixed chrome and source words: the chrome below uses tr; the DOM overlay must not walk the text or aria-label.
     main.dataset.i18nAuthored = '';
+    if (excerptBody) excerptBody.dataset.i18nAuthored = '';
     if (ref.media) {
         // A photo's thumbnail leads the panel (decorative: the panel's name already says what is quoted).
         const thumb = node('img', 'chat-quote-thumb');
@@ -118,8 +123,9 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
         thumb.alt = '';
         thumb.loading = 'lazy';
         thumb.decoding = 'async';
-        main.classList.add('has-thumb');
-        main.append(thumb);
+        body.classList.add('has-thumb');
+        body.append(thumb);
+        if (excerptBody) thumb.addEventListener('click', jump);
     }
     const head = node('span', 'chat-quote-head');
     const selectionLead = ref.excerpt ? tr('chat.reply.sender_selection', 'Selected by sender · Source:') : '';
@@ -132,13 +138,23 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
         : ref.media ? tr('chat.reply.photo', 'Photo') : tr('chat.reply.attachment', 'Attachment'));
     // One line, cut on a word with a clean ending (text_fit.js), never a CSS ellipsis after a full stop.
     const words = node('span', 'chat-quote-text', snippet);
-    main.append(head, words);
+    main.append(head);
+    if (excerptBody) {
+        // The jump button and the potentially focusable scroller are siblings. A pointer can still press the words;
+        // a drag that selected words is a selection, not a jump (chat_activity.js selectionInside).
+        excerptBody.append(main, words);
+        words.addEventListener('click', (event) => {
+            if (event.detail && selectionInside(words)) return;
+            jump();
+        });
+    } else main.append(words);
     if (!ref.excerpt) fitText(words, snippet, 1);
     const lead = selectionLead || (composer ? tr('chat.reply.replying_to', 'Replying to') : tr('chat.reply.reply_to', 'Reply to'));
     main.setAttribute('aria-label', `${lead} ${author}${when ? `, ${when}` : ''}: ${snippet}`);
-    main.addEventListener('click', () => onJump?.(ref));
-    root.append(main);
-    if (ref.excerpt) clampWithToggle(words, root, { onDomWrite, lines: 1 });
+    main.addEventListener('click', jump);
+    root.append(body);
+    if (excerptBody) clampWithToggle(words, root, { onDomWrite, lines: 1,
+        scrollRegion: tr('chat.reply.quotation_region', 'Selected quotation') });
 
     if (composer) {
         const cancel = node('button', 'chat-quote-cancel');
@@ -155,6 +171,12 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
 // ---- The clamp of a long quotation (a relay panel's text) ----
 let nextClampId = 0;
 const CLAMP_LINES = 6;
+// Selected excerpts and a work's cited prompt scroll while open. Relay prose instead grows in flow.
+export function releaseClampFade(text) {
+    replaceScrollFade(text);
+    text?.classList?.remove('scroll-fade-y');
+}
+export const releaseQuoteFades = root => root?.querySelectorAll?.('.chat-clamp.scroll-fade-y').forEach(releaseClampFade);
 /** His words on a note card (chat_relay_deck.js): two lines until the note is opened, which the deck fits them to. */
 export const RELAY_CARD_LINES = 2;
 
@@ -164,7 +186,7 @@ export const RELAY_CARD_LINES = 2;
  * control floats on a row of its own. The toggle shows only while the clamp hides text or the text is open.
  * `fit` may measure a CSS-only clamp when authored child nodes must remain intact.
  */
-export function clampWithToggle(text, host, { onDomWrite = (write) => write(), fit = fitText, lines = CLAMP_LINES } = {}) {
+export function clampWithToggle(text, host, { onDomWrite = (write) => write(), fit = fitText, lines = CLAMP_LINES, scrollRegion = '' } = {}) {
     if (!text || !host) return null;
     const document = text.ownerDocument || globalThis.document;
     const words = text.textContent;
@@ -185,6 +207,10 @@ export function clampWithToggle(text, host, { onDomWrite = (write) => write(), f
         toggle.textContent = open ? tr('chat.clamp.show_less', 'Show less') : tr('chat.clamp.show_all', 'Show all');
         toggle.hidden = false;
         fit(text, words, open ? 0 : lines, onFit);
+        if (open && scrollRegion) {
+            text.classList.add('scroll-fade-y');
+            bindScrollFade(text, { region: scrollRegion });
+        } else if (scrollRegion) releaseClampFade(text);
         return true;
     }));
     host.append(toggle);

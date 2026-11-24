@@ -3,7 +3,7 @@ import { apiClient } from './api_client.js';
 import { previewsRefused } from './chat_preview.js';
 import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
+import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { tr } from './i18n.js';
 import { sendsAsHtml, signalLabels, heardFactWord, noKindChecked } from './consciousness_words.js';
 
@@ -130,7 +130,7 @@ function messageNode(row, markdown, place) {
     // A reaction, a change or content without words has no words of its own; words sent beside one stay speech.
     if (row.text || !(reaction || observed.length)) {
         const text = document.createElement('div'); text.className = 'chat-markdown place-convo-text'; text.dataset.i18nAuthored = '';
-        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); markdown.add(text); }
+        if (row.role === 'assistant' || row.markdown) { mountChatMarkdown(text, row.text, { softBreaks: true }); bindRenderedMarkdown(text); markdown.add(text); }
         else { text.classList.add('place-history-plain'); text.textContent = row.text; }
         article.append(text);
     }
@@ -150,7 +150,7 @@ function messageNode(row, markdown, place) {
         const label = document.createElement('p'); label.className = 'place-sheet-note';
         label.textContent = tr('places.history.held_unchecked', 'held, unchecked');
         const held = document.createElement('div'); held.className = 'chat-markdown place-convo-text'; held.dataset.i18nAuthored = '';
-        mountChatMarkdown(held, facts.held_text, { softBreaks: true }); markdown.add(held);
+        mountChatMarkdown(held, facts.held_text, { softBreaks: true }); bindRenderedMarkdown(held); markdown.add(held);
         article.append(label, held);
     }
     const attachments = Array.isArray(row.attachments) ? row.attachments : [];
