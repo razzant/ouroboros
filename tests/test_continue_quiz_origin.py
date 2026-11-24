@@ -641,8 +641,11 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
     assert recorded["words"] == SHOT_WORDS, "the delivered text beside its rendering"
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",  # no chat row is held for
-           "client_message_id": "owner-shot", "received": recorded["received"], "words": SHOT_WORDS}  # it: when its mail was written
+    # No chat row is held for it, so ``received`` is when its mail was written. ``mail_kind`` is the kind its writer
+    # recorded (``write_owner_message``'s default, plain owner text), kept beside the words, never read from them.
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",
+           "client_message_id": "owner-shot", "received": recorded["received"], "words": SHOT_WORDS,
+           "mail_kind": "owner_text"}
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])

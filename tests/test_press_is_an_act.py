@@ -155,9 +155,11 @@ def test_continue_reads_a_press_as_an_act_with_its_card_and_without_one():
                                    "of task asker")
     worded = _card_lines({"source": "owner_quiz_answer", "content": COMMENT, "source_task_id": "asker", "card": WORDED})
     assert f"(«Publish it», the text of task asker) and wrote: {COMMENT} (answered " in worded[2]
+    # The mail row carries the kind its writer recorded (``owner_text``): that makes it my human's words here, and the
+    # same row without one reads neutrally (``tests/test_owner_continue.py``).
     text = work_order_text("pred", "round_limit", {"later": [
         {"source": "owner_press", "content": "1. Publish it", "ts": "T1"},
-        {"source": "owner_mailbox", "content": "Ship it on Friday", "ts": "T2"}]})
+        {"source": "owner_mailbox", "content": "Ship it on Friday", "ts": "T2", "mail_kind": "owner_text"}]})
     assert ("- T1 (host record: the owner pressed «1. Publish it» and wrote no words; the label is the asking task's "
             "text)") in text
     assert "- T2 Ship it on Friday" in text and "- T1 1. Publish it" not in text
