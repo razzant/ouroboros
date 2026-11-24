@@ -644,6 +644,8 @@ Post-work keeps pooled custody apart from early answer delivery and the solve ce
 
 #### Durable memory and project focus
 
+**Metabolism** (BIBLE P1). An integrating focus's start (owner's Max, known window) measures its parts by whose they are (`memory_floor.measure_text`). Digesting is an authored act that keeps originals readable by address. Host forms only fit, never digest. The mind's occasion is its own judgment, never a clock, count or threshold (BIBLE P5). A part nothing digests is a defect repaired at its cause, not listed here.
+
 `memory_view_work.py` replaces a completed work's replies with its gist (`wake_summary`: PERSISTENCE) in the same block: whole here, first sentence elsewhere.
 
 `memory_forms.STAGES` orders forms by distance (BIBLE P1, "The subject of continuity"): farther sources yield before nearer ones, older first within each stage. The clean-start guard uses only ordinary forms when they fit the same complete frame with the work room. Unsealed notes yield late; story yields before my human's words, which come last, with human quotes kept beside story pointers until then. Selected accounts lead the story whole, with source changes, no rung. Pointer IDs occur once.
