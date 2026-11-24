@@ -408,6 +408,7 @@ def test_corrupt_stored_preferences_read_as_defaults(tmp_path, monkeypatch):
     (Costs then starts no widget by itself), and the read leaves its bytes as
     they are."""
     import errno
+    import os
     import pathlib
 
     from starlette.testclient import TestClient
@@ -418,24 +419,45 @@ def test_corrupt_stored_preferences_read_as_defaults(tmp_path, monkeypatch):
     app.state.drive_root = tmp_path
     path = tmp_path / "state" / "ui_preferences.json"
     defaults = json.loads(json.dumps(DEFAULT_UI_PREFERENCES))
+
+    def windows_not_found(real):
+        def call(target, *args, **kwargs):
+            try:
+                return real(target, *args, **kwargs)
+            except NotADirectoryError as exc:
+                if os.path.isdir(os.path.dirname(os.fspath(target))):
+                    raise  # the target itself is a file: Windows raises ENOTDIR too
+                raise FileNotFoundError(errno.ENOENT, "[WinError 3] path not found", os.fspath(target)) from exc
+        return call
+
+    def permission_denied_for(target_path, real):
+        def call(target, *args, **kwargs):
+            if isinstance(target, (str, os.PathLike)) and pathlib.Path(target) == target_path:
+                raise PermissionError(errno.EACCES, "Permission denied", str(target))
+            return real(target, *args, **kwargs)
+        return call
+
     with TestClient(app) as client:
         assert client.get("/api/ui/preferences").json() == defaults, "a new installation: its folder not created yet"
-        # A file where the folder belongs (ENOTDIR, which Path.exists() reads as absent) is no proof of absence.
+        # A file where the folder belongs is no proof of absence: POSIX raises ENOTDIR on lstat,
+        # while Windows reports ERROR_PATH_NOT_FOUND (FileNotFoundError), the same as a missing parent.
         path.parent.write_text("not a folder", encoding="utf-8")
         assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "lstat", windows_not_found(os.lstat))
+            patch.setattr(pathlib.Path, "lstat", windows_not_found(pathlib.Path.lstat))
+            assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        assert path.parent.read_bytes() == b"not a folder"
         path.parent.unlink()
         path.parent.mkdir()
         assert client.get("/api/ui/preferences").json() == defaults, "the folder, no file yet: still new"
-        # Nor is a lookup that fails (a stand-in error for this one path; Python 3.14's is_file() says False for it).
-        lstat = pathlib.Path.lstat
-
-        def failing_lookup(self, *args, **kwargs):
-            if self == path:
-                raise PermissionError(errno.EACCES, "Permission denied", str(self))
-            return lstat(self, *args, **kwargs)
-
+        # Nor is a lookup that fails on the path or on an ancestor (Python 3.14's is_file() says False for it).
         with monkeypatch.context() as patch:
-            patch.setattr(pathlib.Path, "lstat", failing_lookup)
+            patch.setattr(os, "lstat", permission_denied_for(path, os.lstat))
+            patch.setattr(pathlib.Path, "lstat", permission_denied_for(path, pathlib.Path.lstat))
+            assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "stat", permission_denied_for(path.parent, os.stat))
             assert client.get("/api/ui/preferences").json() == {**defaults, "unreadable": True}
         # Another shape, a value this release refuses (a hand edit, a newer release's), cut off mid-write by hand.
         for saved in (b'[]', b'{"widget_start_mode": {"game:main": "always"}}', b'{"widget_size":'):
