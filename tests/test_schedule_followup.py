@@ -1236,6 +1236,16 @@ def test_a_declared_schedule_keeps_its_author_through_same_assignment_edits_by_a
     assert rewritten["changed"] and writer() == ("consciousness", True) and "author_changed" not in rewritten
     theirs = manage(owner, action="update", objective="Their report")
     assert writer() == ("owner", False) and "became your human's" in theirs["author_changed"]
+    # My human's verified words hand a declared row over even on a re-time that changes no assignment.
+    from ouroboros.loop_messages import _record_owner_directive
+    from tests.test_owner_words_carried import _owner_root
+
+    assert manage(owner, action="update", objective="My last study", mine=True)["changed"]
+    assert writer() == ("consciousness", True)
+    citing = _owner_root(tmp_path, {"owner_ingress": True})
+    _record_owner_directive(citing, source="owner_mailbox", content="Move my study to next year please", msg_id="m-1")
+    cited = manage(citing, action="update", run_at="2033-01-01T00:00:00+00:00", owner_words="Move my study to next year")
+    assert cited["changed"] and writer() == ("owner", False) and "became your human's" in cited["author_changed"]
     declared = manage(owner, action="update", objective="My next study", mine=True)
     assert declared["changed"] and writer() == ("consciousness", True)
     assert not (_rows(root)[sid]["task"]["metadata"].get("owner_corpus"))
@@ -1341,14 +1351,17 @@ def test_the_waiting_note_follows_the_resulting_row(tmp_path, monkeypatch):
     retimed = json.loads(_manage_schedules(owner, action="update", schedule_id=sid, reason="later",
                                            run_at="2031-01-01T00:00:00+00:00"))
     assert "fires only once the consciousness switch is on" in retimed["argument_note"]
+    assert "owner_words" in retimed["argument_note"]  # the way to hand it over
     paused = json.loads(_manage_schedules(owner, action="disable", schedule_id=sid, reason="pause"))
-    assert "fires only once the consciousness switch is on" in paused["note"]
-    assert "owner_words" in retimed["argument_note"] and "owner_words" in paused["note"]  # the way to hand it over
+    assert paused["changed"] and "note" not in paused  # a paused row does not fire at all
     # The note comes from the locked write's own result: a read failing right after the commit does not lose it.
     from ouroboros.tools import followup
     monkeypatch.setattr(followup, "_stored_row", lambda root, audit_row: audit_row)
     restored = json.loads(_manage_schedules(owner, action="restore", schedule_id=sid, reason="resume"))
     assert restored["changed"] and "fires only once the consciousness switch is on" in restored["note"]
+    deleted = json.loads(_manage_schedules(owner, action="delete", schedule_id=sid, reason="drop"))
+    assert deleted["changed"] and "note" not in deleted  # a withdrawn row never fires
+    assert json.loads(_manage_schedules(owner, action="restore", schedule_id=sid, reason="back"))["changed"]
     switch["on"] = True
     paused_on = json.loads(_manage_schedules(owner, action="disable", schedule_id=sid, reason="pause again"))
     assert paused_on["changed"] and "note" not in paused_on and "declared_own" not in paused_on

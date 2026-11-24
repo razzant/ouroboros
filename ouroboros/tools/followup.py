@@ -156,8 +156,9 @@ def _manage_schedules(
             expected_hold_id=expected_hold_id, relation=relation,
             writer_kind=writer_kind, writer_metadata=writer_metadata,
             owned_by=owned_by, agent=True)  # who the row belongs to is decided on the held row
-        if outcome.pop("declared_own", False) and outcome.get("changed") and not own_time_on(ctx):
-            outcome["note"] = OWN_TIME_WAIT_NOTE.strip()  # from the locked write's own result, no read after it
+        declared = outcome.pop("declared_own", False)  # the locked write's own result: no read after it
+        if outcome.get("changed") and (note := _own_time_note(ctx, outcome.get("schedule"), declared)):
+            outcome["note"] = note.strip()
     except ScheduleRefused as exc:
         # Same typed marker the sibling refusals carry: the text channel is the
         # registered ABI, so a refusal must be legible there and not only in the
@@ -219,10 +220,13 @@ def _schedule_writer(ctx: ToolContext) -> tuple[str, dict]:
     return work_kind(getattr(ctx, "task_metadata", None)), metadata
 
 
-def _own_time_note(ctx: ToolContext, row: Any) -> str:
-    """The waiting sentence for a write that leaves a declared row while own time is off; ``""`` otherwise."""
-    origin = row.get("writer_origin") if isinstance(row, dict) else None
-    return OWN_TIME_WAIT_NOTE if is_declared_own(origin) and not own_time_on(ctx) else ""
+def _own_time_note(ctx: ToolContext, row: Any, declared: Any = None) -> str:
+    """The waiting sentence for a write that leaves a declared, enabled, not withdrawn row while own time is off;
+    ``""`` otherwise. ``declared``: the locked write's own answer, else read from the row's origin."""
+    row = row if isinstance(row, dict) else {}
+    declared = is_declared_own(row.get("writer_origin")) if declared is None else declared
+    live = row.get("enabled", True) is not False and not row.get("delete_requested_at")
+    return OWN_TIME_WAIT_NOTE if declared and live and not own_time_on(ctx) else ""
 
 
 def _mine_error(tool: str, mine: Any, owner_words: Any, *, other: bool = False, other_words: str = "") -> str:
