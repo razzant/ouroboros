@@ -38,6 +38,11 @@ test('a route pair is not a reply; only a recorded selection or successful tool 
     // Different routes can share a compact model name; a row without both models is no line.
     assert.deepEqual(modelHandoverLines([row('pending', { from_model: 'openrouter::lab/model', to_model: 'other::model', reply_observed: true }),
         { status: 'selected', selection: 'answer_sha256' }]), ['openrouter::lab/model → other::model · no choice recorded']);
+    // A helper's card names each endpoint as its solve row does, without the local API connection; a root keeps its routes.
+    const named = row('pending', { from_model: 'openai@team::gpt-6', to_model: 'openai@Bad_Name::gpt-6-mini', reply_observed: true });
+    assert.deepEqual(modelHandoverLines([named], true), ['openai::gpt-6 → gpt-6-mini · no choice recorded']);
+    assert.deepEqual(modelHandoverLines([named]), ['openai@team::gpt-6 → openai@Bad_Name::gpt-6-mini · no choice recorded']);
+    assert.deepEqual(modelHandoverLines([row('pending', { reply_observed: true })], true), [`${ASTRA} → ${FABLE} · no choice recorded`]);
     assert.deepEqual(modelHandoverLines(null), []);
 });
 

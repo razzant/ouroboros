@@ -10,6 +10,7 @@ import { syncReviewGateItem } from './review_gate_card.js';
 import { cardMetaKeys, isReplayEvidenceRow, noteToolHostMetrics, positiveTaskTerminalFact, renderLiveCardMeta, toolEvidenceIncomplete, toolEvidenceView } from './chat_activity.js';
 import { referencesTaskOnly } from './chat_row_placement.js';
 import { childCauseFacts, isTerminalTaskDetail, taskCancelPending, taskDoneIsTerminal, taskTerminalPhase } from './log_events.js';
+import { selectedRoute } from './harness_presentation.js';
 import { isoMicros } from './utils.js';
 import { READ_EPOCH, syncContinueAction } from './task_continue.js';
 import { measure } from './layout_batch.js';
@@ -203,7 +204,13 @@ export function terminalChildFrame(childId, info, evt, phase = taskTerminalPhase
         // Only the text this frame carries.
         ...Object.fromEntries(['result', 'trace_summary', 'error'].filter((key) => evt[key]).map((key) => [key, evt[key]])),
         reason_code: evt.reason_code || '',
-        ...cardMetaKeys(evt) };
+        ...cardMetaKeys(evt),
+        // The physical attempt it ends: a normal task_done frame names it only in its `execution_owner` (attemptOf).
+        task_attempt: attemptOf(evt),
+        // The host projects the selection from the frozen snapshot, in history and in a missed frame's detail.
+        requested_executor_route: selectedRoute(evt.requested_executor_route) || undefined,
+        execution_evidence: evt.execution_evidence || evt.subagent_envelope?.execution_evidence,
+        actual_substrate: evt.actual_substrate || evt.subagent_envelope?.actual_substrate };
 }
 
 /** Paint handover evidence through the caller's viewport seam. A census row can only advance the attempt;

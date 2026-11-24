@@ -230,6 +230,12 @@
  * @property {Object.<string,string>=} values  // the words that fill the template's slots, inserted as written, never translated
  * @property {string=} line  // phrase + step in the install's language, added when the row is sent or read; Telegram and Copy say it
  */
+/** The executor a subagent selected as a card shows it: no local connection name, not the launch address.
+ * @typedef {Object} RequestedExecutorRoute
+ * @property {'api_model'|'agent_session'} kind
+ * @property {string} target_id
+ */
+
 /** @typedef {Object} ChatOutbound
  * @property {import('./client_contract_types.js').PresenceContact=} presence_contact
  * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
@@ -273,6 +279,7 @@
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id
+ * @property {number=} task_attempt
  * @property {Object=} origin_message_ref Host-captured inbound identity for a correlated operation's terminal reply.
  * @property {boolean=} ephemeral_decision
  * @property {number=} tool_calls
@@ -311,7 +318,8 @@
  * @property {string=} effort_level  The effort decided at dispatch (a session row: its leaf's); empty = unknown, no chip.
  * @property {string=} effort_requested  The parent's request when it made one.
  * @property {string=} effort_source  auto | pin | model_name | cyber.
- * @property {string=} executor_route  Opaque delegated harness route resolved at dispatch, not an engine receipt; absent = ordinary native presentation, no chip.
+ * @property {string=} executor_route  Opaque delegated harness route stamped at dispatch, not an engine receipt; before or without dispatch, an `agent_session` `requested_executor_route` still renders its harness chip (`api_model` and unrouted native work render none).
+ * @property {RequestedExecutorRoute=} requested_executor_route  The requested executor shown from Queued on (`agent_session` shows its harness logo/chip before dispatch; `api_model` has no chip).
  * @property {Object=} parent_cognitive_route  Recorded parent snapshot; never inferred from the child's model lane.
  * @property {string=} coordinator_route
  * @property {boolean=} use_local_model
@@ -1206,6 +1214,7 @@
  *   Background history placement, separate from task outcome. Routine progress is detail-only;
  *   only a problem appears on the collapsed card.
  * @property {import('./place_contract_types.js').PlaceOrigin=} place_origin  // the place that called this work, as on its frames and census row
+ * @property {RequestedExecutorRoute=} requested_executor_route  // a child's selection frozen at scheduling (ChatOutbound's); absent if none
  * @property {string=} cancel_state
  * @property {string=} cancel_reason
  * @property {string=} stop_policy

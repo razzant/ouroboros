@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # episode it had just opened was withdrawn before the worker could ever drain it.
 from supervisor.log_addressing import bound_project_chat_id as _bound_project_chat_id
 from supervisor.message_bus import notification_chat_route
-from ouroboros.subagent_messages import delegated_activity_meta, executor_observation_meta, subagent_message_meta
+from ouroboros.subagent_messages import delegated_activity_meta, executor_observation_meta, show_requested_executor_route, subagent_message_meta
 
 
 HOST_NARRATION = "host_narration"
@@ -551,6 +551,9 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
             activity = delegated_activity_meta(progress_meta.pop("delegated_activity"), task_id=task_id)
             if activity:
                 progress_meta["delegated_activity"] = activity
+        if progress_meta and "requested_executor_route" in progress_meta:
+            progress_meta = dict(progress_meta)
+            show_requested_executor_route(progress_meta)
         meta = progress_meta or {}
         bound_chat = _bound_project_chat_id(
             ctx, task_id,

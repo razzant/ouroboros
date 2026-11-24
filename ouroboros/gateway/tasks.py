@@ -106,6 +106,7 @@ _RESERVED_METADATA_KEYS = frozenset({
     "budget_drive_root",
     "task_constraint",
     "task_contract",
+    "requested_executor_route",  # a helper's frozen selection (subagent_messages), never a root caller's claim
     "input_sources",
     "allowed_resources",
     "deadline_at",
@@ -921,7 +922,17 @@ def _task_get_response(request: Request) -> JSONResponse:
     payload["question_rooms"] = question_display_rooms(drive_root, task_id, payload.get("owner_quiz"))
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor
     payload["continuation_offer"] = continuation_offer(data, task_id)
-    from ouroboros.subagent_messages import place_origin  # the place that called it, as its census and frames say it
+    from ouroboros.subagent_messages import place_origin, requested_executor_route
+    from ouroboros.task_results import resolve_task_lineage
+
+    # The missed terminal frame and history name the same frozen selection of a child, not a cached display copy, its
+    # lineage read top-level first, then legacy ``metadata``; a root selected no helper executor, whatever its row carries.
+    lineage = resolve_task_lineage(task_id, metadata=data.get("metadata"), **{key: data.get(key) for key in (
+        "root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")})
+    if lineage["delegation_role"] == "subagent" and not lineage["is_root_task"] and (selected := requested_executor_route(data)):
+        payload["requested_executor_route"] = selected
+    else:
+        payload.pop("requested_executor_route", None)
     if origin := place_origin(data["metadata"] if isinstance(data.get("metadata"), dict) else {}):
         payload["place_origin"] = origin
     objections = _plan_objections_view(drive_root, task_id, data)  # the host's fold; the browser never re-derives it

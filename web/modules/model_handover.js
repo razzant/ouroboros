@@ -1,5 +1,6 @@
 import { tr } from './i18n.js';
 import { escapeHtmlText } from './utils.js';
+import { compactModel, displayApiModelTarget } from './harness_presentation.js';
 
 const selectionWords = {
     answer_sha256: () => tr('task.handover.selected.answer_sha256', 'confirmed a saved answer'),
@@ -9,8 +10,10 @@ const selectionWords = {
 };
 
 // Older route pairs include intended routes, not necessarily replies. A typed selection
-// or successful tool call also proves an act; an incomplete status alone does not.
-export function modelHandoverLines(rows) {
+// or successful tool call also proves an act; an incomplete status alone does not. A helper's card (`child`) names
+// each endpoint as its solve row does, without the local API connection; the stored routes keep it.
+export function modelHandoverLines(rows, child = false) {
+    const shown = (route) => (child ? displayApiModelTarget(route) || compactModel(route, false) : route);
     return (Array.isArray(rows) ? rows : []).filter(row => row?.from_model && row?.to_model).map(row => {
         const selected = row.status === 'selected' && typeof row.selection === 'string' && Object.hasOwn(selectionWords, row.selection);
         // The same response can work and then choose (`accept_handover_selection`): every fact a row states is said,
@@ -25,10 +28,10 @@ export function modelHandoverLines(rows) {
         const act = [worked, stated].filter(Boolean).join(' · ');
         const unknown = !observed && tr('task.handover.reply_unrecorded', 'successor reply not recorded');
         // Details keeps the route prefixes: they may be all that changed.
-        return [`${row.from_model} → ${row.to_model}`, unknown, act].filter(Boolean).join(' · ');
+        return [`${shown(row.from_model)} → ${shown(row.to_model)}`, unknown, act].filter(Boolean).join(' · ');
     });
 }
 
-export function modelHandoverFact(rows) {
-    return [tr('task.fact.model_handover', 'Model handover'), modelHandoverLines(rows).map(escapeHtmlText).join('<br>'), true];
+export function modelHandoverFact(rows, child = false) {
+    return [tr('task.fact.model_handover', 'Model handover'), modelHandoverLines(rows, child).map(escapeHtmlText).join('<br>'), true];
 }

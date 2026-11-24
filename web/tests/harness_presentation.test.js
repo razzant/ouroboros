@@ -13,7 +13,6 @@ import {
     identityPartsHtml,
     executorIdentityMarkup,
     formatCoordinatorProvenance,
-    executorModelText,
     harnessAccountIdentityMarkup,
     harnessIdentityMarkup,
     harnessPresentation,
@@ -21,6 +20,7 @@ import {
     planLabel,
     sourcePresentation,
 } from '../modules/harness_presentation.js';
+import { executorModelText } from '../modules/executor_card_facts.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     ROUTE_KIND_API_MODEL,
@@ -146,10 +146,10 @@ test('a saved subscription source has one visual answer: the record\'s, else its
 test('Chat renders the executor evidence chip through the shared identity SSOT', () => {
     const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     const activitySource = readFileSync(new URL('../modules/chat_activity.js', import.meta.url), 'utf8');
-    const logSource = readFileSync(new URL('../modules/log_events.js', import.meta.url), 'utf8');
+    const logSource = readFileSync(new URL('../modules/executor_card_facts.js', import.meta.url), 'utf8');  // executorChip
     assert.match(chatSource, /renderLiveCardMeta/);
     assert.match(activitySource, /const chip = record\.executorChip;/);
-    assert.match(activitySource, /executorIdentityMarkup\(chip, \{ model \}\)/);
+    assert.match(activitySource, /executorIdentityMarkup\(chip, \{ model: fact \}\)/);
     const identitySource = readFileSync(new URL('../modules/harness_presentation.js', import.meta.url), 'utf8');
     assert.match(identitySource, /harnessIdentityMarkup\(chip\.harness/);
     assert.match(logSource, /harnessPresentation\(harness\)\.label/);
@@ -334,10 +334,13 @@ test('Chat, Logs, onboarding, and the subagent catalog consume the same mark own
         const source = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
         assert.match(source, name === 'chat_activity.js' ? /executorIdentityMarkup/ : /harnessIdentityMarkup/, `${name} bypasses harness presentation SSOT`);
     }
-    const events = readFileSync(new URL('../modules/log_events.js', import.meta.url), 'utf8');
-    assert.match(events, /harnessPresentation/);
-    assert.doesNotMatch(events, /HARNESS_CHIP_(?:ICON|NAME)/);
-    assert.doesNotMatch(events, /['"](?:◇|✳|▸|◆)['"]/);
+    const chip = readFileSync(new URL('../modules/executor_card_facts.js', import.meta.url), 'utf8');  // executorChip
+    assert.match(chip, /harnessPresentation/);
+    for (const name of ['log_events.js', 'executor_card_facts.js']) {
+        const events = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
+        assert.doesNotMatch(events, /HARNESS_CHIP_(?:ICON|NAME)/, name);
+        assert.doesNotMatch(events, /['"](?:◇|✳|▸|◆)['"]/, name);
+    }
 });
 
 test('#516 the card meta line separates its parts with real text, not a CSS gap', (t) => {
@@ -354,7 +357,7 @@ test('#516 the card meta line separates its parts with real text, not a CSS gap'
         this.innerHTML = String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
     } }) };
     t.after(() => { globalThis.document = priorDocument; });
-    const chip = { harness: 'claudexor', label: 'Claudexor', title: 'route', observedModels: ['opus'] };
+    const chip = { harness: 'claudexor', label: 'Claudexor', title: 'route', settledRunModel: 'opus' };
     const markup = executorIdentityMarkup(chip, { model: executorModelText(chip) });
     // The chip and the executor's own model are two parts of one line, and the
     // boundary between them carries the separator itself — a copied line and a
@@ -402,19 +405,16 @@ test('#516 the card meta line separates its parts with real text, not a CSS gap'
     assert.doesNotMatch(executorIdentityMarkup(chip, { model: 'sonnet' }), /Coordinator|inherited|fallback/);
 });
 
-// Requested, observed and unknown executor models never collapse (refined A, 21.10): settled observed models are
-// listed as such, a progress report keeps its source, an unconfirmed model is absent, and no id is renamed.
+// A single confirmed settled model can own the line; a progress report keeps its source.
 test('the executor model fact keeps observed, requested and unknown apart', () => {
     assert.equal(executorModelText(null), '');
-    assert.equal(executorModelText({ harness: 'claude', observedModels: ['claude-opus-5-5[1m]'] }), 'claude-opus-5-5[1m]');
-    assert.equal(executorModelText({ harness: 'codex', observedModels: ['gpt-6-astra', 'gpt-6.1-sol'] }), 'gpt-6-astra, gpt-6.1-sol');
+    assert.equal(executorModelText({ harness: 'claude', settledRunModel: 'claude-opus-5-5[1m]' }), 'claude-opus-5-5[1m]');
     const report = (model, source) => ({ harness: 'cursor', observation: { model, model_source: source } });
     assert.equal(executorModelText(report('cursor-grok-4.6-xhigh-fast', 'observed')), 'cursor-grok-4.6-xhigh-fast');
     assert.equal(executorModelText(report('cursor-grok-4.6-xhigh-fast', 'requested')), 'requested cursor-grok-4.6-xhigh-fast');
     assert.equal(executorModelText(report('cursor-grok', 'inferred')), '', 'an unconfirmed source names no model');
     assert.equal(executorModelText(report('', 'observed')), '');
-    assert.equal(executorModelText(report('openai/gpt-6', 'observed'), (id) => id.split('/').pop()), 'gpt-6',
-        'the caller\'s compactor only drops a provider prefix');
+    assert.equal(executorModelText(report('openai/gpt-6', 'observed')), 'gpt-6', 'the shared compactor only drops a provider prefix');
     assert.equal(executorModelText({ harness: 'codex', label: 'Codex' }), '', 'a dispatch alone proves no model');
 });
 

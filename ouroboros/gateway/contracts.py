@@ -32,7 +32,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
 )
 from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
 from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
-from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
+from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact, RequestedExecutorRoute  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
     AttachmentManifestEntry, ChatAttachmentInbound, ChatAttachmentView,
@@ -137,6 +137,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
+    task_attempt: NotRequired[int]
     origin_message_ref: NotRequired[Dict[str, Any]]
     # X3: a repair receipt whose managed task id the router mints only at promotion (typed truth, no invented id).
     task_id_pending: NotRequired[bool]
@@ -204,9 +205,10 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     model_lane: NotRequired[str]
     requested_model_lane: NotRequired[str]
     effective_model_lane: NotRequired[str]
-    # Opaque delegated route stamped once by resolve_subagent_dispatch; absent/empty = native/no chip. Dispatch
-    # intent is not a landing receipt: a reduction belongs in capability_delta, never rewrites this route.
+    # The opaque route resolve_subagent_dispatch stamped (a dispatch decision, no landing receipt: a reduction is
+    # capability_delta's), and the {kind, target_id} the delegation selected, frozen at scheduling, shown from Queued.
     executor_route: NotRequired[str]
+    requested_executor_route: NotRequired[RequestedExecutorRoute]  # absent = not recorded
     # Recorded coordinator facts on live/history frames; absence carries no billing or provenance claim.
     parent_cognitive_route: NotRequired[Dict[str, Any]]
     coordinator_route: NotRequired[str]
@@ -230,8 +232,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame, HostNoticeField):
     # disclosed spend/estimated flag, engine models, nanny_nudge_recorded, delegate_start_attempted. Absence = no
     # evidence yet, never native execution.
     execution_evidence: NotRequired[Dict[str, Any]]
-    # Custody fact beside executor_route: "harness_used" | "harness_attempted" | "native_only". Terminal only;
-    # absent = no substrate claim.
+    # Custody fact beside executor_route: "harness_used" | "harness_attempted" | "native_only" (terminal; absent = no claim).
     actual_substrate: NotRequired[str]
     model: NotRequired[str]
     task_group_id: NotRequired[str]
@@ -804,9 +805,8 @@ class StateResponse(WorkStateFields):
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id}}; a Project's name is in the census rows and
-    # ``projects``): a bound card hides the stray "turn into project" button (v6.33.0 P2) and opens its project
-    # (v6.33.0 F4). Null only when ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the
-    # map's digest; "" after a failed read).
+    # ``projects``): a bound card hides the stray "turn into project" button and opens its project. Null only when
+    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool
@@ -1174,8 +1174,7 @@ class TaskDetailResponse(TypedDict, total=False):
     continuation_offer: ContinuationOffer
     owner_hurry: OwnerHurryProjection
     owner_hurry_history: list[OwnerHurryProjection]
-    # While the queue snapshot lists a non-final row: its hold {reason, detail, label} or {}.
-    project_admission_hold: Dict[str, Any]
+    project_admission_hold: Dict[str, Any]  # while the queue snapshot lists a non-final row: {reason, detail, label} or {}
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
@@ -1184,6 +1183,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # reply_observed=true confirms a reply; legacy rows may not say. Absent list means history unavailable.
     authoring_handovers: List[Dict[str, Any]]
     place_origin: Dict[str, Any]  # ChatOutbound.place_origin's shape, from the task's own admitted focus; absent elsewhere
+    requested_executor_route: RequestedExecutorRoute  # a child's selection frozen at scheduling (ChatOutbound's); absent if none
     error: str
 
 

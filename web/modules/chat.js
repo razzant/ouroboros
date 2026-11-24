@@ -55,10 +55,10 @@ import {
     taskPresentation,
     taskSoftStopPending,
     taskDoneIsTerminal,
-    keepStickyExecutorChip,
     taskTerminalSummary,
     taskTerminalPhase,
 } from './log_events.js';
+import { admissionRefusalRow, cardExecutorChip, keepStickyExecutorChip } from './executor_card_facts.js';
 import {
     ACTION_FINALIZE,
     REUSABLE_TASK_IDS,
@@ -78,15 +78,16 @@ import {
     censusTaskFacts,
     desiredLiveCardPhase,
     frameObservesPhase,
-    liveCardCountBits,
     markOwnerHurry,
     observeChildPhase,
+    observeChildStart,
     replayTerminalPhase,
     restoreLiveCardPhaseState,
     setLiveCardPhase,
     setHistoricalUnavailable,
     setHistoricalUnconfirmed,
     syncParkedPhase,
+    updateLiveCardCount,
 } from './task_phase_chip.js';
 import {
     classifyReviewLifecycle,
@@ -432,7 +433,8 @@ export function createChatInstance({
         else recordConcludedActivity(id, phase);
         settleTerminalRootChildren(id);
     }
-    const settleChildFrom = (id, d) => withStableViewport(() => routeSubagentTerminalToCard(id, { ...d, task_id: id }, true));
+    // A stored row's ts is its creation, not its receipt.
+    const settleChildFrom = (id, d) => withStableViewport(() => routeSubagentTerminalToCard(id, { ...d, task_id: id, ts: d.updated_at || d.ts }, true));
     // A terminal root reads each open descendant once; only proven child terminality changes its state (#300).
     function settleTerminalRootChildren(rootId) {
         for (const [childId, info] of subagentChildParents) {
@@ -1219,6 +1221,8 @@ export function createChatInstance({
             // The proactively-coined LLM name; becomes the card title when set.
             suggestedName: '',
             reviewOwnerDetailObserved: false,
+            // Its meta line for a writer outside a frame: the member state that moves a child's chip (work_status.js).
+            paintMeta: () => renderLiveCardMeta(record),
         };
         const reviewDisclosure = reviewDisclosureByTask.get(normalizedGroupId) || {
             sectionExpanded: false,
@@ -1439,24 +1443,6 @@ export function createChatInstance({
         return record?.root?.isConnected ? withStableViewport(mutate) : mutate();
     }
 
-    function directSubagentCount(record) {
-        return record?.subagentsEl?.querySelectorAll(':scope > .chat-live-card.subagent').length || 0;
-    }
-
-    function updateLiveCardCount(record) {
-        if (!record?.countEl) return;
-        const children = directSubagentCount(record);
-        // Children keep the card's opened facts and notes short (style.css), so they stay in reach below them.
-        const flagged = 'children' in record.root.dataset;
-        if (children > 0 && !flagged) record.root.dataset.children = '1';
-        else if (!children && flagged) delete record.root.dataset.children;
-        const bits = liveCardCountBits(record.items.length, children);
-        const hidden = bits.length === 0;
-        const text = bits.join(' · ');
-        if (record.countEl.hidden !== hidden) record.countEl.hidden = hidden;
-        if (record.countEl.textContent !== text) record.countEl.textContent = text;
-    }
-
     // A window shown again keeps the reading intent (data readiness positions it); hidden, it ends an unread opening
     // still owed; a room away stays put (its return: `resume`).
     const handleVisibility = () => {
@@ -1660,10 +1646,12 @@ export function createChatInstance({
         updateLiveCardCount(record);
         // Cost does not move the activity clock.
         if (ts && (summary.human || summary.reasoning || activityCandidate)) record.latestActivityTs = ts, record.latestActivityRaw = rawTs || '';
-        if (summary.executorChip
-                && !keepStickyExecutorChip(record.executorChip, summary.executorChip)) {
-            record.executorChip = summary.executorChip;
-        }
+        if (summary.requestedExecutor) record.requestedExecutor = summary.requestedExecutor;  // the child's selection
+        const chip = summary.executorChip, adopt = chip && !keepStickyExecutorChip(record.executorChip, chip);
+        record.executorChip = cardExecutorChip(record, adopt ? chip : null);
+        // Coordinator facts outlive the chip: recorded ones over a pre-evidence chip's.
+        const drafted = chip?.coordinator;
+        if (summary.coordinator || drafted) record.coordinator = { ...drafted, ...record.coordinator, ...summary.coordinator };
         if (summary.modelExecution) record.modelExecution = summary.modelExecution;
         if (summary.effort) record.effort = summary.effort;
         record._lastFrameMeta = Array.isArray(summary.meta) ? summary.meta : [];
@@ -1796,8 +1784,8 @@ export function createChatInstance({
         }
     }
 
-    function registerChild(msg) {
-        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent') return null;
+    function registerChild(msg) {  // a refusal names a child id it never admitted (admissionRefusalRow)
+        if (String(msg?.delegation_role || '').toLowerCase() !== 'subagent' || msg.system_type === 'subagent_admission_notice') return null;
         const parentId = taskKey(msg.parent_task_id);
         const childId = taskKey(msg.subagent_task_id || msg.task_id);
         if (!parentId || !childId || parentId === childId) return null;
@@ -1827,7 +1815,7 @@ export function createChatInstance({
             subagent_role: role,
             model,
             ...overrides,
-        });
+        }, liveCardRecords.get(childId)?.requestedExecutor);  // its kept selection, for a frame that repeats none
         // The child's effort fact rides every frame that states a level (live, terminal, replay).
         return summary ? withTaskCostMeta({ ...summary, ...(evt.effort_level ? { effort: effortFact(evt) } : {}) }, evt, { rawTs }) : null;
     }
@@ -1843,6 +1831,7 @@ export function createChatInstance({
 
     function updateLiveCardFromProgressMessage(msg, { grantCancelAuthority = true } = {}) {
         if (msg?.system_type === 'task_checkpoint') return updateLiveCardFromLogEvent({ ...msg, type: 'task_checkpoint', is_progress: false });
+        if (msg?.system_type === 'subagent_admission_notice') msg = admissionRefusalRow(msg);  // its parent's row, never the child's
         const taskId = msg?.task_id || '';
         const rawTs = msg?.ts || new Date().toISOString();
         if (!taskId) return false;
@@ -1904,7 +1893,9 @@ export function createChatInstance({
         // Interrupted is retryable and therefore non-terminal; the canonical
         // projector owns that distinction for both live and replay paths.
         if (summary.terminal) subagentTerminalChildren.add(childId);
-        stampNodeTimestamp(getSubagentCardRecord(childId, parentId, role, rawTs)?.root, rawTs, { anchor: true });
+        const record = getSubagentCardRecord(childId, parentId, role, rawTs);
+        stampNodeTimestamp(record?.root, rawTs, { anchor: true });
+        observeChildStart(record, evt);
         const reviewsChanged = attachTaskDetailReviews(childId, evt);
         const updated = queueTaskLiveUpdate(summary, childId, rawTs);
         return Boolean(reviewsChanged || updated);
@@ -2892,7 +2883,7 @@ export function createChatInstance({
     }
     const handleHistoryLanguage = () => withStableViewport(() => {
         syncLoadOlderControl();
-        for (const record of liveCardRecords.values()) if (record.handoverRows?.length) renderLiveCardMeta(record);
+        for (const record of liveCardRecords.values()) renderLiveCardMeta(record);  // its line's own words (modelWords, clockLabel)
     });
     window.addEventListener('ouro:language-changed', handleHistoryLanguage);
     async function loadOlderHistory() {

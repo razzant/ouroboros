@@ -1,13 +1,13 @@
 """Ordinary root task cards in the approved B composition (owner 30.10, B), in the real shell, chat module and
 stylesheets over static gateway data (no runtime, no account).
 
-A root card's head holds its status, the existing clock (`updated`, else `started`; none once finished) and the quiet
-`Reviews N` and `Details` doors; its name (16px) and latest authored line (14px) wrap whole below; its foot is one band,
-the facts at its left and the host's commands at its right end, the command cluster wrapping whole under the facts on a
-narrow card. What Reviews and Details open lies after the foot and before the children. Children keep their identity
-row and docked Reviews door; a Main portal keeps its Project-reference row and its two-line line. Every word here is
-synthetic: the quiet scene has a real feed's geometry (summaries of two and three lines, short meta lines, unknown
-costs), the work scene is illustrative.
+A root card's head holds its status, the existing clock (`updated`, else `started` from an observed start, else `since`
+its first row; none once finished) and the quiet `Reviews N` and `Details` doors; its name (16px) and latest authored
+line (14px) wrap whole below; its foot is one band, the facts at its left and the host's commands at its right end, the
+command cluster wrapping whole under the facts on a narrow card. What Reviews and Details open lies after the foot and
+before the children. Children keep their identity row and docked Reviews door; a Main portal keeps its Project-reference
+row and its two-line line. Every word here is synthetic: the quiet scene has a real feed's geometry (summaries of two
+and three lines, short meta lines, unknown costs), the work scene is illustrative.
 """
 from __future__ import annotations
 
@@ -107,8 +107,8 @@ QUIET = [
     _log("q1", "task_metrics_event", _at("22:45:23"), tool_calls=4, duration_sec=183, **UNKNOWN),
     _say("q2", Q2, _at("22:42:30"), model=MODEL),
     _done("q2", _at("22:45:18"), tool_calls=4, duration_sec=168, **UNKNOWN),
-    # Named by its admission, with a host note and no narration yet: its clock is when it started. The host offers
-    # no Stop for it (it grants Stop on the first card alone), so it has none.
+    # Named by its admission, with a host note and no narration or observed start yet (no census row dates one): its
+    # clock is its first row's time, `since`. The host offers no Stop for it (it grants Stop on the first card alone).
     _say("q3", "Context ready", _at("22:43"), narration=False, model=MODEL),
     ("task_named", {"task_id": "q3", "suggested_name": Q3}),
     _log("q3", "task_metrics_event", _at("22:45:59"), tool_calls=4, duration_sec=169, **UNKNOWN),
@@ -298,7 +298,7 @@ def _assert_b_root(facts, *, clock=None, reviews="", buttons=()):
             beside = abs((when["t"] + when["b"]) / 2 - (chip["t"] + chip["b"]) / 2) <= 2
             under = when["t"] >= chip["b"] - 1 and abs(when["l"] - chip["l"]) <= 1 and bool(reviews)
             assert beside or under, facts
-    assert "updated" not in facts["meta"] and "started" not in facts["meta"], facts  # the clock moved once, whole
+    assert not any(word in facts["meta"] for word in ("updated", "started", "since")), facts  # the clock moved once, whole
     assert facts["reviews"] == reviews, facts
     if reviews:
         r = facts["reviewsBox"]
@@ -329,11 +329,11 @@ def _assert_b_root(facts, *, clock=None, reviews="", buttons=()):
 
 
 # One leg's day: the page's pinned clock, its timezone, and the three clocks the cards then read (q1 updated, q3
-# started, w-root updated). `NEXT_DAY` is the flake's own scene, pinned: across Moscow midnight every fixture clock
-# reads `Yesterday, HH:MM` and the head keeps its composition with the longer word (#3535).
-SAME_DAY = (NOW, "Europe/Moscow", ("updated 22:42", "started 22:43", "updated 22:47"))
+# since its first row, w-root updated). `NEXT_DAY` is the flake's own scene, pinned: across Moscow midnight every
+# fixture clock reads `Yesterday, HH:MM` and the head keeps its composition with the longer word (#3535).
+SAME_DAY = (NOW, "Europe/Moscow", ("updated 22:42", "since 22:43", "updated 22:47"))
 NEXT_DAY = (NOW_NEXT_DAY, "Europe/Moscow",
-            ("updated Yesterday, 22:42", "started Yesterday, 22:43", "updated Yesterday, 22:47"))
+            ("updated Yesterday, 22:42", "since Yesterday, 22:43", "updated Yesterday, 22:47"))
 
 
 @pytest.mark.parametrize("engine,theme,width,height,coarse,day", [

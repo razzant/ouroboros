@@ -891,6 +891,10 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
         content: 'done', executor_route: 'codex', execution_evidence: evidence } });
     // An ungrouped row keeps the same pair: a quiet chip and its sentence beside it.
     ws.emit('log', { data: { type: 'executor_note', executor_route: 'claude', ts: '2026-09-16T12:00:01Z' } });
+    // A live child's sentence keeps its coordinator's route, provenance and billing beside the executor's.
+    ws.emit('log', { data: { type: 'executor_note', executor_route: 'codex', task_id: 'child-c', subagent_task_id: 'child-c',
+        delegation_role: 'subagent', coordinator_route: 'openai/gpt-6-astra', coordinator_billing: 'measured',
+        coordinator_provenance: 'parent_fallback', ts: '2026-09-16T12:00:02Z' } });
     await settle();
     const entries = mount.querySelector('#log-entries');
     const card = entries.children.find((node) => node.dataset.taskGroup === 'child-x');
@@ -905,6 +909,10 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
     const standalone = entries.children.find((node) => !node.dataset.taskGroup);
     assert.match(standalone.querySelector('.log-executor-chip').textContent, /Claude Code$/);
     assert.match(standalone.querySelector('.log-executor-detail').textContent, /^Dispatched to Claude Code/);
+    assert.doesNotMatch(standalone.querySelector('.log-executor-detail').textContent, /Coordinator/, 'no route, no coordinator clause');
+    const coordinated = [...entries.children].find((node) => node.querySelector('.log-executor-detail')?.textContent.includes('Codex —'));
+    assert.equal(coordinated.querySelector('.log-executor-detail').textContent, 'Dispatched to Codex — run evidence arrives with the '
+        + "terminal receipt. Coordinator: gpt-6-astra (parent's fallback) · bills as measured");
 });
 
 test('Activity treats skill provenance as an ordinary paused schedule', async (t) => {

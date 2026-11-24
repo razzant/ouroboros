@@ -1095,6 +1095,14 @@ test('a recycled card counts no invocation from the cycle before it', () => {
         ['0 tool calls', null, null]);
 });
 
+test('a recycled card keeps no selection or coordinator from the cycle before it', () => {
+    const record = { executorChip: { harness: 'codex', label: 'Codex' },
+        requestedExecutor: { kind: 'agent_session', harness: 'codex', model: 'gpt-5.5' },
+        coordinator: { route: 'gpt-6-astra', billing: 'measured', provenance: 'inherited' } };
+    clearStickyCardState(record);
+    assert.deepEqual([record.executorChip, record.requestedExecutor, record.coordinator], [null, null, null]);
+});
+
 for (const calls of [undefined, 0]) test(`rounds alone never manufacture tool evidence or a Done card: calls=${calls}`, async () => {
     const metrics = { rounds: 4, ...(calls === undefined ? {} : { tool_calls: calls }) };
     const f = fixture();

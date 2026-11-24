@@ -1,14 +1,14 @@
 import { escapeHtml, escapeHtmlAttr, formatMsgTime, machineWords } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
-import { harnessIdentityMarkup } from './harness_presentation.js';
+import { coordinatorLine, harnessIdentityMarkup } from './harness_presentation.js';
+import { executorChip } from './executor_card_facts.js';
 import { plainActivityText, selectionInside as selectionWithin } from './chat_activity.js';
 import {
     ERROR_LOG_PHASES as FAILED_PHASES,
     LOG_CATEGORIES,
     categorizeLogEvent,
     duplicateLogEventKey,
-    executorChip,
     formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -451,15 +451,18 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
         wordsOfNode.set(node, { words, whole });
         showWords(node);
         parts.line.hidden = !words && !failure;
-        const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
+        // The sentence keeps the supervising agent's route and billing beside the executor's, as the card's Coordinator row says them.
+        const coordinator = coordinatorLine({ ...execution?.coordinator, provenance: execution?.coordinatorProvenance });
+        const detail = [execution?.title, coordinator && `Coordinator: ${coordinator}`].filter(Boolean).join('. ');
+        const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(detail)}">${
             harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
         const said = facts.filter(Boolean);
         const links = serviceOutputLinksHtml(serviceStop?.links);
         node.classList.toggle('service-stop-result', Boolean(serviceStop));
         setHtml(parts.facts, chip + escapeHtml(said.join(' · ')) + links);
         parts.facts.hidden = !chip && !said.length && !links;
-        setText(parts.detail, execution?.title || '');
-        parts.detail.hidden = !execution?.title;
+        setText(parts.detail, detail);
+        parts.detail.hidden = !detail;
         if (parts.omitted) { setText(parts.omitted, omitted); parts.omitted.hidden = !omitted; }
     }
 

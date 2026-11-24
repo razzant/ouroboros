@@ -266,8 +266,10 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             changed = card.meta(record) || changed;
             return Boolean(card.controls(record) || changed);
         }
-        const startedSec = Number(row.started_at);
-        if (Number.isFinite(startedSec) && startedSec > 0) record.startedAt = startedSec * 1000;
+        // Only a managed task's row a worker holds dates its start (worker_assignment._bind_running); any other row's
+        // started_at may be when it was queued (gateway/state.py), so the card keeps its first row's time instead.
+        const startedSec = row.kind === 'managed_task' && row.carrier === 'worker' ? Number(row.started_at) : 0;
+        record.startedAt = Number.isFinite(startedSec) && startedSec > 0 ? startedSec * 1000 : 0;
         // Its census row also says which place called the work (task_origin.js): a portal has no frame to say it.
         changed = noteOrigin(record, row) || changed;
         const now = portalPresent(row);

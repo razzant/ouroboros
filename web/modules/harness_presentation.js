@@ -7,10 +7,13 @@
 // Claudexor's or Simple Icons'. The marks are monochrome and inherit currentColor.
 // Product names and marks remain the property of their owners.
 //
-// This module presents identity only. It does not decide route availability,
-// status, requested/effective/executed truth, or review authority.
+// This module presents identity: harness and source marks and names, the route grammar selections and keys are read
+// with (a local connection's name masked for display), compact model names, and the words of an executor's and a
+// coordinator's recorded facts. It decides no route availability, status or review authority; which executor and
+// request a card states across frames and attempts is executor_card_facts.js's.
 
 import { escapeHtmlAttr as escapeHtml, escapeHtmlText } from './utils.js';
+import { fmt } from './i18n.js';
 
 export const HARNESS_MARKS = Object.freeze({
     codex: Object.freeze({
@@ -164,7 +167,104 @@ export function identityPartsHtml(parts) {
         : `<span>${escapeHtml(part.text)}</span>`)).join(`<span class="harness-identity-sep" data-i18n-skip>${escapeHtml(META_PART_SEPARATOR)}</span>`);
 }
 
-/** Normalize coordinator route provenance from a recorded snapshot or frame. */
+// E2 (v6.39 UI): compact model name for the subagent label — drop the provider prefix
+// ("anthropic/claude-sonnet-4.6" -> "claude-sonnet-4.6") and mark a local route once. Shared SSOT
+// reused by the chat live-card headline (web/modules/chat.js).
+// `local` is a recorded lane (`used_local`, `use_local_model`, a selection's own spelling) and alone decides when given.
+// Without one, a route spelled `… (local)` is local, and so is an older id whose own model part says so; a provider or
+// connection head never is (`openai@local-team::remote-a` names a remote model).
+export function compactModel(model = '', local) {
+    const m = String(model || '').trim();
+    if (!m) return '';
+    const spelled = / \(local\)$/i.test(m), id = spelled ? m.slice(0, -' (local)'.length).trim() : m;
+    // Provider-prefixed IDs use either "provider/model" (OpenRouter) or "provider::model"
+    // (direct providers, e.g. openai::gpt-5.5, cloudru::…); show just the model part. Take
+    // whatever follows the LAST '/' or '::' separator.
+    const slash = id.lastIndexOf('/');
+    const dcolon = id.lastIndexOf('::');
+    const short = id.slice(Math.max(slash >= 0 ? slash + 1 : 0, dcolon >= 0 ? dcolon + 2 : 0));
+    return (typeof local === 'boolean' ? local : spelled || /local/i.test(short)) ? `${short} (local)` : short;
+}
+
+/** The harness a route spelling names (`harness[=model][:effort]`, the configured-row grammar); '' when its head is
+ *  no harness id, as an API model target (`openai::gpt-5`, `anthropic/claude-x`, `claudexor::codex=gpt-5`) never is. */
+export function routeHarness(route) {
+    const head = String(route || '').split('=')[0].trim().toLowerCase();
+    const harness = head.includes('::') ? '' : head.split(':')[0];
+    return /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(harness) ? harness : '';
+}
+
+// A named connection's stored name, the twin of provider_models._CONNECTION_NAME: the resolver refuses any other.
+const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const ROUTE_KINDS = new Set(['claudexor', ...Object.keys(API_PROVIDER_LABELS)]);
+
+/** The route grammar's head, the twin of provider_models.parse_model_route that the Models editor
+ *  (route_editor_primitives.parseModelSource), a key's label (connection_labels.routeConnectionId) and a card
+ *  (displayApiModelTarget, routeIdentity) share: `kind::model`, `kind@name::model` a named API connection (`@default`
+ *  the built-in one), a name outside the canonical grammar or a `claudexor@` head `valid: false`, and a head naming no
+ *  known kind an `opaque` OpenRouter id read whole. `connection` is the name as written; the model part is returned as
+ *  written and a trailing ` (local)` stays the caller's. It reads, never rewrites, a route. */
+export function apiRouteParts(route) {
+    const text = String(route || '').trim(), sep = text.indexOf('::');
+    const head = sep < 0 ? '' : text.slice(0, sep), at = head.indexOf('@');
+    const kind = at < 0 ? head : head.slice(0, at), model = text.slice(sep + 2);
+    if (sep < 0 || !ROUTE_KINDS.has(kind)) return { kind: 'openrouter', connection: '', named: false, model: text, valid: true, opaque: true };
+    if (at < 0) return { kind, connection: '', named: false, model, valid: true, opaque: false };
+    const connection = head.slice(at + 1);
+    return { kind, connection, named: true, model, valid: kind !== 'claudexor' && CONNECTION_NAME.test(connection), opaque: false };
+}
+
+/** Mask any local API connection suffix in a known provider head (`kind@name::model` -> `kind::model`) for display.
+ *  Opaque ids, `@` in model names, and one trailing ` (local)` mark stay intact; a connection-headed route with no
+ *  model, a name the resolver refuses (`openai@Bad_Name::m`) or a `claudexor@…` head returns '' rather than leaking
+ *  the connection segment or naming a model the route never selected. */
+export function displayApiModelTarget(raw) {
+    const trimmed = String(raw || '').trim();
+    const local = trimmed.endsWith(' (local)');
+    const parts = apiRouteParts(local ? trimmed.slice(0, -' (local)'.length) : trimmed), model = parts.model.trim();
+    if (!parts.named) return trimmed;
+    return parts.valid && model ? `${parts.kind}::${model}${local ? ' (local)' : ''}` : '';
+}
+
+// The route grammar's provider and model, as provider_models.parse_model_route reads a route: a known kind heads
+// `kind::model`, and a bare or unknown-headed id is OpenRouter's (`sol` is `openrouter::sol`). A local connection name
+// and the lane are no part of it; a caller compares lanes apart.
+export function routeIdentity(route) {
+    const text = displayApiModelTarget(String(route || '').replace(/ \(local\)$/i, ''));
+    return apiRouteParts(text).opaque ? `openrouter::${text}` : text;
+}
+
+/** A selection's carrier as the wire defines it, `{kind, target_id}` and nothing else (a row's account pin,
+ *  local API connection name, or other setting never travels); null when it names no known kind and a target. */
+export function selectedRoute(route) {
+    if (typeof route?.target_id !== 'string' || !['api_model', 'agent_session'].includes(route.kind)) return null;
+    const target = route.kind === 'api_model' ? displayApiModelTarget(route.target_id) : route.target_id.trim();
+    return target ? { kind: route.kind, target_id: target } : null;
+}
+
+/** The model a selection asked of this executor, as a compact line names it (its lane is its own route spelling's): a
+ *  session row's for its own harness only, an API row's for no harness. */
+export function selectedModel(selected, harness = '') {
+    const own = String(harness || '').trim().toLowerCase();
+    const model = selected?.kind === 'api_model' ? (own ? '' : selected.model)
+        : selected?.kind === 'agent_session' && own && selected.harness === own ? selected.model : '';
+    return compactModel(model, / \(local\)$/i.test(model));
+}
+
+/** The lane a card under an API selection knows for the model it names before any solve: the one its frames recorded
+ *  (`kept`, the coordinator route recordedCoordinator compacts with `use_local_model`: an API child's own model) when it
+ *  names this model, else the selection's own spelling for the same route, and none for another: a changed model's
+ *  words never make one. Without an API selection, undefined, so the name keeps compactModel's own reading. */
+export function selectionLane(selected, model, kept = '') {
+    if (selected?.kind !== 'api_model' || !model) return undefined;
+    const name = compactModel(model, false);
+    if (kept === name || kept === `${name} (local)`) return kept !== name;
+    return routeIdentity(model) === routeIdentity(selected.model) && / \(local\)$/i.test(selected.model);
+}
+
+/** Normalize coordinator route provenance from a recorded snapshot or frame: the words a frame stamped
+ *  (supervisor_route.cognitive_route_provenance, what dispatch tells the nanny), else the same words read from an
+ *  older frame's snapshot. */
 export function formatCoordinatorProvenance(source) {
     if (!source) return '';
     if (typeof source === 'string') {
@@ -172,6 +272,7 @@ export function formatCoordinatorProvenance(source) {
         if (!trimmed) return '';
         const lower = trimmed.toLowerCase();
         if (lower === 'inherited' || lower === 'parent') return 'inherited';
+        if (lower === 'parent_switch') return "parent's own choice";
         if (lower === 'fallback' || lower === 'parent_fallback' || lower === "parent's fallback") {
             return "parent's fallback";
         }
@@ -193,10 +294,8 @@ export function formatCoordinatorProvenance(source) {
         || source.selected_supervisor_snapshot?.handle || source.selected_supervisor_snapshot?.selected_subagent_id
         || '',
     ).trim();
-    const explicit = String(
-        source.coordinatorProvenance || source.coordinator_provenance
-        || snap?.chosen_by || source.chosen_by || '',
-    ).trim();
+    const stamped = String(source.coordinatorProvenance || source.coordinator_provenance || '').trim();
+    const explicit = stamped || String(snap?.chosen_by || source.chosen_by || '').trim();
     const lower = explicit.toLowerCase();
     if (lower === 'delegator') {
         return chosenRow ? `chosen by the delegator (${chosenRow})` : 'chosen by the delegator';
@@ -205,26 +304,42 @@ export function formatCoordinatorProvenance(source) {
         return "parent's fallback";
     }
     if (lower === 'inherited' || lower === 'parent') {
-        return 'inherited';
+        // An inherited snapshot names the role its parent handed down (`follows_role`); a stamped word is already whole.
+        const followed = stamped ? '' : String(snap?.follows_role || source.follows_role || '').trim();
+        return followed ? `inherited (follows ${followed})` : 'inherited';
     }
     return explicit ? formatCoordinatorProvenance(explicit) : '';
 }
 
-/** Describe the supervising child's own cognitive route and billing basis for the pre-evidence chip. */
-export function coordinatorRouteClause(evt) {
-    const snap = evt?.parent_cognitive_route && typeof evt.parent_cognitive_route === 'object'
-        ? evt.parent_cognitive_route
-        : null;
+const cognitiveSnapshot = (evt) => (evt?.parent_cognitive_route && typeof evt.parent_cognitive_route === 'object'
+    ? evt.parent_cognitive_route : null);
+const statedBilling = (evt, snap = cognitiveSnapshot(evt)) => String(
+    evt?.coordinator_billing || evt?.nanny_billing || evt?.cost_kind || snap?.billing || snap?.cost_kind || '',
+).trim();
+
+/** The supervising agent's own recorded route and billing basis, for a delegated child's Coordinator row:
+ *  never the executor's, so neither reads as the model the child's work ran on. */
+export function coordinatorFacts(evt) {
+    const snap = cognitiveSnapshot(evt);
     const rawModel = String(evt?.coordinator_route || evt?.model || snap?.model || '').trim();
-    const local = Boolean(evt?.use_local_model ?? snap?.use_local_model) || rawModel.endsWith(' (local)');
-    const route = local && rawModel && !rawModel.endsWith(' (local)') ? `${rawModel} (local)` : rawModel;
-    const explicitBilling = String(
-        evt?.coordinator_billing || evt?.nanny_billing || evt?.cost_kind || snap?.billing || snap?.cost_kind || '',
-    ).trim();
-    const billing = explicitBilling || 'unknown';
-    return route
-        ? `this subagent itself runs on ${route} (bills as ${billing})`
-        : `this subagent runs on its coordinator route (bills as ${billing})`;
+    const lane = evt?.use_local_model ?? snap?.use_local_model;  // recorded, it decides with the route's spelling; else unknown
+    return { route: compactModel(rawModel, lane == null ? undefined : Boolean(lane) || rawModel.endsWith(' (local)')),
+        billing: statedBilling(evt, snap) || 'unknown' };
+}
+
+/** A coordinator's facts in one phrase, as the card's Coordinator row and Dashboard Logs say them: its route with any
+ *  provenance, then its billing basis; nothing without a route. */
+export function coordinatorLine({ route = '', billing = '', provenance = '' } = {}) {
+    return route ? joinMetaParts([provenance ? `${route} (${provenance})` : route, billing && `bills as ${billing}`]) : '';
+}
+
+/** The coordinator facts a frame itself records (route, billing basis, provenance), each only when it states one, so a
+ *  card keeps them past a later chip that carries none and never invents a basis no frame gave; null when none. */
+export function recordedCoordinator(evt) {
+    const snap = cognitiveSnapshot(evt), billing = statedBilling(evt, snap), provenance = formatCoordinatorProvenance(evt);
+    if (!(snap || billing || provenance || String(evt?.coordinator_route || '').trim() || typeof evt?.use_local_model === 'boolean')) return null;
+    const { route } = coordinatorFacts(evt);
+    return { ...(route && { route }), ...(billing && { billing }), ...(provenance && { provenance }) };
 }
 
 /** Card identity consumes projected facts; it does not infer execution from marks.
@@ -237,20 +352,30 @@ export function coordinatorRouteClause(evt) {
  *  never the coordinating model: that one is a labelled row of the details. */
 export function executorIdentityMarkup(chip, { model = '' } = {}) {
     if (!chip) return '';
-    const identity = `<span class="harness-chip chat-live-executor-chip" title="${escapeHtml(chip.title || '')}">`
+    const identity = `<span class="harness-chip chat-live-executor-chip" title="${escapeHtml(executorTitle(chip))}">`
         + harnessIdentityMarkup(chip.harness, { label: chip.label || '', className: 'chat-live-executor-identity' }) + '</span>';
-    return joinMetaParts([identity, model ? `<span class="chat-live-meta-text">${escapeHtmlText(model)}</span>` : '']);
+    const words = modelWords(model);  // a fact with no model (`{model: ''}`) adds no part
+    return joinMetaParts([identity, words ? `<span class="chat-live-meta-text">${escapeHtmlText(words)}</span>` : '']);
 }
 
-/** The model the executor itself ran, as far as its evidence says: settled observed
- *  models (separate historical facts, listed as such), else the run's own progress
- *  report with its source. A requested model says so; an unconfirmed one is absent
- *  (the detail sentence says `model unconfirmed`). `compact` shortens a provider id. */
-export function executorModelText(chip, compact = (model) => model) {
-    if (chip?.observedModels?.length) return chip.observedModels.join(', ');
-    const observation = chip?.observation;
-    const model = compact(String(observation?.model || ''));
-    if (!model) return '';
-    if (observation.model_source === 'observed') return model;
-    return observation.model_source === 'requested' ? `requested ${model}` : '';
+/** An executor's detail sentence in the reader's language where its record types one: a selection that ended before any
+ *  dispatch (log_events' `undispatched`) is worded at paint from its recorded harness and request, with any report it kept;
+ *  every other sentence stays as recorded. */
+export function executorTitle(chip) {
+    if (!chip?.undispatched) return chip?.title || '';
+    const name = harnessPresentation(chip.harness).label, model = chip.undispatched.model;
+    const words = model ? fmt('Selected {name}, model {model} (requested); no dispatch was recorded before it ended', { name, model })
+        : fmt('Selected {name}; no dispatch was recorded before it ended', { name });
+    return chip.lastUpdate ? `${words}. ${chip.lastUpdate}` : words;
 }
+
+/** A compact line's model fact in the reader's language: a typed request (executorModelFact's `requested`) is translated
+ *  where it is painted (a card is no overlay root, i18n.SKIP_ROOTS); a model identifier, a plain string included, stays
+ *  verbatim whatever its words. */
+export function modelWords(fact) {
+    if (typeof fact !== 'object' || !fact) return String(fact || '');
+    return fact.requested ? fmt('requested {model}', { model: fact.model }) : String(fact.model || '');
+}
+
+/** A task attempt as cards compare it (`task_attempt`: a frame's integer, an observation's decimal string), or null. */
+export const taskAttempt = (value) => (/^\d+$/.test(String(value ?? '')) ? Number(value) : null);

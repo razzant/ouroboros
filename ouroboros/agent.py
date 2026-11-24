@@ -48,13 +48,12 @@ from ouroboros.agent_startup_checks import (
     verify_restart,
     verify_system_state,
 )
-from ouroboros.agent_task_pipeline import (
-    emit_task_results, build_review_context,
-)
+from ouroboros.agent_task_pipeline import build_review_context, emit_task_results
 from ouroboros.task_finalization import (
     TERMINAL_ORIGIN_HOST_NOTICE, exception_notice, schedule_report_run, terminal_result_fields,
 )
 from ouroboros.host_notice import phrase
+from ouroboros.terminal_time import source_task_attempt
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -137,7 +136,6 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
         from ouroboros.outcomes import collect_trace_refs, derive_loop_outcome
         from ouroboros.agent_task_pipeline import build_trace_summary
         from ouroboros.task_results import STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
-        from ouroboros.terminal_time import source_task_attempt
 
         loop_outcome = derive_loop_outcome(text, usage, llm_trace)
         write_task_result(
@@ -639,6 +637,26 @@ class OuroborosAgent:
             except Exception:
                 log.warning("mutation baseline capture failed for %s", task.get("id"), exc_info=True)
 
+    def _emit_subagent_started(self, task: Dict[str, Any]) -> None:
+        if str(task.get("delegation_role") or "") != "subagent" or self._event_queue is None or self._current_chat_id is None:
+            return
+        try:
+            role, tid = str(task.get("role") or "").strip(), str(task.get("id") or "")
+            text, said = phrase("subagent_started", "Subagent running ({role})." if role else "Subagent running.",
+                                details=f"task {tid}", **({"role": role} if role else {}))  # its id: a detail
+            progress_meta = subagent_message_meta(task, task_id=tid, event="running")
+            progress_meta.update(said)
+            if (attempt := source_task_attempt(task)) is not None:
+                progress_meta["task_attempt"] = attempt
+            self._event_queue.put({
+                "type": "send_message", "chat_id": self._current_chat_id,
+                "role": "system", "system_type": "subagent_started",
+                "text": text, "format": "markdown", "is_progress": True,
+                "task_id": tid, "progress_meta": progress_meta, "ts": utc_now_iso(),
+            })
+        except Exception:
+            log.debug("Failed to emit subagent running progress", exc_info=True)
+
     def _prepare_task_context(
         self, task: Dict[str, Any], authority_refusal: Optional[Dict[str, Any]] = None,
     ) -> Tuple[ToolContext, List[Dict[str, Any]], Dict[str, Any]]:
@@ -675,28 +693,8 @@ class OuroborosAgent:
                      "activity_emitted_at": getattr(self, "_activity_emitted_at", None)})
         # After persistence, mirror the same resolution to the supervisor/queue.
         emit_dispatch_resolution(self._event_queue, task, dispatch)
-        self._emit_live_log(
-            "context_building_started",
-            task_id=str(task.get("id") or ""),
-            task_type=str(task.get("type") or ""),
-        )
-        if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
-            try:
-                role, tid = str(task.get("role") or "").strip(), str(task.get("id") or "")
-                text, said = phrase("subagent_started", "Subagent running ({role})." if role else "Subagent running.",
-                                    details=f"task {tid}", **({"role": role} if role else {}))  # its id: a detail
-                self._event_queue.put({
-                    "type": "send_message", "chat_id": self._current_chat_id,
-                    "role": "system", "system_type": "subagent_started",
-                    "text": text,
-                    "format": "markdown",
-                    "is_progress": True,
-                    "task_id": str(task.get("id") or ""),
-                    "progress_meta": {**subagent_message_meta(task, task_id=tid, event="running"), **said},
-                    "ts": utc_now_iso(),
-                })
-            except Exception:
-                log.debug("Failed to emit subagent running progress", exc_info=True)
+        self._emit_live_log("context_building_started", task_id=str(task.get("id") or ""), task_type=str(task.get("type") or ""))
+        self._emit_subagent_started(task)
         task_metadata = dict(task.get("metadata") or {}) if isinstance(task.get("metadata"), dict) else {}
         for key in (
             "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role", "role",
@@ -1106,7 +1104,6 @@ class OuroborosAgent:
     def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ouroboros.context_fit import MinimumViewUnfit
         from ouroboros.delegate_resume import finish_selected_answer
-        from ouroboros.terminal_time import source_task_attempt
 
         def finished(text: Any, usage: Dict[str, Any], llm_trace: Dict[str, Any], ctx: Any) -> List[Dict[str, Any]]:
             return finish_selected_answer(ctx, lambda *answer: emit_task_results(  # a forced replacement emits the same way
