@@ -348,6 +348,17 @@ def live_contribution_projection() -> List[Dict[str, Any]]:
         ])
 
 
+def published_skill_contributions(skill_name: str, revision: str, skill_dir: pathlib.Path) -> Optional[List[Dict[str, Any]]]:
+    """This installed release's visible entries. An empty publication is final; None means it is not visible."""
+    directory = str(skill_dir.resolve())
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if (bundle is None or skill_name in _unloading
+                or bundle.content_hash != revision or bundle.skill_dir != directory):
+            return None
+        return copy.deepcopy(bundle.contributions)
+
+
 def live_host_asset(skill_name: str, revision: str, path: str) -> Optional[bytes]:
     """A single lock authorizes the revision and reads its captured bytes."""
     with _lock:

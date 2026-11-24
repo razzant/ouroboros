@@ -26,6 +26,7 @@ from ouroboros.gateway.call_contracts import HostCallOpenRequest
 from ouroboros.gateway.call_ws import read_call_body, refusal, serve_peer
 from ouroboros.gateway.host_service import HostServiceAuthError, _authenticated, _bounded_host_read
 from ouroboros.gateway.schema import validate_ingress
+from ouroboros.places import PlaceError
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ _REFUSAL_STATUS = {
     "place_not_connected": 403, "place_silent": 403, "place_paused": 403, "place_off": 403, "place_advises": 403,
     "place_no_wake_match": 403, "place_reaction_context_only": 403, "place_own_account": 403,
     "place_change_actor_unknown": 403, "place_disconnected": 403, "consciousness_allowance_exhausted": 429,
+    "wake_import_declarations_pending": 429, "places_unreadable": 503,
     "presence_event_invalid": 400, "presence_identity_missing": 400, "presence_identity_invalid": 400,
     "presence_reaction_invalid": 400, "presence_actor_invalid": 400, "presence_payload_invalid": 400,
     "presence_call_invalid_setting": 400,
@@ -50,9 +52,10 @@ def _token_digest(token: str) -> str:
 
 def _place(ctx, skill: str, place_ref: str):
     """The connected place of this connector named by its id or a migrated binding id."""
-    from ouroboros.places import load_places
+    from ouroboros.places import place_records
 
-    place = next((p for p in load_places(ctx.data_dir) if place_ref in (p.place_id, *p.legacy_binding_ids)), None)
+    records = place_records(ctx.data_dir, persist_import=False)
+    place = next((p for p in records.places.values() if place_ref in (p.place_id, *p.legacy_binding_ids)), None)
     if place is None or place.connector != skill:
         raise ValueError("call_place_forbidden")
     return place
@@ -121,6 +124,10 @@ async def api_host_call_open(request: Request) -> JSONResponse:
         return refusal(exc.code, 413 if exc.code == "control_too_large" else 400)
     except ImportError:
         return refusal("presence_call_admission_unavailable", 503)
+    except PlaceError as exc:
+        if exc.code == "places_unreadable":
+            return refusal(exc.code, 503)
+        return refusal("call_binding_forbidden", 403)
     except (ValueError, KeyError):
         return refusal("call_binding_forbidden", 403)
     except Exception:

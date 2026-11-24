@@ -1,5 +1,7 @@
+import json
 import pathlib
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +11,8 @@ from ouroboros.task_results import write_task_result
 
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME, create_host_service_app
 from ouroboros.event_bus import CHAT_OUTBOUND, publish_event
-from ouroboros.skill_loader import compute_content_hash, save_enabled, save_review_state, save_skill_grants, SkillReviewState
+from ouroboros.skill_loader import (compute_content_hash, requested_skill_permissions, save_enabled, save_review_state,
+                                    save_skill_grants, SkillReviewState)
 from ouroboros.utils import atomic_write_json
 from tests._store_shared import seed_result
 from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
@@ -135,9 +138,11 @@ def _seed_token(
     subscribe_events=None,
     manifest_permissions=None,
     bundled=False,
+    contributes=None,
 ) -> None:
     topics = list(subscribe_events or ["chat.outbound"])
     manifest_perms = list(manifest_permissions or ["inject_chat", "subscribe_event"])
+    declarations = f"contributes: {json.dumps(contributes)}\n" if contributes is not None else ""
     skill_dir = data_dir / "skills" / ("native" if bundled else "external") / skill
     skill_dir.mkdir(parents=True, exist_ok=True)
     if bundled:
@@ -151,7 +156,7 @@ type: extension
 entry: plugin.py
 permissions: [{", ".join(manifest_perms)}]
 subscribe_events: [{", ".join(topics)}]
----
+{declarations}---
 # Test
 """,
         encoding="utf-8",
@@ -171,14 +176,7 @@ subscribe_events: [{", ".join(topics)}]
         content_hash=content_hash,
         requested_keys=[],
         granted_permissions=list(permissions or []),
-        requested_permissions=[
-            *(permission for permission in ("inject_chat", "presence", "notify_owner") if permission in manifest_perms),
-            *(
-                f"subscribe_event:{topic}"
-                for topic in topics
-                if topic != "skill.lifecycle" and "subscribe_event" in manifest_perms
-            ),
-        ],
+        requested_permissions=requested_skill_permissions(manifest_perms, topics),
     )
     atomic_write_json(
         data_dir / "state" / "skills" / skill / AUTH_TOKEN_FILENAME,
@@ -321,6 +319,395 @@ def test_presence_turn_resolves_binding_and_returns_typed_result(tmp_path: pathl
     assert captured["admission"].transport_skill == "telegram-bot"
     assert captured["event"].actor["platform_actor_id"] == "user-7"
     assert captured["event"].conversation_key == "telegram:bot-1:room-1:topic-1"
+
+
+def _install_inbox(root, *, declares=True, wakes=("direct_message",)):
+    from ouroboros.extension_contributions import stage_contributions
+    from ouroboros.extension_registry_state import _ExtensionRegistrations
+    from ouroboros.skill_loader import find_skill
+
+    entry = {"provides": "place", "id": "inbox", "label": "Inbox", "destination": "vendor:Telegram",
+             "facts": [*wakes, {"id": "signal.inbox", "label": "Inbox item"}], "wakes": list(wakes)}
+    permissions = ["presence", "call_peer"]
+    _seed_token(root, skill="telegram-bot", token="inbox-token", permissions=permissions,
+                manifest_permissions=permissions, contributes=[entry] if declares else [])
+    skill = find_skill(root, "telegram-bot")
+    bundle = _ExtensionRegistrations(content_hash=skill.content_hash, skill_dir=str(skill.skill_dir.resolve()))
+    stage_contributions(SimpleNamespace(_staged=bundle), skill, skill.content_hash)
+    assert not bundle.contribution_problems
+    return bundle
+
+
+def _inbox_event(source, *facts):
+    return {"source_event_id": source, "provider": "telegram", "account_id": "bot-1", "conversation_id": "dm",
+            "thread_id": "", "conversation_key": "telegram:bot-1:dm:0", "actor": {"platform_actor_id": "sender"},
+            "conversation": {}, "message": {"message_id": source}, "text": "Hello", "facts": list(facts)}
+
+
+@pytest.mark.parametrize("connector_first", [True, False], ids=["connector-first", "core-first"])
+@pytest.mark.parametrize("extra_signal", [False, True], ids=["core-fact", "with-connector-signal"])
+def test_first_dm_waits_for_its_published_place(tmp_path, monkeypatch, connector_first, extra_signal):
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+    from ouroboros.place_intake import HANDED_TO_AUTHOR, ROUTE_TO_MIND
+
+    starts = []
+    monkeypatch.delitem(registry._extensions, "telegram-bot", raising=False)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    binding = _seed_presence_behavior(tmp_path, account_wide=True)
+    bundle = _install_inbox(tmp_path, declares=connector_first)
+    place, = places.load_places(tmp_path)
+    assert place.wakes == (places.WakeItem("legacy_addressed", "migration"),)
+    if not connector_first:
+        bundle = _install_inbox(tmp_path)
+    before = places.places_path(tmp_path).read_bytes()
+    facts = ["direct_message", "signal.inbox"] if extra_signal else ["direct_message"]
+    event, meeting = _inbox_event("first-dm", *facts), _inbox_event("meeting", *facts)
+
+    def run(admission, event, **_kwargs):
+        starts.append((event.source_event_id, event.facts, admission.fact_labels))
+        return SimpleNamespace(outcome="message", text="Hello back", task_id="focus", work_ref="")
+
+    with TestClient(_inject(tmp_path, run), headers={"x-skill-token": "inbox-token"}) as client:
+        call = client.post("/call/open", json={"role": "meeting", "binding_id": binding, "event": meeting})
+        assert (call.status_code, call.json()["code"]) == (429, "wake_import_declarations_pending"), call.text
+        assert set(call.json()) == {"ok", "code", "error"} and call.json()["ok"] is False
+        turn = client.post("/presence/turn", json={"event": event})
+        assert turn.status_code == 429, turn.text
+        assert (turn.json()["code"], turn.json()["disposition"], turn.json()["retry_after"]) == (
+            "wake_import_declarations_pending", "retry", 60)
+        assert "field" not in turn.json()
+        if not extra_signal:
+            with monkeypatch.context() as readers:
+                readers.setattr("ouroboros.place_intake.offer_arrival", lambda *_args, **_kwargs: (ROUTE_TO_MIND, ""))
+                routed = client.post("/presence/turn", json={"event": event})
+                assert (routed.status_code, routed.json()) == (429, turn.json())
+                readers.setattr("ouroboros.place_intake.offer_arrival", lambda *_args, **_kwargs: (HANDED_TO_AUTHOR, "reader"))
+                followup = {**event, "source_event_id": "author-dm", "message": {"message_id": "3"}}
+                follow = client.post("/presence/turn", json={"event": followup})
+                assert follow.status_code == 200 and follow.json()["outcome"] == "silent", follow.text
+        assert not starts and places.places_path(tmp_path).read_bytes() == before
+        assert len(dialogue_store.rows_by_client_id(tmp_path, "first-dm")) == (0 if extra_signal else 1)
+        with monkeypatch.context() as declined:
+            declined.setitem(registry._extensions, "telegram-bot",
+                             replace(bundle, contributions=[], contribution_problems=["Place declaration declined"]))
+            later = {**event, "source_event_id": "next-dm", "message": {"message_id": "4"}}
+            ordinary = client.post("/presence/turn", json={"event": later})
+            if extra_signal:
+                assert (ordinary.status_code, ordinary.json()["code"]) == (400, "presence_payload_invalid")
+                assert ordinary.json()["disposition"] == "rejected"
+            else:
+                assert ordinary.status_code == 200 and ordinary.json()["outcome"] == "silent", ordinary.text
+        assert not starts and places.places_path(tmp_path).read_bytes() == before
+        # Release precisely the contribution the publication owner staged for this reviewed version.
+        monkeypatch.setitem(registry._extensions, "telegram-bot", bundle)
+        repeated = client.post("/presence/turn", json={"event": event})
+        assert repeated.status_code == 200 and repeated.json()["text"] == "Hello back", repeated.text
+        assert starts == [("first-dm", tuple(facts), {"signal.inbox": "Inbox item"})]
+        assert len(dialogue_store.rows_by_client_id(tmp_path, "first-dm")) == 1
+        records = places.place_records(tmp_path)
+        assert records.places[binding].wakes == (*place.wakes, places.WakeItem("direct_message", "connector"))
+        assert records.migration["presence_bindings_v1"] is True
+
+
+def _post_inbox(client, path, binding, event, **payload):
+    if path == "/call/open":
+        payload["role"] = "meeting"
+    return client.post(path, json={"binding_id": binding, "event": event, **payload})
+
+
+@pytest.mark.parametrize("choice", ["new-selected", "migrated", "explicit-empty", "old-writer"])
+def test_connected_place_retries_its_connector_signal_independently_of_wake_import(tmp_path, monkeypatch, choice):
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+    from tests._place_wake_import import old_load_places
+
+    connector = "telegram-bot"
+    monkeypatch.delitem(registry._extensions, connector, raising=False)
+    bundle = _install_inbox(tmp_path)
+    if choice == "new-selected":
+        monkeypatch.setitem(registry._extensions, connector, bundle)
+        place = places.connect_place(tmp_path, connector=connector, provider="telegram", account_id="bot-1",
+                                     conversation_id="dm", scope="conversation", contribution_id="inbox")
+        places.edit_place(tmp_path, place.place_id, "add_wake", author="owner", fact="signal.inbox")
+        monkeypatch.delitem(registry._extensions, connector)
+    else:
+        _seed_presence_behavior(tmp_path, account_wide=True)
+        if choice == "migrated":
+            monkeypatch.setitem(registry._extensions, connector, bundle)
+        place, = places.load_places(tmp_path)
+        if choice == "migrated":
+            monkeypatch.delitem(registry._extensions, connector)
+        elif choice == "explicit-empty":
+            places.edit_place(tmp_path, place.place_id, "set_wakes", author="owner", wakes=[])
+        else:
+            old_load_places(tmp_path, [])
+    assert places.place_records(tmp_path).migration["presence_bindings_v1"] is True
+    before = places.places_path(tmp_path).read_bytes()
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    starts = []
+
+    def run(event, **_kwargs):
+        starts.append(event.source_event_id)
+        return SimpleNamespace(outcome="message", text="Hello back", task_id="focus", work_ref="")
+
+    event = _inbox_event("inbox-item", "signal.inbox")
+    with TestClient(_inject(tmp_path, run), headers={"x-skill-token": "inbox-token"}) as client:
+        def responses(incoming):
+            replies = [_post_inbox(client, path, place.place_id, incoming) for path in ("/presence/turn", "/call/open")]
+            return [(reply.status_code, reply.json().get("code")) for reply in replies]
+
+        retry = [(429, "wake_import_declarations_pending")] * 2
+        rejected = [(400, "presence_payload_invalid")] * 2
+        assert responses(event) == retry
+        assert responses(_inbox_event("other", "signal.inbox", "signal.unknown")) == rejected
+        monkeypatch.setitem(registry._extensions, connector, bundle)
+        with monkeypatch.context() as reload:
+            reload.setattr(registry, "_unloading", {connector})
+            assert responses(event) == retry
+        with monkeypatch.context() as dropped:
+            dropped.setitem(registry._extensions, connector, replace(bundle, contributions=[]))
+            assert responses(event) == rejected
+        assert not starts and not dialogue_store.rows_by_client_id(tmp_path, event["source_event_id"])
+        assert places.places_path(tmp_path).read_bytes() == before
+        turn = _post_inbox(client, "/presence/turn", place.place_id, event)
+        assert turn.status_code == 200, turn.text
+        if choice == "new-selected":
+            assert starts == ["inbox-item"] and turn.json()["outcome"] == "message"
+        else:
+            assert not starts and turn.json()["outcome"] == "silent"
+            refused = _post_inbox(client, "/call/open", place.place_id, _inbox_event("meeting", "signal.inbox"))
+            assert (refused.status_code, refused.json()["code"]) == (403, "place_no_wake_match")
+        assert len(dialogue_store.rows_by_client_id(tmp_path, "inbox-item")) == 1
+        assert places.places_path(tmp_path).read_bytes() == before
+
+
+def test_unpublished_signal_retries_an_unreadable_place_store(tmp_path, monkeypatch):
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+
+    monkeypatch.delitem(registry._extensions, "telegram-bot", raising=False)
+    binding = _seed_presence_behavior(tmp_path, account_wide=True)
+    bundle = _install_inbox(tmp_path)
+    places.load_places(tmp_path)
+    path = places.places_path(tmp_path)
+    event = _inbox_event("unreadable-place", "signal.inbox")
+    read = pathlib.Path.read_text
+
+    def unavailable(file, *args, **kwargs):
+        if file == path:
+            raise OSError("temporary place store outage")
+        return read(file, *args, **kwargs)
+
+    def unreadable_records(root, **_options):  # the store's own refusal of a read that failed
+        raise places.PlaceError("places_unreadable", str(places.places_path(root)), "temporary place store outage")
+
+    with TestClient(create_host_service_app(tmp_path), headers={"x-skill-token": "inbox-token"}) as client:
+        with monkeypatch.context() as outage:
+            outage.setattr(pathlib.Path, "read_text", unavailable)
+            turn = _post_inbox(client, "/presence/turn", binding, event)
+            assert (turn.status_code, turn.json()["code"], turn.json()["disposition"]) == (503, "places_unreadable", "retry")
+            call = _post_inbox(client, "/call/open", binding, event)
+            assert (call.status_code, call.json()["code"]) == (503, "places_unreadable")
+        retry = _post_inbox(client, "/presence/turn", binding, event)
+        assert (retry.status_code, retry.json()["code"]) == (429, "wake_import_declarations_pending")
+        assert not dialogue_store.rows_by_client_id(tmp_path, event["source_event_id"])
+        # Published now, the event is heard; then the read of the place's current choices fails. The captured
+        # event is retried, never rejected, and its resend is the same captured event.
+        monkeypatch.setitem(registry._extensions, "telegram-bot", bundle)
+        with monkeypatch.context() as outage:
+            outage.setattr("ouroboros.place_intake.place_records", unreadable_records)
+            after = _post_inbox(client, "/presence/turn", binding, event)
+            assert (after.status_code, after.json()["code"], after.json()["disposition"]) == (
+                503, "places_unreadable", "retry"), after.text
+        assert len(dialogue_store.rows_by_client_id(tmp_path, event["source_event_id"])) == 1
+        resent = _post_inbox(client, "/presence/turn", binding, event)
+        assert resent.status_code == 200 and resent.json()["outcome"] == "silent", resent.text
+    assert len(dialogue_store.rows_by_client_id(tmp_path, event["source_event_id"])) == 1
+
+
+def test_a_settled_resend_keeps_its_answer_after_an_upgrade_retires_its_signal(tmp_path, monkeypatch):
+    """The first reply was lost and the connector's next release no longer declares the signal its event carried:
+    the identical, authenticated resend gets the answer its heard settlement saved, because it equals the input the
+    room retained. The owner's current connection still comes first, as for an ordinary replay: a pause keeps the
+    history answering, a disconnect refuses it."""
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+    from ouroboros.place_intake import retained_resend
+    from ouroboros.presence_events import parse_event_wire
+    from ouroboros.presence_runner import presence_event_identity, presence_turn_task_id
+
+    connector = "telegram-bot"
+    monkeypatch.delitem(registry._extensions, connector, raising=False)
+    monkeypatch.setitem(registry._extensions, connector, _install_inbox(tmp_path))
+    place = places.connect_place(tmp_path, connector=connector, provider="telegram", account_id="bot-1",
+                                 conversation_id="dm", scope="conversation", contribution_id="inbox")
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: False)  # heard, and settled
+    event = {**_inbox_event("inbox-item", "direct_message", "signal.inbox"),
+             "message": {"message_id": "inbox-item", "edited": False}}
+    answer = ("outcome", "text", "turn_ref")
+    with TestClient(create_host_service_app(tmp_path), headers={"x-skill-token": "inbox-token"}) as client:
+        heard = _post_inbox(client, "/presence/turn", place.place_id, event)
+        assert heard.status_code == 200 and heard.json()["outcome"] == "silent", heard.text
+        monkeypatch.setitem(registry._extensions, connector, _install_inbox(tmp_path, declares=False))  # the upgrade
+        again = _post_inbox(client, "/presence/turn", place.place_id, event)
+        assert again.status_code == 200, again.text
+        assert {key: again.json()[key] for key in answer} == {key: heard.json()[key] for key in answer}
+        places.edit_place(tmp_path, place.place_id, "set_state", author="owner", state="paused")
+        paused = _post_inbox(client, "/presence/turn", place.place_id, event)
+        assert paused.status_code == 200, paused.text
+        assert {key: paused.json()[key] for key in answer} == {key: heard.json()[key] for key in answer}
+        places.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
+        gone = _post_inbox(client, "/presence/turn", place.place_id, event)
+        assert (gone.status_code, gone.json()["code"]) == (409, "place_not_connected"), gone.text
+    assert len(dialogue_store.rows_by_client_id(tmp_path, "inbox-item")) == 1
+    # The match is a comparison with the retained input: equal for the identical event, unequal when a retained field
+    # differs, and nothing for an arrival this room never retained.
+    parsed = parse_event_wire(event)
+    turn_id = presence_turn_task_id(place.place_id, "inbox-item")
+    identity = presence_event_identity(place.place_id, parsed)
+    negotiated = replace(parsed, delivery_reporting_version=1, continuation_version=2)  # versions are not its input
+    reordered = replace(parsed, message=dict(reversed(parsed.message.items())))  # object key order is not either
+    for same in (parsed, negotiated, reordered):
+        assert retained_resend(tmp_path, turn_id, identity, same)
+    # Typed JSON: the retained ``false`` is not ``0``, though Python's ``False == 0``.
+    assert not retained_resend(tmp_path, turn_id, identity, replace(parsed, message={**parsed.message, "edited": 0}))
+    assert not retained_resend(tmp_path, presence_turn_task_id(place.place_id, "never-heard"), identity, parsed)
+
+
+def test_a_sealed_import_reads_the_place_only_for_its_scope_and_current_choices(tmp_path, monkeypatch):
+    """Once the legacy import sealed, an arrival's admission reads the place store for its scope and attention reads
+    it for the owner's current choices; nothing reads it again for the migration. A pause made since still holds
+    the event, and the carrier's own re-admission still reads when a focus starts."""
+    from ouroboros import extension_registry_state as registry, place_intake, places, presence_admission
+
+    connector = "telegram-bot"
+    monkeypatch.delitem(registry._extensions, connector, raising=False)
+    binding = _seed_presence_behavior(tmp_path, account_wide=True)
+    monkeypatch.setitem(registry._extensions, connector, _install_inbox(tmp_path))
+    place, = places.load_places(tmp_path)  # connector first: the import takes its defaults and seals
+    assert [wake.fact for wake in place.wakes] == ["legacy_addressed", "direct_message"]
+    assert places.place_records(tmp_path).migration["presence_bindings_v1"] is True
+    places.edit_place(tmp_path, binding, "set_state", author="owner", state="paused")
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    reads, starts = [], []
+
+    def counted(module):
+        read = module.place_records
+
+        def records(root, **options):
+            reads.append(module.__name__.rsplit(".", 1)[-1])
+            return read(root, **options)
+        monkeypatch.setattr(module, "place_records", records)
+
+    counted(presence_admission)
+    counted(place_intake)
+
+    def run(event, **_kwargs):
+        starts.append(event.source_event_id)
+        return SimpleNamespace(outcome="message", text="Hello back", task_id="focus", work_ref="")
+
+    with TestClient(_inject(tmp_path, run), headers={"x-skill-token": "inbox-token"}) as client:
+        paused = _post_inbox(client, "/presence/turn", binding, _inbox_event("while-paused", "direct_message"))
+        assert paused.status_code == 200 and paused.json()["outcome"] == "silent", paused.text
+        assert not starts and reads == ["presence_admission", "place_intake"]
+        places.edit_place(tmp_path, binding, "set_state", author="owner", state="active")
+        reads.clear()
+        woken = _post_inbox(client, "/presence/turn", binding, _inbox_event("after-pause", "direct_message"))
+        assert woken.status_code == 200 and woken.json()["text"] == "Hello back", woken.text
+    assert starts == ["after-pause"] and reads == ["presence_admission", "place_intake", "presence_admission"]
+
+
+def test_pending_group_message_waits_while_a_previous_mailbox_delivery_replays(tmp_path, monkeypatch):
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+    from tests.test_place_reactions import author_in, mail
+
+    connector = "telegram-bot"
+    monkeypatch.delitem(registry._extensions, connector, raising=False)
+    binding = _seed_presence_behavior(tmp_path, account_wide=True)
+    bundle = _install_inbox(tmp_path, wakes=("any_message",))
+    place, = places.load_places(tmp_path)
+    assert [wake.fact for wake in place.wakes] == ["legacy_addressed"]
+    before = places.places_path(tmp_path).read_bytes()
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available"})
+    group = {**_inbox_event("group-post", "any_message"), "conversation_id": "group",
+             "conversation": {"type": "group"}, "conversation_key": "telegram:bot-1:group:0"}
+    previous = {**group, "source_event_id": "previous-post", "message": {"message_id": "previous-post"}}
+    lease = author_in(SimpleNamespace(root=tmp_path), group["conversation_key"])
+    try:
+        with TestClient(create_host_service_app(tmp_path), headers={"x-skill-token": "inbox-token"}) as client:
+            def post(event):
+                return _post_inbox(client, "/presence/turn", binding, event)
+
+            def unavailable(*_args, **_kwargs):
+                raise OSError("settlement unavailable")
+
+            with monkeypatch.context() as earlier:
+                earlier.setitem(registry._extensions, connector, replace(bundle, contributions=[]))
+                earlier.setattr("ouroboros.place_intake.settle_heard", unavailable)
+                assert post(previous).json()["code"] == "presence_io_unavailable"
+            assert [m["place_arrival"]["wake"] for m in mail(tmp_path)] == [False]
+            waiting = post(group)
+            assert (waiting.status_code, waiting.json()["code"]) == (429, "wake_import_declarations_pending")
+            assert post(previous).json()["outcome"] == "silent"
+            assert len(mail(tmp_path)) == 1 and places.places_path(tmp_path).read_bytes() == before
+
+            monkeypatch.setitem(registry._extensions, connector, bundle)
+            assert post(group).json()["outcome"] == "silent"
+            assert post(group).json()["outcome"] == "silent"
+            assert [m["place_arrival"]["wake"] for m in mail(tmp_path)] == [False, True]
+            assert len(dialogue_store.rows_by_client_id(tmp_path, "group-post")) == 1
+    finally:
+        lease.release()
+
+
+@pytest.mark.parametrize("materialized", [False, True], ids=["first-import", "pending-import"])
+def test_presence_ingress_refusals_preserve_the_import(tmp_path, monkeypatch, materialized):
+    from ouroboros import dialogue_store, extension_registry_state as registry, places
+    from ouroboros.gateway import host_service
+    from ouroboros.presence_events import PresenceTurnError
+
+    connector = "telegram-bot"
+    monkeypatch.delitem(registry._extensions, connector, raising=False)
+    binding = _seed_presence_behavior(tmp_path, account_wide=True)
+    bundle = _install_inbox(tmp_path)
+    if materialized:
+        place, = places.load_places(tmp_path)
+        assert [wake.fact for wake in place.wakes] == ["legacy_addressed"]
+    path = places.places_path(tmp_path)
+    before = path.read_bytes() if materialized else None
+    monkeypatch.setitem(registry._extensions, connector, bundle)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: False)
+    event = _inbox_event("incoming", "direct_message")
+    attachment = tmp_path / "state" / "skills" / connector / "note.txt"
+    attachment.write_text("Meeting notes", encoding="utf-8")
+    with TestClient(create_host_service_app(tmp_path), headers={"x-skill-token": "inbox-token"}) as client:
+        def refuse_files(*_args):
+            raise ValueError("staged files unavailable")
+
+        with monkeypatch.context() as refused:
+            refused.setattr(host_service, "_presence_staged_files", refuse_files)
+            turn = _post_inbox(client, "/presence/turn", binding, event, staged_files=[str(attachment)])
+            assert (turn.status_code, turn.json()["code"]) == (400, "presence_payload_invalid")
+        with monkeypatch.context() as refused:
+            refused.setattr("ouroboros.presence_runner.stage_task_attachments",
+                            lambda *_args: [{"name": "note.txt", "status": "rejected"}])
+            turn = _post_inbox(client, "/presence/turn", binding, event, staged_files=[str(attachment)])
+            assert (turn.status_code, turn.json()["code"]) == (409, "presence_attachment_admission_rejected")
+        def unknown_prior(*_args):
+            raise PresenceTurnError("presence_event_identity_unproven", "source_event_id")
+
+        with monkeypatch.context() as refused:
+            refused.setattr("ouroboros.presence_call._stored_turn", unknown_prior)
+            call = _post_inbox(client, "/call/open", binding, event)
+            assert (call.status_code, call.json()["code"]) == (409, "presence_event_identity_unproven")
+        for door in ("/presence/turn", "/call/open"):
+            wrong_room = _post_inbox(client, door, binding, {**event, "account_id": "another-bot"})
+            assert (wrong_room.status_code, wrong_room.json()["code"]) == (403, "presence_origin_mismatch")
+        assert (path.read_bytes() if path.exists() else None) == before
+        assert not dialogue_store.rows_by_client_id(tmp_path, "incoming")
+        assert _post_inbox(client, "/presence/turn", binding, event).status_code == 200
+        assert [w.fact for w in places.get_place(tmp_path, binding).wakes] == ["legacy_addressed", "direct_message"]
 
 
 def test_presence_turn_attachment_refusal_returns_complete_typed_manifest(

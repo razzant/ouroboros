@@ -440,8 +440,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             record_repair_admission(
                 _pool().DRIVE_ROOT, str(repair_constraint.get("skill_name") or ""),
                 task_id=tid, base_content_hash=_base_content_hash,
-                # The owner door's stamp (dialogue_provenance.run_origin): its
-                # revisions become owner edits of the selected skill.
+                # The owner door's stamp permits recording this Repair's direct file edits,
+                # not issuing grants or accepting opaque observations.
                 owner_request=bool((isinstance(evt.get("source_ref"), dict) and evt.get("source_ref"))
                                    or evt.get("origin_suppressed") is True))
         except Exception:

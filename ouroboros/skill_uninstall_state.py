@@ -89,9 +89,12 @@ def delete_local_skill(
     state_dir = state_root / loaded.name
     if state_root.is_symlink() or state_dir.is_symlink() or not state_dir.is_relative_to(state_root):
         return refuse(f"refusing to delete unsafe state path for {loaded.name!r}", 500)
+    from ouroboros.skill_grant_follow import end_receipt
+
     with _lifecycle_lock_for(loaded.name):
         extension_loader.unload_extension(loaded.name)
         shutil.rmtree(payload_dir)
+        end_receipt(drive, loaded.name)  # the installation ended: a later folder of this name starts unconfirmed
         had_state = state_dir.exists()
         if had_state:
             shutil.rmtree(state_dir)
@@ -116,9 +119,11 @@ def delete_local_skill(
 
 def write_uninstall_tombstone(drive_root: pathlib.Path, name: str, *, source: str) -> None:
     """Durably mark a skill's payload as uninstalled. Never raises."""
+    from ouroboros.skill_grant_follow import end_receipt
     from ouroboros.skill_loader import SKILL_OWNER_STATE_SCHEMA_VERSION, skill_state_dir
 
     try:
+        end_receipt(drive_root, name)  # the payload is gone: a reinstall starts unconfirmed
         atomic_write_json(
             skill_state_dir(pathlib.Path(drive_root), name) / UNINSTALL_TOMBSTONE_FILENAME,
             with_schema_version(

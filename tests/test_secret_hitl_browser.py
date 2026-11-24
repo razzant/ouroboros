@@ -182,8 +182,8 @@ def test_secret_form_first_fill_and_replace_screens(engine_ui, backend, viewport
     dialog.locator(".secret-request-key").filter(has_text="not set").wait_for()
     assert dialog.evaluate("node => getComputedStyle(node).backgroundColor").startswith("rgb(")
     readers = dialog.locator(".secret-request-reader").all_inner_texts()
-    assert readers == ["fakeplug · enabled · needs FAKEPLUG_TOKEN granted in Skills; after saving, this enabled skill cannot run until the keys are granted",
-                       "mailer · disabled · needs FAKEPLUG_TOKEN granted in Skills"]
+    assert readers == ["fakeplug · enabled · its grant does not cover FAKEPLUG_TOKEN; use Grant access in Skills",
+                       "mailer · disabled · its grant does not cover FAKEPLUG_TOKEN; use Grant access in Skills"]
     ok = dialog.locator(".secret-request-ok")
     assert ok.inner_text() == "Save" and ok.is_disabled()
     dialog.locator("input.secret-request-input").fill(CANARY)

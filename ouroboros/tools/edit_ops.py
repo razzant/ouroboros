@@ -1264,6 +1264,7 @@ def _edit_batch(
     if item_refusal:
         return item_refusal
     contents: Dict[str, str] = {}
+    originals: Dict[str, str] = {}  # each file's text as read: the Repair proof predicts the written digest from it
     targets: Dict[str, pathlib.Path] = {}
     bindings: Dict[str, ResolvedResourceBinding] = {}
     sites: Dict[str, List[int]] = {}
@@ -1321,7 +1322,7 @@ def _edit_batch(
                 errors.append(f"edit {idx} ({rel}): file not found")
                 continue
             try:
-                contents[rel] = work_domain.read_text(target)
+                contents[rel] = originals[rel] = work_domain.read_text(target)
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"edit {idx} ({rel}): cannot read: {e}")
                 continue
@@ -1387,10 +1388,16 @@ def _edit_batch(
 
     constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     repair_binding = next((b for b in bindings.values() if b.skill_name), None)
+    local_edit = None
     if repair_binding and constraint and constraint.has_selected_skill:
         if refusal := repair_write_cas_error(repair_binding.state_drive_root, constraint,
                                              task_id=ctx.task_id, repair_task=True):
             return refusal
+        if not any(work_domain.is_work(targets[rel]) for rel in contents):  # the same proof as edit_text's own
+            from ouroboros.skill_repair_admission import confirm_local_text_edit
+
+            local_edit = confirm_local_text_edit(ctx, repair_binding, [(targets[rel], originals[rel], text)
+                                                                       for rel, text in contents.items()])
     changed: List[str] = []
     registered_outputs: List[str] = []
     order = list(contents)
@@ -1417,7 +1424,8 @@ def _edit_batch(
                                               f"{rel} WAS written but its user artifact registration failed: {exc}",
                                               mutation_binding, pending=order[len(changed):])
     if repair_binding and constraint and constraint.has_selected_skill:
-        advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id)
+        advance_repair_expected_hash(repair_binding.state_drive_root, constraint, task_id=ctx.task_id,
+                                     local_edit=local_edit)
     footer = _finish_mutation(ctx, changed, source_tool, mutation_binding)
     previews = "\n".join(f"Context after {rel}:\n{numbered_edit_preview(contents[rel], sites[rel])}"
                          for rel in changed)

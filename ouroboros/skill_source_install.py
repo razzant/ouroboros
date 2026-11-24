@@ -612,8 +612,7 @@ def _merge_instructions(name: str, item: Dict[str, Any], payload_root: str, tree
 
 def _start_merge(drive_root: pathlib.Path, name: str, record: Dict[str, Any], plan: Dict[str, Any],
                  loaded: Any, repo_dir: Optional[pathlib.Path], *, actor: str) -> Dict[str, Any]:
-    """The owner's request becomes a selected-skill task through the owner's door (the same door as
-    Repair), so its edits are owner edits; Ouroboros asking for itself merges in its own task."""
+    """An owner-initiated Merge is selected-skill work, not a Skills Repair press for key continuity."""
     item = plan["item"]
     trees = _merge_trees(drive_root, name, record, plan, repo_dir)
     try:

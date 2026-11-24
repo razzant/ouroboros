@@ -214,10 +214,16 @@ def folderless_scratch_dir(ctx: Any, *, create: bool = True) -> Optional[pathlib
 
 
 def load_bound_skill(binding: ResolvedResourceBinding) -> Any:
-    """Load the frozen payload target while preserving lifecycle provenance."""
-    from ouroboros.skill_loader import _classify_skill_source, load_skill
+    """Load the frozen payload target while preserving lifecycle provenance; its physical location is the
+    inventory's for the selected folder, as ordinary discovery gives it (the selected folder wins a collision)."""
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import _classify_skill_source, _skill_location_inventory, load_skill
     loaded = load_skill(binding.base_path, binding.state_drive_root)
     if loaded is not None:
+        selected = pathlib.Path(binding.base_path).resolve()
+        loaded.location = next((item.location for item in _skill_location_inventory(
+            binding.state_drive_root, repo_path=get_skills_repo_path() or None) if item.skill_dir == selected),
+            binding.source)
         loaded.source = _classify_skill_source(
             binding.base_path,
             location=binding.source,

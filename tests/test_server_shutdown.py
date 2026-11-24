@@ -314,8 +314,8 @@ def test_supervisor_startup_restores_queue_before_worker_reset():
 
     source = inspect.getsource(server._run_supervisor)
     restore = source.index("restore_pending_from_snapshot(terminalized=")
-    reset = source.index("kill_workers(preserve_pending=True)")
-    spawn = source.index('"startup:worker_spawn", spawn_workers)')  # the same one-worker call, now timed
+    reset = source.index('"startup:old_workers_stop"')
+    spawn = source.index('"startup:worker_spawn"')
     assert restore < reset < spawn
 
 

@@ -38,6 +38,7 @@
  * @property {boolean=} changed
  * @property {boolean=} conflict
  * @property {string=} settings_digest
+ * @property {string=} grant_note Saved keys not supplied by the skill; the server's own settings are independent.
  * @property {string=} code
  * @property {string=} error
  * @property {boolean=} saved

@@ -413,24 +413,41 @@ def _admitted(drive_root, *, owner_request):
     return skill_dir, constraint
 
 
-@pytest.mark.parametrize("owner_request", [True, False])
-def test_admitted_owner_task_edits_keep_running(tmp_path, owner_request, not_cyber):
-    from ouroboros.skill_acceptance import OWNER_EDIT_FILENAME
-    from ouroboros.skill_loader import find_skill
-    from ouroboros.skill_repair_admission import advance_repair_expected_hash
+def _edit_admitted_notes(registry, constraint, replacement):
+    registry._ctx.task_id, registry._ctx.task_constraint = "t1", constraint
+    result = registry.execute("edit_text", {"root": "skill_payload", "path": "notes.md",
+                                            "old_str": "body", "new_str": replacement})
+    assert "Replaced" in result, result
 
-    drive_root = tmp_path / "data"
-    skill_dir, constraint = _admitted(drive_root, owner_request=owner_request)
-    (skill_dir / "notes.md").write_text("fixed on the owner's request\n", encoding="utf-8")
-    advance_repair_expected_hash(drive_root, constraint, task_id="t1")
+
+@pytest.mark.parametrize("owner_request", [True, False])
+def test_verified_direct_edit_acceptance_is_independent_of_grant_receipts(tmp_path, monkeypatch, owner_request, not_cyber):
+    from ouroboros.skill_acceptance import OWNER_EDIT_FILENAME
+    from ouroboros.skill_grant_follow import load_receipt
+    from ouroboros.skill_loader import find_skill
+    from ouroboros.skill_repair_admission import load_repair_admission
+
+    from tests.test_d16_skill_payload_authority import _registry
+
+    registry, _, drive_root = _registry(tmp_path, monkeypatch, mode="advanced")
+    _, constraint = _admitted(drive_root, owner_request=owner_request)
+    _edit_admitted_notes(registry, constraint, "fixed text")
     loaded = find_skill(drive_root, "probe")
-    gate = loaded.review.gate_for(loaded.content_hash)
-    assert gate["executable_review"] is owner_request
+    assert load_repair_admission(drive_root, "probe")["expected_content_hash"] == loaded.content_hash
+    assert loaded.review.gate_for(loaded.content_hash)["executable_review"] is owner_request
     assert (drive_root / "state" / "skills" / "probe" / OWNER_EDIT_FILENAME).exists() is owner_request
-    # A later edit from anywhere else leaves the skill unreviewed.
-    (skill_dir / "notes.md").write_text("edited elsewhere\n", encoding="utf-8")
-    later = find_skill(drive_root, "probe")
-    assert later.review.gate_for(later.content_hash)["executable_review"] is False
+    assert load_receipt(drive_root, "probe") == {}
+
+
+def test_local_edit_comparison_requires_both_observations_to_match():
+    from ouroboros.skill_repair_admission import _LocalTextEdit
+
+    before, after, other = "a" * 64, "b" * 64, "c" * 64
+    proof = _LocalTextEdit(before, after)
+    assert proof.matches(before, after)
+    assert not proof.matches(other, after)
+    assert not proof.matches(before, other)
+    assert not proof.matches(before, before)
 
 
 @pytest.mark.parametrize("stamp,owner_request", [
@@ -469,18 +486,44 @@ def test_promotion_admits_owner_edits_only_under_the_owner_door_stamp(tmp_path, 
     assert load_repair_admission(tmp_path, "probe")["owner_request"] is owner_request
 
 
-def test_owner_edit_rebinds_unchanged_grant_requests(tmp_path):
-    from ouroboros.skill_acceptance import record_owner_edit
-    from ouroboros.skill_loader import compute_content_hash, load_skill_grants, save_skill_grants
+def test_an_owner_requested_repair_does_not_reissue_key_or_permission(tmp_path, monkeypatch, not_cyber):
+    from ouroboros import config
+    from ouroboros.skill_loader import (SkillReviewState, find_skill, grant_status_for_skill,
+                                        save_review_state, save_skill_grants)
+    from ouroboros.skill_repair_admission import record_repair_admission, repair_write_cas_error
 
-    drive_root = tmp_path / "data"
-    skill_dir = _skill(drive_root / "skills" / "external")
-    save_skill_grants(drive_root, "probe", [], content_hash=compute_content_hash(skill_dir), requested_keys=[],
-                      granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
-    (skill_dir / "notes.md").write_text("owner edit\n", encoding="utf-8")
-    digest = record_owner_edit(drive_root, skill_dir, task_id="t1")
-    # The manifest requests nothing, so the old request set no longer matches: no carry.
-    assert load_skill_grants(drive_root, "probe")["content_hash"] != digest
+    from tests.test_d16_skill_payload_authority import _registry
+
+    registry, _, drive_root = _registry(tmp_path, monkeypatch, mode="advanced")
+    skill_dir, constraint = _admitted(drive_root, owner_request=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: probe\ndescription: Fixture\nversion: 1.0.0\ntype: extension\nentry: plugin.py\nplugin_api: "2.0"\n'
+        'permissions: [notify_owner]\nenv_from_settings: [REPAIR_FIXTURE_KEY]\n---\nFixture.\n', encoding="utf-8")
+    (skill_dir / "plugin.py").write_text("def register(api):\n    return None\n", encoding="utf-8")
+    settings = drive_root / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings)
+    settings.write_text(json.dumps({"REPAIR_FIXTURE_KEY": "synthetic"}), encoding="utf-8")
+    old = find_skill(drive_root, "probe").content_hash
+    save_review_state(drive_root, "probe", SkillReviewState(status="clean", content_hash=old))
+    items = {"requested_keys": ["REPAIR_FIXTURE_KEY"], "requested_permissions": ["notify_owner"]}
+    save_skill_grants(drive_root, "probe", ["REPAIR_FIXTURE_KEY"], content_hash=old,
+                      granted_permissions=["notify_owner"], **items)
+    record_repair_admission(drive_root, "probe", task_id="t1", owner_request=True, base_content_hash=old)
+    grant = drive_root / "state" / "skills" / "probe" / "grants.json"
+    grant_before, settings_before = grant.read_bytes(), settings.read_bytes()
+    assert repair_write_cas_error(drive_root, constraint, task_id="t1", repair_task=True) == ""
+    _edit_admitted_notes(registry, constraint, "owner edit")
+    current = find_skill(drive_root, "probe")
+    assert current.review.gate_for(current.content_hash)["blocking_reason"] == "owner_edit"
+    assert (grant.read_bytes(), settings.read_bytes()) == (grant_before, settings_before)
+    withheld = grant_status_for_skill(drive_root, current)
+    assert withheld["granted_keys"] == withheld["granted_permissions"] == [] and withheld["blocked"]
+    save_skill_grants(drive_root, "probe", ["REPAIR_FIXTURE_KEY"], content_hash=current.content_hash, **items)
+    key_only = grant_status_for_skill(drive_root, current)
+    assert key_only["granted_keys"] == ["REPAIR_FIXTURE_KEY"] and key_only["granted_permissions"] == []
+    save_skill_grants(drive_root, "probe", [], content_hash=current.content_hash,
+                      granted_permissions=["notify_owner"], **items)
+    assert grant_status_for_skill(drive_root, current)["all_granted"]
 
 
 def test_owner_state_protects_the_acceptance_facts(tmp_path, monkeypatch):

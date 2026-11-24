@@ -397,10 +397,11 @@ def _consumer_line(outcome: Dict[str, Any]) -> str:
         elif row.get("unsupported"):
             grant = "this skill type receives no Settings keys"
         else:
-            missing = [key for key in row.get("reads") or [] if key not in set(row.get("granted") or [])]
-            grant = f"needs the owner's grant for {', '.join(missing)} in Skills" if missing else "its grant covers it"
-            if missing and row.get("enabled"):
-                grant += "; after saving, this enabled skill cannot run until the keys are granted"
+            granted = set(row.get("granted") or [])
+            missing = [key for key in row.get("reads") or [] if key not in granted]
+            # Grant facts only: whether the skill runs is its own readiness, which a saved card cannot keep current.
+            grant = (f"its grant does not cover {', '.join(missing)}; use Grant access in Skills" if missing
+                     else "its grant covers the listed keys")
         parts.append(f"{row.get('name')} ({state}; {grant})")
     return "Skills that read them: " + "; ".join(parts) + "."
 
@@ -421,7 +422,7 @@ def answer_frame(block: Dict[str, Any]) -> str:
          + _consumer_line(outcome)),
     ]
     if replaced:
-        lines.append("Enabled skills that read a replaced key may use the new value on their next call; some keep "
+        lines.append("Enabled skills granted a replaced key may use the new value on their next call; some keep "
                      "the old one until the owner disables and re-enables them, or reconnects them.")
     if block.get("answered_after_terminal") or block.get("delivery_after_terminal"):
         lines.append("The task that asked had already finished; this save resumed nothing.")

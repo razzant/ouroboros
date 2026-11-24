@@ -94,6 +94,14 @@ def conversation_row(meta: Any) -> bool:
     return isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION
 
 
+def awaiting_presence_row(meta: Any) -> bool:
+    """Under Q: a lane Presence row this Host admitted (``admit_turn``) still awaiting its carrier (#3149)."""
+    from ouroboros.task_carrier import execution_owner
+
+    return (conversation_row(meta) and meta.get("worker_id") is None
+            and execution_owner(meta.get("task")).get("kind") == "presence")
+
+
 def lane_carriers(pool: Any = None) -> list:
     """Every conversation carrier that is a custodied worker process."""
     from supervisor.worker_pool_lifecycle import is_worker_slot, lane_slots
@@ -309,7 +317,7 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     task_id = str(task["id"])
     task.setdefault("root_task_id", task_id)
     origin = "presence" if task.get("_presence_turn") else "direct"
-    task["_execution_owner"] = {**execution_owner_record(pool.DRIVE_ROOT, task, origin),
+    task["_execution_owner"] = {**execution_owner_record(task.get("drive_root") or pool.DRIVE_ROOT, task, origin),
                                 "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
     task[PREPARE_KEY] = {
         "admitted_at": now, "quiet": bool(quiet), "reply_expected": bool(reply_expected),
@@ -528,15 +536,16 @@ def reconcile_conversation_lane() -> None:
     beside it: an awaiting turn then takes the degraded executor too.
     """
     from supervisor.worker_pool_lifecycle import (
-        _spawn_worker_slot, request_worker_quiescence, retire_quiescent_worker, worker_ready,
+        _spawn_worker_slot, pool_member_count, request_worker_quiescence, retire_quiescent_worker, worker_ready,
     )
 
     pool = _pool()
-    if not armed() or not pool.WORKERS:
-        return
+    with _queue_lock:
+        if not armed() or not pool_member_count(pool.WORKERS):
+            return
     publish_awaiting_rows()
     with _queue_lock:
-        if not armed() or not pool.WORKERS:
+        if not armed() or not pool_member_count(pool.WORKERS):
             return
         # A marker window forbids a spawn, never a waiting turn's carrier (a spare that finished booting)
         # or its degraded executor: the turns are looked at first, the window decides growth below.
@@ -559,7 +568,7 @@ def reconcile_conversation_lane() -> None:
             quiet = [w for w in idle if w.quiescence_confirmed]
             for slot in quiet[1:]:
                 retire_quiescent_worker(slot)
-        next_id = max(pool.WORKERS, default=-1) + 1
+        next_id = max(0, max(pool.WORKERS, default=-1) + 1)  # a Host pseudo-slot's negative wid is no pool address (#3149)
     for wid in range(next_id, next_id + missing):
         try:
             if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION):
