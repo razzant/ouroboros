@@ -799,6 +799,7 @@ def resume_outcome(outcome: dict) -> dict:
     if outcome.get("runs") and not outcome.get("blockers"):
         outcome = {**outcome, "blockers": [{"kind": "delegated_run", **run} for run in outcome["runs"]]}
     error = str(outcome.get("error") or "")
+    from ouroboros.pause_notices import RESUME_REFUSAL_WORDS, authority_wait_text
     phrases = {"panic_requires_owner_resume": "Only the owner can release a Panic hold.",
                "installation_panic_pending": "Panic is still in effect for this installation. No work was resumed.",
                "panic_selection_changed": "The selected Panic hold changed or is no longer current. Read the list again.",
@@ -806,8 +807,7 @@ def resume_outcome(outcome: dict) -> dict:
                "selection_authority_unavailable": "The current stop or permission to resume could not be verified. Try again later.",
                "update_in_progress": "An update is in progress; press Resume after the restart.",
                "root_still_paused": STOP_TEXT["awaiting_selection"],
-               "root_resume_grant_missing": STOP_TEXT["awaiting_selection"]}
-    from ouroboros.pause_notices import authority_wait_text
+               "root_resume_grant_missing": STOP_TEXT["awaiting_selection"], **RESUME_REFUSAL_WORDS}
     if error in {"billing_authority_unavailable", "billing_authority_unreadable", "control_authority_unreadable"} and (
             cause := authority_wait_text(outcome.get("cause"))):
         phrases[error] = cause

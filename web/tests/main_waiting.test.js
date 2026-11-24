@@ -342,6 +342,37 @@ test('each owner-required action is one System message in the feed, first stampe
     assert.deepEqual(main.feed.children.map(node => node.dataset.ownerAction), ['paused', 'activity-only']);
 });
 
+test('a wake held at its daily share says what its Resume may add beside it; nothing more for another task or an older host', t => {
+    const main = mainPage(t);
+    const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason')).textContent;
+    const budget = 'Paused at the spending limit. Change the limit if needed, then Resume.';
+    // The same body's consciousness snapshot names the held wake, its daily hold and what Resume may add now.
+    const held = (hold, patch = {}) => ({ ...census({ actions: [action('wake-held'), action('other-task')] }),
+        bg_consciousness_enabled: true, bg_consciousness_state: { status: 'wake_paused', live_wake_task_id: 'wake-held',
+            live_wake_held: true, daily_usd: 20, spent_24h_usd: 12.4, live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99, ...hold },
+            ...patch } });
+    for (const [hold, words] of [
+        [{ resume_additional_usd: 7.6 }, 'Estimated room on Resume: $7.60.'],
+        [{ resume_additional_usd: 0.004 }, 'Estimated room on Resume: $0.0040.'],
+        [{ resume_additional_usd: 0 }, 'Estimated room on Resume: none.'],
+        [{ resume_additional_usd: null }, 'Estimated room on Resume: unknown now.'],
+        [{ resume_additional_usd: 7.6, resume_available_usd: 3 },
+            'Estimated room on Resume: $7.60 from the allowance, $3.00 available now because the total budget has less left.']]) {
+        main.waiting.snapshot(held(hold));
+        assert.equal(reason('wake-held'), `${budget} ${words}`, JSON.stringify(hold));
+        assert.equal(reason('other-task'), budget, 'another task\'s message says nothing of the wake');
+    }
+    // An older host (no field), another cause, another held wake and an Off switch add nothing.
+    for (const [hold, patch] of [[{}, {}], [{ cause: 'per_task_cap', resume_additional_usd: 5 }, {}],
+        [{ resume_additional_usd: 5 }, { live_wake_task_id: 'another-wake' }], [{ resume_additional_usd: 5 }, { status: 'sleeping' }]]) {
+        main.waiting.snapshot(held(hold, patch));
+        assert.equal(reason('wake-held'), budget, JSON.stringify([hold, patch]));
+    }
+    const off = held({ resume_additional_usd: 5 });
+    main.waiting.snapshot({ ...off, bg_consciousness_enabled: false });
+    assert.equal(reason('wake-held'), budget, 'consciousness off: nothing promised');
+});
+
 test('the reason names what the task needs from the owner', t => {
     const main = mainPage(t);
     // A plain resume pause beside its own Resume button says nothing more, even with a reason of its own (audit 05.11,

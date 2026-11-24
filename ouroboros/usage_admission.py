@@ -66,7 +66,7 @@ def authority_unavailable(kind: str, root_task_id: str, cause: str) -> BillingAu
                                        kind=kind, cause=cause, root_task_id=root_task_id)
 
 
-def ledger_billing_binding(budget_root: Any, root_task_id: str) -> Dict[str, Any]:
+def ledger_billing_binding(budget_root: Any, root_task_id: str, *, allow_stale: bool = False) -> Dict[str, Any]:
     """The group binding the root's own earliest recorded row carries, never current settings.
 
     The store's ``bindings`` row (the import carried a compacted block's
@@ -79,7 +79,9 @@ def ledger_billing_binding(budget_root: Any, root_task_id: str) -> Dict[str, Any
 
     root = ua._drive_root(budget_root)
     # The money read probes without waiting inside a caller's sliced acquisition (``_usage_wait``).
-    with usage_store.hold(root, timeout_sec=bounded_wait(USAGE_LOCK_TIMEOUT_SEC), write=False) as txn:
+    ctx = (usage_store.read(root, allow_stale=True) if allow_stale
+           else usage_store.hold(root, timeout_sec=bounded_wait(USAGE_LOCK_TIMEOUT_SEC), write=False))
+    with ctx as txn:
         row = txn.binding("root", root_task_id)
     if row is None:
         return {}
@@ -92,7 +94,7 @@ def ledger_billing_binding(budget_root: Any, root_task_id: str) -> Dict[str, Any
 
 def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Optional[float],
                         budget_root: Any = None, *, pin_initial: bool = False,
-                        persist_initial: bool = True) -> Dict[str, Any]:
+                        persist_initial: bool = True, allow_stale: bool = False) -> Dict[str, Any]:
     """Resolve the root's durable whole-work binding; only initial admission may pin it.
 
     Root caps remain independent of the original group cap. Missing descendant or
@@ -114,7 +116,7 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
         row = load_task_result(pathlib.Path(budget_root), root_task_id, strict=True) if budget_root else None
         # A root without a result row may still have spent (its live rows name its
         # group), so the ledger is consulted: a warm view off every other lock.
-        historical = ledger_billing_binding(budget_root, root_task_id) if budget_root and not row else {}
+        historical = ledger_billing_binding(budget_root, root_task_id, allow_stale=allow_stale) if budget_root and not row else {}
         if not row and root_task_id != task_id and not historical:
             raise refused("root_lineage_missing")
         row = row or {}
@@ -158,7 +160,7 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
         carried = root_meta.get("continuation") or carried
         binding = row.get("billing_group") or root_meta.get("billing_group") or metadata.get("billing_group") or carried or historical
         if not binding and row and budget_root:
-            binding = ledger_billing_binding(budget_root, root_task_id)
+            binding = ledger_billing_binding(budget_root, root_task_id, allow_stale=allow_stale)
         if not binding and pin_initial and task_id == root_task_id and budget_root:
             # A root that already ran without recording its cap (no pinned binding, no
             # usable ledger literal) is its own group under the configured cap, disclosed.
@@ -586,6 +588,32 @@ def current_usage_projection(
                                degraded=usage_store.integrity_degraded(root))
 
 
+def _task_money_snapshot_in_txn(txn: Any, fields: Dict[str, Any], root_id: str) -> Dict[str, Any]:
+    """Project both independent ceilings from ``fields`` inside an open ``usage_store.read``."""
+    from ouroboros import usage_accounting as ua
+
+    group = str(fields.get("billing_group_id") or root_id)
+    own, shared, initial = txn.summary(root_id), txn.summary(billing_group_id=group), txn.binding("root", root_id) or {}
+    cap = fields.get("root_limit_usd")
+    if cap is None and not fields.get("root_limit_source") and initial.get("root_limit_usd") is not None:
+        cap = ua._number(initial["root_limit_usd"])
+    axes = {"root": {"settled_usd": own["settled_usd"], "accounted_usd": own["accounted_usd"], "limit_usd": cap,
+                     "source": fields.get("root_limit_source") or initial.get("root_limit_source"),
+                     "revision": fields.get("root_limit_revision")},
+            "group": {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
+                      "limit_usd": fields.get("billing_group_limit_usd"),
+                      "source": fields.get("billing_group_limit_source"),
+                      "revision": fields.get("billing_group_limit_revision")}}
+    rooms = {key: axis["limit_usd"] - axis["settled_usd"] for key, axis in axes.items() if axis["limit_usd"] is not None}
+    binding = min(rooms, key=rooms.get) if rooms else None
+    room = rooms[binding] if binding else None
+    return {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
+            "root_limit_usd": None if room is None else shared["settled_usd"] + room,
+            "remaining_known_usd": room, "root_axis": axes["root"], "group_axis": axes["group"],
+            "accounting_basis": "billing_group", "binding_axis": binding,
+            "integrity_degraded": False, "age_sec": 0.0}
+
+
 def task_money_snapshot(root, task, root_id, *, root_limit=None):
     """One ledger observation of both independent ceilings, on group spend basis.
 
@@ -597,29 +625,13 @@ def task_money_snapshot(root, task, root_id, *, root_limit=None):
     """
     from ouroboros import usage_accounting as ua
     from ouroboros import usage_store
+
     try:
         fields = task_billing_fields(task, root_id, root_limit, root)
     except BillingAuthorityUnavailable:
         return None
-    group = str(fields.get("billing_group_id") or root_id)
-    with usage_store.read(ua._drive_root(root)) as txn:
-        own, shared = txn.summary(root_id), txn.summary(billing_group_id=group)
-        initial = txn.binding("root", root_id) or {}
-        cap = fields.get("root_limit_usd")
-        if cap is None and not fields.get("root_limit_source") and initial.get("root_limit_usd") is not None:
-            cap = ua._number(initial["root_limit_usd"])
-        axes = {"root": {"settled_usd": own["settled_usd"], "accounted_usd": own["accounted_usd"], "limit_usd": cap,
-                         "source": fields.get("root_limit_source") or initial.get("root_limit_source"),
-                         "revision": fields.get("root_limit_revision")},
-                "group": {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
-                          "limit_usd": fields.get("billing_group_limit_usd"),
-                          "source": fields.get("billing_group_limit_source"),
-                          "revision": fields.get("billing_group_limit_revision")}}
-        rooms = {key: axis["limit_usd"] - axis["settled_usd"] for key, axis in axes.items() if axis["limit_usd"] is not None}
-        binding = min(rooms, key=rooms.get) if rooms else None
-        room = rooms[binding] if binding else None
-        return {"settled_usd": shared["settled_usd"], "accounted_usd": shared["accounted_usd"],
-                "root_limit_usd": None if room is None else shared["settled_usd"] + room,
-                "remaining_known_usd": room, "root_axis": axes["root"], "group_axis": axes["group"],
-                "accounting_basis": "billing_group", "binding_axis": binding,
-                "integrity_degraded": usage_store.integrity_degraded(ua._drive_root(root)), "age_sec": 0.0}
+    store_root = ua._drive_root(root)
+    with usage_store.read(store_root) as txn:
+        snapshot = _task_money_snapshot_in_txn(txn, fields, root_id)
+    snapshot["integrity_degraded"] = usage_store.integrity_degraded(store_root)
+    return snapshot

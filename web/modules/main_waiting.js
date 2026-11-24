@@ -19,6 +19,8 @@ import { ANSWERABLE_QUIZ_STATES, questionWaits, unknownDeliveryRemovable, vouche
 import { createSystemMessageActions } from './ui_helpers.js';
 import { showToast } from './toast.js';
 import { fmt, tx } from './i18n.js';
+import { normalizeConsciousness } from './consciousness_api.js';
+import { allowanceHold, wakeResumeRoomWords } from './consciousness_words.js';
 
 const GLYPH = '<svg class="chat-question-nav-glyph" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>';
 const ARROW = '<svg class="chat-question-nav-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
@@ -32,6 +34,16 @@ const rowKey = row => `${row.task_id}:${row.quiz_id}`;
 const REASONS = { budget: 'Paused at the spending limit. Change the limit if needed, then Resume.',
     restart: 'Needs Resume after the restart.', resume: 'Needs an explicit Resume.',
     model_access: 'Needs you to restore model access.' };
+
+// The wake the same body names as held at its daily share, and what its Resume may add (in Costs' words), said beside
+// that Resume on its card. Any other task, a wake held for another cause and a host that does not say add nothing.
+function heldWakeRoom(data) {
+    const bg = data?.bg_consciousness_state;
+    if (!bg || typeof bg !== 'object') return null;
+    const wake = normalizeConsciousness(bg, { enabled: data.bg_consciousness_enabled });
+    const words = allowanceHold(wake) ? wakeResumeRoomWords(wake) : '';
+    return words && wake.liveWakeTaskId ? { taskId: wake.liveWakeTaskId, words } : null;
+}
 
 // `reading` returns the chat's reading position (chat_reading_position.js), read when used like the
 // question owner: a landing claims it, as any other navigation does, so the feed stops following the live edge.
@@ -134,7 +146,9 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         // A named stop explains the button. A plain Resume needs no second instruction.
         const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? reasonText(row.resumeReason)
             : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
-        record.reason.textContent = [needs, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
+        // A wake held at its daily share: what its Resume beside these words may add, an estimate until the press.
+        const room = row.wakeRoom ? `${row.wakeRoom}.` : '';
+        record.reason.textContent = [needs, room, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
         record.reason.hidden = !record.reason.textContent;
         if (row.project_id) {
             const project = { id: row.project_id, name: row.project_name };
@@ -316,6 +330,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
             // spending limit, a restart, model access) stays its own; a list that cannot name a work (absent,
             // unreadable, or a row without its hold) leaves its card as the owner's only door here.
             const panicCovered = panicCards(data);
+            const wake = heldWakeRoom(data);
             mutate(() => {
                 const current = new Set();
                 for (const action of actions) {
@@ -325,7 +340,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
                     // The same body's work projection says the task's latest refused Resume (`last_resume`).
                     const member = memberState(data, id);
                     const row = { ...action, last_resume: member?.last_resume || workOfEpisode(data, id)?.last_resume || action.last_resume,
-                        resumeReason: !action.project_id ? member?.because?.[0] : null };
+                        resumeReason: !action.project_id ? member?.because?.[0] : null, wakeRoom: wake?.taskId === id ? wake.words : '' };
                     const record = recordFor(row);
                     record.available = true;
                     paint(record, row);

@@ -462,3 +462,112 @@ def test_a_busy_pause_read_leaves_the_late_decision_to_the_next_publication(tmp_
     publish_pending_parks(q, "confirm")
     assert {row["id"] for row in q.PENDING} == {"known", "direct"} and not has_active_intent(tmp_path, "direct", strict=True)
     assert [first, second] == [False, True] and q.resume_budget_paused_task("direct")["ok"]
+
+
+def test_tree_accounting_unavailable_technical_recovery_keeps_monetary_stop(tmp_path, monkeypatch):
+    """A technical pause for ``tree_accounting_unavailable`` refuses wake while the strict tree/group sum is
+    degraded or non-numeric, probes without waiting or holding Q, allows the standard wake path once readability
+    returns, and preserves the monetary ceiling stop (which is never auto-resumed)."""
+    from ouroboros import budget_pause as bp, loop_budget, task_pacing, usage_store
+    from ouroboros.consciousness_allowance import RESUMED_ALLOWANCE_KEY
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.store import bounded_wait
+    from ouroboros.task_results import write_task_result
+    from ouroboros.usage_accounting import AttemptRequest, UsageScope, mark_dispatched, reserve_attempt, settle_attempt, usage_scope
+    from ouroboros.usage_ledger import QUARANTINE_REL
+    from supervisor.sleep_wake import authority_readable, wake_ready_sleepers
+
+    q, state, _workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 10.0)
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    root_id = "wake-resumed-tech"
+    meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=2.0, root_cost_ceiling_source="allowance")
+    group = {"billing_group_id": root_id, "billing_group_limit_usd": 10.0,
+             "billing_group_limit_source": "initial_task_admission"}
+    task, row = _parked(tmp_path, monkeypatch, task_id=root_id, root_task_id=root_id, extra={"metadata": meta})
+    write_task_result(tmp_path, root_id, "running", root_task_id=root_id, metadata=meta, billing_group=group,
+                      **{RESUMED_ALLOWANCE_KEY: {"additional_usd": 2.0, "ceiling_usd": 4.0, "source": "allowance"}})
+    row.update(reason="authority", scope="task", rail=bp.RAIL_BILLING_AUTHORITY,
+               cause="tree_accounting_unavailable", state="paused", auto_resume=True,
+               resume_policy="authority_readable")
+    bp.set_budget_pause(tmp_path, root_id, row)
+    task["_budget_pause"] = bp.exact_pause_marker(row)
+    assert q.publish_queue_snapshot("tree_accounting_tech_park")
+
+    scope = UsageScope(drive_root=tmp_path, task_id=root_id, root_task_id=root_id,
+                       billing_group_id=root_id, billing_group_limit_usd=10.0,
+                       billing_group_limit_source="initial_task_admission", root_cost_ceiling_usd=2.0)
+    with usage_scope(scope):
+        res = reserve_attempt(AttemptRequest(model="m", provider="p", task_id=root_id,
+                                             reservation_usd=4.0, global_limit_usd=100.0))
+        mark_dispatched(res)
+        settle_attempt(res, {"prompt_tokens": 10, "completion_tokens": 5}, cost_usd=4.0, cost_final=True)
+
+    try:
+        # 1. Degraded integrity refuses wake; the probe never waits, migrates or holds Q.
+        quarantine = tmp_path / QUARANTINE_REL
+        quarantine.parent.mkdir(parents=True, exist_ok=True)
+        quarantine.write_text("quarantined\n", encoding="utf-8")
+        probes = []
+        real_hold = usage_store.hold
+
+        def spy_hold(*args, **kwargs):
+            probes.append((kwargs.get("timeout_sec"), kwargs.get("migrate"), bounded_wait(5), q._queue_lock._is_owned()))
+            return real_hold(*args, **kwargs)
+
+        with monkeypatch.context() as m:
+            m.setattr(usage_store, "hold", spy_hold)
+            assert authority_readable(task, row, tmp_path) is False
+            assert wake_ready_sleepers(q) == []
+        assert probes and all(wait == 0 and migrate is False and budget == 0 and not owns_q
+                              for wait, migrate, budget, owns_q in probes)
+        assert bp.budget_pause_row(tmp_path, root_id)["state"] == "paused"
+
+        # 2. Without quarantine, non-numeric or negative sums still fail; a valid sum passes nonblocking and wakes.
+        quarantine.unlink()
+        for bad in (None, True, float("nan"), -1.0, "4.0"):
+            with monkeypatch.context() as m:
+                m.setattr(usage_store.Txn, "summary", lambda *_a, _v=bad, **_k: {"settled_usd": _v})
+                assert authority_readable(task, row, tmp_path) is False
+
+        probes.clear()
+        with monkeypatch.context() as m:
+            m.setattr(usage_store, "hold", spy_hold)
+            with q._queue_lock:
+                assert authority_readable(task, row, tmp_path) is True
+        assert probes and all(wait == 0 and migrate is False and budget == 0
+                              for wait, migrate, budget, _owns_q in probes)
+
+        probes.clear()
+        with monkeypatch.context() as m:
+            m.setattr(usage_store, "hold", spy_hold)
+            woke = wake_ready_sleepers(q)
+        assert probes and all(not owns_q for _wait, _migrate, _budget, owns_q in probes)
+        assert len(woke) == 1 and woke[0]["ok"] is True
+        assert bp.budget_pause_row(tmp_path, root_id)["state"] == "resume_granted"
+        assert task["_budget_pause_resume"]["authority"] == "authority_readable"
+
+        # 3. With the $4.0 sum readable again, the resumed wake still hits its monetary $4.0 ceiling stop,
+        #    and that monetary pause is never auto-resumed.
+        ctx, limit_ctx = _loop_ctx(tmp_path, root_id)
+        ctx.task_metadata = meta
+        limit_ctx.accumulated_usage = {"cost": 0.5}
+        _quiet_external(monkeypatch, bp)
+        with usage_scope(scope):
+            ceiling = task_pacing.resolve_task_cost_ceiling(ctx, 10.0)
+            assert ceiling.ceiling_usd == pytest.approx(4.0)
+            with pytest.raises(bp.BudgetPauseRequested) as raised:
+                loop_budget._check_budget_limits(limit_ctx, 10.0, cost_ceiling=ceiling)
+        bp.end_dispatch_fence(root_id)
+        monetary_row = {**raised.value.pause, "state": bp.STATE_PAUSED}
+        assert monetary_row["reason"] == "budget" and monetary_row["rail"] == bp.RAIL_GRACEFUL_CEILING
+        assert monetary_row["scope"] == "root" and monetary_row["auto_resume"] is False
+        bp.set_budget_pause(tmp_path, root_id, monetary_row)
+        task.pop("_budget_pause_resume", None)
+        task["_budget_pause"] = bp.exact_pause_marker(monetary_row)
+        assert q.publish_queue_snapshot("monetary_ceiling_park")
+        assert authority_readable(task, {**monetary_row, "cause": "tree_accounting_unavailable"}, tmp_path) is False
+        assert wake_ready_sleepers(q) == []
+        assert bp.budget_pause_row(tmp_path, root_id)["state"] == "paused"
+    finally:
+        usage_store.forget(tmp_path)

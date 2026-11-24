@@ -68,9 +68,8 @@ def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Option
     root's own by ``task_pacing.resolve_cost_ceiling``, inherited resolved by the members, the ledger fence staying at
     the owner's per-task cap. Only a strictly positive ceiling is stamped: a wake with nothing left is skipped by the
     alarm, never started under a $0 ceiling. ``root_cost_ceiling_source`` (``CEILING_SOURCES``) is stamped beside it:
-    which limit set that number at launch (the allowance left, the per-task cap, or both at once). It is an
-    observation for the views that explain a pause (``consciousness_view.hold_cause``); no stop, fence or Resume
-    reads it, and a record without it says nothing about either limit."""
+    which limit set that number at launch (allowance, per-task cap, or both). The view and an explicit own-wake
+    Resume use it beside the saved pause, never as a grant or as proof by itself."""
     normalized = normalize_level(level)
     metadata: Dict[str, Any] = {
         "initiator": CONSCIOUSNESS_INITIATOR, "usage_category": CONSCIOUSNESS_CATEGORY,

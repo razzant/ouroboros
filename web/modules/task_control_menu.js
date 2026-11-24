@@ -15,6 +15,7 @@
 import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
+import { formatUsd } from './storage_format.js';
 import { showToast } from './toast.js';
 import { fmt, tr, tx } from './i18n.js';
 import { bindScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
@@ -346,15 +347,25 @@ async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
 export function resumeAcceptedWords(ack) {
     // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
     // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
-    return ack?.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
+    const words = ack?.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
         heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
         : ack?.tree_only ? 'Resumed. Ouroboros or you choose which subagents continue.'
         : ack?.late_phase ? 'Resuming: the work left after the delivered answer continues.'
         : 'Resuming: the task returns to the queue.';
+    // A consciousness wake held at its daily share goes on with the room this Resume gave it (`consciousness_resume`),
+    // and the total budget, its own limit beside the allowance, may leave less of it now (`available_now_usd`).
+    const more = ack?.consciousness_resume?.additional_usd;
+    if (typeof more !== 'number' || !Number.isFinite(more) || more < 0) return words;
+    const now = ack.consciousness_resume.available_now_usd;
+    const narrower = typeof now === 'number' && Number.isFinite(now) && now >= 0 && now < more
+        ? `; ${now > 0 ? formatUsd(now) : 'none'} of it is available now under the total budget` : '';
+    return `${words} ${more > 0 ? `It may spend up to ${formatUsd(more)} more of the consciousness allowance${narrower}.`
+        : 'The consciousness allowance gives it nothing more, so it may pause again.'}`;
 }
 
-/** A refused Resume: the server names it (replay_unsafe, fence missing, not budget-paused), said verbatim instead of a
- *  generic failure, and a held Continue's observed blockers as facts (#1721). */
+/** A refused Resume: the server names it (replay_unsafe, fence missing, not budget-paused, a wake's money refusals:
+ *  `work_stop.resume_outcome`, the one owner of those words), said verbatim instead of a generic failure, and a held
+ *  Continue's observed blockers as facts (#1721). */
 export function resumeRefusalWords(exc) {
     const facts = heldWorkFacts(exc?.body?.blockers);
     const message = exc?.body?.cause && exc.body.message ? tx(exc.body.message) : exc?.body?.message;
