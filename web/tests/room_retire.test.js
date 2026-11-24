@@ -3,7 +3,6 @@
 // same room, its selection given back and its frames flowing again. Every visited room stays (parent decision
 // 2026-11-04): only its project going away lets one go; its socket view carries only its own sends' custody while away.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { createCatchUp, createRoomRetirement, roomSocket } from '../modules/room_retire.js';
@@ -426,28 +425,28 @@ test("a room's socket view carries the page's profile proofs, the saved-preview 
     assert.equal(socket.foreignProfile(), false);
     assert.equal(socket.servingProfileScope(), 'scope-1');
     socket.pause();
-    assert.equal(socket.canShowSavedProfile(), true, 'away, the proof is the page\'s and is not paused');
-    canShow = false; foreign = true;
+    assert.equal(socket.canShowSavedProfile(), true, "away, the proof is the page's and is not paused");
+    canShow = false;  // e.g. a disconnect the current socket has not yet re-proven, the profile still the same
     assert.equal(socket.canShowSavedProfile(), false, 'a page socket that may not paint keeps the room from painting');
-    assert.equal(socket.foreignProfile(), true);
+    assert.equal(socket.foreignProfile(), false, 'the two proofs are independent');
     socket.resume();
-    assert.equal(roomSocket({ on: () => () => {} }).canShowSavedProfile(), false, 'a socket that proves nothing permits nothing');
+    assert.equal(socket.canShowSavedProfile(), false, 'back, the same room still follows the page socket');
+    canShow = true;
+    assert.equal(socket.canShowSavedProfile(), true, 'and paints again once the page socket permits it');
+    foreign = true;
+    assert.equal(socket.foreignProfile(), true);
+    assert.equal(roomSocket({ on: () => () => {} }).canShowSavedProfile(), false, 'a socket without the proof permits nothing');
 });
 
-test('every socket method the room code calls exists on the room\'s socket view', () => {
-    // Optional calls (`ws?.name?.()`) read a missing method as a quiet false: a forward forgotten in roomSocket() turns a
-    // room's gate off with no error (the saved preview went dark that way). Each method the room modules call on their
-    // socket must therefore be one the view provides.
+test("a room's socket view offers every public method of the page socket that a room may call", async () => {
+    // An optional call (`ws?.name?.()`) reads a missing method as a quiet false, so a forward forgotten in roomSocket()
+    // turns a room's gate off with no error (the saved preview went dark that way after #4149). The view therefore offers
+    // every public method of the page socket except those only the page itself uses.
+    const { WS } = await import('../modules/ws.js');
+    const pageOnly = new Set(['constructor', 'connect', 'emit']);
+    const expected = Object.getOwnPropertyNames(WS.prototype).filter((name) => !name.startsWith('_') && !pageOnly.has(name));
+    assert.ok(expected.includes('canShowSavedProfile') && expected.includes('send'), "the page socket's public methods are read");
     const view = roomSocket({ on: () => () => {} });
-    const sources = ['chat.js', ...['chat_history.js', 'chat_preview.js', 'composer.js'].filter((name) => {
-        try { readFileSync(new URL(`../modules/${name}`, import.meta.url)); return true; } catch { return false; }
-    })];
-    const called = new Set();
-    for (const name of sources) {
-        const text = readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
-        for (const match of text.matchAll(/\bws\??\.([A-Za-z_]\w*)\??\.?\(/g)) called.add(match[1]);
-    }
-    assert.ok(called.has('canShowSavedProfile') && called.has('isConnected'), 'the scan sees the room\'s socket calls');
-    const missing = [...called].filter((method) => typeof view[method] !== 'function');
+    const missing = expected.filter((name) => typeof view[name] !== 'function');
     assert.deepEqual(missing, [], `roomSocket() lacks ${missing.join(', ')}`);
 });

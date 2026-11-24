@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { installDom, restoreDom, ElementStub, PREVIEW_SCOPE, walkCard } from './chat_dom_fixture.js';
 import { PREVIEW_KEY } from '../modules/chat_preview.js';
+import { roomSocket } from '../modules/room_retire.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text, extra = {}) => ({
@@ -34,8 +35,9 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null, canShow
     const priorSocket = globalThis.WebSocket;
     globalThis.WebSocket = { OPEN: 1 };
     const instance = createChatInstance({
-        ws: { on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
-            isConnected: () => true, canShowSavedProfile, send() {} },
+        // The room's view of the page socket, as app.js gives Main and every Project (a bare page socket hid #4149's gap).
+        ws: roomSocket({ on(type, handler) { handlers.set(type, handler); return () => handlers.delete(type); },
+            isConnected: () => true, canShowSavedProfile, send() {} }),
         state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
         updateUnreadBadge() {}, stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }), gate() { return Promise.resolve(this.begin()); },
             isCurrent: () => true, apply() {} },
