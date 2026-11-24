@@ -623,7 +623,7 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
     read_prefix = f"delegated_runs/{cap_dir.name}"
     unsaved = [str(row.get("path") or "") for row in manifest.get("untracked_excluded") or []
                if isinstance(row, dict) and row.get("reason") in UNSAVED_REASONS] if not evidence_only(entry) else []
-    checkout = ("the copy's checkout itself is released once the capture is saved" if not unsaved else
+    checkout = ("the checkout is eligible for release after capture and evidence retention; custody may defer cleanup" if not unsaved else
                 f"the copy's checkout is KEPT until then: {len(unsaved)} path(s) in it could not be saved in the "
                 f"result (Git repositories or checked-out submodules inside it, or folders Git could not open): "
                 f"{', '.join(unsaved[:8])}. A submodule's own commits live in its separate Git directory "
@@ -679,6 +679,13 @@ def _capture_block(entry: _RunCustody, cap_dir: pathlib.Path, manifest: Dict[str
                     "committed work is still in the captured diff",
         }
     return block
+
+
+def capture_receipt_unwritten(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Bytes exist, but the capture is still owed; retain its readers and custody."""
+    return {**block, "status": "failed", "retry": "transient",
+            "note": "Patch bytes were saved, but the durable capture row could not be written. "
+                    "The result and any private copy and pins are kept. Fix the drive/event log, then call again."}
 
 
 def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_dir: pathlib.Path,
@@ -800,15 +807,11 @@ def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
 
 def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=None,
                                      retain_investigation: bool = True, publish: bool = True) -> Optional[Dict[str, Any]]:
-    """The drive-rooted core of the terminal capture — same contract, no ToolContext.
+    """Capture for collection, maintenance and explicit disposition; reviewers own their capture.
 
-    One ordinary capture author for foreground collection, the body and disposition;
-    startup/control reconciliation leaves its work pending. Reviewers use their native owner. The
-    apply/reject DECISION stays with a live owner, never taken here — an evidence-only investigation has
-    none to take, so its ready capture is retained as evidence at once (#1609). ``patch_captured`` MEANS
-    "a usable patch artifact exists" (C1-R3): the custody row is minted only over a ready-status
-    manifest; a failure manifest is returned as the failed block but leaves the row uncaptured (every
-    retry point stays open), and a pre-R3 row over a failed manifest falls through to a fresh capture.
+    Publish a custody row only for a ready manifest; legacy failed captures may be retried.
+    Maintenance with ``publish=False`` stages bytes but owes publication. Evidence-only
+    investigations may settle after publication (#1609); the live owner decides writer results.
     """
     from ouroboros.delegate_directory import is_directory_run, capture_directory_result, directory_capture_block
     from ouroboros.delegate_capture_attempt import failure_retry
@@ -823,7 +826,12 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         block = in_place_block(entry)  # no run patch, disposition or fictitious apply
         return {**block, "native_capture": note} if note else block
 
-    def finish(block, transport=None):
+    def finish(block, transport=None, *, record=False):
+        if publish and record and not custody.record_patch_captured(
+            drive, entry, status=block["status"], sha256=block["sha256"],
+            patch_size=block["patch_size"], capture_dir=str(cap_dir),
+        ):
+            return capture_receipt_unwritten(block)
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block
 
     if entry is not None and entry.mode == "plan":
@@ -882,13 +890,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         saved = manifest if manifest_path.exists() else {}
         if (str(saved.get("status") or "") in ready and saved.get("result_commit")
                 and saved.get("result_commit") == snapshot.get("result_sha")):
-            # The copy was released after this capture was saved but its row did not
-            # land: the saved result itself is the capture.
-            if publish:
-                custody.record_patch_captured(drive, entry, status=str(saved.get("status") or ""),
-                                              sha256=str(saved.get("sha256") or ""),
-                                              patch_size=saved.get("patch_size"), capture_dir=str(cap_dir))
-            return finish(_capture_block(entry, cap_dir, saved))
+            # The saved result still binds the pin even after checkout release.
+            return finish(_capture_block(entry, cap_dir, saved), record=True)
     if not work_domain.exists(exec_root) and not _restored_from_pin(entry, snapshot):
         # A legacy capture saves file outputs before its diff: a later failure keeps them (#1651).
         kept = len(saved.get("file_output_changes") or []) if saved.get("status") == "failed" else 0
@@ -955,15 +958,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             "note": f"patch capture failed ({type(exc).__name__}: {exc}); the private copy "
                     "is kept — inspect it directly.",
         }
-    if publish and str(manifest.get("status") or "") in ready:
-        custody.record_patch_captured(
-            drive, entry,
-            status=str(manifest.get("status") or ""),
-            sha256=str(manifest.get("sha256") or ""),
-            patch_size=manifest.get("patch_size"),
-            capture_dir=str(cap_dir),
-        )
-    return finish(_capture_block(entry, cap_dir, manifest))
+    block = _capture_block(entry, cap_dir, manifest)
+    return finish(block, record=block["status"] in ready)
 
 
 def capture_stranded_patch(drive_root: Any, run: _RunCustody) -> Dict[str, Any]:

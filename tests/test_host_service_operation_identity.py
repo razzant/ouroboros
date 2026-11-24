@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from ouroboros.host_notice import STEPS
 from ouroboros.project_dialogue import build_owner_message_ref
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import message_bus
@@ -273,7 +274,8 @@ def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, mon
     # The carrier's typed refusal is the host operation's exact failed terminal, correlated by its source.
     [task_id] = list(workers.RUNNING)
     stored = load_task_result(tmp_path, task_id)
-    assert stored["status"] == "failed" and stored["result"] == "The total budget is spent, so this turn did not start. Raise Total budget in Settings → Costs."  # its record keeps the step
+    assert stored["status"] == "failed"  # its record keeps the step
+    assert stored["result"] == f"The total budget is spent, so this turn did not start. {STEPS['raise_total_budget']}"
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
     assert result["status"] == "failed" and result["text"] == stored["result"], "the operation answers from its record"
 
@@ -306,7 +308,7 @@ def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monke
     # durable terminal origin (its client id stays on the live receipt).
     stored = load_task_result(workers.DRIVE_ROOT, receipt["activity_id"])
     assert stored["status"] == "failed", stored
-    assert stored["result"] == "The total budget is spent, so this turn did not start. Raise Total budget in Settings → Costs."
+    assert stored["result"] == f"The total budget is spent, so this turn did not start. {STEPS['raise_total_budget']}"
     assert [row for row in chat_rows(workers.DRIVE_ROOT) if row.get("origin_message_ref")] == []
 
 

@@ -47,7 +47,7 @@ def test_directory_copy_binding_does_not_invent_source_as_execution_root():
 
 def test_capture_block_names_the_saved_result_and_git_failures_in_git_s_words(tmp_path):
     """A capture block reads the saved result: a ready one names its result commit and says the
-    checkout goes once it is saved; a failed one carries the failure itself (a typed note first,
+    checkout is eligible after retention, not necessarily removed; a failure carries its cause (a typed note first,
     else git's own stderr), never boilerplate. Target drift is no longer part of a block."""
     entry = SimpleNamespace(baseline_sha="base-sha", execution_root="/private/snapshot",
                             target_root="/authority/tree", authority_source="external_workspace_root",
@@ -55,7 +55,8 @@ def test_capture_block_names_the_saved_result_and_git_failures_in_git_s_words(tm
     ready = _capture_block(entry, tmp_path, {"status": "ready_with_changes", "sha256": "s", "diffstat": "1 file",
                                              "result_commit": "c" * 40, "current_head": "base-sha"})
     assert ready["result_commit"] == "c" * 40 and "head_moved" not in ready
-    assert "NOT APPLIED" in ready["note"] and "checkout itself is released" in ready["note"]
+    assert "NOT APPLIED" in ready["note"] and "eligible for release" in ready["note"]
+    assert "custody may defer cleanup" in ready["note"] and "checkout itself is released" not in ready["note"]
     failed = _capture_block(entry, tmp_path, {"status": "failed", "errors": [
         {"type": "result_commit_failed", "message": "git diff-tree exited 128", "stderr": "fatal: bad object"}]})
     assert failed["note"] == "capture failed: fatal: bad object" and "result_commit" not in failed

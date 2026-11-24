@@ -586,11 +586,20 @@ def states_under(directory: Any, *, include_retained=False) -> dict:
     return found
 
 
-def publication_lock(path):
-    """Serialize changes in an addressed canonical task store with the owner's Keep/Free choice."""
-    from ouroboros.task_custody import task_custody_lock
+def publication_lock(path, *, custody_held=None):
+    """Serialize publication with Keep/Free; reuse a caller's held custody only for that exact task.
+
+    ``custody_held`` is the (root, task_id) of an enclosing task_custody_lock, passed only
+    within its synchronous scope. It changes no release-state checks and grants no lock
+    on another task or installation; ordinary publishers acquire custody here.
+    """
+    from ouroboros.task_custody import custody_anchor, task_custody_lock
 
     position = _store_position(path)
+    if position and custody_held is not None:
+        root, task_id = custody_held
+        if position[:2] == (custody_anchor(root, task_id), task_id):
+            return contextlib.nullcontext(True)
     return task_custody_lock(*position[:2]) if position else contextlib.nullcontext(True)
 
 

@@ -272,6 +272,7 @@ def test_a_budget_refusal_of_a_minted_turn_writes_no_base(lane, monkeypatch):
     """The carrier's strict money gate refuses before the base's create-only write and the money pin: the
     only row the turn leaves is the carrier's exception terminal (the schema's own default rollup, never
     the preparation's base or binding)."""
+    from ouroboros.host_notice import STEPS
     from ouroboros import usage_accounting as ua
 
     usage_store.migrate_from_journal(lane.root)
@@ -287,7 +288,10 @@ def test_a_budget_refusal_of_a_minted_turn_writes_no_base(lane, monkeypatch):
     assert error.before_task_start is True and error.control_reason == "budget_exhausted"
     stored = load_task_result(lane.root, "S")
     assert stored["status"] == "failed" and stored["reason_code"] == "budget_exhausted"
-    assert stored["result"].startswith("🚫 Budget exhausted."), stored["result"]
+    step = STEPS["raise_total_budget"]
+    assert step.strip()
+    # The record keeps the phrase and the owner's step (DESIGN principle 7), not the old pictograph line.
+    assert stored["result"] == f"The total budget is spent, so this turn did not start. {step}", stored["result"]
     assert "billing_group" not in stored and "host_admission" not in stored, "the preparation never pinned or admitted it"
 
 

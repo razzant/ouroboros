@@ -2,7 +2,6 @@
 import hashlib
 import json
 import uuid
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -74,6 +73,44 @@ _OBSERVE = f"({_CAPTURE_TEST_SOCKET})();({_OBSERVE_CARDS.replace('document.docum
             });
         }
     };
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+        const barrier = window.__reconnectBarrier;
+        if (!barrier) return nativeFetch(input, init);
+        const raw = typeof input === 'string' ? input : input?.url || String(input);
+        const url = new URL(raw, location.href);
+        const matching = url.pathname === '/api/chat/history'
+            && !url.searchParams.has('cursor') && !url.searchParams.has('around')
+            && Number(url.searchParams.get('chat_id') || 1) === barrier.chatId
+            && window.__ouroWs?.ws && window.__ouroWs.ws !== barrier.oldSocket
+            && window.__ouroWs.ws.readyState === WebSocket.OPEN;
+        if (!matching) return nativeFetch(input, init);
+        barrier.armed = false;
+        return nativeFetch(input, init).then(response => {
+            if (!response.ok) {
+                if (window.__reconnectBarrier === barrier) barrier.armed = false;
+                return response;
+            }
+            const nativeJson = response.json.bind(response);
+            response.json = () => nativeJson().then(data => {
+                if (window.__reconnectBarrier === barrier) {
+                    const fault = Array.isArray(data?.window?.truncated_by)
+                        && data.window.truncated_by.some(c => String(c).endsWith('_projection_failed'));
+                    barrier.armed = Boolean(data && !data.reason_code && !fault
+                        && Array.isArray(data.messages) && typeof data.has_more === 'boolean'
+                        && data.page_cursor != null && (!data.has_more || data.next_cursor != null));
+                }
+                return data;
+            }, err => {
+                if (window.__reconnectBarrier === barrier) barrier.armed = false;
+                throw err;
+            });
+            return response;
+        }, err => {
+            if (window.__reconnectBarrier === barrier) barrier.armed = false;
+            throw err;
+        });
+    };
 })();"""
 
 
@@ -120,17 +157,39 @@ def _open(page, server, project):
     return feed
 
 
-def _reconnect(page, chat_id):
+def _reconnect(page, chat_id, feed):
     page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30000)
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === 1", timeout=30000)
-    page.evaluate("window.__completionDocument = true; window.__oldSocket = window.__ouroWs.ws")
-    def history(response):
-        url = urlsplit(response.url)
-        return url.path == "/api/chat/history" and parse_qs(url.query).get("chat_id", ["1"]) == [str(chat_id)]
-    with page.expect_response(history, timeout=60000):
-        page.evaluate("window.__oldSocket.close()")
-    page.wait_for_function("() => window.__ouroWs.ws !== window.__oldSocket && window.__ouroWs.ws?.readyState === 1",
-                           timeout=30000)
+    armed = page.evaluate("""({chatId, feed}) => {
+        const node = document.querySelector(feed);
+        if (!node || !node.isConnected) return false;
+        window.__reconnectBarrier?.observer?.disconnect();
+        window.__completionDocument = true;
+        window.__oldSocket = window.__ouroWs.ws;
+        const barrier = {chatId: Number(chatId), feed: node, oldSocket: window.__oldSocket, armed: false, applied: false, observer: null};
+        barrier.observer = new MutationObserver(rows => {
+            if (barrier.armed && rows.some(r => r.target === barrier.feed) && barrier.feed.dataset.historyHydrated === 'true') {
+                barrier.applied = true;
+                barrier.armed = false;
+            }
+        });
+        barrier.observer.observe(node, {attributes: true, attributeFilter: ['data-history-hydrated']});
+        window.__reconnectBarrier = barrier;
+        window.__oldSocket.close();
+        return true;
+    }""", {"chatId": chat_id, "feed": feed})
+    assert armed, f"feed {feed!r} was not mounted before reconnect"
+    try:
+        page.wait_for_function("""feed => {
+            const b = window.__reconnectBarrier;
+            return Boolean(b?.applied
+                && window.__ouroWs?.ws && window.__ouroWs.ws !== b.oldSocket
+                && window.__ouroWs.ws.readyState === WebSocket.OPEN
+                && document.querySelector(feed) === b.feed && b.feed.isConnected
+                && b.feed.dataset.historyHydrated === 'true');
+        }""", arg=feed, timeout=60000)
+    finally:
+        page.evaluate("() => { window.__reconnectBarrier?.observer?.disconnect(); window.__reconnectBarrier = null; }")
     assert page.evaluate("window.__completionDocument === true"), "reconnect reloaded the document"
 
 
@@ -265,15 +324,17 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
             "mounted_cards": page.evaluate("() => window.__mountedCards")}
 
 
-def _wire_order(page, task_id):
-    page.wait_for_function("id => window.__completionFrames.some(f => f.type === 'log'"
-                          " && f.data?.type === 'task_done' && f.data.task_id === id)",
-                          arg=task_id, timeout=30000)
+def _wire_order(page, task_id, *, chat_id=None):
+    page.wait_for_function("({id, chatId = null}) => window.__completionFrames.some(f => f.type === 'log'"
+                          " && f.data?.type === 'task_done' && f.data.task_id === id"
+                          " && (chatId === null || String(f.data.chat_id) === chatId))",
+                          arg={"id": task_id, "chatId": str(chat_id) if chat_id is not None else None}, timeout=30000)
     frames = page.evaluate("() => window.__completionFrames")
     finals = [i for i, f in enumerate(frames) if f.get("type") == "chat"
               and f.get("task_id") == task_id and f.get("role") == "assistant" and not f.get("is_progress")]
     terminals = [i for i, f in enumerate(frames) if f.get("type") == "log"
-                 and f.get("data", {}).get("type") == "task_done" and f["data"].get("task_id") == task_id]
+                 and f.get("data", {}).get("type") == "task_done" and f["data"].get("task_id") == task_id
+                 and (chat_id is None or str(f["data"].get("chat_id")) == str(chat_id))]
     assert len(finals) == 1 and terminals and finals[0] < terminals[0], (finals, terminals)
     return {"final_indices": finals, "terminal_indices": terminals}
 
@@ -352,7 +413,7 @@ def test_native_completion_receipt_keeps_work_and_errors_visible(
                     delivery = _delivery(oracle, task_id, result, answer, chat_id, stop=case == "unfinished_stop")
                     page.screenshot(path=str(evidence / "live.png"), full_page=True, animations="disabled")
                     capture.checkpoint("reconnect", task_id=task_id)
-                    _reconnect(page, chat_id)
+                    _reconnect(page, chat_id, feed)
                     views["reconnected"] = _presentation(page, feed, task_id, answer, case, project)
                     page.screenshot(path=str(evidence / "reconnected.png"), full_page=True, animations="disabled")
                     capture.checkpoint("reload", task_id=task_id)
@@ -374,7 +435,7 @@ def test_native_completion_receipt_keeps_work_and_errors_visible(
 def test_unfinished_project_parent_preserves_running_child_and_full_output(
     wait_clone, tmp_path, monkeypatch, request, engine, width,
 ):
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     marker = "COMPLETION_PARENT_" + uuid.uuid4().hex
     child_marker = "COMPLETION_CHILD_" + uuid.uuid4().hex
@@ -431,9 +492,16 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                     assert len(calls["parent"]) == 2
                     capture.checkpoint("parent_stopped_child_running", parent_id=parent_id, child_id=child_id)
                     parent_delivery = _delivery(oracle, parent_id, result, parent_answer, project["chat_id"], stop=True)
+                    # Delivery and an early Stopped chip can precede the terminal cause.
+                    parent_order = _wire_order(page, parent_id, chat_id=project["chat_id"])
+                    page.locator(f'{feed} .chat-live-card[data-task-id="{parent_id}"][data-finished="1"]').wait_for(timeout=30000)
                     _presentation(page, feed, parent_id, parent_answer, "unfinished_stop", project, managed=True)
                     page.locator(f'{feed} .chat-live-card[data-task-id="{child_id}"]').wait_for(timeout=30000)
                     page.screenshot(path=str(evidence / "parent-stopped-child-running.png"), full_page=True, animations="disabled")
+                    child_at_release = oracle.task_result(child_id)
+                    assert child_at_release["status"] in {"scheduled", "running"}, child_at_release
+                    assert child_id not in oracle.cancel_intents()
+                    assert not gate.release.is_set() and not gate.timed_out
                     gate.release.set()
                     child_result = wait_durable_result(oracle, child_id, timeout=120)
                     assert child_result["result"] == child_answer and child_result["terminal_origin"] == "model_final"
@@ -443,7 +511,7 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                     for stage in ("live", "reconnected", "reloaded"):
                         capture.checkpoint("child_output_" + stage, parent_id=parent_id, child_id=child_id)
                         if stage == "reconnected":
-                            _reconnect(page, project["chat_id"])
+                            _reconnect(page, project["chat_id"], feed)
                         elif stage == "reloaded":
                             page.reload(wait_until="domcontentloaded")
                             feed = _click_project(page, project)
@@ -453,28 +521,43 @@ def test_unfinished_project_parent_preserves_running_child_and_full_output(
                             card.wait_for(state="attached", timeout=30000)
                             if card.get_attribute("data-expanded") != "1":
                                 card.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
-                        # The authored result precedes its lifecycle notification;
-                        # the latter may repeat an explicitly shortened [RESULT].
-                        line = child_card.locator(":scope > [data-live-timeline] > .chat-live-line.expandable").filter(has_text="CHILD_OUTPUT_HEAD").first
+                        # Replay can insert a lifecycle preview before the selected
+                        # report. Follow the row we open, not its changing rank.
+                        timeline = child_card.locator(":scope > [data-live-timeline]")
+                        matching = timeline.locator(":scope > .chat-live-line.expandable").filter(has_text="CHILD_OUTPUT_HEAD")
+                        line_key = matching.first.get_attribute("data-live-line-key")
+                        line = timeline.locator(f':scope > [data-live-line-key="{line_key}"]')
                         if line.get_attribute("data-expanded") != "1":
                             line.locator("[data-live-line-toggle]").click()
-                        # Inline complete bodies and fetched full bodies share this
-                        # node; the -full class only denotes the fetched variant.
+                        # The tail can appear in a preview that omits the middle.
                         full = line.locator(":scope > .chat-live-line-body")
-                        full.get_by_text("CHILD_OUTPUT_TAIL", exact=False).wait_for(timeout=30000)
-                        rendered = full.inner_text()
-                        selected = rendered[rendered.index("CHILD_OUTPUT_HEAD"):rendered.index("CHILD_OUTPUT_TAIL") + len("CHILD_OUTPUT_TAIL")]
-                        assert selected.split() == child_answer.split(), "the visible full output lost content"
-                        full.evaluate("node => { const range = document.createRange(); range.selectNodeContents(node);"
-                                      " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }")
-                        assert "CHILD_OUTPUT_TAIL" in page.evaluate("window.getSelection().toString()")
+                        full.wait_for(state="visible")
+                        expect(full).to_contain_text(child_answer, use_inner_text=True, timeout=30000)
+                        selected = full.evaluate(
+                            "node => { const range = document.createRange(); range.selectNodeContents(node);"
+                            " const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);"
+                            " return selection.toString(); }")
+                        # The expanded row also selects the report heading and trace.
+                        head, tail = "CHILD_OUTPUT_HEAD", "CHILD_OUTPUT_TAIL"
+                        start = selected.find(head)
+                        end = selected.find(tail, start + len(head))
+                        assert 0 <= start < end, f"{stage}: browser selection lacks the answer boundaries"
+                        selected_answer = selected[start:end + len(tail)]
+                        normalized_answer = " ".join(selected_answer.split())
+                        assert normalized_answer == " ".join(child_answer.split()), stage
                         assert page.locator(feed).get_by_text(parent_answer, exact=True).count() == 1
-                        snapshots[stage] = {"parent_cards": parent.count(), "child_cards": child_card.count(), "full_chars": len(full.inner_text())}
+                        snapshots[stage] = {"parent_cards": parent.count(), "child_cards": child_card.count(),
+                            "full_chars": len(full.inner_text()), "selected_raw_chars": len(selected),
+                            "selected_raw_utf8_sha256": hashlib.sha256(selected.encode()).hexdigest(),
+                            "selected_answer_chars": len(selected_answer),
+                            "selected_answer_utf8_sha256": hashlib.sha256(selected_answer.encode()).hexdigest(),
+                            "selected_answer_normalized_utf8_sha256": hashlib.sha256(normalized_answer.encode()).hexdigest()}
                         page.screenshot(path=str(evidence / (stage + ".png")), full_page=True, animations="disabled")
                     _write_receipt(evidence / "receipt.json", wait_clone, engine=engine, width=width,
                         parent_id=parent_id, child_id=child_id, parent_result=result, child_before=child_before,
-                        child_result=child_result, parent_delivery=parent_delivery,
-                        selected_child_sha256=hashlib.sha256(child_answer.encode()).hexdigest(),
+                        child_at_release=child_at_release, child_result=child_result,
+                        parent_delivery=parent_delivery, parent_wire_order=parent_order,
+                        expected_child_utf8_sha256=hashlib.sha256(child_answer.encode()).hexdigest(),
                         model_calls={name: len(rows) for name, rows in calls.items()}, snapshots=snapshots)
         finally:
             gate.release.set()

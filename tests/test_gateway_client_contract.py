@@ -66,6 +66,71 @@ def test_every_client_envelope_has_a_field_identical_browser_twin():
     index = (REPO / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
     assert "./client_contract_types.js" in index.splitlines()[0]
     assert "import('./client_contract_types.js').ServedUiState" in index
+    # `notice` rides NESTED: every carrier — the live frame (api_types.js), the history row and the search
+    # candidate (their twins) — holds the one HostNotice object, never a flattened field set, and that object's
+    # own fields, with the variable phrase's `template` (string) and `values` (string → string map), match
+    # between the Python TypedDict and the JSDoc twin, each optional as the whole object is.
+    from ouroboros import host_notice
+    from ouroboros.gateway.contracts import ChatOutbound
+    from ouroboros.gateway.history_contracts import ChatHistoryMessage, ChatSearchCandidate
+    from ouroboros.gateway.reference_contracts import HostNotice, HostNoticeField
+
+    assert typing.get_type_hints(HostNoticeField, include_extras=True)["notice"] is HostNotice
+    for cls in (ChatOutbound, ChatHistoryMessage, ChatSearchCandidate):
+        hints = typing.get_type_hints(cls, include_extras=True)
+        assert hints["notice"] is HostNotice, f"{cls.__name__}.notice must stay the nested HostNotice object"
+        assert "notice" not in json_schema_for(cls).get("required", ()), f"{cls.__name__}.notice must stay optional"
+    for source, name, notice_type in (
+        (index, "ChatOutbound", "HostNotice="),
+        (facade, "ChatHistoryMessage", "import('./api_types.js').HostNotice="),
+        (facade, "ChatSearchCandidate", "import('./api_types.js').HostNotice="),
+    ):
+        typedef = re.search(rf"@typedef \{{Object\}} {name}(?=\s|\*/)(.*?)\*/", source, re.S)
+        assert typedef is not None, f"{name} JSDoc typedef is missing"
+        field = rf"^[ \t]*\* @property \{{{re.escape(notice_type)}\}} notice(?=\s|$)"
+        assert re.search(field, typedef[1], re.M), f"{name}.notice must stay an optional nested HostNotice"
+    notice_hints = typing.get_type_hints(HostNotice, include_extras=True)
+    assert _js_typedef_fields(index, "HostNotice") == set(notice_hints), "HostNotice Python and JSDoc mirrors drifted"
+    assert typing.get_args(notice_hints["values"]) == (str, str)
+    # A simple scoped check, not a JSDoc type extractor: the HostNotice typedef declares the variable
+    # phrase's fields as an optional string and an optional string→string map.
+    notice_body = re.search(r"@typedef \{Object\} HostNotice\b(?P<body>.*?)\n \*/", index, re.S)
+    assert notice_body, "api_types.js missing the HostNotice typedef"
+    assert re.search(r"@property \{string=\} template\b", notice_body.group("body")), (
+        "api_types.js HostNotice.template must stay an optional string"
+    )
+    assert re.search(r"@property \{Object\.<string,string>=\} values\b", notice_body.group("body")), (
+        "api_types.js HostNotice.values must stay an optional string→string map"
+    )
+    assert not json_schema_for(HostNotice).get("required"), "every HostNotice field stays optional"
+    # The real shapes the wire carries: the variable phrase's own producer — the same call history.py makes for
+    # an omitted Project origin — fills the row's text with its values and carries the template (what gets
+    # translated) beside them (never translated); an older row's plain string carries neither, and the schema
+    # refuses a notice whose nested template is not a string.
+    said, carried = host_notice.phrase(
+        "origin_omission",
+        "{n} more archived Project start message(s) are not shown here; their full copies are kept.",
+        details="state/project_task_bindings.json (source_text)", n=2)
+    assert said == "2 more archived Project start message(s) are not shown here; their full copies are kept."
+    assert carried["notice"]["values"] == {"n": "2"}
+    assert carried["notice"]["template"] == ("{n} more archived Project start message(s) are not shown here; "
+                                              "their full copies are kept.")
+    emitted_keys = set(carried["notice"])
+    projected = host_notice.view({"text": said, **carried})
+    projected_keys = set(projected["notice"])
+    # Ingress accepts additional properties; check the actual producer and projection against the declared fields.
+    assert emitted_keys <= set(notice_hints) and "line" not in emitted_keys, emitted_keys
+    assert projected_keys == emitted_keys | {"line"} and projected_keys <= set(notice_hints), projected_keys
+    row = {"text": said, "role": "system", "ts": "2026-11-23T04:00:00Z", "is_progress": False,
+           "system_type": "origin_omission", "task_id": "", **projected}
+    assert not validate_ingress(row, ChatHistoryMessage), validate_ingress(row, ChatHistoryMessage)
+    assert validate_ingress({**row, "notice": {**projected["notice"], "template": 3}}, ChatHistoryMessage), (
+        "typed nested: a non-string template is refused on the nested object"
+    )
+    old = host_notice.notice("task_reaper_wedged", step="restart", details="worker slot 3, deadline")
+    assert not validate_ingress(old, HostNotice) and not {"template", "values"} & set(old), (
+        "an older row's notice, a plain string's, carries neither template nor values and still admits"
+    )
 
 
 def test_contract_exposes_calls_without_diagnostic_probe_frames():

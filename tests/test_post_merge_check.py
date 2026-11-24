@@ -7,6 +7,7 @@ checkout for the modules of its size check.
 """
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 import importlib.util
 import json
 import os
@@ -17,7 +18,9 @@ import urllib.error
 
 import pytest
 
+from scripts import post_merge_bisect as pmb
 from scripts import post_merge_check as pmc
+from scripts.post_merge_bisect import PROTECTED
 
 REPO = Path(__file__).resolve().parents[1]
 HEAD = "f" * 40
@@ -33,6 +36,7 @@ def _results(directory, reports, *, exit_code=None, collection=(), selected=None
     failed = any(row["outcome"] == "failed" for row in reports) or collection
     result = {
         "format": 1, "session_exit_code": (1 if failed else 0) if exit_code is None else exit_code,
+        "tests_collected": len(selected) if selected is not None else sum(row["phase"] == "setup" for row in reports),
         "reports": reports,
         "collection_failures": [{"nodeid": path, "outcome": "failed"} for path in collection],
     }
@@ -41,13 +45,14 @@ def _results(directory, reports, *, exit_code=None, collection=(), selected=None
     if skips is not None:  # the collectors that skipped at collection; a producer older than the field names none
         result["collection_skips"] = list(skips)
     (directory / "results.json").write_text(json.dumps(result), encoding="utf-8")
+    return result["session_exit_code"]
 
 
-def _selection(evidence, *, parallel="success", serial="success", node="success", inventory=None):
+def _selection(evidence, *, parallel="success", serial="success", node="success", node_exit=None, inventory=None):
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "selection.json").write_text(json.dumps({
         "tier": "selected", "file_count": 3, "available": 40, "base": "b" * 40, "node": node,
-        "outcomes": {"parallel": parallel, "serial": serial}, "inventory": inventory or {},
+        "outcomes": {"parallel": parallel, "serial": serial}, "inventory": inventory or {}, "node_exit": node_exit,
     }), encoding="utf-8")
 
 
@@ -275,15 +280,16 @@ def test_container_args_never_name_a_node_the_tree_lacks():
 
 def test_one_retry_separates_failed_from_flaky(tmp_path):
     _selection(tmp_path, parallel="failure", serial="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_flaky", "failed"), _row("tests/t.py::test_broken", "failed"),
-                                     _row("tests/t.py::test_fine")])
-    _results(tmp_path / "serial", [_row("tests/s.py::test_skips_now", "failed", "setup")])
+    flaky, red, skipped = "tests/t.py::test_flaky", "tests/t.py::test_broken", "tests/s.py::test_skips_now"
+    _results(tmp_path / "parallel", [*_whole(flaky, _row(flaky, "failed")), *_whole(red, _row(red, "failed")),
+                                     *_whole("tests/t.py::test_fine")])
+    _results(tmp_path / "serial", [_row(skipped, "failed", "setup"), _row(skipped, phase="teardown")])
     seen = []
 
     def retry(args, directory):
         seen.append((list(args), Path(directory)))
-        _results(directory, [_row("tests/t.py::test_flaky"), _row("tests/t.py::test_broken", "failed"),
-                             _row("tests/s.py::test_skips_now", "skipped", "setup")])
+        return _results(directory, [*_whole(flaky), *_whole(red, _row(red, "failed")),
+                                    _row(skipped, "skipped", "setup"), _row(skipped, phase="teardown")])
 
     provisional = []
     record = pmc.classify(tmp_path, run=retry, node=lambda: pytest.fail("the Node lane was green"),
@@ -451,15 +457,17 @@ def test_a_size_check_that_skipped_or_did_not_finish_measured_nothing(tmp_path):
 
 
 def test_a_red_size_test_is_failed_without_a_retry(tmp_path):
+    red = "tests/t.py::test_red"
+    reports = _whole(red, _row(red, "failed"))
     _selection(tmp_path, parallel="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_red", "failed")])
+    _results(tmp_path / "parallel", reports)
     _results(tmp_path / "serial", [])
     _results(tmp_path / "size", [_row(SIZED.removeprefix("size "), "failed"), _row("tests/test_smoke.py::test_ok")])
     retried = []
 
     def retry(args, directory):
         retried.append(list(args))
-        _results(directory, [_row("tests/t.py::test_red", "failed")])
+        return _results(directory, reports)
 
     record = pmc.classify(tmp_path, run=retry, node=lambda: 0, size=lambda: pmc.read_session(tmp_path / "size"))
     assert retried == [["tests/t.py::test_red"]]  # the size test is deterministic: never in the retry
@@ -499,32 +507,59 @@ def test_classify_runs_the_gates_its_leg_names_and_measures_books_by_the_decided
         pmc.main(["classify", "--evidence-dir", str(tmp_path), "--size"])
 
 
-def test_a_red_node_lane_is_retried_as_one_target(tmp_path):
-    for code, verdict in ((0, "flaky"), (1, "failed")):
-        evidence = tmp_path / str(code)
-        _selection(evidence, node="failure")
-        _results(evidence / "parallel", [_row("tests/t.py::test_ok")])
-        _results(evidence / "serial", [])
-        record = pmc.classify(evidence, run=lambda *a: pytest.fail("no pytest red to retry"), node=lambda: code)
-        assert [row["id"] for row in record[verdict]] == [pmc.NODE_LANE]
+@pytest.mark.parametrize("first_exit, code, retry", [(1, 0, "passed"), (1, 1, "failed"), (1, 2, "unknown"),
+                                                     (1, 127, "unknown"), (2, 1, "first confirmed on retry"),
+                                                     (2, 0, "passed")])
+def test_a_red_node_lane_is_retried_as_one_target(tmp_path, first_exit, code, retry):
+    _selection(tmp_path, node="failure", node_exit=first_exit)
+    _results(tmp_path / "parallel", _whole("tests/t.py::test_ok"))
+    _results(tmp_path / "serial", [])
+    record = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no pytest red to retry"), node=lambda: code)
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path)
+    if first_exit == 2 and retry == "passed":
+        assert not record["flaky"] and not record["failed"]
+        assert red and "exit 2" in text and "retry passed" in text
+    else:
+        [row] = record["flaky" if retry == "passed" else "failed"]
+        assert (row["id"], row["retry"]) == (pmc.NODE_LANE, retry)
+        assert red == (retry != "passed")
 
 
-def test_a_retry_pytest_refuses_runs_the_nodes_the_tree_defines(tmp_path):
+@pytest.mark.parametrize("code, receipt, expected", [
+    (0, '{"exit":0}', 0), (1, '{"exit":1}', 1), (1, None, 2), (0, None, 2),
+    (1, '{"exit":', 2), (1, '{"exit":0}', 2), (2, None, 2), (127, None, 127),
+])
+def test_node_retry_and_historical_probe_read_matching_terminal_result(tmp_path, monkeypatch, code, receipt, expected):
+    def invoke(command, *, cwd):
+        assert command[1:4] == [str(tmp_path / "scripts" / "run_tests.py"), "--node", "--evidence-dir"]
+        assert cwd == str(tmp_path)
+        output = Path(command[-1]) / "node.json"
+        assert not output.exists()
+        if receipt is not None:
+            output.write_text(receipt, encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pmc.subprocess, "call", invoke)
+    assert pmc.run_node_lane(tmp_path) == expected
+
+
+def test_head_retry_still_runs_the_protected_test_after_usage_error(tmp_path):
     _selection(tmp_path, parallel="failure")
-    _results(tmp_path / "parallel", [_row("tests/t.py::test_p[redacted-value]", "failed")])
+    nodeid = f"{PROTECTED}::test_p[redacted-value]"
+    _results(tmp_path / "parallel", _whole(nodeid, _row(nodeid, "failed")))
     _results(tmp_path / "serial", [])
     sessions = []
 
     def run(args, directory):
         sessions.append(list(args))
         if len(sessions) == 1:  # "ERROR: not found": nothing ran
-            _results(directory, [], exit_code=4)
-        else:
-            _results(directory, [_row("tests/t.py::test_p[redacted-value]")])
+            return _results(directory, [], exit_code=4)
+        return _results(directory, _whole(nodeid))
 
-    record = pmc.classify(tmp_path, run=run, node=lambda: 0, read_source={"tests/t.py": "def test_p(v): pass\n"}.get)
-    assert sessions == [["tests/t.py::test_p[redacted-value]"], ["tests/t.py::test_p"]]
-    assert [row["id"] for row in record["flaky"]] == ["tests/t.py::test_p[redacted-value]"]
+    record = pmc.classify(tmp_path, run=run, node=lambda: 0, read_source={PROTECTED: "def test_p(v): pass\n"}.get)
+    assert sessions == [[nodeid], [f"{PROTECTED}::test_p"]]
+    assert [row["id"] for row in record["flaky"]] == [nodeid]
 
 
 def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
@@ -541,11 +576,37 @@ def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
     (tmp_path / "serial").mkdir()
     (tmp_path / "serial" / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": "tests/s.py::test_slow"}),
                                                       encoding="utf-8")
-    record = pmc.classify(tmp_path, run=lambda args, directory: _results(directory, [_row("tests/s.py::test_slow")]),
+    record = pmc.classify(tmp_path, run=lambda args, directory: _results(directory, _whole("tests/s.py::test_slow")),
                           node=lambda: 0)
     assert record["problems"][1] == "the serial pass did not finish"
-    assert [(row["id"], row["why"]) for row in record["flaky"]] == [
-        ("tests/s.py::test_slow", "was running when the session ended")]
+    assert not record["flaky"] and not record["failed"]
+    assert "was running when the session ended" in record["problems"][2]
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["journal-only", "complete"])
+def test_only_a_confirmed_first_test_failure_can_turn_flaky(tmp_path, finished):
+    red, sibling = "tests/t.py::test_first", "tests/s.py::test_sibling"
+    _selection(tmp_path, parallel="failure", serial="failure")
+    first = tmp_path / "parallel"
+    if finished:
+        _results(first, _whole(red, _row(red, "failed")), selected=[red])
+    else:
+        first.mkdir()
+        (first / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": red}), encoding="utf-8")
+    _results(tmp_path / "serial", _whole(sibling, _row(sibling, "failed")), selected=[sibling])
+
+    def retry(ids, directory):
+        assert ids == [sibling, red]
+        return _results(directory, [*_whole(sibling), *_whole(red)], selected=ids)
+
+    record = pmc.classify(tmp_path, run=retry)
+    assert not record["failed"] and not record["not_run"]
+    assert [row["id"] for row in record["flaky"]] == ([sibling, red] if finished else [sibling])
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    summary, is_red = pmc.render_summary(tmp_path)
+    assert is_red == (not finished) and "not handed over" in summary
+    if not finished:
+        assert red in summary and "was running when the session ended" in summary and "retry passed" in summary
 
 
 def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeypatch, capsys):
@@ -558,7 +619,7 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
 
     def retry(ids, directory):
         retried.extend(ids)
-        _results(directory, [_row(red)])
+        return _results(directory, _whole(red))
 
     record = pmc.classify(tmp_path, run=retry, node=lambda: 0)
     assert retried == [red] and not record["failed"]
@@ -566,7 +627,7 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
     (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
     text, is_red = pmc.render_summary(tmp_path)
     assert is_red and "— RED" in text and missing in text
-    assert "passed on their one retry" in text  # the good observation is not discarded
+    assert "retry passed" in text and not record["flaky"]  # the good observation is not discarded or mislabeled
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 1
     assert missing in capsys.readouterr().out
@@ -574,6 +635,42 @@ def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeyp
     record["problems"] = []
     (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
     assert pmc.render_summary(tmp_path)[1]
+
+
+@pytest.mark.parametrize("evidence_kind", ["journal", "torn-json", "missing-teardown", "wrapper-exit", "stale",
+                                           "only-retry-confirmed"])
+def test_missing_terminal_retry_evidence_keeps_the_head_red_without_blame(tmp_path, monkeypatch, evidence_kind):
+    red = "tests/sample.py::test_value"
+    whole_red = _whole(red, _row(red, "failed"))
+    _selection(tmp_path, parallel="failure")
+    _results(tmp_path / "parallel", whole_red if evidence_kind != "only-retry-confirmed" else [], exit_code=1)
+    start = json.dumps({"event": "start", "nodeid": red}) + "\n"
+    if evidence_kind == "only-retry-confirmed":
+        (tmp_path / "parallel" / "events.jsonl").write_text(start, encoding="utf-8")
+    if evidence_kind == "stale":
+        _results(tmp_path / "retry", whole_red)
+
+    def run(ids, directory):
+        assert ids == [red]
+        directory.mkdir(exist_ok=True)
+        if evidence_kind in ("journal", "torn-json"):
+            (directory / "events.jsonl").write_text(start, encoding="utf-8")
+            if evidence_kind == "torn-json":
+                (directory / "results.json").write_text('{"reports":[', encoding="utf-8")
+        elif evidence_kind != "stale":
+            _results(directory, whole_red[:-1] if evidence_kind == "missing-teardown" else whole_red)
+        return 2 if evidence_kind == "wrapper-exit" else 1
+
+    record = pmc.classify(tmp_path, run=run)
+    [failed] = record["failed"]
+    status = "first confirmed on retry" if evidence_kind == "only-retry-confirmed" else "unknown"
+    assert (failed["id"], failed["retry"]) == (red, status) and not record["flaky"]
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda *a: pytest.fail("no comparable repeat"))
+    assert pmc.main(["attribute", "--evidence-dir", str(tmp_path), "--base", "base", "--head", HEAD]) == 0
+    [verdict] = json.loads((tmp_path / "attribution.json").read_text(encoding="utf-8"))["verdicts"]
+    assert verdict == {"id": red, "verdict": "unattributed", "why": f"retry: {status}"}
+    assert pmc.render_summary(tmp_path, system="windows")[1]
 
 
 @pytest.mark.parametrize("cost_outcome,session,expected_red", [
@@ -684,7 +781,9 @@ def test_a_missing_report_does_not_establish_removal_and_a_skip_does_not_establi
     ids = ["tests/t.py", "tests/t.py::test_deselected", "tests/gone.py::test_removed"]
     def run(args, directory):
         assert args == ["tests/t.py"]
-        _results(directory, [_row("tests/t.py::test_ok"), _row("tests/t.py::test_skip", "skipped", "setup")])
+        skipped = "tests/t.py::test_skip"
+        return _results(directory, [*_whole("tests/t.py::test_ok"), _row(skipped, "skipped", "setup"),
+                                    _row(skipped, phase="teardown")])
     found = pmc.check_ids(ids, tmp_path, read_source={"tests/t.py": "def test_deselected(): pass\n"}.get, run=run)
     assert found == dict(zip(ids, ["skipped", "unknown", "absent"]))
 
@@ -965,11 +1064,17 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
     _git(repo, "init", "-q", "-b", "ouroboros")
     _git(repo, "config", "user.email", "t@example.invalid")
     _git(repo, "config", "user.name", "t")
+    marker = "OMIT.txt"  # plain text, not an executable test
+    monkeypatch.setattr(pmb, "PROTECTED", marker)
+    monkeypatch.setattr(pmc, "PROTECTED", marker)
     shas = []
     for value in ("1", "1", "2", "2"):  # the third commit changes the value the test checks
         (repo / "tests").mkdir(exist_ok=True)
-        (repo / "tests" / "test_v.py").write_text("def test_value(): pass\n", encoding="utf-8")
+        (repo / "tests" / "test_v.py").write_text(
+            "import pytest\n\ndef test_value(): pass\n\n@pytest.mark.size_ratchet\ndef test_size(): pass\n",
+            encoding="utf-8")
         (repo / "VALUE").write_text(value + str(len(shas)), encoding="utf-8")
+        (repo / marker).write_text("current\n" if len(shas) == 3 else "older\n", encoding="utf-8")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", f"commit {len(shas)}")
         shas.append(_git(repo, "rev-parse", "HEAD"))
@@ -978,20 +1083,24 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
     evidence.mkdir()
     sized = "size tests/test_v.py::test_size"
     (evidence / "classification.json").write_text(json.dumps(
-        {"failed": [{"id": "tests/test_v.py::test_value"}, {"id": pmc.NODE_LANE}, {"id": sized}],
+        {"failed": [{"id": n, "retry": "failed"} for n in ("tests/test_v.py::test_value", pmc.NODE_LANE, sized)],
          "size": {"base": shas[0], "mode": "approved"}}), encoding="utf-8")
     probed, measured = [], []
 
     def run(args, directory, *, cwd):
+        assert args == ["tests/test_v.py::test_value"]
+        assert not (Path(cwd) / marker).exists()
         probed.append(Path(cwd))
         red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
-        _results(directory, [_row("tests/test_v.py::test_value", "failed" if red else "passed")])
+        return _results(directory, _whole(args[0], _row(args[0], "failed" if red else "passed")))
 
-    def size_session(directory, *, base, mode, cwd):  # each probe runs its own tree's size lane
+    def size_session(directory, *, base, mode, cwd, modules=None):  # each probe runs its own tree's size lane
+        assert modules == ["tests/test_v.py"]
         measured.append((base, mode, Path(cwd)))
         red = (Path(cwd) / "VALUE").read_text(encoding="utf-8").startswith("2")
-        _results(directory, [_row("tests/test_v.py::test_size", "failed" if red else "passed")])
-        return pmc.read_session(directory)
+        nodeid = "tests/test_v.py::test_size"
+        code = _results(directory, _whole(nodeid, _row(nodeid, "failed" if red else "passed")))
+        return {**pmc.read_session(directory), "runner_exit": code}
 
     monkeypatch.setattr(pmc, "run_pytest", run)
     monkeypatch.setattr(pmc, "size_session", size_session)
@@ -1008,27 +1117,499 @@ def test_attribute_probes_detached_worktrees_of_the_commits_and_removes_them(tmp
     assert measured == [(shas[0], "approved", path) for path in probed]
     assert record["commits"] == shas[1:] and not any(path.exists() for path in probed)
     assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
+    assert (repo / marker).read_text(encoding="utf-8") == "current\n"
     assert record["notes"] == [] and not any(probe["dependencies_differ"] for probe in record["probes"])
 
 
-def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, monkeypatch):
-    monkeypatch.setattr(pmc, "_git", lambda *args, **kwargs: "")  # no worktree: the tree is the fake's
+def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, monkeypatch, no_process):
+    path = "tests/test_sized.py"
+    monkeypatch.setattr(pmc, "_git", _git_reader({}, size_modules={"a" * 40: [path]}))
     monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
-    ids = [f"size tests/s.py::test_{name}" for name in ("red", "green", "new", "skip")]
+    ids = [f"size {path}::test_{name}" for name in ("red", "green", "new", "skip")]
 
-    def size(tree, directory):
-        _results(directory, [_row("tests/s.py::test_red", "failed"), _row("tests/s.py::test_green"),
-                             _row("tests/s.py::test_skip", "skipped", "setup")])
-        return pmc.read_session(directory)
+    def size(tree, directory, modules):
+        assert modules == [path]
+        red, green, _, skip = [node.removeprefix("size ") for node in ids]
+        code = _results(directory, [*_whole(red, _row(red, "failed")), *_whole(green),
+                                    _row(skip, "skipped", "setup"), _row(skip, phase="teardown")])
+        return {**pmc.read_session(directory), "runner_exit": code}
 
     prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=size,
                         run=lambda *a, **k: pytest.fail("a size test is not rerun as a plain test"))
-    assert prober("a" * 40, ids) == {"size tests/s.py::test_red": "fail", "size tests/s.py::test_green": "pass",
-                                     "size tests/s.py::test_new": "error",  # no report is not proof of removal
-                                     "size tests/s.py::test_skip": "error"}  # it measured nothing there
-    for unfinished in (lambda tree, directory: None, None):  # no size session there; a Prober without one
+    assert prober("a" * 40, ids) == dict(zip(ids, ("fail", "pass", "error", "error")))  # unreported or skipped is unknown
+    for unfinished in (lambda tree, directory, modules: None, None):  # no size session there; a Prober without one
         prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=unfinished)
         assert prober("a" * 40, ids[:1]) == {ids[0]: "error"}
+
+
+# --- the protected path a historical probe may answer -----------------------------------------
+
+def _git_reader(trees, *, importers=None, size_modules=None, unreadable=None, calls=None, sources=None):
+    """A Git that answers only the reads a probe makes, in the shape the real Git answers them.
+
+    A tree search names its files `REV:path`, NUL-separated under `-z`; a search of the checkout
+    names plain relative paths. `ls-tree --name-only` names the file a tree holds, `ls-tree` names
+    its blob, and `show` returns the file's source. Every other read answers as an empty result,
+    and `calls` records what was asked.
+    """
+    def git(*args, cwd=None, strip=True):
+        if calls is not None:
+            calls.append((args, cwd))
+        if args[:1] == ("ls-tree",):
+            named = "--name-only" in args
+            sha, path = (args[2] if named else args[1]), args[-1]
+            if path == PROTECTED and unreadable == "timeout":
+                raise subprocess.TimeoutExpired(args, 300)
+            if path == PROTECTED and unreadable == "entry":
+                raise subprocess.CalledProcessError(128, args)
+            oid = trees.get(sha, {}).get(path)
+            if named:
+                return path if oid else ""
+            return f"100644 blob {oid}\t{path}" if oid else ""
+        if args[:1] == ("show",):
+            path = args[1].partition(":")[2]
+            assert path != PROTECTED, "the protected source must not be read"
+            return (sources or {})[path]
+        if args[:1] == ("grep",):
+            index = args.index("--")
+            rev = "" if args[index - 2] == "-e" else args[index - 1]
+            if "-F" in args:  # the importer search: the module's name and the questioned revision
+                scope = args[index + 1:]
+                if unreadable == "grep" and ("tests" in scope or ":(glob)tests/**/*.py" in scope):
+                    raise subprocess.CalledProcessError(128, args)
+                candidates = {path for i, arg in enumerate(args) if arg == "-e"
+                              for path in (importers or {}).get((rev, args[i + 1]), ())}
+                names = sorted(path for path in candidates if path in scope or path.startswith("tests/") and (
+                    "tests" in scope or any(spec.startswith(":(glob)tests/**/")
+                                            and fnmatchcase(path.rsplit("/", 1)[-1], spec.rsplit("/", 1)[-1])
+                                            for spec in scope)))
+            else:
+                names = (size_modules or {}).get(rev, ())
+            return "".join(f"{rev}:{name}\0" if rev else f"{name}\0" for name in names)
+        return ""
+    return git
+
+
+@pytest.fixture
+def no_process(monkeypatch):
+    """A process this test did not plan for fails before it starts."""
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"unexpected process: {args}")
+    for name in ("run", "call", "check_output", "Popen"):
+        monkeypatch.setattr(pmc.subprocess, name, refuse)
+
+
+def _tree_prober(tmp_path, monkeypatch, trees, *, ids=(), importers=None, size_modules=None, measured=None,
+                 outcome="failed", unreadable=None, calls=None, sources=None, ran=None, runner_exit=None):
+    """A Prober over fake trees: its runner reports only selected IDs, its size lane records the lane it was
+    asked to measure, and nothing it does reaches a process."""
+    suite = [nodeid for nodeid in ids if nodeid != pmc.NODE_LANE and not nodeid.startswith((pmc.LINT_PREFIX, pmc.SIZE_PREFIX))]
+    fixtures = dict(sources or {})
+    for nodeid in suite:
+        path, _, test = nodeid.partition("::")
+        if test and path != PROTECTED:
+            fixtures[path] = fixtures.get(path, "") + f"\ndef {test}(): pass\n"
+    monkeypatch.setattr(pmc, "_git", _git_reader(trees, importers=importers, size_modules=size_modules,
+                                                 unreadable=unreadable, calls=calls, sources=fixtures))
+    monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
+
+    def run(args, directory, cwd=None):
+        allowed = set(suite) | {nodeid.split("::", 1)[0] for nodeid in suite}
+        assert args and set(args) <= allowed and all(arg.split("::", 1)[0] != PROTECTED for arg in args)
+        if ran is not None:
+            ran.append(list(args))
+        selected = [nodeid for nodeid in suite if nodeid in args or nodeid.split("::", 1)[0] in args]
+        code = _results(directory, [row for nodeid in selected for row in _whole(nodeid, _row(nodeid, outcome))])
+        return code if runner_exit is None else runner_exit
+
+    def size(tree, directory, modules):
+        if measured is not None:
+            measured.append(list(modules))
+        return None
+
+    return pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, run=run, size=size, node=lambda tree: 0)
+
+
+def test_a_probe_answers_where_the_protected_file_is_the_head_s_own(tmp_path, monkeypatch, no_process):
+    """The protected file is the head's own at this revision: every id keeps the previous route, even
+    the one whose own file differs there."""
+    importer = "tests/test_importer.py::test_red"
+    trees = {HEAD: {PROTECTED: "a" * 40, "tests/test_importer.py": "b" * 40},
+             "r" * 40: {PROTECTED: "a" * 40, "tests/test_importer.py": "c" * 40}}
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[importer])
+    assert prober("r" * 40, [importer]) == {importer: "fail"}
+
+
+def test_inventory_mentions_do_not_block_independent_pytest_and_size(tmp_path, monkeypatch, no_process):
+    """Two imports belong to the family; data mentions in both searches do not."""
+    revision = "r" * 40
+    paths = [f"tests/test_{name}.py" for name in ("importer", "peer", "inventory", "neighbour")]
+    ids = [f"{path}::test_red" for path in paths]
+    module = "tests/test_sized.py"
+    size_id = f"{module}::test_measure"
+    inventory = "tests/protected_tests.json"
+    trees = {HEAD: {**dict.fromkeys(paths, "b" * 40), PROTECTED: "a" * 40},
+             revision: {**dict.fromkeys(paths, "b" * 40), PROTECTED: "z" * 40}}
+    ran, measured = [], []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=ids, ran=ran,
+                         importers={(revision, "test_repo_health_smoke"): [*paths[:3], inventory],
+                                    (revision, "test_importer"): [inventory, "tests/fixtures/notes.md"]},
+                         size_modules={revision: [PROTECTED, *paths[:2], module]}, sources={
+                             paths[0]: "from tests.test_repo_health_smoke import value\n",
+                             paths[1]: "from . import test_repo_health_smoke as fixture\n",
+                             paths[2]: f"INVENTORY = ({PROTECTED!r},)\n",
+                         })
+
+    def size_run(args, directory, *, cwd, env):
+        measured.append(args)
+        return _results(directory, _whole(size_id))
+
+    prober.size = lambda tree, directory, modules: pmc.size_session(
+        directory, base=revision, cwd=tree, modules=modules, run=size_run)
+    answers = prober(revision, [*ids, f"size {size_id}"])
+    assert ran == [ids[2:]] and all(answers[nodeid] == "fail" for nodeid in ids[2:])
+    assert measured == [["-m", "size_ratchet", module]] and answers[f"size {size_id}"] == "pass"
+    for nodeid, path in zip(ids[:2], paths):
+        assert answers[nodeid][0] == "error" and PROTECTED in answers[nodeid][1] and path in answers[nodeid][1]
+
+
+def test_an_excluded_id_is_unattributed_with_the_probe_that_could_not_answer_it(tmp_path, monkeypatch, no_process):
+    importer = "tests/test_importer.py::test_red"
+    path = importer.split("::", 1)[0]
+    trees = {HEAD: {PROTECTED: "a" * 40}, "b" * 40: {PROTECTED: "a" * 40, path: "c" * 40},
+             "m" * 40: {PROTECTED: "z" * 40, path: "c" * 40}}
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[importer], outcome="passed",
+                         importers={("m" * 40, "test_repo_health_smoke"): [path]},
+                         sources={path: "import tests.test_repo_health_smoke\n"})
+    [verdict] = pmc.bisect(["b" * 40, "m" * 40, HEAD], [importer], prober)
+    assert verdict["verdict"] == "unattributed"
+    assert importer in verdict["why"] and "m" * 12 in verdict["why"] and PROTECTED in verdict["why"]
+
+
+@pytest.mark.parametrize("hook", ["conftest.py", "tests/conftest.py", "tests/helper.py", "plugin", "computed plugin",
+                                  "pyproject.toml", "tests/nested/pytest.ini"])
+def test_a_shared_dependency_withholds_only_python_answers(tmp_path, monkeypatch, no_process, hook):
+    neighbour = ("tests/nested/" if hook.startswith("tests/nested/") else "tests/") + "test_neighbour.py::test_red"
+    sized = f"size {neighbour}"
+    lint = "ruff F401 tests/gone.py name.py"  # even with a .py suffix this is a lint ID
+    trees = {HEAD: {PROTECTED: "a" * 40}, "r" * 40: {PROTECTED: "z" * 40}}
+    if hook.endswith("plugin"):
+        declaration = ('pytest_plugins = ["tests.test_importer"]\n' if hook == "plugin" else
+                       'PLUGIN = "tests.test_importer"\npytest_plugins = [PLUGIN]\n')
+        carrier, hook = "tests/test_importer.py", "tests/conftest.py"
+        importers = {("r" * 40, "test_repo_health_smoke"): [carrier], ("r" * 40, "test_importer"): [hook]}
+        sources = {carrier: "from . import test_repo_health_smoke\n", hook: declaration}
+    else:
+        importers = {("r" * 40, "test_repo_health_smoke"): [hook]}
+        sources = {hook: "from tests import test_repo_health_smoke\n"} if hook.endswith(".py") else {}
+    ran, measured = [], []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[neighbour], importers=importers, sources=sources,
+                         ran=ran, measured=measured, size_modules={"r" * 40: [neighbour.split("::", 1)[0]]})
+    answers = prober("r" * 40, [neighbour, sized, lint, pmc.NODE_LANE])
+    assert answers[neighbour] == answers[sized] and answers[neighbour][0] == "error"
+    assert hook in answers[neighbour][1] and not (ran or measured)
+    assert answers[lint] == answers[pmc.NODE_LANE] == "pass"
+
+
+@pytest.mark.parametrize("fault", ["entry", "timeout", "grep"])
+def test_a_git_read_gap_withholds_only_python_answers(tmp_path, monkeypatch, no_process, fault):
+    neighbour = "tests/test_neighbour.py::test_red"
+    lint = "ruff F401 tests/gone.py name.py"
+    trees = {HEAD: {PROTECTED: "a" * 40}, "r" * 40: {PROTECTED: "z" * 40}}
+    calls, ran = [], []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[neighbour], unreadable=fault, calls=calls, ran=ran)
+    assert prober("r" * 40, [lint, pmc.NODE_LANE]) == {lint: "pass", pmc.NODE_LANE: "pass"}
+    assert any(args[0] == "ls-tree" for args, _ in calls)  # all lanes share the path-omission decision
+    assert not any(args[0] == "show" or ":(glob)tests/**/*.py" in args for args, _ in calls)
+    verdicts = {row["id"]: row for row in pmc.bisect(["r" * 40, HEAD], [neighbour, lint, pmc.NODE_LANE], prober)}
+    assert verdicts[neighbour]["verdict"] == "unattributed" and PROTECTED in verdicts[neighbour]["why"] and not ran
+    assert verdicts[lint]["verdict"] == verdicts[pmc.NODE_LANE]["verdict"] == "culprit"
+
+
+@pytest.mark.parametrize("launcher", ["scripts/run_tests.py", "scripts/safe_test.py"])
+def test_a_node_launcher_that_loads_the_family_does_not_run(tmp_path, monkeypatch, no_process, launcher):
+    revision = "r" * 40
+    lint = "ruff F401 tests/gone.py name"
+    trees = {HEAD: {PROTECTED: "a" * 40}, revision: {PROTECTED: "z" * 40}}
+    calls = []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, calls=calls,
+                          importers={(revision, "test_repo_health_smoke"): [launcher]},
+                          sources={launcher: "from tests import test_repo_health_smoke\n"})
+    prober.node = lambda tree: pytest.fail("a dependent launcher must not run")
+    answers = prober(revision, [pmc.NODE_LANE])
+    assert answers[pmc.NODE_LANE][0] == "error" and launcher in answers[pmc.NODE_LANE][1]
+    assert not any(args[0] == "worktree" for args, _ in calls)
+    assert prober(revision, [pmc.NODE_LANE, lint]) == {**answers, lint: "pass"}
+
+
+@pytest.mark.parametrize("unreadable", [None, "entry"], ids=["changed", "unreadable"])
+def test_protected_lint_does_not_depend_on_neighbouring_probe_ids(tmp_path, monkeypatch, no_process, unreadable):
+    revision = "r" * 40
+    lint = f"ruff F401 {PROTECTED} name"
+    path = "tests/test_neighbour.py"
+    test = f"{path}::test_green"
+    entries = {HEAD: {PROTECTED: "a" * 40}, revision: {PROTECTED: "z" * 40, path: "b" * 40}}
+    calls = []
+    prober = _tree_prober(tmp_path, monkeypatch, entries, ids=[test], unreadable=unreadable, calls=calls)
+    prober.lint = lambda *args: pytest.fail("the protected file must not be linted")
+    assert prober(revision, [lint]) == {lint: "error"}
+    assert prober(revision, [lint, test])[lint] == "error"
+    assert all("--no-checkout" in args for args, _ in calls if args[:2] == ("worktree", "add"))
+
+
+def test_an_unparseable_test_candidate_does_not_erase_its_neighbour(tmp_path, monkeypatch, no_process):
+    broken, plain = "tests/test_broken.py", "tests/test_plain.py"
+    neighbour = f"{plain}::test_red"
+    trees = {HEAD: {PROTECTED: "a" * 40}, "r" * 40: {PROTECTED: "z" * 40, plain: "c" * 40}}
+    ran = []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[neighbour], ran=ran,
+                         importers={("r" * 40, "test_repo_health_smoke"): [broken]},
+                         sources={broken: "from .test_repo_health_smoke import (\n"})
+    answers = prober("r" * 40, [broken, neighbour])
+    assert answers[broken][0] == "error" and "could not be read" in answers[broken][1]
+    assert answers[neighbour] == "fail" and ran == [[neighbour]]
+
+
+@pytest.mark.parametrize("outcome,pytest_exit,runner_exit,stale,expected", [
+    pytest.param("passed", 0, 0, False, "pass", id="fresh-pass"),
+    pytest.param("failed", 1, 1, False, "fail", id="fresh-red"),
+    pytest.param("passed", 1, 1, False, "error", id="red-exit-no-red-row"),
+    pytest.param("failed", 0, 0, False, "error", id="green-exit-red-row"),
+    pytest.param("passed", 0, 1, False, "error", id="wrapper-disagrees"),
+    pytest.param("failed", 2, 2, False, "error", id="abnormal-exit"),
+    pytest.param("partial", 0, 0, False, "error", id="no-teardown-for-pass"),
+    pytest.param("passed", 0, 0, True, "error", id="stale-pass"),
+    pytest.param("failed", 1, 1, True, "error", id="stale-red"),
+])
+def test_historical_pytest_and_size_need_a_fresh_consistent_export(
+        tmp_path, monkeypatch, no_process, outcome, pytest_exit, runner_exit, stale, expected):
+    revision = "r" * 40
+    path, module = "tests/test_neighbour.py", "tests/test_sized.py"
+    nodeid, sized = f"{path}::test_case", f"{module}::test_measure"
+    trees = {HEAD: {PROTECTED: "a" * 40}, revision: {PROTECTED: "a" * 40, path: "c" * 40}}
+    ran = []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[nodeid], size_modules={revision: [module]})
+    if stale:  # the same evidence directories a second `attribute` invocation would find
+        prefix = prober.evidence / "probes" / f"01-{revision[:12]}"
+        _results(prefix, [_row(nodeid, outcome)], exit_code=pytest_exit)
+        _results(prefix.with_name(prefix.name + "-size"), [_row(sized, outcome)], exit_code=pytest_exit)
+
+    def run(args, directory, *, cwd, env=None):
+        ran.append(args)
+        if not stale:
+            node = sized if env else nodeid
+            reports = _whole(node, _row(node, outcome)) if outcome != "partial" else _whole(node)[:-1]
+            _results(directory, reports, exit_code=pytest_exit)
+        return runner_exit
+
+    prober.run = run
+    prober.size = lambda tree, directory, modules: pmc.size_session(
+        directory, base=revision, cwd=tree, modules=modules, run=run)
+    ids = [nodeid, f"size {sized}"]
+    assert prober(revision, ids) == dict.fromkeys(ids, expected)
+    assert ran == [["-m", "size_ratchet", module], [nodeid]]
+
+
+def test_the_size_lane_of_a_revision_is_measured_whole_and_leaves_the_family(tmp_path, monkeypatch, no_process):
+    sized = "size tests/test_other.py::test_size"
+    trees = {HEAD: {PROTECTED: "a" * 40}, "r" * 40: {PROTECTED: "z" * 40}}
+    measured = []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[sized], measured=measured,
+                     importers={("r" * 40, "test_repo_health_smoke"): [PROTECTED]},
+                     size_modules={"r" * 40: [PROTECTED, "tests/test_other.py"]})
+    prober("r" * 40, [sized])
+    assert measured == [["tests/test_other.py"]]  # the whole lane of that revision, without the family
+
+
+def test_the_reader_asks_git_about_the_tree_it_questions(tmp_path, monkeypatch, no_process):
+    """The reads name the tree they ask about, and the names Git writes come back relative."""
+    importer = "tests/test_importer.py::test_red"
+    sized = "size tests/test_other.py::test_size"
+    calls = []
+    trees = {HEAD: {PROTECTED: "a" * 40}, "r" * 40: {PROTECTED: "z" * 40}}
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[importer, sized], calls=calls,
+                     importers={("r" * 40, "test_repo_health_smoke"): ["tests/test_importer.py"]},
+                     sources={"tests/test_importer.py": "from tests import test_repo_health_smoke\n"},
+                     size_modules={"r" * 40: ["tests/test_other.py"]})
+    prober("r" * 40, [importer, sized])
+    asked = [args for args, _ in calls if args[0] == "grep"]
+    assert [args[3] for args in asked] == ["-F", "-F", "-E"]
+    assert all(args[args.index("--") - 1] == "r" * 40 and f":(exclude,literal){PROTECTED}" in args for args in asked)
+    assert [args[1] for args, _ in calls if args[0] == "show"] == [f"{'r' * 40}:tests/test_importer.py"]
+
+
+def test_a_changed_protected_file_leaves_its_family_unanswered(tmp_path, monkeypatch, no_process):
+    """The protected file changed there: its own module, the module that imports it and that
+    module's whole-module size id are not answered, and the neighbour is still probed."""
+    importer = "tests/test_importer.py::test_red"
+    importer_module = "size tests/test_importer.py"
+    direct = [f"{PROTECTED}::test_case", f"size {PROTECTED}"]
+    outside = "size tests/test_other.py::test_size"
+    neighbour = "tests/test_neighbour.py::test_red"
+    trees = {HEAD: {PROTECTED: "a" * 40, "tests/test_importer.py": "b" * 40,
+                     "tests/test_neighbour.py": "c" * 40},
+             "r" * 40: {PROTECTED: "z" * 40, "tests/test_importer.py": "b" * 40,
+                         "tests/test_neighbour.py": "c" * 40}}
+    measured = []
+    prober = _tree_prober(tmp_path, monkeypatch, trees, ids=[importer, neighbour, outside], measured=measured,
+                     importers={("r" * 40, "test_repo_health_smoke"): ["tests/test_importer.py"]},
+                     sources={"tests/test_importer.py": "from .test_repo_health_smoke import value\n"},
+                     size_modules={"r" * 40: [PROTECTED, "tests/test_importer.py", "tests/test_other.py"]})
+    answers = prober("r" * 40, [importer, importer_module, *direct, outside, neighbour])
+    assert answers[neighbour] == "fail"  # the neighbour is probed, not absent
+    for nodeid in (importer, importer_module, *direct):
+        assert answers[nodeid][0] == "error"
+    assert PROTECTED in answers[importer][1] and "tests/test_importer.py" in answers[importer][1]
+    assert measured == [["tests/test_other.py"]]  # the lane without the family it may not answer
+    alone = prober("r" * 40, [importer])  # a single id is no answer either
+    assert alone[importer][0] == "error"
+
+
+@pytest.mark.parametrize("case", ["tracked", "absent", "restore-refused", "unexpected-path"])
+def test_a_partial_probe_requires_the_protected_path_to_stay_off_disk(tmp_path, monkeypatch, no_process, case):
+    revision = "r" * 40
+    tree = tmp_path / "work" / f"pmc-01-{revision[:12]}"
+    path, content = "tests/test_neighbour.py", "\ndef test_green(): pass\n"
+    nodeid, linted, protected_lint = f"{path}::test_green", f"ruff F401 {path} name", f"ruff F401 {PROTECTED} name"
+    tracked = case != "absent"
+    entries = {path: "b" * 40, **({PROTECTED: "z" * 40} if tracked else {})}
+    calls, ran, removed, lint_calls, node_calls = [], [], [], [], []
+    prober = _tree_prober(tmp_path, monkeypatch, {HEAD: {PROTECTED: "a" * 40}, revision: entries},
+                          ids=[nodeid], outcome="passed", calls=calls, ran=ran)
+    read, run = pmc._git, prober.run
+
+    def git(*args, cwd=None, strip=True):
+        result = read(*args, cwd=cwd, strip=strip)
+        if args[:2] == ("worktree", "add"):
+            assert args[2:] == ("--detach", "--quiet", "--no-checkout", str(tree), revision)
+            (tree / "tests").mkdir(parents=True)
+        elif args[0] == "read-tree":
+            assert cwd == tree and args[1:] == (revision,)
+        elif args[0] == "restore":
+            assert cwd == tree and args[1:] == (f"--source={revision}", "--worktree", "--", ".",
+                                                f":(exclude,literal){PROTECTED}")
+            if case == "restore-refused":
+                raise subprocess.CalledProcessError(128, args)
+            (tree / path).write_text(content, encoding="utf-8")
+            if case == "unexpected-path":
+                (tree / PROTECTED).mkdir()
+        elif args[0] == "ls-files":
+            assert cwd == tree and args[1:] == ("--", PROTECTED)
+            return PROTECTED if tracked else ""
+        elif args[0] == "update-index":
+            assert cwd == tree and tracked and args[1:] == ("--skip-worktree", "--", PROTECTED)
+        return result
+
+    def run_projected(args, directory, *, cwd):
+        assert cwd == tree and not os.path.lexists(tree / PROTECTED)
+        assert (tree / path).read_text(encoding="utf-8") == content
+        return run(args, directory, cwd=cwd)
+
+    def lint(cwd, paths):
+        lint_calls.append((cwd, paths))
+        return {linted: "unused name"}
+
+    monkeypatch.setattr(pmc, "_git", git)
+    monkeypatch.setattr(pmc, "remove_worktree", removed.append)
+    prober.run, prober.lint = run_projected, lint
+    prober.node = lambda cwd: node_calls.append(cwd) or 0
+    ids = [nodeid, linted, protected_lint, pmc.NODE_LANE]
+    answers = prober(revision, ids)
+    assert removed == [tree]
+    setup = {"worktree", "read-tree", "restore", "ls-files", "update-index"}
+    want = ["worktree", "read-tree", "restore"]
+    if case != "restore-refused":
+        want += ["ls-files", "update-index"] if tracked else ["ls-files"]
+    assert [args[0] for args, _ in calls if args[0] in setup] == want
+    if case in ("restore-refused", "unexpected-path"):
+        assert answers == dict.fromkeys(ids, "error") and not (ran or lint_calls or node_calls)
+    else:
+        assert ran == [[nodeid]] and lint_calls == [(tree, [path])] and node_calls == [tree]
+        assert answers == {nodeid: "pass", linted: "fail", protected_lint: "error" if tracked else "pass",
+                           pmc.NODE_LANE: "pass"}
+
+
+def test_the_reader_names_what_git_names_and_refuses_what_it_cannot_place():
+    """A tree's names carry the tree they were asked for; a foreign tree is no answer at all."""
+    assert pmc.grep_names("abc", "abc:tests/one.py\0abc:tests/two.py\0") == ["tests/one.py", "tests/two.py"]
+    assert pmc.grep_names("", "tests/one.py\0") == ["tests/one.py"]  # the checkout's own names stay
+    assert pmc.grep_names("abc", "") == []  # nothing matched there
+    assert pmc.grep_names("abc", "def:tests/one.py\0") is None  # a name of another tree
+
+
+def test_size_session_measures_the_modules_it_is_given_and_none_when_the_list_is_empty(tmp_path):
+    seen = []
+
+    def run(args, directory, *, cwd, env):
+        seen.append(list(args))
+        _results(directory, [])
+        return 0
+
+    session = pmc.size_session(tmp_path / "size", base="b" * 40, cwd=tmp_path, run=run,
+                               modules=["tests/test_a.py"])
+    assert session["final"] and seen == [["-m", "size_ratchet", "tests/test_a.py"]]
+    assert pmc.size_session(tmp_path / "empty", base="b" * 40, cwd=tmp_path, run=run, modules=[]) is None
+    assert len(seen) == 1  # an empty lane measures nothing
+
+
+def test_attribute_requires_a_confirmed_head_failure_without_changing_red(tmp_path, monkeypatch, no_process):
+    base, middle = "a" * 40, "b" * 40
+    path = "tests/test_neighbour.py"
+    red, unconfirmed = f"{path}::test_red", f"{PROTECTED}::test_skip"
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    (evidence / "classification.json").write_text(json.dumps({"complete": True, "failed": [
+        {"id": red, "pass": "parallel", "why": "failed in call", "retry": "failed"},
+        {"id": unconfirmed, "pass": "serial", "why": "failed in call", "retry": "skipped"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr(pmc, "first_parent_chain", lambda *args: [base, middle, HEAD])
+    trees = {sha: {PROTECTED: "c" * 40, path: "d" * 40} for sha in (base, middle, HEAD)}
+    calls = []
+    git = _git_reader(trees, calls=calls, sources={path: "def test_red(): pass\n"})
+
+    def run(args, directory, *, cwd):
+        assert args == [red]
+        outcome = "failed" if cwd.name.endswith(middle[:12]) else "passed"
+        return _results(directory, _whole(red, _row(red, outcome)))
+
+    monkeypatch.setattr(pmc, "_git", git)
+    monkeypatch.setattr(pmc, "run_pytest", run)
+    monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
+    assert pmc.main(["attribute", "--evidence-dir", str(evidence), "--base", base,
+                     "--head", HEAD, "--work-dir", str(tmp_path)]) == 0
+    attrib = json.loads((evidence / "attribution.json").read_text(encoding="utf-8"))
+    assert attrib["verdicts"] == [{"id": unconfirmed, "verdict": "unattributed", "why": "retry: skipped"},
+                                  {"id": red, "verdict": "culprit", "culprit": middle, "last_good": base}]
+    assert all(row["ids"] == [red] for row in attrib["probes"])
+    text, remains_red = pmc.render_summary(evidence, system="windows")
+    assert remains_red and "— RED" in text and "unattributed: 1" in text
+
+
+def test_historical_source_read_failure_and_unbound_journal_prove_no_blame(tmp_path, no_process):
+    red, unreadable, absent = (f"tests/test_{name}.py::test_red" for name in ("okay", "unknown", "gone"))
+
+    def source(path):
+        if path == unreadable.split("::")[0]:
+            raise subprocess.CalledProcessError(128, ["git"])
+        return "def test_red(): pass\n" if path == red.split("::")[0] else None
+
+    def run(args, directory):
+        assert args == [red]
+        return _results(directory, _whole(red, _row(red, "failed")))
+
+    ids = [red, unreadable, absent]
+    assert pmc.check_ids(ids, tmp_path, read_source=source, run=run, historical=True) == {
+        red: "failed", unreadable: "unknown", absent: "absent"}
+    (tmp_path / "events.jsonl").write_text(json.dumps({"nodeid": red, "event": "start"}) + "\n", encoding="utf-8")
+
+    def other_run(args, directory):
+        receipt = directory / "new"
+        code = _results(receipt, [_row("tests/test_other.py::test_bad", "failed")])
+        (receipt / "results.json").replace(directory / "results.json")
+        return code
+
+    assert pmc.check_ids(ids, tmp_path, read_source=source, run=other_run, historical=True) == {
+        red: "unknown", unreadable: "unknown", absent: "absent"}
 
 
 # --- summary ---------------------------------------------------------------------------------

@@ -5,6 +5,7 @@ reviewer's brief of a body subject; never a threshold, a warning or a block
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -317,7 +318,8 @@ def test_a_changed_python_source_adds_its_code_shape_and_an_unparsed_one_is_unkn
 def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns_from_no_handle(
         tmp_path, monkeypatch):
     """A side Git does not give, on a delete-only or mode-only edit, is unknown, not removals; a module
-    the change deletes is no module its handles return; a source too deep to parse is unknown too."""
+    the change deletes is no module its handles return; an ordinary source parses to known counts while
+    MemoryError or RecursionError from ast.parse leaves both suite and shape unknown."""
     from ouroboros import review
 
     repo = _body(tmp_path / "body")
@@ -342,13 +344,34 @@ def test_an_unread_side_is_unknown_never_a_deletion_and_a_deleted_module_returns
     _git(repo, "add", "-A")
     assert "Code shape: module handles +0/-1, calls through them +0/-1, re-exported names +0/-0." in diff_pulse(
         repo, staged=True)
-    _write(repo, "tests/test_deep.py", 1, "x = " + " + ".join(["1"] * 20_000) + "\n")
-    _write(repo, "ouroboros/deep.py", 1, "X = " + "-" * 200_000 + "1\n")
-    pulse = diff_pulse(repo, ["tests/test_deep.py", "ouroboros/deep.py"])
-    assert "items +0/-0 (1 unreadable)" in pulse
-    assert ("Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
-            "ouroboros/deep.py); tests: patched product-module names, git init call sites unknown (1 unreadable: "
-            "tests/test_deep.py).") in pulse
+
+    test_src, product_src = "def test_ok():\n    pass\n", "X = 1\n"
+    _write(repo, "tests/test_sample.py", 1, test_src)
+    _write(repo, "ouroboros/sample.py", 1, product_src)
+    known_fact, known_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +1/-0," in known_fact and "unreadable" not in known_fact
+    assert known_shape == (
+        "Code shape: module handles +0/-0, calls through them +0/-0, re-exported names +0/-0; "
+        "tests: patched product-module names +0/-0, git init call sites +0/-0.")
+
+    real_parse = ast.parse
+
+    def fail_parse(*args, **kwargs):
+        source = args[0] if args else kwargs.get("source")
+        if source == product_src:
+            raise MemoryError("simulated parse memory limit")
+        if source == test_src:
+            raise RecursionError("simulated parse recursion limit")
+        return real_parse(*args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ast, "parse", fail_parse)
+        unknown_fact, unknown_shape, _ = diff_pulse(repo, ["tests/test_sample.py", "ouroboros/sample.py"]).split("\n")
+    assert "tests: items +0/-0 (1 unreadable)," in unknown_fact
+    assert unknown_shape == (
+        "Code shape: module handles, calls through them, re-exported names unknown (1 unreadable: "
+        "ouroboros/sample.py); tests: patched product-module names, git init call sites unknown (1 unreadable: "
+        "tests/test_sample.py).")
 
 
 def test_the_suite_reads_the_same_side_presence_as_the_shape_line(tmp_path, monkeypatch):

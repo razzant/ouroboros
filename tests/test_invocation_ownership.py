@@ -747,21 +747,38 @@ def nested_start(gate, events, label="nested"):
     asyncio.run(start())
 
 
-def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, before_start, reader=None):
-    """``tool`` runs with a 0.05 s soft wait inside the caller's own execution bound ``deadline``. Past that wait its
-    body calls ``before_start`` and makes one nested start. The task's owner is held until the body ended, as a live
-    task's owner outlives a tool it stopped waiting for. ``reader`` is bound around the call alone, as a live call's
-    batch binds its End; an abandoned worker keeps it after the call came back. Returns what the body saw and what
-    reached the caller."""
-    from ouroboros import model_wait
+def nested_start_after_soft_wait(registry, monkeypatch, tool, gate, *, control, clock, deadline, before_start,
+                                 reader=None):
+    """Spend the soft wait on a test clock only after handler entry, then make one nested start. For a read the
+    caller leaves first; a foreground edit must join. Keep the task owner live for the tail, but bind the End
+    reader only around the call, as a live call's batch does."""
+    from ouroboros import loop_tool_execution, model_wait
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
     events, body_bounds, refusals, outcome = [], [], [], {}
-    done = threading.Event()
+    entered, proceed, done = (threading.Event() for _ in range(3))
+
+    def monotonic_now(_slot=None):
+        return clock[0]
+
+    def timeout_after_entry(future, timeout):
+        assert entered.wait(5), "the handler did not enter before the simulated soft wait"
+        clock[0] += timeout
+        try:
+            return future.result(timeout=0)  # The handler is parked, so this reports a real Future timeout.
+        finally:
+            if tool == "edit_text":
+                proceed.set()  # The loop joins a foreground mutator rather than returning a timeout.
+
+    monkeypatch.setattr(model_wait, "monotonic_now", monotonic_now)
+    monkeypatch.setattr(loop_tool_execution, "monotonic_now", monotonic_now)
+    monkeypatch.setattr(loop_tool_execution, "future_result", timeout_after_entry)
 
     def body(*_a, _resolved_binding=None, **_kw):
         try:
-            time.sleep(.15)  # past the soft wait: the loop joins a foreground mutator and abandons a read
+            entered.set()
+            assert proceed.wait(5), "the test did not release the handler after the soft wait"
             body_bounds.append(model_wait.dispatch_deadline_remaining_sec())
+            assert clock[0] < deadline, "the caller's bound is still open after the soft wait"
             before_start()
             try:
                 nested_start(gate, events)
@@ -774,14 +791,24 @@ def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, bef
             done.set()
     registry.override_handler(tool, body)
     with owner(registry, control=control):
-        with model_wait.execution_deadline_scope(deadline), (
-                owner_pause.call_end_reader(registry._ctx, reader) if reader is not None else nullcontext()):
-            try:
-                outcome["is_error"] = run(registry, timeout=.05, name=tool, args=SOFT_WAIT_ARGS[tool])["is_error"]
-            except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
-                outcome["raised"] = type(refused).__name__
-        assert done.wait(5)
-        assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=5)["drained"]
+        try:
+            with model_wait.execution_deadline_scope(deadline), (
+                    owner_pause.call_end_reader(registry._ctx, reader) if reader is not None else nullcontext()):
+                try:
+                    result = run(registry, timeout=.05, name=tool, args=SOFT_WAIT_ARGS[tool])
+                    outcome["is_error"] = result["is_error"]
+                    if tool == "knowledge_read":
+                        assert result["tool_result"].code == "TOOL_TIMEOUT" and not done.is_set()
+                except (PhysicalDispatchInterrupted, owner_pause.OwnerPauseRefused) as refused:
+                    if tool == "knowledge_read":
+                        # A read's caller must return TOOL_TIMEOUT; a caller-side control refusal is a defect.
+                        # Re-raise so the parked body's own expected refusal cannot mask the wrong caller outcome.
+                        raise
+                    outcome["raised"] = type(refused).__name__
+        finally:
+            proceed.set()
+            assert budget_pause.drain_local_tool_futures(registry._ctx, timeout_sec=5)["drained"]
+        assert done.is_set(), outcome
     return events, body_bounds, refusals, outcome
 
 
@@ -798,15 +825,15 @@ def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, m
     start whose gate reads the bounds the invocation inherited, as nested starts did before that gate existed: it
     begins while they allow, and the caller's own expired deadline, the call's End, a Stop or a Pause refuse it,
     saying the invocation had begun. The body keeps its spent envelope, so its own model sends still stop."""
-    from ouroboros import cancel_intents, model_wait
+    from ouroboros import cancel_intents
     registry, _, _ = _registry(tmp_path, monkeypatch)
     controls, ended = [None], [None]
-    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+    clock = [0.0]
+    deadline = .4 if control == "caller_deadline" else 30
 
     def before_start():
         if control == "caller_deadline":
-            while model_wait.monotonic_now() <= deadline:
-                time.sleep(.01)
+            clock[0] = deadline + 1
         elif control == "end":
             ended[0] = "owner_end"
         elif control == "stop":
@@ -816,7 +843,8 @@ def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, m
         elif control == "pause":
             owner_pause.install_fence(tmp_path, "root", request_id="after-the-soft-wait")
     events, body_bounds, refusals, outcome = nested_start_after_soft_wait(
-        registry, tool, gate, control=None if control == "durable_stop" else controls, deadline=deadline,
+        registry, monkeypatch, tool, gate, control=None if control == "durable_stop" else controls,
+        clock=clock, deadline=deadline,
         before_start=before_start, reader=lambda: ended[0])
     assert body_bounds == [0.0], "the body itself is past its soft wait"
     if control == "open":
@@ -841,15 +869,15 @@ def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bo
     the spent soft envelope never ends it and the start then begins once, its lock released while it waits. The
     caller's deadline or a Stop seen by that check refuse it there, before any sleep, saying the invocation had
     begun."""
-    from ouroboros import model_wait, queue_observation
+    from ouroboros import queue_observation
     from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
     registry, _, _ = _registry(tmp_path, monkeypatch)
     controls = [None]
-    deadline = model_wait.monotonic_now() + (.4 if control == "caller_deadline" else 30)
+    clock = [0.0]
+    deadline = .4 if control == "caller_deadline" else 30
 
     def expire():  # the caller's own bound passes while the read is contended
-        while model_wait.monotonic_now() <= deadline:
-            time.sleep(.01)
+        clock[0] = deadline + 1
     arm, hits = one_contended_strict_read(monkeypatch, controls, stop=control == "stop",
                                           meanwhile=expire if control == "caller_deadline" else None)
     waits, sleep = [], queue_observation._sleep
@@ -859,7 +887,7 @@ def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bo
         sleep(seconds)
     monkeypatch.setattr(queue_observation, "_sleep", observed_wait)
     events, body_bounds, refusals, _outcome = nested_start_after_soft_wait(
-        registry, tool, gate, control=controls, deadline=deadline, before_start=arm)
+        registry, monkeypatch, tool, gate, control=controls, clock=clock, deadline=deadline, before_start=arm)
     assert hits == [True] and body_bounds == [0.0]
     if control == "open":
         assert events == ["nested"] and refusals == [] and waits == [ACQUISITION_SLICE_SEC], (refusals, waits)

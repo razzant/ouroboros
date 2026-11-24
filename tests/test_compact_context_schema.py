@@ -16,7 +16,12 @@ def _types(value):
 def test_schema_cost_and_all_typed_bindings():
     schema = get_tools()[0].schema
     digest = hashlib.sha256(json.dumps(_types(schema), sort_keys=True).encode()).hexdigest()
-    assert digest == 'd85d0df2301a603f7e053621d1743b1c50978428051307feb436db596cfebed9'
+    # The typed shape changed once: #4050 (22.11.2026) added the public ``fold_last_n`` argument (integer, minimum 1)
+    # and this pin follows it. The fix-forward that carried it shortened the description text only -- no type, field,
+    # constraint, validator or point moved, and the ceiling below stayed the same. The later correction of the
+    # interaction text (what a note is needed for, what an empty keep list keeps, what the receipt estimates, where a
+    # typed arrival ends what stands) is prose too: this digest and the ceiling below are unchanged by it.
+    assert digest == 'b9663aeef5fdafa760ce678dad3b184033fc9ad521761d0b199829a5a779fb43'
     raw = json.dumps(schema, ensure_ascii=False)
     # 4,271 after the nano pass, plus the two owner-approved phrases the compaction test pins and the four
     # working_note phrases test_main_authored_context pins (future reader, within those sources, unaffected

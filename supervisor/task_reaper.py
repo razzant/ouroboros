@@ -895,8 +895,10 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                 from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
                 cause = TASK_CAUSE_PHRASES.get(terminal_reason, "")  # an unknown rail is named in the details only
                 # The cause is one of a closed table of host phrases, so it stays in the template; the seconds do not.
+                # #4074: this row leaves before any respawn attempt, and the slot may not be replaced, so it
+                # states only what was observed — the cause, the seconds, the stop — never a restart.
                 text, said = phrase("task_reaper_stopped", f"{cause + '; it' if cause else 'The task'} was stopped after "
-                                    "{seconds} s, and its worker restarted.", seconds=int(runtime_sec), details=(
+                                    "{seconds} s.", seconds=int(runtime_sec), details=(
                                         f"task {task_id}, worker slot {worker_id}, {terminal_reason}. "
                                         + _stop_detail(ceiling_reached, deadline_reached)))
                 send_with_budget(
