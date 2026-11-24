@@ -677,7 +677,6 @@ def test_an_unreadable_installed_version_leaves_the_pass_unfinished(seed_repo):
 def test_the_dependency_job_carries_a_kind_the_skills_card_labels(windows_installed):
     import re
 
-    from ouroboros.gateway.projects import _SKILL_LIFECYCLE_KINDS
     from ouroboros.skill_lifecycle_queue import queue_snapshot
 
     data, _installs, _reconciles = windows_installed
@@ -688,7 +687,6 @@ def test_the_dependency_job_carries_a_kind_the_skills_card_labels(windows_instal
     card = (REPO / "web" / "modules" / "skill_card_renderer.js").read_text(encoding="utf-8")
     labels = re.search(r"const LIFECYCLE_PENDING_LABELS = \{(.*?)\};", card, re.S).group(1)
     assert job["kind"] in re.findall(r"^\s*(\w+):", labels, re.M)  # else the card says only "Working…"
-    assert _SKILL_LIFECYCLE_KINDS[job["kind"]] == "Skill dependencies"
 
 
 def test_os_declarations_parse_as_platform_lists():

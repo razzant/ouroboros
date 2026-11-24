@@ -33,8 +33,8 @@ const gapNoticeDocs = new WeakSet();
  */
 export function createHistoryControls(messagesDiv, statusHost = null, {
     // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
-    // over its newest rows (U021). A caller with a place for a one-time announcement passes it here.
-    onGapNotice = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    // over its newest rows (U021). Main's archive uses the effective refusal and hears newest restoration separately.
+    onGapNotice = null, archive = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');
@@ -65,7 +65,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
     return {
         olderButton: button,
         showNotice,
-        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; },
+        destroy() { pendingNotice = false; notice?.dispose?.(); notice = null; archive?.dispose(); },
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
@@ -78,24 +78,23 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         },
         // A failure is shown where the loading state was; elsewhere the reader
         // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
-        endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
+        endRecent(error = null, partial = false, page = null) { recent = error ? { error, partial } : null; archive?.recent(partial ? null : error, page); },
         recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
-            const error = recent?.error || snapshot.error;
-            const retry = recent?.error && !recent.partial || snapshot.error;
+            const retry = (!recent?.partial && recent?.error) || snapshot.error;
+            const archiveNote = archive?.refusalNote(retry);
+            const error = archiveNote ? retry : recent?.error || snapshot.error;
             const migrating = isStoreMigrating(error);
             const hydrating = Boolean(recent?.loading);
             const loading = hydrating || Boolean(snapshot.loading);
             const changedView = error?.body?.reason_code === 'history_view_changed';
             const incomplete = coverage.gaps === true;
-            pendingNotice = snapshot.initialized && !migrating && !error
-                && !(hydrating && feedIsEmpty(messagesDiv)) && incomplete;
+            const emptyLoading = hydrating && feedIsEmpty(messagesDiv);
+            pendingNotice = snapshot.initialized && !migrating && !error && !emptyLoading && incomplete;
             showNotice();
             const gapText = incomplete ? tr('history.gap', GAP_NOTE) : '';
-            let noteText = migrating ? 'Saved history is being upgraded…' : error ? 'Some saved history could not be loaded.'
-                : hydrating && feedIsEmpty(messagesDiv) ? ''
-                : incomplete ? gapText
-                : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
+            let noteText = migrating ? 'Saved history is being upgraded…' : archiveNote || (error ? 'Some saved history could not be loaded.' : '');
+            if (!error && !emptyLoading) noteText = incomplete ? gapText : !hydrating && coverage.complete ? 'Beginning of saved history' : '';
             if (approximate) noteText = `${error ? `${noteText} ` : ''}Saved position could not be restored exactly.`;
             // Failure and approximate restoration move into persistent chrome when it describes the reading
             // window; the gap explanation and ordinary beginning marker belong at the feed's start.
@@ -103,8 +102,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (note.parentNode !== host) host.appendChild(note);
             note.classList.toggle('chat-history-status', host === statusHost);
             // A concurrent read/position problem must not consume the persistent gap explanation.
-            const separateGap = incomplete && Boolean(error || approximate)
-                && !(hydrating && feedIsEmpty(messagesDiv));
+            const separateGap = incomplete && Boolean(error || approximate) && !emptyLoading;
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
             const buttonHidden = migrating || (!retry && !snapshot.canOlder
@@ -117,6 +115,7 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
                 [root, { hidden: buttonHidden && (host !== root || !noteText) && !separateGap }],
             ];
+            archive?.offer(button, buttonHidden || loading ? null : retry);
             for (const [node, values] of fields) {
                 for (const [key, value] of Object.entries(values)) if (node[key] !== value) node[key] = value;
             }

@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 3
+          fetch-depth: 6
           persist-credentials: false
       - name: Bind exact wrapper, reviewed product and its parent
         id: pins

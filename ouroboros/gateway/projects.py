@@ -14,24 +14,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
+from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir, run_sync_to_completion
 from ouroboros.project_admission import ProjectAdmissionError, project_admission_basis
 
 log = logging.getLogger(__name__)
 
-# Project name auto-derived from the task objective is capped here so the
-# sidebar label stays readable; the live card keeps showing full progress.
-_MAX_DERIVED_NAME = 60
 
 def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
-    """The task dict of a still-RUNNING/PENDING task from the queue snapshot.
-
-    A main-chat task's task_result carries its fields only once it is written (a
-    plain chat task writes them at finish). But the owner converts a card while
-    the task is IN-PROGRESS, so load_task_result can miss it and the name falls
-    back to the bare id (observed live: task-ae349c73). The queue snapshot
-    persists every PENDING/RUNNING task (title/objective/description) at
-    assignment, so it is the reliable in-flight source. Never raises."""
+    """The read-back task record of a live or pending attempt."""
     try:
         from ouroboros.queue_observation import load_queue_document
 
@@ -48,37 +38,8 @@ def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     return {}
 
 
-def _owner_request_text(drive_root: object, task_id: str, hint: str = "") -> str:
-    """The owner's ORIGINAL request for a task, UNtruncated (unlike the 60-char
-    project name). Preference: persisted/live ``objective`` (what the owner asked)
-    then ``description`` then ``title``; finally the frontend ``objective_hint``
-    (the owner's last main-chat request, for an in-progress DIRECT conversion with
-    no server-side record yet). Used to identify the canonical owner row projected
-    into the Project lens; the row itself is never copied. Never raises."""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        result = load_task_result(drive_root, task_id) or {}
-    except Exception:
-        log.debug("_owner_request_text: load_task_result failed", exc_info=True)
-        result = {}
-    live = _task_from_live_queue(drive_root, task_id)
-    for field in ("objective", "description", "title"):
-        for src in (result, live):
-            value = str((src or {}).get(field) or "").strip()
-            if value:
-                return value
-    return " ".join(str(hint or "").split())
-
-
-def _owner_task_origin(drive_root: object, task_id: str) -> dict:
-    """The typed binding origin for a post-hoc conversion of ``task_id``.
-
-    Reads the ingress-captured ``origin_message_ref``/``origin_message_text``
-    from the persisted task result or the live queue record (identity by value —
-    never re-derived from content). A pre-v6.73.0 task without a captured origin
-    converts with the typed ``post_hoc_unresolved`` reason: its start message is
-    honestly not projectable, never silently empty."""
+def _task_conversion_sources(drive_root: object, task_id: str) -> list[dict]:
+    """Records for this exact episode, not Main's latest message or a client hint."""
     sources = []
     try:
         # Freshest first: the authoritative IN-MEMORY queue (the gateway runs in
@@ -104,174 +65,82 @@ def _owner_task_origin(drive_root: object, task_id: str) -> dict:
         # finds the captured origin.
         from ouroboros.task_status import load_effective_task_result
 
-        sources.append(load_effective_task_result(drive_root, task_id) or {})
-        sources.append(_task_from_live_queue(drive_root, task_id) or {})
+        sources.append(load_effective_task_result(drive_root, task_id, materialize_artifacts=False) or {})
     except Exception:
-        log.debug("_owner_task_origin lookup failed", exc_info=True)
+        log.debug("Conversion result lookup failed", exc_info=True)
+    sources.append(_task_from_live_queue(drive_root, task_id))
+    return sources
+
+
+def _owner_task_origin(drive_root: object, task_id: str, *, sources: list[dict] | None = None) -> dict:
+    """Reuse the captured origin that the placement reader already projects."""
+    from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid
+
+    if sources is None:
+        sources = _task_conversion_sources(drive_root, task_id)
     for source in sources:
         metadata = source.get("metadata") or {}
         ref = source.get("origin_message_ref") or metadata.get("origin_message_ref")
-        if isinstance(ref, dict) and ref:
+        if owner_message_ref_is_valid(ref):
             snapshot = metadata.get("origin_message_snapshot") or {}
             text = snapshot.get("placeholder_text") or source.get("origin_message_text") or metadata.get("origin_message_text")
-            if not (isinstance(text, str) and text.strip()):
-                # A malformed record (ref without its cross-thread text copy)
-                # degrades to the typed absence — never an unhandled 500.
-                continue
-            return {"ref": dict(ref), "text": text, **({"snapshot": snapshot} if snapshot else {})}
+            if isinstance(text, str) and text.strip() and _text_sha256(text) == ref.get("text_sha256"):
+                return {"ref": dict(ref), "text": text, **({"snapshot": snapshot} if snapshot else {})}
     return {"absent": "post_hoc_unresolved"}
 
 
-def _derive_project_name(drive_root: object, task_id: str) -> str:
-    """Best-effort, NO-extra-request project name for a "turn into project" card.
+def _conversion_origin(drive_root, task_id, sources):
+    """The captured opening: carried text its hash proves, else the one stored row its exact ref and hash identify."""
+    from ouroboros.owner_relay import origin_snapshot, source_words
+    from ouroboros.project_dialogue import _text_sha256, owner_message_ref_is_valid, resolve_owner_message_source
+    from ouroboros.store import StoreError
 
-    Names the project with zero human input and zero extra LLM call (owner P1).
-    Preference order: the model-coined short ``title`` (set at card creation),
-    then the task ``objective`` (the owner's original request), then
-    ``description`` — each looked up first in the persisted task_result and then
-    in the live queue snapshot (for an in-progress conversion). Finally an empty
-    string so the caller supplies a generic id fallback. Never raises."""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        result = load_task_result(drive_root, task_id) or {}
-    except Exception:
-        log.debug("_derive_project_name: load_task_result failed", exc_info=True)
-        result = {}
-    live = _task_from_live_queue(drive_root, task_id)
-    raw = ""
-    for field in ("title", "objective", "description"):
-        for src in (result, live):
-            value = str((src or {}).get(field) or "").strip()
-            if value:
-                raw = value
-                break
-        if raw:
-            break
-    cleaned = " ".join(raw.split())
-    if len(cleaned) > _MAX_DERIVED_NAME:
-        cleaned = cleaned[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
-    return cleaned
-
-
-def _preset_suggested_name(drive_root: object, task_id: str) -> str:
-    """The name already sitting in this task's ``suggested_name`` slot, read from
-    the persisted result then the live queue. Reused by turn-into-project so the
-    conversion needs no extra LLM call.
-
-    Two producers fill that slot and this function cannot tell them apart, which
-    is why its naming reason says only where the name was READ: the proactive
-    card namer coins one with a model for a Main-chat turn, and headless
-    admission derives one lexically from the request's first line. Empty when
-    neither has run (a convert click within the first ~second). Never raises."""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        result = load_task_result(drive_root, task_id) or {}
-    except Exception:
-        log.debug("_preset_suggested_name: load_task_result failed", exc_info=True)
-        result = {}
-    live = _task_from_live_queue(drive_root, task_id)
-    for src in (result, live):
-        value = str((src or {}).get("suggested_name") or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _explicit_task_title(drive_root: object, task_id: str) -> str:
-    """Existing model-authored task title, before any naming fallback/call."""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        result = load_task_result(drive_root, task_id) or {}
-    except Exception:
-        log.debug("_explicit_task_title: load_task_result failed", exc_info=True)
-        result = {}
-    for source in (result, _task_from_live_queue(drive_root, task_id)):
-        value = str((source or {}).get("title") or "").strip()
-        if value:
-            return _cap_name(value)
-    return ""
-
-
-# Human labels for the skill-lifecycle job kinds that ``skill_lifecycle_queue.
-# _chat_task_id`` encodes into a synthetic task id (skill_lifecycle_<kind>_<target>_<job>).
-_SKILL_LIFECYCLE_KINDS = {
-    "install": "Install skill",
-    "review": "Review skill",
-    "enable": "Enable skill",
-    "disable": "Disable skill",
-    "remove": "Remove skill",
-    "update": "Update skill",
-    "deps": "Skill dependencies",
-    "dependency": "Skill dependencies",
-    "dependencies": "Skill dependencies",
-}
-
-
-def _skill_name_from_task(drive_root: object, task_id: str) -> str:
-    """An explicit skill name carried by a skill/system task (``skill`` /
-    ``metadata.skill`` / ``target``), persisted-result first then live queue.
-    Empty if none. Never raises."""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        result = load_task_result(drive_root, task_id) or {}
-    except Exception:
-        result = {}
-    live = _task_from_live_queue(drive_root, task_id)
-    for src in (result, live):
-        if not isinstance(src, dict):
+    origin = _owner_task_origin(drive_root, task_id, sources=sources)
+    if origin.get("ref"):
+        return origin
+    for row in sources:
+        ref = row.get("origin_message_ref") or (row.get("metadata") or {}).get("origin_message_ref")
+        if not owner_message_ref_is_valid(ref):
             continue
-        meta = src.get("metadata") if isinstance(src.get("metadata"), dict) else {}
-        for value in (src.get("skill"), meta.get("skill"), src.get("target")):
-            name = str(value or "").strip()
-            if name:
-                return name
-    return ""
+        try:
+            original = resolve_owner_message_source(drive_root, ref)
+        except (OSError, StoreError):
+            continue
+        words = source_words(original) if original else None
+        if words and words.strip() and _text_sha256(words) == ref["text_sha256"]:  # a placeholder row keeps its marks
+            return {"ref": ref, "text": words, "snapshot": origin_snapshot(original, drive_root)}
+    return origin
 
 
-def _cap_name(name: str) -> str:
-    name = " ".join(str(name or "").split())
-    if len(name) > _MAX_DERIVED_NAME:
-        return name[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
-    return name
+def _prepare_conversion(drive_root, task_id, project_id, supplied_name, default):
+    """Read the captured opening and destination off the event loop, before naming."""
+    from ouroboros.project_naming import captured_project_request, captured_project_title
+    from ouroboros.project_placement import placement_basis
+    from supervisor.continuation_admission import verified_work_episodes
 
-
-def _system_task_display_name(drive_root: object, task_id: str) -> str:
-    """A human project name for a NON-human (skill/system) task that carries no
-    owner request text — so "turn into project" never dead-ends at the neutral
-    "New project". Source order: an explicit ``skill`` field, then the structural
-    ``skill_lifecycle_<kind>_<target>_<job>`` task-id form coined by
-    ``skill_lifecycle_queue._chat_task_id``. NOT a semantic gate (P5): it reads an
-    explicit field and a known structural id shape, never the objective text.
-    Empty when the task is not a recognized system task. Never raises."""
-    tid = str(task_id or "")
-    explicit_skill = _skill_name_from_task(drive_root, tid)
-    if tid.startswith("skill_lifecycle_"):
-        parts = tid[len("skill_lifecycle_"):].split("_")
-        kind = parts[0] if parts else ""
-        kind_label = _SKILL_LIFECYCLE_KINDS.get(kind, ("Skill " + kind).strip() or "Skill task")
-        # target = explicit skill field, else the id segments between kind and the
-        # trailing sanitized job-id segment. Best-effort; the name is cosmetic.
-        target = explicit_skill
-        if not target and len(parts) >= 3:
-            target = "_".join(parts[1:-1]).strip("_")
-        elif not target and len(parts) == 2:
-            target = parts[1].strip("_")
-        target = " ".join(str(target or "").split())
-        return _cap_name(f"{kind_label}: {target}" if target else kind_label)
-    if explicit_skill:
-        return _cap_name(f"Skill: {explicit_skill}")
-    return ""
+    sources = _task_conversion_sources(drive_root, task_id)
+    origin = _conversion_origin(drive_root, task_id, sources)
+    basis = placement_basis(drive_root, task_id, project_id)
+    if supplied_name or basis.get("project"):
+        return origin, basis, supplied_name, "supplied", ""
+    try:
+        episodes = verified_work_episodes(drive_root, task_id)
+    except ValueError as exc:
+        return origin, basis, "", getattr(exc, "reason", ""), ""
+    if default and len(episodes) > 1:
+        basis = placement_basis(drive_root, task_id, project_id, episodes=episodes)
+        if basis.get("project"):
+            return origin, basis, "", "", ""
+    first = episodes[0]
+    first_sources = sources if first == task_id else _task_conversion_sources(drive_root, first)
+    first_origin = origin if first == task_id else _conversion_origin(drive_root, first, first_sources)
+    name, reason = captured_project_title(first_sources)
+    text = "" if name else captured_project_request(drive_root, first, first_sources, first_origin)
+    return origin if origin.get("ref") else first_origin, basis, name, reason, text
 
 
 def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str) -> None:
-    """Durable structured telemetry for HOW a project was named (which fallback path
-    fired) so a future "New project" regression is visible in events.jsonl instead of
-    silent (north star: transparency). Written only where a project is really CREATED.
-    Best-effort; never raises."""
+    """Record the title's source when this request actually created a project."""
     try:
         import pathlib
 
@@ -462,7 +331,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
         if working_dir and not str(entry.get("working_dir") or "").strip():
             # create_project was idempotent for an existing row — bind the folder now.
             update_project(drive_root, entry["id"], working_dir=working_dir)
-        if _existing and provenance == "none":
+        if not entry["created"] and provenance == "none":
             # Source-less repeat create of an EXISTING project is a pure idempotent
             # lookup: provenance/clone_url/trusted_at are ADDITIVE HISTORICAL FACTS
             # (registry docstring + ARCHITECTURE) and must not be clobbered to
@@ -480,7 +349,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"project {entry['id']!r} changed while it was being created, so No folder "
                                           "was not recorded; see its Working folder…", "reason_code": exc.reason},
                                 status_code=409)
-        payload: dict = {"project": stamped or entry}
+        payload: dict = {"project": {**(stamped or entry), "created": entry["created"]}}
         if init_git_warnings:
             from ouroboros.utils import append_jsonl
             payload["init_git_warnings"] = init_git_warnings
@@ -676,8 +545,8 @@ async def api_project_from_task(request: Request) -> JSONResponse:
     """Create/get a project from an existing task and bind the task to it."""
     try:
         from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
-        from ouroboros.projects_registry import PROJECT_NAME_MAX, project_id_for_task
-        from ouroboros.project_placement import move_task_to_project, placement_basis
+        from ouroboros.projects_registry import PROJECT_NAME_MAX
+        from ouroboros.project_placement import conversion_destination, move_task_to_project
         from supervisor import workers
 
         body = await request.json()
@@ -686,87 +555,33 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         task_id = str(body.get("task_id") or "").strip()
         if not task_id:
             return JSONResponse({"error": "task_id is required"}, status_code=400)
-        raw_id = str(body.get("id") or body.get("project_id") or f"task-{task_id}").strip()
-        if not explicit_project_id_ok(raw_id):
+        raw_id = str(body.get("id") or body.get("project_id") or "").strip()
+        if raw_id and not explicit_project_id_ok(raw_id):
             return JSONResponse(
                 {"error": f"id {raw_id!r} is not filesystem-clean (lowercase alphanumeric/_/-/., <=64 chars)"},
                 status_code=400,
             )
         drive_root = request_drive_root(request)
-        origin = _owner_task_origin(drive_root, task_id)
-        basis = placement_basis(drive_root, task_id, sanitize_project_id(raw_id))
-        bound = project_id_for_task(drive_root, task_id, strict=True)
-        if bound and not str(body.get("name") or "").strip():
-            outcome = move_task_to_project(
-                drive_root, task_id, sanitize_project_id(raw_id), origin=origin, basis=basis,
-                running=workers.RUNNING, pending=workers.PENDING, initiated_by="owner",
-            )
-            return JSONResponse(outcome)
         supplied_name = str(body.get("name") or "").strip()
         if len(supplied_name) > PROJECT_NAME_MAX:
-            return JSONResponse(
-                {"error": f"name must be <= {PROJECT_NAME_MAX} characters"},
-                status_code=400,
-            )
-        # Keep separate name and canonical-dialogue channels: the short candidate is
-        # capped, while source-ref lookup receives the full owner request. This avoids
-        # silently identifying only a truncated fragment of the canonical message.
-        full_hint = " ".join(str(body.get("objective_hint") or "").split())
-        hint = full_hint
-        if len(hint) > _MAX_DERIVED_NAME:
-            hint = hint[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
-        owner_text = _owner_request_text(drive_root, task_id, full_hint)
-        # LLM-first project name (Cluster B), with no human input and no extra LLM call
-        # on the one-click path (owner P1): explicit caller name -> explicit task title
-        # -> a title the proactive card namer already coined (both reused with ZERO extra
-        # call) -> an inline bounded light-model call -> the heuristic (title/objective/
-        # queue) -> the frontend's objective_hint (the owner's original request, for a
-        # still in-progress DIRECT chat task with no server-side source yet) -> a neutral
-        # "New project". Never the bare task id — the owner does not want names surfacing
-        # as "task-…". The async namer folds the heuristic/hint candidates into its own
-        # fail-soft fallback, so a missing key / timeout never blocks convert.
-        if supplied_name:
-            project_name, reason = supplied_name, "supplied"
-        else:
+            return JSONResponse({"error": f"name must be <= {PROJECT_NAME_MAX} characters"}, status_code=400)
+        project_id, default = conversion_destination(task_id, sanitize_project_id(raw_id), named=bool(supplied_name))
+        origin, basis, project_name, reason, owner_text = await run_in_threadpool(
+            _prepare_conversion, drive_root, task_id, project_id, supplied_name, default)
+        refusal = "" if project_name else (reason or "project_name_source_unavailable")
+        if owner_text:
             from ouroboros.project_naming import llm_project_name_async
 
-            explicit_title = _explicit_task_title(drive_root, task_id)
-            preset = _preset_suggested_name(drive_root, task_id)
-            if explicit_title:
-                project_name, reason = explicit_title, "explicit_task_title"
-            elif preset:
-                project_name, reason = preset, "preset_suggested_name"
-            else:
-                # A skill/system task carries no owner request text; give the namer an
-                # explicit skill-derived candidate so the conversion never dead-ends at
-                # the neutral "New project" (the async namer folds it into its fail-soft
-                # heuristic, so a missing key / timeout still lands a real name).
-                derived = _derive_project_name(drive_root, task_id)
-                sys_name = _system_task_display_name(drive_root, task_id)
-                llm_name = await llm_project_name_async(
-                    owner_text,
-                    fallback_candidates=[derived, sys_name, hint],
-                    drive_root=drive_root,
-                    task_id=task_id,
-                )
-                project_name = llm_name or sys_name or "New project"
-                if not project_name or project_name == "New project":
-                    reason = "anonymous_fallback"
-                elif owner_text:
-                    reason = "llm_or_owner_text"
-                elif sys_name and project_name == sys_name:
-                    reason = "system_task"
-                elif derived and project_name == derived:
-                    reason = "derived"
-                else:
-                    reason = "hint_or_fallback"
-            project_name = _cap_name(project_name)
-        outcome = move_task_to_project(
-            drive_root, task_id, sanitize_project_id(raw_id), name=project_name or "New project",
-            origin=origin, basis=basis, running=workers.RUNNING, pending=workers.PENDING, initiated_by="owner",
+            project_name = await llm_project_name_async(owner_text, drive_root=drive_root, task_id=task_id)
+            refusal, reason = ("" if project_name else "project_name_unavailable"), "model_name"
+        outcome = await run_sync_to_completion(
+            move_task_to_project, drive_root, task_id, project_id, name=project_name, origin=origin, basis=basis,
+            running=workers.RUNNING, pending=workers.PENDING, initiated_by="owner",
+            automatic_name=not supplied_name, naming_refusal=refusal,
+            adopt_work_room=not supplied_name and default,
         )
         if outcome["project"].get("created"):
-            _emit_naming_reason(drive_root, task_id, project_name, reason)
+            await run_in_threadpool(_emit_naming_reason, drive_root, task_id, project_name, reason)
         return JSONResponse(outcome)
     except ProjectAdmissionError as exc:
         return JSONResponse({"error": str(exc), "reason_code": exc.reason}, status_code=409)

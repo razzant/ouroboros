@@ -162,6 +162,18 @@ def test_an_empty_dialogue_store_is_scaffolding_only_to_its_own_reader(layout, m
 
 # --------------------------------------------------------------------------- first boot, interruption, reset
 
+def _confirmed_reset(data):
+    """The POST the Settings page sends for Reset, with the confirmation it names."""
+    async def confirmation():
+        return {"confirm": f"{witness.RESET_CONFIRMATION}:v1"}
+
+    return SimpleNamespace(method="POST", json=confirmation, url=SimpleNamespace(path="/api/reset/v1"),
+                           app=SimpleNamespace(state=SimpleNamespace(
+                               drive_root=data, request_restart=lambda **_: None,
+                               restart_consumer=SimpleNamespace(is_alive=lambda: True),
+                               reset_launch_protection=lambda _root: "local")))
+
+
 def test_first_boot_records_app_root_and_keeps_it_through_interruption_completion_and_reset(layout, monkeypatch):
     from ouroboros import server_entrypoint
     from ouroboros.gateway import control
@@ -181,15 +193,67 @@ def test_first_boot_records_app_root_and_keeps_it_through_interruption_completio
     monkeypatch.delenv(launch_roots.BASIS_ENV)
     assert launch_roots.durable_basis(data) == (launch_roots.APP_ROOT_BASIS, "witness"), "the second boot"
 
-    # Owner Reset wipes state/ and writes a pending witness; the work folders it keeps keep their basis.
+    # The owner request and the new profile carry the basis of the retained work folders.
     monkeypatch.setattr(control, "_acquire_repo_mutation_lock", lambda: (None, None))
-    monkeypatch.setattr(control, "_request_restart", lambda _request: True)
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(drive_root=data)))
+    request = _confirmed_reset(data)
     response = asyncio.run(control.api_reset(request))
     assert response.status_code == 200
     status, reset = witness.read_witness(data)
     assert reset["origin"] == "owner_reset" and reset[launch_roots.BASIS_KEY] == launch_roots.APP_ROOT_BASIS
+    assert status == launch_roots.RESETTING and not launch_roots.reset_handed_off(data)
+    assert witness.hand_off_runtime_reset(data, [])
+    assert launch_roots.reset_handed_off(data)  # what a launcher reads before it starts the successor
+    witness.accept_runtime_reset(data, boot_protection=lambda: "local")
+    assert not launch_roots.reset_handed_off(data)
     assert witness.initialization_decision(data)["initialization_id"] == reset["initialization_id"]
+
+
+def test_a_reset_handed_to_the_next_server_takes_the_cleared_documents_mirror_with_it(tmp_path, monkeypatch):
+    from ouroboros import launcher_bootstrap, settings_integrity as integrity
+
+    # What an earlier projection left in an environment: its mirror of the settings document's provider, route
+    # and interface choices, recorded by digest, beside what the operator set. Every value is an invented placeholder.
+    digest = integrity._value_digest
+    mirrored = {"OPENAI_BASE_URL": "http://provider.invalid/v1", "OUROBOROS_MODEL": "invented/document-model",
+                "OUROBOROS_UI_LANGUAGE": "eo"}
+    environ = {**mirrored, "OUROBOROS_NETWORK_PASSWORD": "placeholder",  # a mirror, not an independent launch input
+               "OUROBOROS_MAX_WORKERS": "3",  # the operator's own: the record names another value
+               "OUROBOROS_SERVER_HOST": "0.0.0.0", "PATH": "/invented/bin"}  # never projected
+    environ[integrity.PROJECTED_SETTINGS_ENV] = json.dumps({
+        **{key: digest(value) for key, value in mirrored.items()},
+        "OUROBOROS_NETWORK_PASSWORD": digest("placeholder"), "OUROBOROS_MAX_WORKERS": digest("7")})
+    environ[integrity.PROJECTED_PROPOSALS_ENV] = json.dumps({"OUROBOROS_MODEL": "invented/document-model"})
+    integrity.drop_projection(environ)
+    assert environ == {
+        "OUROBOROS_MAX_WORKERS": "3",
+        "OUROBOROS_SERVER_HOST": "0.0.0.0", "PATH": "/invented/bin", integrity.PROJECTED_PROPOSALS_ENV: "{}",
+        integrity.PROJECTED_SETTINGS_ENV: "{}"}
+    unrecorded = {"PATH": "/invented/bin", "OUROBOROS_MODEL": "an operator's model no projection recorded"}
+    integrity.drop_projection(unrecorded)  # without the projection's record nothing is recognised as a mirror
+    assert unrecorded == {"PATH": "/invented/bin", "OUROBOROS_MODEL": "an operator's model no projection recorded"}
+
+    # The launcher: any start loads and projects the document. One that a Reset was handed to projects nothing of
+    # the data root's own document, which that admission clears: no bind host is read from it and the launcher's
+    # own mirror goes. A document kept elsewhere is not cleared, so it is loaded and projected as before.
+    data, document, applied = tmp_path / "data", {"OUROBOROS_SERVER_HOST": "0.0.0.0"}, []
+    own, elsewhere = data / "settings.json", tmp_path / "elsewhere" / "settings.json"
+    assert launcher_bootstrap.launch_settings(data, own, lambda: document, applied.append, attest_password=True)[0] == document
+    assert applied == [document]
+    _write_witness(data, phase=launch_roots.RESETTING, origin="owner_reset", reset_handed_off=True,
+                   **{launch_roots.BASIS_KEY: launch_roots.HOME_BASIS})
+    assert launch_roots.reset_handed_off(data)
+    dropped = []
+    monkeypatch.setattr(integrity, "drop_projection", dropped.append)
+    assert launcher_bootstrap.launch_settings(
+        data, own, lambda: pytest.fail("loaded the document Reset clears"), lambda _settings: pytest.fail("projected it"),
+         attest_password=True)[0] == {}
+    assert sum(projection is os.environ for projection in dropped) == 1  # dry launch plans use only copies
+    assert launcher_bootstrap.launch_settings(data, elsewhere, lambda: document, applied.append, attest_password=True)[0] == document
+    _write_witness(data, phase=launch_roots.RESETTING, origin="owner_reset",  # interrupted: nothing was handed off
+                   **{launch_roots.BASIS_KEY: launch_roots.HOME_BASIS})
+    assert not launch_roots.reset_handed_off(data)
+    assert launcher_bootstrap.launch_settings(data, own, lambda: document, applied.append, attest_password=True)[0] == document
+    assert sum(projection is os.environ for projection in dropped) == 1 and applied == [document] * 3
 
 
 @pytest.mark.parametrize("prepare, expected", [
@@ -203,8 +267,8 @@ def test_reset_carries_a_legacy_or_undecided_basis_instead_of_switching_it(layou
     data = _use_lab(monkeypatch, layout)
     prepare(data)
     monkeypatch.setattr(control, "_acquire_repo_mutation_lock", lambda: (None, None))
-    monkeypatch.setattr(control, "_request_restart", lambda _request: True)
-    asyncio.run(control.api_reset(SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(drive_root=data)))))
+    request = _confirmed_reset(data)
+    asyncio.run(control.api_reset(request))
     assert witness.read_witness(data)[1][launch_roots.BASIS_KEY] == expected
 
 

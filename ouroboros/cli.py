@@ -135,6 +135,7 @@ class OuroborosHTTPClient:
 
 def _server_command(args: argparse.Namespace) -> int:
     old_argv = sys.argv[:]
+    reexec_argv: list[str] = []
     try:
         import json
         import __main__
@@ -154,18 +155,33 @@ def _server_command(args: argparse.Namespace) -> int:
             reexec_argv = ["-m", "ouroboros.cli", *old_argv[1:]]
         os.environ["OUROBOROS_SERVER_REEXEC_ARGV_JSON"] = json.dumps(reexec_argv)
     except Exception:
-        pass
+        reexec_argv = []
     if args.host:
         os.environ["OUROBOROS_SERVER_HOST"] = args.host
     if args.port:
         os.environ["OUROBOROS_SERVER_PORT"] = str(args.port)
     import server
+    from ouroboros.launch_roots import same_location
+    from ouroboros.server_entrypoint import CliResetReplay, cli_reset_scope
 
-    try:
-        sys.argv = [old_argv[0]]
-        return server.executable_main()
-    finally:
-        sys.argv = old_argv
+    script = pathlib.Path(__file__).resolve().parents[1] / "server.py"
+    loaded = getattr(server, "__file__", "")
+    replay = None
+    if (reexec_argv[:2] == ["-m", "ouroboros.cli"] and loaded
+            and script.is_file() and same_location(script, loaded)):
+        host = (args.host or "").strip()
+        tail = [str(script)]
+        if host:
+            tail.append(f"--host={host}")
+        if args.port:
+            tail.append(f"--port={args.port}")
+        replay = CliResetReplay(tuple(reexec_argv), tuple(tail), host)
+    with cli_reset_scope(replay):
+        try:
+            sys.argv = [old_argv[0]]
+            return server.executable_main()
+        finally:
+            sys.argv = old_argv
 
 
 def _status_command(args: argparse.Namespace) -> int:

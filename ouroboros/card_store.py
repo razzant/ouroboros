@@ -234,6 +234,18 @@ def late_press_ref(value: Any) -> Optional[Dict[str, Any]]:
     return ref
 
 
+def card_press_name(root: Any, ref: Any) -> Optional[str]:
+    """Title witnessed by the accepted press; empty for unavailable presentation, None for invalid provenance."""
+    press = late_press_ref(ref)
+    if press is None:
+        return None
+    if "submission" in press:
+        return str(press["submission"]["title"])
+    record = load_card(root, press["card_id"]) or {}
+    row = find_submission(record, press["request_id"])
+    return str(row.get("title", record.get("title")) or "") if row else ""
+
+
 def press_wait(row: Dict[str, Any]) -> str:
     """``awaiting_recipient_read`` while a delivered press waits for its author to read it, else ``""``."""
     return "" if row.get("read_at") else str(row.get("delivery_reason") or "")

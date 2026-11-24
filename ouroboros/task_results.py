@@ -621,6 +621,9 @@ def write_task_result(
             if title or existing.get("wake_summary"):
                 projected_fields.update(wake_summary=None, fold_read=None,
                                         suggested_name=title or existing.get("title") or None)
+        if "suggested_name" in projected_fields and "model_coined_name" not in projected_fields:
+            if existing.get("model_coined_name") and projected_fields["suggested_name"] != existing.get("model_coined_name"):
+                projected_fields["model_coined_name"] = None
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
         # (``_cancel_observed``) the supervisor performing a live cancellation. No field can claim either.

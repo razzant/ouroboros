@@ -35,11 +35,12 @@ ElementStub.prototype.dispatchEvent = function (event) {
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
 function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold = {}, fail = {}, historyGate = null,
-    detailReply, stopFailure = false } = {}) {
+    detailReply, stopFailure = false, conversion = null } = {}) {
     const reads = [];
     const posts = [];
     const env = installDom(async (url, init = {}) => {
         const path = String(url);
+        if (init.method === 'POST' && path.endsWith('/projects/from-task') && conversion) return conversion(init);
         if (init.method === 'POST' && path.endsWith('/continue')) {
             return { ok: true, json: async () => continues[path.split('/').at(-2)] || { ok: false, error: 'not admitted' } };
         }
@@ -150,6 +151,71 @@ const work = (...args) => { const value = fixtureWork(...args); delete value.pro
 const partial = (works, activities = []) => ({ active_chat_activities_complete: false,
     active_chat_activities: activities, ...projection(7, works, null, false) });
 const unconfirmed = ['Activity unconfirmed', 'ring', '', []];
+
+test('conversion leaves Main controls available and a concurrent binding survives its late refusal', async () => {
+    let resolve;
+    let sends = 0;
+    let sent;
+    const reply = new Promise(done => { resolve = done; });
+    const f = fixture({ conversion: (init) => { sends += 1; sent = JSON.parse(init.body); return reply; } });
+    const held = { activity: 'paused', controls: [stop, resume] };
+    try {
+        f.narrate('w-1', 'Reading the harbor map.');
+        const node = f.card('w-1');
+        const convert = node.querySelector('[data-turn-into-project]');
+        clickControl(convert);
+        clickControl(convert);
+        assert.equal(sends, 1);
+        assert.deepEqual(sent, { task_id: 'w-1' }, 'the server owns the destination id and the name');
+        assert.equal(node.dataset.projectCreating, '1');
+        assert.equal(convert.disabled, true);
+
+        const main = { ...audit, chat_id: 1 };
+        f.state({ ...partial([work(main, held)], [main]), ...projection(1, [work(main, held)], null, false) });
+        assert.ok(f.part('w-1', 'resume-run'));
+        assert.ok(f.part('w-1', 'cancel-run'));
+        f.state({ ...partial([work(audit, held)], [audit]),
+            task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 } } });
+        assert.equal(shownName(node), 'Audit');
+        assert.equal(node.dataset.projectCreating, undefined);
+        assert.deepEqual(status(f), ['Paused', 'pause', '', ['Resume', 'Stop…']]);
+
+        resolve({ ok: false, status: 409, json: async () => ({ reason_code: 'project_name_unavailable' }) });
+        await settle();
+        assert.equal(f.card('w-1'), node);
+        assert.ok(!node.querySelector('[data-turn-into-project]'));
+        assert.deepEqual(status(f), ['Paused', 'pause', '', ['Resume', 'Stop…']]);
+    } finally { f.close(); }
+});
+
+test('a naming refusal shows the server\'s one sentence and leaves the card and its button for a retry', async () => {
+    const sentences = {
+        project_name_unavailable: 'The naming model gave no title, so the work stayed in Main. Press Turn into project to try again.',
+        project_name_source_unavailable: 'This work couldn\'t be named automatically, so it stayed in Main.',
+    };
+    const toasts = (text) => {
+        const found = [];
+        const walk = (node) => { for (const child of node.children || []) { if (child.textContent === text) found.push(child); walk(child); } };
+        walk(document.body);
+        return found;
+    };
+    for (const [reason, sentence] of Object.entries(sentences)) {
+        const f = fixture({ conversion: async () => ({ ok: false, status: 409, json: async () => ({ error: sentence, reason_code: reason }) }) });
+        const restore = quietToasts();
+        try {
+            f.narrate('w-1', 'Reading the harbor map.');
+            const node = f.card('w-1');
+            clickControl(node.querySelector('[data-turn-into-project]'));
+            await settle();
+            assert.equal(toasts(sentence).length, 1, `${reason}: the sentence the server wrote, as written`);
+            assert.equal(f.card('w-1'), node, 'the card stays in Main');
+            const again = node.querySelector('[data-turn-into-project]');
+            assert.ok(again && !again.disabled, 'the existing button is available again');
+            assert.equal(again.textContent, 'Turn into project');
+            assert.equal(node.dataset.projectCreating, undefined);
+        } finally { restore(); f.close(); }
+    }
+});
 
 test('R2: a projected finalizing outcome never inherits a running row’s axes', () => {
     const f = fixture();

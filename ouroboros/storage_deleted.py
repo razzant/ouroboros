@@ -181,16 +181,6 @@ def _refused(path: str) -> Tuple[str, str]:
     return "unreadable", "read_error"
 
 
-def _registry_rows(data_root: Any) -> List[Dict[str, Any]]:
-    """Every readable row of the registry; a registry missing beside its commit witness is lost, never "no Projects"."""
-    from ouroboros.project_admission import display_registry_snapshot
-    from ouroboros.projects_registry import _registry_path, _registry_witness_path
-
-    if _registry_witness_path(data_root).exists() and not _registry_path(data_root).exists():
-        raise FileNotFoundError(str(_registry_path(data_root)))
-    return display_registry_snapshot(data_root)["projects"]
-
-
 def _name(row: Dict[str, Any], path: str) -> str:
     from ouroboros.project_facts import project_display_name
 
@@ -233,10 +223,11 @@ def _link_active(rows: List[Dict[str, Any]], folders: Dict[Any, FolderMark]) -> 
 
 def read_folders(data_root: Any, device: Optional[int]) -> Tuple[str, int, List[FolderMark]]:
     """``(state, no_folder, one mark per folder)`` of the registry's deleted Projects; DEVICE is the data folder's disk."""
+    from ouroboros.project_admission import display_registry_snapshot
     from ouroboros.projects_registry import PROJECT_TOMBSTONED
 
     try:
-        rows = _registry_rows(data_root)
+        rows = display_registry_snapshot(data_root, require_known_absence=True)["projects"]
     except (OSError, ValueError):
         return "unavailable", 0, []
     no_folder = 0

@@ -62,8 +62,10 @@ def is_response(response, url, method):
 @pytest.mark.parametrize('engine,width,height,theme', MATRIX, ids=['chromium', 'webkit'])
 def test_telegram_form_and_accounts_key(tmp_path, monkeypatch, engine, width, height, theme):
     name = ('base-' if ROLE == 'base' else '') + f'telegram-{engine}'
+    publish_step(name, 'case_started', viewport_width=width, viewport_height=height)
     with live(tmp_path / 'telegram') as server:
         server.start()
+        publish_step(name, 'server_ready')
         # Reviewed public test fixture: bundled register/forms, no supervised sender, no companion.
         _install(server.data, tmp_path / 'fixture-homes', monkeypatch)
         file = server.data / 'state' / 'skills' / _NAME / 'settings.json'
@@ -73,8 +75,10 @@ def test_telegram_form_and_accounts_key(tmp_path, monkeypatch, engine, width, he
         file.write_text(json.dumps(settings) + '\n', encoding='utf-8')
         response = httpx.post(server.url + f'/api/skills/{_NAME}/toggle', json={'enabled': True},
                               timeout=15, trust_env=False)
+        publish_step(name, 'skill_toggle_responded', http_status=response.status_code)
         assert response.status_code == 200 and response.json()['enabled'] is True
         assert json.loads(file.read_text(encoding='utf-8')) == settings
+        publish_step(name, 'skill_enabled')
         saved_sha = sha(file)
         save_url = server.url + f'/api/extensions/{_NAME}/settings/save'
         with sync_playwright() as playwright:
@@ -87,14 +91,36 @@ def test_telegram_form_and_accounts_key(tmp_path, monkeypatch, engine, width, he
                 page.on('requestfailed', lambda request: failed_save_reads.append(True) if
                         request.url == save_url and request.method == 'GET' else None)
                 page.goto(server.url, wait_until='domcontentloaded')
+                publish_step(name, 'page_loaded')
                 go(page, 'skills', width)
+                publish_step(name, 'entered_extensions')
+                if width == 390:
+                    # Below the 40rem section breakpoint (extensions.js), Extensions lands on its home list;
+                    # tap the visible Skills row through the normal UI to open the installed skills view.
+                    skills_row = page.locator('#page-skills [data-extensions-open="installed"]:visible')
+                    expect(skills_row).to_have_count(1)
+                    expect(skills_row).to_be_visible()
+                    skills_row.click()
+                expect(page.locator('#skills-pane-installed')).to_be_visible()
+                publish_step(name, 'skills_list_open')
                 card = page.locator(f'.skills-installed-card[data-skill="{_NAME}"]')
-                card.locator('[data-skill-menu-trigger]').click()
+                expect(card).to_be_visible()
+                publish_step(name, 'skill_card_visible')
+                trigger = card.locator('[data-skill-menu-trigger]')
+                expect(trigger).to_be_visible()
+                trigger.click()
+                publish_step(name, 'skill_menu_clicked')
+                open_settings = page.locator(
+                    f'[role="menuitem"][data-skill-action="open_settings"][data-skill="{_NAME}"]:visible')
+                expect(open_settings).to_be_visible()
+                publish_step(name, 'skill_menu_open')
                 with page.expect_response(lambda resp: is_response(resp, save_url, 'GET')) as caught:
-                    page.locator(f'[role="menuitem"][data-skill-action="open_settings"][data-skill="{_NAME}"]:visible').click()
+                    open_settings.click()
                 hydration = caught.value
+                publish_step(name, 'skill_settings_responded', http_status=hydration.status)
                 assert hydration.status == 200 and hydration.finished() is None
                 assert hydration.json()['TELEGRAM_MINIAPP_ENABLED'] == 'off'
+                publish_step(name, 'skill_form_hydrated')
                 level = settings_page(page, f'skill/{_NAME}')
                 old_copy = level.get_by_text('The bot token lives in Settings → Secrets', exact=False)
                 new_copy = level.get_by_text('The bot token lives in Settings → Accounts and keys', exact=False)
@@ -110,25 +136,25 @@ def test_telegram_form_and_accounts_key(tmp_path, monkeypatch, engine, width, he
                 expect(save).to_be_visible()
                 expect(save).to_be_enabled()
                 expect(form.locator('[data-extension-settings-edit-anyway]')).to_have_count(0)
+                publish_step(name, 'skill_form_ready')
                 screenshot(page, mini, name + '-skill-form', case=name)
                 publish_step(name, 'skill_form_captured')
                 if width == 390:
-                    # Compact: the Telegram level covers Settings' list and hides the drawer toggle. Press the real
-                    # visible Back first; if it hands back to Skills, open Settings from there through the drawer.
-                    settings_home = page.locator('#page-settings .settings-shell[data-settings-view="home"]:visible')
-                    skills_page = page.locator('#page-skills:visible')
-                    for _ in range(4):
-                        if settings_home.count():
-                            break
-                        if page.locator('#page-settings:visible').count():
-                            back = page.locator('#page-settings').get_by_role('button', name=re.compile(r'^Back to .+'))
-                            expect(back).to_have_count(1)
-                            back.click()
-                            expect(settings_home.or_(skills_page)).to_have_count(1)
-                        else:
-                            expect(skills_page).to_have_count(1)
-                            go(page, 'settings', width)
-                    expect(settings_home).to_be_visible()
+                    # Compact (< 40rem): the skill form sits at depth 2 inside #page-skills, which hides the
+                    # mobile drawer toggle while any page level is open. Walk Back to Skills, then Back to
+                    # Extensions home, and open Settings through the real visible drawer toggle.
+                    ext_page = page.locator('#page-skills')
+                    back_btn = page.locator('#page-skills > .app-page-header [data-shell-back]:visible')
+                    for expected_depth, step_name in (('1', 'back_to_skills_list'), ('0', 'back_to_extensions_home')):
+                        expect(back_btn).to_have_count(1)
+                        expect(back_btn).to_have_attribute('aria-label', re.compile(r'^Back to .+'))
+                        back_btn.click()
+                        expect(ext_page).to_have_attribute('data-extensions-depth', expected_depth)
+                        publish_step(name, step_name)
+                    expect(page.locator('#page-skills[data-section-view="home"]')).to_be_visible()
+                    expect(page.locator('#page-skills > .app-page-header [data-mobile-nav-toggle]:visible')).to_have_count(1)
+                    go(page, 'settings', width)
+                    expect(page.locator('#page-settings .settings-shell[data-settings-view="home"]:visible')).to_be_visible()
                 else:
                     go(page, 'settings', width)
                 publish_step(name, 'entered_settings', viewport_width=width, viewport_height=height)
@@ -230,11 +256,13 @@ def click_wakes(page, control, server, before, expected):
 @pytest.mark.parametrize('engine,width,height,theme', MATRIX, ids=['chromium', 'webkit'])
 def test_place_sheet_keeps_or_accepts_wakes(tmp_path, engine, width, height, theme, choice):
     name = f'place-{engine}-{choice}'
+    publish_step(name, 'case_started', viewport_width=width, viewport_height=height)
     with live(tmp_path / 'candidate') as server:
         pending(server.data)
         old_same_list(server, tmp_path / 'old')
         typed(server.data)
         server.start()
+        publish_step(name, 'server_ready')
         path = places.places_path(server.data)
         digest = sha(path)
         initial = get_row(server)
@@ -309,10 +337,12 @@ def test_place_sheet_keeps_or_accepts_wakes(tmp_path, engine, width, height, the
 @pytest.mark.parametrize('engine,width,height,theme', MATRIX, ids=['chromium', 'webkit'])
 def test_place_sheet_pending_unpublished_signal(tmp_path, engine, width, height, theme):
     name = f'place-pending-{engine}'
+    publish_step(name, 'case_started', viewport_width=width, viewport_height=height)
     with live(tmp_path / 'candidate') as server:
         pending(server.data)
         typed(server.data, inbox=True, enabled=False)
         server.start()
+        publish_step(name, 'server_ready')
         path = places.places_path(server.data)
         digest = sha(path)
         initial = get_row(server)

@@ -65,15 +65,18 @@ def _owner_answer_routes() -> list[BaseRoute]:
 
 def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
     """A room's saved messages as the owner's UI reads them from the dialogue store: its history pages
-    (``/api/chat/history``) and the search of their words (``/api/chat/search``); and the neighbour door, the
-    words reader over every room for a program on this computer (``/api/recall``)."""
+    (``/api/chat/history``), the search of their words (``/api/chat/search``), the neighbour door, the
+    words reader over every room for a program on this computer (``/api/recall``), and, while Main's history
+    refuses for the Project registry, the read-only archive of what evidence places (``/api/chat/archive``)."""
+    from ouroboros.gateway.chat_archive import make_chat_archive_endpoint
     from ouroboros.gateway.chat_search import make_chat_search_endpoint
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.gateway.recall import make_recall_endpoint
 
     return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
             Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir)),
-            Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"])]
+            Route("/api/recall", endpoint=make_recall_endpoint(data_dir), methods=["GET"]),
+            Route("/api/chat/archive", endpoint=make_chat_archive_endpoint(data_dir))]
 
 
 def _setup_routes() -> list[BaseRoute]:
@@ -323,7 +326,8 @@ def collect_routes(
         Route("/api/schedules/{schedule_id}/action", endpoint=api_schedules_action, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", endpoint=api_schedules_delete, methods=["DELETE"]),
         Route("/api/command", endpoint=api_command, methods=["POST"]),
-        Route("/api/reset", endpoint=api_reset, methods=["POST"]),
+        Route("/api/reset", endpoint=api_reset, methods=["GET", "POST"]),
+        Route("/api/reset/v1", endpoint=api_reset, methods=["POST"]),
         Route("/api/git/log", endpoint=api_git_log),
         Route("/api/git/rollback", endpoint=api_git_rollback, methods=["POST"]),
         Route("/api/git/promote", endpoint=api_git_promote, methods=["POST"]),

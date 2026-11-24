@@ -37,12 +37,17 @@ def seed_skills(root: pathlib.Path, settings: dict, *, provider_ready: bool) -> 
 
 
 def reconcile_projects(root: pathlib.Path) -> None:
-    """Register any pre-existing data/projects/<id>/ store whose row is missing, so an inherited
-    project's raw chat is partitioned (reserved_project_chat_ids, the multi-project isolation SSOT)
-    before the supervisor routes a turn. Idempotent and never prunes."""
+    """Initialize a first Project registry, restore a certified copy, or reconcile the existing rooms."""
     from ouroboros.projects_registry import reconcile_projects as reconcile
 
     reconcile(root)
+
+
+def recover_dialogue(root: pathlib.Path, repo_dir: pathlib.Path) -> None:
+    """Without a supervisor, start the boot-only look in the same maintenance slot."""
+    from ouroboros.maintenance import child
+
+    child.tick(root, repo_dir, after_dialogue=lambda: reconcile_projects(root))
 
 
 def remember_log_listings(root: pathlib.Path) -> threading.Thread:
@@ -220,6 +225,36 @@ def mcp_startup() -> None:
     # Read the saved document when the step runs, never the early boot snapshot,
     # and without waiting for a Save: one that changes MCP applies its own event.
     configuration_changed(load_settings(), reason="startup")
+
+
+def hold_interrupted_reset(root: pathlib.Path, document: BootDocument) -> bool:
+    """Report the recoverable boot failure before admitting a single writer of the old profile. The boot's own
+    custody retries still run (``_retry_previous_stops``): the repeated Reset proves the previous work stopped
+    from those records, and nothing else of that profile starts."""
+    from supervisor.state_initialization import reset_status
+
+    if reset_status(root)["status"] != "interrupted":
+        return False
+    reason = "Reset was interrupted. Open Settings → This computer → About and confirm Reset all data again."
+    document.step_ended("reset", error=reason)
+    document.fail(reason)
+    threading.Thread(target=_retry_previous_stops, args=(root,), name="reset-hold-custody", daemon=True).start()
+    return True
+
+
+def _retry_previous_stops(root: pathlib.Path) -> None:
+    """What every start does first for the generation before it, kept while the profile is held: retry its
+    stamped stops, then end the task and session processes its ledger still names, by measured identity
+    (``reap_orphaned_processes``). Installation daemons stay, and no task is running to own anything."""
+    try:
+        from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
+        from ouroboros.owned_shutdown import finish_unconfirmed_stops
+        from ouroboros.process_custody import reap_orphaned_processes
+
+        finish_unconfirmed_stops(root)
+        reap_orphaned_processes(root, running_task_ids=set(), retained_purposes={CUSTODY_PURPOSE})
+    except Exception:
+        log.warning("The boot held for Reset could not retry the previous generation's stops", exc_info=True)
 
 
 def wait_store_published(root: pathlib.Path, stop: threading.Event, document: BootDocument = BOOT) -> None:

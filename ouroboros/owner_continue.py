@@ -548,8 +548,8 @@ def valid_wake(wake: Any) -> bool:
             and all(isinstance(focus.get(key), str) and focus[key].strip() for key in ("place_id", "conversation_key")))
 
 
-def _api_opening(result: Dict[str, Any], metadata: Dict[str, Any], task_id: str,
-                 gaps: List[str]) -> Optional[Dict[str, Any]]:
+def accepted_api_opening(result: Dict[str, Any], metadata: Dict[str, Any], task_id: str,
+                         gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The request the API door saved with its accepted receipt, copied by value, or a named gap. The words are its
     caller's under the channel it declared (``client_surface``, the door's one stamp of it); the receipt marks the
     opening, it proves no caller identity. Its inputs are the work's declared inputs (``declared_inputs``)."""
@@ -564,7 +564,7 @@ def _api_opening(result: Dict[str, Any], metadata: Dict[str, Any], task_id: str,
 
 
 def valid_api(api: Any) -> bool:
-    """An API opening exactly as ``_api_opening`` builds it (also its chained copy)."""
+    """An API opening exactly as ``accepted_api_opening`` builds it (also its chained copy)."""
     return (isinstance(api, dict) and api.get("source") == API_OPENING
             and all(isinstance(api.get(key), str) and api[key].strip() for key in ("task_id", "channel", "description"))
             and all(isinstance(api.get(key, ""), str) for key in API_REQUEST_FIELDS))
@@ -625,7 +625,7 @@ def occurrence_schedule_text(result: Dict[str, Any], task_id: str) -> List[Dict[
     return kept
 
 
-def _restore_original(root, original, snapshot, held_messages):
+def restore_original_opening(root, original, snapshot, held_messages):
     """Identify a retained opening without a client id. A verified file placeholder counts as an opening with no words."""
     from ouroboros.project_dialogue import (opening_input, opening_words, _text_sha256,
                                            owner_message_ref_is_valid, resolve_owner_message_source)
@@ -728,7 +728,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
 
     The opening is one recorded state: the owner's message (``original``), a frozen ``schedule``, ``start``
     (``start_task`` recorded none, ``_drafted_start``), ``wake`` (a consciousness wake's own clock or place focus,
-    ``_wake_opening``), ``api`` (the request the task API saved, ``_api_opening``), or none: a lost or legacy source
+    ``_wake_opening``), ``api`` (the request the task API saved, ``accepted_api_opening``), or none: a lost or legacy source
     and a gap. Only the producer's own fact marks absence (never an empty field or a false ``owner_ingress``), and a
     wake, start or API opening never seeds owner words. ``gaps`` names every unreadable required source and every
     row its producer never writes (a non-text body, an unknown source label): admission refuses on any gap rather
@@ -781,7 +781,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         bound = project_binding_for_task(root, task_id) or {}
         if bound.get("source_ref") == origin_ref and bound.get("source_input"):
             snapshot = {**snapshot, "input": bound["source_input"]}
-    has_opening, original_address = _restore_original(root, original, snapshot, result.get("held_owner_messages"))
+    has_opening, original_address = restore_original_opening(root, original, snapshot, result.get("held_owner_messages"))
     if not (schedule or has_opening):
         if chained_start is not None:  # a Continue of a Continue keeps the start it was admitted on
             start = _retained_start(chained_start, gaps)
@@ -799,7 +799,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         elif wake_cause(metadata):
             wake = _wake_opening(metadata, task_id, gaps)
         elif "api_admission" in result:
-            api = _api_opening(result, metadata, task_id, gaps)
+            api = accepted_api_opening(result, metadata, task_id, gaps)
         else:
             gaps.append("original_owner_message_text")
     if original and (original.get("source") != "origin_message" or original.get("input_source") not in (None, OWNER_PRESS, OWNER_CARD_INPUT, "owner_mailbox", "owner_quiz_answer", "origin_message") or
@@ -1392,6 +1392,15 @@ def mark_claim_admitted(drive_root: Any, predecessor_task_id: str, nonce: str) -
     patch_document(pathlib.Path(drive_root), predecessor_task_id, update)
 
 
+def continued_by_binding(result: Dict[str, Any]) -> dict:
+    """The predecessor's hash-bound successor claim, whether prepared or admitted."""
+    claim = result.get("continued_by") if isinstance(result.get("continued_by"), dict) else {}
+    binding = claim.get("binding") if isinstance(claim.get("binding"), dict) else {}
+    successor = claim.get("successor_task_id")
+    return binding if (isinstance(successor, str) and successor and binding.get("successor_task_id") == successor
+                       and claim.get("binding_sha256") == binding_sha(binding)) else {}
+
+
 def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) -> List[str]:
     """The verified roots from ``predecessor_task_id`` to ``task_id``, both included, or ``[]``.
 
@@ -1411,11 +1420,7 @@ def continuation_chain(drive_root: Any, predecessor_task_id: str, task_id: str) 
             result = load_task_result(drive_root, current, strict=True) or {}
         except Exception:
             return []
-        claim = result.get("continued_by") if isinstance(result.get("continued_by"), dict) else {}
-        binding = claim.get("binding") if isinstance(claim.get("binding"), dict) else {}
-        successor = str(claim.get("successor_task_id") or "")
-        if (not successor or binding.get("successor_task_id") != successor
-                or claim.get("binding_sha256") != binding_sha(binding)):
+        if not (successor := continued_by_binding(result).get("successor_task_id")):
             return []
         if successor == target:
             return [*chain, target]

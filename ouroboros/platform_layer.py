@@ -296,12 +296,11 @@ def acquire_exclusive_file_lock(
     poll_sec: float = 0.05,
     owner_aware_stale: bool = False,
     refuse_name_tier_errnos: frozenset = frozenset(),
+    writable_stale_probe: bool = False,
     outcome: Optional[dict] = None,
 ) -> Optional[int]:
-    """Acquire a descriptor-owned lock; optional ``outcome`` records failure facts.
-
-    Only contention retries; owner-aware recovery cannot evict a live writer.
-    Name-tier refusal is caller policy; missing outcomes are unknown. See ARCHITECTURE §1 "Platform substrate"."""
+    """Acquire a descriptor-owned lock. Only contention retries. An absent outcome is unknown.
+    Owner-aware recovery protects live writers. Name-tier refusal is caller policy (ARCHITECTURE §1)."""
     def report(reason, error=None):
         if outcome is not None:
             outcome.update(reason=reason, errno=getattr(error, "errno", None))
@@ -314,13 +313,11 @@ def acquire_exclusive_file_lock(
         log.warning("Name-tier lock refused by caller policy at %s: no lock taken", lock_path)
         return None
     started = time.monotonic()
-    first_attempt = True
-    retry_after_stale = False
-    while first_attempt or retry_after_stale or (time.monotonic() - started) < timeout_sec:
-        first_attempt = False
-        retry_after_stale = False
+    try_now = True
+    while try_now or (time.monotonic() - started) < timeout_sec:
+        try_now = False
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644)
             stamp = (metadata or f"pid={os.getpid()} ts={time.time()}\n").encode("utf-8")
             try:  # the owner pid goes in BEFORE the kernel lock, so an owner-aware
                 os.write(fd, stamp)
@@ -336,7 +333,6 @@ def acquire_exclusive_file_lock(
                     log.warning("Kernel lock refused at %s (errno %s): no lock taken", lock_path, exc.errno)
                     return None
             else:
-                # Only a readable fd/path identity proves the creator still owns this name.
                 won, named = _lock_identity(fd)[:2], _lock_identity(lock_path)[:2]
                 if won and won == named:
                     report("acquired")
@@ -357,7 +353,11 @@ def acquire_exclusive_file_lock(
             report("permission" if isinstance(creation_error, PermissionError) else "unknown", creation_error)
             stale = refused = probe = None
             try:
-                probe = os.open(str(lock_path), os.O_RDONLY)
+                if writable_stale_probe and enforced:
+                    with contextlib.suppress(PermissionError, IsADirectoryError):
+                        probe = os.open(str(lock_path), os.O_RDWR)  # NFS may require this for LOCK_EX.
+                if probe is None:
+                    probe = os.open(str(lock_path), os.O_RDONLY)
                 try:
                     judged = _lock_identity(probe)
                     if not judged:
@@ -380,7 +380,7 @@ def acquire_exclusive_file_lock(
                             if not IS_WINDOWS:  # Windows deletes no open file: it unlinks
                                 if _lock_identity(lock_path) == judged:  # below, after
                                     os.unlink(str(lock_path))  # under the held flock
-                                    retry_after_stale = True  # only our own eviction outlives the deadline
+                                    try_now = True  # only our own eviction outlives the deadline
                                 continue
                 finally:
                     if IS_WINDOWS:  # the probe's hold goes before its handle
@@ -388,7 +388,7 @@ def acquire_exclusive_file_lock(
                     os.close(probe)
                 if stale and _lock_identity(lock_path) == judged:
                     lock_path.unlink()
-                    retry_after_stale = True
+                    try_now = True
                     continue
             except Exception as exc:
                 if probe is None and isinstance(creation_error, FileExistsError) and isinstance(exc, FileNotFoundError):

@@ -69,7 +69,7 @@ def collection_pending(entry, root=None) -> bool:
     if entry.terminal_source and (not entry.ledger_recorded or not entry.settled
         or not entry.output_source or not entry.output_complete
         or entry.output_terminal_sha != entry.terminal_source.get("sha256")
-        or (capture_required(entry) and not entry.patch_captured)
+        or (capture_required(entry) and (not entry.patch_captured or entry.capture_job.get("state") == "ready"))
         or (named_required(entry) and entry.named_evidence.get("status") != "retained")):
         return True
     return False

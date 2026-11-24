@@ -67,6 +67,22 @@ def visible_text(items: Sequence[Any]) -> str:
     return "\n\n".join(text for text in texts if text)
 
 
+def final_answer_text(message: Mapping[str, Any]) -> Optional[str]:
+    """The text the provider marked ``final_answer``, read from the items an intact completed reply carries.
+
+    ``None``: the canonical ``content`` is the reply's text (no intact receipt, as on any Chat-shaped lane, or no
+    message carries a ``phase``). ``""``: phases are marked and none is the final answer, so the reply's
+    commentary is progress, never its answer. The canonical text, log and accounting copies are untouched."""
+    validated = validated_items(message)
+    if validated is None:
+        return None
+    marked = [(item.get("phase"), message_text(item)) for item in validated[1] if item.get("type") == "message"]
+    marked = [(phase, text) for phase, text in marked if text]
+    if not any(phase for phase, _text in marked):
+        return None
+    return "\n\n".join(text for phase, text in marked if phase == "final_answer")
+
+
 def function_calls(items: Sequence[Any]) -> List[Dict[str, Any]]:
     return [dict(item) for item in items if isinstance(item, Mapping) and item.get("type") == "function_call"]
 

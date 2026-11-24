@@ -324,6 +324,15 @@ def test_turn_namer_persists_name_on_already_terminal_task(tmp_path, monkeypatch
     r = tr.load_task_result(tmp_path, "t")
     assert r["status"] == tr.STATUS_COMPLETED, "namer must NOT regress a terminal task to running"
     assert r.get("suggested_name") == "Nice Title", "suggested_name must survive on a terminal task"
+    assert r.get("model_coined_name") == "Nice Title"
+    from ouroboros.post_task_checkpoint import project_replica_task_result_fields
+
+    overlay = project_replica_task_result_fields(r, {**r, "suggested_name": "Old preview", "model_coined_name": None})
+    combined = {**r, **overlay}
+    assert project_naming.captured_project_title([combined]) == ("Nice Title", "stored_model_name")
+    tr.write_task_result(tmp_path, "t", tr.STATUS_COMPLETED, suggested_name="A later display title")
+    tr.write_task_result(tmp_path, "t", tr.STATUS_COMPLETED, suggested_name="Nice Title")
+    assert not tr.load_task_result(tmp_path, "t").get("model_coined_name")
 
 
 def test_turn_namer_late_settlement_refreshes_cost_without_late_name(tmp_path, monkeypatch):

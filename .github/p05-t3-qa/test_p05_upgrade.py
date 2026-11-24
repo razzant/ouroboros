@@ -60,6 +60,7 @@ def first_dm_envelope(response, ref):
 
 @pytest.mark.parametrize('scenario', TRANSITIONS)
 def test_real_old_writer_or_ordinary_restart(tmp_path, scenario):
+    publish_step(scenario, 'case_started')
     save_time = TRANSITIONS[scenario]
     old_branch = save_time != 'none'
     with live(tmp_path / 'new', managed=not old_branch) as server:
@@ -187,6 +188,7 @@ def base_silence(client, first, headers, payload, root, source, ref, calls, stor
 @pytest.mark.parametrize('witness', READINESS)
 def test_first_dm_across_publication(tmp_path, monkeypatch, witness):
     """The real standalone Host and inline carrier, only publication timing controlled; model is loopback."""
+    publish_step(('base-' if ROLE == 'base' else '') + witness, 'case_started')
     order, kind = READINESS[witness]
     bind_inline_world(tmp_path, monkeypatch)
     store = places.places_path(tmp_path)
@@ -305,6 +307,7 @@ def test_public_gateway_dns_verdict(monkeypatch):
     Only NXDOMAIN for exactly the probed name, with no answer records, may say the host is absent; a temporary
     resolver failure, another name's answer or a contradictory NXDOMAIN must stay an unavailable observer.
     """
+    publish_step(f'{ROLE}-public-dns', 'case_started')
     from tests.test_telegram_miniapp_companion import gateway
 
     assert (ROOT / ROLE / 'skills' / 'telegram' / 'scripts' / 'public_gateway.py').samefile(gateway.__file__)

@@ -54,7 +54,7 @@ function fixture(t, options = {}) {
     return {
         instance, reads, messages, controls, logged,
         button: () => controls()?.querySelector('.chat-load-older-btn'),
-        note: () => (messages.parentNode.querySelector('.chat-panel-statusbar').querySelector('.chat-load-older-note') || messages.querySelector('.chat-load-older').querySelector('.chat-load-older-note')),
+        note: () => instance.page.querySelector('.chat-load-older-note'),
         bubbles: () => messages.children.filter(node => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble')),
         async clickRetry() {
@@ -72,29 +72,33 @@ const assertLoading = (f, why) => {
     assert.equal(f.button().disabled, true, why);
 };
 
-test('migration shows a calm note and retries until history publishes without a click', async t => {
-    const f = fixture(t);
-    const paint = f.instance.refreshHistory({ revision: 1 });
-    await settle();
-    f.reads[0].http(503, 'migrating');
-    await paint;
-    assert.equal(f.note().textContent, 'Saved history is being upgraded…');
-    assert.equal(f.button().hidden, true);
-    assert.equal(f.logged.length, 0);
-    await new Promise(resolve => setTimeout(resolve, 750));
-    assert.equal(f.reads.length, 2, 'publication is polled without an owner action');
-    f.reads[1].http(503, 'migrating');
-    await settle();
-    assert.equal(f.note().textContent, 'Saved history is being upgraded…');
-    await new Promise(resolve => setTimeout(resolve, 750));
-    assert.equal(f.reads.length, 3);
+for (const room of ['Main', 'Project']) test(`${room} migration retries until history publishes without a click`, async t => {
+    const f = fixture(t, room === 'Main' ? { chatId: 1, asPanel: false } : {});
+    await t.waitFor(() => assert.equal(f.reads.length, 1, 'opening the room starts its first read'));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const advance = async ms => {
+        t.mock.timers.tick(ms);
+        await new Promise(setImmediate);
+    };
+    // Observe the responses under test. Node can report a Web Storage warning from module startup.
+    const before = f.logged.length;
+    for (let i = 0; i < 2; i++) {
+        f.reads[i].http(503, 'migrating');
+        await advance(0);
+        assert.equal(f.note().textContent, 'Saved history is being upgraded…');
+        assert.equal(f.button().hidden, true);
+        assert.equal(f.messages.querySelector('.chat-archive-door'), null);
+        await advance(750);
+        assert.equal(f.reads.length, i + 2, 'publication is polled without an owner action');
+    }
     f.reads[2].ok(page([row('chat:10', 'Published answer')]));
-    await settle();
+    await advance(0);
     assert.equal(f.bubbles().length, 1);
     assert.equal(f.instance.hasPaintedHistory(), true);
     assert.doesNotMatch(f.note().textContent, /upgraded|could not/);
-    await new Promise(resolve => setTimeout(resolve, 750));
+    await advance(750);
     assert.equal(f.reads.length, 3, 'success stops migration retries');
+    assert.deepEqual(f.logged.slice(before), [], 'neither migration nor publication reports a failure');
 });
 
 test('↓ waits through a store upgrade instead of fading in and out as Retry; an ordinary failure still names Retry', async t => {

@@ -71,6 +71,8 @@ def unbound(value):
 def load_pins(raw):
     value = json.loads(raw)
     require(value['format'] == 1 and set(value['subjects']) == {'base', 'candidate', 'old'}, 'Unsupported pin format')
+    mode = value.get('mode', 'full')
+    require(mode in {'full', 'targeted'}, 'Unsupported QA mode')
     for role, subject in value['subjects'].items():
         require(set(subject) == {'commit', 'tree'} and all(sha(p) for p in subject.values()), f'Unset or invalid {role} pins')
     # Only the candidate may stay unbound, and only until the root binds its reviewed commit and tree.
@@ -78,7 +80,14 @@ def load_pins(raw):
                if unbound(subject['commit']) or unbound(subject['tree'])]
     require(not pending or pending == ['candidate'],
             'Only the candidate subject may be unbound, and it must be bound before a run')
-    require(len({p['commit'] for p in value['subjects'].values()}) == 3, 'The three subjects must be separate')
+    subject_commits = {p['commit'] for p in value['subjects'].values()}
+    require(len(subject_commits) == 3, 'The three subjects must be separate')
+    prev = value.get('previous_wrapper')
+    if prev is not None:
+        require(isinstance(prev, dict) and set(prev) == {'commit', 'tree'}
+                and all(sha(p) and not unbound(p) for p in prev.values()),
+                'Invalid previous_wrapper pin')
+        require(prev['commit'] not in subject_commits, 'previous_wrapper must be distinct from the three subjects')
     history = value['history']
     require(len(history) == 12 and len({r['commit'] for r in history}) == 12, 'Expected twelve distinct historical fixtures')
     for row in history:
@@ -111,11 +120,41 @@ def preflight(repo, event):
                          'to the reviewed product commit and its tree before running this workflow.')
     prod, base = (pins['subjects'][key]['commit'] for key in ('candidate', 'base'))
     # The product commit sits directly on the exact public base (first parent); a second parent may carry a recorded merge.
-    require(parents(repo, event) == [prod] and parents(repo, prod)[:1] == [base] and len(parents(repo, prod)) <= 2,
-            'Expected a QA commit over a single reviewed product commit on the exact base')
+    require(parents(repo, prod)[:1] == [base] and len(parents(repo, prod)) <= 2,
+            'Expected a single reviewed product commit on the exact base')
     for role in ('candidate', 'base'):
         subject = pins['subjects'][role]
         require(obj(repo, subject['commit'] + '^{tree}') == subject['tree'], f'{role} tree does not match the pin')
+    event_parents = parents(repo, event)
+    prev = pins.get('previous_wrapper')
+    if prev is None:
+        require(event_parents == [prod],
+                'Expected a QA commit directly over the pinned reviewed product commit')
+    else:
+        prev_commit = prev['commit']
+        require(obj(repo, prev_commit + '^{tree}') == prev['tree'], 'previous_wrapper tree does not match the pin')
+        for path in sorted(expected):
+            regular_blob(repo, prev_commit, path)
+        if event_parents == [prev_commit]:
+            # Follow-up QA commit on the same QA branch for an unchanged product: verify prod is an ancestor of
+            # previous_wrapper and previous_wrapper itself only added the exact QA allowlist over prod.
+            is_anc = subprocess.run(
+                ['/usr/bin/git', '--no-optional-locks', '-c', 'core.hooksPath=/dev/null',
+                 '-C', str(repo), 'merge-base', '--is-ancestor', prod, prev_commit],
+                env=GIT_ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+            require(is_anc, 'previous_wrapper must descend from the pinned candidate commit when product is unchanged')
+            for filter_arg in ([], ['--diff-filter=A']):
+                prev_changed = paths(git(repo, 'diff', '--no-renames', '--name-only', '-z', *filter_arg,
+                                         prod, prev_commit, '--'))
+                require(set(prev_changed) == expected and len(prev_changed) == len(expected),
+                        'previous_wrapper must only add the exact QA allowlist over candidate')
+        elif event_parents == [prev_commit, prod]:
+            # Ordered merge on the QA branch: first parent is the pinned previous_wrapper commit, second parent is
+            # the pinned newly verified product commit; allowlisted diff against product is enforced below.
+            pass
+        else:
+            require(False, 'Expected a follow-up QA commit over previous_wrapper or an ordered merge '
+                           '[previous_wrapper.commit, candidate.commit]')
     for filter_arg in ([], ['--diff-filter=A']):
         changed = paths(git(repo, 'diff', '--no-renames', '--name-only', '-z', *filter_arg, prod, event, '--'))
         require(set(changed) == expected and len(changed) == len(expected), 'Wrapper must only add the exact QA allowlist')
@@ -170,6 +209,7 @@ def node_dependencies(raw):
 
 def stage(repo, root, sha_of_wrapper):
     pins, expected = preflight(repo, sha_of_wrapper)
+    mode = pins.get('mode', 'full')
     subjects = pins['subjects']
     for role, subject in subjects.items():
         checkout = repo / 'qa-sources' / role
@@ -180,7 +220,8 @@ def stage(repo, root, sha_of_wrapper):
         require(not git(target, 'remote'), 'Unexpected remote in staged checkout')
         if role == 'candidate':
             require(obj(target, subjects['base']['commit'] + '^{tree}') == subjects['base']['tree'], 'Size comparison base is unavailable')
-            history(target, pins['history'])
+            if mode == 'full':
+                history(target, pins['history'])
         verify_checkout(target, subject)
         require(git(target, 'write-tree').decode('ascii').strip() == subject['tree'], 'Index tree does not match HEAD')
     harness = root / 'harness'
@@ -220,9 +261,11 @@ def stage(repo, root, sha_of_wrapper):
                 deps = node_dependencies(raw)
                 require(node_deps is None or deps == node_deps, 'Bootstrap Node dependency changed: ' + path)
                 node_deps = deps
-    subject = {'format': 1, 'workflow_head': sha_of_wrapper, 'subjects': subjects,
+    subject = {'format': 1, 'mode': mode, 'workflow_head': sha_of_wrapper, 'subjects': subjects,
                'harness_sha256': hashes, 'historical_fixtures': pins['history'], 'test_matrix': pins['home'],
                'bootstrap': {role: f'bootstrap/{role}' for role in ('base', 'candidate', 'old')}}
+    if pins.get('previous_wrapper') is not None:
+        subject['previous_wrapper'] = pins['previous_wrapper']
     (root / 'subject.json').write_text(json.dumps(subject, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
 

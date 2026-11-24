@@ -189,7 +189,8 @@ class SetupBootstrap(TypedDict):
 
 class OnboardingBootstrapResponse(TypedDict):
     """``GET /api/onboarding/bootstrap``: a read that writes nothing. ``ready`` is the readiness
-    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``."""
+    ``GET /api/onboarding`` answers with 204; setup completes through ``POST /api/onboarding/complete``.
+    A boot held for an interrupted Reset instead answers 409 ``reset_interrupted`` and serves no setup."""
 
     ready: bool
     bootstrap: SetupBootstrap
@@ -723,15 +724,17 @@ class ProjectUpdateResponse(TypedDict):
 
 
 class ProjectFromTaskRequest(TypedDict):
-    """``POST /api/projects/from-task``. The default ``id`` is ``task-<task_id>``: a request naming no
-    other room joins the project the task's work already has. ``project_id`` is an alias of ``id``.
-    Without ``name`` the core names the project, which may wait for one model call."""
+    """``POST /api/projects/from-task``. Leave ``id`` out: the server owns the default destination (``task-<task_id>``,
+    or a bounded id from a long task id; the truncated id older browsers sent without ``name`` reads as it) and a
+    request naming no other room joins the project the task's work already has. Any other ``id`` is kept as sent;
+    ``project_id`` is an alias of ``id``. Without ``name`` a new project needs a proven title or one successful Light
+    call from the captured opening; a refusal leaves the work in Main and its ``error`` is the sentence to show."""
 
     task_id: str
     id: NotRequired[str]
     project_id: NotRequired[str]
     name: NotRequired[str]
-    objective_hint: NotRequired[str]  # the owner's original request, a naming hint
+    objective_hint: NotRequired[str]  # legacy input; ignored for naming
 
 
 class ProjectTaskBinding(TypedDict, total=False):

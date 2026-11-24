@@ -316,6 +316,8 @@ def _seed_task(
     naming = _late_input_naming(_pool().DRIVE_ROOT, task)  # a late input's head is admitted named by what it answers
     if naming and naming[0]:
         task["suggested_name"] = naming[0]
+        if not naming[1]:  # Late-input admission accepted an authored title, so its namer never runs.
+            task["title"] = naming[0]
     return task
 
 
@@ -335,14 +337,10 @@ def _late_input_naming(root: Any, task: Dict[str, Any]) -> Optional[Tuple[str, s
     """``project_naming.late_input_names`` of a late answer's or a press's head: what it answers (the accepted
     question, the card's title as the stored press recorded it) and the owner's words (its text before the
     first step); None without that provenance. Read at admission and by the carrier's namer, never the frame."""
-    from ouroboros.gateway.card_decision import card_press_name
-    from ouroboros.owner_quiz import late_answer_name
     from ouroboros.project_naming import late_input_names
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    answered = (late_answer_name(metadata["late_answer"]) if metadata.get("late_answer") is not None
-                else card_press_name(root, metadata.get("card_press")))
-    return None if answered is None else late_input_names(metadata, answered, str(task.get("text") or ""))
+    return late_input_names(root, metadata, str(task.get("text") or ""))
 
 
 def admit_owner_turn(

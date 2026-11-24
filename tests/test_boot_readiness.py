@@ -202,6 +202,96 @@ def _health(client):
     return response.json()
 
 
+@pytest.mark.parametrize("ui_choice", ["none", "custom"])
+def test_interrupted_reset_serves_recovery_without_opening_the_old_profile(boot_app, monkeypatch, ui_choice, tmp_path):
+    from starlette.testclient import TestClient
+
+    from ouroboros import server_liveness
+    from ouroboros.gateway import onboarding_host
+    from ouroboros.server_liveness import boot_notice
+    from supervisor.state_initialization import mark_pending
+
+    srv, root = boot_app
+    # The held lifespan writes via server.BOOT; the gateway reads via server_liveness.BOOT.
+    # Keep this generation's failed boot out of later fixtures that do not start a lifespan.
+    document = server_liveness.BootDocument()
+    monkeypatch.setattr(srv, "BOOT", document)
+    monkeypatch.setattr(server_liveness, "BOOT", document)
+    # A synthetic receipt-less witness, without invoking any Reset action.
+    mark_pending(root, origin="owner_reset")
+    custom = tmp_path / "custom-ui"
+    custom.mkdir()
+    (custom / "index.html").write_text("<html><body>saved custom recovery UI</body></html>", encoding="utf-8")
+    selected = "none" if ui_choice == "none" else str(custom)
+    loads = []
+
+    def read_settings(**kwargs):
+        loads.append(kwargs)
+        return {"OUROBOROS_UI_DIR": selected}
+
+    monkeypatch.setattr(srv, "load_settings", read_settings)
+    applied = []
+    real_apply = srv.served_ui.apply
+    monkeypatch.setattr(srv.served_ui, "apply",
+                        lambda app, settings: applied.append(settings) or real_apply(app, settings))
+    monkeypatch.setattr(srv, "admit_data_root", lambda path: None)
+    monkeypatch.setattr(srv.process_scope, "initialize_installation_scope", lambda path: None)
+    monkeypatch.setattr(srv.store_switch, "start", lambda *a, **kw: pytest.fail("opened the old store"))
+    monkeypatch.setattr(onboarding_host, "_live_setup", lambda *a: pytest.fail("opened first-run setup"))
+    # The held boot still retries the previous generation's stops, as every start does; a double stands in here.
+    retried, retry_ran = [], threading.Event()
+    monkeypatch.setattr(srv.server_boot, "_retry_previous_stops", lambda path: (retried.append(path), retry_ran.set()))
+
+    with TestClient(srv.app) as client:
+        boot = _health(client)["boot"]
+        reason = boot["error"]
+        assert boot["phase"] == "failed" and not boot["dialogue_ready"] and not boot["tasks_ready"]
+        assert "Reset was interrupted" in reason and "Settings → This computer → About" in reason
+        assert retry_ran.wait(5) and retried == [root]
+        response = client.get("/api/onboarding")
+        assert response.status_code == 409
+        assert response.json()["reason_code"] == "reset_interrupted" and response.json()["error"] == reason
+        response = client.get("/onboarding", follow_redirects=False)
+        assert response.status_code == 303 and response.headers["location"] == "/"
+        for path in ("/api/onboarding/bootstrap",):
+            response = client.get(path)
+            assert response.status_code == 409
+            assert response.json()["reason_code"] == "reset_interrupted" and response.json()["error"] == reason
+        for path in ("/api/settings", "/api/onboarding/complete",
+                     "/api/onboarding/subagents/preview", "/api/onboarding/model-catalog"):
+            response = client.post(path, json={})
+            assert response.status_code == 409, (path, response.text)
+            assert response.json()["reason_code"] == "reset_interrupted" and response.json()["error"] == reason
+            assert response.json()["saved"] is False and response.json()["code"] == "reset_interrupted"
+        assert not (root / "settings.json").exists(), "a held boot authored no replacement profile"
+        assert client.get("/api/reset").json()["status"] == "interrupted"
+        assert reason in boot_notice(srv.app.app.state) and "not saved" in boot_notice(srv.app.app.state)
+        # The held boot applies exactly one read-only UI choice, even a disabled or custom main interface.
+        assert loads == [{}], "the held boot requests no settings migration"
+        assert applied == [{"OUROBOROS_UI_DIR": selected}]
+        page = client.get("/")
+        if ui_choice == "none":
+            assert page.status_code == 404 and "No main interface is served here" in page.text
+        else:
+            assert page.status_code == 200 and "saved custom recovery UI" in page.text
+    srv.served_ui.apply(srv.app.app, {})  # leave the shared ASGI fixture on its builtin selection
+
+
+def test_a_boot_held_for_reset_retries_the_previous_stops_through_their_owners(tmp_path, monkeypatch):
+    from ouroboros import owned_shutdown, process_custody, server_boot
+    from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
+
+    # Passive doubles of the two owners every start calls first: no record is read and no process is signalled.
+    calls = []
+    monkeypatch.setattr(owned_shutdown, "finish_unconfirmed_stops", lambda root: calls.append(("stops", root)))
+    monkeypatch.setattr(process_custody, "reap_orphaned_processes",
+                        lambda root, **how: calls.append(("ledger", root, how)) or [])
+    server_boot._retry_previous_stops(tmp_path)
+    # No task runs in a held boot, and the installation's own engine daemon is never among what ends.
+    assert calls == [("stops", tmp_path),
+                     ("ledger", tmp_path, {"running_task_ids": set(), "retained_purposes": {CUSTODY_PURPOSE}})]
+
+
 def _ready_supervisor(srv) -> bool:
     """A supervisor whose init ended at once: the readiness latches the real one sets."""
     srv._supervisor_ready.set()
@@ -778,6 +868,108 @@ def test_providerless_boot_does_not_prepare_a_transport(boot_app, monkeypatch, f
     with TestClient(srv.app) as client:
         _wait(lambda: _health(client)["boot"]["phase"] == "ready")
         assert srv.server_boot._head_start is None
+
+
+@pytest.fixture
+def providerless_history_boot_app(boot_app, monkeypatch):
+    from ouroboros.gateway.router import _room_reading_routes
+
+    srv, root = boot_app
+    # History captures its root at route construction, unlike request-scoped project routes.
+    # Replace the Route itself so its ASGI handler also uses the lifespan's test profile.
+    router = srv.app.app.router
+    routes = list(router.routes)
+    path = "/api/chat/history"
+    index, = (i for i, route in enumerate(routes) if getattr(route, "path", None) == path)
+    routes[index], = (route for route in _room_reading_routes(root) if route.path == path)
+    monkeypatch.setattr(router, "routes", routes)
+    return srv, root
+
+
+def test_a_clean_providerless_profile_reads_main_and_creates_its_first_project_without_history_work(
+        providerless_history_boot_app, monkeypatch):
+    """The ordinary read path needs no provider: a clean root performs no dialogue cutover,
+    opens no owner bridge and starts no supervisor, yet Main and ordinary project admission work."""
+    from starlette.testclient import TestClient
+    from ouroboros import dialogue_store
+
+    srv, root = providerless_history_boot_app
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: False)
+    monkeypatch.setattr(srv, "_dialogue_cutover", lambda *_a, **_kw: pytest.fail("clean-root history work"))
+    monkeypatch.setattr(srv, "_open_dialogue", lambda *_a, **_kw: pytest.fail("providerless owner bridge"))
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a: pytest.fail("providerless supervisor"))
+    with TestClient(srv.app) as client:
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+        history = client.get("/api/chat/history")
+        assert history.status_code == 200 and history.json()["messages"] == []
+        created = client.post("/api/projects", json={"name": "First", "no_folder": True})
+        assert created.status_code == 200, created.text
+        assert created.json()["project"]["created"] is True and created.json()["project"]["name"] == "First"
+        assert client.get("/api/projects").json()["projects"][0]["name"] == "First"
+    assert not dialogue_store.path(root).exists(), "no legacy dialogue exists to cut over"
+    assert not (root / "settings.json").exists(), "reading does not author a provider profile"
+
+
+def test_a_providerless_legacy_profile_reaches_main_and_its_first_project_through_the_real_boot(
+        providerless_history_boot_app, monkeypatch, request):
+    """The migrated history becomes readable through normal boot and maintenance,
+    independently of boot phase, the owner bridge and the provider executor."""
+    from pathlib import Path
+
+    from starlette.testclient import TestClient
+    from ouroboros import maintenance, store
+    from tests._dialogue import seed
+
+    srv, root = providerless_history_boot_app
+    # Pytest's disposable repo has no code; boot passes REPO_DIR, not app.state.repo_dir, to maintenance.
+    monkeypatch.setattr(srv, "REPO_DIR", Path(srv.__file__).resolve().parent)
+    seed(root, archives={"chat_20260101T000000.jsonl": [
+             {"ts": "2026-01-01T00:00:00Z", "direction": "in", "chat_id": 1, "user_id": 1,
+              "source": "web", "text": "Archived before boot"}]},
+         live={"chat": [{"ts": "2026-01-02T00:00:00Z", "direction": "in", "chat_id": 1, "user_id": 1,
+                         "source": "web", "text": "Live before boot"}]})
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _settings: False)
+    monkeypatch.setattr(srv, "_open_dialogue", lambda *_a, **_kw: pytest.fail("providerless owner bridge"))
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a: pytest.fail("providerless supervisor"))
+    unit = maintenance.MaintenanceChild()
+    monkeypatch.setattr(maintenance, "child", unit)
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", root / "settings.json")
+    probes = []
+    due = maintenance._dialogue_due
+
+    def first_probe_contended(data_root, *args):
+        probes.append(data_root)
+        if len(probes) == 1:
+            raise store.StoreBusy("test dispatch contention", reason="contention")
+        return due(data_root, *args)
+
+    def join_dispatch():
+        unit.stop()
+        if unit._thread is not None:
+            unit._thread.join(10)
+            assert not unit._thread.is_alive()
+
+    monkeypatch.setattr(maintenance, "_dialogue_due", first_probe_contended)
+    request.addfinalizer(join_dispatch)
+    with TestClient(srv.app) as client:
+        def history_published():
+            history = client.get("/api/chat/history")
+            assert history.status_code in (200, 503), history.text
+            if history.status_code == 503:
+                return False
+            texts = {row["text"] for row in history.json()["messages"]}
+            return {"Archived before boot", "Live before boot"} <= texts
+
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+        _wait(history_published, what="both legacy chain rows in the published Main history")
+        _wait(lambda: unit._thread is not None and not unit.live_children(), what="the maintenance pass to settle")
+        assert probes == [root, root]
+        # Providerless recovery sets the readiness latch without starting the supervisor.
+        _wait(lambda: _health(client)["boot"]["tasks_ready"], what="providerless recovery readiness")
+        assert not _health(client)["boot"]["dialogue_ready"]
+        created = client.post("/api/projects", json={"name": "First", "no_folder": True})
+        assert created.status_code == 200, created.text
+        assert created.json()["project"]["created"] is True
 
 
 def test_the_real_supervisor_creates_the_bus_itself_after_a_failed_head_start(tmp_path, monkeypatch, fresh_bus):

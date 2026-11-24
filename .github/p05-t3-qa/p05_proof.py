@@ -16,9 +16,13 @@ witness now says WHAT the producer left behind, instead of one opaque "unavailab
   default stays strict: only exit 0, a settled custody receipt, every selected test run
   and no non-passing report make a group complete.
 * A red node carries only bounded public facts: the public test file, the public test
-  function, its ordinal in the selection, the pytest phase, the outcome, a closed
-  exception bucket and the definition line of that function in the public file. No
-  assertion text, traceback, stdout, path, payload or credential ever leaves the runner.
+  function/method, optional closed public parameter ID, its ordinal in the selection, the
+  pytest phase, the outcome, a closed exception bucket, the definition line of that function
+  in the public file (`definition_line`), the failure's own asserted source line inside that
+  validated public file and function lexical bounds (`asserted_line`) when determinable, and
+  closed finite known thread labels (`thread_labels` + `thread_labels_observation`) when
+  observable. No assertion text, traceback, stdout, path, payload or credential ever leaves
+  the runner.
 """
 import ast
 from collections import Counter
@@ -32,6 +36,7 @@ import struct
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 
@@ -44,18 +49,31 @@ TRANSITIONS = {'old-same-wakes': 'before-connector', 'typed-then-old-same-wakes'
 READINESS = {f'first-dm-{order}-{kind}': (order, kind)
              for order in ('core-first', 'connector-first') for kind in ('plain', 'inbox-signal')}
 PAIRED_FIRST_DM = 'first-dm-core-first-plain'
+CANDIDATE_LIVE = {
+    'test_p05_upgrade.py': (
+        *(f'test_real_old_writer_or_ordinary_restart[{name}]' for name in TRANSITIONS),
+        *(f'test_first_dm_across_publication[{name}]' for name in READINESS),
+        'test_public_gateway_dns_verdict',
+    ),
+    'test_p05_browser.py': (
+        *(f'test_telegram_form_and_accounts_key[{engine}]' for engine in ENGINES),
+        *(f'test_place_sheet_keeps_or_accepts_wakes[{engine}-{choice}]'
+          for engine in ENGINES for choice in CHOICES),
+        *(f'test_place_sheet_pending_unpublished_signal[{engine}]' for engine in ENGINES),
+    ),
+}
 BASE_LIVE = {
     'test_p05_upgrade.py': (f'test_first_dm_across_publication[{PAIRED_FIRST_DM}]', 'test_public_gateway_dns_verdict'),
     'test_p05_browser.py': ('test_telegram_form_and_accounts_key[chromium]', 'test_telegram_form_and_accounts_key[webkit]'),
 }
-LIVE = {'test_p05_upgrade.py': len(TRANSITIONS) + len(READINESS) + 1, 'test_p05_browser.py': 8}
+LIVE = {file: len(cases) for file, cases in CANDIDATE_LIVE.items()}
 # The live matrix runs in two parts per role: a killed browser session no longer hides the
 # upgrade session's own record, and a browser failure no longer hides the upgrade result.
 LIVE_PARTS = (('upgrade', 'test_p05_upgrade.py'), ('browser', 'test_p05_browser.py'))
 # Paired controls: the same public tests, on the base and on the candidate, under the SAME
 # confinement. They say whether a red belongs to the confinement or to the candidate change.
-# The names are public test names; the projection adds only the validated source line and
-# the typed outcome, never a call, a payload or raw output.
+# The names are public test names; the projection adds only validated public source lines and
+# typed outcomes, never a call, a payload or raw output.
 PROCESS_CONTROL_FILES = ('tests/test_preflight_process_containment.py', 'tests/test_process_custody.py')
 PROCESS_CONTROL_TESTS = ('test_a_detached_child_is_still_found_after_its_root_exits',
                           'test_process_container_kills_a_descendant_that_left_the_group',
@@ -70,8 +88,84 @@ PAIRED_CONTROLS = (
 DIAGNOSTIC_OBSERVATIONS = (
     ('responsiveness', RESPONSIVENESS_CONTROL_FILES, RESPONSIVENESS_CONTROL_TESTS, 180),
 )
+PERSISTENCE_INVENTORY_FILE = 'tests/test_persistence_inventory.py'
+STRUCTURAL_RESIDUAL_NODES = (
+    'tests/test_persistence_inventory.py::test_every_inventory_row_is_still_real',
+    'tests/test_persistence_inventory.py::test_a_fabricated_inventory_row_is_caught_as_stale',
+    'tests/test_persistence_inventory.py::test_actor_source_kinds_have_their_own_retention_row_or_known_debt',
+)
+STARTUP_PERIODIC_BASE = (
+    'tests/test_startup_terminal_files.py::test_periodic_bulk_work_does_not_block_drain_or_duplicate_sweep'
+)
+STARTUP_PERIODIC_NODES = (f'{STARTUP_PERIODIC_BASE}[False]', f'{STARTUP_PERIODIC_BASE}[True]')
+TASK_DONE_PREDECESSOR = (
+    'tests/test_task_done_ordering.py::TestSupervisorTaskDoneAuditTrail::test_handle_task_done_writes_events_jsonl'
+)
+# Bounded base/candidate pairs for the targeted follow-up: exact full node IDs (including class
+# and public synthetic params), with fresh per-role processes for periodic bulk work alone and
+# after exact task-done predecessor, no duplication in red-presence, plus paired structural and
+# process residuals. Tuple shape: (name, entries, budget, ordered, verbose_diff).
+TARGETED_PAIRS = (
+    ('red-presence', (
+        'tests/test_host_service_responsiveness.py::test_queued_and_executing_turns_leave_the_default_executor_free',
+        'tests/test_host_service_responsiveness.py::test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget',
+        'tests/test_host_service_responsiveness.py::test_slow_presence_preparation_cannot_fill_the_default_executor',
+    ), 240, False, False),
+    ('red-startup-periodic-alone', STARTUP_PERIODIC_NODES, 240, True, True),
+    ('red-startup-periodic-after-task-done', (TASK_DONE_PREDECESSOR, *STARTUP_PERIODIC_NODES), 240, True, True),
+    ('red-structural', STRUCTURAL_RESIDUAL_NODES, 240, False, False),
+    ('red-process', (
+        'tests/test_process_custody.py::test_update_quiesce_kills_service_recorded_by_worker_process',
+    ), 240, False, False),
+)
 SAME_SOURCE_PAIR = 'same_source_pair'
+DIFFERENT_SOURCE_PAIR = 'different_source_pair'
+UNKNOWN_SOURCE_PAIR = 'unknown_source_pair'
 NON_EXACT_DIAGNOSTIC = 'non_exact_diagnostic'
+COMPARISON_VALUES = frozenset({
+    SAME_SOURCE_PAIR, DIFFERENT_SOURCE_PAIR, UNKNOWN_SOURCE_PAIR, NON_EXACT_DIAGNOSTIC,
+})
+PUBLIC_PARAM_IDS = frozenset({
+    'False', 'True',
+    *ENGINES,
+    *(f'{engine}-{choice}' for engine in ENGINES for choice in CHOICES),
+    *TRANSITIONS,
+    *READINESS,
+})
+# Closed allowlist of known public thread labels (HOST_DUTIES in ouroboros/server_maintenance.py
+# plus known responsiveness/maintenance threads). Untrusted thread names are never emitted.
+KNOWN_THREAD_LABELS = frozenset({
+    'cancel_intent_sweep',
+    'terminal_delivery_replay',
+    'question_delivery_replay',
+    'pause_notice_replay',
+    'abandoned_usage_reconciliation',
+    'post_task_synthesis_recovery',
+    'held_continuation_recheck',
+    'owner_pause_settlement',
+    'cold-custody',
+    'custody-maintenance',
+    'reconcile-maintenance',
+    'maintenance-child',
+    'schedule-admission',
+    'subscription-census',
+    'body-lifespan-handover',
+    'owned-daemon-latch-retry',
+    'inline_degraded',
+    'shared-default',
+    'auth-saturation',
+    'admission-saturation',
+    'MainThread',
+})
+THREAD_LABEL_PREFIXES = ('inline_degraded-', 'shared-default-', 'auth-saturation-', 'admission-saturation-')
+THREAD_LABEL_OBSERVATIONS = frozenset({
+    'lhs_list_exact',
+    'lhs_list_with_unlisted_omitted',
+    'diff_lines_known_only',
+    'diff_lines_partial',
+    'not_observable',
+    'junit_unavailable',
+})
 OUTCOMES = ('message', 'silent', 'tool_delivered', 'deferred')
 HISTORY_COUNTS = {'test_reseed_from_a_real_previous_seed': 4,
                   'test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits': 22}
@@ -87,11 +181,20 @@ OLD_MENU_COUNTS = {'test_a_cold_start_restores_an_older_releases_owner_before_ex
 ERROR_BUCKETS = {
     'AssertionError': 'assertion', 'Failed': 'assertion', 'Skipped': 'skipped',
     'TimeoutError': 'timeout', 'OSError': 'os', 'PermissionError': 'os', 'FileNotFoundError': 'os',
-    'ValueError': 'value', 'RuntimeError': 'runtime', 'SystemExit': 'exit',
+    'ValueError': 'value', 'JSONDecodeError': 'value', 'RuntimeError': 'runtime', 'SystemExit': 'exit',
+    'KeyError': 'key', 'AttributeError': 'attribute', 'TypeError': 'type',
+    'IndexError': 'lookup', 'LookupError': 'lookup', 'ImportError': 'import', 'ModuleNotFoundError': 'import',
+    'CancelledError': 'cancelled', 'HTTPError': 'http', 'HTTPStatusError': 'http',
+    'ConnectError': 'http', 'ReadTimeout': 'timeout', 'WorkerCrash': 'worker_crash',
+    'Error': 'playwright_or_error',
     'SubprocessError': 'subprocess', 'Exception': 'exception', 'BaseException': 'exception',
 }
 # Closed step names a live case may report: where its witness stopped.
 STEP_VALUES = frozenset({
+    'case_started', 'skill_toggle_responded', 'skill_enabled', 'page_loaded', 'entered_extensions',
+    'skills_list_open', 'skill_card_visible', 'skill_menu_clicked', 'skill_menu_open',
+    'skill_settings_responded', 'skill_form_hydrated', 'skill_form_ready',
+    'back_to_skills_list', 'back_to_extensions_home',
     'entered_settings', 'skill_form_captured', 'accounts_door_clicked', 'accounts_level_attached',
     'secret_row_found', 'secret_opener_label_ok', 'secret_editor_visible', 'secret_editor_empty',
     'accounts_captured', 'fact_published',
@@ -183,7 +286,50 @@ def present(root, rel):
     return True
 
 
+def ast_functions(public):
+    """Map top-level test functions and Class::method names to their (lineno, end_lineno) lexical bounds."""
+    tree = ast.parse(public)
+    bounds = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bounds[node.name] = (node.lineno, node.end_lineno or node.lineno)
+        elif isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    bounds[f'{node.name}::{child.name}'] = (child.lineno, child.end_lineno or child.lineno)
+    return bounds
+
+
+def node_exists_in(root, role, entry):
+    """Whether a public file::func or file::Class::method node (with optional [param]) exists in role's AST."""
+    path, *qual = entry.split('[', 1)[0].split('::')
+    if not path or not qual:
+        return False
+    try:
+        public = read_regular(root, role + '/' + path, 4 * MIB)
+        funcs = ast_functions(public)
+    except (OSError, ValueError, SyntaxError):
+        return False
+    return '::'.join(qual) in funcs
+
+
 def groups(root, subject):
+    mode = subject.get('mode', 'full')
+    if mode == 'targeted':
+        result = {}
+        for part, file in LIVE_PARTS:
+            result[f'candidate-live-{part}'] = ('candidate', 'live', [file], 650, None)
+            result[f'base-live-{part}'] = ('base', 'live', [f'{file}::{case}' for case in BASE_LIVE[file]], 420, None)
+        for set_name, entries, budget, _ordered, verbose_diff in TARGETED_PAIRS:
+            kind = 'pytest-vv' if verbose_diff else 'pytest'
+            for role in ('base', 'candidate'):
+                present_entries = [entry for entry in entries if node_exists_in(root, role, entry)]
+                chosen = list(entries) if present_entries else []
+                result[f'{role}-{set_name}'] = (role, kind, chosen, budget, None)
+        inv_files = ([PERSISTENCE_INVENTORY_FILE]
+                     if present(root, 'candidate/' + PERSISTENCE_INVENTORY_FILE) else [])
+        result['candidate-persistence-inventory'] = ('candidate', 'pytest', inv_files, 240, None)
+        return result
     home = subject['test_matrix']
     result = {f'candidate-{name}': ('candidate', name, home[name], limit, None) for name, limit in (
         ('presence', 1400), ('queue', 620), ('migration', 600), ('telegram', 780), ('history', 420),
@@ -243,6 +389,8 @@ def command(root, subject, role, kind, files, raw, select=None):
     if kind == 'node':
         return [str(root / 'node-standalone/bin/node'), '--test', '--test-reporter=tap', *files]
     args = [py, '-m', 'pytest', *PY_FLAGS, '--timeout=130']
+    if kind == 'pytest-vv':
+        args.append('-vv')
     if select:
         args += ['-k', select]
     if kind == 'size':
@@ -251,7 +399,11 @@ def command(root, subject, role, kind, files, raw, select=None):
         args = [py, '-c', 'import os,runpy,sys; os.environ["OURO_SIZE_RATCHET_BASE_REF"]=sys.argv.pop(1); '
                 'runpy.run_module("pytest", run_name="__main__")', base, *PY_FLAGS, '--timeout=130', '-m', 'size_ratchet']
     if kind == 'live':
-        args += ['--timeout=330', '-p', 'tests.conftest', '-c', str(root / role / 'pyproject.toml')]
+        # Pin --rootdir to harness/ alongside -c <role>/pyproject.toml: without it, pytest's
+        # rootpath is <role>/ (sibling of harness/), so _check_initialpaths_for_relpath gives the
+        # module an empty nodeid ("") and every item is recorded as "::test_..." with no filename.
+        args += ['--timeout=330', '-p', 'tests.conftest', '-c', str(root / role / 'pyproject.toml'),
+                 '--rootdir', str(root / 'harness')]
         files = live_files(root, files)
     return [*args, *files, '--ci-evidence-dir', str(raw), '--junitxml', str(raw / 'private-junit.xml')]
 
@@ -388,8 +540,157 @@ def record_summary(record):
     return summary
 
 
-def pytest_counts(record, files, kind, root, role, live_cases=None, control_tests=None):
-    """The group's projection. Strict as before, but every way it can fail is named."""
+def mangle_nodeid(nodeid):
+    """Exact match to pytest's _pytest.junitxml.mangle_test_address(nodeid) -> (classname, name)."""
+    path, bracket, params = nodeid.partition('[')
+    parts = path.split('::')
+    parts[0] = re.sub(r'\.py\Z', '', parts[0].replace('/', '.'))
+    parts[-1] += bracket + params
+    return '.'.join(parts[:-1]), parts[-1]
+
+
+def junit_failures(root, rel):
+    """Read bounded private JUnit XML inside the isolated pack step only; never uploaded.
+
+    Returns dict[(classname, name, phase)] -> failure text, or None if unavailable/invalid.
+    """
+    try:
+        raw = read_regular(root, rel, 8 * MIB)
+    except (OSError, ValueError):
+        return None
+    if b'<!DOCTYPE' in raw or b'<!ENTITY' in raw:
+        return None
+    try:
+        tree = ET.fromstring(raw)
+    except ET.ParseError:
+        return None
+    found = {}
+    for case in tree.iter('testcase'):
+        classname = case.attrib.get('classname')
+        name = case.attrib.get('name')
+        if not isinstance(classname, str) or not isinstance(name, str):
+            continue
+        for child in case:
+            if child.tag == 'failure':
+                phase = 'call'
+            elif child.tag == 'error':
+                msg = child.attrib.get('message', '')
+                if msg.startswith('failed on setup with '):
+                    phase = 'setup'
+                elif msg.startswith('failed on teardown with '):
+                    phase = 'teardown'
+                else:
+                    continue
+            else:
+                continue
+            text = child.text or ''
+            if text:
+                found[(classname, name, phase)] = text
+    return found
+
+
+_TB_SHORT_RE = re.compile(
+    r'^(?P<path>[^\s:][^:]*):(?P<lineno>\d+):(?:\s+in\s+[A-Za-z_<][A-Za-z0-9_<>]*\s*\Z|\s+[A-Za-z_])'
+)
+_TB_NATIVE_RE = re.compile(r'^\s*File "(?P<path>[^"]+)", line (?P<lineno>\d+), in [A-Za-z_<][A-Za-z0-9_<>]*')
+
+
+def extract_asserted_line(text, root, base_dir, role, rel_file, bounds):
+    """Return the deepest traceback line inside the validated public file and function lexical bounds, or None."""
+    if not text or bounds is None:
+        return None
+    def_line, end_line = bounds
+    expected_abs = os.path.normpath(str(root / base_dir / rel_file))
+    search_bases = [str(root / base_dir)]
+    if base_dir != role:
+        search_bases.append(str(root / role))
+    matched = None
+    for line in text.splitlines():
+        if line.startswith(('E ', 'E\t')) or line == 'E':
+            continue
+        hit = _TB_SHORT_RE.match(line) or _TB_NATIVE_RE.match(line)
+        if not hit:
+            continue
+        raw_path = hit.group('path')
+        lineno = int(hit.group('lineno'))
+        if not (def_line <= lineno <= end_line):
+            continue
+        resolved = [os.path.normpath(raw_path)] if os.path.isabs(raw_path) else [
+            os.path.normpath(os.path.join(base, raw_path)) for base in search_bases
+        ]
+        if expected_abs in resolved:
+            matched = lineno
+    return matched
+
+
+def normalize_thread_label(token):
+    """Map a string token to a closed known thread label, or None if not in the finite allowlist."""
+    if not isinstance(token, str):
+        return None
+    if token in KNOWN_THREAD_LABELS:
+        return token
+    for prefix in THREAD_LABEL_PREFIXES:
+        if token.startswith(prefix):
+            return prefix.rstrip('-')
+    return None
+
+
+def extract_thread_labels(text):
+    """Extract only finite known thread labels from pytest failure lines, or disclose an explicit gap."""
+    if text is None:
+        return [], 'junit_unavailable'
+    e_lines = [line[1:].strip() for line in text.splitlines()
+               if line == 'E' or line.startswith(('E ', 'E\t'))]
+    if not e_lines:
+        return [], 'not_observable'
+    # 1. Exact untruncated LHS list literal in `assert [...] == [...]` (e.g. with -vv).
+    joined = '\n'.join(e_lines)
+    for line in e_lines:
+        match = re.search(r'\bassert\s+(\[[^\[\]]*\])\s*==\s*\[', line)
+        if not match or '...' in match.group(1):
+            continue
+        try:
+            lhs = ast.literal_eval(match.group(1))
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(lhs, list) and lhs and all(isinstance(item, str) for item in lhs):
+            known, unlisted = [], False
+            for item in lhs:
+                label = normalize_thread_label(item)
+                if label is not None:
+                    known.append(label)
+                else:
+                    unlisted = True
+            if known:
+                return known, ('lhs_list_with_unlisted_omitted' if unlisted else 'lhs_list_exact')
+    # 2. Fallback: pytest diff lines (`At index N diff: 'A' != 'B'`, `Left contains ...: 'A'`, `+ 'A'`, LHS before `==`).
+    known, seen, unlisted = [], set(), False
+    for line in e_lines:
+        segment = None
+        if 'assert ' in line and ' == ' in line:
+            segment = line.split(' == ', 1)[0]
+        elif re.match(r'^At index \d+ diff:\s*', line) and ' != ' in line:
+            segment = line.split(' != ', 1)[0]
+        elif line.startswith(('Left contains ', 'Right contains ', 'Extra items in the left', '+', '-')):
+            segment = line
+        if segment is None:
+            continue
+        for token in re.findall(r"""['"]([^'"\n]{1,80})['"]""", segment):
+            label = normalize_thread_label(token)
+            if label is not None:
+                if label not in seen:
+                    seen.add(label)
+                    known.append(label)
+            else:
+                unlisted = True
+    if known:
+        return known, ('diff_lines_partial' if (unlisted or '...' in joined) else 'diff_lines_known_only')
+    return [], 'not_observable'
+
+
+def pytest_counts(record, files, kind, root, role, expected_nodes=None, ordered_nodes=False,
+                  required_subset=None, control_tests=None, junit_map=None):
+    """The group's projection. Strict as before, with exact full node IDs and bounded diagnostics."""
     summary = record_summary(record)
     result = {'selected': summary['selected_count'], 'fully_run': 0, 'nonpass_reports': 0,
               'skipped_reports': 0, 'modules': {}, 'nonpass': [], 'complete': False, 'record': summary}
@@ -401,26 +702,37 @@ def pytest_counts(record, files, kind, root, role, live_cases=None, control_test
         return result
     expected = set(selected)
     hits, names = Counter(), Counter()
+    mismatch = Counter()
+    duplicate_selected = len(selected) - len(expected)
+    if duplicate_selected:
+        mismatch['duplicate_selected'] = duplicate_selected
     for node in selected:
         path, *identity = node.split('[', 1)[0].split('::')
-        if kind == 'live':
-            path = Path(path).name
+        if not path:
+            mismatch['empty_path'] += 1
+        elif path not in files:
+            mismatch['unexpected_path'] += 1
+        if not identity:
+            mismatch['empty_identity'] += 1
         if path not in files or not identity:
-            result['projection'] = 'selection_mismatch'
-            result['selection_mismatch'] = {'selected_count': len(selected)}
-            return result
+            continue
         hits[path] += 1
         names[identity[-1]] += 1
+    if mismatch:
+        result['projection'] = 'selection_mismatch'
+        result['selection_mismatch'] = {'selected_count': len(selected), **dict(mismatch)}
+        return result
     reports = {node: Counter() for node in selected}
+    first_setup, last_teardown = {}, {}
     nonpass = skipped = 0
     cases = {node: i for i, node in enumerate(selected)}
-    known_names, faults = {}, []
+    known_funcs, faults = {}, []
     unexpected = Counter()
     rows = record.get('reports')
     if not isinstance(rows, list):
         result['projection'] = 'record_invalid'
         return result
-    for row in rows:
+    for row_index, row in enumerate(rows):
         if not isinstance(row, dict):
             unexpected['malformed'] += 1
             continue
@@ -432,25 +744,42 @@ def pytest_counts(record, files, kind, root, role, live_cases=None, control_test
             # A crashed worker or another phase the producer names: counted, never named.
             unexpected['phase_or_outcome'] += 1
             continue
-        reports[node][phase] += not row.get('is_subtest')
+        if not row.get('is_subtest'):
+            reports[node][phase] += 1
+            if phase == 'setup' and node not in first_setup:
+                first_setup[node] = row_index
+            if phase == 'teardown':
+                last_teardown[node] = row_index
         nonpass += outcome != 'passed' or 'wasxfail' in row
         skipped += outcome == 'skipped'
         if outcome != 'passed' or 'wasxfail' in row:
-            file, *parts = node.split('[', 1)[0].split('::')
-            if kind == 'live':
-                file = Path(file).name
-            if file not in known_names:
-                public = read_regular(root, ('harness' if kind == 'live' else role) + '/' + file, 4 * MIB)
-                known_names[file] = {node.name: node.lineno for node in ast.walk(ast.parse(public))
-                                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-            function = parts[-1] if parts[-1] in known_names[file] else None
-            # Only a public filename and function, plus an ordinal, the phase, the outcome, a
-            # closed exception bucket and the definition line of that function: no parameter
-            # ID, traceback, assertion message or raw response data.
-            faults.append({'file': file, 'function': function,
-                           'line': known_names[file].get(function) if function else None,
+            base_part = node.split('[', 1)[0]
+            file, *parts = base_part.split('::')
+            base_dir = 'harness' if kind == 'live' else role
+            if file not in known_funcs:
+                public = read_regular(root, base_dir + '/' + file, 4 * MIB)
+                known_funcs[file] = ast_functions(public)
+            qual = '::'.join(parts)
+            bounds = known_funcs[file].get(qual)
+            def_line = bounds[0] if bounds is not None else None
+            junit_text = (junit_map.get((*mangle_nodeid(node), phase))
+                          if isinstance(junit_map, dict) else None)
+            asserted_line = extract_asserted_line(junit_text, root, base_dir, role, file, bounds)
+            thread_labels, thread_obs = extract_thread_labels(
+                junit_text if isinstance(junit_map, dict) else None)
+            param = None
+            if '[' in node and node.endswith(']'):
+                raw_param = node.split('[', 1)[1][:-1]
+                if raw_param in PUBLIC_PARAM_IDS:
+                    param = raw_param
+            # Only bounded public facts leave the runner: validated file, function/method, closed
+            # public param, distinct definition_line vs asserted_line inside function lexical bounds,
+            # closed exception bucket, and finite known thread labels with explicit gap status.
+            faults.append({'file': file, 'function': qual if bounds is not None else None,
+                           'param': param, 'definition_line': def_line, 'asserted_line': asserted_line,
                            'index': cases[node], 'phase': phase, 'outcome': outcome,
-                           'error': error_bucket(row.get('error_type'))})
+                           'error': error_bucket(row.get('error_type')),
+                           'thread_labels': thread_labels, 'thread_labels_observation': thread_obs})
     expected_phases = {'setup': 1, 'call': 1, 'teardown': 1}
     fully_run = sum(dict(phases) == expected_phases for phases in reports.values())
     complete = (record.get('format') == 1 and record.get('session_exit_code') == 0
@@ -464,23 +793,39 @@ def pytest_counts(record, files, kind, root, role, live_cases=None, control_test
         complete &= all(names[name] >= count for name, count in NEW_MENU_FLOORS.items())
     if kind == 'size':
         complete &= len(selected) == 7
-    if kind == 'live':
-        if role == 'base':
-            expected_cases = set(live_cases or ())
-            complete &= {Path(node.split('::', 1)[0]).name + '::' + node.split('::', 1)[1]
-                         for node in selected} == expected_cases
-        else:
-            expected_hits = {name: count for name, count in LIVE.items() if name in files}
-            complete &= dict(hits) == expected_hits
-            if 'test_p05_upgrade.py' in files:
-                complete &= (names['test_first_dm_across_publication'] == len(READINESS)
-                             and names['test_public_gateway_dns_verdict'] == 1)
-            if 'test_p05_browser.py' in files:
-                complete &= (names['test_telegram_form_and_accounts_key'] == len(ENGINES)
-                             and names['test_place_sheet_keeps_or_accepts_wakes'] == len(ENGINES) * len(CHOICES)
-                             and names['test_place_sheet_pending_unpublished_signal'] == len(ENGINES))
+    if expected_nodes is not None:
+        expected_set = set(expected_nodes)
+        missing_expected = expected_set - expected
+        extra_selected = expected - expected_set
+        if missing_expected or extra_selected:
+            result['projection'] = 'selection_mismatch'
+            result['selection_mismatch'] = {
+                'selected_count': len(selected),
+                'expected_count': len(expected_nodes),
+                'missing_expected': len(missing_expected),
+                'extra_selected': len(extra_selected),
+            }
+            complete = False
+        elif ordered_nodes:
+            if list(selected) != list(expected_nodes):
+                result['projection'] = 'selection_order_mismatch'
+                complete = False
+            elif any(prev_n in last_teardown and next_n in first_setup
+                     and last_teardown[prev_n] >= first_setup[next_n]
+                     for prev_n, next_n in zip(expected_nodes, expected_nodes[1:])):
+                result['projection'] = 'execution_order_mismatch'
+                complete = False
+    if required_subset is not None:
+        missing_required = set(required_subset) - expected
+        if missing_required:
+            result.setdefault('projection', 'required_node_missing')
+            result.setdefault('selection_mismatch', {
+                'selected_count': len(selected),
+                'missing_required': len(missing_required),
+            })
+            complete = False
     if unexpected:
-        result['projection'] = 'unexpected_report'
+        result.setdefault('projection', 'unexpected_report')
         result['unexpected_reports'] = dict(unexpected)
         complete = False
     if control_tests is not None:
@@ -641,10 +986,14 @@ def pack(root, run_rc):
     comparisons = {}
     controls = {f'{role}-{name}': tests for name, _files, tests, _budget in PAIRED_CONTROLS
                 for role in ('base', 'candidate')}
+    targeted_exact = {f'{role}-{name}': (entries, ordered)
+                      for name, entries, _budget, ordered, _vv in TARGETED_PAIRS
+                      for role in ('base', 'candidate')}
     diagnostics = {f'{role}-{name}-diagnostic': tests
                    for name, _files, tests, _budget in DIAGNOSTIC_OBSERVATIONS
                    for role in ('base', 'candidate')}
-    declared = {**controls, **diagnostics}
+    declared_controls = {**controls, **diagnostics}
+    skippable = set(declared_controls) | set(targeted_exact) | {'candidate-persistence-inventory'}
     for label, (role, kind, files, _, _) in groups(root, subject).items():
         prefix = f'work/raw/{label}'
         try:
@@ -655,7 +1004,7 @@ def pack(root, run_rc):
                 # Only the producer's exact closed word for a declared observation with no matching
                 # public test in this tree is a known state. The phase file lives in the
                 # test-writable run tree, so any other value is a typed gap, never echoed.
-                known = (label in declared and not files
+                known = (label in skippable and not files
                          and phase.get('skipped') == 'no_matching_tests'
                          and phase['exit'] == 0 and phase['settled'] is True)
                 projection = 'no_matching_tests' if known else 'invalid_skip'
@@ -678,10 +1027,29 @@ def pack(root, run_rc):
                     except (ValueError, OSError):
                         result = {'complete': False, 'projection': 'record_invalid'}
                     else:
-                        result = pytest_counts(record, names, kind, root, role,
-                                               live_cases={entry for entry in files if '::' in entry}
-                                               if kind == 'live' and role == 'base' else None,
-                                               control_tests=declared.get(label))
+                        expected_nodes = None
+                        ordered_nodes = False
+                        required_subset = None
+                        if kind == 'live':
+                            if role == 'base':
+                                expected_nodes = tuple(files)
+                            else:
+                                expected_nodes = tuple(
+                                    f'{name}::{case}' for name in names for case in CANDIDATE_LIVE[name]
+                                )
+                        elif label in targeted_exact:
+                            expected_nodes, ordered_nodes = targeted_exact[label]
+                        elif label == 'candidate-persistence-inventory':
+                            required_subset = STRUCTURAL_RESIDUAL_NODES
+                        junit_map = junit_failures(root, prefix + '/private-junit.xml')
+                        result = pytest_counts(
+                            record, names, kind, root, role,
+                            expected_nodes=expected_nodes,
+                            ordered_nodes=ordered_nodes,
+                            required_subset=required_subset,
+                            control_tests=declared_controls.get(label),
+                            junit_map=junit_map,
+                        )
             except (KeyError, TypeError, ValueError, OSError):
                 result = {'complete': False, 'projection': 'record_invalid'}
             result.update(exit=phase['exit'], settled=phase['settled'], subject=role)
@@ -721,8 +1089,8 @@ def pack(root, run_rc):
     if not ready:
         return 2  # A subject, summary or boundary alone is not a result artifact.
     complete = run_rc == 0 and not missing
-    summary = {'format': 1, 'complete': complete, 'unit_exit': run_rc, 'boundary': box,
-               'missing_or_not_qualified': missing, 'proof_members': sorted(ready),
+    summary = {'format': 1, 'mode': subject.get('mode', 'full'), 'complete': complete, 'unit_exit': run_rc,
+               'boundary': box, 'missing_or_not_qualified': missing, 'proof_members': sorted(ready),
                'comparisons': comparisons}
     ready.update({'subject.json': json_bytes(subject), 'summary.json': json_bytes(summary)})
     archive = sys.stdout.buffer  # Actions traps stdout in a new runner-private regular file, not a job log.
@@ -750,6 +1118,9 @@ def comparison_slot(label):
         for name, _files, _tests, _budget in PAIRED_CONTROLS:
             if label == f'{role}-{name}':
                 return SAME_SOURCE_PAIR
+        for name, _entries, _budget, _ordered, _vv in TARGETED_PAIRS:
+            if label == f'{role}-{name}':
+                return SAME_SOURCE_PAIR
         for name, _files, _tests, _budget in DIAGNOSTIC_OBSERVATIONS:
             if label == f'{role}-{name}-diagnostic':
                 return NON_EXACT_DIAGNOSTIC
@@ -757,14 +1128,23 @@ def comparison_slot(label):
 
 
 def classify(root, result, label, files, role):
-    """Attach the closed comparison word and the byte measurement behind it."""
+    """Attach the closed comparison word derived from observed source_bytes, preserving outcomes."""
     slot = comparison_slot(label)
     if slot is None:
         return result
-    evidence = source_bytes(root, files, role)
+    evidence = source_bytes(root, sorted({entry.partition('::')[0] for entry in files}), role)
     if not evidence:
         return result
-    result['comparison'] = slot
+    if slot == SAME_SOURCE_PAIR:
+        if all(value is True for value in evidence.values()):
+            observed = SAME_SOURCE_PAIR
+        elif any(value is None for value in evidence.values()):
+            observed = UNKNOWN_SOURCE_PAIR
+        else:
+            observed = DIFFERENT_SOURCE_PAIR
+    else:
+        observed = slot
+    result['comparison'] = observed
     result['source_bytes'] = evidence
     return result
 
@@ -779,6 +1159,7 @@ def check_archive(root, filename, rc):
         optional.add(f'steps/{name}.json')
         required.update(f'screens/{name}-{scene}.png' for scene in scenes)
     allowed = required | optional
+    allowed_errors = set(ERROR_BUCKETS.values()) | {'none', 'other'}
     with zipfile.ZipFile(filename) as bundle:
         names = bundle.namelist()
         assert len(names) == len(set(names)) and {'subject.json', 'summary.json'} <= set(names)
@@ -789,6 +1170,28 @@ def check_archive(root, filename, rc):
         summary = json.loads(bundle.read('summary.json'))
         assert bundle.read('subject.json') == json_bytes(subject)
         assert summary['unit_exit'] == rc and members == set(summary['proof_members'])
+        for member in sorted(m for m in members if m.startswith('groups/')):
+            group = json.loads(bundle.read(member))
+            assert isinstance(group, dict)
+            if 'comparison' in group:
+                assert group['comparison'] in COMPARISON_VALUES
+                src = group.get('source_bytes')
+                assert isinstance(src, dict) and src
+                if group['comparison'] == SAME_SOURCE_PAIR:
+                    assert all(value is True for value in src.values())
+                elif group['comparison'] == DIFFERENT_SOURCE_PAIR:
+                    assert any(value is False for value in src.values()) and not any(value is None for value in src.values())
+                elif group['comparison'] == UNKNOWN_SOURCE_PAIR:
+                    assert any(value is None for value in src.values())
+            for fault in group.get('nonpass') or ():
+                assert isinstance(fault, dict)
+                assert fault.get('definition_line') is None or (type(fault['definition_line']) is int and fault['definition_line'] > 0)
+                assert fault.get('asserted_line') is None or (type(fault['asserted_line']) is int and fault['asserted_line'] > 0)
+                assert fault.get('param') is None or fault['param'] in PUBLIC_PARAM_IDS
+                assert fault.get('error') in allowed_errors
+                labels = fault.get('thread_labels')
+                assert isinstance(labels, list) and all(label in KNOWN_THREAD_LABELS for label in labels)
+                assert fault.get('thread_labels_observation') in THREAD_LABEL_OBSERVATIONS
         for name, _scenes, _dimensions in wanted_live():
             member = f'live/{name}.json'
             if member in members:

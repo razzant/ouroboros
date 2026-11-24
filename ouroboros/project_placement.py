@@ -12,53 +12,87 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-def placement_basis(drive_root: Any, task_id: str, project_id: str) -> dict:
-    """Capture the destination before transport or asynchronous project naming."""
-    from ouroboros.projects_registry import project_id_for_task, project_admission_view
+# The one sentence of each typed refusal that leaves the work in Main: the 409 ``error`` the card's toast shows as
+# written (``work_portal.js`` only picks its translation key), so client and server never carry two texts.
+NAMING_REFUSALS = {
+    "project_name_source_unavailable": "This work couldn't be named automatically, so it stayed in Main.",
+    "project_name_unavailable": "The naming model gave no title, so the work stayed in Main. "
+                                "Press Turn into project to try again.",
+    "continuation_pending": "This Continue is still being admitted, so it stayed in Main. "
+                            "Press Turn into project again in a moment.",
+    "continuation_family_too_long": "This work couldn't be named automatically, so it stayed in Main.",
+}
 
-    bound = project_id_for_task(drive_root, task_id, strict=True)
+
+def _work_binding(drive_root: Any, task_id: str, episodes: tuple[str, ...] = ()) -> dict:
+    from ouroboros.projects_registry import project_binding_for_task
+
+    for tid in (task_id, *episodes):
+        if binding := project_binding_for_task(drive_root, tid, strict=True):
+            return binding
+    return {}
+
+
+def conversion_destination(task_id: str, requested: str = "", *, named: bool = False) -> tuple[str, bool]:
+    """``(project_id, default)``: the room id a work's conversion uses and whether it is the work's own default.
+
+    The server owns the default: ``task-<task_id>`` while that already is a valid id (the established short
+    default), else a bounded id derived from the whole task id, so a long Continue episode id has one stable
+    destination. No ``id`` (the canonical request) or the default itself is default (it may join the work's room), and
+    so is the id older browsers sent with no ``name``: truncated and lowercased, it can name another work's room, so
+    the whole-id default replaces it. Any other id, or that older id beside a ``name``, is the caller's explicit
+    destination, kept as sent. A task bound already keeps its binding whatever the destination."""
+    import hashlib
+    import re
+
+    from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
+
+    short = f"task-{task_id}"
+    default = short if explicit_project_id_ok(short) else (
+        f"{sanitize_project_id(short)[:51].rstrip('-.')}-{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:12]}")
+    seed = re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9_.-]+", "-", task_id.lower()))
+    older = (f"task-{seed}" if seed else "")[:64]  # the id older browsers sent, without a name, for a task id
+    own = not requested or requested == default or (requested == older and not named)
+    return (default if own else requested), own
+
+
+def placement_basis(drive_root: Any, task_id: str, project_id: str, *, episodes: tuple[str, ...] = ()) -> dict:
+    """Capture the destination before transport or asynchronous project naming."""
+    from ouroboros.projects_registry import project_admission_view
+
+    bound = _work_binding(drive_root, task_id, episodes).get("project_id")
     return project_admission_view(drive_root, bound or project_id, allow_unregistered=not bound)
 
 
 def move_task_to_project(drive_root: Any, task_id: str, project_id: str, *, name: str = "",
                          origin: dict, basis: dict, running: Any, pending: Any,
-                         initiated_by: str = "mind") -> dict:
+                         initiated_by: str = "mind", automatic_name: bool = False,
+                         naming_refusal: str = "", adopt_work_room: bool = False) -> dict:
     """The mind and owner button share this binding-first placement transaction."""
-    from ouroboros.projects_registry import (
-        _validated_origin, bind_task_to_project, create_project, get_project, origin_claim_lock, project_chat_id,
-        project_admission_basis, project_admission_guard, project_id_for_task, update_project,
-    )
+    from ouroboros.projects_registry import origin_claim_lock
     from ouroboros.project_lease import mark_task_project
     from supervisor.queue import _queue_lock, persist_queue_snapshot
 
-    with origin_claim_lock(), _queue_lock:
-        bound = project_id_for_task(drive_root, task_id, strict=True)
-        pid = bound or project_id
-        if basis.get("project_id") != pid:
-            basis = placement_basis(drive_root, task_id, pid)
-        _validated_origin(origin, (basis.get("project") or {}).get("chat_id", project_chat_id(pid)))
-        if bound:
-            with project_admission_guard(drive_root, basis):
-                project = get_project(drive_root, bound, strict=True)
-                renamed = bool(name and name != project.get("name"))
-                if renamed:
-                    project = update_project(drive_root, bound, name=name)
-        else:
-            project = create_project(drive_root, pid, name=name, origin=initiated_by, admission_basis=basis)
-            renamed = False
-            if basis["project"] is None:
-                basis = project_admission_basis(pid, project)
-        binding = bind_task_to_project(
-            drive_root, task_id, pid, project.get("chat_id"), origin=origin,
-            admission_basis=basis, execution_readmission=True,
-        )
-        # Only PENDING rows can acquire a new lease on their next assignment.
-        marked = mark_task_project(running, pending, task_id, pid, authority="binding", project=project)
-        if marked:
+    with origin_claim_lock():
+        episodes = ()
+        if adopt_work_room and not _work_binding(drive_root, task_id):
+            from supervisor.continuation_admission import verified_work_episodes
+
+            # Read task records off Q. Other conversions serialize here, so a newly
+            # bound sibling wins even if this request prepared before it was admitted.
             try:
-                persist_queue_snapshot(reason="project_placement")
-            except Exception:
-                log.warning("Placement committed; queue snapshot write failed", exc_info=True)
+                episodes = verified_work_episodes(drive_root, task_id)
+            except ValueError as exc:
+                naming_refusal = getattr(exc, "reason", "project_name_source_unavailable")
+        with _queue_lock:
+            project, binding, bound, renamed, pid = _place(drive_root, task_id, project_id, name, origin, basis,
+                                                          initiated_by, automatic_name, naming_refusal, episodes)
+            # Only PENDING rows can acquire a new lease on their next assignment.
+            if mark_task_project(running, pending, task_id, pid, authority="binding", project=project):
+                try:
+                    persist_queue_snapshot(reason="project_placement")
+                except Exception:
+                    log.warning("Placement committed; queue snapshot write failed", exc_info=True)
     from ouroboros.project_handoff import enqueue_project_handoff, handoff_identity
 
     receipt = enqueue_project_handoff(drive_root, task_id, source_ref=origin.get("ref"))
@@ -76,6 +110,46 @@ def move_task_to_project(drive_root: Any, task_id: str, project_id: str, *, name
             "reason": "renamed" if renamed else ("created" if project.get("created") else "attached"),
             "project": project, "binding": binding, "adopted": bool(bound),
             "handoff_receipt": receipt, "handoff_id": handoff_identity(pid, task_id, origin.get("ref"))}
+
+
+def _place(drive_root, task_id, project_id, name, origin, basis, initiated_by, automatic_name, naming_refusal, episodes):
+    """The exact room and binding transaction under the placement and queue locks."""
+    from ouroboros.projects_registry import (
+        _validated_origin, bind_task_to_project, create_project, get_project, project_chat_id,
+        project_admission_basis, project_admission_guard, update_project,
+    )
+
+    winner = _work_binding(drive_root, task_id, episodes)
+    bound = winner.get("project_id") or ""
+    pid = bound or project_id
+    adopting = bool(automatic_name and bound and (basis.get("project_id") != pid or basis["project"] is None))
+    if adopting and winner.get("task_id") == task_id and winner.get("placement_admission"):
+        # This exact task bound meanwhile: what its binding admitted is the basis, so the guard still refuses a room
+        # changed since, and a fresh read never stands in for that admission.
+        basis = winner["placement_admission"]
+    elif basis.get("project_id") != pid or adopting:
+        # A verified sibling's room, joined now: its fence is read fresh here, under the placement lock, and the final
+        # guard honors any later change or deletion. Its own ``placement_admission`` is that binding's history.
+        basis = placement_basis(drive_root, task_id, pid, episodes=episodes)
+    _validated_origin(origin, (basis.get("project") or {}).get("chat_id", project_chat_id(pid)))
+    renamed = False
+    if bound:
+        with project_admission_guard(drive_root, basis):
+            project = get_project(drive_root, bound, strict=True)
+            renamed = bool(not automatic_name and name and name != project.get("name"))
+            if renamed:
+                project = update_project(drive_root, bound, name=name)
+    else:
+        if naming_refusal and basis["project"] is None:
+            from ouroboros.project_admission import ProjectAdmissionError
+
+            raise ProjectAdmissionError(naming_refusal, NAMING_REFUSALS.get(naming_refusal, naming_refusal))
+        project = create_project(drive_root, pid, name=name, origin=initiated_by, admission_basis=basis)
+        if basis["project"] is None:
+            basis = project_admission_basis(pid, project)
+    binding = bind_task_to_project(drive_root, task_id, pid, project.get("chat_id"), origin=origin,
+                                   admission_basis=basis, execution_readmission=True)
+    return project, binding, bound, renamed, pid
 
 
 def pending_placement(drive_root: Any, task: dict, *, bindings_snapshot: dict | None = None) -> dict:

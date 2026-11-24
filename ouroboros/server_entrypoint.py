@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 import errno
 import gc
+from ipaddress import ip_address
+import json
 import logging
 import os
 import pathlib
@@ -13,6 +16,7 @@ import socket
 import sys
 import threading
 import time
+from typing import NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +29,157 @@ class ServerAdmissionRefused(RuntimeError):
     """This process may not serve the data root: another server holds it, or holding is unprovable."""
 
 
-def admit_data_root(data_dir: pathlib.Path, *, wait_sec: float | None = None) -> None:
+class CliResetReplay(NamedTuple):
+    ordinary: tuple[str, ...]
+    reset: tuple[str, ...]
+    host: str
+
+
+_cli_reset = ContextVar[CliResetReplay | None]("cli_reset_replay", default=None)
+
+
+@contextmanager
+def cli_reset_scope(replay: CliResetReplay | None):
+    token = _cli_reset.set(replay)
+    try:
+        yield
+    finally:
+        _cli_reset.reset(token)
+
+
+class ResetLaunch:
+    """In-process launch evidence; never a public credential or a launcher login."""
+
+    def __init__(self, repo_dir: pathlib.Path, managed: bool):
+        from ouroboros.server_control import restart_arguments
+        from ouroboros.settings_integrity import (
+            LAUNCHER_RESET_PROTECTION_ENV, PROJECTED_SETTINGS_ENV,
+        )
+
+        self.repo_dir, self.managed = repo_dir, managed
+        self.cli = None if managed else _cli_reset.get()
+        self.argv = () if managed else restart_arguments(os.environ)
+        mark = os.environ.pop(LAUNCHER_RESET_PROTECTION_ENV, "")
+        if not managed or os.environ.get("OUROBOROS_LAUNCHER_STOP_STDIN") != "1":
+            mark = ""
+        self.launcher_mode, _, self.launcher_host = mark.partition(" ")
+        self.boot_host = ""
+        if not managed and self._owns_direct_replay(os.environ):
+            os.environ.setdefault(PROJECTED_SETTINGS_ENV, "{}")
+
+    def _owns_direct_replay(self, environ) -> bool:
+        from ouroboros.launch_roots import same_location
+        from ouroboros.server_control import restart_arguments
+
+        try:
+            if not self.argv or restart_arguments(environ) != self.argv:
+                return False
+            if self.cli is not None:
+                script = pathlib.Path(self.cli.reset[0])
+                selected = self.argv == self.cli.ordinary and script.is_absolute()
+            else:
+                script = pathlib.Path(self.argv[0])
+                # The spawn fallback uses repo_dir; POSIX exec keeps cwd.
+                selected = self.argv == tuple(sys.argv) and (
+                    script.is_absolute() or same_location(pathlib.Path.cwd(), self.repo_dir))
+            return selected and script.is_file() and same_location(script, self.repo_dir / "server.py")
+        except (OSError, ValueError):
+            return False
+
+    def select_reset_reexec(self, outcome) -> None:
+        """Only the proved Reset handoff uses the CLI producer's absolute script recipe."""
+        if self.cli is not None and isinstance(outcome, dict) and outcome.get("status") == "reset_requested":
+            os.environ["OUROBOROS_SERVER_REEXEC_ARGV_JSON"] = json.dumps(self.cli.reset)
+
+    def _plan(self, data_dir, environ, *, boot: bool = False):
+        from ouroboros import config
+        from ouroboros.launch_roots import same_location
+        from ouroboros.settings_integrity import (
+            drop_projection, own_reset_settings, reset_bind_protection, reset_operator_password,
+        )
+
+        if (not same_location(data_dir, config.DATA_DIR)
+                or not own_reset_settings(config.DATA_DIR, config.SETTINGS_PATH, environ)):
+            return None
+        password = reset_operator_password(environ)
+        if password is None:
+            return None
+        if self.managed:
+            if not self.launcher_mode:
+                return None
+            if not boot:
+                return self.launcher_mode, self.launcher_host, password
+        elif not self._owns_direct_replay(environ):
+            return None
+        post = dict(environ)
+        drop_projection(post)
+        key = "OUROBOROS_SERVER_HOST"
+        default = (post.get(key) or "").strip() or config.SETTINGS_DEFAULTS[key]
+        host = ((self.cli.host or default) if self.cli is not None
+                else parse_server_args(default, 0, argv=list(sys.argv[1:])).host)
+        mode = reset_bind_protection(host, password)
+        if not mode or (self.managed and (self.launcher_mode != mode or self.launcher_host != host)):
+            return None
+        return mode, host, password
+
+    @staticmethod
+    def _passwords(environ) -> tuple[str, str]:
+        from ouroboros import config
+        from ouroboros.server_auth import resolve_network_password
+        from ouroboros.settings_integrity import (
+            NETWORK_PASSWORD_KEY, read_settings_json_strict, settings_read_environ,
+        )
+
+        # No settings writer lock here: Reset can already hold the profile state lock.
+        raw = read_settings_json_strict(config.SETTINGS_PATH)
+        with settings_read_environ(environ):
+            settings = config.settings_of_document(raw, present=raw is not None)
+        active = resolve_network_password(environ.get(NETWORK_PASSWORD_KEY), lambda: settings)
+        projected = resolve_network_password(None, lambda: settings)
+        return active, projected
+
+    def approve(self, bound_host: str, data_dir: pathlib.Path) -> str:
+        from ouroboros.settings_integrity import SETTINGS_ENV_LOCK, reset_bind_protection
+
+        try:
+            with SETTINGS_ENV_LOCK:
+                env = os.environ.copy()
+                plan = self._plan(data_dir, env)
+                if plan is None:
+                    return ""
+                mode, host, password = plan
+                active, projected = self._passwords(env)
+                return mode if (active == projected == password and ip_address(host) == ip_address(bound_host)
+                                and reset_bind_protection(bound_host, active) == mode) else ""
+        except (OSError, RuntimeError, ValueError, SystemExit):
+            return ""
+
+    def at_boot(self, data_dir: pathlib.Path) -> str:
+        try:
+            env = os.environ.copy()
+            plan = self._plan(data_dir, env, boot=True)
+            if plan is None:
+                return ""
+            mode, host, password = plan
+            # A partial cleanup may still leave settings.json for lifespan to project.
+            if self._passwords(env) != (password, password):
+                return ""
+            self.boot_host = host
+            return mode
+        except (OSError, RuntimeError, ValueError, SystemExit):
+            return ""
+
+
+def unisolated_test_root(root: pathlib.Path) -> bool:
+    """Keep both server entry points off the default profile in a bare pytest run or its subprocess."""
+    from ouroboros.launch_roots import same_location
+
+    return (("pytest" in sys.modules or bool(os.environ.get("PYTEST_CURRENT_TEST")))
+            and not os.environ.get("OUROBOROS_DATA_DIR")
+            and same_location(root, pathlib.Path.home() / "Ouroboros" / "data"))
+
+
+def admit_data_root(data_dir: pathlib.Path, *, wait_sec: float | None = None, reset_launch: ResetLaunch | None = None) -> None:
     """Hold this process's exclusive admission to ``data_dir`` until the process exits.
 
     One kernel lock on the fixed ``<data>/state/server.lock`` (``flock`` / ``LockFileEx``)
@@ -78,6 +232,15 @@ def admit_data_root(data_dir: pathlib.Path, *, wait_sec: float | None = None) ->
         except OSError:
             log.debug("Could not stamp %s", lock_path, exc_info=True)
         previous = _admission.get("fd")
+        # No outgoing server can write again. Consume its one-shot Reset before
+        # another caller can observe admission or initialize the new profile.
+        from supervisor.state_initialization import accept_runtime_reset
+        try:
+            path = pathlib.Path(root)
+            accept_runtime_reset(path, boot_protection=None if reset_launch is None else lambda: reset_launch.at_boot(path))
+        except Exception as exc:
+            os.close(fd)
+            raise ServerAdmissionRefused(f"Reset at data-root admission failed: {exc}") from exc
         _admission.update(root=root, fd=fd)
     if previous is not None:  # a second root in one process exists only in tests
         os.close(previous)
@@ -179,7 +342,7 @@ def find_free_port(host: str, start: int = 8765, max_tries: int = 10,
     raise OSError(f"No free port available in range {start}-{start + max_tries - 1}")
 
 
-def parse_server_args(default_host: str, default_port: int) -> argparse.Namespace:
+def parse_server_args(default_host: str, default_port: int, *, argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Ouroboros web server.")
     parser.add_argument(
         "--host",
@@ -192,7 +355,7 @@ def parse_server_args(default_host: str, default_port: int) -> argparse.Namespac
         default=default_port,
         help="Port to bind (default: %(default)s or OUROBOROS_SERVER_PORT).",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     args.host_explicit = args.host is not None
     if not args.host_explicit:
         args.host = default_host
