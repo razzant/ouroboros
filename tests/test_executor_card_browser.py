@@ -1,9 +1,16 @@
 """Actual chat renderers over deterministic progress/history, without model calls."""
 from __future__ import annotations
+
 import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui, capture
+
 from tests.test_delegated_activity_browser import engine_ui as engine_ui  # chromium and webkit
+from tests.test_subscription_setup_browser import PREVIEW_SCOPE, capture
+from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -34,7 +41,7 @@ def test_observed_executor_role_activity_and_project_pointer_live_replay(subscri
                      root_task_id='root',delegation_role='subagent',subagent_role='UI reviewer',
                      model='openai/gpt-6-astra',executor_route='cursor',executor_observation=observation)
     rows = [progress('root','Inspecting the shared UI system. '+ 'Useful activity text. '*20,suggested_name='UI coherence', model='openai/gpt-6-astra'), child]
-    history = {'messages': rows, 'progress': [], 'page_cursor': 'executor-recent',
+    history = {'messages': rows, 'progress': [], 'profile_scope': PREVIEW_SCOPE, 'page_cursor': 'executor-recent',
                'next_cursor': 'executor-older', 'has_more': True,
                'window': {'complete': False, 'truncated_by': ['quota']},
                'coverage': {'v': 1, 'view': 'executor-proof', 'upper': {'chat': 0, 'progress': 7},
@@ -203,7 +210,7 @@ def open_matrix(ui, page, theme, size):
     rows = [progress('matrix-root', 'Coordinating the helpers.', suggested_name='Helper matrix',
                      model='openai/gpt-6-astra')] + [frame for _, frame, _, _ in MATRIX]
     page.route('**/api/chat/history*', lambda route: route.fulfill(content_type='application/json', body=json.dumps(
-        {'messages': rows, 'progress': [], 'has_more': False, 'window': {'complete': True}})))
+        {'messages': rows, 'progress': [], 'profile_scope': PREVIEW_SCOPE, 'has_more': False, 'window': {'complete': True}})))
     page.goto(ui['url'])
     page.wait_for_selector('#chat-input')
     assert page.locator('html').get_attribute('data-theme') == theme
@@ -244,7 +251,7 @@ def test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch(engin
     unreadable = next(frame for task, frame, *_ in MATRIX if task == 'm-unreadable')
     # The detail sentence (quotes included) is the Executor row of the details, which round-trips the same way.
     assert page.evaluate('''async frame => {
-        const {executorChip} = await import('/static/modules/log_events.js');
+        const {executorChip} = await import('/static/modules/executor_card_facts.js');
         const {executorIdentityMarkup} = await import('/static/modules/harness_presentation.js');
         const html = executorIdentityMarkup(executorChip(frame), {model: 'gpt-6-astra'});
         const probe = document.createElement('div'); probe.innerHTML = html;
@@ -347,3 +354,326 @@ def test_logs_print_the_executor_detail_beside_the_quiet_chip(engine_ui, theme):
         // This page-scoped Logs mount ends with the fixture's page/context teardown.
         return valid;
     }''')
+
+
+# The owner asked to see which model a subagent was spawned on (2026-11-22): from Queued on, its card names the
+# executor and model the delegation selected, observed evidence replaces it, and the request stays in Details.
+SEL_ROOT, SEL_KID, SEL_API, SEL_MISSED, SEL_CANCELLED = 'sel-root', 'sel-kid', 'sel-api', 'sel-missed', 'sel-cancelled'
+SEL_LOCAL = 'sel-local'
+SEL_LONG_ROLE = 'Cross-surface consistency reviewer for the long-named settings and history migration'
+SEL_LONG_MODEL = 'claude-opus-5-5-20261101-extended-thinking-preview'
+SEL_CHILDREN = {  # task id: (role, row route, the coordinator's model, observed models, delivered live)
+    SEL_KID: ('Implementation reviewer', {'kind': 'agent_session', 'target_id': 'codex=gpt-5.5'},
+              'openai/gpt-6-astra', ['gpt-5.5-codex'], True),
+    SEL_API: ('API researcher', {'kind': 'api_model', 'target_id': 'openai::gpt-5.5-pro'}, 'openai::gpt-5.5-pro', [], True),
+    # Its coordinator runs on a subscription route: that recorded billing must survive the missed-terminal recovery.
+    SEL_MISSED: (SEL_LONG_ROLE, {'kind': 'agent_session', 'target_id': f'claude={SEL_LONG_MODEL}'},
+                 'claudexor::claude=claude-sonnet-5-5', ['claude-opus-5-5'], False),
+    SEL_CANCELLED: ('Queued-only checker', {'kind': 'agent_session', 'target_id': 'codex=gpt-5.5-mini'}, '', [], True),
+    # A local API row: its target is spelled `… (local)` (configured_subagents), and its actor runs the bare model locally.
+    SEL_LOCAL: ('Local summarizer', {'kind': 'api_model', 'target_id': 'qwen.gguf (local)'}, 'qwen.gguf', [], True),
+}
+SEL_UNDISPATCHED = {SEL_CANCELLED}  # cancelled while queued: never dispatched, so its terminal names no route
+SEL_PARENT_MODEL = 'openai/gpt-6-astra'  # the parent's cognitive route, the snapshot an undispatched child keeps
+SEL_META = '''ids => Object.fromEntries(ids.map(id => {
+    const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
+    const meta = card?.querySelector(':scope > .chat-live-foot [data-live-meta]');
+    const facts = [...(card?.querySelectorAll(':scope > .chat-live-details > [data-live-facts] > div') || [])]
+        .map(row => [row.querySelector('dt').textContent, row.querySelector('dd').textContent]);
+    const chip = card?.querySelector(':scope > .chat-live-foot .chat-live-executor-chip');
+    const box = meta?.getBoundingClientRect(), cardBox = card?.getBoundingClientRect();
+    return [id, {line: meta ? meta.innerText.replace(/\\s+/g, ' ').trim() : null, chip: chip ? chip.innerText.trim() : null,
+        facts: Object.fromEntries(facts), phase: card?.querySelector('[data-live-phase]')?.innerText || null,
+        finished: card?.dataset.finished === '1', fits: meta ? meta.scrollWidth <= meta.clientWidth + 1 : null,
+        inside: box && cardBox ? box.right <= cardBox.right + 1 && box.left >= cardBox.left - 1 : null}];
+}))'''
+SEL_EXPAND = '''ids => { for (const id of ids) {
+    const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
+    if (card && card.dataset.expanded !== '1') card.querySelector('[data-live-disclosure]').click();
+} }'''
+
+
+class SelectionProducers:
+    """The real producers of a child's frames, in process: the admission notice, the worker's running notice through
+    supervisor delivery, a progress report and the supervisor's terminal dispatch, all through ``message_bus``."""
+
+    def __init__(self, data, monkeypatch):
+        from ouroboros.task_results import write_task_result
+        from supervisor import events, events_chat_delivery, message_bus
+
+        self.data, self.live, self.message_bus, self.monkeypatch = data, [], message_bus, monkeypatch
+        bridge = message_bus.LocalChatBridge()
+        bridge._broadcast_fn = self.live.append
+        monkeypatch.setattr(message_bus, 'DATA_DIR', data)
+        monkeypatch.setattr(message_bus, 'load_state', lambda: {'owner_id': 1})
+        monkeypatch.setattr(message_bus, '_BRIDGE', bridge)
+        monkeypatch.setattr(message_bus, 'publish_event', lambda *_: None)
+        monkeypatch.setattr(events_chat_delivery, '_bound_project_chat_id', lambda *_: None)
+        monkeypatch.setattr(events, '_bound_project_chat_id', lambda *_: None)
+        self.tasks = {tid: {'id': tid, 'type': 'task', 'chat_id': 1, '_attempt': 0, 'delegation_role': 'subagent',
+                            'root_task_id': SEL_ROOT, 'parent_task_id': SEL_ROOT, 'role': role, 'subagent_role': role,
+                            'configured_subagent': {'schema': 1, 'selected_subagent_id': tid, 'config_fingerprint': 'fp',
+                                                    'route': {**route, 'credential_profile_id': 'work-account'}},
+                            # The cognitive snapshot admission froze (a session child runs on it as its coordinator).
+                            'parent_cognitive_route': {'model': model or SEL_PARENT_MODEL, 'use_local_model': False,
+                                                       'chosen_by': 'inherited'}}
+                      for tid, (role, route, model, *_rest) in SEL_CHILDREN.items()}
+        self.delivery = SimpleNamespace(DRIVE_ROOT=data, RUNNING={}, send_with_budget=message_bus.send_with_budget,
+                                        append_jsonl=lambda *_: pytest.fail('delivery raised'))
+        write_task_result(data, SEL_ROOT, 'running', chat_id=1)
+
+    def _taken(self, before):
+        return self.live[before:]
+
+    def queued(self):
+        from ouroboros.task_results import write_task_result
+        from supervisor.events_subagent_admission import _subagent_scheduled_meta
+
+        before = len(self.live)
+        for tid, task in self.tasks.items():  # the receipt and fields events_schedule_task writes and sends
+            write_task_result(self.data, tid, 'scheduled', chat_id=1, **{key: task[key] for key in (
+                'delegation_role', 'root_task_id', 'parent_task_id', 'role', 'configured_subagent', 'parent_cognitive_route')})
+            meta = {'root_task_id': SEL_ROOT, 'parent_task_id': SEL_ROOT, 'delegation_role': 'subagent', 'cancelable': False,
+                    **_subagent_scheduled_meta(tid=tid, role=task['role'], task_constraint={}, task_group_id='',
+                                               requested_model_lane='auto', active_subagent_count=1, max_active_subagents=None,
+                                               configured_subagent=task['configured_subagent']),
+                    'parent_cognitive_route': task['parent_cognitive_route']}
+            self.message_bus.send_with_budget(1, f"🗓️ Scheduled subagent {tid} ({task['role']}): check the card", is_progress=True,
+                                              task_id=tid, progress_meta=meta, role='system', system_type='task_scheduled')
+        return self._taken(before)
+
+    def running(self):
+        from ouroboros.subagent_messages import subagent_message_meta
+        from supervisor import events_chat_delivery
+
+        before = len(self.live)
+        for tid, task in self.tasks.items():  # dispatch stamps the route and the coordinating model, as the record does
+            if tid in SEL_UNDISPATCHED:
+                continue
+            role, route, model, *_ = SEL_CHILDREN[tid]
+            task.update(executor_route=route['target_id'], model=model, use_local_model=route['target_id'].endswith(' (local)'))
+            self.delivery.RUNNING[tid] = {'task': task}
+            events_chat_delivery._handle_send_message({
+                'type': 'send_message', 'chat_id': 1, 'role': 'system', 'system_type': 'subagent_started',
+                'text': f'Subagent running ({role}).', 'is_progress': True, 'task_id': tid,
+                'progress_meta': subagent_message_meta(task, task_id=tid, event='running')}, self.delivery)
+        # The run's own report names its harness but no model: the selection stands for that harness.
+        events_chat_delivery._handle_send_message({
+            'type': 'send_message', 'chat_id': 1, 'text': 'Reading the card renderer.', 'is_progress': True,
+            'task_id': SEL_KID, 'progress_meta': {'narration': True, 'executor_observation': {
+                'task_id': SEL_KID, 'task_attempt': '0', 'run_id': 'run-sel', 'attempt_id': 'a01', 'harness_id': 'codex',
+                'phase': 'harness.event', 'revision': 1}}}, self.delivery)
+        return self._taken(before)
+
+    def finish(self, tid, status='completed', **terminal_facts):
+        from ouroboros.headless import prepare_terminal_task_files
+        from ouroboros.task_results import write_task_result
+
+        task = self.tasks.get(tid) or {'id': tid, 'type': 'task', 'chat_id': 1, '_attempt': 0}
+        extra = {}
+        if tid in SEL_CHILDREN:
+            observed = SEL_CHILDREN[tid][3]
+            extra = {key: task[key] for key in ('delegation_role', 'root_task_id', 'parent_task_id', 'configured_subagent',
+                                                'executor_route', 'model') if key in task}
+            if observed:
+                extra['subagent_envelope'] = {'actual_substrate': 'harness_used', 'execution_evidence': {
+                    'delegated_runs_started': 1, 'delegated_runs_settled': 1, 'delegated_runs_succeeded': 1,
+                    'delegated_runs_failed': 0, 'harness_models': observed}}
+            if task.get('use_local_model'):  # the worker's own solve evidence: the bare model, on the local lane
+                extra['model_execution'] = {'source': 'usable_solve_response', 'requested_model': task['model'],
+                                            'requested_use_local': True, 'used_model': task['model'], 'used_local': True,
+                                            'provider': 'local', 'llm_call_id': 'call-local'}
+        write_task_result(self.data, tid, status, result=f'{tid} finished its check.', chat_id=1, **{**extra, **terminal_facts})
+        assert not prepare_terminal_task_files(self.data, task)['error']
+        return self._dispatch({'type': 'task_done', 'task_id': tid, 'task_type': 'task', 'worker_id': 0, 'chat_id': 1,
+                               'ts': '2026-11-22T18:40:00Z', '_files_prepared_attempt': 1}, {tid: {'task': task}})
+
+    def _dispatch(self, done_event, running):
+        from supervisor.events import _handle_task_done
+
+        before = len(self.live)
+        ctx = SimpleNamespace(DRIVE_ROOT=self.data, RUNNING=running, WORKERS={}, PENDING=[], bridge=self.message_bus._BRIDGE,
+                              persist_queue_snapshot=lambda **_: None, send_with_budget=self.message_bus.send_with_budget,
+                              load_state=lambda: {}, save_state=lambda _st: None, sort_pending=lambda: None,
+                              append_jsonl=lambda path, row: __import__('ouroboros.utils').utils.append_jsonl(path, row))
+        _handle_task_done(done_event, ctx)
+        return self._taken(before)
+
+    def cancel_queued(self, tid):
+        """The real pending cancellation (cancel_task_by_id -> _finish_captured_pending -> _emit_cancel_task_done): the
+        child leaves PENDING without ever entering RUNNING, so its task_done has no prepared-files marker and the
+        supervisor's dispatch finds no RUNNING row for it."""
+        from ouroboros import cancel_intents
+        from supervisor import queue, task_lifecycle, workers
+
+        emitted, patch = [], self.monkeypatch
+        for name, value in (('DRIVE_ROOT', self.data), ('PENDING', [self.tasks[tid]]), ('RUNNING', {}),
+                            ('ADMISSION_RESERVATIONS', {})):
+            patch.setattr(queue, name, value)
+        patch.setattr(queue, 'persist_queue_snapshot', lambda reason='': None)
+        patch.setattr(workers, 'WORKERS', {}, raising=False)
+        patch.setattr(workers, 'get_event_q', lambda *_a, **_k: SimpleNamespace(put=emitted.append))
+        patch.setattr(task_lifecycle, 'CANCELLED_ROOT_FENCES', {}, raising=False)
+        patch.setattr(task_lifecycle, '_ACTIVE_CASCADE_FENCES', {}, raising=False)
+        cancel_intents.request_cancel(self.data, tid, source='http_single')
+        assert task_lifecycle.cancel_task_by_id(tid) and queue.PENDING == [] and queue.RUNNING == {}
+        [done] = [event for event in emitted if event.get('type') == 'task_done']
+        assert '_files_prepared_attempt' not in done, done
+        return self._dispatch(done, {})
+
+
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+def test_selected_model_from_queued_through_done_reload_and_missed_terminal_detail(engine_ui, tmp_path, monkeypatch, theme):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from tests.test_task_file_serving import _client
+
+    ui = engine_ui
+    page = ui['page']
+    engine = page.context.browser.browser_type.name
+    data = tmp_path / 'data'
+    (data / 'logs').mkdir(parents=True)
+    producers = SelectionProducers(data, monkeypatch)
+    app = Starlette(routes=[Route('/api/chat/history', endpoint=make_chat_history_endpoint(data))])
+    app.state.served_ui = SimpleNamespace(serving_profile_scope=lambda: PREVIEW_SCOPE)  # the proof the page's scope meta names
+    history = TestClient(app)
+    ui['backend']['task_gateway'] = _client(data)
+    sockets, details = [], []
+
+    def history_route(route):
+        url = route.request.url
+        response = history.get(url[url.index('/api/chat/history'):])
+        route.fulfill(status=response.status_code, content_type='application/json', body=response.text)
+
+    def task_route(route):
+        details.append(route.request.url)
+        route.continue_()  # the served origin answers from the real task route (``task_gateway``)
+
+    page.route('**/api/state', lambda route: route.fulfill(content_type='application/json', body=json.dumps(
+        {'supervisor_ready': True, 'active_chat_activities': [], 'projects': [], 'sha': 'sel-candidate'})))
+    page.route('**/api/chat/history*', history_route)
+    page.route('**/api/tasks/**', task_route)
+    page.route_web_socket('**/ws', lambda ws: (sockets.append(ws),  # the serving socket's proof precedes every other frame
+                                               ws.send(json.dumps({'type': 'connection_profile', 'profile_scope': PREVIEW_SCOPE})),
+                                               ws.send(json.dumps({'type': 'heartbeat'}))))
+    page.set_viewport_size({'width': 1728, 'height': 1084})
+    page.emulate_media(color_scheme=theme)
+    page.goto(ui['url'])
+    page.wait_for_selector('#chat-input')
+    assert page.locator('html').get_attribute('data-theme') == theme
+    frames = []
+
+    def push(payloads):
+        for payload in payloads:
+            frames.append(payload)
+            sockets[-1].send(json.dumps(payload))
+
+    ids = [SEL_KID, SEL_API, SEL_MISSED, SEL_CANCELLED, SEL_LOCAL]
+    measured = {}
+
+    def measure(stage):
+        page.evaluate(SEL_EXPAND, [SEL_ROOT, *ids])
+        page.wait_for_timeout(200)
+        measured[stage] = page.evaluate(SEL_META, ids)
+        capture(page, f'selected-model-{engine}-{theme}-{stage}')
+        if evidence := os.environ.get('OUROBOROS_UI_EVIDENCE_DIR'):  # each card whole, so none is judged off-screen
+            top = page.evaluate("document.getElementById('chat-messages').scrollTop")
+            for tid in ids:  # centred clear of the fixed header and composer, then the reader's place is restored
+                card = page.locator(f'.chat-live-card[data-task-id="{tid}"]')
+                card.evaluate("el => el.scrollIntoView({block: 'center'})")
+                card.screenshot(path=str(Path(evidence) / f'selected-model-{engine}-{theme}-{stage}-{tid}.png'),
+                                animations='disabled')
+            page.evaluate("top => { document.getElementById('chat-messages').scrollTop = top; }", top)
+        return measured[stage]
+
+    producers.message_bus.send_with_budget(1, 'Coordinating three helpers.', is_progress=True, task_id=SEL_ROOT,
+                                           narration=True)
+    push(producers.live)
+    push(producers.queued())
+    page.locator(f'.chat-live-card[data-task-id="{SEL_MISSED}"]').wait_for()
+    queued = measure('1-queued')
+    # Queued: each card names its selected executor and model as a request; an API row has no harness chip.
+    assert queued[SEL_KID]['chip'] == 'Codex' and 'requested gpt-5.5' in queued[SEL_KID]['line'], queued
+    assert queued[SEL_API]['chip'] is None and 'requested gpt-5.5-pro' in queued[SEL_API]['line'], queued
+    assert queued[SEL_MISSED]['chip'] == 'Claude Code' and f'requested {SEL_LONG_MODEL}' in queued[SEL_MISSED]['line']
+    assert 'work-account' not in json.dumps(frames), 'the row account pin never travels with the selection'
+    # A local API row is marked local once, never `(local) (local)`.
+    assert queued[SEL_LOCAL]['chip'] is None and 'requested qwen.gguf (local)' in queued[SEL_LOCAL]['line'], queued
+    assert '(local) (local)' not in json.dumps(queued[SEL_LOCAL]), queued[SEL_LOCAL]
+    # The coordinator is the scheduling snapshot admission sent: Details only, its unstated billing read as unknown.
+    for tid in (SEL_KID, SEL_CANCELLED):
+        assert queued[tid]['facts']['Coordinator'] == 'gpt-6-astra (inherited) · bills as unknown', queued[tid]
+    page.set_viewport_size({'width': 390, 'height': 844})  # the long requested model on a phone's compact line
+    narrow_queued = measure('1b-queued-narrow')
+    assert all(narrow_queued[tid]['inside'] for tid in ids), narrow_queued
+    page.set_viewport_size({'width': 1728, 'height': 1084})
+    push(producers.running())
+    page.wait_for_function(f"document.querySelector('.chat-live-card[data-task-id=\"{SEL_KID}\"] .chat-live-executor-chip')"
+                           ".textContent.includes('last update')")
+    running = measure('2-running')
+    # Running: a model-less report of the selected harness keeps the request; the coordinator stays in Details.
+    assert running[SEL_KID]['chip'] == 'Codex · last update' and 'requested gpt-5.5' in running[SEL_KID]['line']
+    assert 'gpt-6-astra' not in running[SEL_KID]['line'] and running[SEL_KID]['facts']['Coordinator'].startswith('gpt-6-astra')
+    # The progress report's chip carries no coordinator facts: the recorded route, provenance and billing stay.
+    coordinators = {SEL_KID: 'gpt-6-astra (inherited) · bills as unknown',
+                    SEL_MISSED: 'claude=claude-sonnet-5-5 (inherited) · bills as subscription'}
+    for tid, coordinator in coordinators.items():
+        assert running[tid]['facts'].get('Coordinator') == coordinator, (tid, running[tid])
+    assert 'model gpt-5.5 (requested)' in running[SEL_KID]['facts']['Executor'], running[SEL_KID]
+    assert running[SEL_API]['chip'] is None and 'gpt-5.5-pro' in running[SEL_API]['line'], running[SEL_API]
+    push(producers.finish(SEL_KID, model='openai/gpt-6-sol', coordinator_route='openai/gpt-6-sol',
+                          coordinator_billing='measured', coordinator_provenance='parent_fallback'))
+    push(producers.finish(SEL_API))
+    push(producers.finish(SEL_LOCAL))
+    cancelled = producers.cancel_queued(SEL_CANCELLED)  # the real pending cancellation: no RUNNING row, no prepared files
+    assert [frame['data'].get('requested_executor_route') for frame in cancelled if frame.get('type') == 'log'
+            and frame['data'].get('type') == 'task_done'] == [SEL_CHILDREN[SEL_CANCELLED][1]], cancelled
+    push(cancelled)
+    producers.finish(SEL_MISSED)  # its terminal frames never reach this page
+    page.wait_for_function(f"document.querySelector('.chat-live-card[data-task-id=\"{SEL_KID}\"]').dataset.finished === '1'")
+    done = measure('3-done')
+    # Done: the observed model takes the line and the request moves to Details; the missed child is still open.
+    assert 'gpt-5.5-codex' in done[SEL_KID]['line'] and 'requested' not in done[SEL_KID]['line'], done[SEL_KID]
+    assert done[SEL_KID]['facts'].get('Requested') == 'Codex · gpt-5.5', done[SEL_KID]
+    assert not done[SEL_MISSED]['finished'] and f'requested {SEL_LONG_MODEL}' in done[SEL_MISSED]['line']
+    # Cancelled before dispatch: it lost no run, so it keeps its selection and request with no missing-receipt warning.
+    undispatched = 'Selected Codex, model gpt-5.5-mini (requested); no dispatch was recorded before it ended'
+    assert done[SEL_CANCELLED]['finished'] and done[SEL_CANCELLED]['chip'] == 'Codex', done[SEL_CANCELLED]
+    assert 'requested gpt-5.5-mini' in done[SEL_CANCELLED]['line'], done[SEL_CANCELLED]
+    assert done[SEL_CANCELLED]['facts']['Executor'] == undispatched, done[SEL_CANCELLED]
+    assert done[SEL_CANCELLED]['phase'] == 'Stopped', done[SEL_CANCELLED]
+    # The ended child's own coordinator changed after start. The queued cancellation retains its recorded snapshot.
+    assert done[SEL_KID]['facts'].get('Coordinator') == "gpt-6-sol (parent's fallback) · bills as measured", done[SEL_KID]
+    assert done[SEL_CANCELLED]['facts'].get('Coordinator') == coordinators[SEL_KID], done[SEL_CANCELLED]
+    # The local child ran the model it asked for: its solve response names the bare model, so no false request.
+    assert done[SEL_LOCAL]['finished'] and 'qwen.gguf' in done[SEL_LOCAL]['line'], done[SEL_LOCAL]
+    assert 'requested' not in done[SEL_LOCAL]['line'] and 'Requested' not in done[SEL_LOCAL]['facts'], done[SEL_LOCAL]
+    # The root ends: the page reads the missed child's stored detail (the real task route) and settles it from there.
+    push(producers.finish(SEL_ROOT))
+    page.wait_for_function(f"document.querySelector('.chat-live-card[data-task-id=\"{SEL_MISSED}\"]').dataset.finished === '1'")
+    recovered = measure('4-missed-terminal-recovered')
+    assert any(SEL_MISSED in url for url in details), details
+    assert 'claude-opus-5-5' in recovered[SEL_MISSED]['line'] and 'requested' not in recovered[SEL_MISSED]['line']
+    assert recovered[SEL_MISSED]['chip'] == 'Claude Code', recovered[SEL_MISSED]
+    assert recovered[SEL_MISSED]['facts'].get('Requested') == f'Claude Code · {SEL_LONG_MODEL}', recovered[SEL_MISSED]
+    assert recovered[SEL_MISSED]['facts'].get('Coordinator') == coordinators[SEL_MISSED], recovered[SEL_MISSED]
+    page.reload()
+    # A finished root opens collapsed, its finished children folded inside it (DESIGN §5): measure() opens it.
+    page.locator(f'.chat-live-card[data-task-id="{SEL_MISSED}"]').wait_for(state='attached')
+    reloaded = measure('5-reloaded')
+    for tid in ids:  # history replays what live showed
+        assert reloaded[tid]['line'].split(' · ')[:2] == recovered[tid]['line'].split(' · ')[:2], (tid, reloaded, recovered)
+        assert reloaded[tid]['facts'].get('Requested') == recovered[tid]['facts'].get('Requested'), tid
+        assert reloaded[tid]['facts'].get('Coordinator') == recovered[tid]['facts'].get('Coordinator'), (tid, reloaded[tid])
+    assert reloaded[SEL_CANCELLED]['chip'] == 'Codex' and reloaded[SEL_CANCELLED]['facts']['Executor'] == undispatched
+    page.set_viewport_size({'width': 390, 'height': 844})
+    narrow = measure('6-reloaded-narrow')
+    assert all(narrow[tid]['inside'] for tid in ids), narrow
+    root = os.environ.get('OUROBOROS_UI_EVIDENCE_DIR')
+    if root:
+        Path(root).mkdir(parents=True, exist_ok=True)
+        (Path(root) / f'selected-model-{engine}-{theme}.json').write_text(json.dumps(
+            {'measured': measured, 'frames': frames, 'detail_reads': details}, ensure_ascii=False, indent=2), encoding='utf-8')

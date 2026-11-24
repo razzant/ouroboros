@@ -1360,9 +1360,13 @@ preference when it opens and on every reconnect; there is no file watcher.
   longest word, and the role takes a second line before either is cut; only a
   card too narrow for those beside `Details` and its chevron (a 320px phone)
   moves the two controls under the role, never past its edge (audit №2, owner
-  2026-10-28T22:09Z). Its compact line names the executor with only its own model evidence (observed;
-  `requested …`; unconfirmed absent), else the agent model. Coordinator and
-  provenance stay in details; effort stays visible as the leaf's dispatch choice,
+  2026-10-28T22:09Z). From Queued on, a session child's compact line shows the executor logo, name and selected model; in flight, its run's observed model precedes it.
+  On terminal cards, name the model of a single confirmed successful run; other observations stay in Executor details.
+  Without that model, or after a retry until the new attempt reports, show the same executor's selection as `requested …`.
+  An API-model child names its solve's observed model, else the recorded execution wording, else its agent model, else
+  its selection as `requested …`.
+  A line naming anything else keeps the selection in details. Coordinator, its provenance and billing stay
+  in details; effort stays visible as the leaf's dispatch choice,
   not a provider echo. Its chip uses the child's own frames: the applied level (`Effort High`),
   the asked level when it differed (`Effort High (asked Ultra)`), then its
   source: a pin glyph before a pinned level, `· model name` for a level the
@@ -1373,7 +1377,8 @@ preference when it opens and on every reconnect; there is no file watcher.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
   collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A subagent the host could not start has no
-  report: its cause leads the line, the host's notice to its parent stays in details. Subagents' outcomes are their
+  report: its cause leads the line, the host's notice to its parent stays in details; a refusal at admission is its parent's
+  row naming the refused selection, never a child's lifecycle. Subagents' outcomes are their
   root's Details: under a finished, collapsed root a finished subagent folds away (the disclosure's accessible name
   still counts them, `N children`), a subagent still running or holding a running subagent stays in view, and an open
   root shows every subagent as before. A subagent folds at the root's settle, at its own when it finishes later, or when the last running subagent it
@@ -1381,14 +1386,15 @@ preference when it opens and on every reconnect; there is no file watcher.
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the executor and states only exceptions.** The
-  ordinary case is the bare name — an assigned route beside the card's own
-  `Working` chip, or every settled run ok; it names the selected executor and is
-  not proof of current computation. A progress actor adds `last update`; a
+  ordinary case is the logo and bare name — a selected session before dispatch,
+  an assigned route beside `Working`, or every settled run ok; it names the
+  selected executor, not proof of current computation. A progress actor adds `last update`; a
   refused pin, no run, runs not settled, failed or unverified runs, unreadable
   evidence and an undisclosed outcome split qualify it. One priority phrase
-  stays visible; the detail names the other exceptions. Terminal records without
-  run evidence remain explicitly unknown; no promise of a later receipt replaces
-  it. Counts, the model and its source (requested, observed or `model unconfirmed`), spend
+  stays visible; the detail names the other exceptions. Terminal records of a
+  dispatched route without run evidence remain explicitly unknown; no promise of a
+  later receipt replaces it. A selection that ended before any dispatch keeps its
+  bare name and request: no run was due. Counts, the model and its source (requested, observed or `model unconfirmed`), spend
   and access form one detail sentence that the expanded card prints as text,
   never only a title. Settled observed models are separate historical facts,
   not a claim that their union is the current actor. Missing identity stays
@@ -1910,7 +1916,7 @@ in collapsible original-content sections, never duplicate cards.
 
 **Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
-History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Model metadata says `Last solve response`, naming the initial request only when the route changed. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
+History with no current execution or known outcome keeps its expandable content under `Outcome unavailable`, without a task chip, typing or Stop. Before complete live-source reconciliation, it is `Activity unconfirmed`. Positive current activity restores only its proven controls. A delivery warning may coexist with a preserved result-review PASS. Root and API-child Details label an observed solve `Last solve response`, naming `initial request` only when that call's route changed; a session child attributes solve metadata to its coordinator (`Coordinator`, `Last coordinator solve response`, or `Coordinator model execution` when unobserved), never the delegated run. `Model handover` shows which routes were involved, whether a successor reply was recorded, and what the successor did: an accepted answer choice or a successful tool call other than schema discovery. An incomplete handover establishes no act. After one reminder, the successor can explicitly select the complete answer or its offered hash. An accepted choice clears the handover warning alone; other failures stay visible. Restoring the same task ID can recover a proved choice; a new task ID must select for itself. Files, Continue and `Model handover` follow one settled stored detail: the census read serves the card, a reveal joins it, an incomplete read is topped up once, and a failed review read keeps its ordinary Retry. An exact row jump opens what it lands in; folded children stay unread, retranslation is local.
 
 History placement is separate from the task's outcome: ordinary
 `Saving task history` and `Task history saved` appear only in task details and

@@ -6,10 +6,11 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
+import { formatMsgTime } from '../modules/chat_activity.js';
 import { createWorkPortals } from '../modules/work_portal.js';
 import { closeTaskControlMenu } from '../modules/task_control_menu.js';
 import { clock } from '../modules/work_status.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room as serverRoom, SERVER_CASES, work as fixtureWork } from './work_fixture.js';
 
 const originalQuery = ElementStub.prototype.querySelector;
@@ -67,7 +68,7 @@ function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold 
         if (path.startsWith('/api/tasks/') && details[path.split('/').pop().split('?')[0]] === null) {
             return { ok: false, status: 404, json: async () => ({ error: 'task not found' }) };
         }
-        return { ok: true, json: async () => (path.startsWith('/api/chat/history') ? { messages: history, window: { complete: true } }
+        return { ok: true, json: async () => (path.startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : path.startsWith('/api/tasks/') ? details[path.split('/').pop().split('?')[0]] || { status: 'running' }
                 : { active_direct_turns: [] }) };
     });
@@ -1148,6 +1149,36 @@ test('a project_started row binds its work\'s card at the request\'s place inste
         assert.equal(f.part('w-3', 'live-title').textContent, 'Audit the projects', 'named by the row\'s work name');
         assert.equal(messages(f).filter((child) => child.dataset?.systemType === 'project_started').length, 0,
             'the row is data: no second entry');
+    } finally { f.close(); }
+});
+
+test('a portal says started only from a worker\'s census row; a queued row\'s time is its queue entry, never a start', async () => {
+    // The census dates a waiting row with its queue entry (gateway/state.py) and a managed task a worker holds with its
+    // start; without narration the portal's clock reads that start, else its own first row as `since`.
+    const history = [{ role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-6', project_id: 'p-6',
+        project_name: 'Audit room', task_name: 'Audit the projects', text: 'Audit room › Audit the projects · Started',
+        ts: '2026-10-10T12:00:00Z', history_id: 'h-6' }];
+    const f = fixture({ history });
+    const at = (ms) => formatMsgTime(new Date(ms).toISOString()).short;
+    const queuedAt = Date.parse('2026-10-10T12:30:00Z'), startedAt = Date.parse('2026-10-10T12:42:00Z');
+    const queued = room({ activity_id: 'w-6', phase: 'queued', started_at: queuedAt / 1000 });
+    const census = (row) => f.state({ task_bindings: { 'w-6': { project_id: 'p-6', chat_id: 7 } }, active_chat_activities: [row] });
+    const meta = () => f.part('w-6', 'live-meta').innerHTML;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        census(queued);
+        await settle();
+        assert.equal(f.card('w-6').dataset.portal, '1');
+        assert.ok(meta().includes(`since ${at(Number(f.card('w-6').dataset.ts))}`), meta());
+        assert.doesNotMatch(meta(), /started/, 'a queue entry is never called a start');
+        assert.ok(!meta().includes(at(queuedAt)), 'nor shown as one');
+        census({ ...queued, phase: 'working', carrier: 'worker', started_at: startedAt / 1000 });
+        await settle();
+        assert.ok(meta().includes(`started ${at(startedAt)}`), meta());
+        census(queued);
+        await settle();
+        assert.doesNotMatch(meta(), /started/, 'queued again, it claims no start of its own');
     } finally { f.close(); }
 });
 

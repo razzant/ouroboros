@@ -4,16 +4,16 @@
 // the wait picker adopt from the reads they already make. This module reads nothing and repaints nothing:
 // until a label is known a surface shows the key's stored name, and its next paint shows the label.
 
+import { apiRouteParts } from './harness_presentation.js';
+
 const labels = new Map();
 
-/** The added key a stored route names (`kind@name`), or '' for a built-in key and every other route. */
+/** The added key a stored route names (`kind@name`, read by the shared route grammar apiRouteParts), or '' for a
+ *  built-in key, a local-lane route, a name the resolver refuses and every opaque route. */
 export function routeConnectionId(route = '') {
     const value = String(route || '').trim();
-    const cut = value.indexOf('::');
-    const source = cut < 0 ? '' : value.slice(0, cut);
-    const at = source.indexOf('@');
-    const name = at > 0 ? source.slice(at + 1) : '';
-    return name && name !== 'default' && !source.startsWith('claudexor') ? source : '';
+    const { kind, connection, named, valid } = value.endsWith(' (local)') ? {} : apiRouteParts(value);
+    return named && valid && connection !== 'default' ? `${kind}@${connection}` : '';
 }
 
 /** Adopt one settings read's connection list (`_meta.connections`); an absent list changes nothing. */

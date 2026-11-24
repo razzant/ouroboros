@@ -16,7 +16,9 @@ import { fmt, tr, tx } from './i18n.js';
 import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
 import { activeModelWaits } from './model_wait.js';
-import { activityWaitPhase, CENSUS_MARKS, chipWord, desiredLiveCardPhase, observeChildPhase, setLiveCardPhase } from './task_phase_chip.js';
+import {
+    activityWaitPhase, CENSUS_MARKS, chipWord, desiredLiveCardPhase, observeChildMember, observeChildPhase, setLiveCardPhase,
+} from './task_phase_chip.js';
 import {
     ACTION_FINALIZE, ACTION_HURRY, ACTION_PAUSE, ACTION_RESUME, ACTION_STOP_EARLIER, ACTION_STOP_NOW, REUSABLE_TASK_IDS,
     TASK_CONTROL_TRIGGER_LABEL, createTaskResumeButton,
@@ -41,7 +43,7 @@ function displayedMember(member) {
     if (!member) return null;
     if (member.confirmed === true && Object.hasOwn(MEMBER_MARKS, member.activity)) return member;
     return { ...UNKNOWN_MEMBER, confirmed: false, tails: list(member.tails),
-        ...(Number.isSafeInteger(member.queue_attempt) ? { queue_attempt: member.queue_attempt } : {}) };
+        ...(Number.isSafeInteger(member.queue_attempt) && member.queue_attempt >= 0 ? { queue_attempt: member.queue_attempt } : {}) };
 }
 
 /** Whether one member state independently evidences the member's own current activity: its own phase is
@@ -462,6 +464,7 @@ function projectedCardView(work, member, census = true) {
         phase: running ? 'working' : work.activity, text: word, secondary: line, classes,
         tone: waiting ? 'neutral' : 'live', waiting, ...(finalizing ? { finalizing } : {}),
         ...(note ? { note } : {}),
+        ...(member && Number.isSafeInteger(work.queue_attempt) && work.queue_attempt >= 0 ? { queue_attempt: work.queue_attempt } : {}),
     };
 }
 
@@ -517,10 +520,15 @@ export function applyCardWorkViews(records, state) {
             record.livePhaseAt = 0;  // the member's state now speaks for the card
         }
         const view = child && subject ? projectedCardView(subject, true) : cardWorkView(work);
+        // Before the look stores this view: a requeue is read against the view it replaces (task_phase_chip.js).
+        const startChanged = child && observeChildMember(record, view);
         changed = applyCardWorkLook(record, subject, view) || changed;
         if (child) {
             const desired = desiredLiveCardPhase(record);
-            changed = setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary) || changed;
+            if (setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary) || startChanged) {
+                changed = true;
+                record.paintMeta?.();  // its line's clock reads the chip and attempt it moved (chat_activity.js clockLabel)
+            }
         }
     }
     return changed;

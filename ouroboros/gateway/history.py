@@ -48,7 +48,7 @@ from ouroboros.project_completion_facts import (
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS
 from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
-from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, subagent_message_meta
+from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, show_requested_executor_route, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
 from ouroboros.utils import json_dumps_utf8, strip_markdown, utc_now_iso
 
@@ -106,6 +106,7 @@ _PROGRESS_META_FIELDS = (
     # Phase 6: the resolved delegated route (a harness id), so a replayed
     # bubble keeps its executor chip instead of losing it on reload.
     "executor_route",
+    "requested_executor_route",  # the executor the delegation selected, so a queued card keeps it on reload
     # Recorded coordinator facts only; missing facts stay absent without result enrichment.
     "parent_cognitive_route", "coordinator_route", "use_local_model",
     "coordinator_billing", "coordinator_provenance",
@@ -348,6 +349,9 @@ def _annotate_terminal_task_truth(
             # notice and lifecycle rows); tool evidence follows the task's own route.
             if evidence_scope is None or evidence_scope(task_id):
                 represented.setdefault(task_id, str(message.get("ts") or ""))
+            if message.get("system_type") == "subagent_admission_notice":
+                # A parent-addressed refusal carries its own request, not the result of a task with that child id.
+                continue
             if type(message.get("tool_calls")) is int:
                 tool_counts[task_id] = max(tool_counts.get(task_id, 0), message["tool_calls"])
             progress, summary = bool(message.get("is_progress")), message.get("system_type") == "task_summary"
@@ -428,8 +432,7 @@ def _annotate_terminal_task_truth(
                 unread_tasks.add(task_id)
             if carriers.get(task_id, {}).get("system_type") == "task_evidence":
                 carriers[task_id]["_is_direct_chat"] = bool(result.get("_is_direct_chat"))
-            child_meta = subagent_message_meta(result, task_id=task_id)
-            if child_meta:
+            if child_meta := subagent_message_meta(result, task_id=task_id):
                 legacy_child_meta_by_task[task_id] = child_meta
             status = str(result.get("status") or "")
             checkpoint = result.get("root_phase_checkpoint")
@@ -501,7 +504,8 @@ def _annotate_terminal_task_truth(
         summary_anchors.difference_update(anchored, legacy_child_meta_by_task, child_row_task_ids)
         for message in combined:
             task_id = str(message.get("task_id") or "")
-            if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
+            if not task_id or message.get("system_type") in (
+                    "subagent_admission_notice", "project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
                 message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
@@ -1517,6 +1521,7 @@ def _assemble_history_response(
     # that kind on the wire: it supplies replay evidence, not a bubble, quota row or fresh verdict.
     for message in messages:
         message.pop("summary_kind", None)
+        show_requested_executor_route(message)
     messages.extend(replay_evidence_rows(messages, replay_evidence))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {

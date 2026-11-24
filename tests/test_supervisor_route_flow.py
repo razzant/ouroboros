@@ -117,6 +117,78 @@ def test_tool_refuses_invalid_supervisor_before_drive_or_event_and_accepts_valid
     assert schedule(ctx, supervisor="cognition").startswith("Subagent request queued")
 
 
+@pytest.mark.parametrize(("model", "basis", "legacy"), [
+    ("claudexor::codex=parent", "subscription", False),
+    ("openai::parent", "unknown", False),
+    ("claudexor::codex=parent", "subscription", True),
+    (None, "unknown", True),
+])
+def test_queued_coordinator_has_the_same_basis_on_live_scheduling_and_replay(host, monkeypatch, model, basis, legacy):
+    import asyncio
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.task_results import write_task_result
+    from supervisor import events, message_bus
+
+    frames = []
+    bridge = message_bus.LocalChatBridge()
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "DATA_DIR", host.root)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    host.ctx.send_with_budget = message_bus.send_with_budget
+    configured_model = model or "openai::parent"
+    settings = {**_settings(_session_row()), "OUROBOROS_MODEL": configured_model, "OPENAI_API_KEY": "test-key"}
+    ctx = root_context(host.root, settings, monkeypatch)
+    ctx.active_model = configured_model
+    ctx.task_metadata["model_role"] = "main"
+    write_task_result(host.root, "root", "running", chat_id=1, root_task_id="root", delegation_role="root")
+    assert schedule(ctx).startswith("Subagent request queued")
+    event = next(e for e in ctx.pending_events if e["type"] == "schedule_subagent")
+    if legacy:
+        # Schema 1 did not require model or locality; the live projection must not fail admission.
+        event["parent_cognitive_route"] = {"schema": 1, **({"model": model} if model else {})}
+    events._handle_schedule_task(event, host.ctx)
+    assert len(host.pending) == 1 and host.pending[0]["id"] == event["task_id"]
+    live = next(frame for frame in frames if frame.get("subagent_event") == "scheduled")
+    response = asyncio.run(make_chat_history_endpoint(host.root)(SimpleNamespace(query_params={"limit": "20"})))
+    replay = next(row for row in json.loads(response.body)["messages"] if row.get("subagent_event") == "scheduled")
+    for frame in (live, replay):
+        assert frame["subagent_task_id"] == event["task_id"]
+        assert frame.get("coordinator_route", "unknown") == (model or "unknown")
+        assert frame.get("coordinator_billing", "unknown") == basis
+        assert frame.get("cost_usd") is None
+        assert not any(frame.get(key) for key in ("executor_route", "model", "execution_evidence", "actual_substrate"))
+
+
+@pytest.mark.parametrize(("choice", "words"), [
+    ({"kind": "explicit", "source": "switch_model"}, "parent's own choice"),
+    ({"kind": "following", "role": "main"}, "inherited (follows main)"),
+    (None, "inherited"),
+])
+def test_queued_and_running_cards_name_the_choice_as_dispatch_does(host, monkeypatch, choice, words):
+    """The queued snapshot carries the words dispatch tells the nanny (cognitive_route_provenance), never a raw
+    ``parent_switch`` or an inherited choice without the role it follows, and every later frame names it alike."""
+    from ouroboros.subagent_messages import subagent_message_meta
+    from ouroboros.supervisor_route import cognitive_route_provenance
+    from ouroboros.task_results import write_task_result
+    from supervisor import events
+
+    settings = {**_settings(_session_row()), "OUROBOROS_MODEL": "openai::parent", "OPENAI_API_KEY": "test-key"}
+    ctx = root_context(host.root, settings, monkeypatch)
+    ctx.task_metadata["model_role"] = "main"
+    ctx.route_choice = choice
+    write_task_result(host.root, "root", "running", root_task_id="root", delegation_role="root")
+    assert schedule(ctx).startswith("Subagent request queued")
+    event = next(e for e in ctx.pending_events if e["type"] == "schedule_subagent")
+    assert cognitive_route_provenance(event["parent_cognitive_route"]) == words
+    events._handle_schedule_task(event, host.ctx)
+    [queued] = [n["progress_meta"] for n in host.notices if (n.get("progress_meta") or {}).get("subagent_event") == "scheduled"]
+    assert queued["coordinator_provenance"] == words
+    assert subagent_message_meta(host.pending[0], task_id=event["task_id"], event="running")["coordinator_provenance"] == words
+
+
 def test_explicit_route_crosses_event_queue_restart_worker_and_agent_mirrors(host, tmp_path, monkeypatch):
     from ouroboros.agent import OuroborosAgent
     from ouroboros.subagent_messages import subagent_message_meta
@@ -135,6 +207,10 @@ def test_explicit_route_crosses_event_queue_restart_worker_and_agent_mirrors(hos
     events._handle_schedule_task(event, host.ctx)
     assert len(host.pending) == 1
     assert host.pending[0]["metadata"]["parent_cognitive_route"] == original
+    # The queued card already names what the row selected: its route's kind and target, never its account pin.
+    selected = {key: event["configured_subagent"]["route"][key] for key in ("kind", "target_id")}
+    scheduled = [n["progress_meta"] for n in host.notices if (n.get("progress_meta") or {}).get("subagent_event") == "scheduled"]
+    assert [meta.get("requested_executor_route") for meta in scheduled] == [selected]
     # Queue persistence retains the full JSON snapshot, including its selected row.
     assert queue.persist_queue_snapshot()
     host.pending.clear()
@@ -155,6 +231,7 @@ def test_explicit_route_crosses_event_queue_restart_worker_and_agent_mirrors(hos
     # This shared projection feeds running, heartbeat and replayed card metadata.
     meta = subagent_message_meta(task, task_id=tid, event="running")
     assert meta["parent_cognitive_route"] == original
+    assert meta["requested_executor_route"] == selected
     assert not host.attempts
 
 

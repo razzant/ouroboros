@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { executorChip, keepStickyExecutorChip, summarizeChatLiveEvent } from '../modules/log_events.js';
+import { summarizeChatLiveEvent } from '../modules/log_events.js';
+import { executorChip, keepStickyExecutorChip } from '../modules/executor_card_facts.js';
 
 const event = (revision, extras = {}) => ({
     type: 'send_message', is_progress: true, task_id: 'child', subagent_task_id: 'child',
@@ -88,7 +89,8 @@ test('terminal receipt retains distinct observed models without inventing a curr
         harness_models:['Grok 4.6','Fable 5.1','Grok 4.6'],
     }});
     assert.equal(terminal.hasEvidence,true);
-    assert.deepEqual(terminal.observedModels,['Grok 4.6','Fable 5.1']);
+    assert.equal(terminal.settledRunModel, '');
+    assert.match(terminal.title, /models observed across settled runs: Grok 4\.6, Fable 5\.1$/);
     assert.equal(keepStickyExecutorChip(executorChip(event(9)),terminal),false);
     assert.equal(keepStickyExecutorChip(terminal,executorChip(event(9))),true);
 });

@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros import task_store
 from ouroboros.gateway.history import make_chat_history_endpoint
+from ouroboros.project_registry_recovery import initialize_new_root
 from ouroboros.task_reads import TaskReads
 from tests._store_shared import read_result, seed_result
 from tests._cases import chosen_rows
@@ -86,6 +87,7 @@ def _page(root):
 
 def _room(root, tasks):
     """Each task's answer, its terminal summary and one narration row, as their producers write them."""
+    initialize_new_root(root)  # A healthy Main already has its empty Project registry before the history is written.
     (root / "logs").mkdir(parents=True, exist_ok=True)
     chat, progress = [], []
     for index, task_id in enumerate(tasks):
@@ -100,9 +102,12 @@ def _room(root, tasks):
 
 
 def test_display_view_drops_only_the_bulky_evidence(tmp_path):
-    _seed(tmp_path, "task-a", "completed", flag=True, nothing=None, newer_fact={"kept": [1, 2]})
+    snapshot = {"schema": 1, "selected_subagent_id": "row", "config_fingerprint": "F" * 64, "access": "full",
+                "effort": "high", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.5", "credential_profile_id": "acct"}}
+    _seed(tmp_path, "task-a", "completed", flag=True, nothing=None, newer_fact={"kept": [1, 2]}, configured_subagent=snapshot)
     seed_result(tmp_path, "task-b", {"task_id": "task-b", "status": "running", "artifact_bundle": "legacy",
-                                     "task_contract": {"objective": "no deadline"}})
+                                     "task_contract": {"objective": "no deadline"},
+                                     "metadata": {"configured_subagent": {**snapshot, "route": {"kind": "api_model"}}}})
     views = {task_id: json.loads(text) for task_id, text in task_store.display_documents(
         tmp_path, ["task-a", "task-b", "missing"]).items()}
     full = read_result(tmp_path, "task-a")
@@ -122,6 +127,9 @@ def test_display_view_drops_only_the_bulky_evidence(tmp_path):
     assert {key: view[key] for key in kept} == kept
     assert view["flag"] is True and view["nothing"] is None and view["newer_fact"] == {"kept": [1, 2]}
     assert view["metadata"] == {"source": "owner"}
+    # A child's row snapshot keeps only the selected route a card names (kind, target): no pin, no other setting.
+    assert view["configured_subagent"] == {"route": {"kind": "agent_session", "target_id": "codex=gpt-5.5"}}
+    assert views["task-b"]["metadata"]["configured_subagent"] == {"route": {"kind": "api_model"}}
     # A kept key that is not an object stays as stored; an absent kept sub-key stays absent.
     assert views["task-b"]["artifact_bundle"] == "legacy" and views["task-b"]["task_contract"] == {}
 

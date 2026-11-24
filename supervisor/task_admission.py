@@ -193,6 +193,8 @@ def parse_schedule_task_depth(
                     "depth": 0,
                     "raw_task_depth": evt.get("depth"),
                     "invalid_task_depth": True,
+                    **{key: evt[key] for key in ("configured_subagent", "parent_cognitive_route")
+                       if isinstance(evt.get(key), dict)},
                 },
                 detail=f"{'Subagent' if delegation_role == 'subagent' else 'Task'} rejected: invalid task depth: {exc}",
                 reason_code="invalid_task_depth",
@@ -1218,7 +1220,8 @@ def subagent_schedule_preflight(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=evt.get("parent_task_id"),
             root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
-            role=str(evt.get("role") or "").strip(), result_fields={},
+            role=str(evt.get("role") or "").strip(),
+            result_fields={key: evt[key] for key in ("configured_subagent", "parent_cognitive_route") if key in evt},
             detail=(
                 f"{label} not scheduled: the existing durable result for this task id "
                 "is unreadable, so its identity authority was preserved."
