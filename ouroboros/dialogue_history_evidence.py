@@ -16,6 +16,7 @@ import contextlib
 import os
 import pathlib
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional
@@ -176,11 +177,13 @@ def ingress_proof_key(root) -> Optional[tuple]:
     from ouroboros.launch_roots import witness_path
 
     target = ds.path(root)
+    wal = target.with_name(target.name + "-wal")
     key = [str(target)]
-    for source in (target, target.with_name(target.name + "-wal"),
-                   Path(root) / "state" / "state.json", witness_path(root)):
+    for source in (target, wal, Path(root) / "state" / "state.json", witness_path(root)):
         try:
-            key.append(utils.file_identity(os.stat(source)))
+            info = os.stat(source)
+            empty_wal = source == wal and stat.S_ISREG(info.st_mode) and info.st_size == 0
+            key.append(None if empty_wal else utils.file_identity(info))
         except FileNotFoundError:
             key.append(None)
         except OSError:

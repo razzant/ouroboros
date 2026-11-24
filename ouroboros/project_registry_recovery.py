@@ -29,7 +29,7 @@ import os
 import stat
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ouroboros import platform_layer as platform, utils
 from ouroboros.contracts.chat_id_policy import project_chat_id
@@ -665,9 +665,10 @@ def _restore_status(path, primary, raw):
     return "ordinary"
 
 
-def _qualify(writer, witness, snapshot, restore_status="ordinary") -> bool:
+def _qualify(writer, witness, snapshot, restore_status="ordinary", *, identity=None) -> bool:
     """The caller validated these bytes and observed or published the file containing them."""
-    identity = _local_identity(writer.path, writer.fd)
+    if identity is None:
+        identity = _local_identity(writer.path, writer.fd)
     if identity is None:
         return True
     info, raw = snapshot
@@ -895,7 +896,7 @@ def reconcile(root, *, snapshot=None) -> bool:
         if not local:
             _record_existence(witness)
             return status != "ordinary"
-        return _qualify(writer, witness, snapshot, status)
+        return _qualify(writer, witness, snapshot, status, identity=local)
 
 
 def recovery_notice(drive_root: Path) -> dict | None:

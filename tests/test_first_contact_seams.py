@@ -702,7 +702,7 @@ NOTE = "First-send composition"  # the hint's own sentence in the view it shaped
 OTHER = "openai-compatible::other-model"  # the same endpoint and key, another model: another connection
 
 
-def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False):
+def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False, registry=False):
     """A fresh direct chat's real start fit after its connection refused a comparable larger request, before any send:
     the plan the planner chose (the smaller view with its note, the ordinary one kept beside it) and the plan it would
     have sent without the hint; with ``maps_rung`` the refusal's chapter-map retry was answered too, so the hint takes
@@ -720,6 +720,9 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False):
 
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     env, memory = _make_env_and_memory(tmp_path / "world")
+    if registry:
+        from ouroboros.project_registry_recovery import initialize_new_root
+        initialize_new_root(memory.drive_root)
     page = _turn_shapes._page
     with monkeypatch.context() as shapes:
         shapes.setattr(_turn_shapes, "_page", lambda room, ids, text: {
@@ -903,7 +906,7 @@ def test_project_note_exists_before_the_first_physical_owner_row(seam, tmp_path,
     from ouroboros.memory_view import snapshot_from_json
     from tests._turn_shapes import _author
 
-    start = _hinted_start(seam, tmp_path, monkeypatch)
+    start = _hinted_start(seam, tmp_path, monkeypatch, registry=True)
     room = projects_registry.create_project(start.drive, "existing-logical-room")["chat_id"]
     assert ChronicleStore(start.drive).publish([{"kind": "note", "room_id": str(room), "task_id": "earlier",
         "author": _author("earlier"), "text": "This room has work before its first physical chat."}]).ok

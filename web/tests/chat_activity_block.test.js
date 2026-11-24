@@ -17,7 +17,7 @@ import {
 import { upsertToolFoldRow } from '../modules/chat_render_batch.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { clock } from '../modules/work_status.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
 
 // The folded row a sequence of observations produces, with no DOM in the way.
@@ -71,7 +71,7 @@ function fixture(history = [], detail = { active_direct_turns: [] }, chatId = 1)
         const isHistory = String(url).startsWith('/api/chat/history');
         if (isHistory) historyReads++;
         return { ok: true, json: async () => isHistory
-            ? { messages: history, window: { complete: true } }
+            ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : detail };
     });
     const handlers = new Map();
