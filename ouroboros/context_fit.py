@@ -32,8 +32,8 @@ from ouroboros.context_measurement import (
 )
 
 from ouroboros.context_layout import reference_doc_sections, whole_development_book
-from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
-                                     _governance_blocks as _section_governance, _system_blocks)
+from ouroboros.section_floor import (HostSection, _governance_blocks as _section_governance, _system_blocks,
+    capture_system_projection, projection_fields, render_governance, rendered_texts, section_views)
 from ouroboros.reference_books import ReferenceBook
 from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
@@ -72,6 +72,7 @@ class ContextFitProjection:
     # The memory view's fact of this projection (``memory_floor.view_receipt``): role,
     # room, floor steps and boundaries, block sizes; empty without a view.
     memory_facts: Mapping[str, Any] = field(default_factory=dict)
+    assembly_witnesses: tuple = ()  # host side only; never a message field
     # A route rebind may measure the actual shortened transcript, not the initial tail.
     continuation_messages_json: Optional[str] = None
 
@@ -295,8 +296,8 @@ class ContextFitPlan:
                 if number is not None and isinstance(facts.get("floor"), dict):
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-                                     memory_facts={**facts, **{key: value for key, value in projection.memory_facts.items()
-                                                               if key in ("max_room", "first_contact_preference")}},
+                                     **projection_fields(system, facts | {key: projection.memory_facts[key]
+                                         for key in ("max_room", "first_contact_preference") if key in projection.memory_facts}),
                                      continuation_messages_json=tail_json,
                                      estimated_tokens=_request_tokens(system, projection.user_content_json or self.user_content_json,
                                          supplementary_messages_json=self.core.supplementary_messages_json,
@@ -397,6 +398,8 @@ class ContextCore:
     development_required: bool = False
     # Repo-relative path, raw digest, normalized character count and digest.
     base_prompt_source: Optional[Tuple[str, str, int, str]] = None
+    bible_source: Optional[Tuple[str, str, int, str]] = None
+    initial_attachment_facts: Mapping[str, Any] = field(default_factory=dict, compare=False)
     held_note_resume: Optional[Mapping[str, Any]] = None
 
     def required_book_tokens(self, mode: str) -> int:
@@ -1186,10 +1189,10 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     contents = {}
     for m in floor.MODES:
         rows = host_receipts(m, receipts)
-        system = _system_blocks(whole_core, whole_governance[form[m]], story, room, m,
-                                section_views(sections[m], rows), whole)
         facts = {**receipt, "held_note_request_tokens": request_cost(mode, sent)} if held_heads and m == mode else receipt
-        contents[m] = system, {**facts, "host_sections_addressed": rows} if rows else facts
+        contents[m] = capture_system_projection(whole_core, whole_governance[form[m]], story, room, m,
+            section_views(sections[m], rows), rows, whole, shown=shown,
+            facts={**facts, "host_sections_addressed": rows} if rows else facts)
     return contents, mode
 
 
@@ -1507,7 +1510,7 @@ def build_context_fit_plan(
             calibrated_tokens=int(estimated * ratio),
             calibration_ratio=ratio,
             user_content_json=user_projection,
-            memory_facts=memory_facts,
+            **projection_fields(system_content, memory_facts),
             continuation_messages_json=tail_json,
         )
 

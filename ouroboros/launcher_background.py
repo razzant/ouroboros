@@ -848,8 +848,18 @@ class DesktopApi:
 
     def shell_info(self) -> dict:
         """Installed bundle and loaded shell are separate facts; capabilities are read from this process."""
+        from ouroboros.launcher_context_report import webview2_renderer
+
         return {"shell_version": _SHELL_VERSION, **self._shell_facts, "persistent_storage": PERSISTENT_WEBVIEW_STORAGE,
-                "native_notifications": self._notifier_answer("status"), "interface_size": self._zoom_info()}
+                "native_notifications": self._notifier_answer("status"), "interface_size": self._zoom_info(),
+                "local_context_archive": webview2_renderer(sys.modules.get("webview"))}
+
+    def open_local_context_report(self) -> dict:
+        """Open the separate offline viewer; the ordinary page gets only its window status."""
+        from ouroboros.config import DATA_DIR, REPO_DIR
+        from ouroboros.launcher_context_report import open_local_report
+
+        return open_local_report(sys.modules.get("webview"), DATA_DIR, REPO_DIR / "web" / "context-report.html")
 
     def _zoom_info(self) -> dict:
         zoom = getattr(self._background, "zoom", None)

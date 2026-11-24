@@ -361,9 +361,9 @@ def test_the_reentry_note_leaves_only_mailed_messages_to_their_mail_and_its_sour
     seen, retained = {}, []
     real_retain = presence_continuation._retain_reentry
 
-    def retain(binding, ctx, rows, gaps, queue=None):
+    def retain(binding, ctx, rows, gaps, queue=None, **kwargs):
         retained.extend(rows)
-        return real_retain(binding, ctx, rows, gaps, queue)
+        return real_retain(binding, ctx, rows, gaps, queue, **kwargs)
 
     monkeypatch.setattr(presence_continuation, "_retain_reentry", retain)
 

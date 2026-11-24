@@ -60,10 +60,15 @@ class PhysicalAttemptContext:
     window_boundary_tokens: InitVar[Optional[int]] = None  # stated boundary, not admission's reserve-adjusted total
     window_record: InitVar[Optional[WindowRecord]] = None  # live capacity terms; not an extra ledger projection
 
+    bible_source: InitVar[Optional[Tuple[str, str, int, str]]] = None
+    assembly_witnesses: InitVar[tuple] = ()
+    contribution_input: InitVar[Optional[tuple]] = None
+
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
                       first_contact_dispatch: Optional[Tuple[int, str]],
                       first_contact_plan: Optional[Tuple[str, bool]], window_boundary_tokens: Optional[int],
-                      window_record: Optional[WindowRecord]) -> None:
+                      window_record: Optional[WindowRecord], bible_source: Optional[Tuple[str, str, int, str]],
+                      assembly_witnesses: tuple, contribution_input: Optional[tuple]) -> None:
         # Only a witness is kept on the instance: without one, ``vars`` holds just the record's fields, and ``replace``
         # reads the class's None back (it reads every InitVar with ``getattr``).
         if base_prompt_source is not None:
@@ -77,6 +82,12 @@ class PhysicalAttemptContext:
             object.__setattr__(self, "window_boundary_tokens", window_boundary_tokens)
         if window_record is not None:
             object.__setattr__(self, "window_record", window_record)
+        if bible_source is not None:
+            object.__setattr__(self, "bible_source", tuple(bible_source))
+        if assembly_witnesses:
+            object.__setattr__(self, 'assembly_witnesses', assembly_witnesses)
+        if contribution_input is not None:
+            object.__setattr__(self, 'contribution_input', contribution_input)
 
 
 def with_dispatch_stamp(request: Any, stamp: Tuple[int, str]) -> Any:

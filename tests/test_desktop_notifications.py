@@ -75,9 +75,9 @@ def pywebview_exposed(api):
 
 def test_the_bridge_exposes_the_alert_methods_and_hides_its_background():
     api = bridge(Recorder())
-    assert pywebview_exposed(api) == ["notify_owner", "panic_stop", "request_attention", "request_native_notifications",
-                                      "set_interface_size", "set_native_appearance", "shell_info",
-                                      "show_native_notification"]
+    assert pywebview_exposed(api) == ["notify_owner", "open_local_context_report", "panic_stop", "request_attention",
+                                     "request_native_notifications", "set_interface_size", "set_native_appearance",
+                                     "shell_info", "show_native_notification"]  # no rooms, requests or report on this bridge
     assert api.notify_owner(True, "Task finished", "", False) == {"ok": True, "args": (True, "Task finished", "", False)}
 
 
@@ -95,6 +95,18 @@ def test_shell_info_is_the_apps_own_facts():
     assert info["persistent_storage"] is True
     assert info["native_notifications"] == {"available": True, "status": "not_determined", "platform": "test",
                                             "reason": ""}
+
+
+@pytest.mark.parametrize("renderer, supported", [(None, False), ("cocoa", False), ("edgechromium", True)])
+def test_local_archive_availability_uses_only_the_loaded_backend(monkeypatch, renderer, supported):
+    if renderer is None:
+        monkeypatch.setitem(sys.modules, "webview", None)  # an import would fail, like the non-desktop profile
+    else:
+        monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(guilib=SimpleNamespace(renderer=renderer)))
+    api = bridge(Recorder())
+    assert api.shell_info()["local_context_archive"] is supported
+    if not supported:
+        assert api.open_local_context_report() == {"state": "unavailable"}
 
 
 def test_the_persistent_storage_claim_is_the_webview_flag():

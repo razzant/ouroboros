@@ -96,6 +96,27 @@ def test_connected_seconds_and_unreported_usage(quote):
     assert live._price(value, token_usage(), {'input_tokens': 0})[0] == 0
 
 
+@pytest.mark.parametrize('refused', [False, True], ids=['settlement', 'receipt-only'])
+def test_live_usage_cannot_supply_an_http_parser_token_receipt(quote, refused):
+    root, _, _ = quote
+    engine, model = 'grok_realtime', 'xai::grok-test'
+    meter = catalog.get_catalog_quote(model, provider=engine, drive_root=root, allow_live_fetch=False)
+    identity = dict(engine=engine, model=model, call_id='call', response_key='reply', task_id='task',
+                    rendered_mode='max', drive_root=root, quote=meter)
+    usage = dict(connected_seconds=6, text_input_tokens=17, text_output_tokens=5,
+                 _reported_token_usage={'prompt_tokens': 800, 'cached_tokens': 799})
+    receipt = dict(usage=usage, raw_usage={}, status='completed')
+    if refused:
+        live.record_refused_live_response(**identity, **receipt, reason='budget_refused')
+    else:
+        live.settle_live_response(live.reserve_live_response(**identity), **receipt)
+    row, = ua.read_usage_records(root)
+    assert row['cost_usd'] == pytest.approx(.005) and row['cost_final'] is False
+    assert (row['prompt_tokens'], row['completion_tokens']) == (17, 5)
+    assert 'provider_token_receipt' not in row
+    assert usage['_reported_token_usage'] == {'prompt_tokens': 800, 'cached_tokens': 799}
+
+
 def test_explicit_unbilled_zero_and_additional_thinking_contract(quote):
     _, value, _ = quote
     # The provider declares its impossible axes; the host must not invent them.

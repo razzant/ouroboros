@@ -269,7 +269,9 @@ def presence_review_wait(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict,
     if reason in HARD_STOPS or not binding.lease.reacquire(stop):
         ctx._presence_conversation_lost = reason if reason in HARD_STOPS else (stop.reason or "cancelled")
         return outcome
-    messages.append({"role": "user", "content": reentry_note(binding, ctx)})
+    observation = {}
+    messages.append({"role": "user", "content": reentry_note(binding, ctx, observation=observation)})
+    record_reentry_contribution(ctx, messages[-1], observation)
     binding.restored = False
     return outcome
 
@@ -622,7 +624,13 @@ _PARKED_BY = {"review": "While you waited for the review", "pause": "While the P
               "restart": "While your saved work waited through the application's restart"}
 
 
-def reentry_note(binding: ReviewWaitBinding, ctx: Any, *, parked_by: str = "review") -> str:
+def record_reentry_contribution(ctx, row, observation):
+    from ouroboros.context_assembly_trace import note_contribution
+
+    note_contribution(ctx, row, 'presence_reentry', form='reentry_view', observation=observation)
+
+
+def reentry_note(binding: ReviewWaitBinding, ctx: Any, *, parked_by: str = "review", observation=None) -> str:
     """Host-authored facts since this author yielded: observations, never owner directives. ``parked_by`` names
     what actually parked it: a left review, the owner's Pause or a restart's return (``presence_carrier``)."""
     from ouroboros.chat_chain import format_address, row_address
@@ -631,7 +639,7 @@ def reentry_note(binding: ReviewWaitBinding, ctx: Any, *, parked_by: str = "revi
 
     rows, gaps = _conversation_rows_since(binding.drive_root, binding.cursor, binding.event.conversation_key)
     queue = transport_queue_observation(binding.drive_root, binding.task_id, binding.event)
-    source = _retain_reentry(binding, ctx, rows, gaps, queue)
+    source = _retain_reentry(binding, ctx, rows, gaps, queue, observation=observation)
     if not source and any(gap.get("kind") == "scan_budget_exhausted" for gap in gaps):
         # No permitted source reader, or source publication failed: a bound cannot
         # erase available facts. Page the frozen interval into the note instead.
@@ -662,6 +670,9 @@ def reentry_note(binding: ReviewWaitBinding, ctx: Any, *, parked_by: str = "revi
         room -= len(fact)
     kept.reverse()
     omitted = rows[:len(rows) - len(kept)]
+    if observation is not None:
+        observation.update(listed=len(kept), omitted=len(omitted), deferred_to_mail=deferred,
+                           history_gaps=len(gaps), mailbox_read=mailed is not None)
     _carried_arrivals(ctx, rows[len(omitted):])
     lines = list(kept)
     if deferred:
@@ -720,7 +731,7 @@ def _queue_note(observation: dict, *, bounded: bool) -> str:
 
 
 def _retain_reentry(binding: ReviewWaitBinding, ctx: Any, rows: list, gaps: list,
-                    transport_queue: dict | None = None) -> str:
+                    transport_queue: dict | None = None, *, observation=None) -> str:
     """Publish exact observed facts through the existing task artifact/source reader.
 
     The source is an observation checkpoint, not a new chat history. Canonical row
@@ -751,6 +762,8 @@ def _retain_reentry(binding: ReviewWaitBinding, ctx: Any, rows: list, gaps: list
         log.warning("Presence %s reentry source unavailable; keeping observed facts inline", binding.task_id,
                     exc_info=True)
         return ""
+    if observation is not None:
+        observation['presence_reentry_sha256'] = ref['sha256']
     return ("get_task_result(" + json.dumps({"task_id": binding.task_id,
             "presence_reentry_sha256": ref["sha256"]}, ensure_ascii=False)
             + ") returns complete_chars and hash; use source_start_char/source_end_char to page exact text. "

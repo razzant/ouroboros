@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
-from ouroboros.section_floor import HostSection
+from ouroboros.section_floor import HostSection, report_text
 from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
@@ -94,8 +94,8 @@ def build_knowledge_sections(
             journal = journal_tail_digest(pid)
             if journal:
                 sections.append(
-                    f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
-                    "(journal_read shows the full history; journal_write appends.)"
+                    report_text(f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
+                                "(journal_read shows the full history; journal_write appends.)", "project_journal")
                 )
             page = project_workpad_path(pid)
             raw = page.read_bytes() if page.is_file() else b""  # one capture: the page shown and its revision
@@ -107,8 +107,8 @@ def build_knowledge_sections(
                 # consolidate, not a reason to amputate context.
                 if len(workpad) > _LARGE_CONTEXT_SECTION_CHARS:
                     log.warning("context: project workpad (%s) is large (%d chars)", pid, len(workpad))
-                sections.append(f"## Project workpad ({pid})\n\n{workpad}"
-                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()))
+                sections.append(report_text(f"## Project workpad ({pid})\n\n{workpad}"
+                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()), "project_workpad"))
         except Exception:
             log.debug("project journal/workpad context injection failed", exc_info=True)
     return sections

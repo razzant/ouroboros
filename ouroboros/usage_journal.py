@@ -462,7 +462,7 @@ def legacy_candidates(snapshot: Tuple[list, Dict[str, Any], Dict[str, str]],
 _SETTLEMENT_FIELDS = frozenset({
     "settle_reason", "reason", "cost_usd", "cost_final", "prompt_tokens", "completion_tokens",
     "cached_tokens", "cache_write_tokens", "prompt_cache_ttl", "effort_resolution", "processing", "speed",
-    "service_tier", "cost_basis", "cost_evidence", "input_token_usage", "attempt_execution",
+    "service_tier", "cost_basis", "cost_evidence", "input_token_usage", "attempt_execution", "provider_token_receipt",
 })
 _DISPATCH_FIELDS = frozenset({
     "launch_state", "transport_outcome", "candidate_manifest_ref", "local_answer_owner_pid",
