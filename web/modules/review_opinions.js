@@ -371,7 +371,7 @@ function recordFacts(view) {
     const items = shown.map(([label, value]) => (label
         ? `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>` : `<dd class="review-facts-note">${escape(value)}</dd>`)).join('');
     return `<details class="review-facts" data-review-facts="${escape(view.id)}"><summary class="review-facts-summary">${CHEVRON_RIGHT}Record facts</summary>`
-        + `<div class="review-facts-body" data-review-attempt-detail="${escape(view.id)}:facts" tabindex="0" role="group" aria-label="Record facts">`
+        + `<div class="review-facts-body scroll-fade-y" data-review-attempt-detail="${escape(view.id)}:facts" tabindex="0" role="group" aria-label="Record facts">`
         + `<dl class="review-facts-list">${items || '<dd class="review-facts-note">No saved detail.</dd>'}</dl></div></details>`;
 }
 

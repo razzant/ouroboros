@@ -72,7 +72,7 @@ function effortRangeMarkup() {
     // The value is a tier word read through the catalog seam (effortText): the overlay leaves it alone.
     return capsuleHead(ring, 'Effort', 'chat-effort-head', ' data-i18n-skip')
         + '<div class="chat-capsule-body">'
-        + '<div class="chat-effort-strip ui-hit-area" data-effort-strip data-scroll="none"><div class="chat-effort-band" data-effort-band aria-hidden="true"></div>'
+        + '<div class="chat-effort-strip scroll-fade-x ui-hit-area" data-effort-strip data-scroll="none"><div class="chat-effort-band" data-effort-band aria-hidden="true"></div>'
         + '<div class="chat-effort-handle chat-effort-rec" data-handle="rec" role="slider" tabindex="-1" aria-label="Primary effort"></div>'
         + segments
         + '<div class="chat-effort-handle chat-effort-cap chat-effort-min" data-handle="min" role="slider" tabindex="-1" aria-label="Minimum subagent effort"></div>'
@@ -86,7 +86,7 @@ function contextModeMarkup() {
     const modes = CONTEXT_MODES.map((mode) =>
         `<button class="chat-seg ui-hit-area" type="button" role="radio" tabindex="-1" aria-checked="false" data-mode="${mode}"><span class="chat-seg-text">${CONTEXT_LABELS[mode]}</span></button>`).join('');
     return capsuleHead(arcs, 'Context', 'chat-context-head')
-        + `<div class="chat-capsule-body"><div class="chat-context-strip" role="radiogroup" aria-label="Context size mode" data-scroll="none"><span class="chat-context-thumb" aria-hidden="true"></span>${modes}</div></div>`;
+        + `<div class="chat-capsule-body"><div class="chat-context-strip scroll-fade-x" role="radiogroup" aria-label="Context size mode" data-scroll="none"><span class="chat-context-thumb" aria-hidden="true"></span>${modes}</div></div>`;
 }
 
 /** Inline primary/helper effort controls. Gesture-end saves serialize; refusal restores

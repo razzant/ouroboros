@@ -539,7 +539,7 @@ const DIALOG_HTML = `
         <header class="document-reader-head has-lead">
             <div class="document-reader-lead">
                 <div class="document-reader-identity" data-i18n-authored>
-                    <h2 class="document-reader-title" tabindex="0"></h2>
+                    <h2 class="document-reader-title scroll-fade-y" tabindex="0"></h2>
                     <div class="document-reader-meta"></div>
                 </div>
                 <div class="document-reader-actions">
@@ -562,7 +562,9 @@ const DIALOG_HTML = `
             <button type="button" class="btn btn-default document-reader-close" data-reader-action="close" aria-label="Close document">Close</button>
         </header>
         <div class="document-reader-notice" role="note" hidden></div>
-        <div class="document-reader-body scroll-fade-y" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
+        <div class="document-reader-body-frame scroll-fade-focus-frame">
+            <div class="document-reader-body scroll-fade-y" tabindex="0" role="region" aria-label="Document text" aria-busy="true"></div>
+        </div>
     </div>`;
 
 /**
@@ -825,7 +827,7 @@ export function createDocumentReader({ actions = {}, formatSize = (bytes) => `${
         listen(dialog, 'close', () => { if (session === current) close({ restoreFocus: false }); });
         doc.body.appendChild(dialog);
         session = current;
-        current.disposers.push(bindScrollFade(current.body));
+        current.disposers.push(bindScrollFade(current.title), bindScrollFade(current.body));
         // The engine refocuses what was focused at showModal when the dialog closes; WebKit does
         // not focus a pressed button, so the opener takes focus first, in place.
         if (returnFocus && returnFocus !== doc.activeElement) returnFocus.focus?.({ preventScroll: true });

@@ -169,6 +169,132 @@ def assert_nothing_shows_through(page, facts):
     assert difference <= 1, ("content under the list shows through it", difference)
 
 
+@pytest.mark.parametrize("shade", ["work", "consciousness"])
+def test_overflowing_shade_fades_contents_without_revealing_backdrop(room_ui, shade):
+    page, transport = _open(room_ui, width=390, height=600, theme="light", room="main", reduced_motion="reduce")
+    if shade == "work":
+        transport.activities.extend(activity(f"queued-{n}", "queued") for n in range(24))
+        transport.refresh()
+        wait_facts(page, "main", lambda f: f["tone"] == "live", "the Main trigger")
+        trigger(page).click()
+        sheet = page.locator("#page-chat .rw-shade:not(.cx-shade)")
+        assert sheet.locator(".rw-row").count() >= 20
+    else:
+        page.route("**/api/consciousness*", lambda route: route.fulfill(json={
+            "enabled": True, "recent_wakes": [
+                {"task_id": f"wake-{n}", "cause": "own" if n < 3 else "focus", "phase": "done",
+                 "summary": f"Wake {n}: " + "Read the report and kept the relevant notes. " * 8,
+                 "started_at": "2026-11-22T12:30:00Z"} for n in range(6)]}))
+        page.locator("#page-chat .cx-chip").click()
+        sheet = page.locator("#page-chat .cx-shade")
+        assert sheet.locator(".cx-wakes li").count() == 6
+    port = sheet.locator("xpath=descendant-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' scroll-fade-y ')]")
+    page.wait_for_function("el => el.hasAttribute('data-scroll-below')", arg=port.element_handle())
+    assert port.evaluate("el => el.scrollHeight > el.clientHeight && getComputedStyle(el).maskImage.includes('linear-gradient')")
+
+    # Change only the pixels below the shell, in its own stacking context. The center of its rounded
+    # bottom edge would show the new backing if the sheet's material were part of the mask.
+    sheet.evaluate("""el => {
+        const backdrop = document.createElement('div');
+        backdrop.id = 'shade-test-backdrop';
+        Object.assign(backdrop.style, {position: 'absolute', pointerEvents: 'none', background: '#ff00ff',
+            left: `${el.offsetLeft}px`, top: `${el.offsetTop}px`, width: `${el.offsetWidth}px`, height: `${el.offsetHeight}px`});
+        el.before(backdrop);
+    }""")
+    box = sheet.bounding_box()
+    clip = {"x": box["x"] + box["width"] / 2 - 24, "y": box["y"] + box["height"] - 6, "width": 48, "height": 3}
+    pink = _pixels(page, clip)
+    page.locator("#shade-test-backdrop").evaluate("el => el.style.background = '#00ff00'")
+    green = _pixels(page, clip)
+    capture(page, f"overflowing-material-{shade}-{room_ui['engine']}")
+    assert max(high for _, high in ImageChops.difference(pink, green).getextrema()) <= 1, "the backdrop shows through the sheet"
+    assert sheet.evaluate("el => getComputedStyle(el).maskImage") == "none"
+    port.evaluate("el => el.scrollTop = el.scrollHeight")
+    page.wait_for_function("el => el.hasAttribute('data-scroll-above') && !el.hasAttribute('data-scroll-below')",
+                           arg=port.element_handle())
+
+
+@pytest.mark.parametrize("shade", ["work", "consciousness"])
+def test_overflowing_shade_pointer_pagedown_keyboard_open_and_escape(room_ui, shade):
+    """Pointer-opening either overflowing Shade focuses its inner scrollport quietly (no ring) so a real PageDown
+    scrolls it at once; Escape closes and returns focus to the opener; keyboard opening lands on the first enabled
+    control."""
+    page, transport = _open(room_ui, width=390, height=600, theme="light", room="main", reduced_motion="reduce")
+    if shade == "work":
+        transport.activities.extend(activity(f"queued-{n}", "queued") for n in range(24))
+        transport.refresh()
+        wait_facts(page, "main", lambda f: f["tone"] == "live", "the Main trigger")
+        opener = trigger(page)
+        sheet = page.locator("#page-chat .rw-shade:not(.cx-shade)")
+        wait_ready = lambda: page.wait_for_function("el => el.querySelectorAll('.rw-row').length >= 20",
+                                                    arg=sheet.element_handle())
+        first_control = "el => el.querySelector('.rw-list .rw-main[tabindex=\"0\"]')"
+    else:
+        page.route("**/api/consciousness*", lambda route: route.fulfill(json={
+            "enabled": True, "recent_wakes": [
+                {"task_id": f"wake-{n}", "cause": "own" if n < 3 else "focus", "phase": "done",
+                 "summary": f"Wake {n}: " + "Read the report and kept the relevant notes. " * 8,
+                 "started_at": "2026-11-22T12:30:00Z"} for n in range(6)]}))
+        opener = page.locator("#page-chat .cx-chip")
+        opener.wait_for(state="visible")
+        sheet = page.locator("#page-chat .cx-shade")
+        wait_ready = lambda: page.wait_for_function("el => el.querySelectorAll('.cx-wakes li').length === 6",
+                                                    arg=sheet.element_handle())
+        first_control = ("el => [el.querySelector('.cx-toggle'), el.querySelector('.cx-door[data-tab=\"consciousness\"]')]"
+                         ".find(n => n && !n.hidden && !n.disabled)")
+
+    port = sheet.locator(".rw-shade-body.scroll-fade-y")
+    # 1. Pointer click focuses the inner scrollport quietly (no ring), so a real PageDown scrolls immediately.
+    opener.click()
+    wait_ready()
+    page.wait_for_function("el => el.scrollHeight > el.clientHeight && el.hasAttribute('data-scroll-below')",
+                           arg=port.element_handle())
+    opened = port.evaluate("""(el) => ({
+        isActive: document.activeElement === el,
+        tabIndex: el.tabIndex,
+        portOutline: getComputedStyle(el).outlineStyle,
+        sheetOutline: getComputedStyle(el.closest('.rw-shade')).outlineStyle,
+        scrollTop: el.scrollTop,
+    })""")
+    assert opened["isActive"] and opened["tabIndex"] == -1, opened
+    assert opened["portOutline"] == "none" and opened["sheetOutline"] == "none", opened
+    assert opened["scrollTop"] == 0, opened
+
+    page.keyboard.press("PageDown")
+    page.wait_for_function("el => el.scrollTop > 0 && el.hasAttribute('data-scroll-above')", arg=port.element_handle())
+    scrolled = port.evaluate("""(el) => ({
+        isActive: document.activeElement === el,
+        portOutline: getComputedStyle(el).outlineStyle,
+        scrollTop: el.scrollTop,
+    })""")
+    assert scrolled["isActive"] and scrolled["scrollTop"] > 0 and scrolled["portOutline"] == "none", scrolled
+    capture(page, f"shade-pointer-pagedown-{shade}-{room_ui['engine']}")
+
+    # 2. Escape closes from the inner scrollport and restores focus to the opener.
+    page.keyboard.press("Escape")
+    page.wait_for_function("el => el.hidden", arg=sheet.element_handle())
+    assert opener.evaluate("el => document.activeElement === el"), "Escape returns focus to the opener"
+
+    # 3. Keyboard opening (Enter and ArrowDown on the focused opener) lands on the first enabled control.
+    for key in ("Enter", "ArrowDown"):
+        page.keyboard.press(key)
+        page.wait_for_function("el => !el.hidden", arg=sheet.element_handle())
+        wait_ready()
+        landed = sheet.evaluate(f"""(el) => {{
+            const expected = ({first_control})(el);
+            return {{
+                matched: Boolean(expected) && document.activeElement === expected,
+                disabled: Boolean(document.activeElement?.disabled),
+                activeClass: document.activeElement?.className || '',
+                expectedClass: expected?.className || '',
+            }};
+        }}""")
+        assert landed["matched"] and not landed["disabled"], (key, shade, landed)
+        page.keyboard.press("Escape")
+        page.wait_for_function("el => el.hidden", arg=sheet.element_handle())
+        assert opener.evaluate("el => document.activeElement === el"), (key, "Escape returns focus to opener")
+
+
 @pytest.mark.parametrize("room", ["main", "project"])
 @pytest.mark.parametrize("theme", ["dark", "light"])
 @pytest.mark.parametrize("width,height", [(1100, 722), (390, 844)])

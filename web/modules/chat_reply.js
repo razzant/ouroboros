@@ -8,7 +8,7 @@ import { tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { isStoreMigrating } from './api_client.js';
 import { ownerRowRoom } from './chat_history_replay.js';
-import { authorOf, createRelayQuote, createReplyQuote, normalizeReplyRef, replySnippet } from './chat_reply_quote.js';
+import { authorOf, createRelayQuote, createReplyQuote, normalizeReplyRef, releaseQuoteFades, replySnippet } from './chat_reply_quote.js';
 import { createRelayDecks } from './chat_relay_deck.js';
 import { fullText } from './text_fit.js';
 import { bindBubbleActions } from './message_actions.js';
@@ -292,6 +292,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             // The field announces what it answers whenever it takes focus.
             input.setAttribute('aria-describedby', main.id);
             if (before?.isConnected && before.dataset.motion !== 'shut') {
+                releaseQuoteFades(before);
                 before.replaceWith(strip);
                 if (animate) composerArea?.dispatchEvent?.(new Event('ouro:composer-reserve'));
                 return;
@@ -303,7 +304,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         } else input.removeAttribute('aria-describedby');
         if (before?.isConnected && before.dataset.motion !== 'shut') {
             before.inert = true;  // leaving, its controls take no press
-            void run(before, 'shut').then(() => before.remove());
+            void run(before, 'shut').then(() => { releaseQuoteFades(before); before.remove(); });
         }
         if (animate) composerArea?.dispatchEvent?.(new Event('ouro:composer-reserve'));
     }
@@ -501,7 +502,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             if (row.reply_to?.excerpt || row.reply_to?.role === 'system') {
                 const saved = createReplyQuote(row.reply_to, { onJump: jump, onDomWrite });
                 const local = bubble.querySelector(':scope > .chat-quote');
-                if (local) { bubble.insertBefore(saved, local); local.remove(); }
+                if (local) { releaseQuoteFades(local); local.replaceWith(saved); }
                 else bubble.querySelector('.sender')?.after(saved);
             }
             if (!bubble.querySelector(':scope > .chat-message-actions > .chat-message-reply')) mountControl(bubble);
@@ -527,6 +528,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         /** The local echo of a reply, shaped like a row so it draws the same quote (it has no row address yet). */
         echoRow: () => (staged ? { reply_to: staged } : null),
         clear,
+        release: releaseQuoteFades,
         destroy() {
             destroyed = true;
             clearTimeout(targetTimer);
@@ -535,6 +537,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
             bubbleActions.destroy();
             decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);
+            releaseQuoteFades(feed);
+            releaseQuoteFades(composerArea);  // includes an outgoing strip still finishing its motion
             strip?.remove();
             strip = null;
             staged = null;

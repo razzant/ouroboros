@@ -99,21 +99,24 @@ test('the mic stands in its slot only while the chosen engine can run here; its 
         chevron.click();
         const menu = r.doc.body.querySelector('.voice-menu');
         assert.ok(menu, 'the chevron opens the engine menu');
-        const items = menu.children.map((node) => [node.getAttribute('role'), node.children.map((part) => part.textContent),
-            node.getAttribute('aria-checked'), node.getAttribute('aria-disabled')]);
-        assert.deepEqual(items, [
+        const rowsOf = (popup) => popup.querySelectorAll('[role^="menuitem"]');
+        const named = (rows, label) => rows.find((node) => node.querySelector('.voice-menu-name')?.textContent === label);
+        const rows = rowsOf(menu);
+        assert.deepEqual(rows.map((node) => [node.getAttribute('role'), node.children.map((part) => part.textContent),
+            node.getAttribute('aria-checked'), node.getAttribute('aria-disabled')]), [
             ['menuitemradio', ['Whisper', 'On this computer'], 'true', null],
             ['menuitemradio', ['Browser speech', BROWSER.reason], 'false', 'true'],
             ['menuitem', ['Get another engine…'], null, null],
             ['menuitem', ['Turn off dictation'], null, null],
         ], 'speech-to-text engines only, each with its destination or why it cannot run');
-        menu.children[1].click();
+        named(rows, BROWSER.label).click();
         assert.deepEqual(hub.chosen, [], 'an engine that cannot run is not chosen');
-        menu.children[2].click();
+        assert.equal(r.doc.body.querySelector('.voice-menu'), menu, 'a disabled option does not close the menu');
+        named(rows, 'Get another engine…').click();
         assert.equal(chooser.length, 1, 'Get another engine… opens the chooser');
         assert.equal(chooser[0].composer, r.composer);
-        r.slot.children[1].click();
-        r.doc.body.querySelector('.voice-menu').children[3].click();
+        chevron.click();
+        named(rowsOf(r.doc.body.querySelector('.voice-menu')), 'Turn off dictation').click();
         await Promise.resolve();
         assert.deepEqual(hub.chosen, [['stt', '']], 'Turn off dictation clears the choice');
         assert.equal(r.slot.hidden, true);

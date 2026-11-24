@@ -270,11 +270,27 @@ def test_delivered_documents_open_in_the_reader_live_and_after_reload(direct_ser
             assert not [entry for entry in requests if "/artifacts/" in entry[0] or "/api/files/" in entry[0]
                         or "reader-probe" in entry[0] or "example.com" in entry[0]], requests
             page.screenshot(path=str(evidence / "chromium-wide-dark-brief.png"))
-            ring = "() => getComputedStyle(document.querySelector('.document-reader-body')).outlineStyle"
-            assert page.evaluate(ring) == "none", "a pointer open shows no ring on the reading region"
+            ring = """() => {
+                const dialog = document.querySelector('dialog.document-reader[open]');
+                const frame = dialog.querySelector('.document-reader-body-frame');
+                const body = dialog.querySelector('.document-reader-body');
+                const fs = getComputedStyle(frame), bs = getComputedStyle(body);
+                const mask = (s) => (s.maskImage && s.maskImage !== 'none' ? s.maskImage : (s.webkitMaskImage || 'none'));
+                return {
+                    frameOutline: fs.outlineStyle, frameMask: mask(fs),
+                    bodyOutline: bs.outlineStyle, bodyMask: mask(bs),
+                    above: body.hasAttribute('data-scroll-above'), below: body.hasAttribute('data-scroll-below'),
+                };
+            }"""
+            page.wait_for_function("() => document.querySelector('dialog.document-reader[open] .document-reader-body')?.hasAttribute('data-scroll-below')")
+            before_key = page.evaluate(ring)
+            assert before_key["frameOutline"] == "none" and before_key["bodyOutline"] == "none", before_key
+            assert before_key["frameMask"] == "none" and "linear-gradient" in before_key["bodyMask"] and not before_key["above"] and before_key["below"], before_key
             page.keyboard.press("PageDown")
-            page.wait_for_function("() => document.querySelector('.document-reader-body').scrollTop > 0")
-            assert page.evaluate(ring) == "solid", "the first key shows the one focus ring"
+            page.wait_for_function("() => { const body = document.querySelector('dialog.document-reader[open] .document-reader-body'); return body && body.scrollTop > 0 && body.hasAttribute('data-scroll-above'); }")
+            after_key = page.evaluate(ring)
+            assert after_key["frameOutline"] == "solid" and after_key["bodyOutline"] == "none", after_key
+            assert after_key["frameMask"] == "none" and "linear-gradient" in after_key["bodyMask"] and after_key["above"] and after_key["below"], after_key
             for _ in range(8):
                 page.keyboard.press("Tab")
                 assert _reader(page)["activeInside"], "Tab stays inside the reader"

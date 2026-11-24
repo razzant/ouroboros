@@ -741,7 +741,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     z-index: 120;
     width: min(220px, calc(100vw - 16px));
     max-height: var(--tcm-max-height, calc(100vh - 16px));
-    overflow-y: auto;
+    overflow: hidden;
     padding: var(--space-2);
     border: 1px solid transparent;
     border-radius: var(--radius-object);
@@ -752,10 +752,15 @@ html[data-layout="stack"] .resize-handle { display: none; }
     box-shadow: var(--elev-float);
     display: flex;
     flex-direction: column;
+}
+.task-control-menu > .ui-popup-body {
+    display: flex;
+    flex-direction: column;
     gap: var(--space-1);
 }
 
 .task-control-item {
+    flex: 0 0 auto;
     border: none;
     border-radius: var(--radius-inner);
     background: transparent;
@@ -1166,7 +1171,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* A location that scrolls takes the pointer whole, so a sideways wheel on a separator moves it as on a name; the band's
    other empty parts stay the list's. */
 #page-files > :is(.app-page-header, .files-band) .files-breadcrumb:is([data-scroll-start], [data-scroll-end]) { pointer-events: auto; }
-.files-layout .files-sidebar[data-scroll-above] { --scroll-fade-top-clear: var(--files-band-h); --scroll-fade-top: calc(var(--files-band-h) + var(--scroll-fade-edge)); }
+.files-layout .files-sidebar { --scroll-fade-top-clear: var(--files-band-h, 0px); }
 .files-preview { padding-top: var(--files-band-h); }
 
 .files-toolbar {
@@ -1621,11 +1626,6 @@ html[data-layout="docked"] .app-page-header[data-lead] {
     padding-block: 0;
     overflow-x: auto;
     scrollbar-width: none;
-    --band-fade-start: 0px;
-    --band-fade-end: 0px;
-    --scroll-fade-edge: var(--space-4);
-    -webkit-mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
-    mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
 }
 /* With a return the folder rail keeps 14rem, or 40% of a narrow band (a tablet's column keeps Refresh in it); at the
    residual room floor the same row scrolls, so Paste cannot squeeze the rail to zero. */
@@ -1634,8 +1634,6 @@ html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-templ
    column: Settings' search and Logs' Clear end where the cards end, with or without a return. */
 html[data-layout="docked"] .section-place > .app-page-header[data-lead] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title"; }
 html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { display: none; }
-html[data-layout="docked"] .app-page-header[data-scroll-start] { --band-fade-start: var(--space-4); }
-html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: var(--space-4); }
 /* In the macOS window the row is the window's band, so its tabs and actions sit level with the traffic lights at every
    Interface size: a larger size shrinks the band in CSS px, and the strip's insets shrink with it, the bottom one
    keeping the tabs' 16px of shadow room (at 100 % they are the 10px and 26px above; once the band is shorter than a
@@ -1683,18 +1681,9 @@ html[data-layout="docked"] .app-page-lead > .files-breadcrumb {
     gap: 2px;
     overflow-x: auto;
     overscroll-behavior-x: contain;
-    scroll-padding-inline: var(--space-4);
     scrollbar-width: none;
-    --crumb-fade-start: 0px;
-    --crumb-fade-end: 0px;
-    -webkit-mask-image: linear-gradient(to right, transparent, black var(--crumb-fade-start),
-        black calc(100% - var(--crumb-fade-end)), transparent);
-    mask-image: linear-gradient(to right, transparent, black var(--crumb-fade-start),
-        black calc(100% - var(--crumb-fade-end)), transparent);
 }
 html[data-layout="docked"] .app-page-lead > .files-breadcrumb::-webkit-scrollbar { display: none; }
-html[data-layout="docked"] .app-page-lead > .files-breadcrumb[data-scroll-start] { --crumb-fade-start: var(--space-4); }
-html[data-layout="docked"] .app-page-lead > .files-breadcrumb[data-scroll-end] { --crumb-fade-end: var(--space-4); }
 html[data-layout="docked"] .app-page-lead .files-crumb {
     flex: none;
     max-width: min(360px, calc(100% - var(--space-4)));
@@ -1722,15 +1711,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     scroll-padding-inline: var(--space-4);
     margin: 0;
     scrollbar-width: none;
-    --tab-fade-start: 0px;
-    --tab-fade-end: 0px;
-    -webkit-mask-image: linear-gradient(to right, transparent, black var(--tab-fade-start),
-        black calc(100% - var(--tab-fade-end)), transparent);
-    mask-image: linear-gradient(to right, transparent, black var(--tab-fade-start),
-        black calc(100% - var(--tab-fade-end)), transparent);
 }
-.app-tab-strip[data-scroll-start] { --tab-fade-start: var(--space-4); }
-.app-tab-strip[data-scroll-end] { --tab-fade-end: var(--space-4); }
 /* A strip that scrolls clips a reach, so under a finger its tabs take the touch minimum as their own height (the
    control token; the lock writes the box). */
 @media (pointer: coarse) {
@@ -1742,19 +1723,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 
 /* The tab itself (.app-tab, its count pill) is ui.css's; the strip above is the page's composition. */
-
-.scroll-fade-y {
-    --scroll-fade-edge: 32px;
-    --scroll-fade-top: 0px;
-    --scroll-fade-top-clear: 0px;
-    --scroll-fade-bottom: 0px;
-    -webkit-mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
-        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
-    mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
-        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
-}
-.scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
-.scroll-fade-y[data-scroll-below] { --scroll-fade-bottom: var(--scroll-fade-edge); }
 
 .page-header .spacer { flex: 1; }
 
@@ -4248,7 +4216,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     color: var(--status-warn-fg);
 }
 
-.chat-bubble .message pre {
+.chat-bubble .message pre:where(:not(.md-code-block > pre)) {
     background: rgba(0, 0, 0, 0.3);
     border-radius: 6px;
     padding: 8px 10px;
@@ -4258,7 +4226,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     line-height: var(--line-body);
 }
 .ui-rich-content .inline-code,
-.ui-rich-content .md-code-block code,
+.md-code-block code,
 .chat-bubble .message code {
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
     font-size: var(--type-body);
@@ -4471,28 +4439,12 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     -webkit-overflow-scrolling: touch;
     max-width: 100%;
     scrollbar-color: var(--text-disabled) var(--surface-tray);
-    --table-fade-start: 0px;
-    --table-fade-end: 0px;
-}
-/* A table that really scrolls fades on each side that still hides columns, the
-   `.scroll-fade-y` idiom turned sideways: `data-scroll-start`/`-end` come from
-   `bindMarkdownTables` (chat_markdown.js), shared by the rich enhancement and
-   compact surfaces, which also makes that wrapper a focusable region. A mask
-   fades the content itself, so it reads on every bubble tint. */
-.md-table-wrap[data-scroll-start] { --table-fade-start: var(--space-5); }
-.md-table-wrap[data-scroll-end] { --table-fade-end: var(--space-5); }
-.md-table-wrap:is([data-scroll-start], [data-scroll-end]) {
-    -webkit-mask-image: linear-gradient(to right, transparent 0, black var(--table-fade-start),
-        black calc(100% - var(--table-fade-end)), transparent 100%);
-    mask-image: linear-gradient(to right, transparent 0, black var(--table-fade-start),
-        black calc(100% - var(--table-fade-end)), transparent 100%);
+    --scroll-fade-inline-edge: var(--space-5);
 }
 /* Focused, the whole table and its ring show. */
 .md-table-wrap:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
-    -webkit-mask-image: none;
-    mask-image: none;
 }
 
 .md-code-block {
@@ -4506,8 +4458,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     background: var(--code-bg);
     color: var(--text-primary);
 }
-.ui-rich-content .md-code-block pre,
-.chat-bubble .message .md-code-block pre {
+.md-code-block > pre {
     margin: 0;
     padding: var(--space-4);
     overflow: auto;
@@ -4519,6 +4470,20 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     line-height: var(--line-body);
     white-space: pre;
     tab-size: 2;
+}
+/* Give the existing observer a content box that changes with keyed compact text. */
+.md-compact-code > code {
+    display: block;
+    inline-size: max-content;
+    min-inline-size: 100%;
+}
+.md-code-block > pre:focus-visible,
+.ui-rich-content .katex-display:focus-visible,
+.chat-bubble .message .katex-display:focus-visible,
+.md-mermaid-scroll:focus-visible,
+.message-share-code:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
 }
 .md-code-language {
     display: block;
@@ -4580,6 +4545,14 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     color: var(--text-primary);
 }
 .md-mermaid { text-align: center; }
+.md-mermaid.is-rendered {
+    padding: 0;
+    overflow: hidden;
+}
+.md-mermaid-scroll {
+    padding: var(--space-4);
+    overflow-x: auto;
+}
 .md-mermaid-stage {
     position: fixed;
     top: 0;
@@ -4597,6 +4570,11 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     margin: 0 auto;
 }
 .md-chart {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+/* A chart canvas needs a bounded parent; source text uses the outer reader. */
+.md-chart:has(> canvas) {
     height: clamp(280px, 42vw, 480px);
     overflow: hidden;
 }
@@ -4606,15 +4584,12 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     height: 100% !important;
 }
 .md-chart-error {
-    height: auto;
-    overflow-x: auto;
     border-color: var(--status-error-fg);
     color: var(--text-meta);
     font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
     font-size: var(--type-meta);
     line-height: var(--line-body);
     text-align: left;
-    white-space: pre-wrap;
 }
 .md-mermaid-error { border-color: var(--status-error-fg); }
 .md-diagram-error-note {
@@ -5869,25 +5844,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     overscroll-behavior-x: contain;
     scrollbar-width: none;
     touch-action: pan-x;
-    --capsule-fade-to: right;  /* toward the strip's end */
+    --scroll-fade-inline-edge: var(--space-3);
 }
 .chat-capsule[data-fit="overflow"] :is(.chat-effort-strip, .chat-context-strip):dir(rtl) {
-    --capsule-fade-to: left;
+    --scroll-fade-inline-to: left;
 }
 .chat-capsule[data-fit="overflow"] :is(.chat-effort-strip, .chat-context-strip)::-webkit-scrollbar {
     display: none;
 }
-.chat-capsule[data-fit="overflow"] [data-scroll="start"] {
-    -webkit-mask-image: linear-gradient(to var(--capsule-fade-to), black calc(100% - var(--space-3)), transparent);
-    mask-image: linear-gradient(to var(--capsule-fade-to), black calc(100% - var(--space-3)), transparent);
+.chat-capsule[data-fit="overflow"] .scroll-fade-x:is([data-scroll="start"], [data-scroll="middle"]) {
+    --scroll-fade-end: var(--scroll-fade-x-depth);
 }
-.chat-capsule[data-fit="overflow"] [data-scroll="middle"] {
-    -webkit-mask-image: linear-gradient(to var(--capsule-fade-to), transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
-    mask-image: linear-gradient(to var(--capsule-fade-to), transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
+.chat-capsule[data-fit="overflow"] .scroll-fade-x:is([data-scroll="middle"], [data-scroll="end"]) {
+    --scroll-fade-start: var(--scroll-fade-x-depth);
 }
-.chat-capsule[data-fit="overflow"] [data-scroll="end"] {
-    -webkit-mask-image: linear-gradient(to var(--capsule-fade-to), transparent, black var(--space-3));
-    mask-image: linear-gradient(to var(--capsule-fade-to), transparent, black var(--space-3));
+.chat-capsule[data-fit="overflow"] .scroll-fade-x:is([data-scroll="start"], [data-scroll="middle"], [data-scroll="end"]) {
+    -webkit-mask-image: var(--scroll-fade-x-image);
+    mask-image: var(--scroll-fade-x-image);
 }
 @media (prefers-reduced-motion: reduce) {
     .chat-toolbar-row .chat-capsule,
@@ -6359,8 +6332,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 .logs-filters { display: flex; align-items: center; flex: 1; min-width: 0; gap: var(--space-2); }
 .logs-filters[hidden] { display: none; }
 .logs-kinds { flex: 1; }
-.logs-kinds[data-scroll-end] { --tab-fade-end: var(--space-4); }
-.logs-kinds[data-scroll-start] { --tab-fade-start: var(--space-4); }
 .logs-clear-list { flex: none; color: var(--text-secondary); }
 /* A two-pane stack window holds the rail in the header's one row: the strip lends its chips' shadow room outside it, so
    the row keeps the controls' height. */
@@ -6617,10 +6588,11 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 }
 .evo-detail-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; overflow-wrap: anywhere; }
 .evo-detail-lead { margin: 0; max-width: 68ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-/* A tag annotation's body keeps its author's lines (its bullets); a README row has none. */
+/* A tag annotation's body keeps its author's lines (its bullets); a README row has none.
+   Two folded lines give way cleanly at the lower fade ([data-fold-clipped]) without a trailing ellipsis. */
 .evo-detail-body { margin: 0; max-width: 92ch; color: var(--text-meta); font-size: var(--type-meta); line-height: 1.5; overflow-wrap: anywhere;
-    white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.evo-detail-body.is-full { display: block; -webkit-line-clamp: unset; overflow: visible; }
+    white-space: pre-line; max-height: 3em; overflow: hidden; }
+.evo-detail-body.is-full { max-height: none; overflow: visible; }
 .evo-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); padding-top: 2px; }
 .evo-fact { display: grid; gap: 1px; min-width: 0; }
 .evo-fact .evo-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -7598,6 +7570,20 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 #toast-stack .toast-dismiss { position: sticky; top: 0; bottom: 0; }
 /* The focused scroll region uses the same ring as other keyboard controls. */
 #toast-stack:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+/* Words the column's edge cuts wear the shared edge (.scroll-fade-y, ui.css), and only they: toast.js lays it over the
+   column's window (--toast-view-top, --toast-view-height), so it ends at the screen's edge. The column carries no mask:
+   as a masked ancestor it is the glass's backdrop root and flattens its backdrop-filter, and it would fade the sticky
+   close and its ring. */
+#toast-stack .toast-words {
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-size: 100% var(--toast-view-height, 100%);
+    mask-size: 100% var(--toast-view-height, 100%);
+    -webkit-mask-position: 0 var(--toast-view-top, 0);
+    mask-position: 0 var(--toast-view-top, 0);
+}
+/* A plain notice needs one mask box for all its wrapped lines, not an inline box per line. */
+#toast-stack .toast-words:only-child { display: block; }
 
 @keyframes toast-in {
     from { opacity: 0; transform: translateY(8px); }
@@ -7713,7 +7699,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     line-height: var(--line-body);
     overflow-wrap: anywhere;
 }
-.skills-card-purpose[data-clamped] { display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+.skills-card-purpose[data-browse-purpose-preview] { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; overflow: clip; }
 .skills-read-more {
     align-self: flex-start;
     padding: 0;
@@ -7825,15 +7811,7 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     scroll-padding-inline: var(--page-header-padding-x);
     overscroll-behavior-x: contain;
     scrollbar-width: none;
-    --strip-fade-start: 0px;
-    --strip-fade-end: 0px;
-    -webkit-mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
-        black calc(100% - var(--strip-fade-end)), transparent);
-    mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
-        black calc(100% - var(--strip-fade-end)), transparent);
 }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-start] { --strip-fade-start: var(--space-4); }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-end] { --strip-fade-end: var(--space-4); }
 html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
 @media (pointer: coarse) {
     html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
@@ -8045,8 +8023,8 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
     max-height: min(42vh, 380px);
     overflow-y: auto;
     padding: 2px 12px 2px 0;
-    border-bottom: 1px solid var(--divider);
 }
+.confirm-dialog-content-frame { border-bottom: 1px solid var(--divider); }
 
 .confirm-dialog-content:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -8663,6 +8641,9 @@ html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var
     overflow-wrap: anywhere;
 }
 
+/* Keep an observed box at the JSON text's natural height even when the pre is capped. */
+.widget-json pre > code { display: block; }
+
 .widget-form {
     display: flex;
     flex-direction: column;
@@ -8879,11 +8860,16 @@ figure.widget-media {
     gap: 10px;
 }
 
+/* The tray paints the code's backing; the scrollport inside carries no paint, so the shared fade disappears text into
+   that backing at a waiting edge instead of lightening it, and a fitted tray shows no fade at all. */
+.widget-code-tray {
+    border-radius: var(--radius-inner);
+    background: rgba(0, 0, 0, 0.24);
+}
 .widget-code pre {
     margin: 0;
     padding: 10px;
-    border-radius: var(--radius-inner);
-    background: rgba(0, 0, 0, 0.24);
+    background: transparent;
     overflow-x: auto;
 }
 
@@ -10696,7 +10682,7 @@ html[data-layout="stack"] .project-panel {
     color: var(--text-primary);
     margin-top: var(--space-2);
 }
-.updates-letter .updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
+.updates-letter .updates-letter-body:not(.is-open) { display: flow-root; max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; overflow: clip; }
 /* A long reading text keeps its structure: the title one size up, a section as a label with room above it, a
    subsection in the secondary ink — declared after the global .md-h* block it narrows. */
 .updates-letter-body :is(.md-h1, .md-h2, .md-h3) {
@@ -11147,12 +11133,32 @@ html[data-layout="stack"] .project-panel {
 }
 
 /* Opened by a pointer, the focused reading region shows its ring from the first
-   key; until then no ring at all, the engine's own included. */
+   key; until then no ring at all, the engine's own included. Inside the reader's
+   unmasked focus frame (ui.css .scroll-fade-focus-frame), the ring sits on the
+   frame while the body keeps fading; unwrapped sheets that reuse .document-reader-body
+   keep the fallback inset ring. */
+.document-reader-body-frame {
+    --scroll-fade-focus-offset: -2px;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-radius: 0 0 calc(var(--radius-sheet) - 1px) calc(var(--radius-sheet) - 1px);
+}
+
+.document-reader.is-image-scene .document-reader-body-frame {
+    border-radius: calc(var(--radius-sheet) - 1px);
+}
+
 .document-reader-body:focus { outline: none; }
 
 .document-reader-body:focus-visible:not(.is-quiet-focus) {
-    outline: 2px solid var(--focus-accent-border);
+    outline: var(--scroll-fade-focus-outline, 2px solid var(--focus-accent-border));
     outline-offset: -2px;
+}
+
+.document-reader-body:is([data-scroll-above], [data-scroll-below]) {
+    --scroll-fade-focus-mask: var(--scroll-fade-y-image);
 }
 
 .document-reader-notice {
@@ -11317,6 +11323,11 @@ html[data-layout="stack"] .project-panel {
 
     .document-reader-notice { padding-inline: var(--space-3); }
 
+    .document-reader-body-frame,
+    .document-reader.is-image-scene .document-reader-body-frame {
+        border-radius: 0;
+    }
+
     .document-reader-body {
         padding: var(--space-4) var(--space-3) calc(var(--space-5) + var(--inset-bottom));
     }
@@ -11435,7 +11446,7 @@ html[data-layout="stack"] .project-panel {
 }
 
 .message-share-part:hover { background: var(--menu-item-hover); }
-.message-share-part[aria-checked="true"] { background: var(--accent-12); }
+.message-share-part:is([aria-checked="true"], :has(> button[aria-checked="true"])) { background: var(--accent-12); }
 .message-share-part:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
 
 @media (pointer: coarse) {
@@ -11471,10 +11482,16 @@ html[data-layout="stack"] .project-panel {
 .message-share-words .is-link { color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; }
 
 .message-share-part:is(.is-code, .is-diagram, .is-chart, .is-table) .message-share-words {
-    padding: var(--space-2) var(--space-3);
-    overflow-x: auto;
+    overflow: hidden;
     border-radius: var(--radius-inner);
     background: var(--code-bg);
+}
+.message-share-code {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    overflow-x: auto;
+    background: transparent;
+    color: inherit;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-body);
     white-space: pre;
@@ -11490,8 +11507,10 @@ html[data-layout="stack"] .project-panel {
 }
 
 .message-share-part.is-quoted .message-share-words {
-    padding-inline-start: var(--space-3);
     border-inline-start: 3px solid var(--field-border);
+}
+.message-share-part.is-quoted:not(.is-code, .is-diagram, .is-chart, .is-table) .message-share-words {
+    padding-inline-start: var(--space-3);
 }
 
 .message-share-words hr {
@@ -11500,15 +11519,34 @@ html[data-layout="stack"] .project-panel {
     border-top: 1px solid var(--divider);
 }
 
+/* One checkbox look for every part of the list — the app's own checkbox square (.md-checkbox's recipe: 18px,
+   the field's border, the inner radius, the tray fill), whether the control is a verbatim excerpt's own button
+   or a plain row's aria-hidden mirror. A mixed list keeps one affordance language: the empty box always, the
+   mark only when the part is chosen; the row keeps its hover and its chosen wash (the faint crimson one). */
 .message-share-check {
     grid-column: 3;
     display: inline-flex;
-    padding-top: 0.2em;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 18px;
+    height: 18px;
+    min-width: 18px;
+    margin-top: 1px;
+    padding: 0;
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     color: var(--tone-crimson-word);
-    opacity: 0;
 }
-
-.message-share-part[aria-checked="true"] .message-share-check { opacity: 1; }
+/* The chosen state lives on the plain row or the verbatim button, wherever the words put it (message_share.js). */
+.message-share-part[aria-checked="true"] > .message-share-check > svg,
+button.message-share-check[aria-checked="true"] > svg { opacity: 1; }
+.message-share-part[aria-checked="false"] > .message-share-check > svg,
+button.message-share-check[aria-checked="false"] > svg { opacity: 0; }
+button.message-share-check { cursor: pointer; }
+/* The bare checkbox takes the same focus ring as the rows around it (ui.css "One control, three tones"). */
+button.message-share-check:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
 .message-share-foot {
     display: flex;
@@ -12109,7 +12147,7 @@ html[data-layout="stack"] .project-panel {
     inline-size: 2px;
     background: var(--quote-ink);
 }
-.chat-quote-main {
+:is(.chat-quote-main, .chat-quote-excerpt-body) {
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -12138,7 +12176,8 @@ html[data-layout="stack"] .project-panel {
 }
 ::highlight(reply-excerpt) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
 .chat-quote[data-excerpt] { display: flex; align-items: center; gap: var(--space-2); padding-inline-end: var(--space-2); }
-.chat-quote[data-excerpt] .chat-quote-main { flex: 1; }
+.chat-quote-excerpt-body { flex: 1; }
+.chat-quote-excerpt-body .chat-quote-main { padding: 0; }
 .chat-quote[data-excerpt] .chat-quote-head { flex-wrap: wrap; row-gap: 0; }
 .chat-quote[data-excerpt] .chat-quote-text { display: block; white-space: pre; }
 .chat-quote[data-excerpt] .chat-quote-text[data-expanded="1"] {
@@ -12147,15 +12186,15 @@ html[data-layout="stack"] .project-panel {
     max-block-size: 32vh;
     overflow-y: auto;
 }
-.chat-quote-main:hover { background: var(--menu-item-hover); }
+.chat-quote-main:hover, .chat-quote-excerpt-body:hover { background: var(--menu-item-hover); }
 /* A quoted photo leads the panel with its thumbnail (the head and the line stand to its right). */
-.chat-quote-main.has-thumb {
+:is(.chat-quote-main, .chat-quote-excerpt-body).has-thumb {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     column-gap: var(--space-2);
     align-items: center;
 }
-.chat-quote-main.has-thumb > .chat-quote-thumb { grid-row: 1 / span 2; }
+:is(.chat-quote-main, .chat-quote-excerpt-body).has-thumb > .chat-quote-thumb { grid-row: 1 / span 2; }
 .chat-quote-thumb {
     display: block;
     width: var(--chat-attach-thumb-size);
@@ -12457,7 +12496,7 @@ html[data-layout="stack"] .project-panel {
     overflow: hidden;
     pointer-events: none;
 }
-.chat-quote--composer .chat-quote-main { flex: 1 1 auto; width: auto; padding-block: var(--space-2); padding-inline-start: var(--space-5); }
+.chat-quote--composer > :is(.chat-quote-main, .chat-quote-excerpt-body) { flex: 1 1 auto; width: auto; padding-block: var(--space-2); padding-inline-start: var(--space-5); }
 /* In the rounded strip the author bar stands inside the curve, straight from end to end (the bubble quote's
    bar meets square-ish corners; here the pill would bend it into a crescent). */
 .chat-quote--composer::before {
@@ -12525,7 +12564,7 @@ html[data-layout="stack"] .project-panel {
 :root[data-theme="light"] .files-preview-frame { background: var(--bg-secondary); }
 :root[data-theme="light"] .skill-review-summary-main { color: var(--system-text); }
 :root[data-theme="light"] .skill-review-summary-side { color: var(--text-meta); }
-:root[data-theme="light"] .chat-bubble .message pre { background: var(--code-bg); }
+:root[data-theme="light"] .chat-bubble .message pre:where(:not(.md-code-block > pre)) { background: var(--code-bg); }
 :root[data-theme="light"] .md-code-block .hljs-comment,
 :root[data-theme="light"] .md-code-block .hljs-quote { color: var(--text-meta); }
 :root[data-theme="light"] .md-code-block .hljs-keyword,

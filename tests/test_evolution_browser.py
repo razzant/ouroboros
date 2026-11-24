@@ -317,24 +317,57 @@ def test_detail_controls_keep_keyboard_focus_across_repaints(subscription_ui):
         "the pressed control keeps keyboard focus after the detail repaints"
     page.keyboard.press("Enter")  # and a second press keeps stepping without reaching for the mouse
     page.locator(".evo-detail-body").wait_for()
+    assert page.locator(".evo-detail-body").get_attribute("data-fold-clipped") == ""
     more = page.locator("[data-full]")
     more.focus()
     page.keyboard.press("Enter")
     page.wait_for_function("() => document.querySelector('[data-full]')?.textContent === 'Show less'")
     assert page.evaluate("() => document.activeElement?.hasAttribute('data-full')"), "Show more keeps focus as Show less"
+    assert page.locator(".evo-detail-body").get_attribute("data-fold-clipped") is None
 
 
 def test_show_more_appears_when_a_narrower_window_starts_clipping_the_body(subscription_ui):
+    expected_body = ("Memory keeps an open conversation verbatim and turns a closed matter into an "
+                     "authored page whose quotations are checked.")
     short = history()
-    short["versions"][-1]["release"]["body"] = ("Memory keeps an open conversation verbatim and turns a closed matter into an "
-                                                "authored page whose quotations are checked.")
+    short["versions"][-1]["release"]["body"] = expected_body
     page = open_evolution(subscription_ui, short, width=1100)
     body = page.locator(".evo-detail-body")
     body.wait_for()
     assert page.locator("[data-full]").is_hidden(), "two lines fit: nothing to show more of"
+    assert body.get_attribute("data-fold-clipped") is None
     page.set_viewport_size({"width": 390, "height": 844})
     page.wait_for_function("() => { const b = document.querySelector('.evo-detail-body'); return b.scrollHeight > b.clientHeight + 1; }")
     page.locator("[data-full]").wait_for(state="visible", timeout=5000)
+    assert body.get_attribute("data-fold-clipped") == ""
+    folded = page.evaluate("""() => {
+        const b = document.querySelector('.evo-detail-body');
+        const cs = getComputedStyle(b);
+        return {
+            mask: cs.maskImage !== 'none' ? cs.maskImage : cs.webkitMaskImage,
+            clamp: cs.webkitLineClamp || cs.lineClamp || '',
+            height: b.clientHeight,
+            twoLines: parseFloat(cs.lineHeight) * 2,
+        };
+    }""")
+    assert "linear-gradient" in folded["mask"], folded
+    assert folded["clamp"] in ("none", ""), folded
+    assert abs(folded["height"] - folded["twoLines"]) <= 1.5, folded
+    page.locator(".evo-detail").scroll_into_view_if_needed()
+    setup_browser.capture(page, "evolution-detail-narrow-folded")
+    page.locator("[data-full]").click()
+    page.wait_for_function("() => document.querySelector('[data-full]')?.textContent === 'Show less'")
+    assert body.get_attribute("data-fold-clipped") is None
+    assert page.evaluate("() => { const cs = getComputedStyle(document.querySelector('.evo-detail-body')); return cs.maskImage !== 'none' ? cs.maskImage : cs.webkitMaskImage; }") == "none"
+    assert body.inner_text() == expected_body
+    assert body.evaluate("b => b.scrollHeight <= b.clientHeight + 1")
+    page.locator(".evo-detail").scroll_into_view_if_needed()
+    setup_browser.capture(page, "evolution-detail-narrow-expanded")
+    page.locator("[data-full]").click()
+    page.wait_for_function("() => document.querySelector('.evo-detail-body')?.hasAttribute('data-fold-clipped')")
+    page.set_viewport_size({"width": 1100, "height": 844})
+    page.wait_for_function("() => { const b = document.querySelector('.evo-detail-body'); return b && b.scrollHeight <= b.clientHeight + 1 && !b.hasAttribute('data-fold-clipped'); }")
+    assert page.locator("[data-full]").is_hidden()
 
 
 def test_milestone_labels_follow_the_room_and_never_drop_a_version(subscription_ui):

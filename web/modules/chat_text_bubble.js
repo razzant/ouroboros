@@ -120,7 +120,7 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
             : role === 'assistant' && projectId !== ownProjectId) decorateProjectRow(bubble, { ...meta, ...opts, role,
             fold: projectRow && role === 'assistant', addedAt: ts });
         syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
-        wireSkillReviewDisclosure(bubble, { onDomWrite });
+        if (skillReview) wireSkillReviewDisclosure(bubble, { onDomWrite, own: dispose => chatMedia.own(dispose, bubble) });
         stampNodeTimestamp(bubble, ts);
         return { bubble, rich: richMarkdown };
     };

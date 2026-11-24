@@ -108,7 +108,8 @@ test('the mounted list holds its order while open, settles ended work and only n
         const anchor = header.children.find((child) => child.classList.contains('rw-shade-anchor'));
         const surface = anchor.children.find((child) => child.classList.contains('rw-surface'));
         assert.ok(surface.classList.contains('rw-shade'));
-        assert.ok(surface.classList.contains('scroll-fade-y'));
+        assert.equal(surface.classList.contains('scroll-fade-y'), false);
+        assert.ok(surface.querySelector('.rw-shade-body').classList.contains('scroll-fade-y'));
         const list = surface.querySelector('.rw-list');
         const ids = () => list.children.map((row) => row.dataset.id);
         assert.ok(trigger.contains(badge), 'the real status badge is the control’s word');
@@ -725,7 +726,7 @@ test('a Project\'s list opens on its whole name, also with no work, and says whe
         works = [running('t-run')];
         work.update();
         assert.deepEqual(list.children.map((row) => row.dataset.id), ['t-run']);
-        assert.equal(surface.children[0], head);
+        assert.equal(surface.querySelector('.rw-shade-body').children[0], head);
         assert.equal(note.hidden, true, 'nothing to say while work is listed');
         work.close();
         assert.equal(work.isOpen(), false);

@@ -457,10 +457,9 @@ def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
 
 
 def test_every_mask_keeps_its_webkit_companion() -> None:
-    """A fade is a mask (`.scroll-fade-y`, the sideways table fade): each rule that
-    sets `mask-image` also sets `-webkit-mask-image`, as the file's first fade does,
-    so a WebKit view that reads only the prefixed property still fades and unfades."""
-    css = _decommented(_read("web/style.css"))
-    unpaired = [selector.strip() for selector, body in RULE.findall(css)
-                if re.search(r"(?<![-\w])mask-image\s*:", body) and "-webkit-mask-image" not in body]
-    assert not unpaired, f"mask-image without its -webkit- companion: {unpaired}"
+    """Mask and composition keep their prefixed declarations for older WebKit views."""
+    for path in ("web/ui.css", "web/style.css"):
+        for selector, body in RULE.findall(_decommented(_read(path))):
+            for prop in ("mask-image", "mask-composite"):
+                if re.search(rf"(?<![-\w]){prop}\s*:", body):
+                    assert f"-webkit-{prop}" in body, (path, selector.strip(), prop)

@@ -1204,6 +1204,7 @@ export function createChatMedia({
         reset,
         release,
         closeTransient,
+        own,
         holdTransient,
         destroy,
     };

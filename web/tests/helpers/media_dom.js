@@ -44,7 +44,7 @@ export class NodeStub {
         this._text = String(value ?? '');
         this._html = this._text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
-    get textContent() { return this._text || ''; }
+    get textContent() { return (this._text || '') + this.children.map((child) => child.textContent).join(''); }
     set innerHTML(html) {
         this._html = String(html || '');
         this.children = [];

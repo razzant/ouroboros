@@ -6,6 +6,7 @@ import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
 import { tr } from './i18n.js';
+import { replaceScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
 
 const nodePosition = node => node?.dataset?.historySource
     ? { source: node.dataset.historySource, offset: Number(node.dataset.historyOffset) } : null;
@@ -256,6 +257,18 @@ export function keepSelection(doc) {
     return { active, caret, selection, ranges };
 }
 
+const intactRange = ([start, , end]) => start.isConnected && end.isConnected;
+function restoreSelection(doc, scope, { active, caret, selection, ranges }) {
+    if (active && scope.contains?.(active) && doc.activeElement !== active) restoreFocusWithoutReveal(active);
+    if (caret) restoreTextControlCaret(active, caret);
+    if (!ranges.length) return;
+    selection.removeAllRanges();
+    for (const [start, from, end, to] of ranges) {
+        const range = doc.createRange();
+        range.setStart(start, from); range.setEnd(end, to); selection.addRange(range);
+    }
+}
+
 export function insertTimelineNode(messages, node, typing = null, kept = null) {
     const rawNodeTs = node?.dataset?.ts;
     const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
@@ -282,15 +295,7 @@ export function insertTimelineNode(messages, node, typing = null, kept = null) {
     const { active, caret, selection, ranges } = node.isConnected ? kept || keepSelection(doc) : { ranges: [] };
     if (target) messages.insertBefore(node, target);
     else messages.appendChild(node);
-    if (active && node.contains?.(active) && doc.activeElement !== active) active.focus({ preventScroll: true });
-    if (caret) restoreTextControlCaret(active, caret);
-    if (ranges.length && ranges.every(([start, , end]) => start.isConnected && end.isConnected)) {
-        selection.removeAllRanges();
-        for (const [start, startOffset, end, endOffset] of ranges) {
-            const range = doc.createRange();
-            range.setStart(start, startOffset); range.setEnd(end, endOffset); selection.addRange(range);
-        }
-    }
+    restoreSelection(doc, node, { active, caret, selection, ranges: ranges.every(intactRange) ? ranges : [] });
     return { before };
 }
 
@@ -381,8 +386,10 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (current.nodeType !== 1) {
             current.nodeValue = next.nodeValue;
         } else {
+            const keptOutput = current.matches?.('.chat-live-line-body-full') && next.matches?.('.chat-live-line-body-full');
             for (const attr of Array.from(current.attributes)) {
-                if (!next.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+                if (!next.hasAttribute(attr.name) && !attr.name.startsWith('data-scroll-')
+                    && !(keptOutput && ['tabindex', 'role', 'aria-label'].includes(attr.name))) current.removeAttribute(attr.name);
             }
             for (const attr of Array.from(next.attributes)) {
                 if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
@@ -430,10 +437,9 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 if (!next) return;
                 const current = byKey.get(String(item.lineKey || ''));
                 const node = current || remember(next);
-                if (current) {
-                    byKey.delete(String(item.lineKey || ''));
-                    changed = patchNode(current, next) || changed;
-                }
+                const before = innerBox(current);
+                if (current) byKey.delete(String(item.lineKey || ''));
+                if (!current || patchNode(current, next)) { updateInnerFade(before, node); changed = true; }
                 if (el.children[index] !== node) {
                     moved = moved || node.parentNode === el;
                     el.insertBefore(node, el.children[index] || null);
@@ -441,23 +447,11 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
                 }
             });
             for (const node of byKey.values()) {
+                replaceScrollFade(innerBox(node));
                 node.remove();
                 changed = true;
             }
-            if (moved) {
-                if (el.contains(active) && el.ownerDocument.activeElement !== active) active.focus({ preventScroll: true });
-                if (caret) restoreTextControlCaret(active, caret);
-                const intact = ranges.filter(([start, , end]) => start.isConnected && end.isConnected);
-                if (intact.length) {
-                    selection.removeAllRanges();
-                    for (const [start, startOffset, end, endOffset] of intact) {
-                        const range = el.ownerDocument.createRange();
-                        range.setStart(start, startOffset);
-                        range.setEnd(end, endOffset);
-                        selection.addRange(range);
-                    }
-                }
-            }
+            if (moved) restoreSelection(el.ownerDocument, el, { active, caret, selection, ranges: ranges.filter(intactRange) });
             // Only a new newest line keeps a pinned timeline at its end; a disclosure
             // or late full output keeps the line being read where it is. The scroll is
             // written once the batch's writes are done, with every other card's (layout_batch.js).
@@ -479,6 +473,7 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         const node = nodeFor(item, record);
         if (!node) return false;
         record.timelineEl.appendChild(remember(node));
+        updateInnerFade(null, node);
         if (record.root.dataset.expanded === '1' && pinned) {
             record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
         }
@@ -488,7 +483,9 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (defer(record)) return false;
         if (record._timelineDirty || !current) return render(record);
         const node = nodeFor(item, record);
+        const before = innerBox(current);
         if (!node || !patchNode(current, node)) return false;
+        updateInnerFade(before, current);
         return Boolean(record.timelineEl.isConnected);
     };
     // A room away draws nothing (room_retire.js): a timeline that a late read changed meanwhile is owed, and drawn once
@@ -497,6 +494,10 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
     return {
         renderLiveCardTimeline: render,
         oweTimeline: (record) => { owedAway.add(record); },
+        releaseTimeline(record) {
+            owedAway.delete(record);
+            for (const line of record.timelineEl.children) replaceScrollFade(innerBox(line));
+        },
         drawOwedTimelines: () => { const owed = [...owedAway]; owedAway.clear(); owed.forEach((record) => render(record)); },
         appendTimelineItem: append,
         patchLastTimelineItem: (item, record) => replace(
@@ -510,14 +511,12 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
     };
 }
 
-// A live card's header chrome: a saved role inside its owner card.
 const CARD_HEADER = [
     '[data-live-summary-button]', '[data-live-title]', '[data-live-activity]',
     '[data-live-meta]', '.chat-live-actions', '.chat-live-project-card-btn',
 ];
 
-// The feed's bounded, separately scrolling boxes: a card timeline, a fetched
-// full output, a Reviews group's Record facts. Each clips what it holds.
+// Each separately scrolling box clips only its own content.
 const BOUNDED_BOX = '[data-live-timeline], .chat-live-line-body-full, [data-review-attempt-detail]';
 const TRANSIENT_NOTE = '.msg-routing-annotation, .msg-routing-actions, .msg-pending, [data-ingress-unconfirmed]';
 
@@ -531,23 +530,23 @@ export function revealTimelineNode(node, feed, clearance) {
     feed.scrollTop += node.getBoundingClientRect().top - feed.getBoundingClientRect().top - clearance;
 }
 
-// A node's own bounded reading box: an expanded line's fetched full output or
-// a Reviews group's Record facts. The owner card timeline is found from the node.
 function innerBox(node) {
     if (node?.matches?.('[data-review-attempt-detail]')) return node;
     return node?.matches?.('.chat-live-line') ? node.querySelector?.(':scope > .chat-live-line-body-full') || null : null;
 }
 
+function updateInnerFade(previous, line) {
+    const next = innerBox(line);
+    replaceScrollFade(previous, next, next?.matches?.('.chat-live-line-body-full')
+        ? { region: tr('chat.live.full_output_region', 'Full task output') } : undefined);
+}
+
 /**
- * Timeline viewport anchors (extracted verbatim from chat.js at the byte ratchet): capture the first timestamped
- * node in the read band (`band()`, project_read_state.js readBand) and restore its exact offset after a mutation.
- * Pure over the passed feed element.
+ * Capture the first timestamped node in the read band and restore its exact offset after a mutation.
  */
 export function createTimelineAnchors({ messagesDiv, liveCardRecords, band = () => null }) {
     function captureVisibleTimelineAnchor(excludeNode = null, { inPlace = true } = {}) {
-        // The Load-older control is excluded like .typing-bubble [GPT#13]:
-        // anchoring must land on the first visible TIMESTAMPED node, or a
-        // Load-older restore would pin the button itself and drift the view.
+        // Anchor a timestamped message, not Load older or a typing bubble.
         const nodes = Array.from(messagesDiv.children).filter(
             (node) => node !== excludeNode && !excludeNode?.contains?.(node)
                 && !node.classList.contains('typing-bubble') && !node.classList.contains('chat-load-older'),

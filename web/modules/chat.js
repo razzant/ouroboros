@@ -1,6 +1,6 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
 import { tr } from './i18n.js';
-import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
+import { bindCompactMarkdown, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
@@ -365,6 +365,8 @@ export function createChatInstance({
         if (!preserveWaits) modelWaits.forget(id);
         const record = liveCardRecords.get(id);
         record?.timelineDispose?.();
+        if (record) releaseTimeline(record);
+        record?.reviewController?.destroy();
         record?.regions?.forEach((dispose) => dispose());
         record?.episodeDisclosureDispose?.();
         if (record) disposeCardModel(record);
@@ -660,7 +662,7 @@ export function createChatInstance({
         appendTimelineItem,
         patchLastTimelineItem,
         patchTimelineItemAt,
-        oweTimeline, drawOwedTimelines,
+        oweTimeline, drawOwedTimelines, releaseTimeline,
     } = createLiveCardTimelineRenderer({
         withStableViewport, buildTimelineItemHtml, isReplayActive: () => _historyReplayActive,
     });
@@ -1151,11 +1153,11 @@ export function createChatInstance({
                         <span class="chat-live-hurry" data-live-hurry role="img" hidden></span>
                         <span class="chat-live-when" data-live-when hidden></span>
                     </div>
-                    <span class="chat-live-title" data-live-title>Waiting for work</span>
+                    <span class="chat-live-title" data-live-title></span>
                     <div class="chat-live-doors">
                     <button type="button" class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden>${CHEVRON}</button>
                     <button type="button" class="chat-live-summary-side ui-hit-area" data-live-disclosure aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
-                        <span class="chat-live-count" data-live-count hidden></span>
+                        <span class="chat-live-count" data-live-count hidden>0 notes</span>
                         <span class="chat-live-toggle" data-live-toggle>Details</span>
                         ${CHEVRON}
                     </button></div>
@@ -1200,7 +1202,16 @@ export function createChatInstance({
             timelineEl: part('timeline'),
             detailsEl: root.querySelector('.chat-live-details'),
             reviewsHostEl: part('reviews-host'),
+            updates: 0,
+            wakeSummary: '',
+            finished: false,
+            items: [],
+            lastHumanHeadline: '',
+            lastHumanHeadlineSource: null,
             expandedLineKeys: new Set(),
+            _anchorOrderDirty: false,
+            _timelineDirty: false,
+            _lastFrameMeta: [],
             isSubagent: Boolean(options.isSubagent),
             parentGroupId: String(options.parentGroupId || ''),
             subagentRole: String(options.role || ''),
@@ -1252,8 +1263,11 @@ export function createChatInstance({
         if (_pendingName && !record.isSubagent) {
             pendingSuggestedNames.delete(normalizedGroupId);
             record.suggestedName = _pendingName;
+            record.titleEl.textContent = _pendingName;
         }
-        resetLiveCardRecord(record);
+        clearStickyCardState(record);
+        setLiveCardPhase(record, 'working');
+        syncLiveCardToggle(record);  // a card born expanded says so from its first paint
         // A card the last complete body does not name asks for a read.
         if (!_historyReplayActive && workState.complete && !workState.members.has(normalizedGroupId)) reread();
         applyCardWorkViews([record], workState);
@@ -1383,37 +1397,6 @@ export function createChatInstance({
         return record;
     }
 
-    function resetLiveCardRecord(record) {
-        record.updates = 0;
-        record.wakeSummary = '';
-        record.finished = false;
-        record.items = [];
-        record.lastHumanHeadline = '';
-        record.lastHumanHeadlineSource = null;
-        record.expandedLineKeys.clear();
-        record._anchorOrderDirty = false;
-        // collapsed timelines defer DOM building; the flag says
-        // the rendered timeline DOM is stale relative to record.items.
-        record._timelineDirty = false;
-        // Render metadata once per card in a batch.
-        record._lastFrameMeta = [];
-        // P1: last bounded activity projection (remembered even while
-        // the collapsed line is suppressed on unnamed root cards) + sticky cost.
-        clearStickyCardState(record);
-        record.titleEl.textContent = record.suggestedName || '';
-        setLiveCardPhase(record, 'working');
-        record.countEl.hidden = true;
-        record.countEl.textContent = '0 notes';
-        record.metaEl.innerHTML = '';
-        record.timelineEl.innerHTML = '';
-        record.root.dataset.finished = '0';
-        const expanded = explicitCardExpansion.has(record.groupId)
-            ? explicitCardExpansion.get(record.groupId)
-            : Boolean(record.isSubagent && nestedSubagentsExpanded);
-        setLiveCardExpanded(record, expanded);
-        syncLiveCardToggle(record);  // a card born expanded says so from its first paint
-    }
-
     function ensureLiveCardVisible(
         record,
         { suppressDomInsert = false, reorderExisting = false } = {},
@@ -1521,7 +1504,7 @@ export function createChatInstance({
             }
         } finally {
             item._fetchingFull = false;
-            if (changed && !destroyed && record.expandedLineKeys.has(item.lineKey)) {
+            if (changed && !destroyed && liveCardRecords.get(record.groupId) === record && record.expandedLineKeys.has(item.lineKey)) {
                 (leaving ? oweTimeline : renderLiveCardTimeline)(record);
             }
             reading.position();
@@ -2782,6 +2765,7 @@ export function createChatInstance({
     // One retirement path per message node: media, decision views and markdown go with it.
     function releaseMessageNode(node) {
         sharedRead.release(node);
+        replies.release(node);
         chatMedia.release(node); chatDecision.releaseViews(node); destroyChatMarkdown(node); node.remove();
     }
 
@@ -2968,8 +2952,8 @@ export function createChatInstance({
         if (direction < 0 && document.activeElement === input && document.body.classList.contains('keyboard-open')) input.blur();
         navigateHistoryAtEdge(direction);
     });
-    // Compact tables share rich-answer keyboard/overflow affordances; destroy releases them.
-    bindMarkdownTables(messagesDiv);
+    // One compact Markdown binding, released with the column.
+    bindCompactMarkdown(messagesDiv);
     function retryHistoricalUpserts() {
         if (destroyed || leaving) return;
         const ready = [...pendingHistoryUpserts.values()].filter(row =>

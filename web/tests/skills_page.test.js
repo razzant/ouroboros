@@ -8,6 +8,7 @@ import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { opensDetail, publicationDisclosure } from '../modules/skill_presentation.js';
 import { browseCardState } from '../modules/skill_browse.js';
 import { installedSkillModel, installedSkillRowKey, renderInstalledSkillCard } from '../modules/skill_card_renderer.js';
+import { ResizeObserverStub } from './helpers/resize_observer.js';
 import { settle, Stub, world } from './helpers/settings_dom.js';
 
 import {
@@ -736,12 +737,11 @@ test('the tab shown again and the socket reopened are each read once, for the li
     }
 });
 
-// Browse through the real page: the place's shared reads answered by the test, the board's layout inert (its
-// observers and inline styles are absent from this fixture and nothing here measures).
+// Browse through the real page: the test answers the place's shared reads. Observers don't deliver layout events.
 function browsePage(t) {
     const page = world(t);
-    class Observer { observe() {} disconnect() {} }
-    const absent = Object.entries({ ResizeObserver: Observer, MutationObserver: Observer, CSS: { escape: String } })
+    class MutationObserverStub { observe() {} disconnect() {} }
+    const absent = Object.entries({ ResizeObserver: ResizeObserverStub, MutationObserver: MutationObserverStub, CSS: { escape: String } })
         .filter(([name]) => globalThis[name] === undefined);
     for (const [name, value] of absent) globalThis[name] = value;
     const inert = { removeProperty() {}, setProperty() {}, getPropertyValue: () => '' };

@@ -162,13 +162,14 @@ test('the voice door is in the row menu only; its menu names each voice On this 
         const door = registry.actionsFor(row('a'))[1];
         door.run(row('a'), { anchor: bubble });
         const menu = doc.body.querySelector('.voice-menu');
-        const items = menu.children.map((item) => [item.children.map((part) => part.textContent), item.getAttribute('aria-checked')]);
-        assert.deepEqual(items, [
-            [['Automatic', 'A voice on this device'], 'true'],
-            [['Milena', 'On this device · ru-RU'], 'false'],
-            [['Google русский', 'Online voice · ru-RU'], 'false'],
+        const items = menu.querySelectorAll('[role^="menuitem"]');
+        assert.deepEqual(items.map((item) => [item.getAttribute('role'), item.children.map((part) => part.textContent),
+            item.getAttribute('aria-checked')]), [
+            ['menuitemradio', ['Automatic', 'A voice on this device'], 'true'],
+            ['menuitemradio', ['Milena', 'On this device · ru-RU'], 'false'],
+            ['menuitemradio', ['Google русский', 'Online voice · ru-RU'], 'false'],
         ], 'never local unless the browser says so');
-        menu.children[2].click();
+        items.find((item) => item.querySelector('.voice-menu-name')?.textContent === 'Google русский').click();
         await Promise.resolve();
         assert.deepEqual(speech.chosenVoices, ['v-net']);
         bound.destroy();

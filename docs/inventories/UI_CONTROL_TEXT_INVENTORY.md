@@ -5,15 +5,13 @@ it: `docs/DESIGN.md` "References and actions". Rows are sorted by text so that t
 the same thing sit together: when your diff adds a row, read its neighbours.
 
 360 controls with fixed text in 326 rows, 216 distinct texts;
-240 more controls build their text at run time and are not listed.
+239 more controls build their text at run time and are not listed.
 
 ## Fixed control text
 
 | text | classes | file | n |
 |---|---|---|---|
 | + | `btn btn-default` | modules/document_reader.js | 1 |
-| Add the suggested kinds | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
-| Keep my current choice | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | × | `attach-remove` | modules/chat_attachments.js | 1 |
 | ••• | `btn btn-float btn-sm` | modules/chat_media.js | 1 |
 | ↑ | `btn btn-default` | modules/model_roles.js | 1 |
@@ -42,6 +40,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Add server | `btn btn-default btn-sm` | modules/mcp_settings.js | 1 |
 | Add source | `btn` | modules/skill_dialogs.js | 1 |
 | Add subagent | `btn btn-default` | modules/subagents_settings.js | 1 |
+| Add the suggested kinds | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | Advanced: sign in from your own terminal | `(no class)` | modules/harness_login_cards.js | 1 |
 | Answer | `(no class)` | modules/delegated_activity.js | 1 |
 | API spending limits Optional with subscriptions | `(no class)` | modules/onboarding_wizard.js | 1 |
@@ -162,6 +161,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Import JSON… | `btn btn-default btn-sm` | modules/settings_language.js | 2 |
 | Install the local runtime | `btn btn-default` | modules/settings_local_model.js | 1 |
 | Keep it | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
+| Keep my current choice | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | Keep on Widgets | `btn btn-default btn-sm chat-card-action` | modules/chat_cards.js | 1 |
 | Keep one per model | `btn btn-default` | modules/agents_list_view.js | 1 |
 | Largest parts | `(no class)` | modules/storage_format.js | 1 |
@@ -347,7 +347,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 |---|---|
 | `ouro:dashboard-subtab-hidden` | modules/dashboard.js |
 | `ouro:dashboard-subtab-shown` | modules/dashboard.js ×3 |
-| `ouro:extension-settings-mounted` | modules/settings_extension_forms.js ×2 |
+| `ouro:extension-settings-mounted` | modules/settings_extension_forms.js |
 | `ouro:extension-settings-unmounted` | modules/settings_extension_forms.js |
 | `ouro:language-changed` | modules/i18n.js |
 | `ouro:layout-changed` | theme.js |

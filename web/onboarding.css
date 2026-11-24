@@ -616,11 +616,11 @@ textarea::placeholder {
   line-height: var(--line-meta);
 }
 
-.wizard-error:empty {
+.wizard-error[data-empty] {
   position: absolute;
 }
 
-.wizard-error:not(:empty) + .footer-copy {
+.wizard-error:not([data-empty]) + .footer-copy {
   display: none;
 }
 

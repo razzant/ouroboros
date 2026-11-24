@@ -56,7 +56,7 @@ export function skillsViewsTemplate() {
     return `
             <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
-                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
+                <div class="skills-filter-strip scroll-fade-x" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">

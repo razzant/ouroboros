@@ -23,6 +23,7 @@ import { skillTitle } from './skill_presentation.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus } from './ui_helpers.js';
 import { errorWords, setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { createWidgetScrollFades, renderWidgetJson } from './widget_render.js';
 
 const pendingExtensionSettings = new Set();
 
@@ -61,14 +62,18 @@ export function isStatusForm(component = {}) {
 const submitLabel = (spec, check) => spec.submit_label || spec.label || (check ? 'Check status' : 'Save');
 
 export async function renderExtensionSettingsSections(root, sections, {
-    isCurrent = () => true, edits = new Map(), nextEdit = () => Symbol(),
+    isCurrent = () => true, edits = new Map(), nextEdit = () => Symbol(), scrollFades,
 } = {}) {
     const host = root.querySelector('#extension-settings-sections');
     if (!host) return;
+    const painted = () => {
+        scrollFades?.sync();
+        globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted', { detail: { root: host } }));
+    };
     const items = Array.isArray(sections) ? sections : [];
     if (!items.length) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
-        globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted', { detail: { root: host } }));
+        painted();
         return;
     }
     const hydrated = new Map();
@@ -92,7 +97,7 @@ export async function renderExtensionSettingsSections(root, sections, {
             return `<div class="settings-section-copy">${escapeHtml(component.text || '')}</div>`;
         }
         if (type === 'json') {
-            return `<details class="widget-json"><summary>${escapeHtml(component.label || 'JSON')}</summary><pre>${escapeHtml(JSON.stringify(component.value || component.data || {}, null, 2))}</pre></details>`;
+            return renderWidgetJson(component.value || component.data || {}, component.label || 'JSON');
         }
         if (type === 'form' || type === 'action') {
             const fields = Array.isArray(component.fields) ? component.fields : [];
@@ -247,7 +252,7 @@ export async function renderExtensionSettingsSections(root, sections, {
     });
     // Already-granted page modules may enhance their own declared forms. The
     // schema, hydration, write route and Save outcome remain host-owned.
-    globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted', { detail: { root: host } }));
+    painted();
 }
 
 /* ---- The pages ----------------------------------------------------------------------------------------------- */
@@ -338,6 +343,7 @@ function mountSkillForm(container, { path, ctx }) {
     if (!skill) return mountSkillList(container, { path, ctx });
     const host = Object.assign(document.createElement('div'), { id: 'extension-settings-sections', className: 'settings-extension-sections' });
     container.replaceChildren(host);
+    const scrollFades = createWidgetScrollFades(host);
     let alive = true;
     let serial = 0;
     let filling = null;
@@ -355,7 +361,7 @@ function mountSkillForm(container, { path, ctx }) {
             return;
         }
         if (current()) await renderExtensionSettingsSections(container, FORMS.get(skill)?.sections || [], {
-            isCurrent: current, edits, nextEdit: () => ++serial,
+            isCurrent: current, edits, nextEdit: () => ++serial, scrollFades,
         });
     })().finally(() => { filling = null; }));
     const onShown = (event) => { if (event.detail?.path === path) void fill(); };
@@ -367,6 +373,7 @@ function mountSkillForm(container, { path, ctx }) {
             alive = false;
             window.removeEventListener('ouro:settings-page-shown', onShown);
             offLifecycle();
+            scrollFades.dispose();
             window.dispatchEvent(new CustomEvent('ouro:extension-settings-unmounted', { detail: { root: host } }));
             if (host.parentElement === container) host.remove();
         },

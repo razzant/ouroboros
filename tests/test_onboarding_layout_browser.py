@@ -556,16 +556,26 @@ def test_late_save_states_keep_their_actions_beside_a_wrapped_reason(wizard, siz
     assert page.locator("#next-btn").inner_text() == "Retry save"
     assert facts["reason"]["inView"] and "unknown" in facts["reasonText"]
     assert page.locator("#check-save-btn").bounding_box()["y"] + 1 >= facts["reason"]["y"]
+    reason = page.locator(".wizard-error")
+    assert reason.locator('[role="status"]').count() == 1
+    assert reason.get_attribute("tabindex") is None and reason.get_attribute("data-scroll-below") is None
 
     page.click("#next-btn")  # refused, with a long error: all of it readable above Back and Retry
     page.wait_for_function("() => document.querySelector('.wizard-error').textContent.includes('refused')")
     page.wait_for_function("() => Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--wizard-footer-height')) - document.querySelector('.wizard-footer').getBoundingClientRect().height) < 1")
     facts = _facts(page)
-    page.screenshot(path=str(evidence / f"{size[0]}-refused.png"), animations="disabled")
     _assert_way_forward(facts)
     # However long it is, the reason scrolls in place: the actions and the step keep the window.
     assert facts["reason"]["inView"] and 16 < facts["reason"]["h"] <= size[1] * 0.4 + 1, facts["reason"]
     assert facts["footer"]["h"] < size[1] * 0.7, facts["footer"]
+    page.locator(".wizard-error[data-scroll-below]:not([data-scroll-above])").wait_for()
+    assert reason.get_attribute("tabindex") == "0"
+    assert reason.locator('[role="status"]').inner_text().startswith("This save was refused:")
+    assert "linear-gradient" in reason.evaluate("el => getComputedStyle(el).maskImage")
+    page.screenshot(path=str(evidence / f"{size[0]}-refused.png"), animations="disabled")
+    reason.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    page.locator(".wizard-error[data-scroll-above]:not([data-scroll-below])").wait_for()
+    _assert_way_forward(_facts(page))
 
     page.click("#next-btn")  # saved, and this tab cannot restart: no footer, no clearance left behind
     expect(page.locator(".step-title")).to_have_text("Setup saved — restart to apply it")

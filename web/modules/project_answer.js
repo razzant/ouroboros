@@ -13,6 +13,7 @@ import { createSystemMessageActions } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { reasonCodesNote, taskPresentation } from './log_events.js';
 import { projectReference } from './project_reference.js';
+import { syncFoldStops } from './scroll_fade.js';
 import { outcomeTone } from './task_phase_chip.js';
 import { terminalTimeNote } from './utils.js';
 
@@ -56,7 +57,9 @@ export function refreshProjectAnswerFold(bubble) {
         if (!seen) return;
         const { message, fold, folded } = seen;
         bubble.classList.toggle('is-folded', folded);
-        syncFold(bubble, message, folded);
+        // Folded answers offer no keyboard stops (pointer clicks still reach visible links); the Project
+        // reference leads to the complete answer. Shared stop owner preserves original/scroller tabindex.
+        syncFoldStops(message, folded);
         // Compensate only the actual extension: a 180px answer borrows 12px, not the full 48px tail.
         measure(() => (folded ? Math.max(0, parseFloat(getComputedStyle(message).height) - fold) : 0),
             (tail) => message.style.setProperty('--project-answer-compensation', `${-tail}px`));
@@ -67,19 +70,6 @@ function measureFold(bubble) {
     if (!message || !message.clientHeight) return null;
     const fold = foldHeight(message);
     return { message, fold, folded: message.scrollHeight > fold + 1 };
-}
-
-// Folded text offers no keyboard stops (pointer clicks still reach visible links): the Project
-// reference leads to the complete answer. The table enhancer respects the fold even
-// when it registers later; removing its tabindex lets it restore normal keyboard use.
-// Browsers also tab into overflow boxes without an explicit tabindex.
-const FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex], pre, .katex-display, .md-mermaid, .md-chart';
-function syncFold(bubble, message, collapsed) {
-    for (const node of message.querySelectorAll(collapsed ? FOCUSABLE : '[data-fold-stop], .md-table-wrap[tabindex="-1"]')) {
-        node.toggleAttribute('data-fold-stop', collapsed);
-        if (collapsed) node.setAttribute('tabindex', '-1');
-        else node.removeAttribute('tabindex');
-    }
 }
 
 // One set of window listeners for the app's lifetime, however many rows exist: a row holds
