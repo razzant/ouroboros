@@ -454,7 +454,7 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
 
     Reviewable effects are a successful repo commit; a successful write_file/
     edit_text/apply_patch/edit_batch to any non-scratch root; a successful
-    tool that registered a canonical artifact; or a native editor's typed changed-path receipt even on error.
+    tool that registered a canonical artifact; or typed file effects from an editor or integration even on error.
     Failed capture does not erase the write, nor does that write make the call successful. Pure scratch (root=task_drive)
     writes, ``completed_no_effect`` (e.g. same-byte writes), and custody decisions
     without a transfer (``target_files_changed=False``) do not count as file effects.
@@ -475,13 +475,13 @@ def reviewable_effect_projection(llm_trace: Dict[str, Any], *, observed_only: bo
             continue
         succeeded = not call.get("is_error") and str(call.get("status") or "ok") in _OK_TOOL_STATUSES
         tool = str(call.get("tool") or "")
+        integration = tool in _EFFECT_INTEGRATION_TOOLS and meta.get("target_files_changed") is not False
         partial = tool in _ROOT_WRITE_TOOLS and bool(meta.get("changed_paths") or meta.get("changed_paths_omitted"))
-        if not (succeeded or artifact or partial) or (meta.get("operation_outcome") == "completed_no_effect" and not artifact):
+        transferred = integration and meta.get("target_files_changed") is True
+        if not (succeeded or artifact or partial or transferred) or (meta.get("operation_outcome") == "completed_no_effect" and not artifact):
             continue  # the producer proved this call changed nothing (a same-byte write): an outcome, no effect
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        # An empty delegated capture can record custody without delivering any target files.
-        integration = tool in _EFFECT_INTEGRATION_TOOLS and meta.get("target_files_changed") is not False
-        is_effect = succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or integration)
+        is_effect = transferred or succeeded and (tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or integration)
         if (succeeded or partial) and tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
             is_effect = True
         if is_effect or artifact:

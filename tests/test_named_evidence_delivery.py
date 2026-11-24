@@ -24,9 +24,11 @@ from tests.test_delegate_retry_consumers import (
 
 
 
-def _captured(tmp_path, monkeypatch, *, named=True, split=False):
-    """A finished candidate run owned by retry-b whose capture and named evidence were retained."""
-    ctx = retry_context(tmp_path, monkeypatch, chain=("retry-a", "retry-b", "retry-c"), split=split)
+def _captured(tmp_path, monkeypatch, *, named=True, split=False, fixed_clock=False):
+    """A finished candidate run owned by retry-b whose capture and named evidence were retained.
+    ``fixed_clock`` keeps the synthetic queue as fresh as a live supervisor keeps the real one, across reads."""
+    ctx = retry_context(tmp_path, monkeypatch, chain=("retry-a", "retry-b", "retry-c"), split=split,
+                        fixed_ownership_clock=fixed_clock)
     held = durable_run(ctx, owner="retry-b", snapshot_id="capture-one", execution_root=str(tmp_path / "snapshot"))
     data = custody.custody_root(ctx)
     capture = custody.delegated_capture_dir(data, held.task_id, held.snapshot_id)
@@ -48,7 +50,7 @@ def _captured(tmp_path, monkeypatch, *, named=True, split=False):
 
 @pytest.mark.parametrize("split", [False, True])
 def test_a_retry_successor_is_shown_the_named_evidence_and_can_open_its_summary(tmp_path, monkeypatch, split):
-    ctx, held, _data, summary = _captured(tmp_path, monkeypatch, split=split)
+    ctx, held, _data, summary = _captured(tmp_path, monkeypatch, split=split, fixed_clock=True)
     bind_gateway(monkeypatch, TerminalGateway())
     waited = call(ctx, "delegate_wait", run_id=held.run_id)  # retry-c reads retry-b's run
     assert waited.status == "ok", waited.text
@@ -58,6 +60,30 @@ def test_a_retry_successor_is_shown_the_named_evidence_and_can_open_its_summary(
     assert named["summary_read"] == {"root": "artifact_store", "path": str(summary)}
     opened = call(ctx, "read_file", **named["summary_read"])
     assert opened.status == "ok" and '"status": "retained"' in opened.text, opened.text
+    # Every copy of the capture in this delivery addresses the same files the one way, and each opens.
+    delivered = json.loads(waited.text)
+    shown = [delivered["workspace_capture"], delivered["collection"]["workspace_capture"]]  # this wait collected
+    for block in shown:
+        assert block["named_evidence"]["summary_read"] == named["summary_read"]
+        assert block["patch_read"] == {"root": "artifact_store", "path": block["patch_artifact"]}
+        assert block["manifest_read"] == {"root": "artifact_store", "path": block["manifest_artifact"]}
+    for handle, text in ((shown[0]["patch_read"], "+new"), (shown[0]["manifest_read"], "ready_with_changes")):
+        opened = call(ctx, "read_file", **handle)
+        assert opened.status == "ok" and text in opened.text, opened.text
+    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
+
+    saved = retained_terminal_result(ctx, held.run_id, complete_only=False)  # the saved-result wait
+    assert saved is not None and saved["workspace_capture"]["named_evidence"]["summary_read"] == named["summary_read"]
+    assert {key: saved["workspace_capture"][key] for key in ("patch_read", "manifest_read")} == {
+        key: shown[0][key] for key in ("patch_read", "manifest_read")}
+
+
+def test_a_task_outside_the_run_s_custody_is_given_no_capture_address(tmp_path, monkeypatch):
+    ctx, held, _data, _summary = _captured(tmp_path, monkeypatch)
+    bind_gateway(monkeypatch, TerminalGateway())
+    ctx.task_id = "unrelated-task"
+    waited = call(ctx, "delegate_wait", run_id=held.run_id)
+    assert "workspace_capture" not in waited.text and "summary.json" not in waited.text, waited.text
 
 
 def test_the_owner_reads_its_saved_summary_through_its_own_handle_and_nothing_is_recaptured(tmp_path, monkeypatch):

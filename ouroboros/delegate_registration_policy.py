@@ -895,7 +895,7 @@ STARTED_OPTION_FIELDS = ("effort", "processing_preference", "row_effort", "row_p
 STARTED_PROGRESS_FLAGS: Tuple[str, ...] = (
     "ledger_recorded", "settled", "containment_disclosed", "unread_disclosed",
     "output_artifact", "output_complete", "output_sha", "output_consumed", "output_source",
-    "patch_captured", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
+    "patch_captured", "patch_manifest_sha", "patch_disposed", "patch_disposed_by", "patch_result_lost", "patch_apply_pending",
     "superseded_by")
 # The closing facts SETTLED wrote (and the fault CONTAINMENT_FAULT recorded): a later
 # STARTED row never carries them, so replacing wholesale would forget a run's cost,
