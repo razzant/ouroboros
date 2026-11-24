@@ -218,9 +218,12 @@ def capture_system_projection(core, governance, story, room, mode, addressed, re
     return system, {**facts, '_assembly_layout': report}
 
 
-def projection_fields(system, facts, selected=True):
-    """Keep the private observer off the projection and hash only a view chosen for use."""
+def projection_fields(system, facts):
+    """Keep the private observer off the projection; witness each rendered view, small and bound to its blocks.
+
+    A later rebind may select a mode without rendering it again (a cold restore keeping Low): its witness is the
+    one taken when that view's bytes were rendered, never a reread of the sources or a held renderer string."""
     memory_facts = dict(facts)
     report = memory_facts.pop('_assembly_layout', None)
-    witnesses = report(system, memory_facts.get('first_contact_preference')) if report is not None and selected else ()
+    witnesses = report(system, memory_facts.get('first_contact_preference')) if report is not None else ()
     return {'memory_facts': memory_facts, 'assembly_witnesses': witnesses or ()}

@@ -297,8 +297,7 @@ class ContextFitPlan:
                     facts = {**facts, "floor": {**facts["floor"], "no_memory_tokens": number}}
                 projection = replace(projection, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
                                      **projection_fields(system, facts | {key: projection.memory_facts[key]
-                                         for key in ("max_room", "first_contact_preference") if key in projection.memory_facts},
-                                         projection.mode == start),
+                                         for key in ("max_room", "first_contact_preference") if key in projection.memory_facts}),
                                      continuation_messages_json=tail_json,
                                      estimated_tokens=_request_tokens(system, projection.user_content_json or self.user_content_json,
                                          supplementary_messages_json=self.core.supplementary_messages_json,
@@ -1511,7 +1510,7 @@ def build_context_fit_plan(
             calibrated_tokens=int(estimated * ratio),
             calibration_ratio=ratio,
             user_content_json=user_projection,
-            **projection_fields(system_content, memory_facts, mode == (normal[1] if source is not None else initial_mode)),
+            **projection_fields(system_content, memory_facts),
             continuation_messages_json=tail_json,
         )
 

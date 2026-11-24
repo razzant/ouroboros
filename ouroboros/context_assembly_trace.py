@@ -149,8 +149,8 @@ def section_fact(part, addressed, receipts, books):
     receipt = receipts.get(kind, {})
     if receipt:
         fact['reason'] = 'mode_or_start_allowance' if receipt.get('start_room') else 'physical_window'
-        ref = receipt.get('source_ref', {})
-        path = ref.get('path')
+        ref = receipt.get('source_ref')  # None: an actor with no reader retained nothing, so no address is named
+        path = ref.get('path') if isinstance(ref, dict) else None
         if family != 'held_note' and isinstance(path, str) and re.fullmatch(r'source_handles/context_checkpoints/host-[a-zA-Z0-9_.-]+\.md', path):
             fact['retained_source'] = {'path': path, 'sha256': ref.get('sha256')}
     if book := books.get(family.removesuffix('_map')):
@@ -346,17 +346,25 @@ def bind_contribution_input(context, kwargs, canonical, slot=None):
     original = tail if canonical is rows else (
         tuple(canonical[-_CONTRIBUTION_ROWS:]) if canonical is not None and len(canonical) == len(rows) else ())
     observations = getattr(slot, '_context_contributions', {})
-    if observations:
-        live = {id(row) for row in (original or tail)}
-        for retired in observations.keys() - live:
-            del observations[retired]
-    notes = tuple(observations.get(id(row), (None, (), 0))[1:] for row in (original or tail))
+    noted, live = _noted_rows(slot, original or tail, observations)
+    for retired in observations.keys() - live:
+        del observations[retired]
+    notes = tuple(observations.get(id(row), (None, (), 0))[1:] for row in noted)
     tools = tuple(kwargs.get('tools') or ())
     schema_notes = getattr(slot, '_context_schema_origins', {})
     origins = tuple(schema_notes.get(id(schema), (None, None))[1] for schema in tools[:_CONTRIBUTION_ROWS])
     projected = getattr(slot, '_context_image_projections', {})
     image_forms = tuple(_image_forms(row, projected) for row in tail)
     return replace(context, contribution_input=(tail, tools, len(rows), notes, origins, image_forms))
+
+
+def _noted_rows(slot, bound, observations):
+    """Each bound row, or the original a pending trial's copy reads (``carry_contributions``), and the rows whose
+    notes stay: those read, and every original of a pending trial wherever the trial's own window ends, so the frame
+    a failed trial restores keeps its notes. Only ``settle_copied_contributions`` ends a trial."""
+    pairs = getattr(slot, '_context_copies', None) or {}
+    noted = tuple(row if id(row) in observations else pairs.get(id(row), (None, row))[1] for row in bound)
+    return noted, {id(row) for row in noted} | {id(original) for _copy, original in pairs.values()}
 
 
 def _image_forms(row, projected):
@@ -386,8 +394,9 @@ def note_image_projection(block, form):
 def note_contribution(slot, row, family, *, source='', form='typed_row', observation=None):
     """A producer marks the selected occurrence off transcript, including a containing merged row.
 
-    Copy/recovery does not preserve object identity. A missing note is not proof
-    there was no source. Producer IDs remain private; persist their hashes only.
+    Only the copy owner links a copy to its notes (``carry_contributions``); recovery does not preserve
+    object identity. A missing note is not proof there was no source. Producer IDs remain private;
+    persist their hashes only.
     """
     if slot is None:
         return
@@ -446,6 +455,43 @@ def move_contributions(slot, before, after):
     notes = getattr(slot, '_context_contributions', None)
     if notes and (held := notes.pop(id(before), None)) is not None:
         notes[id(after)] = (after, *held[1:])
+
+
+@_optional_observation()
+def carry_contributions(slot, originals, copies, *, adopt=False):
+    """The copy owner links each copied row to the notes of the row it copies, by position, never by bytes.
+
+    A route trial's copy reads them through a bounded pair until the trial settles, and its original keeps them
+    for the frame a failed trial restores; copies that replace their originals now (``adopt``) take them over.
+    Lists of different length link nothing."""
+    notes = getattr(slot, '_context_contributions', None)
+    if not notes or len(originals) != len(copies):
+        return
+    pairs = getattr(slot, '_context_copies', None)
+    if pairs is None:
+        pairs = slot._context_copies = {}
+    for original, twin in zip(originals[-_CONTRIBUTION_ROWS:], copies[-_CONTRIBUTION_ROWS:]):
+        source = original if id(original) in notes else pairs.get(id(original), (None, None))[1]
+        if twin is original or source is None or id(source) not in notes:
+            continue
+        if adopt:
+            move_contributions(slot, source, twin)
+            continue
+        pairs[id(twin)] = (twin, source)  # references until the pair retires; no body is copied
+        if len(pairs) > _CONTRIBUTION_ROWS:
+            del pairs[next(iter(pairs))]
+
+
+@_optional_observation()
+def settle_copied_contributions(slot, adopted=()):
+    """A route trial ends: copies it leaves as the transcript take their originals' notes, as a merged row does;
+    every other pair goes, so the restored frame's next send retires its notes by its own window again."""
+    pairs = getattr(slot, '_context_copies', None)
+    for row in adopted if pairs else ():
+        if (pair := pairs.pop(id(row), None)) is not None:
+            move_contributions(slot, pair[1], row)
+    if pairs:
+        pairs.clear()
 
 
 def _media(row):

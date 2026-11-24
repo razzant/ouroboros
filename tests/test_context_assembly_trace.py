@@ -74,7 +74,9 @@ def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append(
                                                   shown=None, facts=facts)
     appended = [*system[:-1], {**system[-1], 'text': system[-1]['text'] + '\n\nSelected first-contact note'}]
     first_contact = {**captured, 'first_contact_preference': True}
-    assert projection_fields(system, captured, selected=False) == {'memory_facts': facts, 'assembly_witnesses': ()}
+    rendered = projection_fields(system, captured)  # every rendered view: a later rebind may select it unrendered
+    assert rendered['memory_facts'] == facts and '_assembly_layout' not in rendered['memory_facts']
+    assert [row['carrier_sha256'] for row in rendered['assembly_witnesses']] == [digest(block['text']) for block in system]
     assert projection_fields(appended, captured)['assembly_witnesses'] == ()
     measured = projection_fields(appended, first_contact)
     assert measured['memory_facts'] == {**facts, 'first_contact_preference': True}
@@ -83,6 +85,58 @@ def test_projection_witness_is_bound_to_the_selected_blocks_and_declared_append(
     assert tail['groups'][-1]['family'] == 'memory_fit_notes'
     changed_book = [{**appended[0], 'text': 'Different stable text'}, *appended[1:]]
     assert projection_fields(changed_book, first_contact)['assembly_witnesses'] == ()
+
+
+def test_an_optional_section_this_actor_cannot_read_keeps_the_map_and_names_no_source():
+    """``memory_floor._address_optional`` shortens an optional attachment for an actor with no reader and records
+    ``source_ref: None``. That section is still witnessed as shortened, without a retained address; every other
+    section keeps its witness."""
+    from ouroboros.memory_floor import _address_optional
+
+    design = HostSection('design_bible', '## Design bible\n\n' + 'Airy rule. ' * 400, operative_view='## Design bible\n\nAiry.')
+    core = ContextCore(base_prompt='Guide', bible_md='Constitution', architecture_md='Map text', development_md='Handbook',
+                       semi_stable_text='', dynamic_text='', user_content_json='null', docs_need_development=True,
+                       dynamic_sections=(HostSection('recent_tools', 'Tools ran'), design))
+    receipts, addressed = [], {}
+    assert _address_optional(design, receipts, addressed, root='', task_id='') > 0
+    assert receipts[0]['source_ref'] is None and 'unavailable to this actor' in addressed['design_bible']
+    system, captured = capture_system_projection(core, _governance_blocks(None, core, mode='max'), 'Story', 'Room', 'max',
+                                                  addressed, receipts, True, shown=None, facts={'floor': {'steps': {}}})
+    witnesses = projection_fields(system, captured)['assembly_witnesses']
+    assert [row['carrier_sha256'] for row in witnesses] == [digest(block['text']) for block in system]
+    groups = {group['family']: group for row in witnesses for group in row['groups']}
+    assert {'system', 'bible', 'development', 'recent_tools', 'story'} <= groups.keys()
+    shortened = groups['design_bible']
+    assert shortened['form'] == 'shorter' and shortened['reason'] == 'physical_window' and 'retained_source' not in shortened
+    text = system[shortened.get('block', -1)]['text'] if 'block' in shortened else system[-1]['text']
+    assert text[shortened['start']:shortened['start'] + shortened['chars']] == addressed['design_bible']
+
+
+def test_a_cold_restore_keeping_low_sends_the_witness_of_its_low_view(tmp_path, monkeypatch):
+    """A restored task that ran in Low rebinds this process's fresh Max build to Low (``owner_wait.
+    rebind_restored_route``). Where Low already fits, its view is kept, not rendered again; the witness taken when its
+    bytes were rendered names each of its blocks, so the send locates all of them with Low's own book forms."""
+    import json
+
+    from ouroboros.context_assembly_trace import verified_layout
+    from tests._context_fit_fixtures import _built, _rebind
+
+    _core, plan = _built(tmp_path / 'w', monkeypatch)
+    fresh = plan(1_000_000, preferred='max', tool_schemas=[])
+    messages = fresh.messages_for('max')
+    rebound, mode, _event = _rebind(monkeypatch, tmp_path / 'restore', fresh, messages, window=1_000_000, start_mode='low')
+    low = rebound.projection('low')
+    assert fresh.initial_mode == 'max' and mode == 'low'
+    assert low.system_content_json == fresh.projection('low').system_content_json  # kept: no walk, no new render
+    blocks = json.loads(low.system_content_json)
+    assert [row['carrier_sha256'] for row in low.assembly_witnesses] == [digest(block['text']) for block in blocks]
+    layout = verified_layout({'messages': messages}, low.assembly_witnesses)
+    assert [block['status'] for block in layout] == ['located'] * len(blocks)
+    def forms(rows):
+        return {(group['family'], group['form']) for row in rows for group in row['groups']}
+
+    assert ('architecture', 'whole_book') in forms(fresh.projection('max').assembly_witnesses)
+    assert ('architecture', 'whole_book') not in forms(layout)  # Low's own render, not the fresh start's Max
 
 
 def test_late_contributions_bind_exact_prepared_forms_without_storing_body(tmp_path, monkeypatch):
@@ -174,6 +228,71 @@ def test_attachment_limit_records_decisions_without_changing_input(tmp_path, mon
     assert [entry['decision'] for entry in facts['attachment_items']] == [
         'not_selected_as_image', 'unreadable_source', 'prepared_pixels', 'image_count_limit']
     assert facts['manifest_pixels'] == 1
+
+
+def test_a_failed_same_model_trial_leaves_the_restored_send_its_mail_source():
+    """A configured route with Main's model on another account sends a deep copy of the acting frame
+    (``loop_model_call._fallback_rows``) with its notice appended. Its sends read the originals' producer notes through
+    bounded pairs, and until the trial settles none retires an original's notes, not even one its longer frame left
+    outside its own window: the restored primary send still names the mail's containing row. An answered trial's
+    copies take the notes over; a copy that replaces its original at once (an owner's switch) takes them directly."""
+    import copy
+    from types import SimpleNamespace
+
+    from ouroboros.context_assembly_trace import (bind_contribution_input, carry_contributions, note_contribution,
+                                                  settle_copied_contributions, verified_contributions)
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.loop_model_call import _adopt_fallback_route, _fallback_rows
+    from ouroboros.primary_route_observation import tell_failed_attempt
+
+    fit = PhysicalAttemptContext('owner_max', 'max', 'cold_estimate', '', '', None, None, False, False)
+
+    def mail_rows(slot, logical):  # the send seam's reading: each task_mail fact and the row it located
+        wire = {'messages': project_wire_messages(logical)}
+        bound = bind_contribution_input(fit, wire, logical, slot)
+        return [(row.get('path'), row.get('source_id_sha256'), row['form'])
+                for row in verified_contributions(wire, bound.contribution_input)['entries'] if row['family'] == 'task_mail']
+
+    def trial(slot, rows):  # a candidate as ``prepare`` makes it: the copy, then its notice
+        _plan, copied, _schemas, _mode = _fallback_rows((None, rows, None, 'max', 'model/a'), 'model/a', slot)
+        assert copied == rows and not any(new is old for new, old in zip(copied, rows))
+        tell_failed_attempt(copied, 'The previous attempt failed.', 'model/a on another account')
+        return copied
+
+    slot = SimpleNamespace()
+    mail = {'role': 'user', '_host_context_kind': 'owner_words', 'content': '[Message from ancestor task p]\nexact note'}
+    rows = [{'role': 'system', 'content': 'view'}, {'role': 'user', 'content': 'go'}, mail]
+    note_contribution(slot, mail, 'task_mail', source='mail-1', form='containing_row')
+    located = [('$.messages[2]', digest('mail-1'), 'containing_row')]
+    failed = trial(slot, rows)
+    assert mail_rows(slot, failed) == mail_rows(slot, failed) == located  # each send of the trial names its copy's source
+    settle_copied_contributions(slot)  # ``restore_acting_view``: the failed trial's copies go
+    assert mail_rows(slot, rows) == located and not slot._context_copies
+
+    edge_slot, edge = SimpleNamespace(), [{'role': 'user', 'content': f'row {i}'} for i in range(256)]
+    note_contribution(edge_slot, edge[0], 'task_mail', source='mail-edge', form='containing_row')
+    longer = trial(edge_slot, edge)  # its notice leaves the copied mail row outside the trial's 256 rows
+    assert mail_rows(edge_slot, longer) == mail_rows(edge_slot, longer) == []
+    settle_copied_contributions(edge_slot)
+    assert mail_rows(edge_slot, edge) == [('$.messages[0]', digest('mail-edge'), 'containing_row')]
+
+    answered = trial(slot, rows)
+    acting = SimpleNamespace(active_model='model/a', active_use_local=False)
+    candidate = SimpleNamespace(active_model='model/a', active_use_local=False, messages=answered, tool_schemas=[],
+                                context_fit_plan=None, tools=SimpleNamespace(_ctx=slot))
+    _adopt_fallback_route(acting, candidate, rows, None, 'max')
+    assert rows[2] is answered[2] and mail_rows(slot, rows) == located  # the answered copy carries them now
+    assert id(mail) not in slot._context_contributions and not slot._context_copies  # the replaced original is released
+
+    switched = copy.deepcopy(rows)
+    carry_contributions(slot, rows, switched, adopt=True)
+    assert mail_rows(slot, switched) == located and not slot._context_copies
+
+    many = [{'role': 'user', 'content': f'row {i}'} for i in range(300)]
+    for row in many:
+        note_contribution(slot, row, 'task_mail', source=row['content'])
+    carry_contributions(slot, many, copy.deepcopy(many))
+    assert len(slot._context_copies) == 256  # bounded like the notes it reads
 
 
 def test_merged_row_discloses_dropped_contribution_notes():
