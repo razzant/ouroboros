@@ -104,6 +104,34 @@ def _opening(row):
     return row["metadata"]["continuation"]["owner_sources"]["api"]
 
 
+@pytest.mark.parametrize("continued", [False, True])
+def test_project_naming_reads_all_fields_of_the_accepted_api_opening(pool, continued):
+    import asyncio
+    import json
+    from ouroboros import project_naming
+    from ouroboros.gateway.projects import api_project_from_task
+
+    context = "The subject is the 1978 harbor atlas."
+    task_id = _interrupted(pool, description="Prepare a comparison", context=context)
+    if continued:
+        task_id = _continue(pool, task_id)[0]["id"]
+    sends = []
+
+    async def coin(text, **_kwargs):
+        sends.append(json.loads(text))
+        return "1978 harbor atlas"
+
+    async def body():
+        return {"task_id": task_id}
+
+    pool.mp.setattr(project_naming, "llm_project_name_async", coin)
+    request = SimpleNamespace(json=body, app=SimpleNamespace(state=SimpleNamespace(drive_root=pool.root)))
+    reply = asyncio.run(api_project_from_task(request))
+    assert reply.status_code == 200, reply.body
+    assert sends == [{"description": "Prepare a comparison", "context": context,
+                      "expected_output": EXPECTED, "constraints": CONSTRAINTS}]
+
+
 def test_an_api_root_continues_from_its_saved_request_under_the_same_contract(pool):
     from ouroboros.owner_continue import continuation_offer
     from ouroboros.task_results import load_task_result

@@ -424,7 +424,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/projects": Shape("200:ProjectCreateResponse 400,401,409,500:ErrorResponse", "ProjectCreateRequest",
                                 note="401 error_code auth_required: the git clone needs credentials (not the network gate)"),
     "POST /api/projects/from-task": Shape("200:ProjectFromTaskResponse 400,409,500:ErrorResponse", "ProjectFromTaskRequest",
-                                          note="409: the task already belongs to another project"),
+                                          note="409 reason_code: a naming refusal that leaves the work in Main (error is its one "
+                                               "sentence), stale routing, or the task belongs to another project"),
     "POST /api/projects/{project_id}/update": Shape("200:ProjectUpdateResponse 400,404,409,500:ErrorResponse",
                                                     "ProjectUpdateRequest"),
     "POST /api/projects/{project_id}/delete": Shape("200:ProjectDeleteResponse 404,500:ErrorResponse"),

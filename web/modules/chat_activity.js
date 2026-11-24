@@ -494,14 +494,6 @@ export function getOrCreateChatSessionId(storage, cryptoImpl, now = Date.now, ra
     }
 }
 
-export function projectIdFromTask(taskId = '', now = Date.now) {
-    const seed = String(taskId || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9_.-]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-    return (seed ? `task-${seed}` : `task-${now().toString(36)}`).slice(0, 64);
-}
-
 export function loadChatInputHistory(storage, key) {
     try {
         const raw = JSON.parse(storage.getItem(key) || '[]');
@@ -1577,9 +1569,7 @@ export function ownLiveActionsEl(record) {
 }
 
 export function ensureLiveActionsEl(record) {
-    if (!record?.root
-        || record.root.dataset.projectCreated === '1'
-        || record.root.dataset.projectCreating === '1') return null;
+    if (!record?.root || record.root.dataset.projectCreated === '1') return null;
     let actions = ownLiveActionsEl(record);
     if (!actions) {
         actions = document.createElement('div');

@@ -45,7 +45,7 @@ def test_ui_conversion_scopes_a_pending_task(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "PENDING", [pending_task])
 
     resp = asyncio.run(api_project_from_task(_request(
-        tmp_path, {"task_id": "tq", "id": "task-tq", "objective_hint": "queued work"},
+        tmp_path, {"task_id": "tq", "id": "task-tq", "name": "Queued work"},
     )))
     pid = json.loads(resp.body.decode("utf-8"))["project"]["id"]
 
@@ -83,7 +83,7 @@ def test_ui_conversion_persists_pending_scope_across_restart(tmp_path, monkeypat
     monkeypatch.setattr(queue, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
 
     resp = asyncio.run(api_project_from_task(_request(
-        tmp_path, {"task_id": "tq", "id": "task-tq", "objective_hint": "queued work"},
+        tmp_path, {"task_id": "tq", "id": "task-tq", "name": "Queued work"},
     )))
     pid = json.loads(resp.body.decode("utf-8"))["project"]["id"]
 

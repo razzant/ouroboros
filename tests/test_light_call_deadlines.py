@@ -84,7 +84,7 @@ def invoke(env, consumer):
 
 def refused(env, consumer):
     if consumer == "naming":
-        assert invoke(env, consumer) == "Owner request"
+        assert invoke(env, consumer) == ""
     else:
         with pytest.raises(Exception):
             invoke(env, consumer)
@@ -176,8 +176,40 @@ def test_delayed_inline_worker_cannot_mint_a_new_window(call_env, monkeypatch, d
     title = asyncio.run(project_naming.llm_project_name_async(
         "Owner request", timeout_sec=inline_bound, llm_client=call_env.client,
         use_local=False, drive_root=call_env.root, task_id="inline-title"))
-    assert title == "Owner request"
+    assert title == ""
     assert not call_env.sends
+
+
+@pytest.mark.parametrize("outcome, expected", [
+    ("title", "Useful title"), ("empty", ""), ("rejected", ""), ("gemini_parts", "Useful title"), ("thought_only", ""),
+])
+def test_inline_model_only_namer_dispatches_at_most_one_physical_request(call_env, outcome, expected):
+    send = call_env.sdk.chat.completions.create
+
+    def answer(**kwargs):
+        response = send(**kwargs).model_dump()  # log the attempt before the synthetic provider returns
+        if outcome == "rejected" and len(call_env.sends) == 1:
+            error = RuntimeError("reasoning_effort unsupported")
+            error.status_code = 400
+            error.body = {"error": {"type": "invalid_request_error", "message": str(error)}}
+            raise error
+        if outcome == "empty":
+            response["choices"][0]["message"]["content"] = '""'
+        if outcome == "gemini_parts":  # untyped parts: the thought's own marker is all that tells it from the answer
+            response["choices"][0]["message"]["content"] = [
+                {"text": "Weighing the names first.", "thought": True}, {"text": "Useful title"}]
+        if outcome == "thought_only":
+            response["choices"][0]["message"]["content"] = [{"text": "Only a thought.", "thought": True}]
+        return AssembledResponse(response)
+
+    call_env.sdk.chat.completions.create = answer
+    text = "Owner request\n\n" + "Name the north pier.\n" * 250 + "Use the south harbor's name.  "
+    got = asyncio.run(project_naming.llm_project_name_async(
+        text, timeout_sec=8, llm_client=call_env.client, use_local=False,
+        drive_root=call_env.root, task_id="inline-title"))
+    assert got == expected
+    assert len(call_env.sends) == 1
+    assert call_env.sends[0]["messages"][-1]["content"].split("Owner request:\n", 1)[1] == text
 
 
 def test_delayed_background_namer_keeps_the_scheduling_deadline(call_env, monkeypatch):

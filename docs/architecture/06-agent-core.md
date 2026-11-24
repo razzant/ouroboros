@@ -640,7 +640,7 @@ Post-work keeps pooled custody apart from early answer delivery and the solve ce
 
 #### Project placement
 
-`project_placement.move_task_to_project` serves mind and button. Durable exact-task binding wins; a new name renames that room, shared origin only proves provenance. Preparation compares routing generation/incarnation. PENDING rows are marked; RUNNING folder/lease stay. Next-boundary readmission revalidates the room and takes its lease, changing only defaults: explicit folders/opt-outs stay; Main body work keeps its own or inherited candidate as recorded `system_repo` intent, which room-lens and scratch defaults read, so consumers agree. Notices distinguish placement from applied readmission, naming the actual folder. Journal/workpad, knowledge and routing follow binding at once, without reloading memory. Children keep scope; Main keeps task identity.
+`project_placement.move_task_to_project` serves mind and button. Exact binding wins; the default id joins a verified Continue's bound work (its admission proves it; one unconfirmed refuses). Shared origin is not identity. The button uses the first verified episode's title or tries Light once; refusal keeps Main. The routing fence pins room identity. PENDING rows are marked; RUNNING folders/leases stay until readmission at the next execution boundary. There the work takes the room's defaults only if it did not select its own resource; a body candidate keeps `system_repo` intent for the room lens and scratch. Notices name the actual folder. Journal/workpad, knowledge and routing follow binding without a reload; children keep scope, Main identity.
 
 #### Durable memory and project focus
 
