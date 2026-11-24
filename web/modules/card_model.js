@@ -19,7 +19,7 @@
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
-import { clampWithToggle } from './chat_reply_quote.js';
+import { clampWithToggle, releaseClampFade } from './chat_reply_quote.js';
 import { observeLayout } from './capsule.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { isCoarsePointer, isStackLayout } from './layout.js';
@@ -531,6 +531,7 @@ export function openCardModel(record) {
             headKey = nextHead;
             unwatchHead();
             unwatchHead = () => {};
+            releaseClampFade(title.querySelector('.card-model-pop-line'));
             const words = nodeOf(doc, 'span', 'card-model-pop-words', heading);
             title.replaceChildren(words);
             if (said.cited) {
@@ -544,6 +545,7 @@ export function openCardModel(record) {
                 // The published words stay intact, including whitespace and case. Only CSS clips them.
                 const cut = () => line.scrollHeight > line.clientHeight + 1;
                 const toggle = clampWithToggle(line, title, {
+                    scrollRegion: tr('model.cited.scroll_region', 'Quoted model choice'),
                     fit: (_node, _text, _lines, onFit) => onFit(cut()),
                     onDomWrite: (write) => {
                         const changed = write();
@@ -613,6 +615,7 @@ export function openCardModel(record) {
         retry.removeEventListener('click', onRetry);
         unsubscribe();
         unwatchHead();
+        releaseClampFade(title.querySelector('.card-model-pop-line'));
         sheet?.close({ focus: false });
         if (openPopover === handle) openPopover = null;
         if (state.pressable) state.fact.setAttribute('aria-expanded', 'false');

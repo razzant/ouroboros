@@ -45,8 +45,9 @@ import { collectSafeFieldValues, downloadViaHostBridge } from './ui_helpers.js';
 import { getContributions } from './contributions.js';
 import { mountPinnedCard, setCardPinned } from './card_components.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad } from './holds.js';
+import { bindScrollFade } from './scroll_fade.js';
 import {
-    filenameFromWidgetUrl, indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts,
+    createWidgetScrollFades, filenameFromWidgetUrl, indexComponentTree, patchWidgetChildren, renderComponent, syncWidgetCharts,
 } from './widget_render.js';
 
 export {
@@ -220,6 +221,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
     const controllers = new Set();
     const chartInstances = new Map();
     const chartShapes = new Map();
+    const scrollFades = createWidgetScrollFades(mount);
     const eventSources = new Map();
     const activePolls = new Set();
     const activeJobs = new Set();
@@ -289,6 +291,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
         });
         disposed = true;
         unsubscribeTheme();
+        scrollFades.dispose();
         controllers.forEach((controller) => controller.abort());
         controllers.clear();
         chartInstances.forEach((chart) => chart.destroy());
@@ -572,6 +575,7 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
         desired.innerHTML = components.map((component, idx) => renderComponent(renderContext, component, view, `components.${idx}`)).join('');
         patchWidgetChildren(mount, desired.content);
         syncWidgetCharts(mount, chartInstances, chartShapes);
+        scrollFades.sync();
         visibleKeys.forEach((key) => {
             const component = componentSpec(key);
             if (!component) return;
@@ -722,10 +726,14 @@ async function mountTab(card, tab, mountSignal = null, board = null) {
     if (render.kind === 'iframe' && render.route) {
         return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers, board);
     }
-    // A kept living card is Ouroboros's, not a skill's: no route, its presses go to the card's decisions.
-    if (tab.pinned_card) return mountPinnedCard(mount, tab);
-    if (render.kind === 'declarative') {
-        return mountDeclarativeWidget(mount, tab, render);
+    if (tab.pinned_card || render.kind === 'declarative') {
+        // A kept living card's presses go to the card's decisions, not a skill route.
+        const disposeWidget = tab.pinned_card ? mountPinnedCard(mount, tab) : await mountDeclarativeWidget(mount, tab, render);
+        // The board keeps its crisp edges (DESIGN "Widgets board"): no class, no mask on the card's own body, however
+        // far an owner height cuts it. The binding alone names the body while it actually scrolls — the keyboard's
+        // stop into the one scroller the host gives a host-drawn card — and drops the name again once it fits.
+        const disposeFade = bindScrollFade(mount, { region: tab.title || tab.tab_id || tab.skill });
+        return () => { disposeFade(); disposeWidget(); };
     }
     if (render.kind === 'module' && render.entry) {
         return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers, null, board);
@@ -1314,14 +1322,15 @@ export function initWidgets(ctx = {}) {
             const dialog = card?.querySelector('.skills-card-menu-dialog') || (card?.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')
                 ? document.querySelector('body > .skills-card-menu-dialog[open]') : null);
             if (!dialog) continue;
-            const current = dialog.querySelector(':scope > [data-widget-contributions]');
+            // Once opened, its groups stand in the menu's scrolling body, not on the shell (ui_interactions.js popupScrollBody).
+            const current = dialog.querySelector('[data-widget-contributions]');
             const html = renderWidgetContributionGroup(contributionVisibility(tab.skill));
             if ((current?.outerHTML || '') === html) continue;
             const focusedKey = current?.contains(document.activeElement) ? document.activeElement.dataset.widgetContributionKey : '';
             const fresh = html ? Object.assign(document.createElement('template'), { innerHTML: html }).content.firstElementChild : null;
             if (current && fresh) current.replaceWith(fresh);
             else if (current) current.remove();
-            else if (fresh) dialog.querySelector(':scope > [role="group"][aria-label="Size"]')?.before(fresh);
+            else if (fresh) dialog.querySelector('[role="group"][aria-label="Size"]')?.before(fresh);
             if (focusedKey) fresh?.querySelector(`[data-widget-contribution-key="${CSS.escape(focusedKey)}"]`)?.focus();
         }
     }
@@ -1374,6 +1383,7 @@ export function initWidgets(ctx = {}) {
         cardMenus.destroy();
         widths.dispose();
         stopContributionFacts?.();
+        for (const tab of lastTabs || []) if (!isBoardFrame(tab)) disposeWidgetByKey(widgetKey(tab));
         bodiesObserver.disconnect();
         BODY_SIZED.forEach((type) => list.removeEventListener(type, refitBodies, true));
         if (bodiesFrame) cancelAnimationFrame(bodiesFrame);

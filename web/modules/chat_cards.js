@@ -297,8 +297,8 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         record.tab = tab;
         record.widgetSignature = chatWidgetSignature(tab);
         if (tab.render?.kind === 'declarative') {
-            // Under the message's size policy like a frame: the content is measured, its box is capped, Expand
-            // lifts the cap. The declarative host paints its first frame synchronously: inside this write.
+            // Under the message's size policy like a frame: the content is measured, its box is capped (fading where it
+            // is cut), Expand lifts the cap. The declarative host paints its first frame synchronously: inside this write.
             const host = document.createElement('div');
             host.className = 'chat-card-widget';
             const content = document.createElement('div');
@@ -307,7 +307,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             const mounting = write(() => {
                 record.body.replaceChildren(host);
                 setStatus(record, '');
-                inline = createInlineFit(host, record.toggle);
+                inline = createInlineFit(host, record.toggle, { fade: true, region: record.title ? `${record.title} content` : 'Card content' });
                 return mountDeclarativeWidget(content, { ...tab, key: `card:${record.id}` }, tab.render, { input: ref.input });
             });
             const resized = typeof ResizeObserver === 'function' ? new ResizeObserver(() => record.fit?.fit(content.offsetHeight)) : null;

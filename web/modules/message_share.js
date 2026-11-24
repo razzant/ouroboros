@@ -174,11 +174,18 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         current.file = null;
     }
 
+    function releaseParts(current) {
+        for (const dispose of current.partDisposers.splice(0)) {
+            try { dispose(); } catch { /* already gone */ }
+        }
+    }
+
     function close({ restoreFocus = true } = {}) {
         const current = session;
         if (!current) return;
         session = null;
         current.abort.abort();
+        releaseParts(current);
         for (const dispose of current.disposers.splice(0)) {
             try { dispose(); } catch { /* already gone */ }
         }
@@ -278,9 +285,6 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         const row = doc.createElement('div');
         row.className = `message-share-part is-${item.kind}`;
         row.dataset.shareBlock = String(item.index);
-        row.setAttribute('role', 'checkbox');
-        row.setAttribute('aria-checked', String(current.chosen.has(item.index)));
-        row.tabIndex = 0;
         row.style.setProperty('--share-depth', String((item.depth || 0) + (item.quote || 0)));
         if (item.quote) row.classList.add('is-quoted');
         if (item.rtl) row.dir = 'rtl';
@@ -292,14 +296,36 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
             marker.textContent = [item.marker === '•' && box ? '' : item.marker, box].filter(Boolean).join(' ');
         }
         const verbatim = ['code', 'diagram', 'chart', 'table'].includes(item.kind);
-        const content = doc.createElement(verbatim ? 'pre' : 'div');
+        const content = doc.createElement('div');
         content.className = 'message-share-words';
         if (item.kind === 'heading') content.dataset.level = String(item.level);
         if (item.kind === 'rule') content.append(doc.createElement('hr'));
-        item.runs.forEach((run, index) => content.append(runSpan(run, index)));
-        const check = doc.createElement('span');
+        let target = content;
+        if (verbatim) {
+            target = doc.createElement('pre');
+            target.className = 'message-share-code scroll-fade-x';
+            content.append(target);
+            const region = {
+                code: tr('share.excerpt.code', 'Code excerpt'), diagram: tr('share.excerpt.diagram', 'Diagram excerpt'),
+                chart: tr('share.excerpt.chart', 'Chart excerpt'), table: tr('share.excerpt.table', 'Table excerpt'),
+            }[item.kind];
+            current.partDisposers.push(bindScrollFade(target, { axis: 'x', region }));
+        }
+        item.runs.forEach((run, index) => target.append(runSpan(run, index)));
+        const check = doc.createElement(verbatim ? 'button' : 'span');
         check.className = 'message-share-check';
-        check.setAttribute('aria-hidden', 'true');
+        // A checkbox's descendants are presentational to assistive technology. Give a verbatim part a real
+        // checkbox beside its scrollable words, not an interactive region inside a checkbox.
+        if (verbatim) {
+            check.type = 'button';
+            check.setAttribute('aria-label', fmt('Include part {number}', { number: item.index + 1 }));
+        } else {
+            row.tabIndex = 0;
+            check.setAttribute('aria-hidden', 'true');
+        }
+        const choice = verbatim ? check : row;
+        choice.setAttribute('role', 'checkbox');
+        choice.setAttribute('aria-checked', String(current.chosen.has(item.index)));
         check.innerHTML = controlIcon('check', 16);
         row.append(marker, content, check);
         return row;
@@ -388,6 +414,7 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
 
     function paintBody(current) {
         const body = current.body;
+        releaseParts(current);
         current.parts = null;
         if (current.mode === 'choose') {
             const parts = doc.createElement('div');
@@ -672,7 +699,8 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
     function toggle(current, row) {
         const index = Number(row.dataset.shareBlock);
         if (current.chosen.has(index)) current.chosen.delete(index); else current.chosen.add(index);
-        row.setAttribute('aria-checked', String(current.chosen.has(index)));
+        const choice = row.querySelector('button.message-share-check') || row;
+        choice.setAttribute('aria-checked', String(current.chosen.has(index)));
         refreshChoice(current);
     }
 
@@ -721,7 +749,7 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
         const current = {
             dialog, row, bubble, blocks, total: words(blocks), format, mode: 'result', chosen: new Set(),
             selection: null, pressed: null, dismissing: false, excerpt: null, text: shareText(blocks), version: 0, card: null,
-            telegram: null, telegramWait: null, parts: null, body: dialog.querySelector('.message-share-body'),
+            telegram: null, telegramWait: null, parts: null, partDisposers: [], body: dialog.querySelector('.message-share-body'),
             abort: new AbortController(), disposers: [], disposeFocus: null,
             content: row.content || null, cardSource, file: null, fileKey: 0,
         };
@@ -749,8 +777,12 @@ export function registerMessageShare({ registry = getMessageActions(), win = glo
             } else {
                 const part = event.target.closest?.('.message-share-part');
                 // A drag that selected words inside the part is a selection, and a press that only put selected
-                // words away is not a choice: neither is a tap.
-                if (part && current.mode === 'choose' && !current.selection && !current.dismissing) toggle(current, part);
+                // words away is not a choice: neither is a tap. A part's own checkbox is a real control, so its
+                // keyboard activation is the choice itself, even while words elsewhere stay selected.
+                const ownActivation = !event.detail && Boolean(event.target.closest?.('button.message-share-check'));
+                if (part && current.mode === 'choose' && (ownActivation || (!current.selection && !current.dismissing))) {
+                    toggle(current, part);
+                }
             }
         });
         listen(dialog, 'keydown', (event) => {

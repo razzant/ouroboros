@@ -1,4 +1,5 @@
 import { backrefs } from './dom_backrefs.js';
+import { ResizeObserverStub } from './helpers/resize_observer.js';
 
 // The proven data profile a core-served document names before the chat mounts (server_web.chat_preview_scope):
 // the saved preview keys its rooms by this fact, so a test document that never says it opens cold.
@@ -151,6 +152,7 @@ export class ElementStub {
     }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
     get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
+    get childNodes() { return this.children; }  // the fixture's backing list includes text nodes
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }
     replaceChild(next, current) { this.insertBefore(next, current); this.removeChild(current); return current; }
@@ -257,12 +259,18 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
     globalThis.localStorage = { getItem: (key) => persistent.get(key) ?? null,
         setItem: (key, value) => persistent.set(key, String(value)), removeItem: (key) => persistent.delete(key) };
     globalThis.fetch = fetchImpl;
-    globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+    globalThis.ResizeObserver = ResizeObserverStub;
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
     return { prior, mount };
 }
 export function restoreDom(prior) {
     Object.assign(globalThis, prior);
+}
+
+// The chat double's textContent does not include nested elements. Read the notice's words,
+// not its action labels; a room notice without controls writes directly on the toast.
+export function toastMessages(root) {
+    return root.querySelectorAll('.toast').map((toast) => (toast.querySelector('.toast-words') || toast).textContent);
 }
 
 export function walkCard(node, taskId) {

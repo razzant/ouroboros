@@ -57,7 +57,9 @@ export function renderSafeField(field = {}, savedValues = {}, options = {}) {
         // A multiline value the schema declares read-only (a status) is text, never an inert control: whole at any width,
         // selectable and reachable by keyboard, in the value's ink. `<output>` keeps its name in form.elements and its
         // text as `.value`, so collecting the form and refreshing the field in place work as for the control.
-        return `<label class="${fieldClass}${spanClass}"><span>${label}</span><output class="ui-control ui-control-readonly" name="${name}"${accessible} tabindex="0">${value}</output>${help}</label>`;
+        // The field's box keeps its border, fill and ring whole; the value's own body inside is the scrollport the
+        // shared fade masks, so a waiting edge fades text only, never the chrome around it.
+        return `<label class="${fieldClass}${spanClass}"><span>${label}</span><span class="ui-control ui-control-readonly"><output class="ui-readonly-body scroll-fade-y" name="${name}"${accessible} tabindex="0">${value}</output></span>${help}</label>`;
     }
     if (type === 'textarea') {
         return `<label class="${fieldClass}${spanClass}"><span>${label}</span><textarea class="ui-control" name="${name}"${accessible}${placeholder}${required}${disabled}>${value}</textarea>${help}</label>`;

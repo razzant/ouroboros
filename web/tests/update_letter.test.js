@@ -654,7 +654,7 @@ test('the description section keeps one compact action and a quiet Rewrite outsi
     assert.ok(details.indexOf('id="updates-letter-resources"') < details.indexOf('id="updates-letter-rewrite"'));
     assert.match(details, /class="btn btn-default btn-sm updates-letter-rewrite" id="updates-letter-rewrite"/);
     // The body's one length control sits under it: the first part reads at once, Read all opens the rest.
-    assert.match(card, /<button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all<\/button>/);
+    assert.match(card, /<button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" aria-expanded="false" aria-controls="updates-letter-body" hidden>Read all<\/button>/);
     // The note's words are the live region; the door to the running task's card sits beside it, outside it.
     assert.match(card, /<div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"><\/span> <span id="updates-letter-task"><\/span><\/div>/);
     // Which text this is and who writes are read before the text itself: the note line precedes the body.
@@ -690,14 +690,9 @@ test('the letter body goes through the sanitizing markdown pipeline and is dispo
     const render = SOURCE.slice(SOURCE.indexOf('function renderLetter()'), SOURCE.indexOf('function render()'));
     assert.ok(render.indexOf('releaseLetterBody()') < render.indexOf('letterBody.innerHTML'), 'release before write');
     assert.equal((render.match(/releaseLetterBody\(\)/g) || []).length, 2, 'hide path and content path both release');
-    // Unchanged content keeps its DOM (and the owner's selection with it); a "Read all" measure taken while the tab
-    // was hidden (0 x 0, unknown) is still owed and runs once the body has a height.
-    assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) \{\s*if \(letterMeasureOwed\) requestAnimationFrame\(measureLetter\);\s*return;\s*\}/);
-    assert.match(SOURCE, /function measureLetter\(\) \{\s*if \(!letterMeasureOwed \|\| letterBody\.hidden \|\| !letterBody\.clientHeight\) return;/);
-    assert.match(SOURCE, /'ouro:dashboard-subtab-shown', \(event\) => \{\s*if \(event\.detail\?\.tab !== 'updates'[^\n]*\n\s*requestAnimationFrame\(measureLetter\);/);
-    // Whichever door shows the body, its own box takes the owed measure: the page opened from the Dashboard's list by
-    // the row already chosen changes no tab and announces nothing (tests/test_update_description_browser.py, step 7).
-    assert.match(SOURCE, /new ResizeObserver\(\(\) => measureLetter\(\)\)\.observe\(letterBody\)/);
+    // Unchanged content keeps its DOM (and the owner's selection with it); fold, Apply copy, and Recovery list
+    // scroll-fade behavior live in tests/test_update_description_browser.py.
+    assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) return;/);
     // Content identity is the CONTENT: two different paragraphs of equal length must not
     // share a key, and a rewrite that produced the same text must not throw the DOM away.
     assert.match(SOURCE, /function letterContentKey\(view\) \{[\s\S]*?return view\.markdown;/);

@@ -314,19 +314,20 @@ def test_two_grouped_captions_keep_separate_addresses_and_authored_i18n(project_
     staged = page.evaluate("JSON.parse(sessionStorage.getItem('ouro_chat_reply'))")
     assert staged['address'] == second['row_address'] and staged['excerpt'] == {'text': 'Settings', 'start_utf16': 0}
     assert staged['ts'] == second['ts']
-    strip = page.locator('.chat-quote--composer[data-excerpt] .chat-quote-main')
-    assert strip.get_attribute('aria-label').endswith(': Settings') and 'Выбор отправителя' in strip.get_attribute('aria-label')
+    strip = page.locator('.chat-quote--composer[data-excerpt]')
+    jump = strip.locator('.chat-quote-main')
+    assert jump.get_attribute('aria-label').endswith(': Settings') and 'Выбор отправителя' in jump.get_attribute('aria-label')
     when = page.evaluate("async ts => (await import('/static/modules/chat_activity.js')).formatMsgTime(ts).short", second['ts'])
-    assert f', {when}: Settings' in strip.get_attribute('aria-label')
+    assert f', {when}: Settings' in jump.get_attribute('aria-label')
     project_chat['expect'](strip.locator('.chat-quote-text')).to_have_text('Settings', use_inner_text=True)
     page.locator('#chat-input').fill('Clarify the setting.')
     page.locator('#chat-send').click()
-    saved = page.locator('#chat-messages .chat-bubble.user .chat-quote-main')
+    saved = page.locator('#chat-messages .chat-bubble.user .chat-quote[data-excerpt]')
     project_chat['expect'](saved.locator('.chat-quote-text')).to_have_text('Settings', use_inner_text=True)
-    assert saved.get_attribute('aria-label').endswith(': Settings')
+    assert saved.locator('.chat-quote-main').get_attribute('aria-label').endswith(': Settings')
     assert page.evaluate("""async () => !(await import('/static/modules/i18n.js')).pendingMisses()
         .some(key => key.includes(': Settings'))""")
-    saved.click()
+    saved.locator('.chat-quote-main').click()
     page.wait_for_function("""() => [...CSS.highlights.get('reply-excerpt') || []]
         .some(r => r.startContainer.parentElement.matches('figcaption') && r.toString() === 'Settings')""")
 

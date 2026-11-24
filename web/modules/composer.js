@@ -7,6 +7,7 @@
 // namespaces its ids and shows in its feed what was sent.
 import { bindComposerFileTargets, cleanupUploadedAttachments } from './chat_media.js';
 import { composerText, createComposerAttachments } from './chat_attachments.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { loadChatInputHistory, saveChatInputHistory, sendPanic } from './chat_activity.js';
 import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
@@ -38,7 +39,7 @@ const PLUS_ICONS = {
  * text row with "+", the words, the mic slot and Send. */
 export function composerMarkup() {
     return `
-                <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
+                <div id="chat-attachment-preview" class="chat-attachment-preview scroll-fade-y"></div>
                 <div class="chat-toolbar-row">
                     ${renderMobileNavToggle({ inComposer: true })}
                     <div class="chat-model-mode" id="chat-model-mode"></div>
@@ -221,6 +222,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     // Staged files, their thumbnails and object URLs, and the upload on Send ("+" waits while it runs).
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
         input, showToast, onChange: invalidateDraft, onLayout: () => requestAnimationFrame(() => onLayout()) });
+    // Staged badges scroll inside their own bounded strip when many files wait; the cue follows them.
+    const attachmentPreview = byId('attachment-preview');
+    let disposePreviewFade = () => {};
+    if (attachmentPreview) disposePreviewFade = bindScrollFade(attachmentPreview);
 
     // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
@@ -536,6 +541,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
             for (const dispose of contributed) dispose();
             plusMenu.destroy();
             attachments.destroy();
+            disposePreviewFade();
             ownerControls.destroy();
             inputSizing.dispose();
         },

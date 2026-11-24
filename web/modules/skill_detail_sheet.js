@@ -6,7 +6,7 @@
 import { bindDialogFocus } from './ui_interactions.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
+import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
@@ -153,7 +153,9 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
             section('Links', linksHtml(detail, item)),
             detailsHtml(item, installed),
         ].join('');
-        mountChatMarkdown(body.querySelector('.skills-sheet-about'), about, { softBreaks: true });
+        const aboutEl = body.querySelector('.skills-sheet-about');
+        mountChatMarkdown(aboutEl, about, { softBreaks: true });
+        bindRenderedMarkdown(aboutEl);
     };
     const read = async () => {
         if (!readDetail) { paint(null); return; }

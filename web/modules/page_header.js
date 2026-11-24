@@ -170,6 +170,7 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
         if (under) under.hidden = docked;
         header.toggleAttribute('data-lead', docked);  // the bar's two ends: style.css lays them on one line
         header.toggleAttribute('data-scroll-x', docked); // this band owns overflow, like its tab and folder rails
+        header.classList.toggle('scroll-fade-x', docked);
         // An engine drops focus from a node it moves: the owner's place in the page stays where it was.
         if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
     };
@@ -287,7 +288,7 @@ export function renderTabStrip({
         `;
     }).join('');
     return `
-        <div class="${classAttr(['app-tab-strip', stripClass])}" role="tablist" aria-label="${escapeHtml(ariaLabel)}">
+        <div class="${classAttr(['app-tab-strip', 'scroll-fade-x', stripClass])}" role="tablist" aria-label="${escapeHtml(ariaLabel)}">
             ${buttons}
         </div>
     `;
@@ -300,12 +301,7 @@ export function renderTabStrip({
  */
 export function revealStripChoice(strip, tab) {
     if (!tab || !strip.clientWidth) return;
-    const bounds = strip.getBoundingClientRect(), rect = tab.getBoundingClientRect();
-    const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
-    const left = bounds.left + strip.clientLeft + (parseFloat(style.scrollPaddingInlineStart) || 0);
-    const right = bounds.left + strip.clientLeft + strip.clientWidth - (parseFloat(style.scrollPaddingInlineEnd) || 0);
-    if (rect.left < left) strip.scrollLeft += rect.left - left;
-    else if (rect.right > right) strip.scrollLeft += rect.right - right;
+    revealPastFade(strip, tab, { axis: 'x' });
 }
 
 export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange } = {}) {

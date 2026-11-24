@@ -65,9 +65,9 @@ test('a read-only multiline value is whole, selectable text that collection stil
     const long = "Restoring the previous owner's menu button: Telegram did not confirm the restored menu button.";
     const field = { name: 'miniapp_status', label: 'Mini App', type: 'textarea', disabled: true };
     const html = portable.renderSafeField(field, { miniapp_status: long });
-    assert.equal(html, '<label class="ui-field widget-field"><span>Mini App</span><output class="ui-control ui-control-readonly" '
-        + 'name="miniapp_status" aria-label="Mini App" tabindex="0">Restoring the previous owner&#39;s menu button: Telegram '
-        + 'did not confirm the restored menu button.</output></label>');
+    assert.equal(html, '<label class="ui-field widget-field"><span>Mini App</span><span class="ui-control ui-control-readonly">'
+        + '<output class="ui-readonly-body scroll-fade-y" name="miniapp_status" aria-label="Mini App" tabindex="0">Restoring the '
+        + 'previous owner&#39;s menu button: Telegram did not confirm the restored menu button.</output></span></label>');
     assert.doesNotMatch(html, /<textarea|disabled|rows=/, 'no inert control, no fixed rows, no disabled ink');
     const hostile = portable.renderSafeField({ name: 's', type: 'textarea', disabled: true }, { s: '</output><script>x</script>' });
     assert.doesNotMatch(hostile, /<script>/);

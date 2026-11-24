@@ -395,7 +395,7 @@ test('Telegram\'s Connection shows each long production sentence whole, posts wh
     for (const name of names) {
         const label = component.fields.find((field) => field.name === name).label;
         const whole = reads[0][name].replace(/'/g, '&#39;');
-        assert.ok(html.includes(`<output class="ui-control ui-control-readonly" name="${name}" aria-label="${label}" tabindex="0">${whole}</output>`), name);
+        assert.ok(html.includes(`<span class="ui-control ui-control-readonly"><output class="ui-readonly-body scroll-fade-y" name="${name}" aria-label="${label}" tabindex="0">${whole}</output></span>`), name);
     }
     assert.doesNotMatch(html, /<textarea|resize|rows=/);
 
@@ -424,5 +424,82 @@ test('Telegram\'s Connection shows each long production sentence whole, posts wh
     } finally {
         fetcher.restore();
         globalThis.window = priorWindow;
+    }
+});
+
+test('extension settings share one scroll-fade owner for json and readonly output and emit one mounted signal', async () => {
+    const { Stub, settle } = await import('./helpers/settings_dom.js');
+    const { createWidgetScrollFades } = await import('../modules/widget_render.js');
+    const prior = { window: globalThis.window, document: globalThis.document };
+    const win = new EventTarget();
+    const observers = [], frames = new Map();
+    let nextFrame = 0;
+    class Observer {
+        constructor(cb) { this.cb = cb; this.disconnected = false; observers.push(this); }
+        observe() { this.disconnected = false; }
+        disconnect() { this.disconnected = true; }
+    }
+    Object.assign(win, {
+        ResizeObserver: Observer, MutationObserver: Observer,
+        requestAnimationFrame: (fn) => (frames.set(++nextFrame, fn), nextFrame),
+        cancelAnimationFrame: (id) => frames.delete(id),
+        getComputedStyle: () => ({ overflowY: 'auto', overflowX: 'auto' }),
+    });
+    const doc = { activeElement: null, defaultView: win, createElement: (tag) => new Stub(tag) };
+    Object.assign(globalThis, { window: win, document: doc });
+    const mounted = [];
+    win.addEventListener('ouro:extension-settings-mounted', (e) => mounted.push(e.detail?.root));
+    const host = new Stub('div');
+    host.id = 'extension-settings-sections';
+    const container = new Stub('div');
+    container.appendChild(host);
+    const scrollFades = createWidgetScrollFades(host);
+    const readonly = { type: 'form', id: 'ro', route: 'ro', fields: [{ name: 'out', label: 'Out', type: 'textarea', disabled: true }] };
+    const json = { type: 'json', label: 'Data', value: { ok: true } };
+    const fetcher = stubFetch(async () => jsonResponse({}, 500));
+    try {
+        // Empty sections: one mounted signal, no bindings.
+        await renderExtensionSettingsSections(container, [], { scrollFades });
+        assert.equal(mounted.length, 1);
+        assert.equal(mounted[0], host);
+
+        // Failed hydration read: still emits one mounted signal and binds both scrollers once.
+        await renderExtensionSettingsSections(container, [
+            { skill: 'demo', section_id: 's', title: 'S', render: { components: [readonly, json] } },
+        ], { scrollFades });
+        assert.equal(mounted.length, 2);
+        const outNode = host.querySelector('.ui-readonly-body');
+        const jsonNode = host.querySelector('[data-widget-scroll-region]');
+        assert.ok(outNode && jsonNode);
+        outNode.scrollHeight = 400; outNode.clientHeight = 100;
+        jsonNode.scrollHeight = 400; jsonNode.clientHeight = 100;
+        for (const fn of [...frames.values()]) fn();
+        frames.clear();
+        assert.equal(outNode.getAttribute('tabindex'), '0');
+        assert.equal(outNode.getAttribute('role'), null, 'readonly output keeps implicit role without region overwrite');
+        assert.equal(outNode.getAttribute('aria-label'), 'Out');
+        assert.equal(outNode.hasAttribute('data-scroll-below'), true);
+        assert.equal(jsonNode.getAttribute('role'), 'region');
+        assert.equal(jsonNode.hasAttribute('data-scroll-below'), true);
+        const initialObservers = observers.length;
+
+        // Re-enter with empty sections: disposes old bindings and emits one mounted signal.
+        await renderExtensionSettingsSections(container, [], { scrollFades });
+        assert.equal(mounted.length, 3);
+        assert.equal(observers.slice(0, initialObservers).every((o) => o.disconnected), true);
+        assert.equal(outNode.hasAttribute('data-scroll-below'), false);
+        assert.equal(jsonNode.hasAttribute('data-scroll-below'), false);
+
+        // Re-enter with readonly + json again, then unmount dispose releases all.
+        await renderExtensionSettingsSections(container, [
+            { skill: 'demo', section_id: 's', title: 'S', render: { components: [readonly, json] } },
+        ], { scrollFades });
+        assert.equal(mounted.length, 4);
+        scrollFades.dispose();
+        assert.equal(observers.every((o) => o.disconnected), true);
+        await settle();
+    } finally {
+        fetcher.restore();
+        Object.assign(globalThis, prior);
     }
 });

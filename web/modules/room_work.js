@@ -196,7 +196,7 @@ export function createRoomWork({
     const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
-    const surface = element('div', 'rw-surface scroll-fade-y rw-shade');
+    const surface = element('div', 'rw-surface rw-shade');
     surface.id = `${uid}-surface`;
     surface.hidden = true;
     surface.tabIndex = -1;  // where a pointer open lands: a landing point, never a control
@@ -213,7 +213,10 @@ export function createRoomWork({
     const extras = element('div', 'rw-extras');
     // A failed start heads the list: the same state the capsule says, with Restart beside it (host_starting_status.js).
     const failure = createStartFailure(doc, { restart: () => confirmAndSendRestart({ openConfirmDialog, ws }) });
-    surface.append(...[head, failure.el, list, note, extras].filter(Boolean));
+    const scroll = element('div', 'rw-shade-body scroll-fade-y');
+    scroll.tabIndex = -1;  // where a pointer open lands: the inner scrollport, never a control
+    scroll.append(...[head, failure.el, list, note, extras].filter(Boolean));
+    surface.append(scroll);
     // A zero-height anchor under the bar: the list follows the bar's real height at every width. Main's
     // header floats over the transcript, so its anchor is the header's own last child at its bottom edge.
     const shadeAnchor = element('div', 'rw-shade-anchor');
@@ -269,7 +272,7 @@ export function createRoomWork({
     const detailNames = new Map();
     const detailReads = new Set();
     const disposers = [];
-    disposers.push(bindScrollFade(surface));
+    disposers.push(bindScrollFade(scroll));
     const listen = (target, type, fn, options) => {
         if (!target?.addEventListener) return;
         target.addEventListener(type, fn, options);
@@ -927,6 +930,22 @@ export function createRoomWork({
         });
     }
 
+    function firstControl() {
+        const enabled = (node) => Boolean(node) && !node.hidden && !node.disabled;
+        const restart = !failure.el.hidden ? failure.el.querySelector('.btn') : null;
+        if (enabled(restart)) return restart;
+        for (const row of list.children) {
+            if (row.hidden) continue;
+            const main = row.querySelector('.rw-main');
+            if (enabled(main) && main.tabIndex === 0 && main.getAttribute('role') === 'button') return main;
+            const action = [...row.querySelectorAll('.rw-action')].find(enabled);
+            if (action) return action;
+            const more = row.querySelector('.rw-more');
+            if (enabled(more)) return more;
+        }
+        return [...extras.children].find((node) => enabled(node) && (node.tagName === 'BUTTON' || node.tabIndex >= 0)) || null;
+    }
+
     function openSurface(viaKeyboard = false) {
         if (open || destroyed || trigger.disabled || trigger.hidden) return;
         open = true;
@@ -936,9 +955,10 @@ export function createRoomWork({
         surface.hidden = false;
         openHost?.setAttribute('data-rw-open', '');
         render();
-        // A pointer open lands on the (ring-less) list; a keyboard open enters its first real control.
-        const first = viaKeyboard ? list.querySelector('.rw-main[tabindex="0"], .rw-action, .rw-more') : null;
-        (first || surface).focus?.({ preventScroll: true });
+        // A pointer open lands on the (ring-less) inner scrollport so PageDown scrolls it at once;
+        // a keyboard open enters the first enabled control.
+        const first = viaKeyboard ? firstControl() : null;
+        (first || scroll).focus?.({ preventScroll: true });
     }
 
     function close({ restoreFocus = true } = {}) {

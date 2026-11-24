@@ -96,7 +96,7 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel scroll-fade-y';
     page.innerHTML = `
-        <div class="logs-filters"><div class="logs-kinds app-tab-strip" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
+        <div class="logs-filters"><div class="logs-kinds app-tab-strip scroll-fade-x" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
             Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
         }</div><button type="button" class="btn btn-default logs-clear-list" id="btn-clear-logs">Clear</button></div>
         <section class="ui-card logs-card">

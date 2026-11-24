@@ -23,10 +23,10 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `web/ui.css` ← tokens, the locked control box, material and the shared parts, listed once in its register of parts; `style.css` composes pages (Dashboard tab body, shell/card geometry, System's edge-free shadow).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
 - `page_header.js` / `page_icons.js` / `fluent_glyphs.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (the strip, `segment_fill.js`), icons.
-- `ui_interactions.js` ← `bindDialogFocus`, `bindMenu`, `bindPopoverPosition`, `bindEnterSubmit`; every binding returns teardown.
+- `ui_interactions.js` ← dialog focus, menus, popup position, Send keys, each with teardown. Popup/dialog bodies fade, not shells.
 - `ui_hint.js` ← the one hint: a control's words over the page (DESIGN "Hints").
 - `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press; `gesture_tail.js` ← release click (DESIGN §10).
-- `scroll_fade.js` ← `bindScrollFade` (edges), `restoreFocusWithoutReveal`.
+- `scroll_fade.js` ← `bindScrollFade` (x/y), `restoreFocusWithoutReveal`.
 - `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` / `logs_types.js` ← browser API calls with typed errors; mirrors of browser-facing contract shapes.
 - `ui_primitives.js` ← safe fields, tone/status, attribute escaping, action results (`setResult`, `clearResultOnEdit`, `errorWords`); `ui_helpers.js`/`utils.js` re-export it.
 - `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), `copyTextToClipboard`, older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).

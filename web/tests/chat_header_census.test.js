@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, PREVIEW_SCOPE, installDom, restoreDom, toastMessages, walkCard } from './chat_dom_fixture.js';
 import { projection, room, SERVER_CASES, work } from './work_fixture.js';
 import { resumeAttemptWords, workLine } from '../modules/work_status.js';
 
@@ -41,13 +41,15 @@ function makeInstance({ details = {}, calls = [], state = { census: null }, chat
         // `state.census` is what a fetched /api/state answers with (null = idle);
         // `state.fail` makes the read reject like a dropped connection.
         if (state.fail) throw new Error('offline');
+        // The served document proves the fixture's profile scope (chat_dom_fixture.PREVIEW_SCOPE), so its history
+        // answers must prove the same one (gateway/history.py, #3294); an answer without it is a page the core never serves.
         if (String(url).startsWith('/api/chat/history') && state.pages) {
             const cursor = new URL(String(url), 'http://local').searchParams.get('cursor') || 'recent';
             assert.ok(state.pages.has(cursor), cursor);
-            return { ok: true, json: async () => state.pages.get(cursor) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...state.pages.get(cursor) }) };
         }
         if (String(url).startsWith('/api/chat/history') && state.history) {
-            return { ok: true, json: async () => ({ messages: state.history, window: { complete: true } }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: state.history, window: { complete: true } }) };
         }
         return { ok: true, json: async () => state.census || { active_direct_turns: [] } };
     });
@@ -865,7 +867,7 @@ for (const [chatId, asPanel, refused] of [[1, false, true], [7, true, true], [1,
             release();
             for (let i = 0; i < 20 && reads() === before; i += 1) await fx.settle();
             await fx.settle();
-            const toasts = collect(page, (node) => node?.classList?.contains('toast')).map((node) => node.textContent);
+            const toasts = toastMessages(page);
             // A refusal is said as a running card says it; an accepted Stop says nothing.
             assert.equal(toasts.some((text) => text.startsWith('Cancel failed: durable cancel intent could not be recorded')),
                 refused, toasts);
@@ -921,8 +923,7 @@ for (const [chatId, asPanel] of [[1, false], [7, true]]) {
             page.isConnected = true;
             globalThis.document.body = page;
             const item = (action) => collect(page, (node) => node?.dataset?.taskControl === action).at(-1);
-            const refusals = () => collect(page, (node) => node?.classList?.contains('toast'))
-                .filter((node) => node.textContent.startsWith('Cancel failed:')).length;
+            const refusals = () => toastMessages(page).filter((text) => text.startsWith('Cancel failed:')).length;
             try {
                 fx.handlers.get('chat')({ chat_id: chatId, task_id: 'p', role: 'assistant', is_progress: true, cancelable: true,
                     content: 'Handing the survey to a helper', ts: '2026-10-19T09:00:00Z' });

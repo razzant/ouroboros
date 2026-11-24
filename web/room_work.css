@@ -154,8 +154,9 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     color: var(--text-primary);
 }
 .rw-surface[hidden] { display: none; }
-/* A pointer open lands on the list itself: a landing point, not a control, so no ring is drawn there. */
-.rw-surface:focus { outline: none; }
+/* A pointer open lands on the list's inner scrollport: a landing point, not a control, so no ring is drawn there. */
+.rw-surface:focus,
+.rw-shade-body:focus { outline: none; }
 @keyframes rw-unfold { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 /* The list is a floating sheet with its own material (DESIGN principle 2): the opaque neutral sheet, the float
    shadow and the sheet radius, never the room's ink or a bar's backing, so it stands the same under any header. A
@@ -170,14 +171,16 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     right: var(--rw-right, 0px);
     box-sizing: border-box;
     max-height: min(60svh, 28rem);
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border: 1px solid transparent;
     border-radius: var(--radius-sheet);
     background: var(--sheet-float);
     box-shadow: var(--elev-float);
     animation: rw-unfold var(--motion-fade) var(--ease-sheet);
 }
+.rw-shade-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 /* Main and Project: the header floats over the transcript, so its anchor hangs from the header's bottom edge. */
 :is(.chat-page-header, .project-panel-bar) > .rw-shade-anchor { position: absolute; left: 0; right: 0; top: 100%; height: 0; z-index: 30; }
 /* Main's history note hangs on the place an open list covers, so it waits behind the list (Project's note is in

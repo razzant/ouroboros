@@ -632,7 +632,9 @@ const MARKDOWN_LINK = /(!?)\[([^\]]+)\]\([ \t]*((?:[^()\s]|\([^()\s]*\))+)(?:[ \
 export function renderMarkdown(text, { inlineHeadingBreaks = false } = {}) {
     let html = escapeHtmlText(text);
     const code = codeStash(html);
-    html = html.replace(MARKDOWN_FENCED_CODE, (_, body) => code.token(`<pre><code>${body}</code></pre>`));
+    html = html.replace(MARKDOWN_FENCED_CODE, (_, body) => code.token(
+        `<div class="md-code-block"><pre class="md-compact-code scroll-fade-x"><code>${body}</code></pre></div>`,
+    ));
     // One pass for both span forms: a double-backtick span may contain backticks.
     html = html.replace(CODE_SPAN, (match, _tick, body) => code.holds(body)
         ? match : code.token(`<code class="inline-code">${body}</code>`));
@@ -678,7 +680,7 @@ export function renderMarkdown(text, { inlineHeadingBreaks = false } = {}) {
         t += '<tbody>';
         for (let i = headIdx + 1; i < rows.length; i++) t += parseRow(rows[i], 'td');
         t += '</tbody></table>';
-        return '<div class="md-table-wrap">' + t + '</div>';
+        return '<div class="md-table-wrap scroll-fade-x">' + t + '</div>';
     });
     return code.restore(html);
 }

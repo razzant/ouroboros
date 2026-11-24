@@ -16,6 +16,7 @@ import pytest
 
 from ouroboros import projects_registry as registry
 from tests._shared import producer_evidence_dir
+from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401  pytest fixture: the real SPA over a static server
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
@@ -452,6 +453,187 @@ def test_files_preview_modes_keep_write_capability_honest(direct_server_with_dat
             assert "truncated" in page.locator("#files-preview-meta").inner_text()
         finally:
             browser.close()
+
+
+@pytest.fixture(params=["webkit", "chromium"])
+def files_ui(request, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    ui = request.getfixturevalue("subscription_ui")
+    ui["engine"] = request.param
+    return ui
+
+
+PREVIEW_FACTS = """() => {
+    const el = document.querySelector('#files-preview-content'), active = document.activeElement;
+    return {tabindex: el.getAttribute('tabindex'), role: el.getAttribute('role'), label: el.getAttribute('aria-label'),
+            overflows: el.scrollHeight > el.clientHeight + 1, scrollTop: el.scrollTop,
+            active: active === el ? 'preview' : active.classList.contains('files-editor') ? 'editor' : active.id || active.tagName};
+}"""
+FRAMES = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+
+
+def test_a_read_only_files_preview_is_a_keyboard_region_while_it_overflows_and_no_other_preview_is(files_ui):
+    """A big file's truncated text is shown read-only: a scrollport with nothing in it to focus, which WebKit gives no
+    keyboard entry. While its extra text overflows it is a named region the keyboard enters and scrolls (the shared
+    binder's region, no second mechanism); once the window holds it all it is no stop. The editor keeps its one stop (its
+    textarea) in a window too short for it, and an image, a PDF and a note gain none."""
+    ui, engine = files_ui, files_ui["engine"]
+    tab = "Alt+Tab" if engine == "webkit" else "Tab"
+    page = ui["new_page"](viewport={"width": 1280, "height": 560})
+    fixture = _files_gateway(page)
+    fixture["content"]["large.txt"] = "\n".join(f"line {i:03d} of a read-only preview, longer than the box it is read in" for i in range(1, 81))
+    page.goto(ui["url"] + "/")
+    page.wait_for_selector("#page-chat")
+    page.click('[data-nav-page="files"]')
+    page.wait_for_selector("#page-files.active .files-entry")
+
+    def facts(step):
+        seen = page.evaluate(PREVIEW_FACTS)
+        print(f"FILES_PREVIEW {engine} {step} {json.dumps(seen)}")
+        return seen
+
+    def choose(name, shows):
+        page.locator(".files-entry").filter(has_text=name).click()
+        page.wait_for_function("t => document.querySelector('#files-preview-path').textContent.includes(t)", arg=name)
+        if shows:
+            page.wait_for_function(shows)
+        page.evaluate(FRAMES)
+
+    # 1. The overflowing read-only text: Tab from the header's last action enters it, a key scrolls it, and it is named.
+    choose("large.txt", "document.querySelector('#files-preview-content').textContent.startsWith('line 001')")
+    assert facts("read-only")["overflows"], "the window is too short for the text"
+    page.locator("#files-open-external").focus()
+    page.keyboard.press(tab)
+    entered = facts("entered")
+    assert entered["active"] == "preview", ("the keyboard enters the overflowing read-only text", entered)
+    _capture(page, f"files-{engine}-read-only-region-entered")
+    page.keyboard.press("PageDown")
+    page.wait_for_function("document.querySelector('#files-preview-content').scrollTop > 0")
+    named = facts("scrolled")
+    assert (named["tabindex"], named["role"], named["label"]) == ("0", "region", "File contents"), named
+
+    # 2. The stop lasts while the text overflows: a window that holds it all has none, and the short one has it again.
+    page.set_viewport_size({"width": 1280, "height": 2400})
+    page.wait_for_function("(() => { const el = document.querySelector('#files-preview-content'); return el.scrollHeight <= el.clientHeight + 1; })()")
+    page.evaluate(FRAMES)
+    fits = facts("fits")
+    assert not fits["overflows"] and (fits["tabindex"], fits["role"], fits["label"]) == (None, None, None), fits
+    page.set_viewport_size({"width": 1280, "height": 420})
+    page.wait_for_function("document.querySelector('#files-preview-content').getAttribute('tabindex') === '0'")
+
+    # 3. The editor of a small file in the same short window: the page overflows around its textarea, which stays the one stop.
+    choose("sample.txt", "document.querySelector('.files-editor')")
+    editor = facts("editor")
+    assert editor["overflows"], ("the short window overflows around the editor", editor)
+    assert (editor["tabindex"], editor["role"], editor["label"]) == (None, None, None), ("no second stop around the textarea", editor)
+    _capture(page, f"files-{engine}-editor-short-window")
+    page.locator(".files-editor").focus()
+    page.keyboard.press("Alt+Shift+Tab" if engine == "webkit" else "Shift+Tab")
+    assert facts("before-editor")["active"] != "preview", "the textarea's stop is not preceded by a second one"
+    page.locator("#files-open-external").focus()
+    page.keyboard.press(tab)
+    assert facts("into-editor")["active"] == "editor", "one Tab from the last header action reaches the textarea"
+
+    # 4. The read-only text takes its stop back; an image, a PDF and a note never gain one.
+    choose("large.txt", "document.querySelector('#files-preview-content').textContent.startsWith('line 001')")
+    page.wait_for_function("document.querySelector('#files-preview-content').getAttribute('tabindex') === '0'")
+    for name in ("picture.png", "paper.pdf", "archive.bin"):
+        choose(name, None)
+        other = facts(name)
+        assert (other["tabindex"], other["role"], other["label"]) == (None, None, None), (name, other)
+    assert fixture["writes"] == []
+
+
+FADE_PROBE_INIT = """(() => {
+    const probe = window.__fadeProbe = {records: [], seq: 0};
+    const idOf = (el) => (el.__fadeProbeId === undefined ? (el.__fadeProbeId = ++probe.seq) : el.__fadeProbeId);
+    for (const kind of ['ResizeObserver', 'MutationObserver']) {
+        const Original = window[kind];
+        if (!Original) continue;
+        const Wrapped = function (callback) {
+            const instance = new Original(callback);
+            const record = {kind, targets: [], disconnected: false};
+            probe.records.push(record);
+            const observe = instance.observe.bind(instance), disconnect = instance.disconnect.bind(instance);
+            instance.observe = (target, ...rest) => { record.targets.push(idOf(target)); return observe(target, ...rest); };
+            instance.disconnect = () => { record.disconnected = true; return disconnect(); };
+            return instance;
+        };
+        Wrapped.prototype = Original.prototype;
+        window[kind] = Wrapped;
+    }
+})()"""
+FADE_PROBE = """() => {
+    const el = document.querySelector('#files-preview-content');
+    return {previewId: el ? el.__fadeProbeId : null, above: el?.hasAttribute('data-scroll-above') || false,
+            below: el?.hasAttribute('data-scroll-below') || false, role: el?.getAttribute('role') || null,
+            label: el?.getAttribute('aria-label') || null,
+            records: (window.__fadeProbe?.records || []).map((r, i) => ({i, kind: r.kind, targets: r.targets, disconnected: r.disconnected}))};
+}"""
+
+
+def test_a_page_really_going_releases_the_preview_binding_the_last_file_left(files_ui):
+    """Files rebinds the preview's scroll decoration with every file shown, so at the end the binding live on it is
+    never the one the shell was handed at boot. A page kept for its return (bfcache) keeps that live binding; a page
+    really going releases it — the latest one — and the decoration stops publishing. Synthetic observers record which
+    bindings followed the preview and whether each was disconnected: the evidence is those runtime facts."""
+    ui, engine = files_ui, files_ui["engine"]
+    page = ui["new_page"](viewport={"width": 1280, "height": 560})
+    page.add_init_script(FADE_PROBE_INIT)
+    fixture = _files_gateway(page)
+    fixture["content"]["large.txt"] = "\n".join(f"line {i:03d} of a read-only preview, longer than the box it is read in" for i in range(1, 81))
+    page.goto(ui["url"] + "/")
+    page.wait_for_selector("#page-chat")
+    page.click('[data-nav-page="files"]')
+    page.wait_for_selector("#page-files.active .files-entry")
+
+    def choose(name, shows):
+        page.locator(".files-entry").filter(has_text=name).click()
+        page.wait_for_function("t => document.querySelector('#files-preview-path').textContent.includes(t)", arg=name)
+        if shows:
+            page.wait_for_function(shows)
+        page.evaluate(FRAMES)
+
+    def probe(step):
+        seen = page.evaluate(FADE_PROBE)
+        followed = [r for r in seen["records"] if seen["previewId"] in r["targets"]]
+        print(f"FILES_FADE {engine} {step} live={[(r['i'], r['kind']) for r in followed if not r['disconnected']]} "
+              f"spent={[(r['i'], r['kind']) for r in followed if r['disconnected']]} above={seen['above']} "
+              f"role={seen['role']} label={seen['label']}")
+        return seen, followed
+
+    # Three files in turn on the one preview: the boot binding Files swapped out and the two before the latest are
+    # spent; the newest one — the read-only text, named as a region while it overflows — is live.
+    choose("large.txt", "document.querySelector('#files-preview-content').textContent.startsWith('line 001')")
+    choose("sample.txt", "document.querySelector('.files-editor')")
+    choose("large.txt", "document.querySelector('#files-preview-content').textContent.startsWith('line 001')")
+    page.wait_for_function("document.querySelector('#files-preview-content').getAttribute('tabindex') === '0'")
+    seen, followed = probe("swapped")
+    live = [r for r in followed if not r["disconnected"]]
+    assert len(followed) >= 4, ("every binding that followed the preview is recorded", followed)
+    assert sorted(r["kind"] for r in live) == ["MutationObserver", "ResizeObserver"], ("only the newest binding is live", followed)
+    assert all(r["disconnected"] for r in followed[: -len(live)]), ("the boot and earlier bindings are spent", followed)
+
+    # A page kept for its return keeps it: the decoration still follows a scroll and the region stands.
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}))")
+    page.evaluate("document.querySelector('#files-preview-content').scrollTop = 12")
+    page.evaluate(FRAMES)
+    seen, followed = probe("kept")
+    assert [r["i"] for r in followed if not r["disconnected"]] == [r["i"] for r in live], ("a kept page keeps its live binding", followed)
+    assert seen["above"] and (seen["role"], seen["label"]) == ("region", "File contents"), seen
+
+    # A page really going releases the live binding — the last file's, not the spent boot one — and the decoration
+    # stops publishing even after another scroll.
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false}))")
+    page.evaluate(FRAMES)
+    seen, followed = probe("gone")
+    assert all(r["disconnected"] for r in followed), ("the page really going releases every binding that followed the preview", followed)
+    assert not seen["above"] and not seen["below"] and (seen["role"], seen["label"]) == (None, None), seen
+    page.evaluate("document.querySelector('#files-preview-content').scrollTop = 20")
+    page.evaluate(FRAMES)
+    seen, _ = probe("after-scroll")
+    assert not seen["above"] and not seen["below"], ("a released binding no longer publishes edges", seen)
+    assert fixture["writes"] == []
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])

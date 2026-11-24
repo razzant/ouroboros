@@ -34,7 +34,8 @@ class Node extends Events {
         this.disabled = false;
         this.rect = { left: 0, top: 0, right: 100, bottom: 30, width: 100, height: 30 };
         this.classes = new Set();
-        this.classList = { toggle: (name, active) => active ? this.classes.add(name) : this.classes.delete(name) };
+        this.classList = { toggle: (name, active) => active ? this.classes.add(name) : this.classes.delete(name),
+            contains: (name) => this.classes.has(name) };
         this.css = new Map();
         this.style = { setProperty: (key, value) => this.css.set(key, value) };
     }
@@ -44,6 +45,7 @@ class Node extends Events {
     }
     set tabIndex(value) { this.setAttribute('tabindex', String(value)); }
     setAttribute(key, value) { this.attrs.set(key, String(value)); }
+    toggleAttribute(key, force) { if (force) this.setAttribute(key, ''); else this.removeAttribute(key); }
     getAttribute(key) { return this.attrs.get(key) ?? null; }
     removeAttribute(key) { this.attrs.delete(key); }
     matches(selector) {
@@ -62,7 +64,15 @@ class Node extends Events {
     closest(selector) { return this.matches(selector) ? this : this.parent?.closest(selector) || null; }
     contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
     querySelectorAll(selector) { return this.children.flatMap((child) => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]); }
-    append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+    get childNodes() { return this.children; }
+    get firstElementChild() { return this.children[0] || null; }
+    append(...nodes) {
+        for (const node of nodes) {
+            if (node.parent) node.parent.children = node.parent.children.filter(child => child !== node);
+            node.parent = this;
+            this.children.push(node);
+        }
+    }
     getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [this.rect] : []; }
     getBoundingClientRect() { return this.rect; }
     // The laid-out size, as a browser reports it without the element's own transform.
@@ -78,10 +88,12 @@ function environment() {
         ResizeObserver: Observer, MutationObserver: Observer,
         requestAnimationFrame: () => 1, cancelAnimationFrame() {},
         getComputedStyle: (node) => ({ visibility: node.visibility || 'visible',
-            scrollPaddingInlineStart: node.scrollPadding || '0px', scrollPaddingInlineEnd: node.scrollPadding || '0px',
+            scrollPaddingLeft: node.scrollPadding || '0px', scrollPaddingRight: node.scrollPadding || '0px',
             scrollPaddingTop: node.scrollPadding || '0px', scrollPaddingBottom: node.scrollPadding || '0px',
-            overflowY: node.overflowY || 'visible', getPropertyValue: name => name === '--scroll-fade-edge' ? '32px' : '' }),
+            overflowY: node.overflowY || 'visible', getPropertyValue: name => ({
+                '--scroll-fade-edge': '32px', '--scroll-fade-inline-edge': '16px' })[name] || '' }),
     });
+    doc.createElement = tag => new Node(doc, tag);
     doc.body = new Node(doc, 'body');
     doc.activeElement = doc.body;
     return { doc, node: (tag, attrs) => new Node(doc, tag, attrs) };
@@ -235,11 +247,11 @@ test('restored/offscreen tab scrolls only its strip, and hidden-page resize obse
 
 test('revealed tabs keep the strip padding clear of the edge fade', () => {
     const { strip, tabs, controller } = tabFixture();
-    strip.clientWidth = 200; strip.clientLeft = 0; strip.scrollLeft = 0;
+    strip.clientWidth = 200; strip.clientLeft = 0; strip.scrollLeft = 0; strip.scrollWidth = 600;
     strip.scrollPadding = '16px'; strip.rect = {left: 20, right: 220};
     tabs[2].rect = {left: 300, right: 370};
     controller.select('three');
-    assert.equal(strip.scrollLeft, 166);
+    assert.equal(strip.scrollLeft, 182, '150px to the edge, plus 16px of padding inside the 16px fade');
     controller.destroy();
 });
 
@@ -680,4 +692,24 @@ test('composition, a held key and an unavailable field or button send nothing', 
     assert.equal(field.enterKeyHint, undefined);
     press();
     assert.equal(sent(), 1);
+});
+
+// The dialog body wears the one shared edge cue while its dialog is mounted (ui_interactions.bindDialogFocus);
+// closing releases that binding. The edge travel and the mask's disposal are measured in scroll_fade.test.js.
+test('the shared dialog body fades while mounted and releases its binding on close', () => {
+    const { node } = environment();
+    const worn = new Set();
+    const body = node('div');
+    body.classList = { add: (name) => worn.add(name), remove: (name) => worn.delete(name),
+        contains: (name) => worn.has(name),
+        toggle: (name, force) => { const on = force === undefined ? !worn.has(name) : Boolean(force);
+            if (on) worn.add(name); else worn.delete(name); return on; } };
+    const dialog = node('div', { role: 'dialog' });
+    dialog.querySelector = (selector) => (selector === '.ui-modal-body' ? body : null);
+    const quiet = body.listenerCount();
+    const dispose = bindDialogFocus(dialog);
+    assert.equal(body.classList.contains('scroll-fade-y'), true, 'the open dialog body wears the shared cue');
+    assert.ok(body.listenerCount() > quiet, 'the cue is bound on the body itself');
+    dispose();
+    assert.equal(body.listenerCount(), quiet, 'closing the dialog releases the body cue');
 });

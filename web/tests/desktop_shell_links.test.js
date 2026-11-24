@@ -13,6 +13,7 @@ import {
     openExternalViaHostBridge,
 } from '../modules/ui_helpers.js';
 import { createLoginCardController } from '../modules/harness_login_cards.js';
+import { domDouble } from './dom_double.js';
 
 const BASE = 'http://127.0.0.1:8765/';
 
@@ -358,25 +359,10 @@ test('the parent pywebviewready listener is released when the framed document un
 
 // --- bridge refusal degrades to copy-link ---------------------------------
 
-// Minimal DOM the shared toast host needs; the copy path itself only needs
-// window.navigator.clipboard here.
+// Observe notices mounted in the document, not assignments to textContent.
 function toastDocument() {
-    const toasts = [];
-    const node = () => ({
-        classList: { add() {}, contains: () => false },
-        style: { setProperty() {} },
-        children: [],
-        offsetTop: 0, offsetWidth: 0, offsetHeight: 0,
-        setAttribute() {},
-        removeAttribute() {},
-        hasAttribute: () => false,
-        appendChild() {},
-        addEventListener() {},
-        remove() {},
-        set textContent(value) { toasts.push(value); },
-        get textContent() { return toasts.at(-1) || ''; },
-    });
-    return { toasts, doc: { getElementById: () => null, createElement: () => node(), body: { appendChild() {} } } };
+    const { doc } = domDouble();
+    return { doc, get toasts() { return doc.querySelectorAll('.toast').map((toast) => toast.textContent); } };
 }
 
 function bridgeRefusalWindow(api, copied) {
@@ -669,11 +655,15 @@ test('the agent login card never writes to the clipboard without a fallback', as
     await card.start('codex', '');
     const prior = { window: globalThis.window, document: globalThis.document };
     const said = toastDocument();
-    const page = copyPage();
+    const copied = [];
+    said.doc.execCommand = (command) => {
+        const field = said.doc.activeElement;
+        copied.push({ command, tag: field.tagName, text: field.selected ? field.value : '' });
+        return true;
+    };
     try {
         globalThis.window = { navigator: {} };
-        globalThis.document = { ...said.doc, querySelectorAll: () => [], execCommand: (command) => page.execCommand(command),
-            createElement: (tag) => (tag === 'textarea' ? page.createElement() : said.doc.createElement(tag)) };
+        globalThis.document = said.doc;
         for (const control of ['[data-copy-signin-link]', '[data-copy-device-code]', '[data-copy-attach]']) {
             assert.ok(presses.has(control), `${control} is mounted and wired`);
             presses.get(control)();
@@ -684,8 +674,8 @@ test('the agent login card never writes to the clipboard without a fallback', as
         globalThis.document = prior.document;
         card.detach();
     }
-    assert.deepEqual(page.seen, ['https://example.test/login', 'CODE-42', 'fixture-attach --job job-1']
-        .map((text) => ({ command: 'copy', tag: 'area', text })));
+    assert.deepEqual(copied, ['https://example.test/login', 'CODE-42', 'fixture-attach --job job-1']
+        .map((text) => ({ command: 'copy', tag: 'TEXTAREA', text })));
     assert.deepEqual(said.toasts, ['Sign-in link copied.', 'Code copied.', 'Command copied.']);
 });
 

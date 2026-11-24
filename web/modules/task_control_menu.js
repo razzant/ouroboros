@@ -17,6 +17,8 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { showToast } from './toast.js';
 import { fmt, tr, tx } from './i18n.js';
+import { bindScrollFade, restoreFocusWithoutReveal } from './scroll_fade.js';
+import { popupScrollBody } from './ui_interactions.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -563,6 +565,7 @@ let openMenu = null;
 let openTrigger = null;
 let stopMenuWatcher = null;
 let focusReturnTimer = null;
+let disposeMenuFade = null;
 
 const MENU_MARGIN = 8;
 const MENU_GAP = 4;
@@ -571,7 +574,7 @@ function clamp(value, minimum, maximum) {
     return Math.min(Math.max(value, minimum), Math.max(minimum, maximum));
 }
 
-function positionTaskControlMenu(anchor, menu) {
+function positionTaskControlMenu(anchor, menu, body) {
     if (!anchor?.isConnected || !menu?.isConnected) {
         closeTaskControlMenu();
         return false;
@@ -584,10 +587,8 @@ function positionTaskControlMenu(anchor, menu) {
     }
 
     const menuRect = menu.getBoundingClientRect();
-    // scrollHeight preserves the intrinsic item height if the viewport-level
-    // fallback max-height has already constrained the rendered border box.
-    const borderHeight = Math.max(0, menuRect.height - menu.clientHeight);
-    const naturalHeight = Math.max(menuRect.height, menu.scrollHeight + borderHeight);
+    const chrome = Math.max(0, menuRect.height - body.clientHeight);
+    const naturalHeight = body.scrollHeight + chrome;
     const spaceAbove = Math.max(0, anchorRect.top - MENU_GAP - MENU_MARGIN);
     const spaceBelow = Math.max(
         0,
@@ -617,7 +618,7 @@ function watchTaskControlMenu(anchor, menu) {
     const closeForViewportChange = (event) => {
         // A height-clamped portal is its own scrollport. Scrolling it does not
         // move the trigger, so keep it open; ancestor/page scroll may move it.
-        if (event.type === 'scroll' && event.target === menu) return;
+        if (event.type === 'scroll' && (event.target === menu || (event.target?.nodeType === 1 && menu.contains(event.target)))) return;
         // Nor does a scroller that does not hold the trigger: the chat feed re-anchoring behind a floating list
         // (a late history page, a refit) cannot have moved it.
         if (event.type === 'scroll' && event.target?.nodeType === 1 && !event.target.contains(anchor)) return;
@@ -659,25 +660,27 @@ function finishOutsidePointerFocusReturn(trigger) {
     clearPendingFocusReturn();
     focusReturnTimer = window.setTimeout(() => {
         focusReturnTimer = null;
-        if (!openMenu && trigger?.isConnected) trigger.focus();
+        if (!openMenu && trigger?.isConnected) restoreFocusWithoutReveal(trigger);
     }, 0);
 }
 
-export function closeTaskControlMenu() {
+export function closeTaskControlMenu({ returnFocus = false } = {}) {
     clearPendingFocusReturn();
     const menu = openMenu;
     const trigger = openTrigger;
-    const restoreFocus = Boolean(menu?.contains(document.activeElement));
+    const restoreFocus = menu && (returnFocus || menu.contains(document.activeElement));
     const stopWatching = stopMenuWatcher;
     stopMenuWatcher = null;
     stopWatching?.();
+    disposeMenuFade?.();
+    disposeMenuFade = null;
     menu?.remove();
     openMenu = null;
     trigger?.setAttribute?.('aria-expanded', 'false');
     openTrigger = null;
     document.removeEventListener('pointerdown', onOutsidePointer, true);
     document.removeEventListener('keydown', onMenuKeydown, true);
-    if (restoreFocus && trigger?.isConnected) trigger.focus();
+    if (restoreFocus && trigger?.isConnected) restoreFocusWithoutReveal(trigger);
 }
 
 function onOutsidePointer(event) {
@@ -748,6 +751,7 @@ export function openTaskControlMenu(anchor, {
     const menu = document.createElement('div');
     menu.className = 'task-control-menu';
     menu.setAttribute('role', 'menu');
+    const body = popupScrollBody(menu);
     for (const action of offered) {
         const item = document.createElement('button');
         item.type = 'button';
@@ -758,16 +762,19 @@ export function openTaskControlMenu(anchor, {
         if (busy) item.disabled = true;
         item.addEventListener('click', (event) => {
             event.stopPropagation();
-            closeTaskControlMenu();
+            // WebKit needn't give a pressed button focus. The action still hands this menu's focus back.
+            closeTaskControlMenu({ returnFocus: true });
             run(action);
         });
-        menu.appendChild(item);
+        body.appendChild(item);
     }
     document.body.appendChild(menu);
     openMenu = menu;
     openTrigger = anchor;
     stopMenuWatcher = watchTaskControlMenu(anchor, menu);
-    if (!positionTaskControlMenu(anchor, menu)) return null;
+    if (!positionTaskControlMenu(anchor, menu, body)) return null;
+    // A height-clamped menu scrolls its own items; the cue follows them (the portal is its own scrollport).
+    disposeMenuFade = bindScrollFade(body);
     // A11y: keyboard users land on the first actionable item on open.
     menu.querySelector('button:not(:disabled)')?.focus?.();
     document.addEventListener('pointerdown', onOutsidePointer, true);

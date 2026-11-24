@@ -880,7 +880,24 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     const { showToast } = await import('../modules/toast.js');
     const { installDomDouble } = await import('./dom_double.js');
     const env = installDomDouble();
-    t.after(() => env.restore());
+    const observer = globalThis.ResizeObserver;
+    const observers = [];
+    globalThis.ResizeObserver = class {
+        constructor(callback) {
+            this.callback = callback;
+            this.observed = new Set();
+            this.unobserved = [];
+            observers.push(this);
+        }
+        observe(target) { this.observed.add(target); }
+        unobserve(target) {
+            this.observed.delete(target);
+            this.unobserved.push(target);
+        }
+        disconnect() { this.observed.clear(); }
+        trigger() { this.callback(); }
+    };
+    t.after(() => { env.restore(); globalThis.ResizeObserver = observer; });
     const make = env.doc.createElement;
     let cut = true;  // the double has no layout: the stack's measured height is given (the browser lane measures it)
     env.doc.createElement = (tag) => Object.defineProperties(make(tag), {
@@ -890,30 +907,91 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     const words = announceMembershipGap({ rows, count: 23 }, 'resume');
     const stack = env.doc.getElementById('toast-stack');
     const toast = stack.querySelector('.toast-warn');
+    assert.equal(observers.length, 1, 'the page stack and its notices share one ResizeObserver');
+    assert.ok(observers[0].observed.has(stack) && observers[0].observed.has(toast));
     const [box, close] = toast.children;
-    assert.equal(box.className, 'toast-words');
+    assert.equal(box.className, 'toast-words scroll-fade-y');
     assert.equal(box.textContent, words, 'every name stays in the notice');
     assert.match(words, /\(00-f+, 01-f+, .*, 19-f+, …\); whether they belong here is unknown\.$/);
     assert.ok(!box.hasAttribute('tabindex'), 'the words never scroll on their own: the stack does');
     assert.deepEqual([stack.tabIndex, stack.getAttribute('role'), stack.getAttribute('aria-label')],
         [0, 'region', 'Scrollable notices']);
     assert.equal(close.getAttribute('aria-label'), 'Dismiss notice');
+    // The words a cut column's edge hides carry the shared edge and the column's window; padding the column scrolls
+    // into hides none. The double has no layout, so the places are given: a 40 px window over words 10-310 px down.
+    toast.offsetTop = 0;
+    toast.rect = { left: 0, right: 100, width: 100, top: 0, bottom: 330, height: 330 };
+    box.rect = { left: 0, right: 80, width: 80, top: 10, bottom: 310, height: 300 };
+    const edge = (at) => {
+        stack.scrollTop = at;
+        stack.emit('scroll');
+        return [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')];
+    };
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px'], 'cut at the bottom: the window begins above the words');
+    assert.deepEqual(edge(100), [true, true, '90px', '40px'], 'cut at both edges');
+    assert.deepEqual(edge(290), [true, false, '280px', '40px'], 'cut at the top');
+    assert.deepEqual(edge(320), [false, false, '', ''], 'words wholly out of sight show no edge');
+    box.rect = { ...box.rect, bottom: 30, height: 20 };
+    assert.deepEqual(edge(0), [false, false, '', ''], 'words inside the window show none, though the column scrolls');
+    box.rect = { ...box.rect, bottom: 310, height: 300 };
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px']);
+    // A notice above growing inside a capped column shifts this notice without resizing the stack; the shared
+    // ResizeObserver recomputes --toast-view-top for the shifted words.
+    toast.offsetTop = 20;
+    observers[0].trigger();
+    assert.deepEqual(
+        [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')],
+        [false, true, '-30px', '40px'], 'shifted within the window moves --toast-view-top to the real cut',
+    );
+    toast.offsetTop = 0;
+    observers[0].trigger();
+    assert.deepEqual(
+        [box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+            box.style.getPropertyValue('--toast-view-top'), box.style.getPropertyValue('--toast-view-height')],
+        [false, true, '-10px', '40px'],
+    );
+    cut = false;  // released: the next measure clears the edge
+    stack.emit('scroll');
+    assert.deepEqual([box.hasAttribute('data-scroll-above'), box.hasAttribute('data-scroll-below'),
+        box.style.getPropertyValue('--toast-view-top')], [false, false, ''], 'a column that fits fades nothing');
+    cut = true;
+    assert.deepEqual(edge(0), [false, true, '-10px', '40px']);
+    toast.classList.add('is-hiding');  // a notice on its way out is left as it was
+    assert.deepEqual(edge(320), [false, true, '-10px', '40px']);
+    toast.classList.remove('is-hiding');
     cut = false;
     toast.dispose();
+    assert.ok(observers[0].observed.has(stack) && !observers[0].observed.has(toast),
+        'disposing a notice stops observing it while keeping the stack watched');
     assert.ok(!stack.hasAttribute('tabindex') && !stack.hasAttribute('role') && !stack.hasAttribute('aria-label'),
         'once everything fits again the stack is no keyboard stop');
-    const short = showToast('One short notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' }).children[0];
-    assert.equal(short.className, 'toast-words');
+    const shortNotice = showToast('One short notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' });
+    const short = shortNotice.children[0];
+    assert.equal(short.className, 'toast-words scroll-fade-y');
     assert.ok(!stack.hasAttribute('tabindex'), 'words that fit make no keyboard stop');
     const plain = showToast('Saved.', 'ok', { ttl: 0 });
     assert.equal(plain.querySelector('.toast-words')?.textContent, 'Saved.');
     assert.equal(plain.querySelector('.toast-dismiss')?.getAttribute('aria-label'), 'Dismiss notice',
         'a non-expiring toast always has a keyboard-reachable close');
+    assert.equal(observers.length, 1, 'additional global notices reuse the stack observer');
+    assert.ok(observers[0].observed.has(shortNotice) && observers[0].observed.has(plain));
+    shortNotice.dispose();
+    plain.dispose();
+    plain.dispose();
+    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain],
+        'every observed global notice is unobserved once on dispose');
+    assert.deepEqual([...observers[0].observed], [stack], 'only the page stack remains observed');
     cut = true;  // a room's stack keeps its own place: never the page's scrolling region
     const host = env.doc.createElement('div');
     env.doc.body.append(host);
-    showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
+    const room = showToast('A room notice.', 'warn', { ttl: 0, dismissLabel: 'Dismiss notice', host });
     assert.ok(!host.querySelector('.toast-stack--room').hasAttribute('tabindex'));
+    assert.equal(observers.length, 1, 'room stacks create no ResizeObserver');
+    assert.ok(!observers[0].observed.has(room), 'room notices are not observed by the page stack observer');
+    room.dispose();
+    assert.deepEqual(observers[0].unobserved, [toast, shortNotice, plain]);
 });
 
 test('two unconfirmed effects are worded in the plural, as on the server', () => {

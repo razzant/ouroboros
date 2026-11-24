@@ -95,7 +95,8 @@ def open_app(ui, *, width, scheme, history=HISTORY):
             route.abort()
     page.add_init_script(FAKES)
     page.route("**/*", only_this_origin)
-    page.route("**/api/chat/history*", lambda route: route.fulfill(content_type="application/json", body=json.dumps(history)))
+    page.route("**/api/chat/history*", lambda route: route.fulfill(
+        content_type="application/json", body=json.dumps({**history, "profile_scope": setup_browser.PREVIEW_SCOPE})))
     page.set_viewport_size({"width": width, "height": 750 if width > 620 else 844})
     page.emulate_media(color_scheme=scheme)
     page.goto(ui["url"] + "/")
@@ -382,3 +383,104 @@ def test_in_telegram_the_bot_prepares_the_shown_words_and_a_room_leaving_cancels
     setup_browser.capture(page, f"share-telegram-card-{width}-{scheme}")
     page.keyboard.press("Escape")
     sheet.wait_for(state="detached")
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_choose_excerpt_fades_wide_verbatim_blocks_inside_unmasked_tray(request, monkeypatch, engine):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", engine)
+    subscription_ui = request.getfixturevalue("subscription_ui")
+    wide_code = "const excerptLine = '" + ("alpha_beta_gamma_" * 10) + "';"
+    wide_table = "| Metric | " + " | ".join(f"Column {i}" for i in range(1, 9)) + " |\n|---|" + "---|" * 8 + "\n| Value | " + " | ".join(str(10000 + i) for i in range(1, 9)) + " |"
+    answer = {**HISTORY["messages"][1], "text": f"Short lead paragraph.\n\n```js\n{wide_code}\n```\n\n{wide_table}\n\n```js\nshort();\n```"}
+    page, _ = open_app(subscription_ui, width=390, scheme="dark", history={"messages": [answer], "progress": []})
+    page.locator(".chat-bubble.assistant [data-message-action='share']").click()
+    sheet = page.locator(".message-share[open]")
+    sheet.wait_for()
+    assert sheet.locator(".message-share-text").evaluate(
+        "el => getComputedStyle(el).whiteSpace === 'pre-wrap' && el.scrollWidth <= el.clientWidth + 1")
+    sheet.locator("[data-share-action='choose']").click()
+    sheet.locator(".message-share-code").first.wait_for()
+    page.wait_for_function("() => [...document.querySelectorAll('.message-share-code')].slice(0, 2).every(p => p.hasAttribute('data-scroll-end'))")
+    code = sheet.locator(".message-share-code")
+    for index, label in enumerate(("Code excerpt", "Table excerpt")):
+        part = code.nth(index)
+        assert part.get_attribute("role") == "region" and part.get_attribute("aria-label") == label
+        assert part.evaluate("el => !el.closest('[role=checkbox]')")
+    assert code.nth(2).get_attribute("tabindex") is None
+    tab = "Alt+Tab" if engine == "webkit" else "Tab"
+    sheet.locator(".message-share-part").first.focus()
+    page.keyboard.press(tab)
+    assert code.first.evaluate("el => document.activeElement === el && el.scrollLeft === 0")
+    page.keyboard.down("ArrowRight")  # WebKit's native scroll needs a key held through a frame
+    try:
+        page.wait_for_function("() => document.querySelector('.message-share-code').scrollLeft > 0", timeout=5000)
+    finally:
+        page.keyboard.up("ArrowRight")
+    page.keyboard.press(tab)
+    chooser = sheet.locator(".message-share-part.is-code").first.get_by_role("checkbox")
+    assert chooser.evaluate("el => document.activeElement === el")
+    # The bare checkbox shows the same token ring as the rows it sits among.
+    ring = chooser.evaluate("""el => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--focus-accent-border)';
+        el.closest('.message-share').append(probe);
+        const token = getComputedStyle(probe).color;
+        probe.remove();
+        const style = getComputedStyle(el);
+        return { token, color: style.outlineColor, width: style.outlineWidth, line: style.outlineStyle,
+            visible: el.matches(':focus-visible') };
+    }""")
+    assert ring["visible"] is True, "the focused checkbox was not shown as focused"
+    assert (ring["line"], ring["width"]) == ("solid", "2px") and ring["color"] == ring["token"], ring
+    setup_browser.capture(page, f"share-choose-check-focus-{engine}")
+    page.keyboard.press("Space")
+    assert chooser.get_attribute("aria-checked") == "true"
+    # Words selected elsewhere in the list do not mute the checkbox's own activation; a pointer press then only puts
+    # the selection away, and a drag that selected words is a selection, not a tap on the part it lands in.
+    def select_words():
+        page.evaluate("""() => {
+            const span = document.querySelector('.message-share-part:not(.is-code):not(.is-table) [data-share-run]');
+            const range = document.createRange();
+            range.setStart(span.firstChild, 0);
+            range.setEnd(span.firstChild, span.firstChild.length);
+            getSelection().removeAllRanges();
+            getSelection().addRange(range);
+        }""")
+        page.wait_for_function("() => document.querySelector('.message-share-count').textContent.startsWith('3 of ')")
+
+    select_words()
+    page.keyboard.press("Space")
+    assert chooser.get_attribute("aria-checked") == "false"
+    select_words()
+    page.keyboard.press("Enter")
+    assert chooser.get_attribute("aria-checked") == "true"
+    select_words()
+    chooser.click()
+    assert chooser.get_attribute("aria-checked") == "true" and page.evaluate("() => getSelection().isCollapsed")
+    prose = sheet.locator(".message-share-part").first
+    word = prose.locator("[data-share-run]").first
+    word_box = word.bounding_box()
+    page.mouse.move(word_box["x"] + 2, word_box["y"] + word_box["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(word_box["x"] + word_box["width"] - 2, word_box["y"] + word_box["height"] / 2, steps=10)
+    page.mouse.up()
+    assert page.evaluate("() => getSelection().toString()").strip(), "the drag selected no words to read"
+    assert prose.get_attribute("aria-checked") == "false" and chooser.get_attribute("aria-checked") == "true"
+    seen = sheet.evaluate("""dialog => {
+        const prose = dialog.querySelector('.message-share-part:not(.is-code):not(.is-table) .message-share-words');
+        const codes = [...dialog.querySelectorAll('.message-share-code')];
+        codes[0].scrollLeft = 120;
+        codes[0].dispatchEvent(new Event('scroll'));
+        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve({
+            proseCode: prose.querySelectorAll('.message-share-code').length,
+            pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+            traysUnmasked: codes.every((p) => !p.parentElement.classList.contains('scroll-fade-x')
+                && ['none', ''].includes(getComputedStyle(p.parentElement).webkitMaskImage || '')),
+            first: [codes[0].classList.contains('scroll-fade-x'), codes[0].scrollWidth - codes[0].clientWidth > 1,
+                codes[0].hasAttribute('data-scroll-start'), codes[0].hasAttribute('data-scroll-end')],
+            second: [codes[1].classList.contains('scroll-fade-x'), codes[1].scrollWidth - codes[1].clientWidth > 1,
+                codes[1].hasAttribute('data-scroll-start'), codes[1].hasAttribute('data-scroll-end')],
+        }))));
+    }""")
+    assert seen["proseCode"] == 0 and seen["pageOverflow"] <= 0 and seen["traysUnmasked"], seen
+    assert seen["first"][:3] == [True, True, True] and seen["second"] == [True, True, False, True], seen

@@ -2,8 +2,9 @@
 Reply and Copy and in the row menu; a page module that registers its provider and writes into the draft beside one
 that throws (one notice, the page keeps working); the "+" menu's skill sections and host items doing their verbs by
 pointer and keyboard; contributed chips on the capsule row at 320, 360 and 1280 px in both themes, folding into one
-"+N" whose list holds the rest; and the start ledger: a module whose start the page did not outlive is held next time
-and named with Start it, `?hold=all` holds every module for one load, and the chat header offers no reload door."""
+"+N" whose list holds the rest; the start ledger: a module whose start the page did not outlive is held next time
+and named with Start it, `?hold=all` holds every module for one load, and the chat header offers no reload door; and a
+Widgets card menu's "Shown in chat" group, which hides and shows back press after press and follows every refresh."""
 from __future__ import annotations
 
 import json
@@ -44,24 +45,26 @@ def _chip(index, action=None):
                  action=action or {"verb": "notice", "text": f"Meter {index} pressed"})
 
 
-def projection(chips=0, chip_action=None):
+def projection(chips=0, chip_action=None, hidden=(), without=()):
+    """`hidden`: the owner's hidden keys; `without`: skills whose placed controls are gone (uninstalled, say)."""
+    items = [
+        _item("templates:simpler", placement="composer.plus", label="Explain simpler", icon="sparkle", order=10,
+              action={"verb": "draft.insert", "text": "Explain your last answer more simply."}),
+        _item("lists:add", placement="composer.plus", label="Add to list", icon="list", order=20,
+              action={"verb": "skill.request", "route": "add", "with": "draft", "then": "clear_draft",
+                      "url": "/api/extensions/lists/add"}, route_url="/api/extensions/lists/add"),
+        _item("lists:save", placement="message.action", label="Save to list", title="Keep this answer in a list",
+              icon="list", action={"verb": "notice", "text": "Saved to Groceries"}),
+        _item("voice:tts", provides="tts", runtime="client", destination="device", skill_label="Device voice",
+              label="Device voice", render={"kind": "host", "url": VOICE_URL}),
+        _item("broken:panel", placement="composer.plus", action={"verb": "notice", "text": "unused"},
+              render={"kind": "host", "url": BROKEN_URL}),
+        *(_chip(index, chip_action) for index in range(1, chips + 1)),
+    ]
     return {
-        "contributions": [
-            _item("templates:simpler", placement="composer.plus", label="Explain simpler", icon="sparkle", order=10,
-                  action={"verb": "draft.insert", "text": "Explain your last answer more simply."}),
-            _item("lists:add", placement="composer.plus", label="Add to list", icon="list", order=20,
-                  action={"verb": "skill.request", "route": "add", "with": "draft", "then": "clear_draft",
-                          "url": "/api/extensions/lists/add"}, route_url="/api/extensions/lists/add"),
-            _item("lists:save", placement="message.action", label="Save to list", title="Keep this answer in a list",
-                  icon="list", action={"verb": "notice", "text": "Saved to Groceries"}),
-            _item("voice:tts", provides="tts", runtime="client", destination="device", skill_label="Device voice",
-                  label="Device voice", render={"kind": "host", "url": VOICE_URL}),
-            _item("broken:panel", placement="composer.plus", action={"verb": "notice", "text": "unused"},
-                  render={"kind": "host", "url": BROKEN_URL}),
-            *(_chip(index, chip_action) for index in range(1, chips + 1)),
-        ],
+        "contributions": [item for item in items if item["skill"] not in without],
         "offers": {"stt": []}, "voice": {}, "icons": [], "problems": {},
-        "preferences": {"voice": {"stt": "", "tts": ""}, "contributions": {"hidden": [], "order": []}},
+        "preferences": {"voice": {"stt": "", "tts": ""}, "contributions": {"hidden": list(hidden), "order": []}},
     }
 
 
@@ -83,7 +86,8 @@ def open_app(ui, path="/", *, width=1280, scheme="dark", state=None):
     page.route("**/*", lambda route: route.fallback()
                if urlparse(route.request.url).netloc == origin else route.abort())
     page.route("**/api/ui/contributions*", lambda route: route.fulfill(
-        content_type="application/json", body=json.dumps(projection(state["chips"], state.get("chip_action")))))
+        content_type="application/json", body=json.dumps(projection(
+            state["chips"], state.get("chip_action"), state.get("hidden", ()), state.get("without", ())))))
     page.route("**/api/chat/history*", lambda route: route.fulfill(
         content_type="application/json", body=json.dumps(HISTORY)))
 
@@ -371,3 +375,111 @@ def test_a_start_the_page_did_not_outlive_is_held_next_time_and_the_bar_offers_n
     page.wait_for_function("Array.isArray(window.voiceContext)")
     assert loaded.count(VOICE_URL) == 1
     page.wait_for_function("""() => !(JSON.parse(localStorage.getItem('ouroboros.holds') || '{}').entries || {})['module:voice:tts']""")
+
+
+# One card's menu as widgets.js finds it: in its card while closed, on body beside its expanded trigger while open.
+_WIDGET_MENU = """(key) => {
+    const card = document.querySelector(`[data-widget-key="${key}"]`);
+    const menu = card.querySelector('.skills-card-menu-dialog') || (card.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')
+        ? document.querySelector('body > .skills-card-menu-dialog[open]') : null);
+    const focused = document.activeElement?.dataset || {};
+    return { open: Boolean(menu?.open), display: menu ? getComputedStyle(menu).display : '',
+             groups: [...(menu?.querySelectorAll('[role="group"]') || [])].map((group) => group.getAttribute('aria-label')),
+             shown: Object.fromEntries([...(menu?.querySelectorAll('[data-widget-contribution-key]') || [])]
+                 .map((item) => [item.dataset.widgetContributionKey, item.getAttribute('aria-checked')])),
+             focused: focused.widgetContributionKey || focused.widgetStartMode || '' };
+}"""
+
+
+def test_a_widget_card_menu_hides_and_shows_a_skills_control_press_after_press(subscription_ui):
+    """The Widgets card menu's "Shown in chat" (widget_card.js) after `bindMenu` holds the menu's rows in its scrolling
+    body: each press says the opposite of the last, and the group follows the store open or closed, keeps the focused
+    control, leaves with the skill's controls and comes back in its place before Size."""
+    state = {"chips": 0, "hidden": [], "without": []}
+    page, _loaded, _posted = open_app(subscription_ui, state=state)
+    saves = []
+
+    def preferences(route):
+        if route.request.method != "POST":
+            route.fulfill(content_type="application/json", body="{}")
+            return
+        change = (route.request.post_data_json or {}).get("contributions") or {}
+        saves.append(change)
+        kept = [key for key in state["hidden"] if key not in change.get("show", [])]
+        state["hidden"] = kept + [key for key in change.get("hide", []) if key not in kept]
+        route.fulfill(content_type="application/json",
+                      body=json.dumps({"contributions": {"hidden": state["hidden"], "order": []}}))
+
+    page.route("**/api/ui/preferences", preferences)
+    manual = {"kind": "module", "entry": "widget.js", "height": 160, "start": "manual"}
+    tabs = [{"skill": "lists", "tab_id": "board", "title": "Groceries", "render": manual},
+            {"skill": "plain", "tab_id": "clock", "title": "Clock", "render": manual}]
+    page.route("**/api/widgets", lambda route: route.fulfill(content_type="application/json", body=json.dumps({"ui_tabs": tabs})))
+    page.locator('[data-nav-page="widgets"]').click()
+    card = page.locator('[data-widget-key="lists:board"]')
+    card.locator("[data-widget-facade]").wait_for()
+    order = ["Move", "Launch policy", "Shown in chat", "Size", "Height", "Run"]
+    item = "body > .skills-card-menu-dialog[open] [data-widget-contribution-key='{}']".format
+
+    def menu(**expect):
+        """The menu's facts once they include `expect` (5 s at most), else as they stand."""
+        for _ in range(100):
+            facts = page.evaluate(_WIDGET_MENU, "lists:board")
+            if all(facts[name] == value for name, value in expect.items()):
+                break
+            page.wait_for_timeout(50)
+        return facts
+
+    def saved(count):
+        for _ in range(100):
+            if len(saves) >= count:
+                return
+            page.wait_for_timeout(50)
+
+    def refresh():  # the store's own read, as a socket open or another window's arrangement starts it
+        page.evaluate("() => import('/static/modules/contributions.js').then((m) => m.getContributions().refresh())")
+
+    card.locator("[data-widget-menu-trigger]").click()
+    first = menu(open=True)
+    page.locator(item("lists:save")).click()
+    saved(1)
+    hidden = menu(open=False, shown={"lists:add": "true", "lists:save": "false"})
+    card.locator("[data-widget-menu-trigger]").click()
+    reopened = menu(open=True)
+    page.locator(item("lists:save")).click()
+    saved(2)
+    shown = menu(open=False, shown={"lists:add": "true", "lists:save": "true"})
+    assert saves == [{"hide": ["lists:save"]}, {"show": ["lists:save"]}], ("hidden, then shown back", saves)
+    assert first["groups"] == order and first["shown"] == {"lists:add": "true", "lists:save": "true"}, first
+    assert hidden["shown"] == {"lists:add": "true", "lists:save": "false"}, ("the closed menu follows the store", hidden)
+    assert hidden["display"] == "none", ("a closed menu stays out of view", hidden)
+    assert reopened["groups"] == order and reopened["shown"] == hidden["shown"], reopened
+    assert shown["shown"] == {"lists:add": "true", "lists:save": "true"} and shown["display"] == "none", shown
+
+    # Open, another window hides the other control: the group is redrawn in place and keeps the focused one.
+    card.locator("[data-widget-menu-trigger]").click()
+    menu(open=True)
+    page.locator(item("lists:save")).focus()
+    state["hidden"] = ["lists:add"]
+    refresh()
+    live = menu(shown={"lists:add": "false", "lists:save": "true"})
+    setup_browser.capture(page, "widgets-menu-shown-in-chat")
+    assert live["open"] and live["shown"] == {"lists:add": "false", "lists:save": "true"}, live
+    assert live["focused"] == "lists:save", ("the redrawn group keeps the focused control", live)
+    # The skill's controls leave: so does the group; they come back: it stands again before Size.
+    page.locator("body > .skills-card-menu-dialog[open] [data-widget-start-mode='manual']").focus()
+    state["without"] = ["lists"]
+    refresh()
+    gone = menu(groups=[name for name in order if name != "Shown in chat"])
+    assert gone["open"] and gone["groups"] == [name for name in order if name != "Shown in chat"], gone
+    state["without"] = []
+    refresh()
+    back = menu(groups=order)
+    assert back["open"] and back["groups"] == order and back["shown"] == {"lists:add": "false", "lists:save": "true"}, back
+    page.keyboard.press("Escape")
+    closed = menu(open=False)
+    assert closed["display"] == "none" and closed["groups"] == order, closed
+    card.locator("[data-widget-menu-trigger]").click()
+    again = menu(open=True)
+    assert again["groups"] == order and again["shown"] == back["shown"], again
+    assert "Shown in chat" not in page.evaluate(_WIDGET_MENU, "plain:clock")["groups"], "a skill without placed controls has none"
