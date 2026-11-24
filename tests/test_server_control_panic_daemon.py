@@ -267,21 +267,24 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
 def test_indexed_stop_never_holds_panic_exit(monkeypatch, tmp_path, failure):
     """An indexed stop is independent of the hard exit, just like other owners."""
     release = threading.Event()
+    expired = threading.Event()
     diagnostics = []
 
     def indexed(_root):
         if failure == "raises":
             raise OSError("index unreadable")
-        assert release.wait(10), "Panic waited for indexed settlement before its own exit"
+        if not release.wait(10):
+            expired.set()
         return {"state": "completed"}
 
-    def report_exit(_root):
-        # This callback runs before the hard exit; release only after inspecting the request.
+    def report_exit(code):
+        # Release only at the hard exit, after its diagnostic captured the unfinished request.
         release.set()
+        raise _ExitCalled(code)
 
     def configure():
         monkeypatch.setattr("ouroboros.owned_shutdown.panic_owned_work", indexed)
-        monkeypatch.setattr("ouroboros.server_control._persist_panic_controls", report_exit)
+        monkeypatch.setattr("ouroboros.server_control.os._exit", report_exit)
 
     try:
         _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True,
@@ -290,6 +293,7 @@ def test_indexed_stop_never_holds_panic_exit(monkeypatch, tmp_path, failure):
         if failure == "raises":
             assert request["requested"] is False and "index unreadable" in request["error"]
         else:
-            assert release.is_set()  # persistence/exit was reached without waiting for this stop
+            assert release.is_set() and not expired.is_set()
+            assert request == "unfinished", "Panic must report the blocked request before releasing it"
     finally:
         release.set()

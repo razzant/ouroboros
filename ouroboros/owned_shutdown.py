@@ -22,7 +22,7 @@ reads it. finish_unconfirmed_stops retries exact stamped targets before admissio
 extensions, under the same bound, retaining survivors. start_inherited_import indexes
 older on-disk records once on a background thread, never delaying startup or exit.
 Panic stamps indexed work with zero lock wait, leaving native held-process requests to
-their current owners and bounded measured stops to orphaned kept services only.
+their current owners; indexed stops cover kept services not held in this process.
 """
 
 from __future__ import annotations
@@ -844,7 +844,7 @@ def panic_owned_work(drive_root: Any) -> Dict[str, Any]:
     from ouroboros.tools import services
 
     # Existing native request owners signal their held processes first, without any census.
-    # Only session services left behind by another worker need this indexed owner.
+    # Session services not held in this process need this indexed owner.
     held = {record.proc.pid for record in services._SERVICES.copy().values()}
     targets = [entry for entry in targets if entry.get("kind") == "supervised"
                and entry.get("scope") == "session" and entry.get("host_pid") not in held
