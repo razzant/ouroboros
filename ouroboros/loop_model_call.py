@@ -208,9 +208,7 @@ def _run_cross_model_fallback_chain(
         return (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
                 and waiter is not None and waiter.waits_allowed)
 
-    def owner_switched(role: str) -> bool:  # a card's Switch during this walk; an earlier card's choice is no new one
-        # ``TaskModelWait.wait`` stores a NEW entry on every Switch, even one naming the held binding again; Retry and
-        # auto-continue leave the entry as it was. So identity, never equal fields, tells this walk's Switch.
+    def owner_switched(role: str) -> bool:  # Switch during this walk (entry identity, not field equality)
         entry = waiter.overrides.get(role) if waiter is not None else None
         return bool(entry) and entry is not held_choices.get(role)
 
@@ -247,6 +245,7 @@ def _run_cross_model_fallback_chain(
             _adopt_view_facts(slot, context_fit_plan, active_context_mode)
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
         settle_copied_contributions(slot)  # the failed trial's copies go; the restored rows kept their notes
+        output_recovery.trial_left()  # a trial's saved claim is replaced once by the view the walk returns to
 
     def prepare(model, use_local, role, is_primary, predecessor, *, account=None, defer=True):
         basis, rows, schemas, mode = _fallback_rows(source, model, slot)
@@ -270,11 +269,11 @@ def _run_cross_model_fallback_chain(
             attempt_cap=1 if recovering_output else attempt_cap, model_role=role, emit_progress=emit_progress,
             defer_resource_wait=defer, output_recovery_fallback=recovering_output,
             fallback_is_primary=is_primary, fallback_source=source if is_primary is not None else None,
-            fallback_predecessor=predecessor, fallback_entry_failure=entry_failure)
+            fallback_predecessor=predecessor, fallback_entry_failure=entry_failure,
+            fallback_held_override=held_choices.get(role) if is_primary is not None else None)
 
     def adopt(call, mode, own_call, *, answered, fresh=True):
-        from ouroboros.lead_fact import adopt_fallback
-
+        from ouroboros.lead_fact import adopt_fallback, fallback_trial_choice
         shown = messages[0] if messages else None
         model, local, plan, mode = _adopt_fallback_route(ctx, call, messages, tool_schemas, mode)
         if plan is not None:
@@ -286,7 +285,8 @@ def _run_cross_model_fallback_chain(
             round_idx=round_idx, answered=answered, own_call=own_call)
         if not is_primary:
             slot.route_wait_on_primary = False
-        adopt_fallback(slot, is_primary, entry_failure, role, explicit("wait_card") if owner_switched(call.model_role) else None)
+        adopt_fallback(slot, is_primary, entry_failure, role, fallback_trial_choice(slot, call, waiter))
+        output_recovery.trial_left(adopted=True, answered=answered)  # a no-reply end is saved with the adopted route
         emit_progress(fallback_adoption_text(slot, model, local, role, waiter, accumulated_usage,
                                              answered=answered, own_call=own_call, fresh=fresh))
         return model, local, plan, mode
@@ -324,7 +324,7 @@ def _run_cross_model_fallback_chain(
         tried.append(fallback_model)
         failure_before, meta_before = accumulated_usage.get("_last_llm_failure"), accumulated_usage.get("_last_llm_call_meta")
         tools._ctx._pending_handover_reason = reason or "fallback"
-        msg, _cost, candidate_mode = _loop()._call_round_model(candidate_call)
+        msg, _cost, candidate_mode = output_recovery.trial_call(candidate_call, restore_acting_view)
         previous_model, previous_use_local = candidate_call.active_model, candidate_call.active_use_local
         fresh = accumulated_usage.get("_last_llm_failure") is not failure_before  # output recovery's gate sends nothing, keeps it
         if deferred is None and msg is None and not recovering_output:
@@ -379,7 +379,7 @@ def _run_cross_model_fallback_chain(
             slot.route_choice = explicit("wait_card")
         slot._pending_handover_reason = "owner_wait"
         meta_before = accumulated_usage.get("_last_llm_call_meta")
-        msg, _cost, retry_mode = _loop()._call_round_model(retry_call)
+        msg, _cost, retry_mode = output_recovery.trial_call(retry_call, restore_acting_view)
         answered = msg is not None
         exhausted = (accumulated_usage.get("_last_llm_error_kind") == output_recovery.KIND
                      and not accumulated_usage.get("_pending_transport_outcome"))
@@ -694,6 +694,7 @@ class _RoundModelCallContext:
     fallback_source: Optional[tuple] = None  # acting plan, rows, schemas, mode and model, before the route walk
     fallback_predecessor: Optional[dict] = None
     fallback_entry_failure: Optional[dict] = None
+    fallback_held_override: Any = None  # pre-card role override; a newer entry identity means this trial switched
     refused_density: Optional[float] = None  # the size refusal in recovery: its own density, until the recovery sends
     refusal_policy: Optional[Dict[str, bool]] = None  # a refusal pass's bodies view: did a provider start the round (06.11)
 
@@ -1032,8 +1033,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     ctx.active_model, ctx.active_use_local, ctx.model_role = model, use_local, role
     ctx.tools._ctx.active_model = model
     ctx.tools._ctx.active_use_local = use_local
-    waiter = current_model_wait()
-    if waiter is not None and waiter.overrides.get(role):  # the owner's card choice holds for the rest of the task
+    from ouroboros.lead_fact import wait_card_switched
+    if wait_card_switched(ctx, role, current_model_wait()):  # the owner's card choice holds for the rest of the task
         from ouroboros.route_choice import explicit
         ctx.tools._ctx.route_choice = explicit("wait_card")
     _fit_route_tool_ceiling(ctx)  # an owner's switch may land on a route with a schema ceiling

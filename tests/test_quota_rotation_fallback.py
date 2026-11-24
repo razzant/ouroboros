@@ -547,6 +547,264 @@ def test_an_owners_switch_stays_the_owners_choice_after_the_backup_answers(main_
         assert tools._ctx.route_choice == explicit("fallback") and lead["basis"] == "fallback" and lead["cause"] != "wait_card"
 
 
+_PICKED = {"model": "openai::owner-pick", "use_local": False, "model_account_override": ""}
+
+
+def _wait_card_walk(main_call, monkeypatch, preset=None):
+    """The walks below: Main, two configured routes and a live owner wait whose card may switch a route's role, with
+    the loop's own checkpoint writer bound to the round (``limit_ctx``)."""
+    from ouroboros import loop_model_call, route_choice
+
+    ctx, gateway, owner, *_rest = main_call
+    tools, _waiter, _reconciled = _two_route_walk(ctx, owner, monkeypatch, preset)
+    owner.overrides.clear()
+    owner.overrides.update(preset or {})
+    monkeypatch.setattr(model_wait, "current_model_wait", lambda: owner)
+    monkeypatch.setenv("OUROBOROS_MODEL", ctx.active_model)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, model, model_role="", **_kw: (
+        replace(plan, model=model, provider="openai", model_role=model_role or "main", model_route={}), "max"))
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *_a, **_kw: None)
+    monkeypatch.setattr(loop_llm_call, "_prepare_main_messages", lambda msgs, **_kw: msgs)
+    monkeypatch.setattr(loop_model_call, "_fit_route_tool_ceiling", lambda *_a, **_kw: None)
+    slot = tools._ctx
+    slot.task_id, slot.drive_root, slot.budget_drive_root = ctx.task_id, ctx.drive_root, ctx.drive_root
+    slot.task_model_override = slot.task_use_local_override = slot.task_route_source = None
+    slot.active_model, slot.active_use_local, slot.active_effort, slot.active_context_mode = (
+        ctx.active_model, False, "medium", "max")
+    slot.primary_route = {"model": ctx.active_model, "use_local": False, "role": "main"}
+    slot.route_choice, slot.model_wait_context, slot.event_queue = route_choice.following("main"), owner, queue.Queue()
+    return ctx, gateway, owner, tools, SimpleNamespace(
+        tools=tools, messages=ctx.messages, llm_trace={"tool_calls": []}, accumulated_usage=ctx.accumulated_usage,
+        owner_msg_seen=set(), round_idx=ctx.round_idx, tool_schemas=ctx.tool_schemas, budget_tail="tool")
+
+
+def _route(tool_ctx, primary):
+    """The work's next move and its chooser, its published lead, and what a child it starts inherits."""
+    from ouroboros import lead_fact, supervisor_route
+
+    lead = lead_fact.lead_fact(tool_ctx)
+    child = supervisor_route._inherited_cognition(tool_ctx, {"OUROBOROS_MODEL": primary})
+    return {"model": tool_ctx.active_model, "choice": tool_ctx.route_choice,
+            "lead": (lead["model"], lead["basis"], lead.get("cause")),
+            "child": (child["model"], child["chosen_by"], child.get("follows_role"))}
+
+
+def _resumed_route(ctx, saved, primary):
+    """``_route`` of a new attempt restored from one saved working state, as a lost worker's successor starts."""
+    from ouroboros import owner_wait
+    from ouroboros.tools.registry import ToolRegistry
+
+    rtools = ToolRegistry(repo_dir=ctx.drive_root, drive_root=ctx.drive_root)
+    rctx = rtools._ctx
+    rctx.task_id, rctx.task_attempt, rctx.drive_root, rctx.budget_drive_root, rctx.task_metadata = (
+        ctx.task_id, 2, ctx.drive_root, ctx.drive_root, {})
+    with model_wait.task_model_wait_scope(
+        task={"id": ctx.task_id, "_attempt": 2, "drive_root": str(ctx.drive_root)},
+        drive_root=ctx.drive_root, event_queue=None, worker_slot_held=False, owner_control=lambda: None,
+    ) as rwaiter:
+        rwaiter.restore_continuation(saved.get("model_wait") or {}, started_at=saved.get("started_at"))
+        rctx.model_wait_context = rwaiter
+        owner_wait.restore_continuation_state(rtools, saved, [], {}, {}, set())
+        rctx.context_fit_plan = SimpleNamespace(model=rctx.active_model, provider="openai",
+                                                model_role=saved.get("context_model_role") or "main")
+        return _route(rctx, primary)
+
+
+@pytest.mark.parametrize("answer", [
+    "switch", "retry", "earlier_switch", "reselect_same",
+    "switch_in_its_call", "retry_in_its_call_with_earlier_override", "failed_after_switch",
+])
+def test_intermediate_checkpoint_after_wait_card_matches_adoption(main_call, monkeypatch, answer):
+    """Intermediate checkpoint on output exhaustion matches adoption for parent and inheriting child."""
+    from ouroboros import loop_model_call, loop_output_exhaustion as output_recovery, route_choice, working_checkpoint as wc
+
+    picked = dict(_PICKED)
+    preset = ({"fallback:0": dict(picked)} if answer in {"earlier_switch", "reselect_same"}
+              else {"fallback:1": dict(picked)} if answer == "retry_in_its_call_with_earlier_override" else None)
+    ctx, _gw, owner, tools, limit_ctx = _wait_card_walk(main_call, monkeypatch, preset)
+    primary, slot = ctx.active_model, tools._ctx
+    asked, in_call = [], answer in {"switch_in_its_call", "retry_in_its_call_with_earlier_override"}
+
+    def ask_owner(_w):
+        asked.append(answer)
+        if answer in {"switch", "reselect_same", "failed_after_switch"}:
+            owner.overrides["fallback:0"] = dict(picked)
+            return dict(picked)
+        return {"model": "openai::one" if answer == "retry" else picked["model"], "use_local": False}
+
+    def in_call_transport(_llm, _msgs, _model, _schemas, *_a, model_role="", **_kw):
+        if answer == "switch_in_its_call":
+            owner.overrides[model_role] = dict(picked)
+        owner.reprepare(model_role, {"messages": list(ctx.messages), "model": picked["model"],
+                                     "use_local": False, "model_role": model_role, "tools": []})
+        ctx.accumulated_usage.update(_last_llm_error_kind=output_recovery.KIND,
+            _last_llm_output_exhausted={"finish_reason": "length", "model": picked["model"]})
+        return None, 0.0
+
+    def fake_once(call):
+        call.tools._ctx._deferred_resource_refusal = None
+        if in_call:
+            if call.model_role == "fallback:0":
+                call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+                return None, 0.0, "max"
+            return loop_model_call._dispatch_round_model(call, None, attempt_cap=1)[0], 0.0, call.active_context_mode
+        if not asked:
+            if call.model_role == "fallback:0":
+                call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
+                    fact={"reason": "quota", "reset_at": RESET}, ask_owner=ask_owner,
+                    terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
+                call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+            else:
+                call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+            return None, 0.0, "max"
+        if answer == "failed_after_switch":
+            call.accumulated_usage["_last_llm_error_kind"] = "bad_request"
+            return None, 0.0, "max"
+        call.accumulated_usage.update(_last_llm_error_kind=output_recovery.KIND,
+            _last_llm_output_exhausted={"finish_reason": "length", "model": call.active_model})
+        return None, 0.0, "max"
+
+    monkeypatch.setattr(loop_model_call, "_call_round_model_once", fake_once)
+    monkeypatch.setattr(loop, "call_llm_with_retry", in_call_transport)
+    with wc.model_call_scope(limit_ctx):
+        message, model, *_rest = _recover(ctx, tools, "bad_request")
+    if answer == "failed_after_switch":
+        assert message is None and model == primary and slot.route_choice == route_choice.following("main")
+        assert not wc.read_working(ctx.drive_root, ctx.task_id, 1)[1]
+        return
+
+    expected = "openai::one" if answer == "retry" else picked["model"]
+    assert message is None and model == expected
+    _, saved = wc.read_working(ctx.drive_root, ctx.task_id, 1)
+    assert saved and saved["route"]["active_model"] == expected
+    live, restored = _route(slot, primary), _resumed_route(ctx, saved, primary)
+    switched = answer in {"switch", "reselect_same", "switch_in_its_call"}
+    expected_choice = route_choice.explicit("wait_card" if switched else "fallback")
+    assert slot.route_choice == saved["route"]["route_choice"] == restored["choice"] == expected_choice
+    assert live["lead"][1:] == restored["lead"][1:] and live["child"][:2] == restored["child"][:2]
+    if switched:
+        assert restored["lead"][1:] == ("owner", "wait_card") and restored["child"][:2] == (expected, "parent_switch")
+    else:
+        assert restored["lead"][1] == "fallback" and restored["lead"][2] != "wait_card"
+        assert restored["child"] == (primary, "inherited", "main")
+
+
+@pytest.mark.parametrize("answer", [
+    "switch_fails", "retry_fails", "earlier_switch_fails", "switch_length", "switch_unsent", "switch_paused", "switch_stopped",
+])
+def test_work_lost_during_a_walk_for_an_unfinished_reply_resumes_on_the_live_route(main_call, monkeypatch, answer):
+    """An unfinished reply's owed turn claims every send of its round, the walk's trials included. Main refuses that
+    turn, B refuses on quota, the owner answers B's card. B's real request then fails with HTTP 400, ends empty at its
+    length limit, never leaves the host, or meets the owner's Pause or Stop between its saved claim and its send. Each
+    version written from B's claim to the walk's exit is one a lost worker resumes from: B's claim stays pending, so a
+    new execution ends it unrepeated, until B's end is saved once with the route the work keeps. A reverted B is
+    nobody's route, an adopted Switch stays the owner's, a Stop or Pause goes on unchanged, and no route is sent twice."""
+    import httpx
+    import openai
+    from ouroboros import loop_model_call, loop_output_exhaustion as output_recovery, pricing, request_wire_contract
+    from ouroboros import route_choice, working_checkpoint as wc
+    from ouroboros.llm import LLMClient
+
+    preset = {"fallback:0": dict(_PICKED)} if answer == "earlier_switch_fails" else None
+    ctx, gateway, owner, tools, limit_ctx = _wait_card_walk(main_call, monkeypatch, preset)
+    primary, slot, key, ctx.tools = ctx.active_model, tools._ctx, output_recovery.UNFINISHED_KEY, tools
+    adopted, control = answer == "switch_length", {"switch_paused": "owner_pause", "switch_stopped": "cancelled"}.get(answer)
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-not-live")
+    monkeypatch.setattr(request_wire_contract, "canonical_wire_evidence_root", lambda: ctx.drive_root)
+    monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *_a, **_kw: None)
+    monkeypatch.setattr(ua, "_reservation_cost", lambda _request: 1.0)
+    monkeypatch.setattr(LLMClient, "_get_supported_parameters", lambda *_a, **_kw: None)
+    sent, written, write = [], [], wc._write  # the routes' real HTTP sends; each working state, as written
+
+    def respond(request):
+        body = json.loads(request.content)
+        if answer == "switch_unsent" and body["model"] == "owner-pick":
+            raise httpx.ConnectError("connection refused", request=request)  # no request bytes left the host
+        sent.append(body["model"])
+        if not adopted or body["model"] != "owner-pick":
+            return httpx.Response(400, json={"error": {"message": "Upstream request failed"}})
+        delta, usage = {"role": "assistant", "content": ""}, {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0}
+        reply = {"id": "fake", "model": body["model"], "usage": usage, "choices": [
+            {"index": 0, "finish_reason": "length", "delta" if body.get("stream") else "message": delta}]}
+        if body.get("stream"):
+            frame = json.dumps({**reply, "object": "chat.completion.chunk"})
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=f"data: {frame}\n\ndata: [DONE]\n\n")
+        return httpx.Response(200, json={**reply, "object": "chat.completion"})
+
+    def recorded_write(*args, **kwargs):
+        write(*args, **kwargs)
+        written.append((len(sent), state := wc.read_working(ctx.drive_root, ctx.task_id, 1)[1]))
+        if control and asked and "pending" in state["usage"][key]:  # the owner's control lands after B's claim
+            monkeypatch.setattr(owner, "control_reason", lambda **_kw: control)
+
+    sdk = openai.OpenAI(api_key="fixture-not-live", base_url="https://synthetic.invalid/v1", max_retries=0,
+                        http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(ctx.llm, "_get_remote_client", lambda *_a, **_kw: sdk)
+    monkeypatch.setattr(wc, "_write", recorded_write)
+    refusal = {"code": "unsupported_parameter", "message": "unsupported_parameter"}
+    gateway.results = [result(outcome="failed", route=ROUTE, problem=refusal)]  # Main refuses
+    gateway.dispatch, asked, real_once = ["response_received"], [], loop_model_call._call_round_model_once
+
+    def ask_owner(_w):  # as ``TaskModelWait.wait`` answers: a Switch stores a new entry, a Retry the call's values
+        asked.append(len(written))
+        if answer.startswith("switch"):
+            owner.overrides["fallback:0"] = dict(_PICKED)
+            return dict(_PICKED)
+        return {"model": "openai::one" if answer == "retry_fails" else _PICKED["model"], "use_local": False}
+
+    def once(call):  # B's first request is refused on quota and retained for its card; every other send is real
+        call.tools._ctx._deferred_resource_refusal = None
+        if call.model_role == "fallback:0" and not asked:
+            call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
+                fact={"reason": "quota", "reset_at": RESET}, ask_owner=ask_owner,
+                terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
+            call.accumulated_usage["_last_llm_error_kind"] = "quota_exhausted"
+            return None, 0.0, "max"
+        return real_once(call)
+
+    monkeypatch.setattr(loop_model_call, "_call_round_model_once", once)
+    slot._round_response_facts = {"finish_reason": "length", "finish_reason_present": True}
+    cut = {"role": "assistant", "content": "Both files were read; the first count is 12, while the second"}
+    with wc.model_call_scope(limit_ctx):
+        assert output_recovery.unfinished_reply(limit_ctx, cut) is None  # its informed turn is owed
+        assert loop_model_call._call_round_model(ctx)[0] is None  # Main refuses the owed turn
+        assert ctx.accumulated_usage["_last_llm_error_kind"] == "bad_request"
+        try:
+            message, model, *_rest = loop._recover_failed_round(
+                ctx, tools, None, None, context_fit_plan=ctx.context_fit_plan, active_context_mode="max",
+                emit_progress=lambda *_a, **_kw: None)
+            stopped = None
+        except model_wait.ModelWaitInterrupted as interrupted:  # the owner's own control, as it was raised
+            message, model, stopped = None, slot.active_model, interrupted.control_reason
+
+    assert stopped == control
+    retried, reached = "one" if answer == "retry_fails" else "owner-pick", answer.endswith(("fails", "length"))
+    assert len(asked) == 1 and len(gateway.creates) == 1 and sent == ["two", *[retried] * reached]  # none sent twice
+    assert (message, model) == (None, _PICKED["model"] if adopted else primary)
+    live = _route(slot, primary)
+    assert live["choice"] == (route_choice.explicit("wait_card") if adopted else route_choice.following("main"))
+    assert slot.context_fit_plan.model == model  # the view a Pause or the next round saves
+    versions = written[asked[0]:]  # from B's claim to the walk's exit
+    claimed = versions[0][1]["usage"][key]["attempt_id"]
+    for sends, state in versions:
+        record = state["usage"][key]
+        assert (record["stage"], record["finishes"], record["attempt_id"]) == ("informed", ["length"], claimed)
+        if "pending" in record:  # B's claim, saved before its send: a new execution ends it unrepeated
+            probe = SimpleNamespace(accumulated_usage=json.loads(json.dumps(state["usage"])), active_context_mode="max",
+                                    tools=SimpleNamespace(_ctx=SimpleNamespace()))
+            output_recovery.call(probe, lambda _call: pytest.fail("a saved pending claim is never sent again"))
+            assert sends == 1 and probe.accumulated_usage["_last_llm_error_kind"] == "output_recovery_interrupted"
+        else:  # B's end (known, or refunded unsent: the turn stays owed), saved only with the route the work keeps
+            assert _resumed_route(ctx, state, primary) == live
+    assert [("pending" in state["usage"][key], sends) for sends, state in versions] == [(True, 1), (False, len(sent))]
+    if reached:  # the failure row saved with B's end is B's own
+        known = {name: ctx.accumulated_usage["_last_llm_failure"][name] for name in ("model", "failure_code", "physical_attempt_id")}
+        assert known["failure_code"] == (output_recovery.KIND if adopted else "bad_request") and known["physical_attempt_id"] == claimed
+        assert {name: versions[-1][1]["usage"]["_last_llm_failure"][name] for name in known} == known
+
+
 def test_owner_selected_account_rebinds_fallback_before_physical_send(main_call, monkeypatch):
     """An A->B switch on the refused fallback must bind B's capacity in the ledger.
 

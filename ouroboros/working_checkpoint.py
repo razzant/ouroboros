@@ -244,7 +244,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
         {key: value for key, value in usage.items() if key not in _TRANSIENT_USAGE},
         int(limit_ctx.round_idx), list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ()))
     if model_call is not None:  # a provisional alternative can checkpoint before route adoption
-        from ouroboros.route_choice import after_fallback
+        from ouroboros.lead_fact import fallback_trial_choice
 
         state["messages"] = model_call.messages
         state["tool_schemas"] = list(model_call.tool_schemas or [])
@@ -255,7 +255,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
         state["context_model_role"] = role
         if (primary := getattr(model_call, "fallback_is_primary", None)) is not None:
             failure = model_call.fallback_entry_failure or {}
-            state["route"].update(route_choice=after_fallback(ctx, primary), _route_facts_pending="",
+            state["route"].update(route_choice=fallback_trial_choice(ctx, model_call), _route_facts_pending="",
                                   _lead_role=role, _lead_cause=failure.get("failure_code") or "configured fallback",
                                   _lead_return_from=None, _lead_episode=None)
             if not primary:
@@ -289,6 +289,7 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None,
                                        create=True), data)
     written = time.perf_counter()
     ctx._working_checkpoint_seq, ctx._working_checkpoint_signature = seq, signature
+    ctx._working_checkpoint_trial = getattr(model_call, "fallback_is_primary", None) is not None  # a trial's claim
     stats = usage.setdefault("working_checkpoint", {"saves": 0, "max_bytes": 0, "encode_ms": 0.0, "write_ms": 0.0,
                                                     "parts_written": 0})
     stats.update(saves=stats["saves"] + 1, last_bytes=len(data), max_bytes=max(stats["max_bytes"], len(data)),
@@ -335,17 +336,17 @@ def model_call_scope(limit_ctx: Any):
         _MODEL_CALL.reset(token)
 
 
-def save_model_call(*, model_call: Any = None) -> None:
+def save_model_call(*, model_call: Any = None, trial_only: bool = False) -> None:
     """Usage-only transition: bypass ready's cognition signature, hold on write failure.
 
-    The accepted-response checkpoint later replaces this ready state. Until then
-    recovery sees an unconfirmed dispatch, even if the live receiver got an answer.
-    Direct calls without a recoverable loop have no working checkpoint.
+    The accepted-response checkpoint later replaces this ready state. Until then recovery sees an unconfirmed
+    dispatch, even if the live receiver got an answer. ``trial_only`` writes only over a configured route's trial
+    claim, as the fallback walk leaves it. Direct calls without a recoverable loop have no working checkpoint.
     """
     from ouroboros.budget_pause import _hold_until
 
     limit = _MODEL_CALL.get()
-    if limit is not None:
+    if limit is not None and (not trial_only or getattr(limit.tools._ctx, "_working_checkpoint_trial", False)):
         _hold_until(limit.tools._ctx, limit.accumulated_usage, HOLD_UNWRITABLE,
                     lambda: _write(limit.tools._ctx, limit, "ready", model_call=model_call), rail="working_checkpoint")
 
