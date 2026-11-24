@@ -267,9 +267,31 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
     return await send(f"{compact}\n{hint_text}"), True
 
 
-def _load(api) -> Dict[str, Any]:
-    data = _read_json_file(_state_file(api, _QUIZ_STATE_FILE))
-    data = data if isinstance(data, dict) else {}
+from .telegram_owner_auth import owner_matches_live
+from .telegram_secret_guard import (
+    SecretGuardUnreadable,
+    lookup_secret_message,
+    record_secret_message,
+)
+
+
+class QuizStateUnreadable(RuntimeError):
+    """quiz_state.json exists but cannot be read or parsed; callers must fail closed."""
+
+
+def _load(api, *, strict: bool = False) -> Dict[str, Any]:
+    path = _state_file(api, _QUIZ_STATE_FILE)
+    if strict and path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise QuizStateUnreadable(f"quiz_state.json unreadable ({type(exc).__name__})") from exc
+        if not isinstance(raw, dict):
+            raise QuizStateUnreadable("quiz_state.json is not a JSON object")
+        data = raw
+    else:
+        data = _read_json_file(path)
+        data = data if isinstance(data, dict) else {}
     quizzes, bots, secrets = data.get("quizzes"), data.get("bots"), data.get("secret_messages")
     return {"quizzes": dict(quizzes) if isinstance(quizzes, dict) else {},
             "bots": dict(bots) if isinstance(bots, dict) else {},
@@ -319,6 +341,10 @@ def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
         cid = int(stored.get("chat_id") or 0)
         all_ids = [int(x or 0) for x in [stored.get("message_id"), *(stored.get("message_ids") or [])]]
         for mid in dict.fromkeys(x for x in all_ids if x > 0):
+            record_secret_message(
+                api, bot, cid, mid, kind="card",
+                task_id=str(stored.get("task_id") or ""), quiz_id=str(stored.get("quiz_id") or ""),
+            )
             skey = f"{prefix}{cid}:{mid}"
             secrets.pop(skey, None)
             secrets[skey] = {
@@ -340,6 +366,7 @@ def remember_secret_message(api, bot: str, chat_id: int, message_id: int,
     mid, cid = int(message_id or 0), int(chat_id or 0)
     if mid <= 0:
         return
+    record_secret_message(api, bot, cid, mid, kind="card", task_id=str(task_id or ""), quiz_id=str(quiz_id or ""))
     data = _load(api)
     _, prefix = _bot_cards(data, bot)
     secrets = data.setdefault("secret_messages", {})
@@ -397,6 +424,12 @@ def quiz_for_message(api, bot: str, chat_id: int, message_id: int) -> Optional[D
     """
     if not message_id:
         return None
+    try:
+        durable_secret = lookup_secret_message(api, bot, chat_id, message_id)
+        if durable_secret is not None:
+            return durable_secret
+    except SecretGuardUnreadable:
+        return {"chat_id": int(chat_id), "message_id": int(message_id), "options": [], "secret": True, "unreadable": True}
 
     def sent_as_this(record: Any) -> bool:
         if not isinstance(record, dict) or int(record.get("chat_id") or 0) != int(chat_id):
@@ -405,7 +438,10 @@ def quiz_for_message(api, bot: str, chat_id: int, message_id: int) -> Optional[D
             return True
         return int(message_id) in [int(x or 0) for x in (record.get("message_ids") or [])]
 
-    data = _load(api)
+    try:
+        data = _load(api, strict=True)
+    except QuizStateUnreadable:
+        return {"chat_id": int(chat_id), "message_id": int(message_id), "options": [], "secret": True, "unreadable": True}
     quizzes, prefix = _bot_cards(data, bot)
     for key, record in quizzes.items():
         if key.startswith(prefix) and sent_as_this(record):
@@ -600,7 +636,10 @@ def lifecycle_target(
         reason = str(event.get("closed_reason") or "").strip()
         facts = {"closed_reason": reason} if reason else {}
     remember_state(api, bot, token, record, state, facts)
-    return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
+    target_chat = int(record.get("chat_id") or 0)
+    if not owner_matches_live(api.get_state_dir(), target_chat):
+        return None
+    return target_chat, message_id, edit[0], edit[1]
 
 
 def card_lock(token: str) -> asyncio.Lock:
@@ -720,6 +759,8 @@ async def apply_retained_fact(api, token: str, lang: str, *, client_factory, pub
     client = client_factory()
     record = quiz_for_token(api, client.bot_id, token)
     for target in (record or {}).get("creation_edits") or []:
+        if target and not owner_matches_live(api.get_state_dir(), int(target[0] or 0)):
+            return
         await client.edit_message_text_with_inline_keyboard(*target, parse_mode="")
     outran = _RETAINED_FACTS.pop(token, None)
     held = _settled_fact(record)
@@ -779,10 +820,11 @@ async def _settle_answer(api, client, record: Dict[str, Any], payload: Dict[str,
         if edit is None:
             return True, facts
         remember_state(api, client.bot_id, token, record, "answered", facts)
-        if not message_id:
+        target_chat = int(record.get("chat_id") or 0)
+        if not message_id or not owner_matches_live(api.get_state_dir(), target_chat):
             return True, facts
         settled = await client.edit_message_text_with_inline_keyboard(
-            int(record.get("chat_id") or 0), message_id, edit[0], edit[1], parse_mode="")
+            target_chat, message_id, edit[0], edit[1], parse_mode="")
     if not settled:
         api.log("warning", "Telegram quiz card edit failed (answered).")
     return bool(settled), facts
@@ -808,7 +850,7 @@ async def _tell_outcome(api, client, record: Dict[str, Any], status: int, payloa
             lines = (lines or [_receipt(facts, payload.get("answered_after_terminal") is True, lang)]) + [texts["not_updated"]]
     else:
         lines = [texts["closed"] if outcome == "closed" else _refusal_text(status, lang)]
-    if lines:
+    if lines and owner_matches_live(api.get_state_dir(), int(chat_id or 0)):
         await client.send_message(chat_id, "\n".join(lines), parse_mode="")
     if outcome == "closed":
         await _settle_closed(api, client, record, payload, lang)

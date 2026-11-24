@@ -124,7 +124,7 @@ def recorded_end(payload: Dict[str, Any]) -> Tuple[str, Any]:
 
 
 def own_message_row(
-    account_id: str, chat_id: str, topic_id: Any, result: Dict[str, Any], words: str
+    account_id: str, chat_id: str, topic_id: Any, result: Dict[str, Any], words: str, *, album_origin_known: int = 0
 ) -> Optional[Tuple]:
     message_id = result.get("message_id")
     if not account_id or type(message_id) is not int:
@@ -141,6 +141,7 @@ def own_message_row(
         1,
         str(result.get("text") or result.get("caption") or words),
         str(result.get("media_group_id") or ""),
+        int(bool(album_origin_known)),
     )
 
 
@@ -150,26 +151,31 @@ class ProviderCalls:
     def __init__(self, store: CustodyStore, lease: OutboxLease):
         self.store, self.lease = store, lease
         self.recorded = recorded_calls(lease.payload)
-        self.fence: Optional[int] = lease.attempts if self.recorded else None
+        self.fence: int = lease.attempts
+        self.lease_token: str = lease.lease_token
         self.open: Optional[Dict[str, Any]] = None
 
     def checkpoint(
         self, payload: Dict[str, Any], *, report=None, sent=None, confirmed: Sequence[int] = ()
     ) -> None:
         stored = self.store.checkpoint_outbox(
-            self.lease.delivery_id, payload, report=report, sent=sent, attempts=self.fence
+            self.lease.delivery_id, payload, report=report, sent=sent,
+            attempts=self.fence, lease_token=self.lease_token or None,
         )
-        if not stored and self.fence is not None:
+        if not stored:
             raise LeaseLost("this attempt no longer holds the outbox row; its record was not stored", confirmed)
 
     async def make(
         self, payload: Dict[str, Any], part: int, method: str, call: Callable[[], Awaitable[Any]]
     ) -> Any:
         if not self.recorded:
+            if not self.store.outbox_lease_valid(self.lease.delivery_id, self.fence, self.lease_token or None):
+                raise LeaseLost("this attempt no longer holds the outbox row; nothing was sent")
             return await call()
         marker = {"part": part, "method": method}
         if not self.store.start_outbox_call(
-            self.lease.delivery_id, self.lease.attempts, {**payload, CALL_STARTED: marker}
+            self.lease.delivery_id, self.lease.attempts, {**payload, CALL_STARTED: marker},
+            lease_token=self.lease_token or None,
         ):
             raise LeaseLost("this attempt no longer holds the outbox row; nothing was sent")
         self.open = marker
@@ -183,6 +189,18 @@ class ProviderCalls:
 
     def answered(self) -> None:
         self.open = None
+
+
+def _with_before_send(fn: Any, before_send: Any) -> Dict[str, Any]:
+    if before_send is None:
+        return {}
+    try:
+        import inspect
+        if "before_send" in inspect.signature(fn).parameters:
+            return {"before_send": before_send}
+    except (TypeError, ValueError):
+        pass
+    return {}
 
 
 async def deliver_outbox(
@@ -229,6 +247,7 @@ async def deliver_outbox(
                     parse_mode=ch["parse_mode"],
                     topic_id=topic_id,
                     reply_to_message_id=reply_id if idx == 0 else None,
+                    **_with_before_send(client.send_text_chunk, before_send),
                 ),
             )
             if not names_message(result):
@@ -316,6 +335,7 @@ async def deliver_outbox(
             prepared_caption=caption,
             topic_id=topic_id,
             reply_to_message_id=reply_id,
+            **_with_before_send(client.send_media, before_send),
         ),
     )
     if not names_message(result):
@@ -374,7 +394,8 @@ async def deliver_album(
         0,
         "sendMediaGroup",
         lambda: client.send_media_group(
-            chat_id, items, topic_id=topic_id, reply_to_message_id=optional_int(payload.get("reply_to_message_id"))
+            chat_id, items, topic_id=topic_id, reply_to_message_id=optional_int(payload.get("reply_to_message_id")),
+            **_with_before_send(client.send_media_group, before_send),
         ),
     )
     messages, reports, rows = [], [], []
@@ -400,7 +421,10 @@ async def deliver_album(
         )
         message = {key: value for key, value in result.items() if key != "_delivery"}
         messages.append(message)
-        rows.append(own_message_row(account_id, chat_id, topic_id, message, wire.get("text", "")))
+        rows.append(own_message_row(
+            account_id, chat_id, topic_id, message, wire.get("text", ""),
+            album_origin_known=1 if index == 0 else 0,
+        ))
     complete = len(results) == len(messages) == len(items)
     calls.checkpoint(
         {**payload, "_sent_media": messages, **({} if complete else {CALL_STARTED: calls.open})},
@@ -438,8 +462,12 @@ class ReactionDeliveryHelper:
         self._current_gen = current_gen
         self._unrecorded: Dict[str, Dict[str, Any]] = {}
 
+    def _fence(self, lease: OutboxLease) -> Dict[str, Any]:
+        return {"attempts": lease.attempts, "lease_token": lease.lease_token or None}
+
     async def process(self, lease: OutboxLease) -> None:
         known = dict(self._unrecorded.pop(lease.delivery_id, None) or lease.payload)
+        fence = self._fence(lease)
         if "_operation_result" in known:
             self._finish(lease, known)
             return
@@ -456,7 +484,8 @@ class ReactionDeliveryHelper:
             gen = self._current_gen()
             self._check_account(known)
             known["_reporting"] = await self._resolved_reporting(known)
-            self.store.checkpoint_outbox(lease.delivery_id, known)
+            if not self.store.checkpoint_outbox(lease.delivery_id, known, **fence):
+                raise LeaseLost("reaction attempt lost its outbox lease before sending")
             parameters = known.get("parameters")
             if not str(known.get("chat_id") or "").strip() or not isinstance(parameters, dict):
                 raise ValueError("Telegram reaction chat_id and parameters are required")
@@ -464,26 +493,30 @@ class ReactionDeliveryHelper:
             self._check_account(known)
             if self._current_gen() != gen or not getattr(client, "is_current", lambda: True)():
                 raise PlaceHeld("Held: Telegram bot identity or server binding changed")
-            self.store.checkpoint_outbox(lease.delivery_id, {**known, REACTION_MARKER: True})
+            if not self.store.checkpoint_outbox(lease.delivery_id, {**known, REACTION_MARKER: True}, **fence):
+                raise LeaseLost("reaction attempt lost its outbox lease right before provider call")
             known[REACTION_MARKER] = True
             result = await client.operation(REACTION_METHOD, dict(parameters))
             if result.get("ok") is False:
                 raise TelegramApiError(REACTION_METHOD, "Telegram did not confirm the reaction")
             known["_operation_result"] = result
+        except LeaseLost as exc:
+            self._note_error(format_error(exc))
+            return
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc))
+            self.store.hold_outbox(lease.delivery_id, str(exc), **fence)
         except PlaceBindingRevoked as exc:
             self._settle(lease, known, state="failed", error=str(exc))
         except asyncio.CancelledError:
-            self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0)
+            self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0, **fence)
             raise
         except Exception as exc:
             if isinstance(exc, TelegramRequestNotSent) and (
                 self._current_gen() != gen or (client is not None and not getattr(client, "is_current", lambda: True)())
             ):
                 known.pop(REACTION_MARKER, None)
-                self.store.checkpoint_outbox(lease.delivery_id, known)
-                self.store.hold_outbox(lease.delivery_id, f"Held: {format_error(exc)}")
+                if self.store.checkpoint_outbox(lease.delivery_id, known, **fence):
+                    self.store.hold_outbox(lease.delivery_id, f"Held: {format_error(exc)}", **fence)
                 return
             self._note_error(format_error(exc))
             try:
@@ -494,6 +527,7 @@ class ReactionDeliveryHelper:
             self._finish(lease, known)
 
     def _after_error(self, lease: OutboxLease, known: Dict[str, Any], exc: Exception) -> None:
+        fence = self._fence(lease)
         code = exc.error_code if isinstance(exc, TelegramApiError) else None
         if known.get(REACTION_MARKER):
             if code in REACTION_REFUSALS:
@@ -503,15 +537,16 @@ class ReactionDeliveryHelper:
                 self._settle(lease, known, state="uncertain", error=format_error(exc))
                 return
             del known[REACTION_MARKER]
-            self.store.checkpoint_outbox(lease.delivery_id, known)
+            if not self.store.checkpoint_outbox(lease.delivery_id, known, **fence):
+                return
         wait = max(retry_delay(lease.attempts), float(getattr(exc, "retry_after", None) or 0.0))
         if code == 429:
-            self.store.hold_outbox(lease.delivery_id, f"Rate limited: {format_error(exc)}", retry_after_sec=wait)
+            self.store.hold_outbox(lease.delivery_id, f"Rate limited: {format_error(exc)}", retry_after_sec=wait, **fence)
             return
         if lease.attempts >= MAX_OUTBOX_ATTEMPTS:
             self._settle(lease, known, state="failed", error=format_error(exc))
         else:
-            self.store.release_outbox(lease.delivery_id, reason=format_error(exc), retry_after_sec=wait)
+            self.store.release_outbox(lease.delivery_id, reason=format_error(exc), retry_after_sec=wait, **fence)
 
     async def _settle_unanswered(self, lease: OutboxLease, known: Dict[str, Any]) -> None:
         try:
@@ -526,12 +561,15 @@ class ReactionDeliveryHelper:
             self._note_error(format_error(exc))
 
     def _settle(self, lease: OutboxLease, known: Dict[str, Any], *, state: str, error: str) -> None:
-        self.store.checkpoint_outbox(lease.delivery_id, known)
+        fence = self._fence(lease)
+        if not self.store.checkpoint_outbox(lease.delivery_id, known, **fence):
+            return
         report = delivery_report(lease.delivery_id, known, part_id="status", state=state, error=error)
-        self.store.mark_outbox_failed(lease.delivery_id, reason=error, report=report, state=state)
-        self._note_error(error)
+        if self.store.mark_outbox_failed(lease.delivery_id, reason=error, report=report, state=state, **fence):
+            self._note_error(error)
 
     def _finish(self, lease: OutboxLease, known: Dict[str, Any]) -> None:
+        fence = self._fence(lease)
         try:
             report = delivery_report(
                 lease.delivery_id,
@@ -542,16 +580,17 @@ class ReactionDeliveryHelper:
                 text=str(known.get("text") or ""),
                 fmt="plain",
             )
-            self.store.checkpoint_outbox(lease.delivery_id, known, report=report)
-            self.store.mark_delivered(lease.delivery_id, provider_receipt=reaction_receipt(known))
+            if not self.store.checkpoint_outbox(lease.delivery_id, known, report=report, **fence):
+                return
+            self.store.mark_delivered(lease.delivery_id, provider_receipt=reaction_receipt(known), **fence)
         except Exception as exc:
             self._note_error(format_error(exc))
             self._unrecorded[lease.delivery_id] = known
             try:
-                self.store.checkpoint_outbox(lease.delivery_id, known)
-                self.store.release_outbox(
-                    lease.delivery_id, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts)
-                )
+                if self.store.checkpoint_outbox(lease.delivery_id, known, **fence):
+                    self.store.release_outbox(
+                        lease.delivery_id, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts), **fence
+                    )
             except Exception as store_error:
                 self._note_error(format_error(store_error))
             else:

@@ -150,7 +150,7 @@ _TOKEN_WORDS = {
 _KEPT_TOKEN = "; the current token stays in use"
 _BRIDGE_WORDS = {
     "ready": "Connected",
-    "waiting_owner": "Connected; send the bot a private message to bind its owner",
+    "waiting_owner": "Connected; set Owner Chat ID in Settings → Telegram (or confirm pairing from Ouroboros)",
     "connecting": "Connecting with the saved token…",
     "missing_token": "Waiting for a bot token",
     "settings_unknown": "Waiting: saved settings can't be read",
@@ -176,7 +176,7 @@ _MINIAPP_WORDS = {
     "ready": "Ready",
     "disabled": "Off; the text bridge stays on",
     "waiting_token": "Waiting for a bot token",
-    "waiting_owner": "Waiting: send the bot a private message to bind its owner",
+    "waiting_owner": "Waiting: set Owner Chat ID in Settings → Telegram (or confirm pairing from Ouroboros)",
     "starting": "Starting",
     "verifying": "Checking its public link",
     "syncing_menu": "Setting the bot's menu button",

@@ -647,11 +647,8 @@ class TelegramClient:
                  on_message=None, reply_to_message_id: int = 0, strict_reply: bool = False,
                  reply_fallback_id: int = 0, on_reply_changed=None,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
-                 generation: Optional[int] = None, origin_label: str = ""):
-        # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
-        # generation of ONE snapshot (the caller's, which also chose its bot-specific references, or taken
-        # here). A binding that moved on since makes it refuse its next request, never switch tokens.
-        self._binding, self.generation, self.accepted = binding, 0, 0
+                 generation: Optional[int] = None, origin_label: str = "", binding_guard=None):
+        self._binding, self.generation, self.accepted, self._binding_guard = binding, 0, 0, binding_guard
         if binding is not None:
             if generation is None:
                 token, generation = binding.snapshot()
@@ -671,20 +668,17 @@ class TelegramClient:
         self.on_reply_changed = on_reply_changed
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
-        # An explicit proxy replaces ambient proxies for these calls only. With the default
-        # base the target stays https://api.telegram.org, so TLS runs end to end through the
-        # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
-        # never followed. A TELEGRAM_API_BASE origin serves the same Bot API from the owner's
-        # server with that origin's own transport security; files_dir is a --local store.
         self.proxy = _telegram_proxy(proxy)
         base = _telegram_api_base(api_base_url)
+        self.api_base_origin = base
         self.api_base = f"{base}/bot{self.token}"
         self.file_base = f"{base}/file/bot{self.token}"
         self.files_dir = _telegram_files_dir(files_dir)
 
     def check_binding(self) -> None:
-        """Before each request: after a token change this client asks Telegram nothing more."""
-        if self._binding is not None and not self._binding.current(self.generation):
+        """Before each request: after a token, owner, or API-base change this client asks Telegram nothing more."""
+        if ((self._binding is not None and not self._binding.current(self.generation))
+                or (self._binding_guard is not None and not self._binding_guard())):
             raise TelegramBindingChanged(self.accepted)
 
     def origin_prefix(self, parse_mode: str = "") -> str:
@@ -708,7 +702,8 @@ class TelegramClient:
         """What a failed request raises: its own failure while this client's token is in force. Once the binding
         moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
         so it ends as the typed change with the parts Telegram accepted, never as a failure of the token now in force."""
-        if self._binding is not None and not self._binding.current(self.generation):
+        if ((self._binding is not None and not self._binding.current(self.generation))
+                or (self._binding_guard is not None and not self._binding_guard())):
             return TelegramBindingChanged(self.accepted, unsent=bool(getattr(failure, "unsent", False)))
         return failure
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
-from typing import Any, Dict, List
+import stat
+from typing import Any, Dict, List, Tuple
 
 
 def _safe_lineage_ids(ctx: Any) -> set[str]:
@@ -138,8 +140,41 @@ def _resolve_candidate(ctx: Any, raw: str) -> pathlib.Path:
     return fp.resolve()
 
 
-def authorize_upload_path(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> pathlib.Path:
-    """Verify the calling task may read ``file_path`` BEFORE stat/open/copy (fail-closed)."""
+def _open_confined_regular_fd(root: pathlib.Path, target: pathlib.Path) -> tuple[int, int]:
+    """Open ``target`` under ``root`` via dir_fd + O_NOFOLLOW traversal (zero-TOCTOU).
+
+    Returns ``(fd, st_size)``. Every intermediate directory and the leaf are opened without
+    following symlinks, guaranteeing the bytes read belong strictly to ``root``.
+    """
+    root_real = pathlib.Path(root).resolve(strict=True)
+    rel = pathlib.Path(target).relative_to(root_real)
+    parts = rel.parts
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        raise PermissionError("file_path must name a regular file inside an authorized root")
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    step_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    cur_fd = os.open(root_real, dir_flags)
+    try:
+        for segment in parts[:-1]:
+            nxt = os.open(segment, step_flags, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt
+        leaf_fd = os.open(parts[-1], leaf_flags, dir_fd=cur_fd)
+    finally:
+        os.close(cur_fd)
+    try:
+        st = os.fstat(leaf_fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError("file_path must name a regular file")
+        return leaf_fd, int(st.st_size)
+    except BaseException:
+        os.close(leaf_fd)
+        raise
+
+
+def _authorize_with_root(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Path]:
+    """Verify the calling task may read ``file_path`` and return ``(authorized_root, resolved_target)``."""
     from types import SimpleNamespace
 
     raw = str(file_path or "").strip()
@@ -163,9 +198,15 @@ def authorize_upload_path(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> 
         import re
 
         safe_dir = re.sub(r"[^A-Za-z0-9_.-]+", "_", event_id)[:160] or "event"
-        if not _path_under_exact(fp, (staging_root / safe_dir).resolve(strict=False)):
-            raise PermissionError("file_path cannot read another event's staged attachment")
-        return fp
+        exact_dir = (staging_root / safe_dir).resolve(strict=False)
+        if _path_under_exact(fp, exact_dir):
+            return exact_dir, fp
+        rel_staged = fp.relative_to(staging_root)
+        if rel_staged.parts and rel_staged.parts[0].startswith(safe_dir + "--"):
+            attempt_dir = (staging_root / rel_staged.parts[0]).resolve(strict=False)
+            if _path_under_exact(fp, attempt_dir):
+                return attempt_dir, fp
+        raise PermissionError("file_path cannot read another event's staged attachment")
 
     # Enforce any frozen Presence capability ceiling on the task contract (fail-closed on tamper/error).
     try:
@@ -237,7 +278,19 @@ def authorize_upload_path(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> 
         raise
     except Exception as exc:
         raise PermissionError(f"protected_artifacts policy check failed: {exc}") from exc
-    return fp
+    return matched[0][1], fp
+
+
+def authorize_upload_path(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> pathlib.Path:
+    """Verify the calling task may read ``file_path`` BEFORE stat/open/copy (fail-closed)."""
+    return _authorize_with_root(ctx, file_path, state_dir)[1]
+
+
+def open_authorized_upload(ctx: Any, file_path: Any, state_dir: pathlib.Path) -> Tuple[int, pathlib.Path, int]:
+    """Authorize ``file_path`` and open it pinned to its verified root via O_NOFOLLOW dir_fd traversal."""
+    root, fp = _authorize_with_root(ctx, file_path, state_dir)
+    fd, size = _open_confined_regular_fd(root, fp)
+    return fd, fp, size
 
 
 def caller_scope(ctx: Any) -> Dict[str, str]:
@@ -294,17 +347,34 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
             presence.get("place_id") or focus.get("place_id") or getattr(caller_binding, "place_id", "") or ""
         ).strip()
         row_place = str(scope.get("place_id") or (payload.get("_place_binding") or {}).get("place_id") or "").strip()
-        if focus_place and row_place:
-            return focus_place == row_place
+        if focus_place and row_place and focus_place != row_place:
+            return False
+        # One Place may span multiple conversations (account-level or group+topics):
+        # never let focus_place == row_place bypass exact (account, chat, topic) isolation!
         if event.get("provider") == "telegram":
             ev_acct = str(event.get("account_id") or "").strip()
             ev_chat = str(event.get("conversation_id") or "").strip()
             ev_topic = str(event.get("thread_id") or "").strip()
+            row_acct = str(payload.get("account_id") or scope.get("account_id") or "").strip()
+            row_chat = str(payload.get("chat_id") or scope.get("conversation_id") or "").strip()
+            row_topic = str(payload.get("topic_id") or scope.get("thread_id") or "").strip()
+            if not (ev_acct and ev_chat):
+                return False
+            return row_acct == ev_acct and row_chat == ev_chat and row_topic == ev_topic
+        if focus_place and row_place and focus_place == row_place:
+            cb_acct = str(getattr(caller_binding, "account_id", "") or "").strip()
+            cb_chat = str(getattr(caller_binding, "conversation_id", "") or "").strip()
+            cb_topic = str(getattr(caller_binding, "thread_id", "") or "").strip()
             row_acct = str(payload.get("account_id") or "").strip()
             row_chat = str(payload.get("chat_id") or "").strip()
             row_topic = str(payload.get("topic_id") or "").strip()
-            if ev_acct and ev_chat and row_acct == ev_acct and row_chat == ev_chat:
-                return row_topic == ev_topic
+            if cb_acct and cb_acct != "*" and row_acct and row_acct != cb_acct:
+                return False
+            if cb_chat and row_chat != cb_chat:
+                return False
+            if cb_topic and row_topic != cb_topic:
+                return False
+            return True
         return False
     # Restricted subagent: only rows from its own task lineage.
     try:

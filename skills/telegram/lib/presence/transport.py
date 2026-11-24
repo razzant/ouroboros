@@ -15,7 +15,8 @@ import os
 import pathlib
 import re
 import stat
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import uuid
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -268,6 +269,7 @@ class PresenceBotClient:
         parse_mode: str = "",
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"chat_id": str(chat_id), "text": text}
         if topic_id is not None:
@@ -281,6 +283,8 @@ class PresenceBotClient:
         except TelegramApiError as exc:
             if parse_mode != "HTML" or exc.error_code != 400:
                 raise
+            if before_send is not None:
+                await before_send()
             payload.pop("parse_mode", None)
             payload["text"] = _telegram_html_to_plain(text)
             result = await self._post_json("sendMessage", payload)
@@ -298,6 +302,7 @@ class PresenceBotClient:
         prepared_caption: Dict[str, str],
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         endpoint = MEDIA_METHODS.get(kind)
         if endpoint is None:
@@ -319,6 +324,8 @@ class PresenceBotClient:
         except TelegramApiError as exc:
             if not caption or parse_mode != "HTML" or exc.error_code != 400:
                 raise
+            if before_send is not None:
+                await before_send()
             fields.pop("parse_mode", None)
             fields["caption"] = _telegram_html_to_plain(caption)
             result = await self._post_multipart(endpoint, fields, [(kind, pathlib.Path(file_path))], timeout=60.0)
@@ -334,6 +341,7 @@ class PresenceBotClient:
         *,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
+        before_send: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> List[Dict[str, Any]]:
         media: List[Dict[str, Any]] = []
         files: List[Tuple[str, pathlib.Path]] = []
@@ -359,6 +367,8 @@ class PresenceBotClient:
         except TelegramApiError as exc:
             if exc.error_code != 400 or not any(entry.get("parse_mode") == "HTML" for entry in media):
                 raise
+            if before_send is not None:
+                await before_send()
             media = [
                 {
                     **{key: value for key, value in entry.items() if key != "parse_mode"},
@@ -456,20 +466,17 @@ class PresenceBotClient:
         timeout: float = 60.0,
     ) -> Any:
         self._check_binding(endpoint)
-        files_payload: List[Tuple[str, Tuple[str, bytes, str]]] = []
         try:
-            for field_name, file_path in file_specs:
-                path = pathlib.Path(file_path)
-                if path.stat().st_size > CLOUD_UPLOAD_LIMIT:
-                    raise TelegramRequestNotSent("upload", "file exceeds Telegram Bot API upload limit")
-                mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-                safe_name = path.name.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
-                files_payload.append((field_name, (safe_name, path.read_bytes(), mime)))
+            stream = await asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs)
         except TelegramRequestNotSent:
             raise
         except OSError as exc:
             raise TelegramRequestNotSent("upload", type(exc).__name__) from None
         url = f"{self._api_server}/bot{self._token}/{endpoint}"
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={stream.boundary}",
+            "Content-Length": str(stream.content_length),
+        }
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
@@ -478,14 +485,110 @@ class PresenceBotClient:
                 follow_redirects=False,
             ) as client:
                 self._check_binding(endpoint)
-                response = await client.post(url, data=fields, files=files_payload)
+                response = await client.post(url, content=stream, headers=headers)
         except TelegramRequestNotSent:
             raise
         except _UNSENT_ERRORS as exc:
             raise TelegramRequestNotSent(endpoint, type(exc).__name__) from None
         except httpx.HTTPError as exc:
             raise TelegramApiError(endpoint, type(exc).__name__) from None
+        finally:
+            await stream.aclose()
         return _parse_result(endpoint, response)
+
+
+_UPLOAD_STREAM_CHUNK = 64 * 1024
+
+
+class _AsyncMultipartStream(httpx.AsyncByteStream):
+    """Bounded-memory async multipart body streaming files in 64 KiB chunks off the event loop."""
+
+    def __init__(self, boundary: str, field_parts: List[bytes], file_parts: List[Tuple[bytes, int, int]], tail: bytes):
+        self.boundary = boundary
+        self._field_parts = field_parts
+        self._file_parts = file_parts  # (header_bytes, fd, expected_size)
+        self._tail = tail
+        self.content_length = (
+            sum(len(p) for p in field_parts)
+            + sum(len(h) + sz + 2 for h, _fd, sz in file_parts)
+            + len(tail)
+        )
+        self._closed = False
+
+    @classmethod
+    def open(cls, fields: Dict[str, str], file_specs: Sequence[Tuple[str, pathlib.Path]]) -> "_AsyncMultipartStream":
+        boundary = f"ouro-tg-{uuid.uuid4().hex}"
+        b_bytes = boundary.encode("ascii")
+        field_parts: List[bytes] = []
+        for key, value in fields.items():
+            safe_key = str(key).replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
+            part = (
+                b"--" + b_bytes + b"\r\n"
+                + f'Content-Disposition: form-data; name="{safe_key}"\r\n\r\n'.encode("utf-8")
+                + str(value).encode("utf-8")
+                + b"\r\n"
+            )
+            field_parts.append(part)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        file_parts: List[Tuple[bytes, int, int]] = []
+        try:
+            for field_name, file_path in file_specs:
+                path = pathlib.Path(file_path)
+                fd = os.open(path, flags)
+                try:
+                    st = os.fstat(fd)
+                    if not stat.S_ISREG(st.st_mode):
+                        raise TelegramRequestNotSent("upload", "upload source is not a regular file")
+                    if st.st_size > CLOUD_UPLOAD_LIMIT:
+                        raise TelegramRequestNotSent("upload", "file exceeds Telegram Bot API upload limit")
+                    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                    safe_name = path.name.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
+                    safe_field = str(field_name).replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
+                    hdr = (
+                        b"--" + b_bytes + b"\r\n"
+                        + f'Content-Disposition: form-data; name="{safe_field}"; filename="{safe_name}"\r\n'.encode("utf-8")
+                        + f"Content-Type: {mime}\r\n\r\n".encode("utf-8")
+                    )
+                    file_parts.append((hdr, fd, int(st.st_size)))
+                except BaseException:
+                    os.close(fd)
+                    raise
+        except BaseException:
+            for _h, opened_fd, _sz in file_parts:
+                try:
+                    os.close(opened_fd)
+                except OSError:
+                    pass
+            raise
+        return cls(boundary, field_parts, file_parts, b"--" + b_bytes + b"--\r\n")
+
+    async def __aiter__(self):
+        try:
+            for part in self._field_parts:
+                yield part
+            for hdr, fd, expected in self._file_parts:
+                yield hdr
+                remaining = expected
+                while remaining > 0:
+                    chunk = await asyncio.to_thread(os.read, fd, min(_UPLOAD_STREAM_CHUNK, remaining))
+                    if not chunk:
+                        raise OSError("frozen upload file truncated during streaming")
+                    remaining -= len(chunk)
+                    yield chunk
+                yield b"\r\n"
+            yield self._tail
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for _h, fd, _sz in self._file_parts:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _announced_length(headers: Any) -> Optional[int]:

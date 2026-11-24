@@ -1,6 +1,7 @@
 """Private settings authority shared by the Telegram extension and companion."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -115,25 +116,34 @@ def telegram_proxy(state_dir: Path) -> str | None:
     return validate_telegram_proxy(load_settings(state_dir).get("TELEGRAM_PROXY"))
 
 
+def _is_loopback_host(host: str) -> bool:
+    clean = str(host or "").strip().lower().rstrip(".")
+    if clean == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(clean).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_telegram_api_base(value: Any) -> str:
     """Parse TELEGRAM_API_BASE (self-hosted Bot API server) without credentials.
 
-    Accepts http/https scheme://host[:port] with no path beyond an optional
-    trailing slash; anything else is rejected so the token-bearing URL is
-    never silently assembled from a malformed base. The returned string is a
-    canonical origin (scheme://host[:port]) rebuilt from the parsed URL: no
-    fragment/query ever survives, not even an empty "#" delimiter that would
-    otherwise swallow the /bot<token>/... suffix during string concatenation.
+    Accepts https://host[:port] for any host and http://host[:port] ONLY for
+    loopback hosts (127.0.0.1, ::1, localhost), with no path beyond an optional
+    trailing slash. Remote plaintext HTTP is rejected so the bot token, updates,
+    and owner identities never traverse a network unencrypted.
     """
     text = str(value or "").strip().rstrip("/")
     if not text:
         return "https://api.telegram.org"
     if "#" in text or "?" in text:
         raise ValueError(
-            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
-            "query, fragment or credentials."
+            "TELEGRAM_API_BASE must be https://host[:port] (or http:// on loopback only) "
+            "with no path, query, fragment or credentials."
         )
     canonical: Optional[str] = None
+    remote_http = False
     try:
         url = httpx.URL(text)
         valid = (
@@ -146,20 +156,28 @@ def validate_telegram_api_base(value: Any) -> str:
         )
         if valid:
             host = url.host or ""
-            # httpx.URL.host returns IPv6 literals WITHOUT brackets; rebuild
-            # the origin with them so http://[::1]:8081 round-trips through
-            # settings persistence and client revalidation.
-            bracketed = f"[{host}]" if ":" in host else host
-            origin = f"{url.scheme}://{bracketed}"
-            if url.port is not None:
-                origin += f":{url.port}"
-            canonical = origin
+            if url.scheme == "http" and not _is_loopback_host(host):
+                valid = False
+                remote_http = True
+            else:
+                # httpx.URL.host returns IPv6 literals WITHOUT brackets; rebuild
+                # the origin with them so http://[::1]:8081 round-trips through
+                # settings persistence and client revalidation.
+                bracketed = f"[{host}]" if ":" in host else host
+                origin = f"{url.scheme}://{bracketed}"
+                if url.port is not None:
+                    origin += f":{url.port}"
+                canonical = origin
     except Exception:
         valid = False
+    if remote_http:
+        raise ValueError(
+            "TELEGRAM_API_BASE must use https:// for remote hosts (http:// is allowed on loopback only)."
+        )
     if not valid:
         raise ValueError(
-            "TELEGRAM_API_BASE must be http(s)://host[:port] with no path, "
-            "query, fragment or credentials."
+            "TELEGRAM_API_BASE must be https://host[:port] (or http:// on loopback only) "
+            "with no path, query, fragment or credentials."
         )
     return canonical or "https://api.telegram.org"
 
@@ -263,7 +281,7 @@ def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
 
 def request_may_change_owner(request: Any) -> bool:
     headers = getattr(request, "headers", {})
-    if str(headers.get(MINIAPP_MARKER_HEADER, "")).strip():
+    if any(str(k).lower() == MINIAPP_MARKER_HEADER.lower() and str(v or "").strip() for k, v in headers.items()):
         return False
     client = getattr(request, "client", None)
     host = str(getattr(client, "host", "") or "").strip()
@@ -423,6 +441,11 @@ def make_settings_save(api):
                 server_ignored |= str(payload.pop("TELEGRAM_PROXY") or "").strip() != saved_proxy
         try:
             merge_settings(Path(api.get_state_dir()), payload)
+            if "TELEGRAM_CHAT_ID" in payload:
+                try:
+                    (Path(api.get_state_dir()) / "owner_pairing.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
         except TelegramSettingsError as exc:
             return JSONResponse(
                 {"ok": False, "message": str(exc)},

@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import os
-import pathlib
-import sqlite3
-import threading
-import time
-import weakref
+import json, os, pathlib, sqlite3, threading, time, uuid, weakref
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
@@ -18,9 +12,9 @@ from .custody_schema import (
     HELD_REPORTS_SQL, PRESENCE_WORK_TABLE, REACTION_ATTEMPTS_MARKED, REACTION_WITHHELD, REMEMBER_MESSAGE,
     STAMP_PATH, UNANSWERED_ATTEMPT, UNMARKED_NO_EFFECT, UNRECORDED_SEND_NO_EFFECT, InboxFullError, InboxLease,
     OutboxLease, WorkLease, anchor_message_id, build_delivery_receipt, build_status_snapshot, chat_forum,
-    compact_json, held_by_clause, newest_chat_forum, recorded_calls, remember_event, reply_payload, retained_message,
-    schema_script, token_binding_prefix, unmarked_reaction, unproven_earlier_attempt, with_album_position,
-    with_reaction_target,
+    compact_json, held_by_clause, migrate_custody_schema, newest_chat_forum, recorded_calls, remember_event,
+    reply_payload, retained_message, schema_script, token_binding_prefix, unmarked_reaction,
+    unproven_earlier_attempt, with_album_position, with_reaction_target,
 )
 from .delivery import stored_answers
 from .events import TelegramEvent
@@ -98,29 +92,49 @@ class CustodyStore:
             conn.commit()
         return inserted
 
+    def record_inbox_overflow(
+        self, update_id: int, conversation_key: str, groups: Sequence[discovery.GroupSighting] = (), *, sighting_key: str = ""
+    ) -> None:
+        """Record an inbox overflow gap and advance offset without losing sightings or stalling /panic."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            discovery.record_sightings(conn, int(update_id), groups, sighting_key=sighting_key)
+            count = self._metadata_int(conn, "inbox_overflow_count") + 1
+            next_offset = max(self._metadata_int(conn, "telegram_offset"), int(update_id) + 1)
+            for key, val in (
+                ("inbox_overflow_count", str(count)),
+                ("inbox_overflow_last_conversation", str(conversation_key or "")[:200]),
+                ("telegram_offset", str(next_offset)),
+            ):
+                conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, val),
+                )
+            conn.commit()
+
     def telegram_offset(self) -> int:
         with self._connect() as conn:
             return self._metadata_int(conn, "telegram_offset")
 
-    def record_confirmed_bot(self, token: str, account_id: str) -> None:
+    def record_confirmed_bot(self, token: str, account_id: str, *, api_base: str = "") -> None:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO metadata(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (CONFIRMED_BOT_KEY, token_binding_prefix(token) + account_id),
+                (CONFIRMED_BOT_KEY, token_binding_prefix(token, api_base) + account_id),
             )
 
-    def forget_confirmed_bot(self, token: str) -> None:
+    def forget_confirmed_bot(self, token: str, *, api_base: str = "") -> None:
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM metadata WHERE key=? AND value LIKE ?",
-                (CONFIRMED_BOT_KEY, token_binding_prefix(token) + "%"),
+                (CONFIRMED_BOT_KEY, token_binding_prefix(token, api_base) + "%"),
             )
 
-    def confirmed_account(self, token: str) -> str:
+    def confirmed_account(self, token: str, *, api_base: str = "") -> str:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM metadata WHERE key=?", (CONFIRMED_BOT_KEY,)).fetchone()
-        binding = token_binding_prefix(token)
+        binding = token_binding_prefix(token, api_base)
         return row["value"][len(binding):] if row is not None and row["value"].startswith(binding) else ""
 
     @staticmethod
@@ -134,21 +148,15 @@ class CustodyStore:
         return row
 
     def claim_inbox(self, *, lease_sec: float = 90.0) -> Optional[InboxLease]:
-        now = time.time()
+        now, token = time.time(), uuid.uuid4().hex
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_INBOX, now)
             if row is None:
                 return None
             updated = conn.execute(
-                """
-                UPDATE inbox
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
-                WHERE event_id=? AND (
-                    (state='pending' AND available_at<=?)
-                    OR (state='leased' AND lease_until<=?)
-                )
-                """,
-                (now + max(1.0, lease_sec), row["event_id"], now, now),
+                "UPDATE inbox SET state='leased', lease_until=?, attempts=attempts+1, lease_token=?, last_error='' "
+                "WHERE event_id=? AND ((state='pending' AND available_at<=?) OR (state='leased' AND lease_until<=?))",
+                (now + max(1.0, lease_sec), token, row["event_id"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
@@ -157,30 +165,41 @@ class CustodyStore:
                 event_id=str(row["event_id"]),
                 payload=json.loads(row["payload_json"]),
                 attempts=int(row["attempts"]) + 1,
+                lease_token=token,
             )
 
-    def release_inbox(self, event_id: str, *, reason: str, retry_after_sec: float) -> None:
+    def inbox_lease_valid(self, event_id: str, lease_token: str) -> bool:
+        if not lease_token:
+            return True
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE inbox
-                SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE event_id=? AND state='leased'
-                """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
-            )
+            return conn.execute(
+                "SELECT 1 FROM inbox WHERE event_id=? AND state='leased' AND lease_token=?",
+                (event_id, lease_token),
+            ).fetchone() is not None
 
-    def defer_inbox(self, event_id: str, *, reason: str, retry_after_sec: float) -> None:
+    def release_inbox(
+        self, event_id: str, *, reason: str, retry_after_sec: float, lease_token: Optional[str] = None
+    ) -> bool:
+        held, args = held_by_clause(None, lease_token)
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE inbox
-                SET state='pending', available_at=?, lease_until=0, last_error=?,
-                    attempts=MAX(0, attempts-1)
-                WHERE event_id=? AND state='leased'
-                """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
+            cur = conn.execute(
+                "UPDATE inbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
+                "WHERE event_id=? AND state='leased'" + held,
+                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id, *args),
             )
+            return cur.rowcount == 1
+
+    def defer_inbox(
+        self, event_id: str, *, reason: str, retry_after_sec: float, lease_token: Optional[str] = None
+    ) -> bool:
+        held, args = held_by_clause(None, lease_token)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE inbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=?, "
+                "attempts=MAX(0, attempts-1) WHERE event_id=? AND state='leased'" + held,
+                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id, *args),
+            )
+            return cur.rowcount == 1
 
     def release_own_leases(self) -> Dict[str, int]:
         now = time.time()
@@ -189,7 +208,7 @@ class CustodyStore:
             conn.execute("BEGIN IMMEDIATE")
             for table in ("inbox", "outbox", "presence_work"):
                 cursor = conn.execute(
-                    f"UPDATE {table} SET state='pending', available_at=?, lease_until=0, "
+                    f"UPDATE {table} SET state='pending', available_at=?, lease_until=0, lease_token='', "
                     "last_error='released_at_runtime_start' WHERE state='leased'",
                     (now,),
                 )
@@ -197,12 +216,14 @@ class CustodyStore:
             conn.commit()
         return released
 
-    def checkpoint_inbox(self, event_id: str, payload: Dict[str, Any]) -> None:
+    def checkpoint_inbox(self, event_id: str, payload: Dict[str, Any], *, lease_token: Optional[str] = None) -> bool:
+        held, args = held_by_clause(None, lease_token)
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE inbox SET payload_json=? WHERE event_id=? AND state='leased'",
-                (compact_json(payload), event_id),
+            cur = conn.execute(
+                "UPDATE inbox SET payload_json=? WHERE event_id=? AND state='leased'" + held,
+                (compact_json(payload), event_id, *args),
             )
+            return cur.rowcount == 1
 
     def download_failure(self, event_id: str, ordinal: int) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
@@ -242,13 +263,16 @@ class CustodyStore:
                 conn.execute("DELETE FROM download_failures WHERE event_id=?", (event_id,))
 
     def request_typing(
-        self, *, chat_id: str, topic_id: str, turn_ref: str, source_event_id: str, account_id: str = ""
+        self, *, chat_id: str, topic_id: str, turn_ref: str, source_event_id: str, account_id: str = "",
+        place_binding: Optional[Dict[str, Any]] = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO typing_requests"
-                "(chat_id, topic_id, turn_ref, source_event_id, account_id, requested_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (str(chat_id), str(topic_id or ""), str(turn_ref), str(source_event_id or ""), str(account_id or ""), time.time()),
+                "(chat_id, topic_id, turn_ref, source_event_id, account_id, place_binding_json, requested_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(chat_id), str(topic_id or ""), str(turn_ref), str(source_event_id or ""), str(account_id or ""),
+                 compact_json(place_binding) if isinstance(place_binding, dict) else "", time.time()),
             )
 
     def typing_requests(self) -> List[Dict[str, Any]]:
@@ -281,53 +305,53 @@ class CustodyStore:
             )
 
     def mark_inbox_failed(
-        self, event_id: str, *, reason: str, receipt: Optional[Dict[str, Any]] = None
-    ) -> None:
+        self, event_id: str, *, reason: str, receipt: Optional[Dict[str, Any]] = None, lease_token: Optional[str] = None
+    ) -> bool:
+        held, args = held_by_clause(None, lease_token)
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE inbox
-                SET state='failed', lease_until=0, failed_at=?, last_error=?,
-                    host_receipt_json=COALESCE(?, host_receipt_json)
-                WHERE event_id=? AND state='leased'
-                """,
-                (time.time(), str(reason)[:500], compact_json(receipt) if receipt else None, event_id),
+            cur = conn.execute(
+                "UPDATE inbox SET state='failed', lease_until=0, lease_token='', failed_at=?, last_error=?, "
+                "host_receipt_json=COALESCE(?, host_receipt_json) WHERE event_id=? AND state='leased'" + held,
+                (time.time(), str(reason)[:500], compact_json(receipt) if receipt else None, event_id, *args),
             )
+            return cur.rowcount == 1
 
-    def record_retention(self, event_id: str, *, binding_id: str, receipt: Dict[str, Any]) -> None:
+    def record_retention(
+        self, event_id: str, *, binding_id: str, receipt: Dict[str, Any], lease_token: Optional[str] = None
+    ) -> bool:
         response = receipt.get("response") if isinstance(receipt.get("response"), dict) else {}
         turn_ref = str(response.get("turn_ref") or "").strip()
         if not turn_ref:
             raise ValueError("retained receipt must name its original turn")
         child_ref = str(response.get("work_ref") or "").strip()
         mode = int(response.get("delivery_reporting_version") == 1)
-        now = time.time()
+        now, (held, args) = time.time(), held_by_clause(None, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
-                (event_id,),
+                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'" + held, (event_id, *args)
             ).fetchone()
             if row is None:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("inbox event is not leased")
             event = json.loads(row["payload_json"])
             self._add_work(conn, event_id, binding_id, turn_ref, "turn", event, mode, now)
             if child_ref and child_ref != turn_ref:
                 self._add_work(conn, event_id, binding_id, child_ref, "child", event, mode, now)
             updated = conn.execute(
-                """
-                UPDATE inbox
-                SET state='submitted', lease_until=0, submitted_at=?, submission_ref=?,
-                    host_receipt_json=?, last_error=''
-                WHERE event_id=? AND state='leased'
-                """,
-                (now, turn_ref[:500], compact_json(receipt), event_id),
+                "UPDATE inbox SET state='submitted', lease_until=0, lease_token='', submitted_at=?, submission_ref=?, "
+                "host_receipt_json=?, last_error='' WHERE event_id=? AND state='leased'" + held,
+                (now, turn_ref[:500], compact_json(receipt), event_id, *args),
             )
             if updated.rowcount != 1:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("inbox event lease changed")
             conn.commit()
+            return True
 
     @staticmethod
     def _add_work(
@@ -373,16 +397,18 @@ class CustodyStore:
         continuation_ref: str = "",
         output_ref: str = "",
         reply_anchor: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        now = time.time()
+        lease_token: Optional[str] = None,
+    ) -> bool:
+        now, (held, args) = time.time(), held_by_clause(None, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
-                (event_id,),
+                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'" + held, (event_id, *args)
             ).fetchone()
             if row is None:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("inbox event is not leased")
             event = json.loads(row["payload_json"])
             event["_reporting"] = {
@@ -397,19 +423,13 @@ class CustodyStore:
             if text and outcome in {"message", "deferred"}:
                 if output_ref:
                     self._enqueue_output(
-                        conn,
-                        event_id,
-                        turn_ref,
-                        event,
-                        {"output_ref": output_ref, "text": text, "reply_anchor": reply_anchor},
-                        now,
+                        conn, event_id, turn_ref, event,
+                        {"output_ref": output_ref, "text": text, "reply_anchor": reply_anchor}, now,
                     )
                 else:
                     self._enqueue_outbox(
-                        conn,
-                        f"presence:{event_id}:turn",
-                        reply_payload(event, text, anchor_message_id(conn, event, reply_anchor)),
-                        now,
+                        conn, f"presence:{event_id}:turn",
+                        reply_payload(event, text, anchor_message_id(conn, event, reply_anchor)), now,
                     )
             observed = continuation_ref or (work_ref if outcome == "deferred" else "")
             if outcome == "deferred" and not observed:
@@ -417,28 +437,24 @@ class CustodyStore:
                 raise ValueError("deferred submission requires work_ref")
             if observed:
                 conn.execute(
-                    """
-                    INSERT OR IGNORE INTO presence_work(
-                        event_id, binding_id, work_ref, event_json, state,
-                        attempts, available_at, created_at
-                    ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
-                    """,
+                    "INSERT OR IGNORE INTO presence_work(event_id, binding_id, work_ref, event_json, state, "
+                    "attempts, available_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)",
                     (event_id, binding_id, observed, compact_json(event), now, now),
                 )
             if continuation_ref and work_ref and work_ref != continuation_ref:
                 self._add_work(conn, event_id, binding_id, work_ref, "child", event, delivery_reporting_version, now)
             updated = conn.execute(
-                """
-                UPDATE inbox
-                SET state='submitted', lease_until=0, submitted_at=?, submission_ref=?, last_error=''
-                WHERE event_id=? AND state='leased'
-                """,
-                (now, str(turn_ref or work_ref)[:500], event_id),
+                "UPDATE inbox SET state='submitted', lease_until=0, lease_token='', submitted_at=?, submission_ref=?, "
+                "last_error='' WHERE event_id=? AND state='leased'" + held,
+                (now, str(turn_ref or work_ref)[:500], event_id, *args),
             )
             if updated.rowcount != 1:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("inbox event lease changed")
             conn.commit()
+            return True
 
     def enqueue_outbox(self, delivery_id: str, payload: Dict[str, Any]) -> bool:
         now = time.time()
@@ -477,71 +493,70 @@ class CustodyStore:
         )
 
     def claim_work(self, *, lease_sec: float = 90.0) -> Optional[WorkLease]:
-        now = time.time()
+        now, token = time.time(), uuid.uuid4().hex
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_WORK, now)
             if row is None:
                 return None
             updated = conn.execute(
-                """
-                UPDATE presence_work
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
-                WHERE work_ref=? AND (
-                    (state='pending' AND available_at<=?)
-                    OR (state='leased' AND lease_until<=?)
-                )
-                """,
-                (now + max(1.0, lease_sec), row["work_ref"], now, now),
+                "UPDATE presence_work SET state='leased', lease_until=?, attempts=attempts+1, lease_token=?, last_error='' "
+                "WHERE work_ref=? AND ((state='pending' AND available_at<=?) OR (state='leased' AND lease_until<=?))",
+                (now + max(1.0, lease_sec), token, row["work_ref"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
                 return None
             return WorkLease(
-                event_id=str(row["event_id"]),
-                binding_id=str(row["binding_id"]),
-                work_ref=str(row["work_ref"]),
-                event=json.loads(row["event_json"]),
-                attempts=int(row["attempts"]) + 1,
-                role=str(row["role"]),
+                event_id=str(row["event_id"]), binding_id=str(row["binding_id"]),
+                work_ref=str(row["work_ref"]), event=json.loads(row["event_json"]),
+                attempts=int(row["attempts"]) + 1, role=str(row["role"]), lease_token=token,
             )
 
     def release_work(
-        self, work_ref: str, *, reason: str, retry_after_sec: float, child_ref: str = ""
-    ) -> None:
-        now = time.time()
+        self, work_ref: str, *, reason: str, retry_after_sec: float, child_ref: str = "",
+        lease_token: Optional[str] = None,
+    ) -> bool:
+        now, (held, args) = time.time(), held_by_clause(None, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT event_id, binding_id, event_json FROM presence_work WHERE work_ref=? AND state='leased'",
-                (work_ref,),
+                "SELECT event_id, binding_id, event_json FROM presence_work WHERE work_ref=? AND state='leased'" + held,
+                (work_ref, *args),
             ).fetchone()
-            if row is not None and child_ref and child_ref != work_ref:
+            if row is None:
+                conn.rollback()
+                return False
+            if child_ref and child_ref != work_ref:
                 event = json.loads(row["event_json"])
                 mode = int((event.get("_reporting") or {}).get("version") == 1)
                 self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child", event, mode, now)
-            conn.execute(
-                """
-                UPDATE presence_work
-                SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE work_ref=? AND state='leased'
-                """,
-                (now + max(0.0, retry_after_sec), str(reason)[:500], work_ref),
+            cur = conn.execute(
+                "UPDATE presence_work SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
+                "WHERE work_ref=? AND state='leased'" + held,
+                (now + max(0.0, retry_after_sec), str(reason)[:500], work_ref, *args),
             )
             conn.commit()
+            return cur.rowcount == 1
 
-    def record_work_outputs(self, work_ref: str, outputs: Sequence[Dict[str, Any]]) -> None:
+    def record_work_outputs(
+        self, work_ref: str, outputs: Sequence[Dict[str, Any]], *, lease_token: Optional[str] = None
+    ) -> bool:
+        held, args = held_by_clause(None, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT event_id, event_json FROM presence_work WHERE work_ref=?",
-                (work_ref,),
-            ).fetchone()
+            query = ("SELECT event_id, event_json FROM presence_work WHERE work_ref=? AND state='leased'" + held
+                     if lease_token else "SELECT event_id, event_json FROM presence_work WHERE work_ref=?")
+            row = conn.execute(query, (work_ref, *args) if lease_token else (work_ref,)).fetchone()
             if row is None:
+                conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("presence work reference is missing")
             event = json.loads(row["event_json"])
             for output in outputs:
                 self._enqueue_output(conn, str(row["event_id"]), work_ref, event, output, time.time())
             conn.commit()
+            return True
 
     def _enqueue_output(
         self,
@@ -576,33 +591,35 @@ class CustodyStore:
         text: str,
         child_ref: str = "",
         reply_anchor: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        lease_token: Optional[str] = None,
+    ) -> bool:
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("work status is not terminal")
-        now = time.time()
+        now, (held, args) = time.time(), held_by_clause(None, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT event_id, binding_id, role, event_json FROM presence_work WHERE work_ref=? AND state='leased'",
-                (work_ref,),
+                "SELECT event_id, binding_id, role, event_json FROM presence_work WHERE work_ref=? AND state='leased'" + held,
+                (work_ref, *args),
             ).fetchone()
             if row is None:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("presence work is not leased")
             if child_ref and child_ref != work_ref:
                 event = json.loads(row["event_json"])
                 mode = int((event.get("_reporting") or {}).get("version") == 1)
                 self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child", event, mode, now)
             updated = conn.execute(
-                """
-                UPDATE presence_work
-                SET state=?, lease_until=0, completed_at=?, last_error=''
-                WHERE work_ref=? AND state='leased'
-                """,
-                (status, now, work_ref),
+                "UPDATE presence_work SET state=?, lease_until=0, lease_token='', completed_at=?, last_error='' "
+                "WHERE work_ref=? AND state='leased'" + held,
+                (status, now, work_ref, *args),
             )
             if updated.rowcount != 1:
                 conn.rollback()
+                if lease_token:
+                    return False
                 raise ValueError("presence work lease changed")
             if text:
                 event_id, role = str(row["event_id"]), str(row["role"])
@@ -611,23 +628,20 @@ class CustodyStore:
                 )
                 event = json.loads(row["event_json"])
                 self._enqueue_outbox(
-                    conn,
-                    delivery_id,
-                    reply_payload(event, text, anchor_message_id(conn, event, reply_anchor)),
-                    now,
+                    conn, delivery_id, reply_payload(event, text, anchor_message_id(conn, event, reply_anchor)), now,
                 )
             conn.commit()
+            return True
 
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
-        now = time.time()
+        now, token = time.time(), uuid.uuid4().hex
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_OUTBOX, now)
             if row is None:
                 return None
             payload = json.loads(row["payload_json"])
             unanswered = row["state"] == "leased" or row["last_error"] in UNANSWERED_ATTEMPT
-            unrecorded = False
-            marked = None
+            unrecorded, marked = False, None
             if unmarked_reaction(payload):
                 unanswered = unanswered or unproven_earlier_attempt(
                     payload, row["attempts"], row["last_error"], UNMARKED_NO_EFFECT
@@ -643,51 +657,49 @@ class CustodyStore:
                     payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
                     marked = compact_json(payload)
             updated = conn.execute(
-                """
-                UPDATE outbox
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error='',
-                    payload_json=COALESCE(?, payload_json)
-                WHERE delivery_id=? AND (
-                    (state='pending' AND available_at<=?)
-                    OR (state='leased' AND lease_until<=?)
-                )
-                """,
-                (now + max(1.0, lease_sec), marked, row["delivery_id"], now, now),
+                "UPDATE outbox SET state='leased', lease_until=?, attempts=attempts+1, lease_token=?, last_error='', "
+                "payload_json=COALESCE(?, payload_json) WHERE delivery_id=? AND "
+                "((state='pending' AND available_at<=?) OR (state='leased' AND lease_until<=?))",
+                (now + max(1.0, lease_sec), token, marked, row["delivery_id"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
                 return None
             return OutboxLease(
-                delivery_id=str(row["delivery_id"]),
-                payload=payload,
-                attempts=int(row["attempts"]) + 1,
-                previous_unanswered=unanswered,
-                unrecorded_attempt=unrecorded,
+                delivery_id=str(row["delivery_id"]), payload=payload, attempts=int(row["attempts"]) + 1,
+                previous_unanswered=unanswered, unrecorded_attempt=unrecorded, lease_token=token,
             )
 
-    def release_outbox(
-        self, delivery_id: str, *, reason: str, retry_after_sec: float, attempts: Optional[int] = None
+    def outbox_lease_valid(
+        self, delivery_id: str, attempts: Optional[int] = None, lease_token: Optional[str] = None
     ) -> bool:
-        held, args = held_by_clause(attempts)
+        held, args = held_by_clause(attempts, lease_token)
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM outbox WHERE delivery_id=? AND state='leased'" + held, (delivery_id, *args)
+            ).fetchone() is not None
+
+    def release_outbox(
+        self, delivery_id: str, *, reason: str, retry_after_sec: float,
+        attempts: Optional[int] = None, lease_token: Optional[str] = None,
+    ) -> bool:
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             updated = conn.execute(
-                """
-                UPDATE outbox
-                SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE delivery_id=? AND state='leased'
-                """
-                + held,
+                "UPDATE outbox SET state='pending', available_at=?, lease_until=0, lease_token='', last_error=? "
+                "WHERE delivery_id=? AND state='leased'" + held,
                 (time.time() + max(0.0, retry_after_sec), str(reason)[:500], delivery_id, *args),
             )
             return updated.rowcount == 1
 
     def hold_outbox(
-        self, delivery_id: str, reason: str, *, retry_after_sec: float = 5.0, attempts: Optional[int] = None
+        self, delivery_id: str, reason: str, *, retry_after_sec: float = 5.0,
+        attempts: Optional[int] = None, lease_token: Optional[str] = None,
     ) -> bool:
-        held, args = held_by_clause(attempts)
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             updated = conn.execute(
-                "UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
+                "UPDATE outbox SET state='pending',available_at=?,lease_until=0,lease_token='',"
                 "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
                 "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
                 "ELSE payload_json END WHERE delivery_id=? AND state='leased'" + held,
@@ -703,10 +715,11 @@ class CustodyStore:
         report=None,
         state: str = "failed",
         attempts: Optional[int] = None,
+        lease_token: Optional[str] = None,
     ) -> bool:
         if state not in {"failed", "uncertain"}:
             raise ValueError("terminal outbox state must be failed or uncertain")
-        held, args = held_by_clause(attempts)
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = (
@@ -721,33 +734,25 @@ class CustodyStore:
             if payload is not None:
                 payload["_terminal_outcome"] = "uncertain"
             updated = conn.execute(
-                """
-                UPDATE outbox
-                SET state='failed', lease_until=0, failed_at=?, last_error=?,
-                    payload_json=COALESCE(?,payload_json)
-                WHERE delivery_id=? AND state='leased'
-                """
-                + held,
-                (
-                    time.time(),
-                    str(reason)[:500],
-                    compact_json(payload) if payload is not None else None,
-                    delivery_id,
-                    *args,
-                ),
+                "UPDATE outbox SET state='failed', lease_until=0, lease_token='', failed_at=?, last_error=?, "
+                "payload_json=COALESCE(?,payload_json) WHERE delivery_id=? AND state='leased'" + held,
+                (time.time(), str(reason)[:500], compact_json(payload) if payload is not None else None, delivery_id, *args),
             )
-            if attempts is not None and updated.rowcount != 1:
+            if (attempts is not None or lease_token) and updated.rowcount != 1:
                 conn.rollback()
                 return False
             self._add_reports(conn, delivery_id, [report] if report else [])
             conn.commit()
             return updated.rowcount == 1
 
-    def start_outbox_call(self, delivery_id: str, attempts: int, payload: Dict[str, Any]) -> bool:
+    def start_outbox_call(
+        self, delivery_id: str, attempts: int, payload: Dict[str, Any], *, lease_token: Optional[str] = None
+    ) -> bool:
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             updated = conn.execute(
-                "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased' AND attempts=?",
-                (compact_json(payload), delivery_id, int(attempts)),
+                "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'" + held,
+                (compact_json(payload), delivery_id, *args),
             )
             return updated.rowcount == 1
 
@@ -759,17 +764,18 @@ class CustodyStore:
         report=None,
         sent: Optional[Sequence[Any]] = None,
         attempts: Optional[int] = None,
+        lease_token: Optional[str] = None,
     ) -> bool:
         reports = report if isinstance(report, list) else [report] if report else []
         rows = sent if isinstance(sent, list) else [sent] if sent else []
-        held, args = held_by_clause(attempts)
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
                 "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'" + held,
                 (compact_json(payload), delivery_id, *args),
             )
-            if attempts is not None and updated.rowcount != 1:
+            if (attempts is not None or lease_token) and updated.rowcount != 1:
                 conn.rollback()
                 return False
             for row in rows:
@@ -786,21 +792,17 @@ class CustodyStore:
         provider_receipt: Dict[str, Any],
         report=None,
         attempts: Optional[int] = None,
+        lease_token: Optional[str] = None,
     ) -> bool:
-        held, args = held_by_clause(attempts)
+        held, args = held_by_clause(attempts, lease_token)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
-                """
-                UPDATE outbox
-                SET state='delivered', lease_until=0, delivered_at=?,
-                    provider_receipt_json=?, last_error=''
-                WHERE delivery_id=? AND state='leased'
-                """
-                + held,
+                "UPDATE outbox SET state='delivered', lease_until=0, lease_token='', delivered_at=?, "
+                "provider_receipt_json=?, last_error='' WHERE delivery_id=? AND state='leased'" + held,
                 (time.time(), compact_json(provider_receipt), delivery_id, *args),
             )
-            if attempts is not None and updated.rowcount != 1:
+            if (attempts is not None or lease_token) and updated.rowcount != 1:
                 conn.rollback()
                 return False
             self._add_reports(conn, delivery_id, [report] if report else [])
@@ -871,6 +873,7 @@ class CustodyStore:
                 return {
                     "retained": True, "topic_id": str(row["topic_id"]),
                     "media_group_id": mg, "is_self": bool(row["is_self"]), "album_earlier": earlier,
+                    "album_origin_known": bool(row["album_origin_known"]),
                 }
             return {"retained": False, "forum": newest_chat_forum(conn, account_id, chat_id)}
 
@@ -906,17 +909,9 @@ class CustodyStore:
         with self._connect() as conn:
             conn.executescript(schema_script())
             conn.execute("BEGIN IMMEDIATE")
-            columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
-            if "reports_json" not in columns:
-                conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
-                conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
-            conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
-            if "host_receipt_json" not in {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}:
-                conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
             if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
                 self._key_work_by_reference(conn)
-            if "account_id" not in {r[1] for r in conn.execute("PRAGMA table_info(typing_requests)")}:
-                conn.execute("ALTER TABLE typing_requests ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+            migrate_custody_schema(conn)
             conn.commit()
         discovery.backfill_legacy(self._connect)
 

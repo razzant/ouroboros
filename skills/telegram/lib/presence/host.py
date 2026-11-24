@@ -133,6 +133,7 @@ class PresenceHostTransport(Protocol):
 
 _MAX_HOST_BODY_BYTES = 2 * 1024 * 1024
 _MAX_HOST_ERROR_BYTES = 64 * 1024
+_IDENTITY_TTL_SEC = 60.0
 
 
 def _parse_places_version(body: Any) -> int:
@@ -145,6 +146,14 @@ def _parse_places_version(body: Any) -> int:
     if type(version) is int and version >= 1:
         return 1
     raise PresenceHostError("presence Host /identity returned missing or invalid places_version")
+
+
+def _parse_place_binding_version(body: Any) -> int:
+    """Detect ``presence_place_binding_version`` separately from ``places_version``."""
+    if not isinstance(body, dict):
+        return 0
+    version = body.get("presence_place_binding_version")
+    return 1 if type(version) is int and version >= 1 else 0
 
 
 def _check_identity_encoding(headers: Any) -> None:
@@ -307,15 +316,18 @@ def bind_place_sync(
     conversation_id: str,
     thread_id: str = "",
     places_version: Optional[int] = None,
+    place_binding_version: Optional[int] = None,
     delivery_reporting_status: str = "unknown",
     timeout_sec: float = 5.0,
 ) -> Optional[Dict[str, Any]]:
     """Capture an enqueue-time Place binding snapshot synchronously via loopback Host Service.
 
-    Returns ``None`` ONLY when the Host explicitly reports integer ``places_version == 0`` (legacy Host).
+    Returns ``None`` when the Host explicitly reports ``places_version == 0`` (legacy Host), or when a
+    Places-capable Host explicitly lacks ``presence_place_binding_version`` and confirms the Place is active.
     Raises :class:`PlaceBindingUnavailable` when a Places-capable Host cannot confirm or bind the Place.
     """
-    if delivery_reporting_status in {"supported", "unsupported"} and type(places_version) is int and places_version == 0:
+    discovered = delivery_reporting_status in {"supported", "unsupported"}
+    if discovered and type(places_version) is int and places_version == 0:
         return None
     base = str(host_base).rstrip("/")
     try:
@@ -332,7 +344,8 @@ def bind_place_sync(
             return {"timeout": {"connect": rem, "read": rem, "write": rem, "pool": rem}}
 
         with httpcore.ConnectionPool(network_backend=_DeadlineBackend(deadline), http1=True, http2=False) as pool:
-            if delivery_reporting_status not in {"supported", "unsupported"}:
+            binding_ver = place_binding_version if discovered and type(place_binding_version) is int else None
+            if not discovered or binding_ver is None:
                 with pool.stream("GET", f"{base}/identity", headers=headers, extensions=_timeout_ext()) as id_resp:
                     if id_resp.status != 200:
                         raise PlaceBindingUnavailable(
@@ -344,6 +357,43 @@ def bind_place_sync(
                 id_body = json.loads(id_raw.decode("utf-8"))
                 if _parse_places_version(id_body) == 0:
                     return None
+                binding_ver = _parse_place_binding_version(id_body)
+            if binding_ver == 0:
+                # Host supports Places reads (places_version>=1) without place-binding snapshots:
+                # verify the Place exists and is accessible without expecting a binding envelope.
+                status_q = urllib.parse.urlencode({
+                    "provider": "telegram",
+                    "account_id": str(account_id),
+                    "conversation_id": str(conversation_id),
+                    **({"thread_id": str(thread_id)} if thread_id else {}),
+                })
+                with pool.stream("GET", f"{base}/presence/place?{status_q}", headers=headers, extensions=_timeout_ext()) as resp:
+                    if resp.status >= 400:
+                        raw_err = _read_sync_bounded(resp, _MAX_HOST_ERROR_BYTES, "presence Host error", deadline=deadline)
+                        err_code = str(_error_payload(raw_err).get("code") or "")
+                        if err_code in {"place_not_connected", "place_unattributable"}:
+                            raise PlaceBindingUnavailable(
+                                "This chat is not a connected Place in Circles. Nothing was queued.",
+                                code="place_not_connected",
+                            )
+                        if err_code == "presence_auth_blocked":
+                            raise PlaceBindingUnavailable(
+                                "Check this skill's access in Skills. Nothing was queued.", code="presence_auth_blocked"
+                            )
+                        raise PlaceBindingUnavailable(
+                            f"Host could not verify Place (HTTP {resp.status}). Nothing was queued."
+                        )
+                    if resp.status != 200:
+                        raise PlaceBindingUnavailable(
+                            f"Host could not verify Place (HTTP {resp.status}). Nothing was queued."
+                        )
+                    raw_ok = _read_sync_bounded(
+                        resp, _MAX_HOST_BODY_BYTES, "presence Host place response", deadline=deadline
+                    )
+                status_body = json.loads(raw_ok.decode("utf-8"))
+                if not isinstance(status_body, dict) or not str(status_body.get("state") or "").strip():
+                    raise PlaceBindingUnavailable("Host returned an invalid Place status. Nothing was queued.")
+                return None
             query = urllib.parse.urlencode({
                 "operation": "bind",
                 "provider": "telegram",
@@ -413,15 +463,26 @@ class PresenceHostClient:
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
         self.places_version = 0
+        self.place_binding_version = 0
         self.presence_wake_signals = 0
         self.presence_identity = 0
         self.connector_identity: Dict[str, Any] = {}
         self.presence_reaction_context = 0
         self.presence_explicit_completion = 0
         self.continuation_version = 0
+        self._identity_discovered_at = 0.0
 
-    async def discover_delivery_support(self) -> int:
-        if self.delivery_reporting_status in {"supported", "unsupported"}:
+    def invalidate_identity(self) -> None:
+        """Force the next capability check to re-read ``/identity`` from the Host."""
+        self.delivery_reporting_status = "unknown"
+        self._identity_discovered_at = 0.0
+
+    async def discover_delivery_support(self, *, force: bool = False) -> int:
+        if (
+            not force
+            and self.delivery_reporting_status in {"supported", "unsupported"}
+            and (time.monotonic() - self._identity_discovered_at) < _IDENTITY_TTL_SEC
+        ):
             return self.delivery_reporting_version
         try:
             response = await self.transport.request_json(
@@ -430,6 +491,7 @@ class PresenceHostClient:
             places_ver = _parse_places_version(response)
             self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
             self.places_version = places_ver
+            self.place_binding_version = _parse_place_binding_version(response) if places_ver else 0
             self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
             self.presence_identity = int(response.get("presence_identity") == 1)
             self.presence_reaction_context = int(
@@ -446,13 +508,16 @@ class PresenceHostClient:
                 else 0
             )
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+            self._identity_discovered_at = time.monotonic()
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
             self.delivery_reporting_status = "unavailable"
             self.delivery_reporting_version = 0
             self.places_version = 0
+            self.place_binding_version = 0
             self.continuation_version = 0
             self.presence_reaction_context = 0
             self.presence_explicit_completion = 0
+            self._identity_discovered_at = 0.0
         return self.delivery_reporting_version
 
     async def place_status(self, account_id: str, conversation_id: str, thread_id: str = "") -> Dict[str, Any]:
@@ -486,21 +551,24 @@ class PresenceHostClient:
                 return {"state": "not_connected", "error": str(exc.payload.get("error") or "")}
             if code == "presence_auth_blocked":
                 return {"state": "auth_blocked", "error": str(exc.payload.get("error") or "")}
+            if exc.status_code >= 500 or exc.status_code == 404:
+                self.invalidate_identity()
             return {"state": "unavailable"}
         except (PresenceHostError, OSError, TimeoutError):
+            self.invalidate_identity()
             return {"state": "unavailable"}
 
     async def bind_place(self, account_id: str, conversation_id: str, thread_id: str = "") -> Optional[Dict[str, Any]]:
         """Capture an enqueue-time Place binding snapshot (``place_id`` + ``connected_revision``).
 
-        Returns ``None`` ONLY on an explicitly legacy Host (integer ``places_version == 0``).
-        Raises :class:`PlaceBindingUnavailable` on unconnected/unattributable chats (``code="place_not_connected"``),
-        access denials (``code="presence_auth_blocked"``), or transient Host errors.
+        Returns ``None`` on a legacy Host (``places_version == 0``) or on a Places-capable Host that does not
+        advertise ``presence_place_binding_version`` (preventing infinite bind loops on older Hosts).
+        Raises :class:`PlaceBindingUnavailable` on unconnected/unattributable chats, access denials, or errors.
         """
         await self.discover_delivery_support()
         if self.delivery_reporting_status not in {"supported", "unsupported"}:
             raise PlaceBindingUnavailable("Host unavailable to confirm Place binding")
-        if not self.places_version:
+        if not self.places_version or not self.place_binding_version:
             return None
         if not account_id or not conversation_id:
             raise PlaceBindingUnavailable("Place binding requires confirmed account_id and conversation_id")
@@ -524,60 +592,74 @@ class PresenceHostClient:
                 raise PlaceBindingUnavailable(
                     "Check this skill's access in Skills.", code="presence_auth_blocked"
                 ) from exc
+            if exc.status_code >= 500 or exc.status_code == 404:
+                self.invalidate_identity()
             raise PlaceBindingUnavailable(f"Host Place bind rejected (HTTP {exc.status_code})") from exc
         except (PresenceHostError, OSError, TimeoutError) as exc:
+            self.invalidate_identity()
             raise PlaceBindingUnavailable(f"Host Place bind failed ({type(exc).__name__})") from exc
         binding = body.get("binding") if isinstance(body, dict) else None
         if isinstance(binding, dict) and binding.get("version") == 1 and str(binding.get("place_id") or "").strip():
             return dict(binding)
         if isinstance(body, dict) and str(body.get("code") or "") in {"place_not_connected", "place_unattributable"}:
             raise PlaceBindingUnavailable("Add this place in Circles.", code="place_not_connected")
+        self.invalidate_identity()
         raise PlaceBindingUnavailable("Host did not return a valid Place binding")
 
     async def place_hold(
         self, account_id: str, conversation_id: str, thread_id: str = "", *, binding: Optional[Dict[str, Any]] = None
     ) -> str:
-        if isinstance(binding, dict) and binding.get("version") == 1:
+        if binding is not None:
+            if not isinstance(binding, dict) or binding.get("version") != 1:
+                raise PlaceBindingRevoked("Retained place binding is malformed")
             await self.discover_delivery_support()
-            if self.places_version:
-                query = urllib.parse.urlencode({
-                    "operation": "check",
-                    "provider": "telegram",
-                    "account_id": account_id,
-                    "conversation_id": conversation_id,
-                    "require_place": "true",
-                    "binding": json.dumps(binding, sort_keys=True, separators=(",", ":")),
-                    **({"thread_id": thread_id} if thread_id else {}),
-                })
-                try:
-                    res = await self.transport.request_json(
-                        "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(), payload=None, timeout_sec=10.0
-                    )
-                except PresenceHostHTTPError as exc:
-                    code = str(exc.payload.get("code") or "")
-                    if code == "presence_auth_blocked":
-                        return SKILL_ACCESS_REFUSED
-                    if code == "place_binding_invalid":
-                        raise PlaceBindingRevoked(str(exc.payload.get("error") or "Retained place binding is invalid")) from exc
-                    if code in {"place_not_connected", "place_disconnected", "place_scope_changed"}:
-                        raise PlaceBindingRevoked(str(exc.payload.get("error") or "Place was disconnected")) from exc
-                    return PLACE_POLICY_UNREAD
-                except (PresenceHostError, OSError, TimeoutError):
-                    return PLACE_POLICY_UNREAD
-                if res.get("allowed") is True:
-                    return ""
-                code = str(res.get("code") or "")
-                state = str(res.get("state") or "unavailable")
-                label = str(res.get("label") or "Telegram")
-                if code in {"place_disconnected", "place_scope_changed", "place_not_connected"}:
-                    raise PlaceBindingRevoked(
-                        f"Cancelled: {label} was disconnected or changed scope since this operation was queued"
-                    )
-                if state in {"silent", "paused", "observe"}:
-                    return f"Held: {label} is {state}"
-                if code == "place_unattributable":
-                    return f"Held: {label} cannot be attributed right now"
+            if self.delivery_reporting_status not in {"supported", "unsupported"}:
                 return PLACE_POLICY_UNREAD
+            if not self.places_version or not self.place_binding_version:
+                return "Held: Host does not support verifying this row's saved Place binding"
+            query = urllib.parse.urlencode({
+                "operation": "check",
+                "provider": "telegram",
+                "account_id": account_id,
+                "conversation_id": conversation_id,
+                "require_place": "true",
+                "binding": json.dumps(binding, sort_keys=True, separators=(",", ":")),
+                **({"thread_id": thread_id} if thread_id else {}),
+            })
+            try:
+                res = await self.transport.request_json(
+                    "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(), payload=None, timeout_sec=10.0
+                )
+            except PresenceHostHTTPError as exc:
+                code = str(exc.payload.get("code") or "")
+                if code == "presence_auth_blocked":
+                    return SKILL_ACCESS_REFUSED
+                if code == "place_binding_invalid":
+                    raise PlaceBindingRevoked(str(exc.payload.get("error") or "Retained place binding is invalid")) from exc
+                if code in {"place_not_connected", "place_disconnected", "place_scope_changed"}:
+                    raise PlaceBindingRevoked(str(exc.payload.get("error") or "Place was disconnected")) from exc
+                if exc.status_code >= 500 or exc.status_code == 404:
+                    self.invalidate_identity()
+                return PLACE_POLICY_UNREAD
+            except (PresenceHostError, OSError, TimeoutError):
+                self.invalidate_identity()
+                return PLACE_POLICY_UNREAD
+            if res.get("allowed") is True:
+                return ""
+            code = str(res.get("code") or "")
+            state = str(res.get("state") or "unavailable")
+            label = str(res.get("label") or "Telegram")
+            if code in {"place_disconnected", "place_scope_changed", "place_not_connected"}:
+                raise PlaceBindingRevoked(
+                    f"Cancelled: {label} was disconnected or changed scope since this operation was queued"
+                )
+            if state in {"silent", "paused", "observe"}:
+                return f"Held: {label} is {state}"
+            if code == "place_unattributable":
+                return f"Held: {label} cannot be attributed right now"
+            if "allowed" not in res:
+                self.invalidate_identity()
+            return PLACE_POLICY_UNREAD
         info = await self.place_status(account_id, conversation_id, thread_id)
         state = info.get("state", "unavailable")
         if state in {"active", "legacy"}:

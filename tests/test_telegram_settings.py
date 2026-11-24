@@ -381,7 +381,7 @@ def test_api_base_validator_canonicalizes_ipv6_with_brackets():
 def test_api_base_form_keeps_what_it_shows_and_an_emptied_field_returns_to_the_cloud(tmp_path):
     plugin = _load_plugin()
     handler = plugin._make_settings_save(_RouteApi(tmp_path))
-    base = "http://192.168.1.48:18085"
+    base = "https://192.168.1.48:18085"
 
     def request(payload=None, method="POST"):
         return asyncio.run(handler(_RouteRequest(payload, host="127.0.0.1", method=method)))
@@ -399,8 +399,8 @@ def test_api_base_form_keeps_what_it_shows_and_an_emptied_field_returns_to_the_c
     # A request without the key leaves the saved value alone.
     assert "Bot API server" not in message({"TELEGRAM_COMMAND_MODE": "strict"})
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == base
-    # A fragment/query/base-with-path is rejected, and the stored value stands.
-    for bad in ("https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
+    # Remote plaintext HTTP and malformed origins are rejected, and the stored value stands.
+    for bad in ("http://192.168.1.48:18085", "https://host#", "https://host?x=1", "https://host/bot", "ftp://host"):
         refused = request({"TELEGRAM_API_BASE": bad})
         assert refused.status_code == 400, bad
         assert "TELEGRAM_API_BASE" in json.loads(refused.body)["message"]
@@ -522,7 +522,7 @@ def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Pa
         assert reply.status_code == 200
         return json.loads(reply.body)
 
-    refused = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
+    refused = save({"TELEGRAM_API_BASE": "https://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
                     "TELEGRAM_COMMAND_MODE": "strict"}, host=host, marker=marker)
     assert refused["ok"] is True and refused["server_ignored"] is True
     assert "change them from the Settings page on the computer running Ouroboros" in refused["message"]
@@ -540,9 +540,9 @@ def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Pa
     assert hand_edited["server_ignored"] is False and "Settings page" not in hand_edited["message"]
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://bot.example:443/"
     merge_settings(tmp_path, {"TELEGRAM_API_BASE": "http://127.0.0.1:8081", "TELEGRAM_API_FILES_DIR": store})
-    local = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081"}, host="127.0.0.1")
+    local = save({"TELEGRAM_API_BASE": "https://198.51.100.9:8081"}, host="127.0.0.1")
     assert local["server_ignored"] is False
-    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "http://198.51.100.9:8081"
+    assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://198.51.100.9:8081"
 
 
 def test_server_notes_agree_on_timing_and_the_move_with_ouroboros_quit(tmp_path):

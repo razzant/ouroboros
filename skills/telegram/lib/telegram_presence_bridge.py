@@ -27,9 +27,11 @@ from .telegram_mirror import (
     VALID_OWNER_CHAT_MODES,
     owner_chat_mode,
 )
+from .telegram_owner_auth import owner_matches_live
 from .telegram_panels import _MODE_TEXTS, build_mode_panel, presence_readiness_hint
 from .telegram_poll_binding import InjectNotAccepted, update_key
-from .telegram_state import _load_settings
+from .telegram_secret_guard import classify_secret_exposure
+from .telegram_state import _load_settings, _message_ref
 
 _PRESENCE_HINT_THROTTLE_SEC = 60.0
 _LAST_PRESENCE_HINT: Dict[tuple[str, int], float] = {}
@@ -183,21 +185,25 @@ async def handle_non_owner_update(
     if runtime is None:
         raise InjectNotAccepted("Presence runtime unavailable")
     record_only = False
+    api_base = str(getattr(client, "api_base_origin", "") or "")
     for key in ("message", "edited_message"):
         payload = update.get(key)
         if isinstance(payload, dict):
             chat = payload.get("chat") or {}
-            reply_to = payload.get("reply_to_message") or {}
-            if str(chat.get("type") or "") == "private" and isinstance(reply_to, dict) and reply_to:
-                chat_id = int(chat.get("id") or 0)
-                quiz_ref = telegram_quiz.quiz_for_message(api, client.bot_id, chat_id, int(reply_to.get("message_id") or 0))
-                if quiz_ref and quiz_ref.get("secret"):
-                    if callable(post) and pinned_chat and str(chat_id) == str(pinned_chat):
-                        await telegram_quiz.answer_from_reply(
-                            api, client, quiz_ref, "", chat_id=chat_id,
-                            request_key=update_key(update), lang=lang, post=post,
-                        )
-                    return  # Secret replies and edits never touch SQLite custody or Presence turns.
+            chat_id = int(chat.get("id") or 0)
+            secret_ref = classify_secret_exposure(
+                api, client.bot_id, payload, api_base=api_base, is_edit=(key == "edited_message"),
+                known_non_secret_fn=lambda cid, mid: bool(_message_ref(api, client.bot_id, cid, mid)),
+            )
+            if secret_ref is not None:
+                if (callable(post) and str(chat.get("type") or "") == "private"
+                        and pinned_chat and str(chat_id) == str(pinned_chat)
+                        and owner_matches_live(api.get_state_dir(), chat_id)):
+                    await telegram_quiz.answer_from_reply(
+                        api, client, secret_ref, "", chat_id=chat_id,
+                        request_key=update_key(update), lang=lang, post=post,
+                    )
+                return  # Secret replies, quotes, and edits never touch SQLite custody or Presence turns.
     for key in ("edited_message", "message_reaction", "message_reaction_count"):
         payload = update.get(key)
         if isinstance(payload, dict):

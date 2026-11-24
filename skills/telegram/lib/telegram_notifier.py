@@ -18,6 +18,7 @@ from .telegram_api import (
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
+from .telegram_owner_auth import api_base_matches_live, owner_matches_live
 from .telegram_poll_binding import bot_id
 from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
@@ -85,13 +86,17 @@ async def _push_notification(
     try:
         if not token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
+        api_base = telegram_api_base(state_dir)
         client = TelegramClient(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),
             **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
-            api_base_url=telegram_api_base(state_dir),
+            api_base_url=api_base,
             files_dir=telegram_files_dir(state_dir),
             binding=binding, generation=generation,
+            binding_guard=lambda sdir=state_dir, cid=int(chat_id), base=api_base: (
+                owner_matches_live(sdir, cid) and api_base_matches_live(sdir, base)
+            ),
         )
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None

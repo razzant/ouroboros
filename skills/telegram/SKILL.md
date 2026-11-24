@@ -90,8 +90,11 @@ companion_processes:
 # Telegram
 
 One unified Telegram integration provides the owner control bridge, the optional
-Mini App, and Circles/Presence transport over a single bot token. The first positive private Telegram chat binds as
-the sole owner. Text, photos and files (documents, video, audio and voice notes within
+Mini App, and Circles/Presence transport over a single bot token. Owner access is
+never auto-bound from an unconfirmed first DM: the owner binds explicitly by setting
+`TELEGRAM_CHAT_ID` in local Settings or redeeming a single-use, time-bounded pairing
+code issued on loopback via `POST /api/extensions/telegram/owner/pair` in a private
+DM (`/pair <code>` or `/start <code>`). Text, photos and files (documents, video, audio and voice notes within
 this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A helper's own final report
@@ -296,8 +299,9 @@ The bridge speaks the install's interface language (Settings → Appearance → 
 `/language` lists English and the languages the install already has,
 `/language <name or tag>` chooses one for the whole installation through the host's
 one writer, and the bridge's own menu, buttons, card hints and notifications are
-English source read through the install's translation memory (a line it lacks is
-generated like a browser miss), so the bot ships no dictionary and follows any
+English source read passively from the install's translation memory (read-only lookup,
+falling back to English when a key is not yet cached, never writing directly to
+installation state), so the bot ships no dictionary and follows any
 chosen language. A host notice arrives as the host's one line (`ouroboros/host_notice.py`): its
 phrase and its next step, each translated before they are joined; its raw details stay behind
 Details in the web. A notice's one-line instruction (the Git command that puts kept local
@@ -352,8 +356,10 @@ attributed observations, not the supervising task's narration or a completion
 receipt; journal gaps and preview omissions remain visible.
 
 Set `TELEGRAM_BOT_TOKEN` in Settings (or enter it in the form setup asks with),
-grant it to this skill, enable the skill, and send the bot a private message to
-bind the owner. No legacy Telegram skill
+grant it to this skill, enable the skill, and bind the owner either by setting
+`TELEGRAM_CHAT_ID` in local Settings or by issuing a one-time pairing code from
+Ouroboros (`POST /api/extensions/telegram/owner/pair`) and sending `/pair <code>`
+in a private DM to the bot. No legacy Telegram skill
 state is copied or changed. Installations that use `telegram-bridge` or
 `telegram-miniapp-poc` must disable or remove those skills before enabling this
 one.
@@ -378,12 +384,11 @@ binding). A Save applies to the next send; polling moves after its current long
 poll or retry wait (up to about a minute). An empty value means
 `https://api.telegram.org`, and the form refuses an invalid value with an
 error naming the key. The server receives the bot token in every request path
-and becomes the source of the bot's updates, so prefer a loopback address or an
-`https://` origin: a plain `http://` origin on another machine carries the
-token unencrypted. A saved `TELEGRAM_PROXY` carries these calls too, whatever
+and becomes the source of the bot's updates, so remote servers MUST use `https://`
+and plain `http://` is permitted only for loopback hosts (`localhost`, `127.0.0.1`,
+`::1`, or loopback IP literals). A saved `TELEGRAM_PROXY` carries these calls too, whatever
 `NO_PROXY` says: clear it to reach a server on this computer's loopback, and
-remember that it sees the token in the request path of a plain `http://`
-origin. An environment or system proxy the bridge already uses carries them
+remember that a proxy on a loopback `http://` server sees the token in the request path. An environment or system proxy the bridge already uses carries them
 as well unless the server's host is listed in `NO_PROXY`; the Mini App
 companion never uses those proxies. If the server refuses
 the token for good, polling waits, sending it nothing more, until the token,
@@ -491,7 +496,7 @@ the owner bridge, the Cloudflare Quick Tunnel Mini App, and Circles/Presence pla
 eliminating 409 polling conflicts and sharing `TELEGRAM_PROXY`, `TELEGRAM_API_BASE`, and
 `TELEGRAM_API_FILES_DIR` across every path without calling `deleteWebhook`. `setMyCommands` always
 clears Telegram's public `default` scope and installs owner admin commands only on the bound owner
-chat scope (immediately on TOFU binding and on every validation), so admin commands never appear in
+chat scope (immediately on owner confirmation/binding and on every validation), so admin commands never appear in
 groups or non-owner DMs. Upgrading from 1.4.x adds `fs`, `tool`, and `presence` permissions; installs
 without `auto_grant` will require re-granting permissions in Extensions → Skills before reload.
 

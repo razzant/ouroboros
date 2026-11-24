@@ -589,12 +589,13 @@ def test_r6_security_and_live_readiness_hardening(tmp_path):
     manifest = parse_skill_manifest_text((_REPO_ROOT / "skills" / "telegram" / "SKILL.md").read_text(encoding="utf-8"))
     assert "telegram-bot" in manifest.conflicts
 
-    # 1) Panic normalization (/main /panic, Host-parity prefix) + concurrent Panic bypasses earlier slow message!
+    # 1) Panic normalization (/main /panic, strict command boundary rejecting /panicking & literal code) + concurrency!
     assert plugin._panic_update({"message": {"text": "/main /panic"}}) is True
     assert plugin._panic_update({"message": {"text": "/m@my_bot /panic now"}}) is True
-    assert plugin._panic_update({"message": {"text": "/panic!"}}) is True
-    assert plugin._panic_update({"message": {"text": "/main /panicking"}}) is True
-    assert plugin._panic_update({"message": {"caption": "/panic!"}}) is True
+    assert plugin._panic_update({"message": {"text": "/panic!"}}) is False
+    assert plugin._panic_update({"message": {"text": "/main /panicking"}}) is False
+    assert plugin._panic_update({"message": {"caption": "/panic!"}}) is False
+    assert plugin._panic_update({"message": {"text": "/panic", "entities": [{"type": "code", "offset": 0, "length": 6}]}}) is False
     assert plugin._panic_update({"message": {"text": "/main hello"}}) is False
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -916,7 +917,7 @@ def test_r6_security_and_live_readiness_hardening(tmp_path):
     _places.connect_place(real_host_dir, connector="telegram", provider="telegram", account_id="123456", conversation_id="-1001")
     class _RealPlaceTransport:
         async def request_json(self, method, url, *, headers, payload, timeout_sec):
-            if url.endswith("/identity"): return {"ok": True, "places_version": 1, "presence_delivery_version": 1}
+            if url.endswith("/identity"): return {"ok": True, "places_version": 1, "presence_place_binding_version": 1, "presence_delivery_version": 1}
             import urllib.parse as _up
             qs = dict(_up.parse_qsl(_up.urlsplit(url).query))
             return {"ok": True, **_ob_facts(real_host_dir, "telegram", {k: qs.get(k, "") for k in ("provider", "account_id", "conversation_id", "thread_id")}, require_place=qs.get("require_place") == "true")}
@@ -930,7 +931,7 @@ def test_r6_security_and_live_readiness_hardening(tmp_path):
     assert json.loads(api.tools["telegram_send"](focus_a, chat_id="-1001", kind="photo", file_path=str(ok_file), caption="c", request_id="bind-fail-1"))["code"] == "place_binding_unavailable"
 
     class _RetainedSub(_StubSubmitter):
-        places_version = 1
+        places_version = place_binding_version = 1
         async def bind_place(self, acct, chat, topic=""):
             if chat == "-99": raise PlaceBindingUnavailable("Add in Circles", code="place_not_connected")
             if chat == "-97": raise PlaceBindingUnavailable("Check access", code="presence_auth_blocked")
@@ -973,7 +974,7 @@ def test_r6_security_and_live_readiness_hardening(tmp_path):
                     raw = conn.recv(4096).decode("latin-1", "ignore")
                     if mode == "two_req":
                         _tm.sleep(0.38)
-                        body = b'{"places_version":1}' if "/identity" in raw else b'{"binding":{"version":1,"place_id":"p1"}}'
+                        body = b'{"places_version":1,"presence_place_binding_version":1}' if "/identity" in raw else b'{"binding":{"version":1,"place_id":"p1"}}'
                         conn.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
                     elif mode == "hdr_drip":
                         for b in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}":

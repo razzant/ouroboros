@@ -14,9 +14,10 @@ import hashlib
 import os
 import pathlib
 import re
+import stat
 import threading
 import uuid
-from typing import Any, Callable, Dict, Iterator, List, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 try:
     import fcntl
@@ -40,6 +41,13 @@ class OutboxStorageFull(OSError):
 
 class StagingStorageFull(OSError):
     """The skill's inbound staging store reached its disk cap."""
+
+
+class FrozenFileMissing(ValueError):
+    """Media/album outbox row lacks a verified frozen copy inside outbox_files/."""
+
+
+_MEDIA_KINDS = frozenset({"photo", "document", "video", "audio", "voice", "animation"})
 
 
 @contextlib.contextmanager
@@ -149,12 +157,10 @@ def safe_filename(value: str) -> str:
     return clean or "attachment"
 
 
-def keep(source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: int = MAX_OUTBOX_FILES_BYTES) -> Dict[str, Any]:
-    """Copy ``source`` into a new folder of its own and return the row's record of the copy.
-
-    The copy reaches the disk (fsync) before the row that names it can be queued, so a row never names a partial
-    copy. Any failure removes what was written and raises: ``OSError``, ``OutboxStorageFull`` or ``CopyTooLarge``.
-    """
+def keep_fd(
+    src_fd: int, source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: int = MAX_OUTBOX_FILES_BYTES
+) -> Dict[str, Any]:
+    """Copy bytes directly from an already-opened, root-confined ``src_fd`` into ``outbox_files/``."""
     source = pathlib.Path(source)
     root = pathlib.Path(state_dir) / DIRECTORY
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -164,33 +170,49 @@ def keep(source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: i
             raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) reached")
         folder = root / uuid.uuid4().hex
         folder.mkdir(mode=0o700)
-        target = folder / source.name
+        target = folder / safe_filename(source.name)
         digest, size = hashlib.sha256(), 0
         try:
-            read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-            src_fd = os.open(source, read_flags)
-            with os.fdopen(src_fd, "rb") as reader:
-                src_size = os.fstat(reader.fileno()).st_size
-                if src_size > max_bytes:
-                    raise CopyTooLarge(f"{source.name} exceeds {max_bytes:,} bytes")
-                if storage_cap > 0 and current + src_size > storage_cap:
-                    raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
-                created = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-                with os.fdopen(created, "wb") as writer:
-                    while chunk := reader.read(_CHUNK):
-                        size += len(chunk)
-                        if size > max_bytes:
-                            raise CopyTooLarge(f"{source.name} grew past {max_bytes:,} bytes while it was copied")
-                        if storage_cap > 0 and current + size > storage_cap:
-                            raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
-                        digest.update(chunk)
-                        writer.write(chunk)
-                    writer.flush()
-                    os.fsync(writer.fileno())
+            st = os.fstat(src_fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise PermissionError(f"{source.name} is not a regular file")
+            src_size = st.st_size
+            if src_size > max_bytes:
+                raise CopyTooLarge(f"{source.name} exceeds {max_bytes:,} bytes")
+            if storage_cap > 0 and current + src_size > storage_cap:
+                raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
+            os.lseek(src_fd, 0, os.SEEK_SET)
+            created = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            with os.fdopen(created, "wb") as writer:
+                while chunk := os.read(src_fd, _CHUNK):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise CopyTooLarge(f"{source.name} grew past {max_bytes:,} bytes while it was copied")
+                    if storage_cap > 0 and current + size > storage_cap:
+                        raise OutboxStorageFull(f"outbox_files storage limit ({storage_cap:,} bytes) exceeded")
+                    digest.update(chunk)
+                    writer.write(chunk)
+                writer.flush()
+                os.fsync(writer.fileno())
         except BaseException:
             discard([{"path": str(target)}], state_dir)
             raise
     return {"path": str(target), "sha256": digest.hexdigest(), "size": size, "source": str(source)}
+
+
+def keep(source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: int = MAX_OUTBOX_FILES_BYTES) -> Dict[str, Any]:
+    """Copy ``source`` into a new folder of its own and return the row's record of the copy."""
+    source = pathlib.Path(source)
+    read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    src_fd = os.open(source, read_flags)
+    try:
+        return keep_fd(src_fd, source, state_dir, max_bytes, storage_cap=storage_cap)
+    finally:
+        os.close(src_fd)
 
 
 def records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -199,16 +221,63 @@ def records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [item for item in kept if isinstance(item, dict) and item.get("path")] if isinstance(kept, list) else []
 
 
-def verify(payload: Dict[str, Any]) -> None:
-    """Raise ``ValueError`` unless every copy the row names still has the size and SHA-256 recorded when queued."""
-    for record in records(payload):
+def _open_frozen_copy_fd(path_str: str, state_dir: Optional[Any]) -> int:
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if state_dir is None:
+        return os.open(path_str, leaf_flags)
+    root = (pathlib.Path(state_dir) / DIRECTORY).resolve(strict=True)
+    target = pathlib.Path(path_str)
+    try:
+        rel = target.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FrozenFileMissing("frozen copy lies outside outbox_files/") from exc
+    if len(rel.parts) != 2:
+        raise FrozenFileMissing("frozen copy path is not directly inside an outbox_files/ copy folder")
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root_fd = os.open(root, dir_flags)
+    try:
+        sub_fd = os.open(rel.parts[0], dir_flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+    try:
+        return os.open(rel.parts[1], leaf_flags, dir_fd=sub_fd)
+    finally:
+        os.close(sub_fd)
+
+
+def verify(payload: Dict[str, Any], *, state_dir: Optional[Any] = None, require_for_media: bool = False) -> None:
+    """Verify every frozen copy matches its size, SHA-256, and (when ``state_dir`` is given) lives in ``outbox_files/``.
+
+    When ``require_for_media=True``, media and album rows without complete, matching ``_frozen`` records raise
+    :class:`FrozenFileMissing` so legacy or tampered rows cannot read raw ``file_path`` from disk.
+    """
+    kept = records(payload)
+    kind = str(payload.get("kind") or "message")
+    if require_for_media:
+        if kind in _MEDIA_KINDS:
+            expected_path = str(payload.get("file_path") or "")
+            if len(kept) != 1 or not expected_path or str(kept[0].get("path") or "") != expected_path:
+                raise FrozenFileMissing("media row lacks a verified frozen copy in outbox_files; held")
+        elif kind == "album":
+            items = payload.get("_rendered_items") or payload.get("items") or []
+            if not isinstance(items, list) or not items or len(kept) != len(items):
+                raise FrozenFileMissing("album row lacks complete verified frozen copies in outbox_files; held")
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict) or str(item.get("file_path") or "") != str(kept[idx].get("path") or ""):
+                    raise FrozenFileMissing("album item path does not match its verified frozen copy; held")
+    for record in kept:
         name = pathlib.PurePath(str(record["path"])).name
         digest, size = hashlib.sha256(), 0
         try:
-            with open(record["path"], "rb") as reader:
+            fd = _open_frozen_copy_fd(str(record["path"]), state_dir)
+            with os.fdopen(fd, "rb") as reader:
+                if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode):
+                    raise ValueError(f"the copy of {name} is not a regular file; not sent")
                 while chunk := reader.read(_CHUNK):
                     size += len(chunk)
                     digest.update(chunk)
+        except FrozenFileMissing:
+            raise
         except OSError as exc:
             raise ValueError(
                 f"the copy of {name} kept when it was queued cannot be read ({type(exc).__name__}); not sent"

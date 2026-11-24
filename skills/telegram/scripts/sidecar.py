@@ -24,7 +24,7 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
-from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -34,14 +34,33 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import HTMLResponse, Response
 from starlette.websockets import WebSocket
 
+try:
+    from . import sidecar_http as _sidecar_http
+except ImportError:
+    import importlib.util as _ilu
+    import pathlib as _pl
+
+    _http_spec = _ilu.spec_from_file_location("_tg_sidecar_http", _pl.Path(__file__).with_name("sidecar_http.py"))
+    assert _http_spec and _http_spec.loader
+    _sidecar_http = _ilu.module_from_spec(_http_spec)
+    _http_spec.loader.exec_module(_sidecar_http)
+
+MINIAPP_REQUEST_MARKER_HEADER = _sidecar_http.MINIAPP_REQUEST_MARKER_HEADER
+_ProxyStreamResponse = _sidecar_http.ProxyStreamResponse
+_BUILTIN_STATIC_CACHE = _sidecar_http._BUILTIN_STATIC_CACHE
+_bounded_body = _sidecar_http.bounded_body
+_header_values = _sidecar_http.header_values
+_plain_response = _sidecar_http.plain_response
+_request_headers = _sidecar_http.request_headers
+_response_headers = _sidecar_http.response_headers
+send_with_session_guard = _sidecar_http.send_with_session_guard
+
 AUTH_PATH = "/__telegram/auth"
 BOOTSTRAP_JS_PATH = "/__telegram/bootstrap.js"
 SESSION_PATH = "/__telegram/session"
 RESERVED_PREFIX = "/__telegram/"
 SESSION_COOKIE = "__Host-ouroboros-telegram"
 GATEWAY_MARKER_HEADER = "X-Ouroboros-Telegram-Gateway"
-MINIAPP_REQUEST_MARKER_HEADER = "X-Ouroboros-Telegram-MiniApp"
-_MINIAPP_REQUEST_MARKER = MINIAPP_REQUEST_MARKER_HEADER.lower().encode("ascii")
 
 _MAX_AUTH_BODY_BYTES = 16 * 1024
 _MAX_INIT_DATA_BYTES = 12 * 1024
@@ -51,58 +70,6 @@ _SESSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _TRYCLOUDFLARE_SUFFIX = ".trycloudflare.com"
 _ALLOWED_HTTP_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
-
-_HOP_BY_HOP_HEADERS = {
-    b"connection",
-    b"keep-alive",
-    b"proxy-authenticate",
-    b"proxy-authorization",
-    b"te",
-    b"trailer",
-    b"transfer-encoding",
-    b"upgrade",
-}
-_REQUEST_BLOCKED_HEADERS = _HOP_BY_HOP_HEADERS | {
-    b"authorization",
-    b"content-length",
-    b"cookie",
-    b"expect",
-    b"forwarded",
-    b"host",
-    b"origin",
-    b"referer",
-    b"true-client-ip",
-    b"x-client-ip",
-    _MINIAPP_REQUEST_MARKER,
-    b"x-ouroboros-password",
-    b"x-real-ip",
-}
-_REQUEST_BLOCKED_PREFIXES = (
-    b"cf-",
-    b"proxy-",
-    b"sec-websocket-",
-    b"x-envoy-",
-    b"x-forwarded-",
-    b"x-original-",
-    b"x-real-",
-    b"x-rewrite-",
-)
-_RESPONSE_BLOCKED_HEADERS = _HOP_BY_HOP_HEADERS | {
-    b"cache-control",
-    b"cdn-cache-control",
-    b"clear-site-data",
-    b"cloudflare-cdn-cache-control",
-    b"date",
-    b"expires",
-    b"pragma",
-    b"refresh",
-    b"server",
-    b"set-cookie",
-    b"surrogate-control",
-}
-
-# The core's own mark on its builtin /static files (ouroboros/server_web.py BUILTIN_STATIC_CACHE).
-_BUILTIN_STATIC_CACHE = b"private, no-cache, must-revalidate"
 
 _BOOTSTRAP_HTML = """<!doctype html>
 <html lang="en">
@@ -206,50 +173,6 @@ class SidecarSeams:
     session_clock: Callable[[], float] | None = None
     rate_clock: Callable[[], float] | None = None
     exposure_guard: Callable[[], bool] | None = None
-
-
-class _ProxyStreamResponse:
-    """Minimal ASGI response that preserves a streamed upstream body verbatim."""
-
-    def __init__(
-        self,
-        status_code: int,
-        headers: list[tuple[bytes, bytes]],
-        body: AsyncIterator[bytes],
-        close: Callable[[], Awaitable[None]],
-    ) -> None:
-        self.status_code = status_code
-        self.headers = headers
-        self.body = body
-        self.close = close
-
-    async def __call__(self, _scope: dict[str, Any], receive: Any, send: Any) -> None:
-        # The upstream response closes however delivery ends. uvicorn (ASGI 2.3) reports a client gone only to
-        # receive(), its send() then returning quietly, so delivery races that report as Starlette's StreamingResponse
-        # does: an abandoned stream (a stream widget's EventSource) lets its upstream socket go.
-        delivery = asyncio.ensure_future(self._deliver(send))
-        gone = asyncio.ensure_future(self._client_gone(receive))
-        try:
-            await asyncio.wait((delivery, gone), return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in (delivery, gone):
-                task.cancel()
-            await asyncio.gather(delivery, gone, return_exceptions=True)
-            await self.close()
-        if not delivery.cancelled() and delivery.exception() is not None:
-            raise delivery.exception()
-
-    async def _deliver(self, send: Any) -> None:
-        await send({"type": "http.response.start", "status": self.status_code, "headers": self.headers})
-        async for chunk in self.body:
-            if chunk:
-                await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
-
-    @staticmethod
-    async def _client_gone(receive: Any) -> None:
-        while (await receive())["type"] != "http.disconnect":
-            pass
 
 
 def _data_check_string(items: Iterable[tuple[str, str]]) -> str:
@@ -377,94 +300,6 @@ def _normalise_public_url(value: str) -> tuple[str, str]:
     return f"https://{host}/", host
 
 
-def _header_values(scope: dict[str, Any], name: bytes) -> list[str]:
-    return [
-        value.decode("latin-1")
-        for key, value in scope.get("headers", [])
-        if key.lower() == name
-    ]
-
-
-def _connection_tokens(headers: Iterable[tuple[bytes, bytes]]) -> set[bytes]:
-    tokens: set[bytes] = set()
-    for name, value in headers:
-        if name.lower() != b"connection":
-            continue
-        for item in value.lower().split(b","):
-            token = item.strip()
-            if token:
-                tokens.add(token)
-    return tokens
-
-
-def _request_headers(scope: dict[str, Any]) -> list[tuple[bytes, bytes]]:
-    raw_headers = list(scope.get("headers", []))
-    blocked = _REQUEST_BLOCKED_HEADERS | _connection_tokens(raw_headers)
-    output: list[tuple[bytes, bytes]] = []
-    for raw_name, value in raw_headers:
-        name = raw_name.lower()
-        if name in blocked or any(name.startswith(prefix) for prefix in _REQUEST_BLOCKED_PREFIXES):
-            continue
-        output.append((name, value))
-    if not any(name == b"accept-encoding" for name, _ in output):
-        # The body is relayed raw: the phone's own choice reaches the core, never httpx's default.
-        output.append((b"accept-encoding", b"identity"))
-    output.append((_MINIAPP_REQUEST_MARKER, b"1"))
-    return output
-
-
-def _response_headers(
-    headers: Iterable[tuple[bytes, bytes]],
-    *,
-    core_origin: str,
-    public_origin: str,
-    revalidated_static: bool = False,
-) -> list[tuple[bytes, bytes]]:
-    """Every answer is ``no-store`` except an owner's GET of a builtin ``/static`` file that the core marks
-    ``_BUILTIN_STATIC_CACHE``: that one keeps its revalidation (ETag, 304) and no shared cache may hold it."""
-    raw_headers = list(headers)
-    blocked = _RESPONSE_BLOCKED_HEADERS | _connection_tokens(raw_headers)
-    keep = revalidated_static and (b"cache-control", _BUILTIN_STATIC_CACHE) in ((n.lower(), v) for n, v in raw_headers)
-    output: list[tuple[bytes, bytes]] = []
-    for raw_name, raw_value in raw_headers:
-        name = raw_name.lower()
-        if name in blocked or name.startswith(b"access-control-"):
-            continue
-        value = raw_value
-        if name == b"location":
-            try:
-                location = raw_value.decode("latin-1")
-            except UnicodeError:
-                continue
-            if location == core_origin or location.startswith(core_origin + "/"):
-                location = public_origin + location[len(core_origin) :].lstrip("/")
-                value = location.encode("latin-1")
-        output.append((name, value))
-    if keep:
-        return [*output, (b"cache-control", _BUILTIN_STATIC_CACHE), (b"cdn-cache-control", b"no-store")]
-    return [*output, (b"cache-control", b"private, no-store"), (b"pragma", b"no-cache"), (b"expires", b"0")]
-
-
-def _plain_response(status_code: int, text: str, *, headers: dict[str, str] | None = None) -> Response:
-    response_headers = {
-        "Cache-Control": "no-store",
-        "Referrer-Policy": "no-referrer",
-        "X-Content-Type-Options": "nosniff",
-    }
-    if headers:
-        response_headers.update(headers)
-    return Response(text, status_code=status_code, media_type="text/plain", headers=response_headers)
-
-
-async def _bounded_body(request: Request, limit: int) -> bytes:
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > limit:
-            raise ValueError("request body is too large")
-    return bytes(body)
-
-
 class TelegramProxySidecar:
     """ASGI auth boundary and reverse proxy for the existing Ouroboros SPA."""
 
@@ -539,6 +374,7 @@ class TelegramProxySidecar:
         self._public_host: str | None = None
         self._generation = 0
         self._sessions: OrderedDict[bytes, _Session] = OrderedDict()
+        self._revocation_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._active_websockets = 0
         self._active_auth = 0
         self._auth_global: deque[float] = deque()
@@ -564,6 +400,14 @@ class TelegramProxySidecar:
         with self._state_lock:
             return self._public_host
 
+    def _notify_revocation_locked(self) -> None:
+        for loop, event in list(self._revocation_waiters):
+            try:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                pass
+
     def set_public_url(self, url: str) -> str:
         normalised, host = _normalise_public_url(url)
         with self._state_lock:
@@ -572,6 +416,7 @@ class TelegramProxySidecar:
                 self._public_host = host
                 self._generation += 1
                 self._sessions.clear()
+                self._notify_revocation_locked()
         return normalised
 
     def clear_public_url(self) -> None:
@@ -580,6 +425,7 @@ class TelegramProxySidecar:
             self._public_host = None
             self._generation += 1
             self._sessions.clear()
+            self._notify_revocation_locked()
 
     def _exposure_is_authorized(self) -> bool:
         guard = self._exposure_guard
@@ -876,11 +722,44 @@ class TelegramProxySidecar:
         combined = raw_path + (b"?" + query if query else b"")
         return self._core_url.copy_with(raw_path=combined)
 
-    async def _proxy_http(self, scope: dict[str, Any], receive: Any) -> Any:
+    def _is_session_active(self, token: str, session: _Session) -> bool:
+        if not self._exposure_is_authorized():
+            return False
+        if self._session_clock() >= session.expires_at:
+            return False
+        current = self._lookup_session(token)
+        return current is not None and current.generation == session.generation
+
+    async def _wait_session_invalid(self, token: str, session: _Session) -> None:
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        waiter = (loop, event)
+        with self._state_lock:
+            self._revocation_waiters.add(waiter)
+        try:
+            while self._is_session_active(token, session):
+                remaining = max(0.01, session.expires_at - self._session_clock())
+                event.clear()
+                if not self._is_session_active(token, session):
+                    return
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=min(0.25, remaining))
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            with self._state_lock:
+                self._revocation_waiters.discard(waiter)
+
+    async def _proxy_http(self, scope: dict[str, Any], receive: Any, token: str, session: _Session) -> Any:
         try:
             upstream_url = self._upstream_url(scope)
         except (UnicodeError, ValueError):
             return _plain_response(400, "Invalid request target.")
+
+        is_valid = lambda: self._is_session_active(token, session)  # noqa: E731
+        wait_invalid = lambda: self._wait_session_invalid(token, session)  # noqa: E731
+        if not is_valid():
+            return _plain_response(401, "Telegram owner session expired.")
 
         request = Request(scope, receive=receive)
         client = await self._get_http_client()
@@ -891,18 +770,21 @@ class TelegramProxySidecar:
             content=request.stream(),
         )
         try:
-            upstream = await client.send(upstream_request, stream=True)
+            upstream, revoked = await send_with_session_guard(
+                client.send(upstream_request, stream=True), is_valid=is_valid, wait_invalid=wait_invalid
+            )
         except (httpx.HTTPError, OSError):
             return _plain_response(502, "Ouroboros is unavailable.")
         except ClientDisconnect:
-            # The phone left while this request waited for a socket: once one freed, its head reached the core and
-            # reading its body met the disconnect, which ended the upstream exchange. Nobody receives this answer.
             return _plain_response(502, "Ouroboros is unavailable.")
+        if revoked or upstream is None:
+            return _plain_response(401, "Telegram owner session expired.")
 
         public_target = self._public_target()
-        if public_target is None:
+        if public_target is None or not is_valid():
             await upstream.aclose()
-            return _plain_response(503, "Gateway is not ready.")
+            return _plain_response(401 if public_target is not None else 503,
+                                   "Telegram owner session expired." if public_target is not None else "Gateway is not ready.")
         public_origin = public_target[0]
         return _ProxyStreamResponse(
             upstream.status_code,
@@ -916,6 +798,8 @@ class TelegramProxySidecar:
             ),
             upstream.aiter_raw(),
             upstream.aclose,
+            is_valid=is_valid,
+            wait_invalid=wait_invalid,
         )
 
     async def _handle_http(self, scope: dict[str, Any], receive: Any) -> Any:
@@ -923,12 +807,7 @@ class TelegramProxySidecar:
         require_origin = method not in {"GET", "HEAD"}
         validation_error = self._validate_public_request(scope, require_origin=require_origin)
         if validation_error is not None:
-            messages = {
-                403: "Origin rejected.",
-                421: "Host rejected.",
-                503: "Gateway is not ready.",
-            }
-            return _plain_response(validation_error, messages[validation_error])
+            return _plain_response(validation_error, {403: "Origin rejected.", 421: "Host rejected.", 503: "Gateway is not ready."}[validation_error])
 
         path = str(scope.get("path") or "/")
         if path == AUTH_PATH and method == "POST":
@@ -948,12 +827,9 @@ class TelegramProxySidecar:
         if path.startswith(RESERVED_PREFIX):
             return _plain_response(404, "Not found.")
         if method not in _ALLOWED_HTTP_METHODS:
-            return _plain_response(
-                405,
-                "Method not allowed.",
-                headers={"Allow": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"},
-            )
-        return await self._proxy_http(scope, receive)
+            return _plain_response(405, "Method not allowed.", headers={"Allow": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"})
+        token, active_session = session
+        return await self._proxy_http(scope, receive, token, active_session)
 
     async def _client_to_upstream(self, client: WebSocket, upstream: Any) -> None:
         while True:
@@ -985,16 +861,8 @@ class TelegramProxySidecar:
             else:
                 await client.send_bytes(bytes(message))
 
-    async def _session_guard(self, token: str, expires_at: float) -> None:
-        while True:
-            now = self._session_clock()
-            if (
-                not self._exposure_is_authorized()
-                or now >= expires_at
-                or self._lookup_session(token) is None
-            ):
-                return
-            await asyncio.sleep(min(1.0, max(0.01, expires_at - now)))
+    async def _session_guard(self, token: str, session: _Session) -> None:
+        await self._wait_session_invalid(token, session)
 
     async def _handle_websocket(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         client = WebSocket(scope, receive=receive, send=send)
@@ -1047,7 +915,7 @@ class TelegramProxySidecar:
                 await client.accept()
                 from_client = asyncio.create_task(self._client_to_upstream(client, upstream))
                 from_upstream = asyncio.create_task(self._upstream_to_client(upstream, client))
-                guard = asyncio.create_task(self._session_guard(token, session.expires_at))
+                guard = asyncio.create_task(self._session_guard(token, session))
                 tasks = {from_client, from_upstream, guard}
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 expired = guard in done
@@ -1088,8 +956,6 @@ class TelegramProxySidecar:
         if self._owns_http_client and self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
-        with self._state_lock:
-            self._sessions.clear()
 
     async def _handle_lifespan(self, receive: Any, send: Any) -> None:
         while True:

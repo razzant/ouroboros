@@ -509,7 +509,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         panic_text = str(payload.get("text") or payload.get("image_caption") or "")
-        is_panic = panic_text.strip().lower().startswith("/panic")
+        is_panic = (not payload.get("literal_text")) and (lambda t: t == "/panic" or (t.startswith("/panic@") and len(t) > 7))((panic_text.strip().split(None, 1) or [""])[0].lower())
         from ouroboros.panic_source import source_evidence
         from ouroboros.server_control import request_panic
         if is_panic and request_panic(

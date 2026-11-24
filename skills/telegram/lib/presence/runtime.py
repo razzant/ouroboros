@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio, contextlib, inspect, pathlib, re, sqlite3, threading, time, uuid
+import asyncio, contextlib, inspect, json, pathlib, re, sqlite3, threading, time, uuid
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
@@ -73,7 +73,7 @@ class PresenceRuntime:
         self._stopped_event.set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._run_task: Optional[asyncio.Task[Any]] = None
-        self._bot_id = self._bot_username = self._validated_token = ""
+        self._bot_id = self._bot_username = self._validated_token = self._validated_api_base = ""
         self._bot_label = "not connected"
         self._validation_gen = 0
         self._runtime_state = "not_started"
@@ -103,7 +103,10 @@ class PresenceRuntime:
         if self._validation_gen != validation_gen or not self._bot_id:
             return False
         try:
-            return telegram_api_base(self.state_dir) == api_server
+            live_base = telegram_api_base(self.state_dir)
+            if self._validated_api_base and live_base != self._validated_api_base:
+                return False
+            return live_base == api_server
         except Exception:
             return False
 
@@ -126,30 +129,30 @@ class PresenceRuntime:
             is_current=lambda gen=val_gen, srv=api_server: self._matches_binding(gen, srv),
         )
 
-    def on_bot_validated(self, token: str, bot_id_value: str, username: str = "") -> None:
+    def on_bot_validated(self, token: str, bot_id_value: str, username: str = "", *, api_base: str = "") -> None:
         """Record a successful ``getMe`` from the unified poller without making a second request."""
         clean_token, clean_id, clean_user = str(token or "").strip(), str(bot_id_value or "").strip(), str(username or "").strip()
+        clean_base = str(api_base or "").strip() or telegram_api_base(self.state_dir)
         if clean_token and _BOT_ID.fullmatch(clean_id):
             with contextlib.suppress(sqlite3.Error, OSError):
-                self.store.record_confirmed_bot(clean_token, clean_id)
+                self.store.record_confirmed_bot(clean_token, clean_id, api_base=clean_base)
         elif clean_token:
             with contextlib.suppress(sqlite3.Error, OSError):
-                self.store.forget_confirmed_bot(clean_token)
+                self.store.forget_confirmed_bot(clean_token, api_base=clean_base)
         self._bot_id = clean_id if _BOT_ID.fullmatch(clean_id) else ""
         self._bot_username = clean_user
         self._bot_label = f"@{clean_user}" if clean_user else (self._bot_id or "not connected")
-        self._validated_token = clean_token
+        self._validated_token, self._validated_api_base = clean_token, clean_base
         self._validation_gen += 1
         if self._bot_id:
             self.submitter.connector_identity = {"sends_as": {"id": self._bot_id, "label": self._bot_label, "kind": "bot"}}
         self._runtime_state, self._last_error = "polling", ""
 
     def _clear_validated_identity(self, *, label: str, state: str) -> None:
-        self._bot_id = self._bot_username = self._validated_token = ""
-        self._bot_label = label
+        self._bot_id = self._bot_username = self._validated_token = self._validated_api_base = ""
+        self._bot_label, self._runtime_state = label, state
         self._validation_gen += 1
         self.submitter.connector_identity = {}
-        self._runtime_state = state
         with contextlib.suppress(sqlite3.Error, OSError):
             self.store.clear_typing()
 
@@ -159,11 +162,11 @@ class PresenceRuntime:
     def on_token_changed(self) -> None:
         self.on_token_cleared() if not self._current_token()[0] else self._clear_validated_identity(label="not connected", state="connecting")
 
-    def on_token_rejected(self, token: str, error: str = "") -> None:
+    def on_token_rejected(self, token: str, error: str = "", *, api_base: str = "") -> None:
         clean_token = str(token or "").strip()
         if clean_token:
             with contextlib.suppress(sqlite3.Error, OSError):
-                self.store.forget_confirmed_bot(clean_token)
+                self.store.forget_confirmed_bot(clean_token, api_base=str(api_base or "").strip() or telegram_api_base(self.state_dir))
         self._clear_validated_identity(label="not connected", state="provider_error")
         self._last_error = str(error or "Telegram rejected the bot token")[:500]
 
@@ -221,8 +224,12 @@ class PresenceRuntime:
             return self.store.commit_update(update_id, event, sightings, sighting_key=sighting_key)
         except InboxFullError as exc:
             self._last_error = str(exc)
-            self._log("warning", f"telegram presence: {exc}; deferring update {update_id}")
-            raise InjectNotAccepted(str(exc)) from exc
+            self._log("warning", f"telegram presence: {exc}; recording overflow for update {update_id}")
+            with contextlib.suppress(sqlite3.OperationalError):
+                self.store.record_inbox_overflow(
+                    update_id, event.conversation_key if event is not None else "", sightings, sighting_key=sighting_key
+                )
+            return False
         except sqlite3.OperationalError as exc:
             raise InjectNotAccepted(f"Presence custody busy ({type(exc).__name__}); deferring update") from exc
 
@@ -250,21 +257,16 @@ class PresenceRuntime:
                     self._runtime_state = "connecting" if token else "waiting_for_token"
             for index in range(self.inbox_workers):
                 workers.append(asyncio.create_task(self._inbox_worker(), name=f"telegram-presence-inbox-{index}"))
-            workers.append(asyncio.create_task(self._work_worker(), name="telegram-presence-work"))
-            workers.append(asyncio.create_task(self._outbox_worker(), name="telegram-presence-outbox"))
-            workers.append(asyncio.create_task(self._typing_worker(), name="telegram-presence-typing"))
+            for coro, wname in ((self._work_worker, "work"), (self._outbox_worker, "outbox"), (self._typing_worker, "typing")):
+                workers.append(asyncio.create_task(coro(), name=f"telegram-presence-{wname}"))
             stop_wait = asyncio.create_task(self._stop_event.wait(), name="telegram-presence-stop")
             try:
                 while not self._stop_event.is_set():
                     needs_discover = bool(
-                        discover
-                        and getattr(self.submitter, "delivery_reporting_status", "unknown")
-                        not in {"supported", "unsupported"}
+                        discover and getattr(self.submitter, "delivery_reporting_status", "unknown") not in {"supported", "unsupported"}
                     )
                     done, _ = await asyncio.wait(
-                        [stop_wait, *workers],
-                        timeout=5.0 if needs_discover else None,
-                        return_when=asyncio.FIRST_COMPLETED,
+                        [stop_wait, *workers], timeout=5.0 if needs_discover else None, return_when=asyncio.FIRST_COMPLETED
                     )
                     if not done:
                         if needs_discover and not self._stop_event.is_set():
@@ -272,13 +274,12 @@ class PresenceRuntime:
                                 await discover()
                         continue
                     for finished in done:
-                        if finished is stop_wait:
+                        if finished is stop_wait or self._stop_event.is_set():
                             continue
-                        if not self._stop_event.is_set():
-                            exc = finished.exception() if not finished.cancelled() else None
-                            if exc is not None:
-                                raise exc
-                            raise RuntimeError(f"Presence worker {finished.get_name()} exited unexpectedly")
+                        exc = finished.exception() if not finished.cancelled() else None
+                        if exc is not None:
+                            raise exc
+                        raise RuntimeError(f"Presence worker {finished.get_name()} exited unexpectedly")
             finally:
                 stop_wait.cancel()
                 await asyncio.gather(stop_wait, return_exceptions=True)
@@ -289,9 +290,7 @@ class PresenceRuntime:
             for task in workers:
                 task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
-            self._runtime_state = "stopped"
-            self._run_task = None
-            self._loop = None
+            self._runtime_state, self._run_task, self._loop = "stopped", None, None
             self.store.close()
             self._stopped_event.set()
 
@@ -335,11 +334,12 @@ class PresenceRuntime:
             host_base=host_base, token_provider=token_provider,
             account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
             places_version=getattr(self.submitter, "places_version", None),
+            place_binding_version=getattr(self.submitter, "place_binding_version", None),
             delivery_reporting_status=str(getattr(self.submitter, "delivery_reporting_status", "unknown") or "unknown"),
         )
 
     def confirmed_bot(self) -> Tuple[str, str]:
-        """The bot id validated for the current token in this process, else ``("", reason)``."""
+        """The bot id validated for the current token and API base in this process, else ``("", reason)``."""
         if self._run_task is None:
             return "", "Telegram bot not running"
         token, _, _ = self._current_token()
@@ -347,16 +347,18 @@ class PresenceRuntime:
             return "", "Bot token missing"
         if token != self._validated_token or not _BOT_ID.fullmatch(self._bot_id):
             return "", "Bot identity is unconfirmed; check the transport status"
+        if self._validated_api_base and telegram_api_base(self.state_dir) != self._validated_api_base:
+            return "", "Bot API server changed; awaiting re-validation"
         return self._bot_id, ""
 
     def recorded_bot(self) -> str:
-        """The bot ``getMe`` last confirmed for the current token, across server and worker processes."""
+        """The bot ``getMe`` last confirmed for the current token and API base, across processes."""
         binding = binding_for(self.api)
         if self._run_task is None or binding.state == "pending":
             binding.read_now(self.api)
         token, _ = binding.snapshot()
         token = str(token or "").strip()
-        return self.store.confirmed_account(token) if token else ""
+        return self.store.confirmed_account(token, api_base=telegram_api_base(self.state_dir)) if token else ""
 
     async def place_readiness(self, conversation_id: str) -> Dict[str, Any]:
         """Query the Host for the current Place state of ``conversation_id`` (read-only)."""
@@ -412,91 +414,96 @@ class PresenceRuntime:
                 self._log("warning", f"telegram presence: inbox worker error: {self._last_error}")
                 await self._pause(1.0)
 
+    async def _ensure_inbox_binding(
+        self, lease: InboxLease, pb: Optional[Dict[str, Any]], *, require: bool = False, stage: str = "staging"
+    ) -> Optional[Dict[str, Any]]:
+        binder = getattr(self.submitter, "bind_place", None)
+        if pb is None and callable(binder) and (not require or getattr(self.submitter, "place_binding_version", 0) >= 1):
+            pb = await binder(
+                str(lease.payload.get("account_id") or self._bot_id),
+                str(lease.payload.get("conversation_id") or ""),
+                str(lease.payload.get("thread_id") or ""),
+            )
+            if require and pb is None:
+                raise PlaceBindingUnavailable(f"Place binding unavailable for {stage} on Places host")
+        if isinstance(pb, dict) and lease.payload.get("_place_binding") != pb:
+            lease.payload["_place_binding"] = pb
+            if not self.store.checkpoint_inbox(lease.event_id, lease.payload, lease_token=lease.lease_token or None):
+                raise LeaseLost(f"inbox lease lost before {stage}")
+        return pb
+
     async def process_one_inbox(self) -> bool:
         lease = self.store.claim_inbox(lease_sec=1860.0)
         if lease is None:
             return False
+        tok = lease.lease_token or None
         row_account = str(lease.payload.get("account_id") or "").strip()
         if row_account and (not self._bot_id or row_account != self._bot_id):
-            reason = (
-                f"Held: queued for bot {row_account}, active bot is {self._bot_id}"
-                if self._bot_id
-                else f"Held: waiting for bot {row_account} validation"
-            )
-            self.store.defer_inbox(lease.event_id, reason=reason, retry_after_sec=5.0)
+            reason = f"Held: queued for bot {row_account}, active bot is {self._bot_id}" if self._bot_id else f"Held: waiting for bot {row_account} validation"
+            self.store.defer_inbox(lease.event_id, reason=reason, retry_after_sec=5.0, lease_token=tok)
             return True
         if str((lease.payload.get("message") or {}).get("event_kind") or "") in _REACTION_KINDS:
             verdict = await self._reaction_deliverable(lease.payload)
             if verdict == "defer":
-                self.store.defer_inbox(
-                    lease.event_id, reason="presence host unavailable for reaction check", retry_after_sec=5.0
-                )
+                self.store.defer_inbox(lease.event_id, reason="presence host unavailable for reaction check", retry_after_sec=5.0, lease_token=tok)
                 return True
             if verdict != "deliver":
-                self.store.mark_inbox_failed(lease.event_id, reason=REACTION_WITHHELD)
+                self.store.mark_inbox_failed(lease.event_id, reason=REACTION_WITHHELD, lease_token=tok)
                 return True
         staged: List[pathlib.Path] = []
         try:
             pb = lease.payload.get("_place_binding") if isinstance(lease.payload.get("_place_binding"), dict) else None
-            binder = getattr(self.submitter, "bind_place", None)
-            if pb is None and callable(binder):
-                pb = await binder(str(lease.payload.get("account_id") or self._bot_id), str(lease.payload.get("conversation_id") or ""), str(lease.payload.get("thread_id") or ""))
-            if isinstance(pb, dict) and lease.payload.get("_place_binding") != pb:
-                lease.payload["_place_binding"] = pb
-                self.store.checkpoint_inbox(lease.event_id, lease.payload)
+            pb = await self._ensure_inbox_binding(lease, pb, stage="staging")
             staged = await self._stage_attachments(lease)
+            if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
+                raise LeaseLost("inbox lease lost before submit")
             submit_event = {k: v for k, v in lease.payload.items() if k != "_place_binding"}
             try:
                 result = await self.submitter.submit(submit_event, staged)
             except PresenceHostHTTPError as refusal:
                 delay = refusal.busy_retry_after
                 if delay is not None:
-                    self.store.defer_inbox(lease.event_id, reason=format_error(refusal), retry_after_sec=delay)
+                    self.store.defer_inbox(lease.event_id, reason=format_error(refusal), retry_after_sec=delay, lease_token=tok)
+                    self._remove_staged_files(staged)
                     return True
                 if refusal.disposition == "retained":
-                    if pb is None and callable(binder) and getattr(self.submitter, "places_version", 0) >= 1:
-                        pb = await binder(str(lease.payload.get("account_id") or self._bot_id), str(lease.payload.get("conversation_id") or ""), str(lease.payload.get("thread_id") or ""))
-                        if pb is None:
-                            raise PlaceBindingUnavailable("Place binding unavailable for retained turn on Places host")
-                    if isinstance(pb, dict) and lease.payload.get("_place_binding") != pb:
-                        lease.payload["_place_binding"] = pb
-                        self.store.checkpoint_inbox(lease.event_id, lease.payload)
+                    pb = await self._ensure_inbox_binding(lease, pb, require=True, stage="retention")
                 if not self._settle_refusal(lease, refusal):
                     raise
             else:
                 if result.text or result.work_ref or result.continuation_ref:
-                    if pb is None and callable(binder) and getattr(self.submitter, "places_version", 0) >= 1:
-                        pb = await binder(str(lease.payload.get("account_id") or self._bot_id), str(lease.payload.get("conversation_id") or ""), str(lease.payload.get("thread_id") or ""))
-                        if pb is None:
-                            raise PlaceBindingUnavailable("Place binding unavailable for reply on Places host")
-                    if isinstance(pb, dict) and lease.payload.get("_place_binding") != pb:
-                        lease.payload["_place_binding"] = pb
-                        self.store.checkpoint_inbox(lease.event_id, lease.payload)
+                    pb = await self._ensure_inbox_binding(lease, pb, require=True, stage="reply")
                 self.store.record_submission(
                     lease.event_id, binding_id=result.binding_id, turn_ref=result.turn_ref,
                     outcome=result.outcome, text=result.text, work_ref=result.work_ref,
                     delivery_reporting_version=result.delivery_reporting_version,
                     continuation_ref=result.continuation_ref, output_ref=result.output_ref,
-                    reply_anchor=result.reply_anchor,
+                    reply_anchor=result.reply_anchor, lease_token=tok,
                 )
             self._remove_staged_files(staged)
+            return True
+        except LeaseLost as exc:
+            self._remove_staged_files(staged)
+            self._last_error = format_error(exc)
             return True
         except PlaceBindingUnavailable as exc:
             self._remove_staged_files(staged)
             if exc.code == "place_not_connected":
-                self.store.mark_inbox_failed(lease.event_id, reason=format_error(exc))
+                self.store.mark_inbox_failed(lease.event_id, reason=format_error(exc), lease_token=tok)
             else:
-                self.store.release_inbox(lease.event_id, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts))
+                self.store.release_inbox(lease.event_id, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts), lease_token=tok)
                 if exc.code == "presence_auth_blocked":
                     await self._pause(2.0)
             self._last_error = format_error(exc)
             return True
         except asyncio.CancelledError:
-            self.store.release_inbox(lease.event_id, reason="worker_cancelled", retry_after_sec=0)
+            self._remove_staged_files(staged)
+            self.store.release_inbox(lease.event_id, reason="worker_cancelled", retry_after_sec=0, lease_token=tok)
             raise
         except Exception as exc:
+            self._remove_staged_files(staged)
             wait = getattr(exc, "retry_after", None) or 0.0
-            self.store.release_inbox(lease.event_id, reason=format_error(exc), retry_after_sec=max(retry_delay(lease.attempts), wait))
+            self.store.release_inbox(lease.event_id, reason=format_error(exc), retry_after_sec=max(retry_delay(lease.attempts), wait), lease_token=tok)
             self._last_error = format_error(exc)
             if isinstance(exc, PresenceHostHTTPError) and str(exc.payload.get("code") or "") == "presence_auth_blocked":
                 await self._pause(2.0)
@@ -513,14 +520,14 @@ class PresenceRuntime:
         return "deliver" if getattr(self.submitter, "presence_reaction_context", 0) == 1 else "withhold"
 
     def _settle_refusal(self, lease: InboxLease, refusal: PresenceHostHTTPError) -> bool:
-        receipt = {"http_status": refusal.status_code, "response": refusal.payload}
+        receipt, tok = {"http_status": refusal.status_code, "response": refusal.payload}, lease.lease_token or None
         code = str(refusal.payload.get("code") or "")
         if refusal.disposition == "retained":
-            self.store.record_retention(lease.event_id, binding_id=refusal.binding_id, receipt=receipt)
+            self.store.record_retention(lease.event_id, binding_id=refusal.binding_id, receipt=receipt, lease_token=tok)
         elif refusal.disposition == "rejected" or (
             refusal.disposition == "blocked" and code in {"place_not_connected", "place_unattributable"}
         ):
-            self.store.mark_inbox_failed(lease.event_id, reason=format_error(refusal), receipt=receipt)
+            self.store.mark_inbox_failed(lease.event_id, reason=format_error(refusal), receipt=receipt, lease_token=tok)
         else:
             return False
         self._last_error = format_error(refusal)
@@ -537,8 +544,9 @@ class PresenceRuntime:
         client = await self._ready_client()
         if client is None:
             raise RuntimeError("telegram token is unavailable")
-        limit = client.download_limit
-        event_dir = self.state_dir / "staging" / outbox_files.safe_component(lease.event_id)
+        limit, tok = client.download_limit, lease.lease_token or ""
+        attempt_dir = f"{outbox_files.safe_component(lease.event_id)}--{tok[:16]}" if tok else outbox_files.safe_component(lease.event_id)
+        event_dir = self.state_dir / "staging" / attempt_dir
         staged, settled, waiting = [], False, None
         for index, attachment in enumerate(attachments):
             if not isinstance(attachment, dict):
@@ -565,6 +573,8 @@ class PresenceRuntime:
                         await client.download_file(str(attachment["file_id"]), tmp_dest, max_bytes=remaining)
                     else:
                         await client.download_file(str(attachment["file_id"]), tmp_dest)
+                    if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
+                        raise LeaseLost("inbox lease lost during attachment download")
                     outbox_files.commit_staged_file(self.state_dir, tmp_dest, destination, _MAX_STAGING_BYTES)
                 except outbox_files.StagingStorageFull:
                     attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
@@ -597,10 +607,12 @@ class PresenceRuntime:
                         tmp_dest.unlink(missing_ok=True)
             attachment["status"] = "staged"
             staged.append(destination)
-        if settled:
-            self.store.checkpoint_inbox(lease.event_id, lease.payload)
+        if settled and not self.store.checkpoint_inbox(lease.event_id, lease.payload, lease_token=tok or None):
+            raise LeaseLost("inbox lease lost while checkpointing attachment status")
         if waiting is not None:
             raise waiting
+        if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
+            raise LeaseLost("inbox lease lost after staging")
         self.store.forget_download_failures(lease.event_id)
         return staged
 
@@ -638,32 +650,33 @@ class PresenceRuntime:
         lease = self.store.claim_work(lease_sec=120.0)
         if lease is None:
             return False
+        tok = lease.lease_token or None
         try:
             result = await self.submitter.poll(lease.work_ref, lease.binding_id)
-            if result.outputs:
-                self.store.record_work_outputs(lease.work_ref, result.outputs)
+            if result.outputs and not self.store.record_work_outputs(lease.work_ref, result.outputs, lease_token=tok):
+                return True
             if result.terminal:
                 self.store.complete_work(
                     lease.work_ref, status=result.status,
                     text=result.text if result.outcome in {"message", "deferred"} and not result.output_ref else "",
-                    child_ref=result.child_work_ref, reply_anchor=result.reply_anchor,
+                    child_ref=result.child_work_ref, reply_anchor=result.reply_anchor, lease_token=tok,
                 )
             elif result.status == "unresolved":
                 self.store.release_work(
                     lease.work_ref, reason=f"presence_work_unresolved: {result.code}",
-                    retry_after_sec=retry_delay(lease.attempts), child_ref=result.child_work_ref,
+                    retry_after_sec=retry_delay(lease.attempts), child_ref=result.child_work_ref, lease_token=tok,
                 )
             else:
                 self.store.release_work(
                     lease.work_ref, reason="presence_work_pending",
-                    retry_after_sec=5.0, child_ref=result.child_work_ref,
+                    retry_after_sec=5.0, child_ref=result.child_work_ref, lease_token=tok,
                 )
             return True
         except asyncio.CancelledError:
-            self.store.release_work(lease.work_ref, reason="worker_cancelled", retry_after_sec=0)
+            self.store.release_work(lease.work_ref, reason="worker_cancelled", retry_after_sec=0, lease_token=tok)
             raise
         except Exception as exc:
-            self.store.release_work(lease.work_ref, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts))
+            self.store.release_work(lease.work_ref, reason=format_error(exc), retry_after_sec=retry_delay(lease.attempts), lease_token=tok)
             self._last_error = format_error(exc)
             return True
 
@@ -732,6 +745,7 @@ class PresenceRuntime:
         if recorded_calls(lease.payload) and self._settled_by_record(lease):
             return True
         calls, client, val_gen = ProviderCalls(self.store, lease), None, self._validation_gen
+        tok = calls.lease_token or None
         try:
             client = await self._ready_client()
             if client is None:
@@ -745,12 +759,16 @@ class PresenceRuntime:
                 self._check_row_account(lease.payload)
                 if not self._client_is_current(client, val_gen):
                     raise PlaceHeld("Held: Telegram bot identity or server binding changed")
+                if not self.store.outbox_lease_valid(lease.delivery_id, calls.fence, tok):
+                    raise LeaseLost("this attempt no longer holds the outbox row; nothing was sent")
 
             async def before_send() -> None:
                 _ensure_current()
                 await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
-                if outbox_files.records(lease.payload):
-                    await asyncio.to_thread(outbox_files.verify, lease.payload)
+                try:
+                    await asyncio.to_thread(outbox_files.verify, lease.payload, state_dir=self.state_dir, require_for_media=True)
+                except outbox_files.FrozenFileMissing as exc:
+                    raise PlaceHeld(f"Held: {exc}") from exc
                 _ensure_current()
 
             receipt = await deliver_outbox(
@@ -758,19 +776,19 @@ class PresenceRuntime:
                 account_id=str(lease.payload.get("account_id") or self._bot_id),
                 delivered=self._note_delivered, calls=calls,
             )
-            self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
+            if self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence, lease_token=tok):
+                outbox_files.discard(outbox_files.records(lease.payload), self.state_dir)
             return True
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
+            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence, lease_token=tok)
             return True
         except PlaceBindingRevoked as exc:
             report = delivery_report(lease.delivery_id, lease.payload, part_id="status", state="failed", error=str(exc))
-            self.store.mark_outbox_failed(lease.delivery_id, reason=str(exc), report=report, attempts=calls.fence)
+            if self.store.mark_outbox_failed(lease.delivery_id, reason=str(exc), report=report, attempts=calls.fence, lease_token=tok):
+                outbox_files.discard(outbox_files.records(lease.payload), self.state_dir)
             return True
         except asyncio.CancelledError:
-            self.store.release_outbox(
-                lease.delivery_id, reason="worker_cancelled", retry_after_sec=0, attempts=calls.fence
-            )
+            self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0, attempts=calls.fence, lease_token=tok)
             raise
         except LeaseLost as exc:
             self._last_error = format_error(exc)
@@ -781,50 +799,32 @@ class PresenceRuntime:
             if (
                 isinstance(exc, AlbumIncomplete)
                 or calls.open is not None
-                or (
-                    lease.payload.get("kind") in {"operation", "moderation"}
-                    and isinstance(exc, TelegramApiError)
-                    and not isinstance(exc, TelegramRequestNotSent)
-                    and exc.error_code == 0
-                )
+                or (lease.payload.get("kind") in {"operation", "moderation"} and isinstance(exc, TelegramApiError) and not isinstance(exc, TelegramRequestNotSent) and exc.error_code == 0)
             ):
-                self._end_uncertain(lease.delivery_id, format_error(exc), attempts=calls.fence)
+                self._end_uncertain(lease.delivery_id, format_error(exc), attempts=calls.fence, lease_token=tok)
                 return True
             if calls.recorded and self._settled_by_stored_record(lease, exc):
                 return True
             if isinstance(exc, TelegramRequestNotSent) and not self._client_is_current(client, val_gen):
-                self.store.hold_outbox(lease.delivery_id, f"Held: {format_error(exc)}", attempts=calls.fence)
+                self.store.hold_outbox(lease.delivery_id, f"Held: {format_error(exc)}", attempts=calls.fence, lease_token=tok)
                 return True
             wait = max(retry_delay(lease.attempts), float(getattr(exc, "retry_after", None) or 0.0))
             if isinstance(exc, TelegramApiError) and exc.error_code == 429:
-                self.store.hold_outbox(lease.delivery_id, f"Rate limited: {format_error(exc)}", retry_after_sec=wait, attempts=calls.fence)
+                self.store.hold_outbox(lease.delivery_id, f"Rate limited: {format_error(exc)}", retry_after_sec=wait, attempts=calls.fence, lease_token=tok)
                 self._last_error = format_error(exc)
                 return True
             if lease.attempts >= MAX_OUTBOX_ATTEMPTS:
                 payload = self.store.outbox_payload(lease.delivery_id)
                 state = (
                     "failed"
-                    if (
-                        recorded_calls(payload)
-                        or isinstance(exc, TelegramRequestNotSent)
-                        or (isinstance(exc, RuntimeError) and str(exc) == "telegram token is unavailable")
-                        or (isinstance(exc, TelegramApiError) and exc.error_code)
-                    )
+                    if (recorded_calls(payload) or isinstance(exc, TelegramRequestNotSent) or (isinstance(exc, RuntimeError) and str(exc) == "telegram token is unavailable") or (isinstance(exc, TelegramApiError) and exc.error_code))
                     else "uncertain"
                 )
-                report = delivery_report(
-                    lease.delivery_id, payload, part_id="status", state=state, error=format_error(exc)
-                )
-                self.store.mark_outbox_failed(
-                    lease.delivery_id, reason=format_error(exc), report=report, state=state, attempts=calls.fence
-                )
+                report = delivery_report(lease.delivery_id, payload, part_id="status", state=state, error=format_error(exc))
+                if self.store.mark_outbox_failed(lease.delivery_id, reason=format_error(exc), report=report, state=state, attempts=calls.fence, lease_token=tok) and state == "failed":
+                    outbox_files.discard(outbox_files.records(payload), self.state_dir)
             else:
-                self.store.release_outbox(
-                    lease.delivery_id,
-                    reason=format_error(exc),
-                    retry_after_sec=wait,
-                    attempts=calls.fence,
-                )
+                self.store.release_outbox(lease.delivery_id, reason=format_error(exc), retry_after_sec=wait, attempts=calls.fence, lease_token=tok)
             self._last_error = format_error(exc)
             return True
 
@@ -840,7 +840,7 @@ class PresenceRuntime:
         return True
 
     def _settled_by_record(self, lease: OutboxLease) -> bool:
-        payload = lease.payload
+        payload, tok = lease.payload, lease.lease_token or None
         end, value = recorded_end(payload)
         if (CALL_STARTED in payload and end != "uncertain") or (not end and lease.unrecorded_attempt):
             marker = payload.get(CALL_STARTED)
@@ -850,17 +850,18 @@ class PresenceRuntime:
             return False
         try:
             if end == "delivered":
-                self.store.mark_delivered(lease.delivery_id, provider_receipt=value, attempts=lease.attempts)
+                if self.store.mark_delivered(lease.delivery_id, provider_receipt=value, attempts=lease.attempts, lease_token=tok):
+                    outbox_files.discard(outbox_files.records(payload), self.state_dir)
             else:
-                self._end_uncertain(lease.delivery_id, value, attempts=lease.attempts)
+                self._end_uncertain(lease.delivery_id, value, attempts=lease.attempts, lease_token=tok)
         except Exception as exc:
             self._last_error = format_error(exc)
         return True
 
-    def _end_uncertain(self, delivery_id: str, error: str, *, attempts: Optional[int] = None) -> None:
+    def _end_uncertain(self, delivery_id: str, error: str, *, attempts: Optional[int] = None, lease_token: Optional[str] = None) -> None:
         payload = self.store.outbox_payload(delivery_id)
         report = delivery_report(delivery_id, payload, part_id="status", state="uncertain", error=error)
-        self.store.mark_outbox_failed(delivery_id, reason=error, report=report, state="uncertain", attempts=attempts)
+        self.store.mark_outbox_failed(delivery_id, reason=error, report=report, state="uncertain", attempts=attempts, lease_token=lease_token)
         self._last_error = error
 
     def _note_delivered(self, chat_id: str, topic_id: Any) -> None:
@@ -919,7 +920,11 @@ class PresenceRuntime:
                 if any(_typing_account(row) != self._bot_id for row in rows):
                     ended.extend(rows)
                     continue
-                await self._check_place({"chat_id": key[0]}, thread_id=key[1])
+                for raw_pb in sorted({str(row.get("place_binding_json") or "").strip() for row in rows}) or [""]:
+                    parsed_pb = json.loads(raw_pb) if raw_pb else None
+                    if raw_pb and not isinstance(parsed_pb, dict):
+                        raise PlaceBindingRevoked("malformed typing place binding")
+                    await self._check_place({"chat_id": key[0], **({"_place_binding": parsed_pb} if parsed_pb else {})}, thread_id=key[1])
                 if not self._client_is_current(client, val_gen) or any(_typing_account(row) != self._bot_id for row in rows):
                     ended.extend(rows)
                     continue

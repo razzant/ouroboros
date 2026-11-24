@@ -25,6 +25,7 @@ class InboxLease:
     event_id: str
     payload: Dict[str, Any]
     attempts: int
+    lease_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class OutboxLease:
     attempts: int
     previous_unanswered: bool = False
     unrecorded_attempt: bool = False
+    lease_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class WorkLease:
     event: Dict[str, Any]
     attempts: int
     role: str = "deferred"
+    lease_token: str = ""
 
 
 PRESENCE_WORK_TABLE = """
@@ -77,6 +80,7 @@ CREATE TABLE IF NOT EXISTS telegram_messages(
     is_self INTEGER NOT NULL DEFAULT 0,
     text TEXT NOT NULL DEFAULT '',
     media_group_id TEXT NOT NULL DEFAULT '',
+    album_origin_known INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(account_id, chat_id, message_id)
 )"""
 
@@ -95,8 +99,9 @@ ALBUM_EARLIER = (
 
 REMEMBER_MESSAGE = """
 INSERT OR REPLACE INTO telegram_messages(
-    account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id,
+    album_origin_known
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 DOWNLOAD_FAILURES_TABLE = """
 CREATE TABLE IF NOT EXISTS download_failures(
@@ -116,6 +121,7 @@ CREATE TABLE IF NOT EXISTS typing_requests(
     turn_ref TEXT NOT NULL,
     source_event_id TEXT NOT NULL DEFAULT '',
     account_id TEXT NOT NULL DEFAULT '',
+    place_binding_json TEXT NOT NULL DEFAULT '',
     requested_at REAL NOT NULL,
     PRIMARY KEY(chat_id, topic_id, turn_ref)
 )"""
@@ -254,8 +260,36 @@ def schema_script() -> str:
     )
 
 
-def token_binding_prefix(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest() + ":"
+def token_binding_prefix(token: str, api_base: str = "") -> str:
+    base = str(api_base or "https://api.telegram.org").strip().rstrip("/")
+    return hashlib.sha256(f"{base}\0{token}".encode("utf-8")).hexdigest() + ":"
+
+
+def migrate_custody_schema(conn: sqlite3.Connection) -> None:
+    """Idempotently add backward-compatible security & lease-fencing columns to custody tables."""
+    outbox_cols = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
+    if "reports_json" not in outbox_cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
+    if "lease_token" not in outbox_cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
+    inbox_cols = {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}
+    if "host_receipt_json" not in inbox_cols:
+        conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
+    if "lease_token" not in inbox_cols:
+        conn.execute("ALTER TABLE inbox ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
+    work_cols = {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}
+    if "lease_token" not in work_cols:
+        conn.execute("ALTER TABLE presence_work ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
+    typing_cols = {r[1] for r in conn.execute("PRAGMA table_info(typing_requests)")}
+    if "account_id" not in typing_cols:
+        conn.execute("ALTER TABLE typing_requests ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+    if "place_binding_json" not in typing_cols:
+        conn.execute("ALTER TABLE typing_requests ADD COLUMN place_binding_json TEXT NOT NULL DEFAULT ''")
+    msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(telegram_messages)")}
+    if "album_origin_known" not in msg_cols:
+        conn.execute("ALTER TABLE telegram_messages ADD COLUMN album_origin_known INTEGER NOT NULL DEFAULT 0")
 
 
 def build_delivery_receipt(row: sqlite3.Row, *, stored_answers_fn: Any, outbox_files_mod: Any) -> Dict[str, Any]:
@@ -381,8 +415,15 @@ def recorded_calls(payload: Dict[str, Any]) -> bool:
     return kind == "operation" and payload.get("method") != "setMessageReaction"
 
 
-def held_by_clause(attempts: Optional[int]) -> tuple:
-    return ("", ()) if attempts is None else (" AND attempts=?", (int(attempts),))
+def held_by_clause(attempts: Optional[int] = None, lease_token: Optional[str] = None) -> tuple:
+    clauses, args = [], []
+    if attempts is not None:
+        clauses.append(" AND attempts=?")
+        args.append(int(attempts))
+    if lease_token:
+        clauses.append(" AND lease_token=?")
+        args.append(str(lease_token))
+    return ("".join(clauses), tuple(args))
 
 
 def unproven_earlier_attempt(payload: Dict[str, Any], attempts: int, last_error: str, no_effect: re.Pattern) -> bool:
@@ -394,19 +435,32 @@ def unproven_earlier_attempt(payload: Dict[str, Any], attempts: int, last_error:
 def remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
     actor = event.actor
     name = " ".join(part for part in (str(actor.get("first_name") or ""), str(actor.get("last_name") or "")) if part)
+    mid = int(event.message["message_id"])
+    mg = str(event.message.get("media_group_id") or "")
+    origin_known = 0
+    if mg:
+        earlier = int(conn.execute(ALBUM_EARLIER, (event.account_id, event.conversation_id, mg, mid)).fetchone()[0])
+        if earlier == 0 and mid > 1:
+            prev = conn.execute(
+                "SELECT media_group_id FROM telegram_messages WHERE account_id=? AND chat_id=? AND message_id=?",
+                (event.account_id, event.conversation_id, mid - 1),
+            ).fetchone()
+            if prev is not None and str(prev["media_group_id"] or "") != mg:
+                origin_known = 1
     conn.execute(
         REMEMBER_MESSAGE,
         (
             event.account_id,
             event.conversation_id,
-            int(event.message["message_id"]),
+            mid,
             event.thread_id,
             chat_forum(event.conversation.get("chat_type"), event.conversation.get("is_forum"), event.thread_id),
             str(actor.get("platform_actor_id") or ""),
             name or str((actor.get("sender_chat") or {}).get("title") or ""),
             0,
             event.text,
-            str(event.message.get("media_group_id") or ""),
+            mg,
+            origin_known,
         ),
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import pathlib
 import re
 import uuid
@@ -16,6 +17,7 @@ from .file_access import (
     authorize_upload_path,
     caller_scope,
     idempotency_fingerprint,
+    open_authorized_upload,
     receipt_visible_to,
     sanitize_tool_receipt,
 )
@@ -44,14 +46,8 @@ def _upload_limit(kind: str) -> int:
     return CLOUD_PHOTO_UPLOAD_LIMIT if kind == "photo" else CLOUD_UPLOAD_LIMIT
 
 
-def upload_path(ctx: Any, kind: str, file_path: Any, state_dir: pathlib.Path) -> str:
-    try:
-        path = authorize_upload_path(ctx, file_path, state_dir)
-    except PermissionError as exc:
-        raise SendRefused("file_access_denied", str(exc)) from exc
-    if not path.is_file():
-        raise SendRefused("file_missing", "file_path must name an existing file")
-    size, limit = path.stat().st_size, _upload_limit(kind)
+def _validate_upload_meta(kind: str, path: pathlib.Path, size: int) -> None:
+    limit = _upload_limit(kind)
     if size > limit:
         raise SendRefused(
             "file_too_large",
@@ -65,7 +61,56 @@ def upload_path(ctx: Any, kind: str, file_path: Any, state_dir: pathlib.Path) ->
             "voice_format",
             "Telegram plays a voice message from OGG/Opus, MP3 or M4A; send this file as audio or document. Not queued.",
         )
+
+
+def upload_path(ctx: Any, kind: str, file_path: Any, state_dir: pathlib.Path) -> str:
+    try:
+        fd, path, size = open_authorized_upload(ctx, file_path, state_dir)
+    except PermissionError as exc:
+        raise SendRefused("file_access_denied", str(exc)) from exc
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError) as exc:
+        raise SendRefused("file_missing", "file_path must name an existing file") from exc
+    except OSError as exc:
+        raise SendRefused("file_access_denied", f"file_path could not be opened safely ({type(exc).__name__})") from exc
+    try:
+        _validate_upload_meta(kind, path, size)
+    finally:
+        os.close(fd)
     return str(path)
+
+
+def open_and_freeze_file(ctx: Any, kind: str, file_path: Any, state_dir: Any) -> dict[str, Any]:
+    """Zero-TOCTOU authorize, open via dir_fd + O_NOFOLLOW, validate, and freeze from the same fd."""
+    limit = _upload_limit(kind)
+    try:
+        fd, path, size = open_authorized_upload(ctx, file_path, pathlib.Path(state_dir))
+    except PermissionError as exc:
+        raise SendRefused("file_access_denied", str(exc)) from exc
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError) as exc:
+        raise SendRefused("file_missing", "file_path must name an existing file") from exc
+    except OSError as exc:
+        raise SendRefused("file_access_denied", f"file_path could not be opened safely ({type(exc).__name__})") from exc
+    try:
+        _validate_upload_meta(kind, path, size)
+        return outbox_files.keep_fd(fd, path, state_dir, limit)
+    except SendRefused:
+        raise
+    except outbox_files.CopyTooLarge as exc:
+        raise SendRefused(
+            "file_too_large",
+            f"{exc}; the Bot API accepts a {kind} of at most {limit // (1024 * 1024)} MB from a bot. Not queued.",
+            limit_bytes=limit,
+        ) from exc
+    except outbox_files.OutboxStorageFull as exc:
+        raise SendRefused("outbox_storage_full", f"{exc}. Not queued.") from exc
+    except OSError as exc:
+        raise SendRefused(
+            "file_copy_failed",
+            f"{path.name} could not be copied for sending "
+            f"({type(exc).__name__}: {exc.strerror or exc}). Not queued.",
+        ) from exc
+    finally:
+        os.close(fd)
 
 
 def queue_file(kind: str, source: str, state_dir: Any) -> dict[str, Any]:
@@ -135,17 +180,18 @@ def album_items(
     if caption and any(captions):
         raise SendRefused("album_caption", "give the album one caption, or captions on its items, not both. Not queued.")
     captions[0] = captions[0] or caption
-    paths = [upload_path(ctx, kind, item.get("file_path"), pathlib.Path(state_dir or ".")) for kind, item in zip(kinds, items)]
     rendered = [frozen_caption(text, markdown) for text in captions]
     kept: list[dict[str, Any]] = []
     if state_dir is not None:
         try:
-            for kind, path in zip(kinds, paths):
-                kept.append(queue_file(kind, path, state_dir))
+            for kind, item in zip(kinds, items):
+                kept.append(open_and_freeze_file(ctx, kind, item.get("file_path"), state_dir))
         except BaseException:
             discard_files(kept, state_dir)
             raise
         paths = [record["path"] for record in kept]
+    else:
+        paths = [upload_path(ctx, kind, item.get("file_path"), pathlib.Path(".")) for kind, item in zip(kinds, items)]
     queued = [{"kind": kind, "file_path": path, "caption": text} for kind, path, text in zip(kinds, paths, captions)]
     return queued, [{**item, "caption": frozen} for item, frozen in zip(queued, rendered)], kept
 
@@ -387,6 +433,28 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
         except (TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         state_dir = pathlib.Path(api.get_state_dir())
+        if payload.get("reply_to_message_id"):
+            store_chk = CustodyStore.shared(state_dir / "custody.sqlite3")
+            reply_mid = int(payload["reply_to_message_id"])
+            known_reply = store_chk.reaction_target(account, target, reply_mid)
+            given_topic = str(payload.get("topic_id") or "")
+            if known_reply.get("retained"):
+                if given_topic != str(known_reply.get("topic_id") or ""):
+                    where = f"topic {known_reply['topic_id']}" if known_reply["topic_id"] else "this chat's General conversation"
+                    return {
+                        "ok": False,
+                        "code": "forum_topic_mismatch",
+                        "error": f"reply_to_message_id {reply_mid} is in {where}; pass matching topic_id. Not queued.",
+                    }
+            elif known_reply.get("forum") == 1 or (known_reply.get("forum") is None and target.startswith("-")):
+                return {
+                    "ok": False,
+                    "code": "reply_target_unconfirmed",
+                    "error": (
+                        f"reply_to_message_id {reply_mid} in chat {target} is not retained here, so its topic cannot "
+                        "be verified from a confirmed source. Not queued."
+                    ),
+                }
         try:
             if selected_kind == "message":
                 if not str(text or "").strip():
@@ -404,10 +472,9 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
             else:
                 if str(text or "").strip():
                     raise SendRefused("use_caption", "Pass media captions in caption, not text. Not queued.")
-                source = upload_path(ctx, selected_kind, file_path, state_dir)
                 payload["caption"] = str(caption or "")
                 payload["_rendered_caption"] = frozen_caption(payload["caption"], markdown)
-                kept = queue_file(selected_kind, source, state_dir)
+                kept = open_and_freeze_file(ctx, selected_kind, file_path, state_dir)
                 payload["file_path"], payload["_frozen"] = kept["path"], [kept]
         except SendRefused as refusal:
             return refusal.answer()
@@ -449,7 +516,7 @@ def make_send_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *
     return telegram_send
 
 
-def make_typing_tool(api: Any):
+def make_typing_tool(api: Any, place_binder=lambda *_a, **_k: None):
     def telegram_typing(ctx: Any = None, *, chat_id: str, topic_id: int | None = None) -> dict[str, Any]:
         metadata = getattr(ctx, "task_metadata", None) or {}
         event = (metadata.get("presence") or {}).get("event") or {} if isinstance(metadata, dict) else {}
@@ -462,7 +529,11 @@ def make_typing_tool(api: Any):
                 "code": "no_turn",
                 "error": "typing shows only during a Telegram Presence turn, in its own chat. Nothing was shown.",
             }
-        if str(chat_id or "").strip() != own_chat or (topic_id not in (None, "") and str(topic_id) != own_topic):
+        try:
+            given_topic = "" if topic_id in (None, "") else str(_positive_id(topic_id, "topic_id"))
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "code": "invalid_topic_id", "error": str(exc)}
+        if str(chat_id or "").strip() != own_chat or given_topic != own_topic:
             where = f"chat {own_chat}" + (f", topic {own_topic}" if own_topic else "")
             return {
                 "ok": False,
@@ -473,8 +544,15 @@ def make_typing_tool(api: Any):
         source = str(event.get("source_event_id") or "")
         if not store.turn_live(source, turn):
             return {"ok": False, "code": "turn_ended", "error": "this turn is no longer live here. Nothing was shown."}
+        try:
+            binding = place_binder(own_account, own_chat, own_topic)
+        except Exception as exc:
+            if not isinstance(exc, PlaceBindingUnavailable) and not getattr(exc, "place_binding_unavailable", False):
+                raise
+            return {"ok": False, "code": str(getattr(exc, "code", "place_binding_unavailable")), "error": str(exc)}
         store.request_typing(
-            chat_id=own_chat, topic_id=own_topic, turn_ref=turn, source_event_id=source, account_id=own_account
+            chat_id=own_chat, topic_id=own_topic, turn_ref=turn, source_event_id=source, account_id=own_account,
+            place_binding=binding if isinstance(binding, dict) else None,
         )
         return {
             "ok": True,
@@ -527,6 +605,11 @@ def make_moderation_tool(api: Any, confirmed_account=lambda: "", place_binder=la
                 known = store.reaction_target(account, target, mid)
                 local_topic_id, _ = _reaction_conversation(known, target, mid, local_topic_id)
             elif action in {"restrict_member", "ban_member", "unban_member"}:
+                if local_topic_id is not None:
+                    raise ValueError(
+                        "topic_id is not allowed for group-wide member moderation; membership actions apply to the "
+                        "whole group and must be authorized at group level"
+                    )
                 parameters["user_id"] = _positive_id(user_id, "user_id")
                 if action == "restrict_member":
                     if (
@@ -638,22 +721,20 @@ def _reaction_conversation(
             )
         return given, "resolved"
     if known["forum"] == 0 or (known["forum"] is None and private):
-        if given and not private:
+        if given:
             raise ValueError("this chat has no topics; omit topic_id")
-        return given, "unresolved" if given else "resolved"
-    if not given:
-        what = (
-            "has shown topics and message"
-            if private
-            else "is a forum and message"
-            if known["forum"] == 1
-            else "may be a forum (not observed yet) and message"
-        )
-        raise ValueError(
-            f"forum_topic_unknown: chat {chat_id} {what} {message_id} is not retained here, so its "
-            "topic is unknown; pass the topic_id from the event if you have it. Not sent."
-        )
-    return given, "unresolved"
+        return "", "resolved"
+    what = (
+        "has shown topics and message"
+        if private
+        else "is a forum and message"
+        if known["forum"] == 1
+        else "may be a forum (not observed yet) and message"
+    )
+    raise ValueError(
+        f"forum_topic_unknown: chat {chat_id} {what} {message_id} is not retained here, so its "
+        "topic cannot be verified from a confirmed source. Not sent."
+    )
 
 
 def make_operation_tool(api: Any, confirmed_account=lambda: "", place_binder=lambda *_a, **_k: None):
@@ -696,8 +777,8 @@ def make_operation_tool(api: Any, confirmed_account=lambda: "", place_binder=lam
             if method == "editMessageText":
                 if not str(text or "").strip():
                     raise ValueError("text is required for editMessageText")
-                if known.get("retained") and not known.get("is_self"):
-                    raise ValueError("editMessageText can only edit this bot's own messages")
+                if not known.get("retained") or not known.get("is_self"):
+                    raise ValueError("editMessageText can only edit this bot's own messages (retained records only)")
                 local_topic_id, _ = _reaction_conversation(known, target, message, local_topic_id)
                 parameters["text"] = str(text)
                 if parse_mode:
@@ -707,10 +788,10 @@ def make_operation_tool(api: Any, confirmed_account=lambda: "", place_binder=lam
                 parameters["is_big"] = bool(is_big)
                 local_topic_id, resolution = _reaction_conversation(known, target, message, local_topic_id)
                 album = known.get("media_group_id", "")
-                if album and int(known.get("album_earlier") or 0) > 0:
+                if album and (int(known.get("album_earlier") or 0) > 0 or not known.get("album_origin_known")):
                     raise ValueError(
                         "album_target_unconfirmed: Telegram applies reactions on a non-first album item to the "
-                        "album's first undeleted message, so the target cannot be confirmed. Not sent."
+                        "album's first undeleted message, and this album's first item is not confirmed here. Not sent."
                     )
                 reaction_target = {"message_id": str(message), "resolution": resolution}
         except (TypeError, ValueError) as exc:
@@ -866,7 +947,7 @@ def register_presence_tools(api: Any, runtime: Any) -> None:
     )
     register_tool(
         "telegram_typing",
-        _json_tool(make_typing_tool(api)),
+        _json_tool(make_typing_tool(api, place_binder)),
         description=(
             "Ask for \"typing…\" in this turn's own Telegram chat while preparing a reply. Not speech, no receipt; "
             "ends on next delivered message, turn end, or ~2 minutes. Pass the event's topic_id in a forum topic."

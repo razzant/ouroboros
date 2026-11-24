@@ -1273,7 +1273,7 @@ def _companion_states() -> set[str]:
 
 @pytest.mark.parametrize("state,message,words", [
     ("waiting_owner", "Open the private Telegram bot chat once to pin its owner.",
-     "Waiting: send the bot a private message to bind its owner"),
+     "Waiting: set Owner Chat ID in Settings → Telegram (or confirm pairing from Ouroboros)"),
     ("verifying", "Verifying the public authentication boundary.", "Checking its public link"),
     ("syncing_menu", "Synchronizing the private Telegram Mini App button.", "Setting the bot's menu button"),
     ("reconnecting", "The tunnel generation ended; retrying inside the same companion.",

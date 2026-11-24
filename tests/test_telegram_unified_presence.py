@@ -223,9 +223,11 @@ def test_validate_bot_single_getme_scopes_commands_and_populates_presence(tmp_pa
     assert json.loads(default_call["scope"]) == {"type": "default"}
     assert json.loads(default_call["commands"]) == []
 
-    # 2) TOFU binding immediately scopes owner commands to owner DM and clears default scope
+    # 2) Unbound stranger DM is rejected (no first-DM TOFU); Ouroboros-issued one-time pairing binds and scopes commands
     client.calls.clear()
-    bound = asyncio.run(plugin._authorized_owner(api, client, _dm_update(1, "hi", chat_id=42), "", "en"))
+    assert asyncio.run(plugin._authorized_owner(api, client, _dm_update(1, "hi", chat_id=42), "", "en")) is None
+    pair_code = plugin.issue_owner_pairing_code(api)["code"]
+    bound = asyncio.run(plugin._authorized_owner(api, client, _dm_update(2, f"/pair {pair_code}", chat_id=42), "", "en"))
     assert bound == "42"
     cmd_calls = [data for method, data in client.calls if method == "setMyCommands"]
     assert len(cmd_calls) == 2
@@ -588,6 +590,12 @@ def test_presence_worker_and_tools_delivery_receipt_and_place_hold(tmp_path, mon
     bad_topic = json.loads(send_fn(chat_id="-100555", kind="message", text="x", topic_id="bad"))
     assert bad_topic["ok"] is False
     op_fn = api.tools["telegram_operation"][0]
+    with rt.store._connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO telegram_messages"
+            "(account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id, album_origin_known) "
+            "VALUES ('123456', '-100555', 9, '77', 1, '123456', '', 1, 'orig', '', 0)"
+        )
     assert json.loads(send_fn(chat_id="-100555", kind="message", text="first", topic_id="77", request_id="t77-send"))["ok"] is True
     assert json.loads(op_fn(method="editMessageText", chat_id="-100555", message_id=9, text="edit", topic_id=77, request_id="t77-edit"))["ok"] is True
     assert rt.store.outbox_payload("telegram-operation:t77-edit")["topic_id"] == "77"
