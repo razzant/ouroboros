@@ -9,6 +9,7 @@ import {
     continuableReview, fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard,
     reviewSentence,
 } from '../modules/skill_card_renderer.js';
+import { blockingGrantItems, grantBlocks } from '../modules/utils.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
 const row = (name) => structuredClone(LISTING.skills.find((skill) => skill.name === name));
@@ -492,6 +493,53 @@ test('a grant left behind by a byte change is named as the earlier version’s g
     // Never granted: the tray asks, and says nothing about an earlier version.
     const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
     assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
+});
+
+test('Enable asks first only for the access the host says stops the skill', () => {
+    // A pending key is not a blocker; an ungranted permission is.
+    const pending = { all_granted: false, blocked: false, missing_keys: ['LATER_KEY'], pending_keys: ['LATER_KEY'] };
+    assert.equal(grantBlocks({ grants: pending }), false);
+    assert.deepEqual(blockingGrantItems(pending), []);
+    const mixed = { ...pending, blocked: true, missing_keys: ['LATER_KEY', 'OPENAI_API_KEY'],
+        missing_permissions: ['notify_owner'] };
+    assert.equal(grantBlocks({ grants: mixed }), true);
+    assert.deepEqual(blockingGrantItems(mixed), ['OPENAI_API_KEY', 'notify_owner'], 'only what blocks is asked on Enable');
+    const mixedPendingNotify = { ...mixed, pending_permissions: ['notify_owner'] };
+    assert.equal(grantBlocks({ grants: mixedPendingNotify }), true);
+    assert.deepEqual(blockingGrantItems(mixedPendingNotify), ['OPENAI_API_KEY'], 'pending permission is omitted when Enable asks for blocking access');
+    assert.match(traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: mixedPendingNotify }))),
+        /data-skill-action="grant" data-keys="LATER_KEY[^"]*OPENAI_API_KEY[^"]*notify_owner"/,
+        'voluntary Grant access still offers pending permission alongside missing keys');
+    const mixedPendingWithRequiredPerm = { all_granted: false, blocked: true, missing_keys: [],
+        missing_permissions: ['write_calendar', 'notify_owner'], pending_permissions: ['notify_owner'] };
+    assert.equal(grantBlocks({ grants: mixedPendingWithRequiredPerm }), true);
+    assert.deepEqual(blockingGrantItems(mixedPendingWithRequiredPerm), ['write_calendar']);
+    const pendingNotifyOnly = { all_granted: false, blocked: false, missing_keys: [],
+        missing_permissions: ['notify_owner'], pending_permissions: ['notify_owner'] };
+    assert.equal(grantBlocks({ grants: pendingNotifyOnly }), false);
+    assert.deepEqual(blockingGrantItems(pendingNotifyOnly), []);
+    assert.match(traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: pendingNotifyOnly }))),
+        /data-skill-action="grant" data-keys="notify_owner"/,
+        'voluntary Grant access still offers a pending permission on its own');
+    assert.equal(grantBlocks({ grants: { all_granted: false } }), true, 'an older host without `blocked` answers by all_granted');
+    assert.deepEqual(blockingGrantItems({ all_granted: false, missing_keys: ['K'] }), ['K']);
+    assert.deepEqual(blockingGrantItems({ all_granted: false, missing_keys: ['K'], missing_permissions: ['notify_owner'], pending_permissions: ['notify_owner'] }), ['K', 'notify_owner']);
+    assert.equal(grantBlocks({ grants: { all_granted: true } }), false);
+});
+
+test('access the host says stops nothing stays a voluntary grant: Connect tools stays, no Needs access chip', () => {
+    const server = { id: 'example', title: 'Example', conflict: false, configured: false, tool_count: 0, listed: false, error: '' };
+    const pending = skill({ type: 'script', enabled: true, mcp_servers: [server], grants: {
+        all_granted: false, blocked: false, usable: true, missing_keys: ['LATER_KEY'], pending_keys: ['LATER_KEY'] } });
+    const html = renderInstalledSkillCard(pending);
+    assert.match(traysOf(html), /data-skill-action="connect_tools"[^>]*>Connect tools</);
+    assert.match(traysOf(html), /data-skill-action="grant" data-keys="LATER_KEY"/, 'the key is still offered for a grant');
+    assert.match(traysOf(html), /LATER_KEY is saved in Settings but not granted to this skill\./);
+    assert.notDeepEqual((chipOf(html) || []).slice(2), ['Needs access']);
+    assert.equal(installedSkillModel(pending).needs, false);
+    const blocked = renderInstalledSkillCard(skill({ ...pending, grants: { ...pending.grants, blocked: true, pending_keys: [] } }));
+    assert.doesNotMatch(blocked, /connect_tools|saved in Settings/);
+    assert.deepEqual(chipOf(blocked).slice(1), ['warn', 'Needs access']);
 });
 
 test('declared MCP servers: Connect tools once the skill is ready, then the configured and listed facts', () => {

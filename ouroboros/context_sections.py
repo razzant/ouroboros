@@ -239,7 +239,8 @@ _NOT_PASSED: Any = object()  # ``skills`` omitted: the section discovers them it
 
 
 @timed_section("installed_skills")
-def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, selected_skill: str = "") -> str:
+def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, selected_skill: str = "",
+                                    first_view: Any = None) -> str:
     """Every enabled, admitted skill in both forms: the compact one keeps its status, description and
     trigger (owner 2.11.2026); tools, schedules and model experience are the full form's. A long field
     is a labelled prefix naming its manifest's ``read_file`` address, which the root and both child tool
@@ -253,7 +254,15 @@ def _build_installed_skills_section(env: Any, *, skills: Any = _NOT_PASSED, sele
     Any failure on the way (discovery, the summary, a row it renders) is said in both forms with its cause, never
     a missing or partly built section. A context build passes its own discovery's result (``skills``), a failed
     one included, so the catalog and the always-in-context block rest on one read. ``selected_skill``: the payload
-    this work is bound to, where reading another skill's manifest is refused (a cut purpose then names list_skills)."""
+    this work is bound to, where reading another skill's manifest is refused (a cut purpose then names list_skills).
+    ``first_view``: the work's context, which keeps the first enabled digests and differences seen on later reads
+    for the end-of-work fact (``skill_readiness.note_enabled_skill_digests``)."""
+    if first_view is not None and skills is not _NOT_PASSED:
+        from ouroboros.skill_catalogue import SkillDiscoveryFailure
+        from ouroboros.skill_readiness import note_enabled_skill_digests
+
+        if not isinstance(skills, SkillDiscoveryFailure):
+            note_enabled_skill_digests(first_view, skills)
     try:
         return _installed_skills_section(env, skills, selected_skill)
     except Exception as exc:

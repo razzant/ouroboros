@@ -812,12 +812,13 @@ def _catalog_context(skill, drive_root, repo_dir, settings_reader=None):
     registration input) and the fixed settings it reads: the declared keys, else all its PluginAPI may read."""
     from ouroboros.extension_import_staging import catalog_identity, declared_catalog_inputs
     from ouroboros.settings_integrity import skill_settings
+    from ouroboros.skill_grant_follow import declared_catalog_settings, registration_view
 
     env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir), host_access=False)
     declaration, current = declared_catalog_inputs(skill), skill_settings(settings_reader)
     grants = grant_status_for_skill(drive_root, skill)
-    settings = ({k: current[k] for k in declaration["settings"] if k in current} if declaration is not None
-                else _readable_settings(skill, pathlib.Path(drive_root), current, grants))
+    settings = (declared_catalog_settings(declaration["settings"], current, grants) if declaration is not None
+                else registration_view(_readable_settings(skill, pathlib.Path(drive_root), current, grants)))
     return catalog_identity(skill, settings, env, grants), env, settings
 
 

@@ -174,3 +174,16 @@ def test_payload_sidecars_use_shared_control_filenames():
     for filename in SKILL_PAYLOAD_CONTROL_FILENAMES:
         assert is_skill_payload_control_filename(filename) is True
     assert is_skill_payload_control_filename("plugin.py") is False
+
+
+def test_host_grant_receipts_are_control_state_not_part_of_a_skills_state(tmp_path):
+    from ouroboros.contracts.skill_payload_policy import (
+        is_skill_control_plane_path, is_skill_owner_state_target, skill_grant_receipts_path, skill_state_dir_path,
+    )
+
+    root = tmp_path / "data"
+    receipt = skill_grant_receipts_path(root)
+    assert is_skill_owner_state_target(receipt, root)
+    assert is_skill_control_plane_path(receipt.with_suffix(".json.lock"), root)
+    assert is_skill_control_plane_path(receipt.with_name(f".{receipt.name}.tmp.fixture"), root)
+    assert not is_skill_control_plane_path(skill_state_dir_path(root, "fixture") / receipt.name, root)

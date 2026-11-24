@@ -189,6 +189,30 @@ def _connect(world, *, confirm=False, digest=None):
                                       confirm_other_servers=confirm)
 
 
+def test_the_connect_preview_distinguishes_skill_grants_and_mcp_row_settings(world, monkeypatch):
+    """Pending fields do not stop Connect; the preview does not claim what the independent row supplies."""
+    from ouroboros.skill_loader import SkillReviewState, save_enabled, save_review_state
+
+    (world.skill_dir / "SKILL.md").write_text(
+        _manifest().replace("runtime: node\n", "runtime: node\nenv_from_settings: [LATER_KEY, OTHER_KEY]\n"),
+        encoding="utf-8")
+    save_review_state(world.data, "chrome_browser", SkillReviewState(
+        status="clean", content_hash=load_skill(world.skill_dir, world.data).content_hash))
+    save_enabled(world.data, "chrome_browser", True, actor="owner_ui")
+    monkeypatch.setattr(skill_mcp, "_not_ready", world.readiness)
+    _write_settings(world, {"LATER_KEY": "saved later", "OTHER_KEY": "also saved"})
+    preview = skill_mcp.preview_connect(world.data, "chrome_browser")
+    assert preview["ready"]
+    assert "not supplied by this skill: LATER_KEY, OTHER_KEY" in preview["grant_note"]
+    assert "own settings can supply" in preview["grant_note"]
+    assert "saved later" not in preview["grant_note"] and "also saved" not in preview["grant_note"]
+    from ouroboros.gateway.skill_mcp_contracts import SkillMcpConnectPreviewResponse
+
+    assert set(preview) <= set(typing.get_type_hints(SkillMcpConnectPreviewResponse)), "the contract names the field"
+    _write_settings(world, {})
+    assert "grant_note" not in skill_mcp.preview_connect(world.data, "chrome_browser")
+
+
 def test_connect_writes_exactly_the_bound_row_and_the_flag_preserving_everything_else(world):
     before = {"OUROBOROS_MODEL": "provider/model-x", "MCP_SERVERS": [OTHER], "MCP_ENABLED": True,
               "CUSTOM_SECRET_KEY": "sk-custom", "unknown_key": {"nested": [1, 2]},
