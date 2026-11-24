@@ -1,0 +1,35 @@
+name: Nano voice wire qualification
+'on':
+  push:
+    branches: ['qa/m2-nano-voice-b2a03abc']
+permissions:
+  contents: read
+jobs:
+  voice:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'b2a03abce9922f8a1595d08173f323fc48061e94'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+      - name: Test the final serialized request and the open-socket allowance
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne 'b2a03abce9922f8a1595d08173f323fc48061e94') { throw 'Unexpected product revision' }
+          $python = (Get-Command python).Source
+          $nodes = @(
+            'tests/test_live_start_room.py::test_a_new_nano_setup_can_raise_the_reply_after_pricing_its_wire'
+            'tests/test_live_start_room.py::test_nano_wire_reply_pricing_converges_across_digit_and_density_boundaries'
+            'tests/test_live_start_room.py::test_running_nano_prices_reply_after_serializing_the_wire'
+            'tests/test_live_context_delivery.py::test_prepared_catchup_cannot_borrow_a_smaller_reply_than_the_open_socket'
+          )
+          & $python scripts/safe_test.py --timeout 420 -- $python -m pytest -n 0 -p no:cacheprovider -o 'addopts=' -vv @nodes
+          exit $LASTEXITCODE
