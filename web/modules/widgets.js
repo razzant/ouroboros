@@ -1058,6 +1058,9 @@ export function initWidgets(ctx = {}) {
         } else {
             relayout();
         }
+        // A frame kept running while Widgets was hidden may have changed with no box to measure in, and below the fold
+        // nothing in it says the page is back: its bounds go to it again, so that it measures anew.
+        keptRunning().forEach((key) => frameRefits.get(key)?.({ shown: true }));
         await syncWidgets(generation);
     }
 

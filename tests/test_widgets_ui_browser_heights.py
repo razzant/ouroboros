@@ -1512,7 +1512,7 @@ _BADGE = ("document.head.insertAdjacentHTML('beforeend', '<style>@keyframes badg
           "document.body.insertAdjacentHTML('beforeend', '<div id=\"badge\"></div>');\n")
 
 
-def _write_modules(data_dir: pathlib.Path, name: str, sources: dict) -> str:
+def _write_modules(data_dir: pathlib.Path, name: str, sources: dict, starts: dict | None = None) -> str:
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
 
     skill_dir = data_dir / "skills" / "external" / name
@@ -1531,7 +1531,8 @@ def _write_modules(data_dir: pathlib.Path, name: str, sources: dict) -> str:
     (skill_dir / "plugin.py").write_text(textwrap.dedent(f"""\
         def register(api):
             for tab in {tuple(sources)!r}:
-                api.register_ui_tab(tab, tab, render={{"kind": "module", "entry": f"{{tab}}.js", "start": "auto"}})
+                api.register_ui_tab(tab, tab, render={{"kind": "module", "entry": f"{{tab}}.js",
+                                                       "start": {dict(starts or {})!r}.get(tab, "auto")}})
         """), encoding="utf-8")
     for tab, source in sources.items():
         (skill_dir / f"{tab}.js").write_text(source, encoding="utf-8")
@@ -1606,44 +1607,85 @@ def test_an_animation_that_moves_nothing_does_not_keep_a_follower_growing(direct
 
 # Cards that fill every column (three at 1440 px), so the next one in order lands below the fold.
 _PILLAR = "document.getElementById('root').innerHTML = '<div style=\"height:1400px\">Pillar</div>';\n"
-# Its status arrives after load, while it stands below the fold: a loading line, then 16 rows. It notes when it grew and
-# each report it sent (test observation only).
-_LATE = """(() => {
-    const root = document.getElementById('root');
-    root.innerHTML = '<p style="margin:0">Loading</p>';
-    window.__reportsAt = [];
+# A card that loads with one 20 px line and changes only when the test calls into it. Its margins are its own, so its
+# natural height is where its last row ends plus the body's bottom margin, whatever its frame's height (the document's
+# scrollHeight is never less than its window, so it follows a frame that is too tall). It notes each size report it
+# sends (test observation only).
+_CHANGES_LATER = """(() => {
+    document.head.insertAdjacentHTML('beforeend',
+        '<style>body{margin:8px}#rows{margin:0;padding:0}#rows>div{height:20px;margin:0}</style>');
+    document.getElementById('root').innerHTML = '<div id="rows"><div>Loading</div></div>';
+    const rows = document.getElementById('rows');
+    window.__reports = [];
     const report = window.__ouroWidgetReport;
-    if (report) window.__ouroWidgetReport = (message) => {
-        window.__reportsAt.push([Math.round(performance.now()), message.height]);
-        report(message);
+    if (report) window.__ouroWidgetReport = (message) => { window.__reports.push(message.height); report(message); };
+    const natural = () => Math.ceil(rows.lastElementChild.getBoundingClientRect().bottom + window.scrollY
+        + parseFloat(getComputedStyle(document.body).marginBottom));
+    const fill = (count) => rows.replaceChildren(...Array.from({ length: count }, (_, i) =>
+        Object.assign(document.createElement('div'), { textContent: 'Row ' + (i + 1) })));
+    window.__natural = natural;
+    // Each change answers what it measures right after it, before any report can have resized the frame.
+    window.__fill = (count) => {
+        fill(count);
+        return { natural: natural(), inner: window.innerHeight, scrollHeight: document.documentElement.scrollHeight };
     };
-    setTimeout(() => {
-        root.innerHTML = Array.from({ length: 16 }, (_, i) => '<div style="height:20px">Row ' + (i + 1) + '</div>').join('');
-        window.__grownAt = Math.round(performance.now());
-    }, 1500);
 })();
 """
-_PLACE = """(selector) => {
-    const frame = document.querySelector(`${selector} iframe`).getBoundingClientRect();
-    const view = document.querySelector('.widgets-scroll').getBoundingClientRect();
-    return { top: Math.round(frame.top), height: Math.round(frame.height),
-             viewBottom: Math.round(Math.min(view.bottom, window.innerHeight)) };
+_FOLD = """(skill) => {
+    const scroller = document.querySelector('.widgets-scroll');
+    const cards = {};
+    for (const card of document.querySelectorAll(`[data-widget-key^="${skill}:"]`)) {
+        const box = card.getBoundingClientRect();
+        const element = card.querySelector('iframe');
+        const frame = element?.getBoundingClientRect();
+        cards[card.dataset.widgetKey.slice(skill.length + 1)] = {
+            left: Math.round(box.left), top: Math.round(box.top), bottom: Math.round(box.bottom),
+            frameTop: frame ? Math.round(frame.top) : null, frame: frame ? Math.round(frame.height) : null,
+            content: Number(element?.dataset.widgetContentHeight || 0),
+        };
+    }
+    return { cards, viewBottom: Math.round(Math.min(scroller.getBoundingClientRect().bottom, window.innerHeight)),
+             scrollTop: scroller.scrollTop, scrollY: window.scrollY, focus: document.activeElement?.tagName || null };
 }"""
 
 
 @pytest.mark.parametrize("engine", ("chromium", "webkit"))
-def test_a_card_that_grows_below_the_fold_has_its_height_before_it_is_scrolled_to(direct_server_with_data, engine):
-    """A frame out of view gets no animation frame; its growth is reported all the same, so the card stands at its
-    height before the owner scrolls to it, and scrolling to it moves nothing."""
+def test_a_card_that_changes_below_the_fold_has_its_height_before_it_is_scrolled_to(direct_server_with_data, engine):
+    """A board frame out of view gets no animation frame. A change in it is measured all the same, so the card stands
+    at the height its content now has, grown or shrunk, before the owner scrolls to it, and scrolling to it moves
+    nothing. Kept running while Widgets is hidden, it changes there and is shown again below the fold: it has the
+    height of what it holds then, still before any scroll, from one report."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    probe = _write_modules(data_dir, "board_fold_probe", {**{f"pillar{i}": _PILLAR for i in range(3)}, "status": _LATE})
-    late = f'[data-widget-key="{probe}:status"]'
+    # Every card is kept running, so that leaving and showing Widgets remounts none and the board stays as it was.
+    sources = {**{f"pillar{i}": _PILLAR for i in range(3)}, "status": _CHANGES_LATER}
+    probe = _write_modules(data_dir, "board_fold_probe", sources, dict.fromkeys(sources, "retain"))
+    status = f'[data-widget-key="{probe}:status"]'
     shots = evidence_dir(data_dir)
     report = {}
+
+    def board_when(done, label: str) -> dict:
+        """Polls the board until `done(seen)` (5 s at most), then records and returns what it saw last."""
+        deadline = time.monotonic() + 5
+        while True:
+            seen = page.evaluate(_FOLD, probe)
+            if done(seen) or time.monotonic() > deadline:
+                report[label] = seen
+                return seen
+            page.wait_for_timeout(50)
+
+    def settled_at(natural: int, label: str) -> dict:
+        return board_when(lambda seen: abs(seen["cards"]["status"]["frame"] - natural) <= 1, label)
+
+    def under_a_pillar(seen: dict) -> bool:
+        """The card is packed under a pillar of its column that is mounted and measured whole."""
+        card = seen["cards"]["status"]
+        return any(key != "status" and other["left"] == card["left"] and other["bottom"] <= card["top"]
+                   and other["content"] >= 1400 and abs(other["frame"] - other["content"]) <= 1
+                   for key, other in seen["cards"].items())
 
     with sync_playwright() as pw:
         browser, context = launch(pw, engine, viewport={"width": 1440, "height": 1000})
@@ -1656,27 +1698,60 @@ def test_a_card_that_grows_below_the_fold_has_its_height_before_it_is_scrolled_t
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: true}),
             })).status""", probe) == 200
             page.click('[data-nav-page="widgets"]')
-            page.wait_for_function("(s) => document.querySelector(`${s} iframe`)?.dataset.widgetContentHeight",
-                                   arg=late, timeout=30_000)
-            inner = page.locator(f"{late} iframe").element_handle().content_frame()
-            # Polled by interval: the default polls by animation frame, which a frame out of view never runs.
-            inner.wait_for_function("() => window.__grownAt", polling=100, timeout=15_000)
-            report["grown"] = page.evaluate(_PLACE, late)
-            page.wait_for_timeout(1500)
-            report["below"] = page.evaluate(_PLACE, late)
-            report["natural"] = inner.evaluate("() => document.documentElement.scrollHeight")
-            report["reports"] = inner.evaluate("() => ({ grownAt: window.__grownAt, at: window.__reportsAt })")
-            page.screenshot(path=str(shots / f"{engine}-below-the-fold.png"))
-            below = report["below"]
-            assert report["grown"]["top"] >= report["grown"]["viewBottom"], ("it grew below the fold", report)
-            assert below["top"] >= below["viewBottom"], ("still below the fold", report)
-            assert below["height"] > 300 and abs(below["height"] - report["natural"]) <= 2, report
-            page.locator(late).scroll_into_view_if_needed()
+            for tab in ("pillar0", "pillar1", "pillar2", "status"):
+                page.wait_for_function("(s) => document.querySelector(`${s} iframe`)?.dataset.widgetContentHeight",
+                                       arg=f'[data-widget-key="{probe}:{tab}"]', timeout=30_000)
+            inner = page.locator(f"{status} iframe").element_handle().content_frame()
+            # The board packs again once the pillars report their height (an animation frame of the page later).
+            start = board_when(lambda seen: seen["cards"]["status"]["frameTop"] >= seen["viewBottom"]
+                               and under_a_pillar(seen), "start")
+            loaded = report["loaded"] = inner.evaluate(
+                "() => ({ ready: document.readyState, reports: window.__reports, natural: window.__natural() })")
+            card = start["cards"]["status"]
+            # Before any change: loaded and measured at its one line, below the fold of the board's own scroller,
+            # under a pillar of its column that is mounted and measured whole.
+            assert loaded["ready"] == "complete" and loaded["reports"][-1:] == [loaded["natural"]], report
+            assert card["content"] == loaded["natural"] and abs(card["frame"] - loaded["natural"]) <= 1, report
+            assert card["frameTop"] >= start["viewBottom"], ("not below the fold", report)
+            assert under_a_pillar(start), ("no measured pillar above it", report)
+            # Rows arrive, called into the loaded frame: nothing scrolls or takes the focus.
+            grown = report["grown"] = inner.evaluate("() => window.__fill(16)")
+            below = settled_at(grown["natural"], "below")["cards"]["status"]
+            assert abs(below["frame"] - grown["natural"]) <= 1, ("no growth below the fold", report)
+            # Half of them go. Right after, its frame is still the taller one: the document's scrollHeight matches
+            # that frame and its content boundary does not, so the check above cannot pass for a frame too tall.
+            shrunk = report["shrunk"] = inner.evaluate("() => window.__fill(8)")
+            assert shrunk["scrollHeight"] == shrunk["inner"] and shrunk["natural"] < shrunk["inner"] - 1, report
+            after = settled_at(shrunk["natural"], "shrunk_below")
+            assert abs(after["cards"]["status"]["frame"] - shrunk["natural"]) <= 1, ("no shrink below the fold", report)
+            assert after["cards"]["status"]["frameTop"] >= after["viewBottom"], report
+            assert [after[key] for key in ("scrollTop", "scrollY", "focus")] == \
+                [start[key] for key in ("scrollTop", "scrollY", "focus")], ("scroll or focus moved", report)
+            # Widgets is left with the card kept running, 12 rows replace its 8 there, and Widgets is shown again with
+            # the card still below the fold.
+            inner.evaluate("() => { window.__kept = window.__reports.length; }")
+            for target, shown in (("dashboard", False), ("widgets", True)):
+                page.evaluate("""(target) => [...document.querySelectorAll(`[data-nav-page="${target}"]`)]
+                    .find((item) => getComputedStyle(item).display !== 'none')?.click()""", target)
+                page.wait_for_function("(shown) => document.getElementById('page-widgets').classList.contains('active')"
+                                       " === shown", arg=shown)
+                if not shown:
+                    inner.evaluate("() => { window.__fill(12); }")
+                    page.wait_for_timeout(500)
+            natural = report["returned_natural"] = inner.evaluate("() => window.__natural()")
+            back = board_when(lambda seen: abs(seen["cards"]["status"]["frame"] - natural) <= 1, "returned")
+            report["since_hidden"] = since = inner.evaluate("() => window.__reports.slice(window.__kept)")
+            assert abs(back["cards"]["status"]["frame"] - natural) <= 1, ("not measured when shown again", report)
+            assert back["cards"]["status"]["frameTop"] >= back["viewBottom"], report
+            assert since.count(natural) == 1 and since[-1] == natural, ("one report of what it holds", report)
+            assert back["scrollTop"] == start["scrollTop"] and back["scrollY"] == start["scrollY"], report
+            # Scrolled to, it is already whole: nothing moves.
+            page.locator(status).scroll_into_view_if_needed()
             page.wait_for_timeout(600)
-            report["scrolled"] = page.evaluate(_PLACE, late)
+            scrolled = report["scrolled"] = page.evaluate(_FOLD, probe)
             page.screenshot(path=str(shots / f"{engine}-below-the-fold-scrolled.png"))
-            assert report["scrolled"]["top"] < report["scrolled"]["viewBottom"], report
-            assert report["scrolled"]["height"] == below["height"], ("scrolling to it moves nothing", report)
+            assert scrolled["cards"]["status"]["frameTop"] < scrolled["viewBottom"], report
+            assert scrolled["cards"]["status"]["frame"] == back["cards"]["status"]["frame"], ("moved", report)
             assert errors == [], errors
         finally:
             (shots / f"{engine}-below-the-fold.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

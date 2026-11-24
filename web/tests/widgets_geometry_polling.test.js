@@ -65,6 +65,10 @@ function resizeHarness({
     let observerDisconnects = 0;
     let frameId = 0;
     const frames = new Map();
+    // Every box and computed style the reporter reads (not the presence check of the root's box below).
+    let geometryReads = 0;
+    // Whether the page shows the frame: one it hides (Widgets left, the frame kept running) has no box.
+    let rendered = true;
     const flushFrame = () => {
         const pending = [...frames.values()];
         frames.clear();
@@ -103,7 +107,7 @@ function resizeHarness({
             },
         };
     };
-    const documentElement = { style: createStyle('html') };
+    const documentElement = { style: createStyle('html'), getClientRects: () => (rendered ? [{}] : []) };
     const follow = { rootOf };
     const contentHeight = () => (follow.rootOf ? follow.rootOf(window.innerHeight) : state.height);
     // An element of this stand-in: its box, its scrollable overflow (its children's boxes), the siblings the reporter
@@ -114,7 +118,11 @@ function resizeHarness({
                 marginBottom: '0px', ...style },
             get lastElementChild() { return children.at(-1) || null; },
             previousElementSibling: null,
-            getBoundingClientRect: () => { const { top, height } = box(); return { top, height, bottom: top + height }; },
+            getBoundingClientRect: () => {
+                geometryReads += 1;
+                const { top, height } = box();
+                return { top, height, bottom: top + height };
+            },
             get scrollHeight() {
                 const { top, height } = box();
                 return Math.max(height, ...children.map((child) => child.getBoundingClientRect().top + child.scrollHeight - top));
@@ -145,6 +153,7 @@ function resizeHarness({
         // The body's box holds the content, its bottom spacing and the margins the content's children keep inside it;
         // its own height or min-height (`imposed`) can make it taller.
         getBoundingClientRect: () => {
+            geometryReads += 1;
             const height = Math.max(imposed(), heldHeight() + paddingBottom + borderBottom);
             return { top: bodyTop, bottom: bodyTop + height, height };
         },
@@ -213,6 +222,7 @@ function resizeHarness({
         disconnect() { observerDisconnects += 1; }
     }
     const getComputedStyle = (target) => {
+        geometryReads += 1;
         if (target !== body) return target.computed;
         return {
             display: 'block',
@@ -250,6 +260,7 @@ function resizeHarness({
         pendingTimers: () => timers.size,
         timerDelays,
         flushTimers,
+        geometryReads: () => geometryReads,
         notify(height) { state.height = height; observerCallback(); },
         resize(height) {
             state.height = height;
@@ -261,6 +272,25 @@ function resizeHarness({
         dispose() { disposeCallbacks.forEach((callback) => callback()); },
         entryRan() { window.__ouroWidgetEntryRan?.(); },
         viewport(next) { viewportCallbacks.forEach((callback) => callback(next)); },
+        // Widgets is left with the frame kept running: the page hides it, so it has no box and runs no animation frame.
+        // Its window keeps its size (as Chromium and WebKit keep it), or has none (`zeroWindow`, which reportOnce
+        // also allows for).
+        hide({ zeroWindow = false } = {}) {
+            rendered = false;
+            if (zeroWindow) {
+                window.innerHeight = 0;
+                listeners.get('resize')?.();
+            }
+        },
+        // Widgets is shown again: the frame has its box and its window back. A case runs its animation frame (in view)
+        // or only its timers (below the fold).
+        show(height) {
+            rendered = true;
+            if (height !== window.innerHeight) {
+                window.innerHeight = height;
+                listeners.get('resize')?.();
+            }
+        },
         // The parent applies a frame height: the window follows it (and fires resize), and a root that follows it
         // resizes.
         frame(height) {
@@ -294,13 +324,12 @@ test('resize observer defers layout writes, coalesces updates, and cancels on di
     assert.deepEqual(harness.styleWrites, { set: 2, remove: 2 });
 });
 
-test('a frame that gets no animation frame (out of view) still reports after a short timer, once', () => {
-    // A board card below the fold: the browser runs no animation frame in it, only timers.
-    // A root that grows (ResizeObserver), and a board document whose placed box moves with no change to the root's
-    // size (a layout cue).
+test('a board frame out of view (no animation frame) reports after a short timer, once; a frame in a message keeps the frame alone', () => {
+    // A board card below the fold: the browser runs no animation frame in it, only timers. A root that grows
+    // (ResizeObserver), and a board document whose placed box moves with no change to the root's size (a layout cue).
     let boxTop = 40;
     for (const [label, harness, change] of [
-        ['root resize', resizeHarness(), (harness) => harness.notify(1200)],
+        ['root resize', resizeHarness({ wholeDocument: true, maxHeight: 8192 }), (harness) => harness.notify(1200)],
         ['document change', resizeHarness({ wholeDocument: true, maxHeight: 8192, placed: [{ top: () => boxTop, height: 20 }] }),
             (harness) => { boxTop = 1400; harness.documentListeners.get('transitionend')(); }],
     ]) {
@@ -316,20 +345,66 @@ test('a frame that gets no animation frame (out of view) still reports after a s
         harness.flushFrame();
         assert.equal(harness.messages.length, before + 1, label);
     }
-    // Visible: the frame comes first and reports alone; its timer is cleared.
-    const visible = resizeHarness();
+    // In view the frame comes first and reports alone; its timer is cleared. Dispose before either fires cancels both.
+    const visible = resizeHarness({ wholeDocument: true, maxHeight: 8192 });
+    const shown = visible.messages.length;
     visible.notify(1200);
     visible.flushFrame();
     assert.equal(visible.pendingTimers(), 0);
     visible.flushTimers();
-    assert.deepEqual(visible.messages.map((item) => item.height), [616, 1216]);
-    // Dispose before either fires cancels both.
+    assert.equal(visible.messages.length, shown + 1);
     visible.notify(1300);
     assert.equal(visible.pendingTimers(), 1);
     visible.dispose();
     assert.equal(visible.pendingFrames(), 0);
     assert.equal(visible.pendingTimers(), 0);
-    assert.deepEqual(visible.messages.map((item) => item.height), [616, 1216]);
+    assert.equal(visible.messages.length, shown + 1);
+    // A frame in a message is measured in its animation frame only, as before.
+    const message = resizeHarness();
+    message.notify(1200);
+    assert.equal(message.pendingTimers(), 0);
+    message.flushFrame();
+    assert.deepEqual(message.messages.map((item) => item.height), [616, 1216]);
+});
+
+test('a board frame its page hides reads nothing, and shown again below the fold is measured, then and later', () => {
+    for (const zeroWindow of [false, true]) {
+        const label = zeroWindow ? 'no window' : 'no box';
+        let boxTop = 40;
+        const harness = resizeHarness({ wholeDocument: true, maxHeight: 8192, placed: [{ top: () => boxTop, height: 20 }] });
+        harness.flushFrame();
+        const shown = harness.messages.length;
+        // Changes queued in view, then Widgets is left (the frame kept running) before either callback runs; then more
+        // changes while it is hidden. Its timers fire there: they read nothing, post nothing and arm nothing again.
+        harness.notify(900);
+        harness.documentListeners.get('transitionend')();
+        harness.hide({ zeroWindow });
+        const reads = harness.geometryReads();
+        harness.flushTimers();
+        boxTop = 1400;
+        harness.notify(1000);
+        harness.documentListeners.get('pointerover')();
+        harness.flushTimers();
+        assert.equal(harness.geometryReads(), reads, `${label}: nothing is measured while hidden`);
+        assert.equal(harness.messages.length, shown, label);
+        assert.equal(harness.pendingTimers(), 0, `${label}: nothing is armed again`);
+        // Widgets is shown again with the card below the fold: no animation frame runs there, and the board sends the
+        // same bounds again. The document is measured as it is now, once.
+        harness.show(768);
+        harness.viewport({ floor: WIDGET_FRAME_DEFAULT_HEIGHT, ceiling: 8192 });
+        harness.flushTimers();
+        assert.equal(harness.messages.length, shown + 1, label);
+        assert.ok(harness.messages.at(-1).height >= 1420, `${label}: ${JSON.stringify(harness.messages)}`);
+        harness.flushTimers();
+        assert.equal(harness.messages.length, shown + 1, `${label}: one report`);
+        // A later change there is measured too (still below the fold, timers only): nothing is left waiting on an
+        // animation frame that cannot come.
+        boxTop = 1600;
+        harness.documentListeners.get('transitionend')();
+        harness.flushTimers();
+        assert.equal(harness.messages.length, shown + 2, label);
+        assert.ok(harness.messages.at(-1).height >= 1620, `${label}: ${JSON.stringify(harness.messages)}`);
+    }
 });
 
 test('widget frame contract keeps the bounded host geometry', () => {
@@ -703,6 +778,11 @@ test('new bounds end a hold, and a fresh start measures only once the frame has 
     settleBoard(harness, 0, 6);
     assert.deepEqual(heights(harness).slice(3), [336, 352, 352], 'the same stop from the same start, no drift');
     assert.equal(harness.messages.at(-1).held, 16);
+    // The same bounds again (Widgets shows a frame it kept running) measure anew and keep the stop.
+    const stopped = harness.messages.length;
+    harness.viewport({ floor: 0, ceiling: 8192 });
+    settleBoard(harness, 0, 4);
+    assert.equal(harness.messages.length, stopped, 'the stop stands');
     // A newer change of bounds supersedes the wait: nothing stays stuck waiting for a height that will never come.
     harness.viewport({ floor: 0, ceiling: 8192, frame: 320 });
     harness.viewport({ floor: 0, ceiling: 400 });

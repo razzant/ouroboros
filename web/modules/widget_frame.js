@@ -207,8 +207,8 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // (100vh with margins outside it, 110vh, a bar at the window's bottom) asks for at least as much extra in
             // every frame it is given, up to the ceiling otherwise. The sign is measured, not a CSS cause: the frame
             // has become exactly the height last asked for, below the ceiling (an echo), the document asks for more,
-            // no less than at the last echo (growing did not bring it nearer), and did so one animation frame later
-            // too, unchanged. Then the reporter stops asking, says so, and lets the document scroll where it stands: a
+            // no less than at the last echo (growing did not bring it nearer), and did so at its next measurement too,
+            // unchanged. Then the reporter stops asking, says so, and lets the document scroll where it stands: a
             // conservative fallback, so what it places below the frame stays reachable. An echo at which the
             // document fits ends the episode; a different extra at a held height (content that really changed), new
             // bounds or another frame height take the hold off, and it measures on; a held height is also
@@ -328,10 +328,14 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // browser fires a loop error on window, which the bridge's fault
             // channel reports as a widget script error. A microtask would still
             // run inside delivery; an animation frame runs before the next
-            // observation pass and coalesces bursts into one measurement. A frame
-            // out of view (a board card below the fold) gets no animation frames,
-            // so a 100 ms timer races it, also outside delivery: whichever comes
-            // first measures, once. Dispose cancels both.
+            // observation pass and coalesces bursts into one measurement. A board
+            // frame out of view (below the fold) gets no animation frames, so there
+            // a timer asked for 100 ms races it, also outside delivery: whichever
+            // runs first measures, once. A frame with no box (as Chromium leaves one
+            // on a page that hides it: Widgets left, the frame kept running) or no
+            // window is not read: the timer ends the attempt there (its callback
+            // hears false), and the next cue, the board's showing it again among
+            // them, measures it. Dispose cancels both.
             const nextFrame = (callback) => {
                 let frame = 0;
                 let timer = 0;
@@ -339,24 +343,29 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
                     window.cancelAnimationFrame(frame);
                     window.clearTimeout(timer);
                 };
-                frame = window.requestAnimationFrame(() => { cancel(); callback(); });
-                timer = window.setTimeout(() => { cancel(); callback(); }, 100);
+                frame = window.requestAnimationFrame(() => { cancel(); callback(true); });
+                if (wholeDocument) {
+                    timer = window.setTimeout(() => {
+                        cancel();
+                        callback(Boolean(window.innerHeight && document.documentElement.getClientRects().length));
+                    }, 100);
+                }
                 return cancel;
             };
             const scheduleReport = () => {
                 if (disposed || resizeFrame !== null) return;
-                resizeFrame = nextFrame(() => {
+                resizeFrame = nextFrame((measurable) => {
                     resizeFrame = null;
-                    report();
+                    if (measurable) report();
                 });
             };
             // A change in a board document is measured once a frame (nextFrame), and reported only when it moved that;
             // the report goes on from that same measure.
             const scheduleChange = () => {
                 if (disposed || changeFrame !== null) return;
-                changeFrame = nextFrame(() => {
+                changeFrame = nextFrame((measurable) => {
                     changeFrame = null;
-                    if (!root || !document.body) return;
+                    if (!measurable || !root || !document.body) return;
                     if (held?.moving && !settling()) {
                         held = null;
                         echoed = null;
@@ -395,6 +404,11 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // New bounds end a hold (the owner's height, Show all, Back); Natural height and Reset (frame: the height
             // being applied, fit: that fresh fit's number) also make it measure anew, once its window has that height.
             window.__ouroWidgetOnViewport?.((viewport) => {
+                // The same bounds again (Widgets shows a frame it kept running): measured anew, nothing else changes.
+                if (!viewport.frame && viewport.floor === floor && viewport.ceiling === ceiling) {
+                    scheduleReport();
+                    return;
+                }
                 floor = viewport.floor;
                 ceiling = viewport.ceiling;
                 held = null;
