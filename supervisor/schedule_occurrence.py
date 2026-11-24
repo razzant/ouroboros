@@ -827,8 +827,8 @@ def admit(prepared: List[Dict[str, Any]], *, stop: Optional[Callable[[], bool]] 
                     with q.prepared_root_billing(prepared_task, resolved=billing[item["schedule_id"]]):
                         outcome = q.enqueue_task(prepared_task, consciousness_window=windows.get(item["schedule_id"]),
                                                  project_admission=item.get("project_admission"),
-                                                 continuation=bool(record.get("continuation_of") or
-                                                                   (item.get("stored_task") or {}).get("_consciousness_continuation")))
+                                                 continuation=bool((frozen or {}).get("_consciousness_continuation") if frozen
+                                                                   else record.get("continuation_of")))
                     block = str(outcome.get("_admission_blocked") or "") if isinstance(outcome, dict) else ""
                     if block and outcome.get("_admission_contention"):
                         defer(item)

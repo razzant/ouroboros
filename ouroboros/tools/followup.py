@@ -156,9 +156,8 @@ def _manage_schedules(
             expected_hold_id=expected_hold_id, relation=relation,
             writer_kind=writer_kind, writer_metadata=writer_metadata,
             owned_by=owned_by, agent=True)  # who the row belongs to is decided on the held row
-        if (outcome.get("changed") and isinstance(outcome.get("schedule"), dict)
-                and (note := _own_time_note(ctx, _stored_row(root, outcome["schedule"])))):
-            outcome["note"] = note.strip()
+        if outcome.pop("declared_own", False) and outcome.get("changed") and not own_time_on(ctx):
+            outcome["note"] = OWN_TIME_WAIT_NOTE.strip()  # from the locked write's own result, no read after it
     except ScheduleRefused as exc:
         # Same typed marker the sibling refusals carry: the text channel is the
         # registered ABI, so a refusal must be legible there and not only in the

@@ -253,7 +253,8 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
     with the stamp ``declared_own_origin`` builds alone and no ``continuation_of`` (its runs take a task slot). An
     editor's inherited mark is never copied onto a row. A declared row stays declared through every write of an
     agent tool (``agent``) until my human re-authors it: a verified cite, or a new assignment an owner-kind writer
-    makes; the owner's own door (not ``agent``) re-authors it as every row. Undeclared rows follow the rule below.
+    makes; the owner's own door (not ``agent``) re-authors it as every row. A same-assignment write keeps the
+    recorded origin; a new assignment the mind writes carries its current writer's. Undeclared rows: the rule below.
 
     Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
     unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
@@ -271,8 +272,9 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
         return
     recorded = record.get("writer_origin")
     if agent and is_declared_own(recorded) and not source.get("owner_basis") and (
-            same_work or writer_kind != WORK_KIND_OWNER):
-        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS, writer_origin=dict(recorded))
+            same_work or writer_kind != WORK_KIND_OWNER):  # the same assignment keeps its origin; the mind's new one
+        record.update(writer_kind=WORK_KIND_CONSCIOUSNESS,  # carries its current writer's (level, cap, tools)
+                      writer_origin=dict(recorded) if same_work else declared_own_origin(source))
         return
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
     basis = source.get("owner_basis") if started_root else None

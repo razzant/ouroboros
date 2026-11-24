@@ -276,6 +276,13 @@ def _patched_definition(current, patch):
     return incoming, changed
 
 
+def _declared_fact(row: dict) -> dict:
+    """``{"declared_own": True}`` for a row declared the mind's own as this locked write leaves it, else nothing."""
+    from ouroboros.consciousness_authority import is_declared_own
+
+    return {"declared_own": True} if is_declared_own(row.get("writer_origin")) else {}
+
+
 def _declaration_refusal(current: dict, incoming: dict, changed_fields: list) -> None:
     """A ``mine`` update declares a really new assignment of independent work, without owner words; else refused."""
     from supervisor.followup_policy import relation_kind
@@ -620,7 +627,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                 "running_or_queued": running,
                 "audit": "recorded" if recorded else ("incomplete" if changed else "not_written"),
                 **({"detail": detail} if detail else {}),
-                "schedule": _audit_row(current),
+                "schedule": _audit_row(current), **_declared_fact(current),
             }
     except ScheduleLockTimeout as exc:
         return {"ok": False, "changed": False, "status": "lock_timeout",

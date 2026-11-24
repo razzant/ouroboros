@@ -1109,6 +1109,99 @@ def test_a_republished_occurrence_keeps_the_author_it_froze(tmp_path, monkeypatc
     assert pending == [] and _rows(root)[sid]["hold"]["reason"] == "own_time_off"
 
 
+def test_my_humans_accepted_task_is_republished_by_its_receipt_while_off(tmp_path, monkeypatch):
+    """The receipt landed but the table write failed (the row still says claimed); the next assignment is then declared
+    while Off. The owner's accepted task is republished by its receipt, not held for the declaration that follows."""
+    from supervisor import queue_schedules
+
+    switch = {"on": True}
+    _own_time(monkeypatch, switch)
+    root = tmp_path / "data"
+    queue, pending = _fresh_queue(root)
+    owner = _owner_turn(tmp_path)
+    _followup(owner, run_at="2000-01-01T00:00:00+00:00", objective="Their report")
+    [sid] = _rows(root)
+    real_write, writes = queue_schedules._write_scheduled_tasks, []
+
+    def failing_admission_write(data, *args):
+        writes.append(1)
+        if len(writes) == 2:  # the pass's claim lands; the admission's table write fails
+            raise OSError("disk full")
+        return real_write(data, *args)
+
+    monkeypatch.setattr(queue_schedules, "_write_scheduled_tasks", failing_admission_write)
+    queue.check_scheduled_tasks()
+    monkeypatch.setattr(queue_schedules, "_write_scheduled_tasks", real_write)
+    occurrence = _rows(root)[sid]["occurrence"]
+    assert pending == [] and occurrence["phase"] == "claimed"
+    switch["on"] = False
+    from ouroboros.tools.followup import _manage_schedules
+    _manage_schedules(owner, action="update", schedule_id=sid, reason="mine next", objective="My study", mine=True)
+    assert _rows(root)[sid]["writer_origin"].get("own_declared") is True
+    queue.check_scheduled_tasks()
+    assert [task["id"] for task in pending] == [occurrence["task_id"]]
+    assert pending[0]["metadata"]["work_kind"] == "owner"
+
+
+def test_a_republished_run_keeps_the_continuation_it_froze(tmp_path, monkeypatch):
+    """Republication counts what the receipt froze: a declared run frozen without the continuation exemption takes a
+    task slot even if its row carries an older continuation (data an intermediate build could leave)."""
+    from supervisor import queue_schedules
+
+    switch = {"on": True}
+    _own_time(monkeypatch, switch)
+    root = tmp_path / "data"
+    queue, pending = _fresh_queue(root)
+    _followup(_owner_turn(tmp_path), mine=True, run_at="2000-01-01T00:00:00+00:00", objective="My study")
+    [sid] = _rows(root)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **_k: False)
+    queue.check_scheduled_tasks()  # admitted, then withdrawn: the receipt stays to republish
+    monkeypatch.undo()
+    _own_time(monkeypatch, switch)
+    with queue_schedules.schedule_transaction(root):
+        data = queue_schedules.load_schedule_store(root)
+        data["tasks"][0]["continuation_of"] = {"task_id": "older", "root_task_id": "older"}
+        queue_schedules._write_scheduled_tasks(data, root)
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
+    queue.check_scheduled_tasks()
+    assert pending == [] and _rows(root)[sid]["hold"]["reason"] == "consciousness_task_limit"
+
+
+def test_a_new_assignment_the_mind_writes_carries_its_current_level(tmp_path, monkeypatch):
+    """A declared row re-assigned by a wake keeps its declaration but runs at the wake's level (its Light cap and
+    disabled tools), not the level it was declared at; a same-assignment re-time keeps the recorded origin."""
+    import json
+
+    from ouroboros import consciousness_authority as ca
+    from ouroboros.consciousness_wake import wake_task_metadata
+    from ouroboros.tools.followup import _manage_schedules
+    from supervisor.queue_schedules import _task_from_schedule
+
+    _own_time(monkeypatch, {"on": True})
+    root = tmp_path / "data"
+    queue, _pending = _fresh_queue(root)
+    monkeypatch.setattr(queue, "load_state", lambda: {"owner_chat_id": 1, "bg_consciousness_enabled": True})
+    for declared_at, retimed in (("full", "full"), ("observe", "observe")):
+        monkeypatch.setattr(ca, "get_consciousness_autonomy", lambda level=declared_at: level)
+        assert _followup(_owner_turn(tmp_path), mine=True, objective=f"Study at {declared_at}").startswith("FOLLOWUP")
+        sid = next(row["id"] for row in _rows(root).values() if row["task"]["text"] == f"Study at {declared_at}")
+        monkeypatch.setattr(ca, "get_consciousness_autonomy", lambda: "act")  # my human lowers the level
+        wake = _ctx(tmp_path, task_id="wake-1")
+        wake.task_metadata.update(wake_task_metadata("act", "heartbeat"))
+        assert json.loads(_manage_schedules(wake, action="update", schedule_id=sid, reason="later",
+                                            run_at="2031-01-01T00:00:00+00:00"))["changed"]
+        assert _rows(root)[sid]["writer_origin"]["consciousness_autonomy"] == retimed  # same assignment: as recorded
+        assert json.loads(_manage_schedules(wake, action="update", schedule_id=sid, reason="refine",
+                                            objective=f"Refined study {declared_at}"))["changed"]
+        row = _rows(root)[sid]
+        assert row["writer_origin"]["own_declared"] is True and row["writer_origin"]["consciousness_autonomy"] == "act"
+        fired = _task_from_schedule(row)
+        assert fired["metadata"]["runtime_mode_cap"] == "light"
+        assert fired["task_contract"]["disabled_tools"] == list(ca.ACT_DISABLED)
+        assert "request_restart" in fired["task_contract"]["disabled_tools"]
+        assert "start_task" not in fired["task_contract"]["disabled_tools"]
+
+
 def test_a_declared_schedule_keeps_its_author_through_same_assignment_edits_by_any_caller(tmp_path, monkeypatch):
     """A declared row keeps its author through a timing edit, an unchanged objective echoed beside it, disable and
     restore, from an owner turn or a wake; replacing its assignment without ``mine`` makes it my human's, with
@@ -1223,6 +1316,7 @@ def test_a_declared_trees_follow_up_keeps_its_continuation_and_a_declared_update
     assert _followup(owner, run_at=due, objective="Their follow-up").startswith("FOLLOWUP_SCHEDULED")
     rows = {row["task"]["text"]: row for row in _rows(root).values()}
     assert not rows["tree follow-up"]["writer_origin"].get("own_declared") and rows["tree follow-up"]["continuation_of"]
+    assert "own_declared" not in rows["tree follow-up"]["task"]["metadata"]  # the stored template carries no mark
     sid = rows["Their follow-up"]["id"]
     assert json.loads(_manage_schedules(owner, action="update", schedule_id=sid, reason="mine",
                                         objective="My follow-up", mine=True))["changed"]
@@ -1249,9 +1343,15 @@ def test_the_waiting_note_follows_the_resulting_row(tmp_path, monkeypatch):
     assert "fires only once the consciousness switch is on" in retimed["argument_note"]
     paused = json.loads(_manage_schedules(owner, action="disable", schedule_id=sid, reason="pause"))
     assert "fires only once the consciousness switch is on" in paused["note"]
+    assert "owner_words" in retimed["argument_note"] and "owner_words" in paused["note"]  # the way to hand it over
+    # The note comes from the locked write's own result: a read failing right after the commit does not lose it.
+    from ouroboros.tools import followup
+    monkeypatch.setattr(followup, "_stored_row", lambda root, audit_row: audit_row)
+    restored = json.loads(_manage_schedules(owner, action="restore", schedule_id=sid, reason="resume"))
+    assert restored["changed"] and "fires only once the consciousness switch is on" in restored["note"]
     switch["on"] = True
-    plain = json.loads(_manage_schedules(owner, action="restore", schedule_id=sid, reason="resume"))
-    assert plain["changed"] and "note" not in plain
+    paused_on = json.loads(_manage_schedules(owner, action="disable", schedule_id=sid, reason="pause again"))
+    assert paused_on["changed"] and "note" not in paused_on and "declared_own" not in paused_on
 
 
 def test_mine_on_a_legacy_row_of_unknown_relationship_says_so(tmp_path, monkeypatch):

@@ -871,14 +871,14 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 # disabled row: admission already happened, later changes are future-only.
                 if occurrences.holding(record, now_utc):
                     continue
-                if record["occurrence"].get("phase") == "claimed" and own_time_waits(record, root, own_reading):
-                    continue  # an unadmitted declared claim is neither prepared nor rewritten while own time is off
                 try:
                     verdict, stored = occurrences.reconcile(record, reads=reads)
                 except Exception as exc:
                     if occurrences.contention(exc):
                         continue
                     raise
+                if verdict == "prepare" and own_time_waits(record, root, own_reading):
+                    continue  # an unadmitted declared claim is neither prepared nor rewritten while own time is off
                 changed = changed or verdict not in {"live", "retry"}
                 if verdict == "reconsider":
                     # Unstarted work follows the current authored timing/control.
