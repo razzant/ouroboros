@@ -47,8 +47,9 @@ import uuid
 from typing import Any, Dict, List
 
 from ouroboros.consciousness_authority import (
-    WORK_KIND_CONSCIOUSNESS, consciousness_origin_metadata, declared_own_origin, is_own_work, work_kind,
+    WORK_KIND_CONSCIOUSNESS, consciousness_origin_metadata, declared_own_origin, work_kind,
 )
+from ouroboros.tools.control_routing import OWN_TIME_WAIT_NOTE, own_time_on
 from ouroboros.deadline_utils import naive_instant, parse_deadline_ts
 from ouroboros.dialogue_provenance import presence_caller_binding, presence_root_carrier, presence_root_relation
 from ouroboros.settings_scales import EFFORT_SCALE, requested_effort
@@ -103,11 +104,11 @@ def _manage_schedules(
             ),
         ))
     root = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
-    if mine not in (None, False) and (mine is not True or operation != "update" or not (
-            str(objective or "").strip() or str(context or "").strip()) or str(owner_words or "").strip()):
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "⚠️ TOOL_ARG_ERROR (manage_schedules): mine=true declares a NEW assignment your own: only an update that "
-            "replaces objective or context, without owner_words; other changes keep the recorded author. Nothing changed.")))
+    if error := _mine_error("manage_schedules", mine, owner_words, other=operation != "update" or not (
+            str(objective or "").strip() or str(context or "").strip()), other_words=(
+            "an update that replaces objective or context declares a new assignment; other changes keep the recorded "
+            "author")):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error + " Nothing changed."))
     try:
         from ouroboros.tool_capabilities import tool_result_limit
         result_limit = tool_result_limit("manage_schedules")
@@ -148,13 +149,13 @@ def _manage_schedules(
         if len(json.dumps(str(schedule_id or ""), ensure_ascii=False)) > result_limit - 2_000:
             return publish_no_effect(ctx, json.dumps({"ok": False, "changed": False, "status": "identity_too_large",
                                "audit": "not_written", "detail": "Schedule identity exceeds the tool result limit; nothing changed."}), tool_name="manage_schedules")
-        writer_kind, writer_metadata = _schedule_writer(ctx, root, schedule_id)
+        writer_kind, writer_metadata = _schedule_writer(ctx)
         outcome = mutate_scheduled_task(
             operation, schedule_id, reason=reason, actor="agent",
             task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
             expected_hold_id=expected_hold_id, relation=relation,
             writer_kind=writer_kind, writer_metadata=writer_metadata,
-            owned_by=owned_by)
+            owned_by=owned_by, keep_declared=True)  # a declared author is kept, decided on the held row
     except ScheduleRefused as exc:
         # Same typed marker the sibling refusals carry: the text channel is the
         # registered ABI, so a refusal must be legible there and not only in the
@@ -208,31 +209,25 @@ def _manage_schedules(
     return json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _schedule_writer(ctx: ToolContext, root: Any, schedule_id: str, *, mine: bool = False,
-                     assignment: bool = False) -> tuple[str, dict]:
-    """``(writer_kind, writer_metadata)`` of an agent's write to a schedule.
+def _schedule_writer(ctx: ToolContext, *, mine: bool = False) -> tuple[str, dict]:
+    """``(writer_kind, writer_metadata)`` of an agent's new schedule or write; ``mine``: declared its own.
 
-    ``mine``: a new assignment the caller declared its own. Without it, a same-assignment change (a lifecycle step,
-    a timing or label edit) from an owner-kind turn keeps a recorded own-work author: the mind's own schedule
-    stays under its switch; any other write is the caller's, as before.
-    """
+    Who an edit of an existing row belongs to is decided by the lifecycle writer on the row it holds."""
     metadata = {**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")}
     if mine:
         return WORK_KIND_CONSCIOUSNESS, {**metadata, **declared_own_origin(metadata)}
-    kind = work_kind(getattr(ctx, "task_metadata", None))
-    if kind == WORK_KIND_CONSCIOUSNESS or assignment:
-        return kind, metadata
-    from supervisor.queue import ScheduleStoreUnreadable, load_schedule_store
+    return work_kind(getattr(ctx, "task_metadata", None)), metadata
 
-    try:
-        row = next((row for row in load_schedule_store(root)["tasks"]
-                    if str(row.get("id") or "") == str(schedule_id or "").strip()), None)
-    except ScheduleStoreUnreadable:
-        row = None  # the write itself reports the unreadable table
-    recorded = (row or {}).get("writer_origin")
-    if is_own_work(recorded):
-        return WORK_KIND_CONSCIOUSNESS, {**recorded, "task_id": metadata["task_id"]}
-    return kind, metadata
+
+def _mine_error(tool: str, mine: Any, owner_words: Any, *, other: bool = False, other_words: str = "") -> str:
+    """The typed refusal of a ``mine`` argument, read before any effect; ``""`` when it may proceed."""
+    if mine is None or mine is False:
+        return ""
+    if mine is not True:
+        return f"⚠️ TOOL_ARG_ERROR ({tool}): mine must be true or omitted."
+    if str(owner_words or "").strip():
+        return f"⚠️ TOOL_ARG_ERROR ({tool}): mine declares the work your own; owner_words makes it your human's. Choose one."
+    return f"⚠️ TOOL_ARG_ERROR ({tool}): mine: {other_words}." if other else ""
 
 
 def _stored_row(root: Any, audit_row: dict) -> dict:
@@ -285,7 +280,7 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "once", "run_at": patch.pop("run_at")}
     elif "cron" in patch:
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
-    assignment = bool(patch.keys() & {"objective", "context"})
+    assignment = bool(patch.keys() & {"objective", "context"}) and not mine  # declared work carries no owner words
     if assignment or owner_basis:  # a new assignment keeps the words that changed it; a verified cite is stored either way
         from ouroboros.owner_words import SCHEDULE_TEXT, carried_owner_corpus
 
@@ -293,17 +288,18 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         carried = [row for row in carried_owner_corpus(ctx) if row.get("source") != SCHEDULE_TEXT] if assignment else []
         if words := [*carried, *([owner_basis] if owner_basis else [])]:
             patch["owner_corpus"] = words
-    writer_kind, writer_metadata = _schedule_writer(ctx, root, schedule_id, mine=mine,
-                                                    assignment=assignment or bool(owner_basis))
+    writer_kind, writer_metadata = _schedule_writer(ctx)
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
-                                   writer_kind=writer_kind,
+                                   writer_kind=writer_kind, agent=True, declare=mine,
                                    writer_metadata={**writer_metadata,
                                                     **({"owner_basis": owner_basis} if owner_basis else {})})
     if outcome.get("ok") is False:
         return publish_no_effect(ctx, json.dumps(outcome, ensure_ascii=False), tool_name="manage_schedules")
     facts = {key: outcome[key] for key in ("status", "changed_fields", "audit", "reconsidered_claim")}
     row = {key: value for key, value in outcome.items() if key not in facts}
+    if mine and not own_time_on(ctx):
+        notes += OWN_TIME_WAIT_NOTE
     if notes:
         facts["argument_note"] = notes.strip()
     return _schedule_definition_reply(row, ok=outcome["audit"] == "recorded",
@@ -336,7 +332,7 @@ def _starting_effort(value: Any) -> tuple[str, str]:
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.tools.control import _MINE_PARAM, _OWNER_WORDS_PARAM
+    from ouroboros.tools.control import _OWNER_WORDS_PARAM
 
     return [
         ToolEntry(
@@ -408,8 +404,7 @@ def get_tools() -> List[ToolEntry]:
                                            "level and the result says so. Omit for that level.",
                         },
                         "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM},
-                        "mine": {"type": "boolean", "description": _MINE_PARAM + " Not with relation='related'; "
-                                 "stored while the switch is off, it fires only once it is on."},
+                        "mine": {"type": "boolean", "description": "true: your own, as in start_task; waits while the switch is off."},
                     },
                     "required": ["objective", "relation"],
                 },
@@ -457,8 +452,7 @@ def get_tools() -> List[ToolEntry]:
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based list offset."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Rows per list page (max 20; responses stay bounded)."},
                 "owner_words": {"type": "string", "description": "Update: " + _OWNER_WORDS_PARAM},
-                "mine": {"type": "boolean", "description": "Update replacing objective or context: " + _MINE_PARAM
-                         + " Other changes keep the recorded author."},
+                "mine": {"type": "boolean", "description": "Update: the new objective or context is your own, as in start_task."},
             }, "required": ["action"], "additionalProperties": False},
         }, _manage_schedules, timeout_sec=30),
     ]
@@ -630,22 +624,17 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     from ouroboros.owner_words import cited_owner_basis
     from supervisor.followup_policy import resolve_relation
     mine = params.get("mine")
-    if mine not in (None, False) and (mine is not True or str(params.get("owner_words") or "").strip()
-                                      or (not notify and params.get("relation") == "related")):
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "⚠️ TOOL_ARG_ERROR (schedule_followup): mine=true declares new independent work or a note your own; "
-            "owner_words makes it your human's and relation='related' continues this work on its money and deadline. "
-            "Choose one. Nothing was scheduled.")))
+    if error := _mine_error("schedule_followup", mine, params.get("owner_words"),
+                            other=not notify and params.get("relation") == "related", other_words=(
+                                "relation='related' continues this work on its money and deadline; your own task is "
+                                "independent")):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error + " Nothing was scheduled."))
     owner_basis, cite_error = cited_owner_basis(ctx, params.get("owner_words"))
     if cite_error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (schedule_followup): {cite_error}"))
-    if mine is True:
-        from ouroboros.tools.control_routing import own_time_on
-
-        if not own_time_on(ctx):
-            timezone_note += (" It is your own and the consciousness switch is not on now: it is kept and will not "
-                              "fire until own time is on.")
+    if mine is True and not own_time_on(ctx):
+        timezone_note += OWN_TIME_WAIT_NOTE
     origin = {"task_id": task_id, "root_task_id": str(getattr(ctx, "root_task_id", "") or
               (getattr(ctx, "task_metadata", None) or {}).get("root_task_id") or task_id)}
     if notify and str(params.get("relation") or "") == "related":
@@ -721,7 +710,7 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         # My human's cited words live in the one home the lifecycle and Off read; a note's template holds only them.
         **({"task": {"metadata": {"owner_corpus": [owner_basis]}}} if owner_basis else {}),
     }
-    writer_kind, writer_metadata = _schedule_writer(ctx, drive_root, "", mine=mine, assignment=True)
+    writer_kind, writer_metadata = _schedule_writer(ctx, mine=mine)
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
@@ -801,14 +790,15 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     }
     # The host writer persists this origin separately; the template is not its
     # authority. Only independent work uses the root-start exception and cause.
-    writer_kind, writer_metadata = _schedule_writer(ctx, drive_root, "", mine=mine, assignment=True)
+    writer_kind, writer_metadata = _schedule_writer(ctx, mine=mine)
     record["task"]["metadata"].update(declared_own_origin(writer_metadata) if mine else consciousness_origin_metadata(
         metadata_src, started_root=relation["kind"] == "independent",
         owner_basis=owner_basis if relation["kind"] == "independent" else None))
     from ouroboros.owner_words import carried_owner_corpus
 
     # My human's words ride by value, as a drafted start's, the cited ones among them; none: no claim.
-    if corpus := [*carried_owner_corpus(ctx), *([owner_basis] if owner_basis else [])]:
+    # Declared own work carries none of my human's words (``mine`` and a cite are refused together).
+    if corpus := [] if mine else [*carried_owner_corpus(ctx), *([owner_basis] if owner_basis else [])]:
         record["task"]["metadata"]["owner_corpus"] = corpus
     # The resource choice rides BY VALUE (#1315): the origin's producer-stamped intent,
     # else a direct turn's own (its room's default, or Main's system repo).
@@ -844,7 +834,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
             host_followup={"followup_origin": origin, "followup_relation": relation},
             # Host-authored provenance of a NAMED continuation (never payload/prose):
             # it keeps a consciousness follow-up out of the spontaneous-start cap.
-            continuation_of={"task_id": task_id, "root_task_id": str(root_task_id or "") or task_id})
+            continuation_of=None if mine else {"task_id": task_id, "root_task_id": str(root_task_id or "") or task_id})
     except ScheduleRefused as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="unavailable", code="CAPABILITY_UNAVAILABLE",

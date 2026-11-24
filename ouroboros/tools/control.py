@@ -118,9 +118,6 @@ _OWNER_WORDS_PARAM = (
     "pressed without adding words. The host verifies the words or press and records which one you cited. A place "
     "message must come directly from their confirmed account. A verified choice starts their work. A missing cite "
     "leaves work from a place turn or wake your own. In Main the work is already your human's.")
-# The typed declaration of own work: from any caller, the new work is the mind's (its allowance, cap and switch).
-_MINE_PARAM = ("true: this new work is your own, not your human's: it uses the consciousness allowance and own-task "
-               "cap and runs only while the consciousness switch is on. Not with owner_words.")
 _START_TASK_DESCRIPTION = (
     "Start a NEW, separate independent work with its own task id and card. "
     "The work reading the current request already exists and can do that request itself. "
@@ -366,7 +363,7 @@ def get_tools() -> List[ToolEntry]:
                         "empty keeps the message this run answers, with its files. A held message's files never refuse the start; "
                         "a turn's own fresh files stage what they can and refuse it only if none can; others' stay named, not given. "
                         "Only a root your human started.")},
-                    "mine": {"type": "boolean", "description": _MINE_PARAM + " Refused while the switch is off; nor with owner_source or destination='owner'."},
+                    "mine": {"type": "boolean", "description": "true: your own work, not your human's: consciousness switch, allowance and task cap apply."},
                 },
                 "required": ["objective", "title"],
             },

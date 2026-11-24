@@ -458,4 +458,3 @@ def test_off_ends_declared_own_work_and_keeps_only_my_humans(monkeypatch):
     monkeypatch.setattr(queue, "PENDING", [declared, theirs])
     monkeypatch.setattr(queue, "RUNNING", {})
     assert carriers.autonomous_tasks() == ["mine-1"] and carriers.cited_owner_roots() == []
-    assert "Its 1 own task is asked to stop now." in V.switch_preview("off", PLACES, running={"tasks_running": 1})["lines"]

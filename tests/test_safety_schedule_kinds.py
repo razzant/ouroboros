@@ -49,6 +49,23 @@ def test_legacy_forged_stamp_is_not_a_host_fact(q):
     assert _task_from_schedule(record)["metadata"]["work_kind"] == "consciousness"
 
 
+def test_a_template_cannot_declare_own_work_only_the_writer_can(q):
+    """``own_declared`` (the mark the scheduler holds while own time is off) comes from the host writer's origin:
+    a template that carries it is not authority, and a declared writer's origin reaches the fired task."""
+    from ouroboros.consciousness_authority import declared_own_origin
+    from supervisor.queue_schedules import _task_from_schedule
+
+    forged = row()
+    forged["task"]["metadata"]["own_declared"] = True
+    record = q.queue.upsert_scheduled_task(forged, drive_root=q.root, writer_kind="owner", actor="owner:gateway")
+    record["task"]["metadata"]["own_declared"] = True  # as a hand-edited table row would carry it
+    assert "own_declared" not in _task_from_schedule(record)["metadata"]
+    declared = declared_own_origin({"owner_ingress": True, "task_id": "turn-1"})
+    record = q.queue.upsert_scheduled_task(row(), drive_root=q.root, writer_kind="consciousness", actor="agent",
+                                           writer_metadata=declared)
+    assert _task_from_schedule(record)["metadata"]["own_declared"] is True
+
+
 def test_schedule_lifecycle_edit_changes_writer(q):
     q.queue.upsert_scheduled_task(row(), drive_root=q.root, writer_kind="owner", actor="owner:gateway")
     outcome = q.queue.mutate_scheduled_task("disable", "schedule", reason="later", actor="agent", drive_root=q.root,

@@ -217,18 +217,31 @@ def declared_own_origin(caller_metadata: Any) -> Dict[str, Any]:
     The same stamp a consciousness-origin start carries: initiator, ``consciousness_task`` category,
     ``started`` cause and a level (the caller's own inside a consciousness tree, else the installed one),
     so the allowance, the own-task cap and the switch see it, plus ``own_declared`` (the scheduler keeps such
-    a schedule due while own time is off). A typed argument, never a text reading.
+    a schedule due while own time is off). No owner schedule's writer kind rides along. A typed argument,
+    never a text reading.
     """
-    source = dict(caller_metadata) if isinstance(caller_metadata, Mapping) else {}
+    source = {key: value for key, value in (caller_metadata.items() if isinstance(caller_metadata, Mapping) else ())
+              if key != "schedule_writer_kind"}
     level = source.get("consciousness_autonomy") if is_consciousness_origin(source) else None
     return consciousness_origin_metadata({**source, "work_kind": WORK_KIND_CONSCIOUSNESS, OWN_DECLARED: True,
                                           "initiator": CONSCIOUSNESS_INITIATOR, "consciousness_autonomy": level},
                                          started_root=True)
 
 
-def is_own_work(metadata: Any) -> bool:
-    """Work the mind started or declared its own (origin and kind together): what the switch governs."""
-    return is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+def is_declared_own(metadata: Any) -> bool:
+    """Own work a run declared (``mine``): consciousness origin and kind with the ``own_declared`` mark."""
+    return (is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+            and isinstance(metadata, Mapping) and metadata.get(OWN_DECLARED) is True)
+
+
+def kept_declared_writer(record: Mapping[str, Any], writer_kind: str, writer_metadata: Any) -> tuple:
+    """``(writer_kind, writer_metadata)`` of an agent's same-assignment write: a declared recorded author is kept
+    for any caller; every other row takes its writer, as before."""
+    recorded = record.get("writer_origin")
+    if not is_declared_own(recorded):
+        return writer_kind, writer_metadata
+    task_id = writer_metadata.get("task_id") if isinstance(writer_metadata, Mapping) else ""
+    return WORK_KIND_CONSCIOUSNESS, {**recorded, "task_id": task_id or ""}
 
 
 def schedule_owner_corpus(record: Mapping[str, Any]) -> list:

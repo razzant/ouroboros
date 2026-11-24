@@ -276,13 +276,39 @@ def _patched_definition(current, patch):
     return incoming, changed
 
 
+def _agent_writer(current: dict, incoming: dict, changed_fields: list, writer_kind: str, writer_metadata: Any,
+                  *, declare: bool) -> tuple:
+    """Who an agent tool's edit belongs to, decided on the row this write holds.
+
+    ``declare`` (``mine``) makes a really new assignment of independent work the mind's own, without owner words;
+    without it a same-assignment edit keeps a declared author and any other edit takes its writer, as before."""
+    from ouroboros.consciousness_authority import declared_own_origin, kept_declared_writer
+    from supervisor.followup_policy import relation_kind
+
+    assignment = bool({"objective", "context"} & set(changed_fields))
+    if not declare:  # a new assignment, or my human's cited words, is the writer's (as before)
+        cited = isinstance(writer_metadata, dict) and bool(writer_metadata.get("owner_basis"))
+        return ((writer_kind, writer_metadata) if assignment or cited
+                else kept_declared_writer(current, writer_kind, writer_metadata))
+    if not assignment:
+        raise ScheduleRefused("mine_needs_new_assignment", "mine declares a new assignment your own: the objective "
+                              "or context must change; nothing changed")
+    if relation_kind(current) != "independent":
+        raise ScheduleRefused("mine_on_related", "mine declares independent work your own; this schedule continues "
+                              "its origin's work on that work's money and deadline; nothing changed")
+    ((incoming.get("task") or {}).get("metadata") or {}).pop("owner_corpus", None)  # own work carries no owner words
+    return "consciousness", {**(writer_metadata or {}), **declared_own_origin(writer_metadata)}
+
+
 def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: str,
                          task_id: str = "", drive_root=None,
-                         writer_kind: str = "consciousness", writer_metadata: Any = None) -> dict:
+                         writer_kind: str = "consciousness", writer_metadata: Any = None,
+                         agent: bool = False, declare: bool = False) -> dict:
     """Change only supplied authored fields in one audited table write.
 
     Refusals return a typed no-change result; in particular adoption is staged,
     so an invalid edit of a legacy row leaves its durable bytes untouched.
+    ``agent``: an agent tool's edit, whose author ``_agent_writer`` decides (``declare``: its ``mine``).
     """
     from supervisor.schedule_occurrence import remember_claim_basis, fingerprint, _read_back, _unstarted_claim
 
@@ -307,6 +333,9 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
             incoming, changed_fields = _patched_definition(current, patch)
             # A task's edit: the text it changed is the task's (``tools.followup._update_schedule``).
             _stamp_text_authors(current, incoming, {"kind": "task", "task_id": str(task_id)} if task_id else None)
+            if agent:
+                writer_kind, writer_metadata = _agent_writer(current, incoming, changed_fields, writer_kind,
+                                                             writer_metadata, declare=declare)
             changed = bool(changed_fields or adopted)
             reconsidered = False
             if changed:
@@ -483,7 +512,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
                           drive_root: pathlib.Path | None = None,
                           expected_hold_id: str = "", relation: str = "",
                           writer_kind: str = "consciousness", writer_metadata: Any = None,
-                          owned_by: Any = None) -> Dict[str, Any]:
+                          owned_by: Any = None, keep_declared: bool = False) -> Dict[str, Any]:
     """Apply one owner-governed future-dispatch mutation, audited intent-first.
 
     Affects DISPATCH only: a task already admitted from this schedule keeps
@@ -492,6 +521,7 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
     unknown in-flight run is not the same claim as no run at all. ``owned_by``,
     a narrowed caller's ownership predicate, is judged on the stored row under the
     same transaction; a row it does not own reads ``not_found`` with nothing written.
+    ``keep_declared``: an agent tool's step keeps a declared recorded author (``kept_declared_writer``).
     """
     wanted, operation = str(schedule_id or "").strip(), str(action or "").strip().lower()
     if operation not in SCHEDULE_ACTIONS:
@@ -530,6 +560,9 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             except ScheduleRefused as exc:
                 return {"ok": False, "changed": False, "status": exc.status,
                         "schedule_id": wanted, "audit": "not_written", "detail": str(exc)}
+            if keep_declared:
+                from ouroboros.consciousness_authority import kept_declared_writer
+                writer_kind, writer_metadata = kept_declared_writer(current, writer_kind, writer_metadata)
             # An exact release request never becomes generic enable on replay,
             # and a relationship decision only resolves an observed hold.
             if operation == "restore" and (expected_hold_id or resolved or current.get("followup_hold") or

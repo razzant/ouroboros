@@ -293,7 +293,15 @@ def promote_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-OWNER_TURN = {"owner_ingress": True, "root_task_id": "turn-1"}
+WORDS = "What is the weather in Lisbon today?"
+
+
+def _owner_turn():
+    """A real owner turn's metadata: the door's message reference and words (what a Main turn carries)."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+
+    ref = build_owner_message_ref(chat_id=1, client_message_id="cm-1", ts="2026-11-24T10:00:00+00:00", text=WORDS)
+    return {"root_task_id": "turn-1", "origin_message_ref": ref, "origin_message_text": WORDS, "client_message_id": "cm-1"}
 
 
 def _own_time(monkeypatch, on):
@@ -302,8 +310,8 @@ def _own_time(monkeypatch, on):
     monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
 
 
-def _owner_start(root, monkeypatch, **kwargs):
-    """``start_task`` from an owner turn through the real promote admission: (reply, emitted event, enqueued roots)."""
+def _owner_start(root, monkeypatch, uploads=(), **kwargs):
+    """``start_task`` from an owner turn through the real promote admission: (reply, event, enqueued roots, ctx)."""
     from ouroboros.tools.control_routing import _start_task
     from ouroboros.utils import append_jsonl
     from supervisor.events_project_routing import _handle_promote_chat_to_task
@@ -316,27 +324,44 @@ def _owner_start(root, monkeypatch, **kwargs):
         persist_queue_snapshot=lambda **_k: True, load_state=lambda: {"owner_chat_id": 1}, append_jsonl=append_jsonl)
     ctx = SimpleNamespace(
         pending_events=[], current_chat_id=1, drive_root=root, budget_drive_root=str(root), task_id="turn-1",
-        is_direct_chat=True, last_owner_delivery=None, project_id="", task_metadata=dict(OWNER_TURN), task_contract={},
+        is_direct_chat=True, last_owner_delivery=None, project_id="", task_contract={},
+        task_metadata={**_owner_turn(), **({"chat_attachment_uploads": list(uploads)} if uploads else {})},
+        _owner_directives=[{"source": "initial_user", "content": WORDS, "client_message_id": "cm-1", "chat_id": "1"}],
         event_queue=SimpleNamespace(put_nowait=lambda event: (captured.update(event),
                                                                _handle_promote_chat_to_task(event, supervisor))))
-    return _start_task(ctx, "tidy my own notes", title="Own notes", workspace="none", **kwargs), captured, enqueued
+    from ouroboros.tools import tool_result
+
+    sentinel = object()
+    token = tool_result._install_tool_result_sidecar(ctx, sentinel)  # the published typed result, as the registry reads it
+    try:
+        out = _start_task(ctx, "tidy my own notes", title="Own notes", workspace="none", **kwargs)
+        ctx.published = tool_result._published_tool_result(ctx, sentinel)
+    finally:
+        tool_result._TOOL_RESULT_STATE.reset(token)
+    return out, captured, enqueued, ctx
 
 
 def test_a_declared_start_from_an_owner_turn_is_my_own_counted_and_governed(promote_root, monkeypatch):
-    """``mine`` from an owner turn mints the consciousness stamp: the cap and allowance count it, Off holds it,
-    and its children inherit it; without ``mine`` the same start stays my human's and dispatches while Off."""
+    """``mine`` from a real owner turn mints the consciousness stamp and nothing of my human's: no door stamp (no
+    reply owed), no owner words, no files; the cap and allowance count it, Off holds it, children inherit it.
+    Without ``mine`` the same start keeps today's owner stamp, words and reply, and dispatches while Off."""
     from ouroboros.consciousness_authority import OWN_DECLARED, consciousness_origin_metadata
+    from ouroboros.dialogue_provenance import run_origin
     from supervisor import queue
+    from supervisor.active_activity import reply_expected
     from supervisor.consciousness_carriers import autonomous_work_enabled
 
     _own_time(monkeypatch, True)
-    out, event, [root] = _owner_start(promote_root, monkeypatch, mine=True)
-    assert out.startswith("OK: task") and "Started as your own work" in out, out
-    assert event["initiator"] == "consciousness" and event["work_kind"] == "consciousness"
+    upload = {"upload_id": "up-1", "name": "notes.txt"}
+    out, event, [root], _ = _owner_start(promote_root, monkeypatch, uploads=[upload], mine=True)
+    assert out.startswith("OK: task") and "Started as your own work (consciousness kind, act autonomy)" in out, out
+    assert "answers the owner message" not in out and event["attachment_uploads"] == [] and not event["client_message_id"]
     meta = root["metadata"]
     assert (meta["work_kind"], meta["initiator"], meta["usage_category"], meta["consciousness_cause"]) == (
         "consciousness", "consciousness", "consciousness_task", "started")
     assert meta["consciousness_autonomy"] == "act" and meta[OWN_DECLARED] is True and root["actor_id"] == "consciousness"
+    assert "origin_message_ref" not in root and meta.get("origin_message_absent") is True
+    assert not run_origin(root)["owner_ingress"] and not reply_expected(root) and not root.get("owner_corpus")
     assert queue.counts_as_consciousness_root(root)  # the own-task cap and the allowance see it
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_MAX_TASKS", "0")
     assert queue._consciousness_admission_block(root)[0] == "consciousness_task_limit"
@@ -346,10 +371,12 @@ def test_a_declared_start_from_an_owner_turn_is_my_own_counted_and_governed(prom
     assert autonomous_work_enabled(root, promote_root) is False  # the dispatch hold for a switch turned off later
     assert autonomous_work_enabled({"metadata": child}, promote_root) is False
 
-    _own_time(monkeypatch, False)  # undeclared: my human's work, untouched by the switch, the cap and the allowance
-    out, event, [owner_root] = _owner_start(promote_root, monkeypatch)
+    # Undeclared: my human's work as before, untouched by the switch, the cap and the allowance.
+    out, event, [owner_root], _ = _owner_start(promote_root, monkeypatch)
     assert out.startswith("OK: task") and "your own work" not in out, out
     assert owner_root["metadata"]["work_kind"] == "owner" and "initiator" not in owner_root["metadata"]
+    assert owner_root["origin_message_ref"] and run_origin(owner_root)["owner_ingress"] and reply_expected(owner_root)
+    assert any(row.get("content") == WORDS for row in owner_root.get("owner_corpus") or [])
     assert not queue.counts_as_consciousness_root(owner_root) and queue._consciousness_admission_block(owner_root) is None
     assert autonomous_work_enabled(owner_root, promote_root) is True
 
@@ -358,10 +385,37 @@ def test_a_declared_start_from_an_owner_turn_is_my_own_counted_and_governed(prom
     ({"mine": True}, "OWN_TIME_OFF"),
     ({"mine": True, "owner_words": "please tidy"}, "make it your human's"),
     ({"mine": True, "owner_source": "h-1"}, "make it your human's"),
+    ({"mine": True, "destination": "owner"}, "make it your human's"),
     ({"mine": "yes"}, "mine must be true"),
+    ({"mine": 0}, "mine must be true"),
 ])
 def test_a_declared_start_is_refused_typed_before_anything_is_staged(promote_root, monkeypatch, kwargs, words):
+    """Each refusal is published as a typed no-effect result, nothing emitted or queued; omitted or false proceeds."""
     _own_time(monkeypatch, kwargs != {"mine": True})  # the contradictions are refused even while own time is on
-    out, event, enqueued = _owner_start(promote_root, monkeypatch, **kwargs)
+    out, event, enqueued, ctx = _owner_start(promote_root, monkeypatch, **kwargs)
     assert words in out and "Nothing was" in out, out
     assert event == {} and enqueued == []
+    assert ctx.published.meta.get("operation_outcome") == "completed_no_effect"
+    if words == "OWN_TIME_OFF":
+        assert "owner_words" in out  # the way forward names the cite, for a wake as for an owner turn
+    out, event, enqueued, _ = _owner_start(promote_root, monkeypatch, mine=False)
+    assert out.startswith("OK: task") and event["work_kind"] == "owner" and len(enqueued) == 1, out
+
+
+def test_a_declared_start_refused_by_the_cap_or_allowance_says_what_to_do_instead():
+    from ouroboros.tools.control_routing import MINE_WAY_FORWARD, _cause_words
+
+    for code in ("consciousness_task_limit", "consciousness_allowance_exhausted"):
+        assert MINE_WAY_FORWARD in _cause_words(code, mine=True)
+        assert MINE_WAY_FORWARD not in _cause_words(code)
+    assert MINE_WAY_FORWARD not in _cause_words("worker_pool_unavailable", mine=True)
+
+
+def test_a_declared_stamp_carries_no_owner_schedules_writer_kind():
+    """Declared from my human's scheduled run, the stamp does not keep that schedule's writer kind (Safety would read
+    "owner work's schedule" for my own work); an undeclared start from it keeps the kind as before."""
+    from ouroboros.consciousness_authority import consciousness_origin_metadata, declared_own_origin
+
+    run = {"work_kind": "owner", "schedule_writer_kind": "owner", "task_id": "fired-1"}
+    assert "schedule_writer_kind" not in declared_own_origin(run)
+    assert consciousness_origin_metadata(run, started_root=True)["schedule_writer_kind"] == "owner"
