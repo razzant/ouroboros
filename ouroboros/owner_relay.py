@@ -20,6 +20,7 @@ from typing import Any
 
 from ouroboros.chat_chain import _FULL_DIGEST, _row_chat_id, format_address, row_address
 from ouroboros.context_budget import OWNER_WORDS_KIND
+from ouroboros.safety_evidence import CLOSED_STAMP, UNKINDED_STAMP
 
 KIND_RELAY = "relay_entry"
 # A carried row's ``went_to`` when no work was delivered it: a head of the room routed it. A typed marker, never a
@@ -413,9 +414,21 @@ def _with_captured_reply(row: dict, citation, targets: dict) -> dict:
     return row
 
 
+def _rebuilt_card_frame(card: dict, carried: dict) -> str:
+    """Model-visible frame of a rebuilt card: reference body with its provenance note, then this submission's choice."""
+    frame = f"{card.get('author')}: {card['text']}"
+    if card.get("note"):
+        frame += f"\n[Host note: {card['note']}]"
+    if pressed := card.get("pressed_label"):
+        from ouroboros.answer_facts import press_record, pressed_option_record
+        record = press_record if carried.get("source") == "owner_press" else pressed_option_record
+        frame += "\n" + record(pressed, carried.get("source_task_id"))
+    return frame
+
+
 def owner_quote(root, row: dict, *, address: str = "") -> dict:
     """One retained owner row as a quote: exact words, attachments and where/when."""
-    from ouroboros.answer_facts import late_quiz_input, living_card_input
+    from ouroboros.answer_facts import card_reference_view, late_quiz_input, living_card_input, press_record, row_source
     from ouroboros.owner_quiz import late_answer_ref, recorded_answer_frame, resolved_late_quiz
     from ouroboros.owner_words import answered_card_source
     from ouroboros.projects_registry import list_reserved_projects
@@ -444,18 +457,20 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
         return quote
     if carried := row.get("corpus_answer"):
         quote["input_source"] = carried["source"]
-        if card := carried.get("reply_to"):
-            quote["question_frame"] = f"{card.get('author')}: {card.get('text')}"
+        card = card_reference_view(carried.get("reply_to") or {})
+        if card.get("text"):  # a reference without a body has no frame
+            quote["question_frame"] = _rebuilt_card_frame(card, carried)
+        # The envelope drops the row and history reads the quote: a form's card, and the fields it retained, ride on it.
+        quote.update({k: copy.deepcopy(card[k]) for k in ("card_id", "submitted_values") if card.get(k)})
     if living := living_card_input(row, root):
         quote.update(input_source=living["source"], text=living["content"])
         if target := living.get("reply_to"):
             quote["question_frame"] = f"Card of task {living['source_task_id']}: {target['text']}"
             if living["source"] == "owner_press":
-                from ouroboros.answer_facts import press_record
                 quote["question_frame"] += "\n" + press_record(living["content"], living["source_task_id"])
+            quote.update({k: copy.deepcopy(target[k]) for k in ("card_id", "submitted_values") if target.get(k)})
     answered, asker = answered_card_source(row, root)
     if isinstance(answered, dict):  # the delivered quiz snapshot, under the asking task's name
-        from ouroboros.answer_facts import row_source
         quote["input_source"] = row_source(row, "owner_mailbox", root)
         quote["question_frame"] = recorded_answer_frame(answered, asker=str(asker or ""))
     return quote
@@ -558,10 +573,10 @@ def carried_quote_line(quote: dict, *, address: str, fact=None, input_source="")
 
 
 def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> str:
-    """The quoted row under its line: its words whole (a press without words: the host's record of the act), then
-    the message it replies to, the card it answers and the files it carries, each as a host frame beside my human's
-    words."""
-    from ouroboros.answer_facts import card_input, press_record, row_words
+    """The quoted row under its line: its words whole (a press without words: the host's record of the act) and the
+    fields a form was submitted with, by name; then the message it replies to, the card it answers and the files it
+    carries, each as a host frame beside my human's words."""
+    from ouroboros.answer_facts import card_input, card_reference_view, press_record, row_words, submitted_fields_line
     from ouroboros.dialogue_provenance import excerpt_citation
     from ouroboros.owner_words import OWNER_PRESS, answered_card_source
 
@@ -573,7 +588,14 @@ def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> 
                 else living["content"])
     else:
         text = row_words(row, root)
+    # A living submission's own card is the snapshot it was pressed on; a rebuilt answer's is a reference by address
+    # (``card_reference_view``). The frame stands only where a body is held, and says which kind it is; a rebuilt card
+    # names this submission's retained pressed choice separately from the reference body.
+    carried = row.get("corpus_answer") or {}
+    card = living.get("reply_to") if living else card_reference_view(carried.get("reply_to") or {})
     body = f"{line}\n{text}"
+    if fields := submitted_fields_line(card):  # the words alone lose an empty field and where a value ends
+        body += "\n" + fields
     reply = row.get("_owner_reply_target") or row.get("reply_to")
     if isinstance(reply, dict) and reply:
         source = {key: value for key, value in reply.items() if key != "excerpt"}
@@ -589,8 +611,10 @@ def _quote_body(row: dict, line: str, living: dict | None = None, root=None) -> 
                  + json.dumps(source, ensure_ascii=False))
         if citation:
             body += "\n" + citation
-    if (target := (living or row.get("corpus_answer") or {}).get("reply_to")) and not row.get("late_answer"):
-        body += f"\n[Host question frame]\n{target.get('author')}: {target.get('text')}"
+    if card and card.get("text") and not row.get("late_answer"):
+        frame = (f"{card.get('author')}: {card['text']}"
+                 + (f"\n[Host note: {card['note']}]" if card.get("note") else "")) if living else _rebuilt_card_frame(card, carried)
+        body += f"\n[Host question frame]\n{frame}"
     answered, asker = answered_card_source(row, root)
     if isinstance(answered, dict):  # the question it answers, for the model too, under the asking task's name
         from ouroboros.owner_quiz import recorded_answer_frame
@@ -658,7 +682,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     own voice. A ``host_carried`` entry takes the carried mode (``inject_carried``) instead. Returns the addresses
     of carried rows shown here under the fact ``reached this work`` (the drain's closing control); ``[]`` otherwise."""
     from ouroboros import loop
-    from ouroboros.answer_facts import mark_press_arrival, row_source
+    from ouroboros.answer_facts import card_reference_view, mark_press_arrival, row_source
     from ouroboros.owner_words import OWNER_PRESS, answered_card_reply, answered_card_source, owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
@@ -688,8 +712,9 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
         from ouroboros.answer_facts import card_input
         living = card_input(row, source_root)
         answered, asker = answered_card_source(row, source_root)
-        carried_answer = row.get("corpus_answer") or {}
-        target = living.get("reply_to") or answered_card_reply(answered, asker) or carried_answer.get("reply_to")
+        carried_answer = row.get("corpus_answer") or {}  # a rebuilt quote's card, rejoined by its address
+        target = (living.get("reply_to") or answered_card_reply(answered, asker)
+                  or card_reference_view(carried_answer.get("reply_to") or {}))
         replied = target or row.get("_owner_reply_target") or reply_target(source_root, row.get("reply_to")) or None
         source = living.get("source") or row_source(row, "owner_mailbox", source_root)
         teller = entry.get("source_task_id")
@@ -748,9 +773,11 @@ def first_request_stamps(messages: list) -> dict:
 
 def _stamp_parts(line: str) -> list[str]:
     """The parts of one owner-words stamp line as ``words_stamp`` prints it (``[… · owner · …]``); ``[]`` for any
-    other line, a reply target's stamp among them. The one parser of a stamp for every reader of one."""
+    other line, a reply target's stamp among them. The one parser of a stamp for every reader of one. A host closure
+    notice of the same set, stamped under ``CLOSED_STAMP`` instead, is read in that place, so its reference stays found."""
     line = line.strip()
     parts = line[1:-1].split(" · ") if line.startswith("[") and line.endswith("]") else []
+    parts = ["owner" if index < 2 and part in (CLOSED_STAMP, UNKINDED_STAMP) else part for index, part in enumerate(parts)]
     return parts if "owner" in parts[:2] else []
 
 
@@ -1221,13 +1248,15 @@ def _words_identity(row: dict) -> Any:
 
 
 def _member_identity(row: dict) -> tuple[str, str]:
-    """An exact physical identity, or a legacy by-value row (never a physical row's alias)."""
+    """An exact physical identity, or a legacy by-value row (never a physical row's alias). A writer's kind shown beside
+    a row (``mail_kind``) is no part of it: a field written before rows carried one keeps its identity's bytes."""
     from ouroboros.project_dialogue import _text_sha256
 
     digest = row.get("row_sha256")
     if isinstance(digest, str) and _FULL_DIGEST.fullmatch(digest):
         return "row_sha256", digest
-    return "governing_word", _text_sha256(json.dumps(row, sort_keys=True, ensure_ascii=False))
+    by_value = {key: value for key, value in row.items() if key != "mail_kind"}
+    return "governing_word", _text_sha256(json.dumps(by_value, sort_keys=True, ensure_ascii=False))
 
 
 def _field_rows(rows: list) -> dict:
@@ -1255,7 +1284,9 @@ def _inherited_selection(field: dict, address: str, row: dict, *, earlier_ref: s
 
 def _pristine_form(ctx, row: dict, targets: dict | None = None) -> tuple:
     """``(address, chat row)`` for a row of the set this run holds no chat row for (a direct turn's input): its
-    words, time, room and client id as the corpus recorded them, in the shape a quote is built from."""
+    words, time, room and client id as the corpus recorded them, in the shape a quote is built from. These bytes are
+    the quote's address (``row_address``), which earlier work holds the row under: an answer's card rides only where its
+    field kept the body, an empty field is not carried, and a card whose body was not kept is absent here."""
     from ouroboros.owner_words import _carried_selection, _reply_body_key
 
     ref, client = str(row.get("ref") or ""), ""

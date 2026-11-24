@@ -340,11 +340,13 @@ def _drain_incoming_messages(
                     continue
             from ouroboros.answer_facts import card_input
             from ouroboros.owner_words import OWNER_PRESS
+            from ouroboros.safety_evidence import mailbox_mail_kind
             living = card_input(entry, getattr(owner_ctx, "budget_drive_root", None) or drive_root)
             if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):
                 _loop()._record_owner_directive(
                     owner_ctx, source=living.get("source", "owner_mailbox"), content=living.get("content", dmsg),
-                    origin={**_arrival(received=entry.get("ts")), "source_task_id": living.get("source_task_id")},
+                    origin={**_arrival(received=entry.get("ts")), "source_task_id": living.get("source_task_id"),
+                            "mail_kind": mailbox_mail_kind(entry, living)},  # its writer's typed kind (never its id or words)
                     reply_to=living.get("reply_to"), msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 if living.get("source") == OWNER_PRESS:
@@ -407,9 +409,10 @@ def _drain_incoming_messages(
                 content=living["content"] if living else dmsg if fact else _owner_content(entry, drive_root, task_id),
                 words=None if living else dmsg,
                 msg_id=str(entry.get("msg_id") or ""),
-                # Keep the physical identity and the card fields distinct from the mailbox delivery id.
+                # Keep the physical identity, the card fields and the writer's typed kind apart from the mailbox delivery id.
                 origin={**_arrival(held, entry.get("ts"), held=True), "client_message_id": entry.get("client_message_id"),
-                        "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id")},
+                        "source_task_id": living.get("source_task_id"), "quiz_id": living.get("quiz_id"),
+                        "mail_kind": mailbox_mail_kind(entry, living, source=source)},
                 reply_to=target or None,
                 attachments=((held or {}).get("attachments") or delivery_manifest_refs(entry.get("attachment_manifest"))) if fact else None,
             )

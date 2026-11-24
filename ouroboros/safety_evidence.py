@@ -16,11 +16,13 @@ import json
 from typing import Any, Mapping
 
 _ATTACHMENTS = ("[ATTACHMENTS]\n", "\n[END_ATTACHMENTS]")  # the presence producer's manifest block
-# Who wrote a source row, by the label the host recorded it under: the one table every row's ``author`` comes from.
+# Who wrote a source row, by the label the host recorded it under. ``with_author`` names rows apart from this table:
+# the run's opening text, a carried copy of a row addressed here, and a mail row by its trusted host-stamped kind: the
+# host's notice of a closed question, a task-opening or live living-card form's submitted values, or no retained kind.
 SOURCE_AUTHORS = {
     "initial_user": "the owner: the message that opened this task",
-    "origin_message": "the owner: the message that opened the work this task belongs to or continues (it may be "
-                      "about an earlier stage)",
+    # One corpus can keep the origin messages of several works.
+    "origin_message": "the owner: a message recorded as a work's origin",
     "owner_mailbox": "the owner: a later message to this work",
     "direct_incoming": "the owner: a later message to this work",
     "owner_quiz_answer": "the owner: the owner's answer to the card quoted in reply_to (the card's text was written "
@@ -28,14 +30,43 @@ SOURCE_AUTHORS = {
     "owner_press": "the owner's answer by a press of an offered option on the card in reply_to, with no words of their "
                    "own (the option's label is the card's text, written by Ouroboros)",
     "owner_card_input": "the owner submitted a living card. The original submission is unavailable",
-    "place_confirmed": "the owner: the owner's own message in this chat, from a confirmed owner account",
-    "place_owner": "the owner: the owner's own message in this chat, from a confirmed owner account",
+    # The place confirms the sending account at the message's source, wherever the work later reads it.
+    **dict.fromkeys(("place_confirmed", "place_owner"),
+                    "a message from the owner's confirmed account in the source conversation"),
     "owner_corpus": "the owner",
     "principal_task_message": "the parent task (Ouroboros), not the owner",
     "relayed_peer_message": "a sibling task (Ouroboros), not the owner",
     "schedule_text": "text of a schedule; its supplier is named in the row",
     "live_call": "speech in a live call",
 }
+# A carried copy replaces a label that would name this run as the opening or addressee. The transfer neither
+# establishes nor rules out an original addressee; source and reply facts remain in the row.
+CARRIED_WORDS = "a record of owner input carried into this run; any host framing is not the owner's wording"
+_ADDRESSED_HERE = frozenset({"initial_user", "owner_mailbox", "direct_incoming"})
+# A task-opening living form with submitted values is recorded under ``owner_mailbox`` (preserving its word-source
+# contract) yet is not later mail; its producer stamps this distinct host kind.
+OPENING_CARD_INPUT = "opening_card_input"
+# A mail row keeps its writer's trusted typed kind (``mail_kind``). Plain mail (``owner_text``) reads as later owner
+# prose; a live living-card form (``card_input``) and a task-opening living form (``opening_card_input``) name the
+# owner's submitted field values distinctly from the card author's text and pressed label; a closure of a question
+# (``quiz_closed``, ``supervisor/events_chat_delivery.py``) reads as the host's notice even when carried. A row under
+# the mail label without a trusted kind (recorded before kinds were kept, or rebuilt from a field that never kept one)
+# reads neutrally, never by its id, words, or card reference alone.
+CLOSED_QUESTION = ("the host's notice that the owner closed the question it names without an answer: no option was "
+                   "chosen and nothing was approved. The notice's words are the host's; the reason it quotes is the "
+                   "owner's own words or the host's standard sentence")
+OPENING_CARD_FORM = ("the owner: the owner's submitted field values on the living card in reply_to that opened this "
+                     "task (the card's text and pressed label were written by Ouroboros, not the owner)")
+CARD_FORM_MAIL = ("the owner: the owner's submitted field values delivered later to this work on the living card in "
+                  "reply_to (the card's text and pressed label were written by Ouroboros, not the owner)")
+MAIL_UNKINDED = ("input that reached this work under the mail label without a retained kind: the owner's own words or "
+                 "the host's record of an act of theirs, such as closing a question; the row does not show which")
+# The same closure where a row of my human's words is stamped (``owner_words.words_stamp``) in place of ``owner``;
+# ``owner_relay._stamp_parts`` reads that stamp as the same row. Never " · ", the stamp's separator.
+CLOSED_STAMP = "host notice: my human closed a question without an answer, not my human's words"
+# Mail the host drained from a mailbox whose writer left no kind (an older entry): the row does not show whether it is my
+# human's words or a host record, so its stamp claims neither. ``_stamp_parts`` reads it as ``owner`` too.
+UNKINDED_STAMP = "mail of unrecorded kind: my human's words or a host record, not shown which"
 _OPENING_AUTHORS = {  # ``initial_text``: the run's first turn, by what the host knows of it
     "event": "a chat event that woke this turn: event.actor wrote message_text; the other keys are host facts",
     "brief": "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the "
@@ -164,13 +195,98 @@ def focus_event_source(row: Any, metadata: Mapping[str, Any], notes: list) -> An
             **({"images": [image_facts(part) for part in images]} if images else {})}
 
 
+def trusted_mail_kind(value: Any, *, source: Any = "owner_mailbox") -> str:
+    """A host-stamped ``mail_kind`` recognized for an ``owner_mailbox`` row, else ``""``."""
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_CLOSED
+
+    return value if source == "owner_mailbox" and isinstance(value, str) and value in {
+        KIND_OWNER_TEXT, KIND_CARD_INPUT, KIND_QUIZ_CLOSED, OPENING_CARD_INPUT,
+    } else ""
+
+
+def closure_notice(row: Any) -> bool:
+    """A mail row its writer typed as the host's notice that my human closed a question (``quiz_closed``): the one
+    reading of that kind for every reader that names a row's author (Safety, a stamp, a Continue's work order)."""
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED
+
+    return isinstance(row, Mapping) and trusted_mail_kind(row.get("mail_kind"), source=row.get("source")) == KIND_QUIZ_CLOSED
+
+
+def stamp_voice(row: Any) -> str:
+    """Who a stamped row of ``words_stamp`` speaks as: ``owner``, the host's closure notice (``CLOSED_STAMP``), or, for a
+    row under the mail label that proves no author (no trusted writer kind and no physical chat row of its own,
+    ``row_sha256``), neither (``UNKINDED_STAMP``). The row decides, not its carrier: a forwarded or continued copy
+    (``ctx``, ``owner_corpus``) of such mail stays neutral. A typed kind (a card form included), a physical row and
+    every other source keep ``owner``."""
+    if closure_notice(row):
+        return CLOSED_STAMP
+    if (row.get("source") == "owner_mailbox" and not row.get("row_sha256")
+            and not trusted_mail_kind(row.get("mail_kind"), source="owner_mailbox")):
+        return UNKINDED_STAMP
+    return "owner"
+
+
+def stamp_when(row: Any) -> str:
+    """The time a stamp prints: a mailbox row's ``ts`` is the mailbox's receipt, named so for the reader; the row's own
+    bytes (its identity, its quote's address) keep the time as recorded."""
+    when = str(row.get("ts") or "")
+    return f"received {when}" if when and row.get("carrier") == "mailbox" and not when.startswith("received ") else when
+
+
+def mailbox_mail_kind(entry: Any, item: Any = None, *, source: Any = None) -> str:
+    """Trusted writer kind for an ``owner_mailbox`` row produced from mailbox ``entry`` and card ``item``. A drained row
+    its writer recorded without a kind routes as owner text; that default is the reader's, so its ``recorded_kind``
+    (``owner_mailbox.drain_owner_entries``) stands for the writer: none."""
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT
+
+    resolved = source if source is not None else (
+        item.get("source", "owner_mailbox") if isinstance(item, Mapping) else "owner_mailbox"
+    )
+    if resolved != "owner_mailbox":
+        return ""
+    raw = entry.get("recorded_kind", entry.get("kind")) if isinstance(entry, Mapping) else None
+    reply = item.get("reply_to") if isinstance(item, Mapping) else None
+    if raw == KIND_OWNER_TEXT and isinstance(reply, Mapping) and reply.get("card_id"):
+        return KIND_CARD_INPUT
+    return trusted_mail_kind(raw)
+
+
+def opening_card_mail_kind(submitted: Any) -> str:
+    """``OPENING_CARD_INPUT`` when ``submitted`` is a task-opening living form with submitted values, else ``""``."""
+    reply = submitted.get("reply_to") if isinstance(submitted, Mapping) else None
+    if (isinstance(submitted, Mapping) and submitted.get("source") == "owner_mailbox"
+            and isinstance(reply, Mapping) and reply.get("card_id")):
+        return OPENING_CARD_INPUT
+    return ""
+
+
 def with_author(row: Any, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """A source row with its ``author`` (``SOURCE_AUTHORS``). The run's opening text is a place event when its typed
     records ride with it (``focus_event_source``), a helper's brief when this task is a delegated child, else the
-    host's or Ouroboros's text; a row under any other label, or none, is unattributed."""
+    host's or Ouroboros's text. A mail row reads by its writer's trusted retained kind: the host's closure notice
+    (``CLOSED_QUESTION``, even when carried), a task-opening living form's submitted values (``OPENING_CARD_FORM``),
+    a live living-card form delivery's submitted values (``CARD_FORM_MAIL``), plain mail (the table), else neutrally
+    (``MAIL_UNKINDED``). A carried copy replaces only a label asserting opening or delivery here (``CARRIED_WORDS``),
+    without changing the row's source or reply facts. Unknown labels are unattributed."""
+    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT
+
     row = dict(row) if isinstance(row, Mapping) else {"content": row}
+    if isinstance(row.get("delivered"), Mapping):  # the room and time a delivered copy verified; never its client id or digest
+        row["delivered"] = {key: row["delivered"][key] for key in ("chat_id", "ts") if key in row["delivered"]}
     source = row.get("source")
     if source == "initial_text":
         kind = "event" if "event" in row else "brief" if metadata.get("delegation_role") == "subagent" else "other"
         return {**row, "author": _OPENING_AUTHORS[kind]}
+    mail_kind = row.get("mail_kind")
+    if closure_notice(row):
+        return {**row, "author": CLOSED_QUESTION}
+    if isinstance(source, str) and source in _ADDRESSED_HERE and row.get("carried"):
+        return {**row, "author": CARRIED_WORDS}
+    if source == "owner_mailbox":
+        if mail_kind == OPENING_CARD_INPUT:
+            return {**row, "author": OPENING_CARD_FORM}
+        if mail_kind == KIND_CARD_INPUT:
+            return {**row, "author": CARD_FORM_MAIL}
+        if mail_kind != KIND_OWNER_TEXT:
+            return {**row, "author": MAIL_UNKINDED}
     return {**row, "author": SOURCE_AUTHORS.get(source, UNATTRIBUTED) if isinstance(source, str) else UNATTRIBUTED}

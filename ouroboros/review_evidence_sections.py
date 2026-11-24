@@ -377,6 +377,7 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
 
     recorded = getattr(ctx, "_owner_directives", None)
     if isinstance(recorded, list):
+        from ouroboros.safety_evidence import trusted_mail_kind
         for item in recorded:
             if isinstance(item, dict):
                 facts = {key: item[key] for key in ("words", "ts", "received") if key in item}
@@ -385,14 +386,18 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                 if item.get("attachments"):
                     from ouroboros.chat_uploads import stored_refs
                     facts["attachments"] = stored_refs(item["attachments"])
+                mail_kind = trusted_mail_kind(item.get("mail_kind"), source=item.get("source"))
                 add(
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
-                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                    "client_message_id", "chat_id", "row_sha256", "relay_source_root",
-                                                    # a schedule's text keeps its schedule, field and supplier
-                                                    "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
+                    {**{key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                       "client_message_id", "chat_id", "row_sha256", "relay_source_root",
+                                                       # a confirmed place row keeps its provider identity
+                                                       "conversation_id", "message_id",
+                                                       # a schedule's text keeps its schedule, field and supplier
+                                                       "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
+                     **({"mail_kind": mail_kind} if mail_kind else {})},
                     item.get("reply_to"), facts,
                 )
 
@@ -419,12 +424,16 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         try:
             from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, drain_owner_entries
             from ouroboros.owner_words import mailbox_owner_input
+            from ouroboros.safety_evidence import mailbox_mail_kind
 
             for entry in drain_owner_entries(pathlib.Path(drive_root), task_id, seen_ids=set()):
                 if (entry.get("kind") or KIND_OWNER_TEXT) in (KIND_OWNER_TEXT, KIND_CARD_INPUT):
                     item = mailbox_owner_input(drive_root, entry)
+                    mail_kind = mailbox_mail_kind(entry, item)
                     add(item["source"], item["content"], str(entry.get("msg_id") or ""),
-                        {key: item.get(key) for key in ("source_task_id", "quiz_id")}, item.get("reply_to"))
+                        {**{key: item.get(key) for key in ("source_task_id", "quiz_id")},
+                         **({"mail_kind": mail_kind} if mail_kind else {})},
+                        item.get("reply_to"))
         except Exception:
             log.debug("Failed to collect owner mailbox for the owner corpus", exc_info=True)
     return rows

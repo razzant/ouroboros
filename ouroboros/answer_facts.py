@@ -314,6 +314,77 @@ def is_answered_card(reply: Any) -> bool:
     return isinstance(reply, Mapping) and str(reply.get("address") or "").startswith("quiz ")
 
 
+# A living card keeps one address while its author revises it, so a body joined to a submission by that address alone
+# (a helper's field, ``card_reference``; a quote rebuilt from it, ``owner_relay._pristine_form``) is a reference: its
+# text, a label in it included, may be another revision's or another press's. A submission's own snapshot
+# (``living_card_input``) and a quiz card (one record, ``answered_card_reply``) need no note.
+CARD_REFERENCE_NOTE = ("reference text kept at this card's address: it may come from a different revision of the card, "
+                       "and a label in it from another press; this submission's own fields are recorded separately "
+                       "(pressed_label, submitted_values)")
+
+
+def card_reference(fact: Mapping, body: Mapping) -> dict:
+    """The card one submission answers as a field's reader is shown it, rejoined from its ``answer_input`` (``fact``):
+    the body the field kept at its ``reply_address`` (none kept: its author and text stay empty, the address still names
+    the card) beside this submission's own card id, label and values as the fact holds them; ``{}`` without an address.
+    Only for showing, never stored: a row's identity covers its stored form (``owner_words._words_rows``,
+    ``owner_relay._pristine_form``). A reader reads it through ``card_reference_view``."""
+    if not (address := fact.get("reply_address")):
+        return {}
+    return {"address": address, "author": body.get("author") or "", "text": body.get("text") or "",
+            **{key: fact[key] for key in ("card_id", "pressed_label", "submitted_values") if key in fact}}
+
+
+def card_reference_view(target: Mapping) -> dict:
+    """A card joined by its address (``card_reference``) as its readers see it: a living card's (its ``card_id``) with
+    ``CARD_REFERENCE_NOTE`` beside the body it shows; a quiz card's, or one without a body, as it is."""
+    return {**target, "note": CARD_REFERENCE_NOTE} if target.get("card_id") and target.get("text") else dict(target)
+
+
+def merged_card_reply(shown: Any, later: Any) -> dict[str, Any] | None:
+    """When ``later`` is a fuller copy of the same living-card reply as ``shown`` (matching ``address`` and
+    ``card_id``) and supplies a missing body, return ``shown`` with just the missing body and provenance fields."""
+    shown = shown if isinstance(shown, Mapping) else {}
+    later = later if isinstance(later, Mapping) else {}
+    if (later.get("address") and shown.get("address") == later["address"]
+            and shown.get("card_id") and shown["card_id"] == later.get("card_id")
+            and later.get("text") and not shown.get("text")):
+        return {**shown, **{k: later[k] for k in ("author", "text", "note") if later.get(k) and not shown.get(k)}}
+    return None
+
+
+def qualify_reconstructed_card_reference(row: Any, kept: Mapping[str, dict[str, Any]]) -> None:
+    """Qualify a pre-update saved carried directive's card body in ``kept`` only from a matching already-delivered
+    reconstructed held row (``corpus_answer`` without direct card snapshot fields): no history lookup, and never
+    mark a direct snapshot, a context (``went_to``) row, or an unrelated legacy row."""
+    if not isinstance(row, Mapping):
+        return
+    carried = row.get("carried")
+    carried_answer = row.get("corpus_answer")
+    if ((isinstance(carried, Mapping) and carried.get("went_to"))
+            or not isinstance(carried_answer, Mapping) or not carried_answer
+            or row.get("kind") == "card_input"
+            or any(row.get(k) for k in ("card_press", "card_delivery", "late_answer"))):
+        return
+    from ouroboros.owner_relay import owner_row_address, owner_row_identity
+
+    digest = owner_row_identity(row)["row_sha256"]
+    listed = kept.get(f"row-sha256:{digest}")
+    if listed is None:
+        candidate = kept.get(owner_row_address(row))
+        if candidate is not None and not candidate.get("row_sha256"):
+            listed = candidate
+    reply = carried_answer.get("reply_to")
+    ref_card = card_reference_view(reply if isinstance(reply, Mapping) else {})
+    shown = (listed or {}).get("reply_to")
+    shown = shown if isinstance(shown, Mapping) else {}
+    if (listed is not None and listed.get("carried") and not listed.get("mail_kind")
+            and shown.get("text") and not shown.get("note") and ref_card.get("note")
+            and shown.get("address") == ref_card.get("address")
+            and shown.get("card_id") and shown["card_id"] == ref_card.get("card_id")):
+        listed["reply_to"] = {**shown, "note": ref_card["note"]}
+
+
 def retained_card_input(row: Mapping, root: Any) -> dict:
     """An accepted physical card row as an input. Only its own record can interpret the display text."""
     if item := card_input(row, root):

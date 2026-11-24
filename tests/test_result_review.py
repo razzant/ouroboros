@@ -975,8 +975,8 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
     # row is now held with its chat row (one identity, two printed references); a second «да» (``msg m-1``, inside
     # the seen ``msg m-12`` as a substring), the change, and a «да» in the Project room are new.
     ctx._owner_directives = [{"source": "owner_corpus", "content": "да", "msg_id": "m-12", "ts": "2026-10-01T00:00:01+00:00"},
-                             ctx._owner_directives[1], {"source": "owner_mailbox", "content": "да", "msg_id": "m-1"},
-                             {"source": "owner_mailbox", "content": words, "msg_id": "m-2"}]
+                             ctx._owner_directives[1], {"source": "owner_mailbox", "mail_kind": "owner_text", "content": "да", "msg_id": "m-1"},
+                             {"source": "owner_mailbox", "mail_kind": "owner_text", "content": words, "msg_id": "m-2"}]
     ctx._held_owner_messages = {"row:held": {"ts": "2026-10-01T00:00:02+00:00", "direction": "in", "chat_id": 1,
                                              "text": "Use miles", "client_message_id": "cm-3", "task_id": ""}}
     ds.append(ctx.drive_root, "chat", {"ts": "2026-10-01T00:00:03+00:00", "direction": "in", "chat_id": room, "text": "да",

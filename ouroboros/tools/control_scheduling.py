@@ -39,7 +39,7 @@ from ouroboros.subagent_runtime import (
     runtime_subagent_settings,
     select_subagent_snapshot,
 )
-from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, declared_words_fact
+from ouroboros.subagent_work_order import ORIGINAL_INPUTS_FACT, TYPED_STAMPS_FACT, declared_words_fact
 from ouroboros.subagents import build_subagent_envelope
 from ouroboros.task_results import STATUS_REQUESTED, write_task_result
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -1002,7 +1002,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         **({ORIGINAL_INPUTS_FACT: True} if fields.get("prepared_input_files") else {}),
         "resource_intent": resource_intent,
     }
-    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
+    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract), TYPED_STAMPS_FACT: True}  # the owner's words, by value
     from ouroboros.held_notes import carried_situation  # my situation names, by value, where the install records claims
 
     held_origin, held_note = carried_situation(ctx, canonical_data_root(ctx), declared=bool(declared_words_fact(child_contract)))

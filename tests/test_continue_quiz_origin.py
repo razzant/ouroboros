@@ -503,8 +503,10 @@ def test_an_owner_turn_root_keeps_its_original_and_the_words_it_started_with(tmp
     assert ack["ok"] is True, ack
     successor = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
     assert f"Owner's original instruction (verbatim):\n{words}" in successor["text"]
-    assert "Other owner words in that task's record" in successor["text"]
-    assert "Only public data, please" in successor["text"] and "began without an owner message" not in successor["text"]
+    # A mail row its start recorded without its writer's kind is listed, by a heading that claims no author for it.
+    assert "Later inputs in that task's record (in order):" in successor["text"]
+    assert ("Mail of an unrecorded kind (my human's words or the host's record of an act of theirs): "
+            "Only public data, please") in successor["text"] and "began without an owner message" not in successor["text"]
     assert "start" not in successor["metadata"]["continuation"]["owner_sources"], "the chain shape is unchanged"
     assert [(row["source"], row["content"]) for row in successor["metadata"]["owner_corpus"]] == [
         ("origin_message", words), ("owner_mailbox", "Only public data, please")]

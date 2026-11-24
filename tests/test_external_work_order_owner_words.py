@@ -20,6 +20,7 @@ import pytest
 from ouroboros import owner_words as ow
 from ouroboros.subagent_work_order import (
     DECLARED_WORDS_FACT,
+    TYPED_STAMPS_FACT,
     _source_task_from_context,
     assignment_instructions,
     canonical_work_order_source,
@@ -98,6 +99,7 @@ def test_the_words_follow_the_parent_context_verbatim():
 def test_the_payload_the_flat_metadata_and_the_record_render_one_work_order(tmp_path):
     root = _root(tmp_path)
     _event, stored, payload = _schedule(root)
+    assert stored[TYPED_STAMPS_FACT] is True and payload["metadata"][TYPED_STAMPS_FACT] is True
     rendered = compile_external_work_order(payload)  # the nanny's bootstrap: the payload with nested metadata
     assert ASKED in rendered and LATER in rendered
     child = _child(tmp_path, payload)
@@ -1303,3 +1305,77 @@ def test_address_only_schedule_uses_resolved_reader_and_does_not_require_transfe
     assert "Synthetic transfer refusal" in reply and root.event_queue.empty()
     assert any(operation == "copy" for _, operation, _ in observations)
     assert not observations[0][0].drive_root.exists(), "a refused selection does not provision an execution drive"
+
+
+def test_a_work_order_frozen_before_typed_stamps_keeps_its_hash_and_new_ones_keep_honest_stamps(tmp_path):
+    """A pre-update record without ``TYPED_STAMPS_FACT`` re-renders its exact launched stamp bytes for recovery,
+    projection and ``canonical_work_order_source``; the scheduling fact alone switches on typed/receipt stamps."""
+    from types import SimpleNamespace
+
+    from ouroboros.delegate_recovery import _successor_binding_mismatch, authority_fingerprint_from_task
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.owner_mailbox import KIND_QUIZ_CLOSED
+    from ouroboros.safety_evidence import CLOSED_STAMP, UNKINDED_STAMP
+    from ouroboros.task_results import write_task_result
+
+    legacy_rows = [
+        {"text": "Keep the quarterly totals in EUR.", "source": "owner_mailbox", "carrier": "ctx",
+         "task_id": "root", "ts": "received 2026-10-04T09:00:00+00:00", "ref": "msg mail-old"},
+        {"text": "Add the appendix table.", "source": "owner_mailbox", "carrier": "mailbox",
+         "task_id": "root", "ts": "2026-10-04T09:05:00+00:00", "ref": "msg mail-raw"},
+    ]
+    blocks = (
+        "[received 2026-10-04T09:00:00+00:00 · owner · owner_mailbox of task root · msg mail-old]\nKeep the quarterly totals in EUR.\n\n"
+        "[2026-10-04T09:05:00+00:00 · owner · owner_mailbox of task root · msg mail-raw]\nAdd the appendix table."
+    )
+    expected_room, old_sha = "", ""
+    for extra in ({}, {ow.ROOM_FIELD: []}):
+        heading, frame = (SESSION_HEADING, ow._FRAMES["session"]) if ow.ROOM_FIELD in extra else (LAUNCHED_HEADING, LAUNCHED_FRAME)
+        expected_room = SNAPSHOT_TEXT.replace("\n\nEXPECTED OUTPUT", f"\n\n{heading}\n{frame}\n{blocks}\n\nEXPECTED OUTPUT")
+        old_sha = hashlib.sha256(expected_room.encode("utf-8")).hexdigest()
+        frozen = {**SNAPSHOT_TASK, "configured_subagent": {"route": {"kind": "agent_session"},
+                  "selected_subagent_id": "codex-row", "config_fingerprint": "cfg-1"},
+                  "metadata": {ow.FIELD: legacy_rows, **extra}}
+        assert compile_external_work_order(frozen) == expected_room
+        assert work_order_fingerprint(frozen) == old_sha
+        binding = {"authority_fingerprint": authority_fingerprint_from_task(frozen), "actor_binding_source": "task_snapshot",
+                   "config_fingerprint": "cfg-1", "selected_subagent_id": "codex-row", "work_order_fingerprint": old_sha}
+        assert _successor_binding_mismatch(binding, frozen) == ""
+
+    write_task_result(
+        tmp_path, "kid1", "running", parent_task_id="root", root_task_id="root",
+        objective=SNAPSHOT_TASK["objective"], context=SNAPSHOT_TASK["context"],
+        expected_output=SNAPSHOT_TASK["expected_output"], constraints=SNAPSHOT_TASK["constraints"],
+        task_contract=dict(SNAPSHOT_TASK["task_contract"]), **{ow.FIELD: legacy_rows, ow.ROOM_FIELD: []},
+    )
+    record = load_effective_task_result(tmp_path, "kid1", materialize_artifacts=False)
+    projected, reason = work_order_source_projection(record, 0, len(expected_room))
+    assert reason == "" and projected["text"] == expected_room and projected["complete_sha256"] == old_sha
+    old_request = {
+        "complete_sha256": old_sha, "complete_chars": len(expected_room),
+        "source": {"kind": "task_result", "task_id": "kid1", "tool": "get_task_result",
+                   "arguments": {"task_id": "kid1", "include_authority": True, "include_work_order_source": True},
+                   "projection": "canonical_work_order"},
+    }
+    old_ctx = SimpleNamespace(task_id="kid1", task_metadata={ow.FIELD: legacy_rows, ow.ROOM_FIELD: []},
+                              task_contract=dict(SNAPSHOT_TASK["task_contract"]), drive_root=tmp_path, budget_drive_root=tmp_path)
+    newer_caller = SimpleNamespace(task_id="parent-new", task_metadata={TYPED_STAMPS_FACT: True},
+                                   task_contract={}, drive_root=tmp_path, budget_drive_root=tmp_path)
+    assert canonical_work_order_source(old_ctx, old_request) == (expected_room, "")
+    assert canonical_work_order_source(newer_caller, old_request) == (expected_room, "")
+
+    typed_task = {**SNAPSHOT_TASK, "metadata": {ow.FIELD: legacy_rows, ow.ROOM_FIELD: [], TYPED_STAMPS_FACT: True}}
+    typed_rendered = compile_external_work_order(typed_task)
+    assert f"[received 2026-10-04T09:00:00+00:00 · {UNKINDED_STAMP} · owner_mailbox of task root · msg mail-old]" in typed_rendered
+    assert f"[received 2026-10-04T09:05:00+00:00 · {UNKINDED_STAMP} · owner_mailbox of task root · msg mail-raw]" in typed_rendered
+    assert work_order_fingerprint(typed_task) != old_sha
+
+    root = _root(tmp_path)
+    _record_owner_directive(root, source="owner_mailbox", content="Unkinded follow-up", msg_id="mail-unk")
+    _record_owner_directive(root, source="owner_mailbox", content="Question closed by the owner without an answer.",
+                            msg_id="mail-closed", origin={"mail_kind": KIND_QUIZ_CLOSED})
+    _event, _stored, payload = _schedule(root)
+    rendered = compile_external_work_order(payload)
+    assert f"[{UNKINDED_STAMP} · owner_mailbox of task root · msg mail-unk]\nUnkinded follow-up" in rendered
+    assert f"[{CLOSED_STAMP} · owner_mailbox of task root · msg mail-closed]\nQuestion closed by the owner without an answer." in rendered
+    assert f"[owner · owner_mailbox of task root · msg mail-1]\n{LATER}" in rendered
