@@ -151,7 +151,7 @@ _STEPS = _rows(("id", "title", "railTitle", "railCopy", "copy", "footer"), (
     ("consciousness", "Consciousness", "Consciousness", "When it acts", "", ""),
     ("skills", "Skills", "Skills", "What it can do", "Ouroboros starts with the ticked skills; clear any you do not want.", "Add or remove skills any time in Extensions."),
     ("budget", "Review limits", "Limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Review", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+    ("summary", "Review before launch", "Review", "Final check", "Check your choices. Start Ouroboros saves them.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 

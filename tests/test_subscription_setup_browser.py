@@ -260,6 +260,13 @@ def subscription_ui():
         elif path == "/api/onboarding":
             route.fulfill(status=204)
             return
+        elif path == "/api/ui/i18n":
+            # The normal fresh-install envelope (gateway/ui_i18n.py::memory_payload), not the default {}.
+            body = {"language": "", "chosen": False, "english": True, "revision": 0, "profile": None,
+                    "plural_select": None, "plural_categories": None, "entries": {}, "languages": [],
+                    "stats": {"entries": 0, "generated": 0, "owner": 0, "imported": 0,
+                              "stale": None, "pending": 0, "refused": 0}, "updated_at": "", "memory_error": "",
+                    "generator": {"state": "idle", "error": "", "updated_at": "", "applied": 0, "language": "", "in_flight": 0}}
         elif path == "/api/state":
             body = {"supervisor_ready": True, "active_chat_activities": [], "projects": []}
         elif path == "/api/projects":
@@ -384,8 +391,10 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
     assert "gpt-test" in page.locator('.summary-card').inner_text()
+    page.locator('[data-summary-assignments] > summary').press('Enter')
     reviewers = page.locator('.summary-kv').filter(has=page.get_by_text('Reviewers', exact=True))
     assert "codex=gpt-test" in reviewers.inner_text()
+    page.get_by_text('English, the source text; no language chosen yet.', exact=True).wait_for()
     capture(page, "summary-quick")
     page.click('#next-btn')
     page.wait_for_url(ui["url"] + "/")
@@ -406,6 +415,107 @@ def test_codex_quick_setup_computes_skipped_steps_and_finishes_once(subscription
     assert 'OUROBOROS_REVIEWER_SLOTS' not in saved
     assert not saved['OPENAI_API_KEY'] and not saved['OPENROUTER_API_KEY']
     assert onboarding.calls['supervisor'] == 1
+
+
+@pytest.mark.parametrize("source, filename, expected_source, artifact", [
+    (r"W:\fixture\direct.gguf", "quant/previous.gguf", r"W:\fixture\direct.gguf", "direct.gguf"),
+    ("fixture-labs/Local-GGUF", "quant/repository.gguf", "fixture-labs/Local-GGUF / quant/repository.gguf", "repository.gguf"),
+], ids=["direct-Windows-file", "repository-file"])
+def test_summary_local_artifact_and_late_review_pool_preserve_the_draft(subscription_ui, source, filename, expected_source, artifact):
+    from playwright.sync_api import expect
+
+    ui = subscription_ui
+    page = ui["page"]
+    legacy = "https://legacy.example.invalid/v1"
+    ui["bootstrap"]["initialState"].update(
+        localSource=source, localFilename=filename, localRoutingMode="all", legacyCompatibleBaseUrl=legacy,
+        openaiKey=ui["bootstrap"]["secretPlaceholder"], compatibleBaseUrl="https://dedicated.example.invalid/v1",
+    )
+    page.route("**/*", lambda route: route.fallback() if route.request.url.startswith(ui["url"] + "/") else route.abort())
+    page.goto(ui["url"] + "/onboarding")
+    page.wait_for_selector("#quick-start-btn:not([hidden])")
+    walk(page, "accounts", "budget")
+    preview_path = "**/api/onboarding/subagents/preview"
+    held = []
+    page.route(preview_path, lambda route: held.append(route))
+    with page.expect_request(preview_path):
+        page.click("#next-btn")
+    page.wait_for_selector(".summary-card")
+    summary = page.locator(".summary-card")
+
+    def row(label):
+        return summary.locator(".summary-kv").filter(has=page.get_by_text(label, exact=True)).locator("span")
+
+    expect(row("Local source")).to_have_text(expected_source)
+    expect(row("Main model")).to_have_text(f"Local · {artifact}")
+    assert row("OpenAI").inner_text().startswith(f"configured for the legacy address {legacy}")
+    assert "dedicated.example" not in row("OpenAI").inner_text()
+    details = summary.locator("[data-summary-assignments]")
+    caption = details.locator(":scope > summary")
+    warning = page.locator("[data-review-pool-warning]")
+    expect(warning).to_be_hidden()
+    assert not details.evaluate("node => node.open")
+    page.locator("#ui-language-select").select_option("__other__")
+    language = page.locator("#ui-language-other")
+    language.fill("pt-BR")
+    language.press("Home")
+    original = language.element_handle()
+    caret = language.evaluate("node => node.selectionStart")
+
+    def preview(*, packet, target):
+        reply = copy.deepcopy(ui["fixture"]["preview"])
+        reply["available_subagents"] = {"enabled": True, "items": [{
+            "subagent_id": "fixture-reviewer", "review_eligible": True, "delivery": "packet" if packet else "native",
+            "route": {"kind": "api_model", "target_id": target}, "recommended_use": "Fixture review.",
+        }]}
+        assert held
+        for route in held:
+            route.fulfill(json=reply)
+        held.clear()
+
+    preview(packet=True, target="openai::fixture-packet")
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("Every reviewer is a Packet row")
+    assert details.evaluate("node => node.open")
+    assert original.evaluate("node => node === document.activeElement && node.isConnected")
+    assert language.input_value() == "pt-BR" and language.evaluate("node => node.selectionStart") == caret
+    expect(row("Safety Supervisor")).to_contain_text(f"Uses Light · Local · {artifact}")
+    expect(row("Vision")).to_contain_text(f"Uses Main · Local · {artifact}")
+    capture(page, f"summary-{artifact}-warning")
+
+    # New ordinary status evidence asks for another preview while Summary remains mounted.
+    def new_status(label):
+        harness = ui["fixture"]["status"]["harnesses"][0]
+        harness["models_error"] = label
+        with page.expect_request(preview_path):
+            page.evaluate("async () => (await import('/onboarding/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+
+    caption.press("Enter")
+    assert not details.evaluate("node => node.open")
+    new_status("Fixture catalog changed")
+    preview(packet=True, target="openai::fixture-fresh-packet")
+    expect(row("Reviewers")).to_contain_text("fixture-fresh-packet", use_inner_text=False)
+    assert not details.evaluate("node => node.open")
+    expect(caption).to_be_focused()
+    caption.press("Enter")
+    assert details.evaluate("node => node.open")
+    new_status("")
+    preview(packet=False, target="openai::fixture-reader")
+    expect(warning).to_be_hidden()
+    expect(row("Reviewers")).to_contain_text("fixture-reader")
+    assert details.evaluate("node => node.open")
+    expect(caption).to_be_focused()
+    capture(page, f"summary-{artifact}-fresh-pool")
+
+    language.press("Enter")  # Stage, do not save yet.
+    assert not any(path == "/api/ui/i18n/language" for path, _ in ui["posts"])
+    page.locator("#next-btn").press("Enter")
+    page.wait_for_url(ui["url"] + "/")
+    (writes,) = [body for path, body in ui["posts"] if path == "/api/onboarding/complete"]
+    assert (writes["LOCAL_MODEL_SOURCE"], writes["LOCAL_MODEL_FILENAME"]) == (source, filename)
+    assert [path for path, _ in ui["posts"] if path not in {"/api/onboarding/subagents/preview"}] == [
+        "/api/onboarding/complete", "/api/ui/i18n/language",
+    ]
 
 
 @pytest.mark.parametrize("credential_harness, expected", [("codex", True), ("claude", False)])
@@ -429,6 +539,7 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
 
     ui = subscription_ui
     page = ui["page"]
+    ui['bootstrap']['initialState'].update(processingPreference='standard', modelProcessingPreferences={'light': 'fast'})
     def catalog(source, profile=None, **_kw):
         profile = profile or "personal"
         row = ui["fixture"]["catalog"]["items"][0]
@@ -520,7 +631,12 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     page.wait_for_selector('.summary-card')
     page.wait_for_function("() => !document.querySelector('.wizard-error').textContent")
     summary = page.locator('.summary-card')
+    assert 'Codex · owner-model · Account: personal' in summary.inner_text(), "Main among the choices: source, model, pinned account"
+    assert '1,000,000 tokens, set by you' not in summary.inner_text(), "the whole assignments wait behind their disclosure"
+    summary.locator('[data-summary-assignments] > summary').click()
     assert '1,000,000 tokens, set by you' in summary.inner_text()
+    safety = summary.locator('.summary-kv').filter(has=page.get_by_text('Safety Supervisor', exact=True))
+    assert 'Uses Light · Codex · gpt-test · Account: work · Processing: Fast' in safety.inner_text()
     vision = summary.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True))
     assert 'Uses Main' in vision.inner_text()
     assert 'Account: work' in vision.inner_text()
@@ -537,6 +653,7 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     assert body['OUROBOROS_MODEL_ACCOUNTS']['vision'] == 'work'
     assert body['OUROBOROS_MODEL_ACCOUNTS']['fallback'] == ['', 'work']
     assert body['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 1000000
+    assert body['OUROBOROS_MODEL_PROCESSING_PREFERENCES']['light'] == 'fast'
     assert body['OUROBOROS_MODEL_FALLBACKS'] == 'openai::second, claudexor::codex=first'
     (row,) = body['OUROBOROS_SUBAGENTS']['items']
     assert (row['subagent_id'], row['review_eligible'], row['effort']) == ('codex', True, 'high')
@@ -1003,6 +1120,9 @@ def test_review_shortcut_reconciles_local_vision_before_preview(
     page.click('#quick-start-btn')
     past_quick_steps(page)  # Review & start passes Consciousness and Skills where offered, then Summary
     page.wait_for_selector('.summary-card')
+    main = page.locator('.summary-kv').filter(has=page.get_by_text('Main model', exact=True))
+    assert 'Local · local-test.gguf' in main.inner_text()
+    page.locator('[data-summary-assignments] > summary').press('Enter')
     summary = page.locator('.summary-kv').filter(has=page.get_by_text('Vision', exact=True)).inner_text()
     capture(page, f'shortcut-summary-{choice}')
     page.click('#next-btn')

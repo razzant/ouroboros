@@ -208,11 +208,13 @@ def test_pointer_entry_fetches_the_author_repository_at_its_commit(drive, hub, t
     _refresh(drive, rows[1:2])
     item = next(i for i in catalog.catalog_view(drive, rows=rows[1:])["items"] if i["name"] == "scholar")
     assert item["author_repo"] == str(bare)
+    assert not {"type", "needs_keys", "permissions"} & set(item), "a catalog read never fetches a pointer's manifest"
     installer.install_item(drive, item["id"], rows=rows)
     record = read_install_record(drive, "scholar")
     assert record["release"]["commit"] == commit and record["release"]["repo"] == str(bare)
     detail = catalog.item_detail(drive, item["id"], rows=rows)
     assert "About it." in detail["about"] and detail["links"]["author_repo"] == str(bare)
+    assert detail["item"]["type"] == "instruction" and detail["item"]["permissions"] == [], "the pinned release's own"
 
 
 def test_plain_git_repository_lists_every_manifest_folder(drive, tmp_path):

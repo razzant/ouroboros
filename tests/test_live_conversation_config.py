@@ -131,21 +131,24 @@ def test_default_call_skills_install_without_credentials_and_leave_beta_off(tmp_
     assert plugin.configuration_view(api.feature['configure'](), [])['offered'] is False
 
 
-def test_call_setup_copy_describes_default_on_skills_and_the_owner_flow(config_api):
+def test_call_setup_help_describes_the_owner_flow(config_api):
     from pathlib import Path
-    api, _, _, _ = config_api
+    api, _, _, credentials = config_api
     intro = ' '.join(component['text'] for component in api.sections[0][1]['schema']['components']
                      if component['type'] == 'markdown')
-    skill = ' '.join((Path(__file__).resolve().parents[1] / 'skills/live_conversation/SKILL.md').read_text(encoding="utf-8").split())
-    for text in (intro, skill):
-        assert 'on by default' in text
-        assert 'turn on calls (beta)' in text.lower()
-        assert 'choose an engine' in text.lower()
-        assert 'add its API key' in text
-        assert 'Enable this feature' not in text and 'Choose an enabled voice engine' not in text
-        assert 'grant that engine its credential' not in text
-    assert 'auto-grant' in skill and 'with it off' in skill
-    assert 'Calls are a beta, off by default' in skill
+    skill = (Path(__file__).resolve().parents[1] / 'skills/live_conversation/SKILL.md').read_text(encoding='utf-8')
+    for surface, text in (('Calls settings', intro), ('SKILL.md', skill)):
+        flow = ' '.join(text.casefold().split())
+        discovery = flow.partition('search')[2].partition('install')[0]
+        assert all(provider in discovery for provider in ('gemini', 'grok', 'openai')), surface
+        assert 'off by default' in flow, surface
+        for step in ('search', 'extensions → browse', 'install', 'enable', 'extensions → skills',
+                     'keys and permissions', 'auto-grant is off',
+                     'api key', 'settings → accounts and keys', 'choose the engine', 'turn on calls (beta)'):
+            _, matched, flow = flow.partition(step)
+            assert matched, f'{surface}: {step!r} missing or out of order'
+        assert all(term in flow for term in ('gemini live', 'openai realtime', 'russia or belarus')), surface
+        assert all(value not in text for value in credentials.values()), surface
 
 
 @pytest.mark.parametrize(("saved", "engine"), [

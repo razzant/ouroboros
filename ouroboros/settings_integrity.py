@@ -162,13 +162,20 @@ def operator_variables(environ: Mapping, keys) -> dict:
     return {key: environ[key] for key in keys if environ.get(key) and environ[key] != echo.get(key)}
 
 
-def note_proposal_projection(environ, before: Mapping) -> None:
-    """Record the proposal-key values a projection left in ``environ`` (``before``: their values before it),
-    except where it kept or respelled an operator's own variable (``operator_variables`` of ``before``): our echo
-    must never turn the operator's choice into a proposal the next read replaces.
+def note_proposal_projection(environ, before: Mapping, settings: Mapping) -> None:
+    """Record the proposal-key values a projection of ``settings`` left in ``environ`` (``before``: their values
+    before it), except where it kept or respelled an operator's own variable (``operator_variables`` of ``before``):
+    our echo must never turn the operator's choice into a proposal the next read replaces.
 
     A proposal key no projection exports any more (the catalog: ``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``) keeps no echo:
     an earlier mirror leaves ``environ`` only while its value matches our echo or recorded projection digest.
+
+    Every other projected value is ours by digest (``PROJECTED_SETTINGS_ENV``) unless it stays the operator's own
+    variable (``_left_to_operator``). The record describes a variable as a projection found it: that text is ours
+    again, while the operator's own re-spelling of it (an earlier default 2 set again as ``02``) is theirs. What the
+    settings document sets (a launcher or an earlier release may have mirrored it there with no record), a fallback
+    for a text naming no value and what the deployment policy supplied stay ours; ``true`` written ``True`` and the
+    default spelled the operator's way stay theirs.
 
     A recorded projection distinguishes an unchanged operator input from our mirror even if the document agrees.
     An unrecorded legacy input still recognizes equality with the document as a mirror, not as operator proof."""
@@ -191,28 +198,70 @@ def note_proposal_projection(environ, before: Mapping) -> None:
         else:
             echo[key] = after
     environ[PROJECTED_PROPOSALS_ENV] = json.dumps(echo, sort_keys=True)
-    document, record = _document_keys(), {}
-    for key in settings_env_keys():
+    document, reading, record = _read_document(), {}, {}
+    for key in exported:
         value = environ.get(key)
         if value is None:
             continue
-        digest = _value_digest(value)
-        if (value != before.get(key) or ours.get(key) == digest
-                or (key in document and (prior is None or key in ours))):
-            record[key] = digest
+        previous = before.get(key)
+        # Unchanged and not held by a record that exists: the operator's, even where the document agrees.
+        theirs = (previous is not None and ours.get(key) != _value_digest(previous)
+                  and ((value == previous and prior is not None and key not in ours)
+                       or _left_to_operator(key, value, previous, before, settings, document, reading)))
+        if not theirs:
+            record[key] = _value_digest(value)
     environ[PROJECTED_SETTINGS_ENV] = json.dumps(record, sort_keys=True)
 
 
-def _document_keys() -> set:
-    """The keys the settings document on disk sets to a value, as every reader normalizes it; none when unreadable."""
+def _left_to_operator(key: str, value: str, previous: str, before: Mapping, settings: Mapping, document,
+                      reading: dict) -> bool:
+    """Whether projected ``value`` leaves ``key`` to the operator's own variable ``previous`` from ``before``, which
+    no record of ours describes. The loader is the authority: one read of the operator's own variables in ``before``
+    (``reading``, once per projection) reports the valid choices it takes from them, before the deployment policy's
+    overlay (``config.settings_of_document``'s ``sources_out``). An unchanged value stays theirs unless the
+    document's value is in force; a changed one only where the env writer emitted exactly their choice in its own
+    spelling, as read or as the route consumers respell it (``_emits_choice``). An unknown document leaves only an
+    unchanged value; a read that fails proves nothing for the operator."""
+    from ouroboros import config
+
+    if document is None:
+        return value == previous
+    raw, documented = document
+    if value == previous and key not in documented:
+        return True
+    try:
+        if "choices" not in reading:
+            taken: dict = {}
+            with settings_read_environ(_without_our_mirrors(before)):
+                config.settings_of_document(raw, present=raw is not None, sources_out=taken)
+            reading["choices"] = taken
+        choices = reading["choices"]
+        return key in choices and (value == previous or _emits_choice(key, value, choices[key], settings))
+    except Exception:  # the projection never fails on its record; an unproven value is ours
+        return False
+
+
+def _emits_choice(key: str, value: str, choice, settings: Mapping) -> bool:
+    """Whether ``value`` is the operator's ``choice`` as the env writer spells it (``config.setting_env_text``), read
+    as it is or as the route consumers respell it among ``settings`` (``apply_runtime_provider_defaults``)."""
+    from ouroboros import config
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+
+    routed = apply_runtime_provider_defaults({**settings, key: choice})[0].get(key)
+    return value in (config.setting_env_text(key, choice), config.setting_env_text(key, routed))
+
+
+def _read_document() -> tuple[dict | None, set[str]] | None:
+    """``(raw, keys)``: the settings document as read (``None`` when absent) and the keys its normalized form holds;
+    ``None`` when a present document cannot be read."""
     from ouroboros import config
 
     try:
-        raw = read_settings_json_verified(config.SETTINGS_PATH)
-        document = config.normalize_settings_raw(raw) if isinstance(raw, dict) else {}
+        raw = read_settings_json_strict(config.SETTINGS_PATH)
+        document = config.normalize_settings_raw(raw) if raw is not None else {}
     except Exception:
-        return set()
-    return {key for key, value in document.items() if value not in (None, "")}
+        return None
+    return raw, set(document)
 
 
 @contextlib.contextmanager
@@ -488,6 +537,11 @@ def skill_environ() -> dict:
             source = dict(os.environ)
     else:
         source = dict(snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ)
+    return _without_our_mirrors(source)
+
+
+def _without_our_mirrors(source: Mapping) -> dict:
+    """``source`` without the values its own projection record (``projected_settings``) names as this tree's."""
     ours = projected_settings(source)
     return {key: value for key, value in source.items() if key not in ours or ours[key] != _value_digest(value)}
 

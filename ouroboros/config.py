@@ -642,19 +642,24 @@ def _release_settings_lock(fd: Optional[int]) -> None:
         pass
 
 
-def _coerce_setting_value(key: str, value):
+# Closed choices a read normalizes so all consumers see the enum: a text outside the set reads the key's default.
+_CLOSED_CHOICES = {
+    "OUROBOROS_RUNTIME_MODE": normalize_runtime_mode, "OUROBOROS_UPDATE_CHANNEL": normalize_update_channel,
+    "OUROBOROS_SUBAGENTS_MODE": normalize_subagents_mode, "OUROBOROS_CONTEXT_MODE": normalize_context_mode,
+}
+_NO_VALUE = object()  # the fallback ``settings_of_document`` passes to tell a text read as written from a typo
+
+
+def _coerce_setting_value(key: str, value, *, fallback: Any = None):
+    """``value`` typed as ``key``'s default declares. A text that names no value of that type (a number, list or
+    closed choice that does not parse; an effort tier its range does not know) reads the key's own fallback, or
+    ``fallback`` when given. An optional bound or cap reads a typo as its finite value by design, never refused."""
     default = SETTINGS_DEFAULTS.get(key)
     if key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
         return normalize_model_role_options(key, value)[1]
-    # Normalize runtime mode on read so all consumers see the closed enum.
-    if key == "OUROBOROS_RUNTIME_MODE":
-        return normalize_runtime_mode(value)
-    if key == "OUROBOROS_UPDATE_CHANNEL":
-        return normalize_update_channel(value)
-    if key == "OUROBOROS_SUBAGENTS_MODE":
-        return normalize_subagents_mode(value)
-    if key == "OUROBOROS_CONTEXT_MODE":
-        return normalize_context_mode(value)
+    if key in _CLOSED_CHOICES:
+        choice = _CLOSED_CHOICES[key](value)
+        return choice if fallback is None or choice == str(value or "").strip().lower() else fallback
     if key in OPTIONAL_VALUE_KEYS:  # a number, else "unlimited" or blank; a typo is finite
         return document_optional_value(key, value)
     # Trim so whitespace-only config is not treated as a configured skills repo.
@@ -665,8 +670,10 @@ def _coerce_setting_value(key: str, value):
             try:
                 value = json.loads(value)
             except (TypeError, ValueError):
-                return []
-        return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+                value = None
+        if not isinstance(value, list):
+            return [] if fallback is None else fallback
+        return [dict(item) for item in value if isinstance(item, dict)]
     if isinstance(default, bool):
         if isinstance(value, bool):
             return value
@@ -676,7 +683,9 @@ def _coerce_setting_value(key: str, value):
         try:
             return max(60, cast(value)) if key in {"OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX"} else cast(value)
         except (TypeError, ValueError):
-            return default
+            return default if fallback is None else fallback
+    if fallback is not None and key in EFFORT_RANGE_KEYS and str(value or "").strip().lower() not in EFFORT_SCALE:
+        return fallback  # its range reads an unknown tier as the default (``settings_scales.effort_range``)
     return str(value or "")
 
 
@@ -833,10 +842,13 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True, strict: bool = 
     return settings_of_document(raw, present=raw is not None or SETTINGS_PATH.exists())
 
 
-def settings_of_document(raw: Any, *, present: bool = True) -> dict:
+def settings_of_document(raw: Any, *, present: bool = True, sources_out: Optional[dict] = None) -> dict:
     """The loader's read of one document, pure: defaults, its normalized keys, the environment the read
     binds (``settings_integrity.read_environ``) where it leaves a key to it, proposals, the deployment policy
-    last. ``load_settings`` reads the saved document; a write's policy step, the one it would save."""
+    last. ``load_settings`` reads the saved document; a write's policy step, the one it would save.
+    ``sources_out`` (given) receives each key the read took from that environment with a text naming a value of its
+    type (no fallback stood in: ``_coerce_setting_value``), mapped to the value it read, normalized and before the
+    deployment policy's overlay, which is a constraint on the operator's choice and never the choice itself."""
     from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
     from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
     loaded = normalize_settings_raw(raw) if isinstance(raw, dict) else {}
@@ -852,6 +864,8 @@ def settings_of_document(raw: Any, *, present: bool = True) -> dict:
             continue  # this tree's own projection of a proposal is no choice; a saved slot or choice (blank too) is the owner's
         if key == "OUROBOROS_RETURN_REASONING" and raw_env == "":
             settings[key] = ""
+            if sources_out is not None:
+                sources_out[key] = None  # an operator's blank: no reasoning
             continue
         if raw_env == "" and key not in OPTIONAL_BOUND_LEGACY:
             continue
@@ -859,11 +873,15 @@ def settings_of_document(raw: Any, *, present: bool = True) -> dict:
             continue
         settings[key] = _coerce_setting_value(key, raw_env)
         env_authored.add(key)
+        if sources_out is not None and _coerce_setting_value(key, raw_env, fallback=_NO_VALUE) is not _NO_VALUE:
+            sources_out[key] = None  # its normalized value follows, read before the policy's overlay
     settings.update(normalize_effort_document({EFFORT_FORMAT_KEY: loaded.get(EFFORT_FORMAT_KEY),
         **{key: settings[key] for key in EFFORT_RANGE_KEYS if key in loaded or key in env_authored}}))
     # Unauthored slots and the never-configured catalog follow the configured access.
     propose_unauthored_model_slots(settings, authored_model_slots(loaded) | env_authored)
     apply_at_read_seam(settings, merged=True)
+    if sources_out is not None:
+        sources_out.update({key: settings.get(key) for key in sources_out})
     return _deployment_policy.effective_settings(settings)
 
 
@@ -961,6 +979,17 @@ def get_mcp_tool_timeout_sec() -> int:
     return parsed if parsed > 0 else int(SETTINGS_DEFAULTS["MCP_TOOL_TIMEOUT_SEC"])
 
 
+def setting_env_text(key: str, value) -> Optional[str]:
+    """How ``apply_settings_to_env`` writes one settings value into an environment; ``None`` removes the key."""
+    if value == "" and key in {"OUROBOROS_RETURN_REASONING", "OUROBOROS_MODEL_FALLBACKS"}:
+        return ""  # a blank that means something (no reasoning, no fallback chain) stays present
+    if value is None or value == "":
+        return None
+    if key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
+        return normalize_model_role_options(key, value)[1]
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")) if isinstance(value, (dict, list)) else str(value)
+
+
 def apply_settings_to_env(settings: dict, *, environ=None) -> None:
     """Push settings into environment variables for supervisor modules."""
     with _settings_integrity.SETTINGS_ENV_LOCK:
@@ -974,26 +1003,19 @@ def apply_settings_to_env(settings: dict, *, environ=None) -> None:
         unauthored = {k for k in _DISK_AUTHORED_SETTINGS if not _settings_file_value(k, "")}
         before = dict(environ)
         for k in env_keys:
-            val = settings.get(k)
             if k in unauthored and not owner_declared_low(
                     environ.get(k) if k == "OUROBOROS_CONTEXT_MODE_AUTO_LOW" else ""):
                 continue
-            if k in {"OUROBOROS_RETURN_REASONING", "OUROBOROS_MODEL_FALLBACKS"} and val == "":
-                environ[k] = ""  # a blank that means something (no reasoning, no fallback chain) stays present
-                continue
-            if val is None or val == "":
+            text = setting_env_text(k, settings.get(k))
+            if text is None:
                 environ.pop(k, None)
             else:
-                if k in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY):
-                    val = normalize_model_role_options(k, val)[1]
-                elif isinstance(val, (dict, list)):
-                    val = json.dumps(val, ensure_ascii=False, separators=(",", ":"))
-                environ[k] = str(val)
+                environ[k] = text
         if not environ.get("OUROBOROS_TASK_REVIEW_MODE"):
             environ["OUROBOROS_TASK_REVIEW_MODE"] = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
         # The note must see this tree's own injected default: labelled here, it drops with the mirror at a Reset;
         # unlabelled it would ride the drop as if the operator had supplied it.
-        _settings_integrity.note_proposal_projection(environ, before)
+        _settings_integrity.note_proposal_projection(environ, before, settings)
 
 
 # PID lock: platform_layer uses OS-released locks on Unix and Windows.

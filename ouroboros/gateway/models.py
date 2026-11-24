@@ -42,6 +42,7 @@ from ouroboros.provider_models import (
     connection_id,
     parse_model_route,
 )
+from ouroboros.settings_integrity import skill_settings
 
 log = logging.getLogger(__name__)
 
@@ -898,7 +899,7 @@ async def api_openai_compatible_models(request: Request) -> JSONResponse:
         from ouroboros.secret_masking import looks_masked_settings_secret
         if looks_masked_settings_secret(key_setting or _DEDICATED_KEY, api_key):
             from ouroboros.gateway.secret_rows import rehydrate_connections
-            settings = dict(load_settings())
+            settings = skill_settings(load_settings)  # saved values as setup reads them, never our old mirrors
             if name:
                 draft = {"kind": "openai-compatible", "name": name, "api_key": api_key}
                 api_key = rehydrate_connections([draft], settings.get(CONNECTIONS_KEY))[0]["api_key"]
@@ -1033,7 +1034,7 @@ def _run_provider_test(provider_id: str, overrides: dict[str, str], connection: 
     (``_saved_secret_moved``): before discovery and the probe, so nothing is sent."""
     from ouroboros.secret_masking import looks_masked_settings_secret
 
-    settings = dict(load_settings())
+    settings = skill_settings(load_settings)  # bootstrap's and Finish's read: operator variables, never our mirrors
     before = dict(settings)  # the read a save of this draft would start from
     saved_rows = connection_rows(settings.get(CONNECTIONS_KEY))
     under_test = (provider_id, connection or BUILTIN_CONNECTION)

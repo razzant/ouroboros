@@ -120,6 +120,66 @@ export function safetyChain(entries, valueOf) {
     return '';
 }
 
+function modelRoleRow(settings, slot, value, index = -1) {
+    const option = (key) => {
+        const held = modelRoleMap(settings[key])[slot.slot];
+        return index < 0 ? held : held?.[index];
+    };
+    const parsed = parseModelSource(value);
+    if (!parsed.model && !['main', 'fallback'].includes(slot.slot)) parsed.source = 'inherit';
+    const local = settings[`USE_LOCAL_${slot.slot.toUpperCase()}`];
+    return { slot, ...parsed, account: String(option(MODEL_ACCOUNTS_KEY) || ''), context: option(MODEL_CONTEXT_KEY) || 0,
+        processing_preference: String(option(MODEL_PROCESSING_PREFERENCES_KEY) || ''), local: local === true || local === 'true' };
+}
+
+function modelRoleRows(settings, slots) {
+    return slots.flatMap((slot) => slot.slot === 'fallback'
+        ? String(settings[slot.settingKey] || '').split(',').map((entry) => entry.trim()).filter(Boolean)
+            .map((entry, index) => modelRoleRow(settings, slot, entry, index))
+        : [modelRoleRow(settings, slot, settings[slot.settingKey])]);
+}
+
+// The row an empty role resolves to along its inherit chain (Safety → Light → Main).
+function modelRoleTarget(row, rows) {
+    let current = row;
+    for (let step = 0; step < 4 && current?.source === 'inherit'; step += 1) {
+        const target = inheritTargetOf(current.slot);
+        current = rows.find((entry) => entry.slot.slot === target && entry !== current)
+            || rows.find((entry) => entry.slot.slot === 'main');
+    }
+    return current;
+}
+
+// An empty Safety Supervisor inherits its route's authored options, per model_slots.model_role_option.
+function modelRoleOption(row, rows, field) {
+    if (row.slot.slot !== 'safety' || row[field]) return row[field];
+    return safetyChain(rows.map((entry) => ({ slot: entry.slot.slot, set: entry.source !== 'inherit' && Boolean(entry.model),
+        value: entry[field] })), (entry) => entry.value);
+}
+
+// An empty role follows Main's lane or its own local box; Safety follows Light's lane, box included.
+function modelRoleLocal(row, rows, localSlot) {
+    const local = (entry) => Boolean(entry && (entry.local || localSlot?.(entry.slot.slot)));
+    if (row.source !== 'inherit') return local(row);
+    const main = rows.find((entry) => entry.slot.slot === 'main');
+    if (row.slot.slot !== 'safety') return local(row) || local(main);
+    const light = rows.find((entry) => entry.slot.slot === 'light');
+    return local(light) || (!(light && light.source !== 'inherit' && light.model) && local(main));
+}
+
+/** Role facts for a read-only summary of the current draft, including when the Models editor has not mounted. */
+export function resolveModelRoleAssignments(settings, slots, localSlot) {
+    const rows = modelRoleRows(settings, slots);
+    return rows.map((row) => {
+        const { source = DEFAULT_API_PROVIDER, model = '' } = modelRoleTarget(row, rows) || {};
+        const local = modelRoleLocal(row, rows, localSlot) || usesLocalSuffix(row.slot.slot, model);
+        return { slot: row.slot.slot, source, model, local, inherits: row.source === 'inherit' ? inheritTargetOf(row.slot) : '',
+            account: !local && source.startsWith('subscription:') ? modelRoleOption(row, rows, 'account') : '',
+            context: Number(modelRoleOption(row, rows, 'context') || 0), processing: row.processing_preference,
+            inheritedProcessing: modelRoleOption(row, rows, 'processing_preference') || settings[PROCESSING_PREFERENCE_KEY] || '' };
+    });
+}
+
 export function modelRolesHost(id) {
     return `<div id="${escapeHtml(id)}" class="model-role-editor"></div>`;
 }
@@ -175,19 +235,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     const responseEdits = new WeakSet();
     const host = () => getDoc()?.getElementById(hostId);
 
-    function rowState(slot, value, index = -1) {
-        const account = modelRoleMap(settings[MODEL_ACCOUNTS_KEY])[slot.slot];
-        const context = modelRoleMap(settings[MODEL_CONTEXT_KEY])[slot.slot];
-        const processing = modelRoleMap(settings[MODEL_PROCESSING_PREFERENCES_KEY])[slot.slot];
-        const parsed = parseModelSource(value);
-        if (!parsed.model && !['main', 'fallback'].includes(slot.slot)) parsed.source = 'inherit';
-        return { id: index < 0 ? slot.slot : mintStableId('fallback', rows.map((row) => row.id)), slot,
-            ...parsed, account: String(index < 0 ? account || '' : account?.[index] || ''),
-            context: index < 0 ? context || 0 : context?.[index] || 0,
-            processing_preference: String(index < 0 ? processing || '' : processing?.[index] || ''),
-            local: settings[`USE_LOCAL_${slot.slot.toUpperCase()}`] === true
-                || settings[`USE_LOCAL_${slot.slot.toUpperCase()}`] === 'true' };
-    }
+    const withId = (row) => ({ ...row, id: row.slot.slot === 'fallback' ? mintStableId('fallback', rows.map((entry) => entry.id)) : row.slot.slot });
+    const rowState = (slot, value, index) => withId(modelRoleRow(settings, slot, value, index));
 
     function collect() {
         if (!loaded) return {};
@@ -233,16 +282,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Flex or route defaults for Processing.'] : []),
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
-    // The row an empty role resolves to, along its inherit chain (safety → light → main).
-    function inheritedRow(row) {
-        let current = row;
-        for (let step = 0; step < 4 && current?.source === 'inherit'; step += 1) {
-            const target = inheritTargetOf(current.slot);
-            current = rows.find((entry) => entry.slot.slot === target && entry !== current)
-                || rows.find((entry) => entry.slot.slot === 'main');
-        }
-        return current;
-    }
+    const inheritedRow = (row) => modelRoleTarget(row, rows);
     const inheritName = (row) => {
         const target = slots.find((slot) => slot.slot === inheritTargetOf(row.slot));
         return String(target?.label || 'Main').replace(/ Model$/, '');
@@ -258,22 +298,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return name ? `${head}: ${[name, ...facts].join(' · ')}` : head;
     };
     function effectiveSource(row) { return row.source === 'inherit' ? inheritedRow(row)?.source || 'openrouter' : row.source; }
-    // An empty Safety Supervisor's account and tier, as the runtime reads them (model_slots.model_role_option): its
-    // own, else Light's, else Main's, the chain ending at the first role with a model. Other roles hold their own.
-    function heldOption(row, field) {
-        if (row.slot.slot !== 'safety' || row[field]) return row[field];
-        return safetyChain(rows.map((entry) => ({ slot: entry.slot.slot, set: entry.source !== 'inherit' && Boolean(entry.model),
-            value: entry[field] })), (entry) => entry.value);
-    }
-    // Where an empty role runs (route_choice.model_role_slot_override): its own box over a cloud Main puts Main's model
-    // on the local model; an empty Supervisor takes Light's route, Light's box included.
-    function heldLocal(row) {
-        if (row.source !== 'inherit') return Boolean(row.local);
-        const main = rows.find((entry) => entry.slot.slot === 'main');
-        if (row.slot.slot !== 'safety') return Boolean(row.local || main?.local);
-        const light = rows.find((entry) => entry.slot.slot === 'light');
-        return light && light.source !== 'inherit' && light.model ? Boolean(light.local) : Boolean(light?.local || main?.local);
-    }
+    const heldOption = (row, field) => modelRoleOption(row, rows, field);
+    const heldLocal = (row) => modelRoleLocal(row, rows);
     // The revision of the API connection the row's route sends to, as this page read it ('' none, null not named).
     const sourceRevision = (row) => (heldLocal(row) ? '' : revisionIn(settings, { model: responseModel(row), use_local: false }));
     function responseModel(row) {
@@ -800,12 +826,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             mainChoice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
             apiProviders = configuredApiProviders(settings, providerProfiles);
             rows = [];
-            for (const slot of slots) {
-                if (slot.slot === 'fallback') {
-                    String(settings[slot.settingKey] || '').split(',').map((entry) => entry.trim()).filter(Boolean)
-                        .forEach((entry, index) => rows.push(rowState(slot, entry, index)));
-                } else rows.push(rowState(slot, settings[slot.settingKey]));
-            }
+            for (const row of modelRoleRows(settings, slots)) rows.push(withId(row));
             // A role's page past the saved fallbacks holds a new one, unsaved until its Save.
             const fallback = only?.slot === 'fallback' && slots.find((slot) => slot.slot === 'fallback');
             if (fallback && !soleRow()) rows.push(Object.assign(rowState(fallback, '', rows.length), { account: '', context: 0, processing_preference: '' }));

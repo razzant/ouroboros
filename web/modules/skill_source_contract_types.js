@@ -136,7 +136,7 @@
  * @property {string=} author_repo
  * @property {?Object=} signals  // {votes, comments, discussion_url, author_repo_stars}; null = no data
  * @property {?Object=} withdrawn  // {reason, at}
- * @property {string=} type
+ * @property {string=} type  // `type`, `needs_keys` and `permissions` are the release manifest's: absent for a pointer entry (its manifest is read only by the detail or the install)
  * @property {string[]=} needs_keys
  * @property {string[]=} permissions
  * @property {*=} install_specs
@@ -287,7 +287,9 @@
 /**
  * One skill the setup's Skills step offers; `title` and `pitch` are the catalog's optional words ("" when it has
  * none: show `name` and `description`), `needs` its prerequisite in words and `mark` the same in a few words ("" none, null when the catalog says
- * nothing); `recommended` means ticked by the starter list.
+ * nothing); `recommended` is the tick from saved settings. `default_with_keys` gives supported voice key presence;
+ * an empty map leaves the default off (a voice declaration no bundled one matches, or a manifest not read). The
+ * Accounts draft can update presence, not an owner's ticks.
  * @typedef {Object} StarterSkillItem
  * @property {string} id
  * @property {string} name
@@ -301,6 +303,7 @@
  * @property {boolean=} builtin
  * @property {boolean=} recommended
  * @property {string[]=} needs_keys
+ * @property {Object<string, boolean>=} default_with_keys
  * @property {StarterConnection=} connection
  */
 

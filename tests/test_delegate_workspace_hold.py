@@ -23,8 +23,13 @@ from tests._store_shared import seed_result
 from tests.test_delegate_shared_registration import Engine, _finish, _owed, _rows, _settle, w  # noqa: F401 -- fixture
 
 X = "prj-x"  # a temporary registration another project's start created
-OWN = "/fixture/own"  # project P's own folder
 KEY = current.owed_key(X, {"daemon_store_id": STORE})  # X's owed duty, where every use it meets is kept
+
+
+def _own(env):
+    """Project P's own folder: one native absolute address under the test's own root, the same in the fixture engine's
+    catalog and in every request, which the claim resolves as a fresh root before comparing it on any system."""
+    return str(env.root / "own")
 
 
 @pytest.fixture
@@ -42,8 +47,9 @@ def x(w):  # noqa: F811
 
 def _pending(env, task, folder, invocation):
     """A START the host recorded for P in ``folder`` whose answer never came: no STARTED row, no refusal."""
-    project_id = env.engine.projects.setdefault(OWN, "prj-p")
-    body = {"prompt": "work", "scope": {"kind": "project", "root": OWN},
+    own = _own(env)
+    project_id = env.engine.projects.setdefault(own, "prj-p")
+    body = {"prompt": "work", "scope": {"kind": "project", "root": own},
             "execution": {"isolation": "live", "delegated": True, "workspaceRoot": folder}}
     assert custody.record_start_requested(env.root, gateway=env.engine, run_id="", task_id=task, root_task_id=task,
         invocation_id=invocation, idempotency_key=invocation, project_id=project_id, route="r", request=body)
@@ -64,7 +70,7 @@ def _bound(env, task, folder, invocation, run_id, **facts):
 
 
 def _prepare(env, folder, invocation, preparing):
-    return policy.resolve_for_start(env.root, env.engine, OWN, folder, "workspace_write", task_id="t-b",
+    return policy.resolve_for_start(env.root, env.engine, _own(env), folder, "workspace_write", task_id="t-b",
                                     invocation_id=invocation, preparation=preparing)[0]
 
 
@@ -197,8 +203,8 @@ def test_an_unanswered_release_holds_back_a_start_in_its_folder_until_answered(x
             _prepare(x, x.alias, "b-1", preparing)
     with ExitStack() as preparing:
         _prepare(x, x.other, "b-2", preparing)
-    row = {"project_id": x.engine.projects[OWN], "invocation_id": "b-3",
-           "request": {"scope": {"kind": "project", "root": OWN}, "execution": {"workspaceRoot": x.alias}}}
+    row = {"project_id": x.engine.projects[_own(x)], "invocation_id": "b-3",
+           "request": {"scope": {"kind": "project", "root": _own(x)}, "execution": {"workspaceRoot": x.alias}}}
     with policy.registration_held(x.root, x.engine, row) as refusal:
         assert refusal.get("reason") == ("registration_unconfirmed" if effect == "lost" else None)
     _sweep(x)

@@ -458,9 +458,10 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
     global _agent_proc, _agent_job, _agent_start
     # Stdlib-only; import before spawning so broken server imports cannot leave its pipe undrained.
     from ouroboros.process_logging import copy_capped_output
+    from ouroboros.settings_integrity import skill_settings
 
-    settings, protection = launch_settings(DATA_DIR, SETTINGS_PATH, _load_settings, _apply_settings_to_env,
-                                           attest_password=not _reset_legacy_input)
+    settings, protection = launch_settings(DATA_DIR, SETTINGS_PATH, lambda: skill_settings(_load_settings),
+                                           _apply_settings_to_env, attest_password=not _reset_legacy_input)
     env = embedded_python_env(DATA_DIR, host_environment() if IS_LINUX else os.environ.copy())
     env["PYTHONPATH"] = str(REPO_DIR)
     host_source = apply_launcher_bind(env, settings, protection)
@@ -869,8 +870,7 @@ def _await_server_ready(port: int, abort_event=None, lifecycle_thread=None) -> t
     return False, _generation_port or port
 
 
-def _load_settings() -> dict:
-    return load_settings()
+_load_settings = load_settings
 
 
 def _save_settings(changes: dict) -> None:

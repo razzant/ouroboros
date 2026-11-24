@@ -67,6 +67,7 @@ from ouroboros.gateway._helpers import request_drive_root
 from ouroboros.gateway.claudexor_passive import ACCOUNT_MODEL_UNSUPPORTED
 from ouroboros.gateway.onboarding_host import recorded_attempt
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
+from ouroboros.settings_integrity import skill_settings
 from ouroboros.skill_starter import after_onboarding, onboarding_skill_choices
 from ouroboros.settings_setup_contract import (
     ONBOARDING_COMPLETED_KEY, completion_facts,
@@ -529,9 +530,8 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
     """Re-prove eligibility INSIDE the settings lock, against the state this
     write is about to overwrite.
 
-    The re-read is ``load_settings_lock_held``, the read for a holder of the
-    settings lock, which is not re-entrant: the lock-free ``load_settings()``
-    re-reads an undecodable document behind that lock, which this caller holds."""
+    Use the same settings view as preparation but with ``load_settings_lock_held``:
+    the ordinary loader re-reads an undecodable document behind this non-reentrant lock."""
     def _check() -> str:
         from ouroboros.config import SETTINGS_PATH, load_settings_lock_held
 
@@ -557,7 +557,7 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
         if expect_safety_light and SETTINGS_PATH.exists():
             return ("A settings file appeared while onboarding was being saved; "
                     "refusing to author the first-install safety default over it.")
-        if expect_preset and not preset_eligible(load_settings_lock_held()):
+        if expect_preset and not preset_eligible(skill_settings(load_settings_lock_held)):
             return ("This install is no longer in first-run onboarding; refusing "
                     "to apply install-time agent defaults over it.")
         return ""
@@ -572,13 +572,11 @@ def _write_precondition(expect_preset: bool, expect_safety_light: bool, read_fin
 
 def _prepared_settings(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
     """(old_settings, prepared_settings, error) through the SHARED validator."""
-    from ouroboros.config import load_settings
     from ouroboros.onboarding_wizard import prepare_onboarding_settings
 
-    # Preview and completion judge a draft against the settings the runtime resolves (#2969): an operator's
-    # environment key the wizard shows (a masked row, a built-in placeholder) is the key either sends. This lock-free
-    # read writes nothing; only completion persists the compatibility upgrades first (``migrate=True``).
-    old_settings = load_settings()
+    # Like bootstrap and the starter list, read the current document with operator env, not our old mirrors.
+    # This read writes nothing; only completion persists the compatibility upgrades first (``migrate=True``).
+    old_settings = skill_settings()
     error = roster_save_error(body.get(SUBAGENTS_SETTING), old_settings, body)  # twins: only a roster change is judged
     prepared, error = ({}, error) if error else prepare_onboarding_settings(body, old_settings)
     if error:
@@ -698,7 +696,6 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
 
 async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     """List models for draft access (keys, connections and local model) while Main is still unchosen."""
-    from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
     from ouroboros.gateway.onboarding_host import read_onboarding_draft
     from ouroboros.provider_models import CONNECTIONS_KEY
@@ -710,7 +707,7 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     provider_id = request.query_params.get("provider_id")
     if provider_id is not None and not provider_id.strip():
         return unsaved_error("provider_id must name one connection.", 400)
-    saved = load_settings()
+    saved = skill_settings()
     connections, keys, typed, error = draft_access(body, saved)
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")

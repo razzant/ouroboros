@@ -19,6 +19,7 @@ from ouroboros.config import (
 from ouroboros.launcher_appearance import NativeAppearance
 from ouroboros.launcher_window_chrome import fit_to_work_area, paint_room
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
+from ouroboros.settings_integrity import skill_settings
 
 # The launcher's own logger: these lines belong in launcher.log next to the
 # startup sequence they are part of.
@@ -64,7 +65,8 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
     launcher shows once it is healthy. The onboarding SURFACE is not rendered
     here: the live server serves it (``present_first_run_onboarding``).
     """
-    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
+    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(
+        skill_settings(load_settings))
     # The normalization is APPLIED, not persisted. Startup is a read, and a read that
     # rewrites the file it read is how a normalization becomes an owner decision: the
     # fresh-install case already had to be carved out of this save (it would create

@@ -150,7 +150,9 @@ def test_the_first_run_offer_carries_the_switch_words():
 
     words = consciousness_offer({}, enabled=False)["words"]
     assert words == V.FIRST_RUN and words["choice"] == V.position_words(True)
-    assert "places you connect are heard, not answered" in words["meaning"]
+    # Off says, inside its own choice, what it does while the owner is away (owner 2026-11-23, the side-by-side).
+    assert "Places you connect are heard, not answered." in words["offAway"]
+    assert words["offAway"] in words["meaning"] and words["onAway"] in words["meaning"]  # the whole, for older pages
 
 
 def test_recent_people_counts_each_person_once_across_places_and_skips_bots(tmp_path):
