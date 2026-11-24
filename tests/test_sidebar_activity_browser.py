@@ -411,14 +411,22 @@ RAIL = """() => {
         return {
             id: row.dataset.projectId, shape: mark.dataset.shape, hue: mark.dataset.hue,
             unread: row.hasAttribute('data-unread'), deleting: item.classList.contains('is-deleting'),
-            active: row.classList.contains('active'), row: rect(row), label: rect(label),
+            pinned: item.hasAttribute('data-pinned'), active: row.classList.contains('active'), row: rect(row), label: rect(label),
             line1: rect(row.querySelector('.nav-project-line1')), line2: rect(row.querySelector('.nav-project-line2')),
             time: rect(row.querySelector('.nav-project-time')), slot: rect(row.querySelector('.nav-mark-slot')),
             solo: row.hasAttribute('data-solo'), rowFill: getComputedStyle(row).backgroundColor,
-            controls: [...item.querySelectorAll('.nav-project-pin, .nav-project-kebab')].some(control => {
-                const box = control.getBoundingClientRect(), ink = getComputedStyle(control);
-                return box.width > 0 && box.height > 0 && ink.opacity === '1' && ink.visibility !== 'hidden';
-            }),
+            // A resting pinned glyph coexists with the mark even when hit-testable on a fine pointer; row controls
+            // take the mark's rail only when ⋯ is drawn or Pin itself is visibly focused (or drawn on an unpinned row).
+            controls: (() => {
+                const shown = (el) => {
+                    if (!el) return false;
+                    const box = el.getBoundingClientRect(), ink = getComputedStyle(el);
+                    return box.width > 0 && box.height > 0 && ink.opacity === '1' && ink.visibility !== 'hidden';
+                };
+                const kebab = item.querySelector(':scope > .nav-project-kebab');
+                const pin = item.querySelector(':scope > .nav-project-pin');
+                return shown(kebab) || (shown(pin) && (!item.hasAttribute('data-pinned') || pin.matches(':focus-visible')));
+            })(),
             ellipsized: label.scrollWidth > label.clientWidth || label.scrollHeight > label.clientHeight, marker: rect(mark),
             drawn: style.display !== 'none' && style.visibility !== 'hidden', opacity: style.opacity,
             // Where each dot lies in the column: a moving dot's wave lifts and scales it for a moment, so its place
@@ -510,27 +518,29 @@ def assert_rail(page, rows, states):
 ])
 def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
     ui, page = subscription_ui, subscription_ui['page']
-    specs = [  # key, name, unread, deleting, census rows
-        ('wu', 'Working unread', True, False, [activity('wu', 'p-wu')]),
-        ('w', 'Working room', False, False, [activity('w', 'p-w')]),
-        ('wl', LONG_NAME, True, False, [activity('wl', 'p-wl', 'thinking')]),
-        ('qu', 'Queued unread', True, False, [activity('qu', 'p-qu', 'queued')]),
-        ('q', 'Paused room', False, False, [activity('q', 'p-q', 'budget_paused')]),
-        ('a', 'Waiting room', False, False, [model_wait('a', 'p-a')]),
-        ('iu', 'Idle unread', True, False, []),
-        ('i', 'Idle room', False, False, []),
-        ('dw', 'Deleting working', False, True, [activity('dw', 'p-dw')]),
-        ('d', 'Deleting room', False, True, []),
+    specs = [  # key, name, unread, deleting, pinned, census rows
+        ('wu', 'Working unread', True, False, False, [activity('wu', 'p-wu')]),
+        ('pw', 'Pinned working', True, False, True, [activity('pw', 'p-pw')]),
+        ('w', 'Working room', False, False, False, [activity('w', 'p-w')]),
+        ('wl', LONG_NAME, True, False, False, [activity('wl', 'p-wl', 'thinking')]),
+        ('qu', 'Queued unread', True, False, False, [activity('qu', 'p-qu', 'queued')]),
+        ('q', 'Paused room', False, False, False, [activity('q', 'p-q', 'budget_paused')]),
+        ('a', 'Waiting room', False, False, False, [model_wait('a', 'p-a')]),
+        ('iu', 'Idle unread', True, False, False, []),
+        ('i', 'Idle room', False, False, False, []),
+        ('dw', 'Deleting working', False, True, False, [activity('dw', 'p-dw')]),
+        ('d', 'Deleting room', False, True, False, []),
     ]
     projects = [dict(id='p-' + key, name=name, chat_id=42 + i, lifecycle='deleting' if deleting else 'active',
-                     visible_revision=4 if unread else 0)
-                for i, (key, name, unread, deleting, _) in enumerate(specs)]
+                     visible_revision=4 if unread else 0, pinned=pinned,
+                     **({'last_message_at': '2026-03-10T10:15:00Z'} if pinned else {}))
+                for i, (key, name, unread, deleting, pinned, _) in enumerate(specs)]
     initial = [row for spec in specs for row in spec[-1]] + [activity('main', phase='thinking')]
     mounted = mount_sidebar(ui, width, theme, reduced, projects, initial)
     refresh = mounted['refresh']
-    states = dict(wu=('moving', 'unread'), w=('moving', 'ink'), wl=('moving', 'unread'), qu=('still', 'unread'),
-                  q=('pause', 'ink'), a=('still', 'ink'), iu=('dot', 'unread'), i=('none', 'ink'),
-                  dw=('none', 'ink'), d=('none', 'ink'))
+    states = dict(wu=('moving', 'unread'), pw=('moving', 'unread'), w=('moving', 'ink'), wl=('moving', 'unread'),
+                  qu=('still', 'unread'), q=('pause', 'ink'), a=('still', 'ink'), iu=('dot', 'unread'),
+                  i=('none', 'ink'), dw=('none', 'ink'), d=('none', 'ink'))
     states = {'p-' + key: value for key, value in states.items()}
 
     def capture(suffix):
@@ -555,7 +565,9 @@ def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
 
     shaped('p-a', 'still')
     assert page.locator('[data-project-id="p-dw"]').get_attribute('title') == 'Deleting working — Deleting… · Working'
-    reference = assert_rail(page, rail_rows(page), states)
+    default_rows = rail_rows(page)
+    assert default_rows['p-pw']['pinned'] and not default_rows['p-pw']['controls'] and default_rows['p-pw']['drawn']
+    reference = assert_rail(page, default_rows, states)
     capture('default')
 
     # Hovering draws the controls over the end and the row's fill; the mark gives way but keeps its ink and slot.
