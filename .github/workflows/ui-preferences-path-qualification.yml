@@ -1,0 +1,31 @@
+name: UI preferences path qualification
+'on':
+  push:
+    branches: ['qa/unreadable-ui-preferences-windows']
+permissions:
+  contents: read
+jobs:
+  preferences:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-latest, interpreter: setup-python}
+          - {os: ubuntu-latest, interpreter: shipped}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: '531fae3f880d8136b8302b555255b97adcc32477'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: ${{ matrix.interpreter }}
+      - name: Read preferences on the native filesystem
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne '531fae3f880d8136b8302b555255b97adcc32477') { throw 'Unexpected product revision' }
+          $python = (Get-Command python).Source
+          & $python -I -S scripts/safe_test.py --timeout 420 -- $python -m pytest -n 0 -p no:cacheprovider -o 'addopts=' -vv --tb=short tests/test_ui_preferences_api.py
+          exit $LASTEXITCODE
