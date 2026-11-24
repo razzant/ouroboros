@@ -1,13 +1,15 @@
 """Source-only evidence for the actor-source store; not a Python interpreter.
 
 Follow the named writer/relay calls and just their naming arguments. The supported
-syntax is literal strings, f-strings/concatenation, single local bindings, literal
-alternatives and the enclosing literal loop (including a local module tuple). A
-relay's branch on its own parameter (``if part``, ``isinstance(payload, str)``)
+syntax is literal strings, f-strings/concatenation, single local bindings, direct
+string constants imported from a scanned module, literal ``PurePosixPath(...).name``,
+literal alternatives and the enclosing literal loop (including a local module tuple).
+A relay's branch on its own parameter (``if part``, ``isinstance(payload, str)``)
 is decided where a caller names it; an undecidable payload type leaves the
-extension opaque. Any other rebinding makes a name unknown. A new, opaque naming
-shape needs review; computed direct paths, dynamic dispatch and assignments
-through aliases are not promised coverage.
+extension opaque. Any other rebinding makes a name unknown, and so does importing
+or defining it again as another object; a call still follows its last import or
+definition. A new, opaque naming shape needs review; computed direct paths, dynamic
+dispatch and assignments through aliases are not promised coverage.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ import itertools
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from tests._persistence_rows import inventory_rows, lifetime
 
@@ -104,6 +106,8 @@ class Scope:
     fn: ast.FunctionDef | ast.AsyncFunctionDef | None = None
     cls: str = ""
     names: dict[str, str] = field(default_factory=dict)
+    unsettled: set[str] = field(default_factory=set)
+    modules: set[str] = field(default_factory=set)  # bound by a plain ``import``: a module, never a value
     assigned: dict[str, list[ast.expr | None]] = field(default_factory=dict)
     dict_edits: dict[str, set] = field(default_factory=dict)
     returns: list[ast.expr] = field(default_factory=list)
@@ -117,6 +121,20 @@ class Scope:
 
     def bind(self, name, value):
         self.assigned.setdefault(name, []).append(value)
+
+    def bind_name(self, name, target):
+        """An import, def or class: the last one is the callee; another target leaves the name unsettled."""
+        if self.names.get(name, target) != target:
+            self.unsettled.add(name)
+        self.names[name] = target
+
+    def settled(self, node):
+        """``node``'s first name is one imported or defined object in its scope: no other binding or ``*`` import."""
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        owner = self.defining(node.id) if isinstance(node, ast.Name) else None
+        return (owner is not None and node.id in owner.names and "*" not in owner.names
+                and node.id not in {*owner.assigned, *owner.parameters, *owner.unsettled})
 
     def defining(self, name):
         scope = self
@@ -197,14 +215,14 @@ class SourceScan:
                 self.visit(value, scope, loops)
             key = f"{cls or scope.key}.{node.name}"
             if not cls:
-                scope.names[node.name] = key
+                scope.bind_name(node.name, key)
             inner = self.scopes[key] = Scope(key, scope.module, scope, node, cls or scope.cls)
             for item in node.body:
                 self.visit(item, inner, loops)
             return
         if isinstance(node, ast.ClassDef):
             key = f"{scope.key}.{node.name}"
-            scope.names[node.name] = key
+            scope.bind_name(node.name, key)
             for item in node.body:
                 if isinstance(item, _FN):
                     self.visit(item, scope, loops, cls=key)
@@ -224,15 +242,20 @@ class SourceScan:
         if isinstance(node, ast.ImportFrom):
             prefix = scope.module.split(".")[:-node.level] if node.level else []
             module = ".".join([*prefix, *([node.module] if node.module else [])])
-            scope.names.update({a.asname or a.name: f"{module}.{a.name}" for a in node.names})
+            for a in node.names:
+                scope.bind_name(a.asname or a.name, f"{module}.{a.name}")
         if isinstance(node, ast.Import):
-            scope.names.update({a.asname or a.name.split(".")[0]: a.name if a.asname else a.name.split(".")[0]
-                                for a in node.names})
+            for a in node.names:
+                name = a.asname or a.name.split(".")[0]
+                scope.bind_name(name, a.name if a.asname else name)
+                scope.modules.add(name)
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
-                for name, value in _target_pairs(target, node.value).items():
-                    scope.bind(name, value)
+                pairs = _target_pairs(target, node.value)
+                for name in ast.walk(target):  # an unpaired name (``PREFIX, _ = pair``) is unknown
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                        scope.bind(name.id, pairs.get(name.id))
                 if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
                     key = target.slice.value if isinstance(target.slice, ast.Constant) else None
                     scope.dict_edits.setdefault(target.value.id, set()).add(key)
@@ -282,12 +305,30 @@ class SourceScan:
             owner = site.scope.defining(node.id)
             if owner is not None:
                 bindings = owner.assigned.get(node.id)
-                if bindings and len(bindings) == 1:
+                if bindings and len(bindings) == 1 and node.id not in owner.names:
                     # ``record_id = record_id or new_record_id()`` reads the
                     # earlier parameter, not the local being assigned.
                     return self.value(Site(owner, site.node, ()), bindings[0], {**local, node.id: None}, depth + 1)
                 if not bindings and node.id in owner.parameters and owner.key in _RELAYS | _VALUE_HELPERS:
                     return {f"\0{node.id}\0"}
+                if site.scope.settled(node) and node.id not in owner.modules:  # a ``from``-imported string constant
+                    module, _, attr = owner.names[node.id].rpartition(".")
+                    mod = self.scopes.get(module)
+                    if mod is not None and mod.parent is None and attr not in mod.names and "*" not in mod.names:
+                        assigned = mod.assigned.get(attr)
+                        if (assigned and len(assigned) == 1
+                                and isinstance(assigned[0], ast.Constant) and isinstance(assigned[0].value, str)):
+                            return {assigned[0].value}
+        if (isinstance(node, ast.Attribute) and node.attr == "name"
+                and isinstance(node.value, ast.Call) and len(node.value.args) == 1 and not node.value.keywords
+                and site.scope.callee(node.value.func) == "pathlib.PurePosixPath"
+                and site.scope.settled(node.value.func)):
+            parts = get(node.value.args[0])
+            if parts and all(v == _literal(v) for v in parts):
+                names = {PurePosixPath(v).name for v in parts}
+                if all(n not in {"", ".", ".."} for n in names):
+                    return names
+            return {_HOLE}
         if isinstance(node, ast.JoinedStr):
             return _concat(get(v) for v in node.values)
         if isinstance(node, ast.FormattedValue) and node.format_spec is None and node.conversion in (-1, ord("s")):

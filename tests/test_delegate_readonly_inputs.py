@@ -423,8 +423,10 @@ def test_a_selected_exported_file_reaches_the_helper_as_its_own_copy_and_delegat
     data = pathlib.Path(ctx.drive_root)
     exported = resource_root_path(ctx, "task_drive") / "export-for-the-helper.txt"
     exported.parent.mkdir(parents=True, exist_ok=True)
-    text = "Exported file: one neutral handoff line.\n"
-    exported.write_text(text, encoding="utf-8")
+    initial_bytes = b"Exported file: one neutral handoff line.\n"
+    exported.write_bytes(initial_bytes)
+    source_bytes = exported.read_bytes()
+    assert source_bytes == initial_bytes
     engine = _Reader()
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: engine)
     monkeypatch.setattr(safety, "check_safety", lambda *_a, **_k: (True, ""))
@@ -435,25 +437,29 @@ def test_a_selected_exported_file_reaches_the_helper_as_its_own_copy_and_delegat
         "input_files": [{"root": "task_drive", "path": str(exported)}],
     }))
     assert result["status"] == "started", result
-    digest = hashlib.sha256(exported.read_bytes()).hexdigest()
+    digest = hashlib.sha256(source_bytes).hexdigest()
     [receipt] = result["input_files"]
     assert receipt["status"] == "prepared" and receipt["source"] == str(exported)
-    assert receipt["sha256"] == digest and receipt["size"] == len(text.encode())
+    assert receipt["sha256"] == digest and receipt["size"] == len(source_bytes)
     assert "source_handles/delegated_readonly_inputs" in pathlib.Path(receipt["retained"]).as_posix(), receipt
-    assert pathlib.Path(receipt["retained"]).read_bytes() == text.encode(), "the retained copy holds this file"
+    assert pathlib.Path(receipt["retained"]).read_bytes() == source_bytes, "the retained copy holds this file"
 
     # The helper's first start reads exactly this one copy: the explicit selection replaced lineage staging.
     [view] = engine.views
     [row] = view["rows"]
     assert row["selected_path"] == str(exported) and row["source"] == str(exported)
     assert row["source_sha256"] == row["sha256"] == digest
+    assert row["source_size"] == row["size"] == len(source_bytes)
     copy = view["scope"] / row["local"]
     assert pathlib.Path(receipt["local"]) == copy, "the receipt names the same copy the helper reads"
-    assert view["bytes"][str(exported)] == text.encode() and copy.read_bytes() == text.encode()
+    assert view["bytes"][str(exported)] == source_bytes and copy.read_bytes() == source_bytes
     assert os.lstat(copy).st_ino != os.lstat(exported).st_ino, "the helper's own resource, not the live file"
+    updated_bytes = b"Exported file: later neutral handoff line.\n"
+    exported.write_bytes(updated_bytes)
+    assert copy.read_bytes() == source_bytes and pathlib.Path(receipt["retained"]).read_bytes() == source_bytes
     with copy.open("r+b") as handle:
         handle.write(b"helper-local")
-    assert exported.read_text(encoding="utf-8") == text, "the live source is untouched by the copy"
+    assert exported.read_bytes() == updated_bytes, "the live source is untouched by the copy"
 
     # A helper whose own project is a test-local id: the standard reader pages that project's synthetic rows;
     # the foreign fictional project is refused by the policy decision.
@@ -462,8 +468,7 @@ def test_a_selected_exported_file_reaches_the_helper_as_its_own_copy_and_delegat
 
     mine = project_journal_path("mine")
     mine.parent.mkdir(parents=True, exist_ok=True)
-    mine.write_text('{"ts": "2026-01-01T00:00:00Z", "kind": "note", "text": "synthetic helper row"}\n',
-                    encoding="utf-8")
+    mine.write_bytes(b'{"ts": "2026-01-01T00:00:00Z", "kind": "note", "text": "synthetic helper row"}\n')
     helper = ToolContext(repo_dir=ctx.repo_dir, drive_root=data)
     helper.task_id, helper.project_id = "h-journal", "mine"
     helper.task_metadata = {"parent_task_id": "t-payload", "delegation_role": "subagent",
