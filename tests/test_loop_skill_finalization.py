@@ -313,6 +313,10 @@ def test_finish_reports_an_unavailable_script_without_blocking_its_separate_mcp(
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "get_skills_repo_path", lambda: "")
+    # The gap under test is the absent script file, not this host's Node. Where the reviewed Node is not prepared (a
+    # fresh checkout, CI) the interpreter reason is long and the 300-character preview cuts the separate-MCP clause
+    # (disclosed by its omission note; the whole note stays at list_skills): that host fact is not asserted here.
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _runtime: ("/node", ""))
     folder = tmp_path / "skills" / "external" / "mixed"
     folder.mkdir(parents=True)
     (folder / "tool.js").write_text("// fixture, never started\n", encoding="utf-8")

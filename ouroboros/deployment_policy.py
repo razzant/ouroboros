@@ -33,8 +33,9 @@ may use, never a Settings slot, role option, wait-card switch or second-check ro
 which actor/outcome-specific Safety exits stay open (``SAFETY_EXITS``, ``safety_exit_open``); ``rules`` reach every
 acting mind, delegated session and Safety check as the organization's, beside the employee's own rules;
 ``extensions`` names installed extensions that must run, each by its canonical name, package directory and the
-digest the loader computes for its bytes, with the custom settings it fixes, and whether ordinary work holds
-or continues while one is not running (``deployment_extensions`` reads it; no default is assumed). ``trusted``
+digest the loader computes for its bytes, with the custom settings it fixes. ``extensions.when_unmet`` chooses
+whether ordinary work waits or continues with a warning while one is not ready, including when it cannot read a
+fixed setting (``deployment_extensions``; no default is assumed). ``trusted``
 exists only with ``execution``: the exact packages, named the same way, whose code the service imports, catalogs
 or launches, each where the work domain cannot write; every required package must be one of them.
 Each field constrains only what it names, except that a named checker also closes ``release_unjudged`` unless
@@ -97,7 +98,7 @@ REPEAT_AFTER_DANGEROUS, RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED = SAFETY_EXITS
     "repeat_after_dangerous", "release_after_dangerous", "release_unjudged")
 # A local checker answers from this model server: which weights, template and port.
 _LOCAL_IDENTITY_KEYS = ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CHAT_FORMAT", "LOCAL_MODEL_PORT")
-# What ordinary work does while a required extension is not running: wait for it, or go on with the gap shown.
+# When a required extension is not ready, ordinary work waits or continues with a warning.
 WHEN_UNMET = ("hold", "warn")
 MAX_REQUIRED_EXTENSIONS = 16
 MAX_TRUSTED_EXTENSIONS = 64  # the bundled built-ins and an organization's own, with room
@@ -276,8 +277,9 @@ def _extensions_section(value: Any, execution: Any) -> tuple[str, tuple, tuple]:
         raise DeploymentPolicyError(f"extensions.trusted must be a list of at most {MAX_TRUSTED_EXTENSIONS} extensions")
     when_unmet = _choice(section, "when_unmet", "extensions.when_unmet", WHEN_UNMET)
     if rows and not when_unmet:
-        raise DeploymentPolicyError("extensions.when_unmet must say whether ordinary work holds or warns while a "
-                                    "required extension is not running: one of hold, warn")
+        raise DeploymentPolicyError("extensions.when_unmet must say whether ordinary work waits or continues with "
+                                    "a warning when a required extension is not ready, including when it cannot "
+                                    "read a fixed setting: one of hold, warn")
     required, names, paths, keys = [], set(), set(), set()
     for index, item in enumerate(rows):
         where = f"extensions.required[{index}]"

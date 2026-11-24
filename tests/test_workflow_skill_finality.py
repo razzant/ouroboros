@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 import pytest
 
@@ -114,7 +115,7 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
     assert json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))["exit_code"] == 0
 
 
-def test_exec_schema_states_the_author_path_its_gate_permits(subject, monkeypatch):
+def test_exec_schema_states_the_author_path_its_gate_permits(subject):
     """skill_exec's description is the gate it obeys: outside Cyber Pro a qualified
     author acceptance runs the current bytes while the reviewer status is still
     pending, and enablement, grants and dependencies stay separate conditions."""
@@ -124,11 +125,15 @@ def test_exec_schema_states_the_author_path_its_gate_permits(subject, monkeypatc
     gate = loaded.review.gate_for(loaded.content_hash)
     assert (loaded.review.status, gate["executable_review"], gate["blocking_reason"]) == (
         "pending", True, "author_accepted_advisory")
-    description = skill_exec._EXEC_SCHEMA["description"]
-    assert "fresh executable review verdict" not in description
-    assert "qualified author acceptance" in description and "still be pending" in description
-    assert "Advisory" not in description and "Blocking" not in description
-    assert all(term in description for term in ("must be enabled", "grants", "dependencies", "Cyber Pro"))
+    assert skill_exec._EXEC_SCHEMA["name"] == "skill_exec"
+    description = " ".join(re.sub(r"[`*]|(?<!\w)_+|_+(?!\w)", "", skill_exec._EXEC_SCHEMA["description"]).casefold().split())
+    assert all(concept in description for concept in ("enabled", "grants", "dependencies", "cyber pro"))
+    assert re.search(
+        r"\breview_gate must permit\b[^.;()]*\bor (?:a )?qualified author acceptance"
+        r" of (?:these |the )?exact bytes\s*\(\s*(?:the )?review(?:er)? status may"
+        r"(?: then)?(?: still)? be pending(?: or stale)?\s*\)", description,
+    )
+    assert "review_enforcement" not in description
     save_enabled(ctx.drive_root, "demo", True)
     result = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
     assert result["exit_code"] == 0
