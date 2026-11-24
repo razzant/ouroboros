@@ -55,9 +55,9 @@ def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
 # instructions in the delivered lead, not the placement or exact wording of the old paragraph.
 _SCHEDULE_PRECALL = (
     "no commits, tool self-grants or identity/scratchpad",
-    "Cyber children inherit review/skill/runtime tools within limits; nesting capped",
+    "Cyber children inherit review/skill/runtime tools, bounded",
     "Same-round starts run concurrently",
-    "Priced cache writes: full prefix write per start before first reply",
+    "Cold parallel starts may cost a full prefix write if priced, either input",
     "Native children message any task in their tree",
     "name interim reports, recipients and when to stop",
     "Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work may repeat",
@@ -240,6 +240,9 @@ _SCHEDULE_REMOVALS_IN_SYSTEM = (
     "`start_task` begins only separate new work",
     "without candidate write authority its changes remain evidence and create no apply duty",
     "I verify the files and its recorded verdict instead of re-applying its patch",
+    # The lead's "nesting capped" and "Runtime data is never a write_surface" paid for its input_sources choice.
+    "Depth bounds how DEEP delegation goes",
+    "Runtime `data/` is never a `write_surface`",
 )
 
 
@@ -266,7 +269,7 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
             for condition in (*_SCHEDULE_PRECALL, "write_root, else workspace_root, else new Git tree",
                               "Default native READ-ONLY", "no other writes or shell/review/runtime/skills",
                               "ACTING write_surface: self_worktree",
-                              "Runtime data is never a write_surface",
+                              "Omit input_sources: normally shares room context, inherits declared; declared: deliberate blind starts only",
                               "access='readonly' forces read-only", "private evidence-only copies"):
                 assert condition in custom, condition
             system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")

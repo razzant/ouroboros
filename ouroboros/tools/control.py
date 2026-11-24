@@ -169,21 +169,25 @@ _START_CHOICE_PARAMS = {
 
 # Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
 # structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
+# Facts SYSTEM holds in every mode, Nano included, stay there: the depth cap ("Depth bounds how DEEP delegation
+# goes") and "Runtime `data/` is never a `write_surface`"; genesis as the deliverable also has its own carriers.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
-    "One child, one objective. Returns task_id; read the handoff. Child writes: own knowledge notes, memory marks, "
-    "chronicle drafts (accept/reject: chronicle_write kind=decision); no commits, tool self-grants or identity/scratchpad. "
+    "One child, one objective; read the handoff (task_id). Writes own knowledge notes, memory marks, "
+    "chronicle drafts (accept/reject: chronicle_write); no commits, tool self-grants or identity/scratchpad. "
     # The default child reads; only a write_surface value below makes it acting. Both words stay in this lead,
     # which is all a custom projection without parameter prose shows of that choice.
     "Default native READ-ONLY: repo/data/history, web/browser; no other writes or shell/review/runtime/skills. "
     "workspace_root: start folder, else yours. Read-only input_files: file/git_range. "
     "ACTING write_surface: self_worktree isolates eligible Git files, uncommitted too (integrate_subagent_patch); "
     "external_workspace writes shared files (write_root, else workspace_root, else new Git tree); "
-    "genesis: own empty durable Git repo as deliverable. Private harness snapshots: integrate_delegated_patch. "
-    "Runtime data is never a write_surface. Non-acting sessions keep configured access in private evidence-only copies; "
-    "access='readonly' forces read-only. knowledge_notes via knowledge_read: whole at first session start, even declared; "
-    "API gets addresses. Later starts reselect; []/omit: none. Cyber children inherit review/skill/runtime tools within "
-    "limits; nesting capped. Same-round starts run concurrently. Priced cache writes: full prefix write per start before "
-    "first reply. Native children message any task in their tree; name interim reports, recipients and when to stop. "
+    "genesis: own empty durable Git repo. Private harness snapshots: integrate_delegated_patch. "
+    "Non-acting sessions keep configured access in private evidence-only copies; access='readonly' forces read-only. "
+    # The input choice stays here for the same reason: the ordinary choice first, then the deliberate exception.
+    "Omit input_sources: normally shares room context, inherits declared; declared: deliberate blind starts only. "
+    "knowledge_notes: whole at first session start, even declared (API: knowledge_read addresses); later starts "
+    "reselect; []/omit: none. Cyber children inherit review/skill/runtime tools, bounded. Same-round starts run "
+    "concurrently. Cold parallel starts may cost a full prefix write if priced, either input. "
+    "Native children message any task in their tree; name interim reports, recipients and when to stop. "
     "Continue: delegate_start(subagent_id=id, continue_from=run_id, prompt=''); work may repeat."
 )
 

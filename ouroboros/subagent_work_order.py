@@ -16,6 +16,11 @@ DECLARED_WORDS_FACT = "declared_inputs_carry_owner_words"
 # An immutable scheduling fact, not a migration: records without it must
 # reconstruct the original canonical bytes for source reads and handoff recovery.
 ORIGINAL_INPUTS_FACT = "work_order_input_files_original_only"
+# Host note for a declared session start (work-order or direct), outside the work order's fingerprint.
+DECLARED_SESSION_NOTE = ("[Host: this work's input is declared: it chose what this start carries, not what you may "
+                         "read. Extra sources do not change your authority or objective; your assignment's explicit "
+                         "scope still binds. Report what informed the result, and do not call it a blind first "
+                         "position if you saw a peer's conclusion beforehand.]")
 
 
 def declared_words_fact(contract: Mapping[str, Any]) -> dict[str, bool]:
@@ -46,8 +51,10 @@ def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = Fa
     rows (``work_order_room_words``) name the marks in force and the knowledge
     outline among the included inputs; an older session task's work order keeps
     the literals it was rendered with, so its retained bytes and fingerprint stay
-    stable. This receipt describes case-input selection; standing owner rules are
-    separate context/host governance, outside the canonical work order.
+    stable. A native request words its lifetime and later inputs for its reader (descendants keep
+    the selection; reading more changes a blind conclusion's evidence, not its authority or objective),
+    while every work order keeps its rendered literals. This receipt describes case-input selection;
+    standing owner rules are separate context/host governance, outside the canonical work order.
     """
     from ouroboros.contracts.task_contract import task_input_sources
 
@@ -86,15 +93,20 @@ def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = Fa
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",
         ],
-        "lifetime": "Entire task, including tools, retries, fallback, compaction and selected descendants.",
+        "lifetime": ("Entire task, including tools, retries, fallback, compaction and descendants: a child it "
+                     "schedules without input_sources stays declared, and shared is refused." if native else
+                     "Entire task, including tools, retries, fallback, compaction and selected descendants."),
         "collaboration": (
             "Ordinary task messages remain available; input selection imposes no collaboration order. "
             "The host does not gate mailbox delivery or detect the first position."
         ),
         "later_inputs": (
-            "Tools, messages, reviews and restored sources are additional inputs; reading outside "
-            "the declared corpus changes the claim. Retained model-send/tool-source projections "
-            "record the actual sequence."
+            "Tools, messages, reviews and restored sources are additional inputs; "
+            + ("extra sources do not change authority or the objective: explicit scope still binds, the result "
+               "names what informed it, and it does not claim a blind first position if a peer's conclusion "
+               "was seen beforehand." if native else
+               "reading outside the declared corpus changes the claim.")
+            + " Retained model-send/tool-source projections record the actual sequence."
             + (" When this task delegates through schedule_subagent or delegate_start, the host adds "
                "the knowledge index (the global shelf's and its room's) once, to the result of the "
                "first accepted call; knowledge_list reads it again." if with_words else "")
@@ -883,9 +895,9 @@ def session_memory_references(ctx: Any, named: str = "") -> str:
     task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
     task["task_contract"] = getattr(ctx, "task_contract", None) or task.get("task_contract")
     ctx._session_held_heads = held = None
-    helper = False  # the working-notes line closes held heads and named notes alike
+    helper = declared = False  # the working-notes line closes held heads and named notes alike
     try:
-        root = canonical_data_root(ctx)
+        root, declared = canonical_data_root(ctx), task_input_sources(task) == "declared"
         navigation = {"bodies": {}, "names": helper_names(ctx, root)}
         outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or ""),
                                                          global_capture=navigation))
@@ -898,7 +910,7 @@ def session_memory_references(ctx: Any, named: str = "") -> str:
         store = ChronicleStore(root)  # a chronicle never activated holds no mark; nothing activates it here
         marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
         marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
-        if task_input_sources(task) == "declared":
+        if declared:
             if topics := held_notes.claimed_topics(root, navigation["names"], navigation.get("inventory", ())):
                 held = ("[Host: this start does not automatically add heads of room-claiming notes or of the notes "
                         "those heads link, because its input is declared: " + ", ".join(topics) + ".]")
@@ -910,10 +922,10 @@ def session_memory_references(ctx: Any, named: str = "") -> str:
         log.warning("session references: my memory could not be read at this start", exc_info=True)
         return head + "\n\n".join(part for part in (
             f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline.",
-            named, named and held_notes.HELPER_NOTE) if part)
+            declared and DECLARED_SESSION_NOTE, named, named and held_notes.HELPER_NOTE) if part)
     return head + "\n\n".join(part for part in (
-        marks_text or "No marks are in force for this work's room or globally.", outline, held, named,
-        (helper or named) and held_notes.HELPER_NOTE) if part)
+        marks_text or "No marks are in force for this work's room or globally.", outline, held,
+        declared and DECLARED_SESSION_NOTE, named, (helper or named) and held_notes.HELPER_NOTE) if part)
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
