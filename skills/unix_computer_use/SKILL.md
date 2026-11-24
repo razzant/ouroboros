@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.9.0
+version: 0.9.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -213,8 +213,42 @@ cut off by the helper's timeout (`helper_stopped`) leaves the action's receipt
 as it was: the top-level outcome is always the action's. A helper stopped
 before that line, with or without `observe`, leaves no receipt: the outcome is
 unknown (the action may have run), as below. A call carries one
-action at most. Several independent calls in one response are admitted one by
-one; a step that depends on an earlier step's outcome belongs to the next round.
+action at most.
+
+Ordinary desktop tool calls in one response start one at a time in written
+order: each starts after the previous call answered or the host stopped waiting
+for it (`TOOL_TIMEOUT`). That orders dispatch, not effects: an input left
+unknown (an `unknown` receipt, no helper answer, a call still running after
+`TOOL_TIMEOUT`) may take effect during or after the next call. When the target
+and arguments are already known, group a chosen action and the read of its
+result in that response instead of spending a model round merely to request
+the read. A **decision** that needs that result belongs to the next round; do
+not guess a newly appearing target or stack further inputs whose permission
+depends on an earlier result. Do not put dependent calls in an explicitly
+parallel batch (a wrapper some clients offer).
+
+For a known semantic target, `element_act(observe=true, until_text=...)` acts
+once and waits on the window it acted in, in one helper. After ordinary `key`,
+`click` or `type_text`, follow with `ax_tree(app=..., window=...,
+until_text=..., timeout_ms=...)` in the same response when the window is
+already known. On local macOS the read selects its window when it starts. To
+read the same window after input, pass the integer `window_id` from `window_list`.
+AX treats a digit-only string as an ID too: for a window titled `"42"`, pass
+its listed ID, not its title. Other titles are looked up again and must match
+exactly one window at read time. Without `window`, the read takes the app's
+focused window (else main, else first), so an inspector that came forward can
+satisfy `until_text` instead of the intended document. Choose text specific to the result,
+not the search query already echoed in a field: an echo or a nonempty tree is
+not readiness.
+If no useful text predicate is known, a short bounded `wait(ms=...)` then
+`ax_tree` or `screenshot` in that response is available; inspect that result
+before choosing more input. Waiting alone does not prove the app finished.
+
+Each call keeps its own receipt: the grouping is not a transaction, and the
+following read is not conditional on the action's success. A read describes its
+window, not the earlier input: a match does not make an `unknown` action
+completed, nor does `not_observed` make it unsent. Check **all** the receipts
+before continuing; never blindly repeat an uncertain input.
 
 With `observe=true`, `until_text="expected text"` polls only that observation;
 the action, target selection and AX exposure are each done once. The checkpoint
