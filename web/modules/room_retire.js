@@ -268,10 +268,12 @@ export function roomSocket(ws) {
         isConnected: () => !paused && ws.isConnected?.() !== false,
         serverAnswersWhileDown: () => !paused && ws.serverAnswersWhileDown?.() === true,
         previouslyConnected: () => ws.previouslyConnected?.() === true,  // the page's history, never paused
-        // The page's profile proof, never paused: without this the per-room gates in chat.js
-        // (history paint, live frames, reads) read false through the room's own socket view (#3294).
+        // The page's profile proofs, never paused: without them the per-room gates in chat.js
+        // (history paint, live frames, reads, the saved text preview) read false through the room's own socket view
+        // (#3294; the preview's gate went dark when only the page socket learned it, #4149).
         foreignProfile: () => ws.foreignProfile?.() === true,
         servingProfileScope: () => ws.servingProfileScope?.() || '',
+        canShowSavedProfile: () => ws.canShowSavedProfile?.() === true,
         on(event, fn) {
             const sub = { event, fn, off: null };
             subscriptions.add(sub);

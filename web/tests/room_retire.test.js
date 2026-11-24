@@ -413,3 +413,40 @@ test('settling waits out each catch-up read a reconnect begins meanwhile, and st
     await new Promise(setImmediate);
     assert.equal(stopped, true, 'a read still out keeps no one waiting who left');
 });
+
+test("a room's socket view carries the page's profile proofs, the saved-preview permission included, also while away", () => {
+    let canShow = true, foreign = false;
+    const ws = {
+        on: () => () => {}, isConnected: () => true, send: () => ({ status: 'sent' }), ws: { readyState: 1 },
+        canShowSavedProfile: () => canShow, foreignProfile: () => foreign, servingProfileScope: () => 'scope-1',
+    };
+    const socket = roomSocket(ws);
+    assert.equal(socket.canShowSavedProfile(), true, 'the page socket may paint the saved preview: so may the room');
+    assert.equal(socket.foreignProfile(), false);
+    assert.equal(socket.servingProfileScope(), 'scope-1');
+    socket.pause();
+    assert.equal(socket.canShowSavedProfile(), true, "away, the proof is the page's and is not paused");
+    canShow = false;  // e.g. a disconnect the current socket has not yet re-proven, the profile still the same
+    assert.equal(socket.canShowSavedProfile(), false, 'a page socket that may not paint keeps the room from painting');
+    assert.equal(socket.foreignProfile(), false, 'the two proofs are independent');
+    socket.resume();
+    assert.equal(socket.canShowSavedProfile(), false, 'back, the same room still follows the page socket');
+    canShow = true;
+    assert.equal(socket.canShowSavedProfile(), true, 'and paints again once the page socket permits it');
+    foreign = true;
+    assert.equal(socket.foreignProfile(), true);
+    assert.equal(roomSocket({ on: () => () => {} }).canShowSavedProfile(), false, 'a socket without the proof permits nothing');
+});
+
+test("a room's socket view offers every public method of the page socket that a room may call", async () => {
+    // An optional call (`ws?.name?.()`) reads a missing method as a quiet false, so a forward forgotten in roomSocket()
+    // turns a room's gate off with no error (the saved preview went dark that way after #4149). The view therefore offers
+    // every public method of the page socket except those only the page itself uses.
+    const { WS } = await import('../modules/ws.js');
+    const pageOnly = new Set(['constructor', 'connect', 'emit']);
+    const expected = Object.getOwnPropertyNames(WS.prototype).filter((name) => !name.startsWith('_') && !pageOnly.has(name));
+    assert.ok(expected.includes('canShowSavedProfile') && expected.includes('send'), "the page socket's public methods are read");
+    const view = roomSocket({ on: () => () => {} });
+    const missing = expected.filter((name) => typeof view[name] !== 'function');
+    assert.deepEqual(missing, [], `roomSocket() lacks ${missing.join(', ')}`);
+});
