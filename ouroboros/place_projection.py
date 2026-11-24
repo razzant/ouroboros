@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 from ouroboros.places import (AUTHOR_OWNER, STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place,
-                              place_records, place_summary, note_identity, migration_problems)
+                              is_wake_signal, place_records, place_summary, note_identity, migration_problems)
+from ouroboros.places_migration import declared_wake_facts, matching_declarations, merged_declared_facts, wake_review
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +17,9 @@ def place_declarations(root) -> list[dict]:
     from ouroboros.icon_geometry import icon_spec
     rows = live_place_declarations()
     for row in rows:
-        row["readiness"] = {"text": "Connector on", "tone": "ok"}
+        # ``published``: the declarations a wake save reads (``places.declared_fact_labels``). The rows added below are
+        # only installed: a save refuses a new signal of theirs until their connector is on (``unpublished_signals``).
+        row.update(readiness={"text": "Connector on", "tone": "ok"}, published=True)
     published = {row["skill"] for row in rows}
     for skill in discover_skills(root):
         if skill.name in published or skill.load_error or skill.identity_collision:
@@ -41,6 +44,15 @@ def place_declarations(root) -> list[dict]:
             rows.append(project_place_status({**row, "skill": skill.name, "readiness": readiness,
                          "icon_spec": icon_spec(row.get("icon", ""), source)}))
     return rows
+
+
+def unpublished_signals(declarations, offered) -> list[str]:
+    """The ``offered`` signals a wake save refuses now: it adds a new signal only when a published declaration of the
+    place labels it (``places.declared_fact_labels``), so the signals an installed connector declares wait until it is
+    on. Core kinds are never held, and a saved signal stays removable whatever this says."""
+    from ouroboros.extension_contributions import place_fact_labels
+    accepted = place_fact_labels([row for row in declarations if row.get("published")])
+    return [fact for fact in dict.fromkeys(offered) if is_wake_signal(fact) and fact not in accepted]
 
 
 def connect_declared_place(root, connector: str, *, account_id: str = "", conversation_id: str = "", label: str = "",
@@ -94,7 +106,7 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     from ouroboros.route_choice import following_route
     if allowance is None and not brief:
         allowance = allowance_window(root, allow_stale=True)
-    records = place_records(root) if records is None else records
+    records = place_records(root, persist_import=False) if records is None else records
     result = dict(place_summary(place))
     # Legacy notes predate ids; use stable content+ordinal ids without rewriting history.
     result["notes"] = [{**n, "note_id": note_identity(place.place_id, i, place.notes[i])}
@@ -133,16 +145,28 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                   last_activity_at=own["last_activity_at"],
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
-    row = next((r for r in rows if r["skill"] == place.connector and (
-        not place.contribution_id or r["id"] == place.contribution_id)), {})
+    matches = matching_declarations(place, rows)
+    row = matches[0] if matches else {}
+    suggestions = declared_wake_facts(matches) if place.legacy_binding_ids else list(row.get("wakes") or [])
     result.update(label=said_once(place.label or row.get("label") or place.provider),
                   reply_destination=place.destination,
                   destination=row.get("destination") or "vendor:" + place.provider,
-                  icon=row.get("icon_spec") or {}, wake_suggestions=list(row.get("wakes") or []),
+                  icon=row.get("icon_spec") or {}, wake_suggestions=suggestions,
                   readiness=row.get("readiness") or {"text": "Connector unavailable", "tone": "warn"})
+    review = wake_review(records, place, result["wake_suggestions"])
+    if review:
+        result["wake_review"] = review
+    from ouroboros.extension_contributions import place_fact_labels
     from ouroboros.safety_config import get_safety_mode
-    result.update(safety_mode=get_safety_mode("consciousness"), labels=row.get("labels") or {})
-    result.update({key: row[key] for key in ("facts", "source", "settings") if key in row})
+    # The vocabulary combines all matching declarations; the status and settings doors belong to the first one.
+    facts = merged_declared_facts(matches)
+    result.update(safety_mode=get_safety_mode("consciousness"), labels=place_fact_labels(matches))
+    if facts is not None:
+        result["facts"] = facts
+    offered = [item.get("id") if isinstance(item, dict) else item for item in facts or ()]
+    if waiting := unpublished_signals(matches, [*offered, *suggestions]):
+        result["unpublished_signals"] = waiting
+    result.update({key: row[key] for key in ("source", "settings") if key in row})
     result["account_candidates"] = own["account_candidates"]
     # Accounts another place of this bot or app confirms count here too (``places.counted_owner_accounts``): named
     # with where they were confirmed, removed there.
@@ -162,14 +186,14 @@ def circle_summary(circle) -> dict[str, Any]:
 
 def places_view(root) -> dict:
     declarations = place_declarations(root)
-    records = place_records(root)
+    records = place_records(root, persist_import=False)
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import place_facts
     allowance = allowance_window(root, allow_stale=True) or {}
     switch = switch_state(root)
     facts = place_facts(root, records.places.values())
     from ouroboros.consciousness_view import connect_note
-    return {"migration_problems": migration_problems(root), "connect_note": connect_note(switch),
+    return {"migration_problems": migration_problems(root, records), "connect_note": connect_note(switch),
             "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records,
                                   facts=facts, switch=switch) for p in records.places.values()],
             "circles": [circle_summary(circle) for circle in records.circles],
@@ -177,6 +201,7 @@ def places_view(root) -> dict:
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],
                             "readiness": r.get("readiness") or {"text": "Connector unavailable", "tone": "warn"},
                             **{key: r[key] for key in ("facts", "source", "settings", "labels") if key in r},
-                            "wakes": r.get("wakes") or [], "connected": any(p.connector == r["skill"] for p in records.places.values())}
+                            "wakes": r.get("wakes") or [],
+                            "connected": any(matching_declarations(p, (r,)) for p in records.places.values())}
                            for r in declarations]}
 

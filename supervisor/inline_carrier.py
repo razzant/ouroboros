@@ -31,6 +31,7 @@ import pathlib
 import threading
 import time
 from collections import deque
+from itertools import count
 from types import SimpleNamespace
 from typing import Any, Callable, Deque, Dict, Optional
 
@@ -49,6 +50,10 @@ INLINE_KEPT = 50  # the disclosed executions this process remembers for the vita
 _INLINE: Deque[Dict[str, Any]] = deque(maxlen=INLINE_KEPT)
 _INLINE_LOCK = threading.Lock()
 _DEGRADED_TOTAL = [0]
+# Boot owns the nonnegative pool addresses (#3149). A Presence thread may still be unwinding
+# when a new pool takes slot zero or the same source event is retried, so its pseudo-slot
+# takes a negative wid no pool start can ever claim.
+_HOST_SLOT_IDS = count(-2, -1)  # -1 already denotes a row without a worker
 
 
 def _pool():
@@ -213,7 +218,12 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     task["_execution_owner"] = owner
     from supervisor.conversation_lane import armed
 
-    wid = max(pool.WORKERS, default=-1) + 1
+    presence = bool(task.get("_presence_run"))
+    # #3149: a Presence body on a host thread takes a NEGATIVE pseudo-slot id, never an
+    # address the pool could own; a degraded direct-chat/call executor keeps the base
+    # on-demand nonnegative id (clamped at 0), so the spawn guard and the boot stop can
+    # tell the two apart by wid alone.
+    wid = next(_HOST_SLOT_IDS) if presence else max(0, max(pool.WORKERS, default=-1) + 1)
     in_q: Any = stdqueue.Queue()
     if armed():
         out_q = pool.get_event_q()
@@ -227,7 +237,6 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
             out_q = _UnarmedFrames(pool.get_event_q())  # a test's event-queue stub takes no create kwarg
         except RuntimeError:
             out_q = _UnarmedFrames(None)
-    presence = bool(task.get("_presence_run"))
     if agent is None:
         # A Presence body is its own runner (``presence_carrier.carry_presence_turn`` builds the actor):
         # the pseudo-slot needs only the owner-wait seam, never a fresh native agent.

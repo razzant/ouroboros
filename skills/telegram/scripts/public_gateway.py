@@ -33,6 +33,10 @@ class _PublicProbeError(RuntimeError):
     pass
 
 
+class _PublicHostAbsentError(_PublicProbeError):
+    """The public resolver returned NXDOMAIN for the queried name itself."""
+
+
 class PublicGatewayError(RuntimeError):
     pass
 
@@ -48,6 +52,7 @@ def require_running(stop_event: asyncio.Event) -> None:
 class PublicProbeOutcome(enum.Enum):
     READY = "ready"
     UNHEALTHY_RESPONSE = "unhealthy_response"
+    HOST_ABSENT = "host_absent"
     OBSERVER_UNAVAILABLE = "observer_unavailable"
     TUNNEL_EXITED = "tunnel_exited"
 
@@ -158,10 +163,6 @@ async def _probe_gateway_normally(
         return await _gateway_response_ready(response)
 
 
-def _normalise_dns_name(value: Any) -> str:
-    return str(value or "").strip().lower().rstrip(".")
-
-
 def _is_public_unicast_ipv4(address: ipaddress.IPv4Address) -> bool:
     return address.is_global and not (
         address.is_multicast
@@ -183,22 +184,30 @@ def _parse_doh_ipv4_response(raw: bytes, host: str) -> tuple[str, ...]:
     if not isinstance(payload, dict):
         raise _PublicProbeError("Cloudflare DNS response had an unexpected shape.")
     status = payload.get("Status")
-    if type(status) is not int or status != 0 or payload.get("TC") is not False:
-        raise _PublicProbeError("Cloudflare DNS did not return a complete successful answer.")
+    if type(status) is not int or status not in (0, 3) or payload.get("TC") is not False:
+        raise _PublicProbeError("Cloudflare DNS did not return a complete address or name-error response.")
     questions = payload.get("Question")
-    if not isinstance(questions, list) or len(questions) != 1:
+    if not isinstance(questions, list) or len(questions) != 1 or not isinstance(questions[0], dict):
         raise _PublicProbeError("Cloudflare DNS response did not bind one question.")
     question = questions[0]
+    name = question.get("name")
+    qtype = question.get("type")
+    qclass = question.get("class", 1)  # Cloudflare's DNS JSON omits the implicit Internet class.
     if (
-        not isinstance(question, dict)
-        or type(question.get("type")) is not int
-        or question.get("type") != 1
-        or _normalise_dns_name(question.get("name")) != host
+        not isinstance(name, str) or not name.isascii() or name.lower().removesuffix(".") != host
+        or type(qtype) is not int or qtype != 1
+        or type(qclass) is not int or qclass != 1
     ):
-        raise _PublicProbeError("Cloudflare DNS response did not match the tunnel hostname.")
-    answers = payload.get("Answer")
+        raise _PublicProbeError("Cloudflare DNS response did not match the tunnel's IN A question.")
+    answers = payload.get("Answer", [])
     if not isinstance(answers, list) or len(answers) > _MAX_DOH_ANSWERS:
         raise _PublicProbeError("Cloudflare DNS response had an invalid answer set.")
+    if status == 3:
+        # A CNAME can exist while its target is absent. Authority records (e.g. SOA)
+        # accompany ordinary negative answers and do not assert that the host exists.
+        if answers:
+            raise _PublicProbeError("NXDOMAIN with answer records did not establish absence of the queried name.")
+        raise _PublicHostAbsentError("Cloudflare DNS returned NXDOMAIN for the tunnel hostname.")
     addresses: list[str] = []
     for answer in answers:
         if (
@@ -328,6 +337,8 @@ async def probe_public_gateway_once(
             stop_event=stop_event,
             timeout_sec=timeout_sec,
         )
+    except _PublicHostAbsentError:
+        return PublicProbeOutcome.HOST_ABSENT
     except (httpx.HTTPError, asyncio.TimeoutError, OSError, _PublicProbeError):
         return PublicProbeOutcome.OBSERVER_UNAVAILABLE
     saw_response = False

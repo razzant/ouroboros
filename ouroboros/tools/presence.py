@@ -37,7 +37,7 @@ def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **par
         if action == "list":
             result = places_view(root)
         elif action == "inspect":
-            records = places.place_records(root)
+            records = places.place_records(root, persist_import=False)
             circle_id = "" if place_id else params.get("circle_id", "")
             try:
                 previous = earlier(root, place_id, circle_id=circle_id)
