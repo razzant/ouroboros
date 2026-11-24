@@ -1,0 +1,220 @@
+{
+  "format": 1,
+  "subjects": {
+    "candidate": {
+      "commit": "ba3e0221eb0291b11060e5ca8997cd2a035b1071",
+      "tree": "3d7ad0eb622074a646ea8a026dcbf8d1898fffc2"
+    },
+    "base": {
+      "commit": "edf3d13e34ffd48331a2be138990c10db4215471",
+      "tree": "d6025c72861bab29dc03c9e5849dd6fae5f491cf"
+    },
+    "old": {
+      "commit": "e758a2190298d9890b1f26e632f63775d0b33d55",
+      "tree": "12bde15df792cff8f89edd522cca644509d7fbb2"
+    }
+  },
+  "history": [
+    {
+      "commit": "7f71fe8d29c975e25b35a235e1c821e1b547674f",
+      "tree": "3161679aaa4330e104499f65d5ce92e3b06f7892",
+      "paths": {
+        "skills/telegram": "873fc90c988a065e061fb7357f96a1909f55dc68"
+      }
+    },
+    {
+      "commit": "6014e8896dabe371f5c06cf8adc5dc9902f53c2d",
+      "tree": "18a2a567b46c229c66f34837c2a3708750b1f4bc",
+      "paths": {
+        "skills/telegram": "d04e6e9fd0ad10e5d7121d5344210f4bdc8b0b3e"
+      }
+    },
+    {
+      "commit": "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76",
+      "tree": "651cbeeca923f81997f4a07f16d60b15eb5167a9",
+      "paths": {
+        "skills/telegram": "ffef8a54afe06feb104fec970ed5d4bf61ddbbb6"
+      }
+    },
+    {
+      "commit": "25cb4131511df8eded3d9762e23173ce9dcb8853",
+      "tree": "bee3bb004fc27ee9f54ce6bf1fa82e56e47c4835",
+      "paths": {
+        "skills/telegram": "a19c14e657fc4bbe72349eae91fa0625226fd7da"
+      }
+    },
+    {
+      "commit": "d51b09bd61944f2e4d000f2fcce5e9a890f209fc",
+      "tree": "30da335abbac330f199bbce3a829f1a27ad7c303",
+      "paths": {
+        "skills/live_conversation": "92c02e288da7be8cbdaa9a4a9c60f54e83136461",
+        "skills/gemini_live": "9ccd05b02d56fc83b41544e3e5acc30e6480882a",
+        "skills/grok_realtime": "072042f2c5c26d1995d3064cae2ec165058ad342",
+        "skills/openai_realtime": "51ef25c26677b21261fa5e81768592e96b2df1ea"
+      }
+    },
+    {
+      "commit": "96816f12257276d273d1dadeda3300ec6e6739a5",
+      "tree": "f92971ff3abb10ce77818850b9b53c17195b21ca",
+      "paths": {
+        "skills/live_conversation": "b7c3e8f7c1382aa0283f3e07f6c7ae919cfc639a"
+      }
+    },
+    {
+      "commit": "cf6f95cf420791fcff08af1943cae40731c28e7e",
+      "tree": "a5906ebda7d5ac4d53e47a3913087f0dc16cc0b7",
+      "paths": {
+        "skills/live_conversation": "b2efeacc1f7fd526c781a8a8f7d7828f1a1fee1b"
+      }
+    },
+    {
+      "commit": "085f41abafcee74a61c60e79824025e7e5d3a4e1",
+      "tree": "e6f8fc0faa5131e6b71c2b63638ee80fd21389f9",
+      "paths": {
+        "skills/live_conversation": "22da8004e035163bc715062d4c31f654d29fef33"
+      }
+    },
+    {
+      "commit": "33d5ea79b65e994f96ccd696117b8f565b3b1cc2",
+      "tree": "bc751ff22d71efa484935a7bc8885532851ba349",
+      "paths": {
+        "skills/live_conversation": "93af73b8a2e6464e2c299942b497a410bfe45294",
+        "skills/gemini_live": "0dee0b7825cd9379537138b5099264519c8798e2"
+      }
+    },
+    {
+      "commit": "e471e380e6de1e7f728e0fffbb4457667422ebf4",
+      "tree": "169fd8abec083971b307f8aa9320f1415034c521",
+      "paths": {
+        "skills/unix_computer_use": "426b2c5a1da4c4045f830463214dfa4184fce81d"
+      }
+    },
+    {
+      "commit": "8ee5aaadc1a56e724d62dceb163d3bf8216ec3a7",
+      "tree": "1a2f4bbdc83bb23a2612326059b3af5dba8c5728",
+      "paths": {
+        "skills/telegram/scripts/telegram_menu.py": "87bc58535f30157a06fb6cf923794763ca1daa54"
+      },
+      "contents_sha256": "5d00cabe2e0e7afd1ce19de2f7cc78ac1d1d79871e02001a5123e02ab41b0654"
+    },
+    {
+      "commit": "201f5b62ce35bdb388c3e238bad261b27d3739a8",
+      "tree": "d02191c077a9b65d948227404743fa9a7f08fed8",
+      "paths": {
+        "skills/live_conversation": "76eb20cec1669fdd02af9934231ea514b52b30ed"
+      }
+    }
+  ],
+  "home": {
+    "presence": [
+      "tests/test_cancel_intent_corruption_s6.py",
+      "tests/test_conversation_lane_presence.py",
+      "tests/test_conversation_lane_degraded.py",
+      "tests/test_direct_activity_registry.py",
+      "tests/test_executor_inventory.py",
+      "tests/test_host_message_voice.py",
+      "tests/test_host_service_responsiveness.py",
+      "tests/test_presence_contact_wait.py",
+      "tests/test_presence_moved_lifecycle.py",
+      "tests/test_restart_child_orphans.py",
+      "tests/test_server_shutdown.py",
+      "tests/test_conversation_lane_admission.py",
+      "tests/test_conversation_lane_pool.py",
+      "tests/test_conversation_lane_laws.py",
+      "tests/test_conversation_lane_saved_turn_restore.py",
+      "tests/test_restart_retention.py",
+      "tests/test_zombie_prevention.py",
+      "tests/test_owned_shutdown.py",
+      "tests/test_owner_wait_restart.py",
+      "tests/test_owner_wait_pool.py",
+      "tests/test_presence_retained_custody.py",
+      "tests/test_presence_orphan_replay.py",
+      "tests/test_task_done_ordering.py",
+      "tests/test_host_service_api.py",
+      "tests/test_presence_attempt_end.py",
+      "tests/test_boot_readiness.py",
+      "tests/test_presence_call_door.py",
+      "tests/test_startup_terminal_files.py",
+      "tests/test_nested_rights_depth_custody.py",
+      "tests/test_presence_project_activity.py",
+      "tests/test_presence_lane_rows.py",
+      "tests/test_presence_admission.py",
+      "tests/test_presence_connector_contract.py"
+    ],
+    "queue": [
+      "tests/test_queue_publisher_thread.py",
+      "tests/test_queue_publication_followup3.py",
+      "tests/test_queue_publication_revision.py",
+      "tests/test_saved_queue_custody.py",
+      "tests/test_queue_lock_io_inventory.py",
+      "tests/test_queue_publication.py",
+      "tests/test_queue_publication_followup2.py",
+      "tests/test_queue_publication_followup4.py",
+      "tests/test_worker_launch_atomicity.py",
+      "tests/test_continue_resume_writer_wait.py",
+      "tests/test_pool_admission.py",
+      "tests/test_budget_pause_monetary_selection.py",
+      "tests/test_budget_pause_safety.py"
+    ],
+    "migration": [
+      "tests/test_client_contract_bindings.py",
+      "tests/test_consciousness_switch_words.py",
+      "tests/test_extension_loop.py",
+      "tests/test_place_projection.py",
+      "tests/test_places.py",
+      "tests/test_presence_history.py",
+      "tests/test_place_retry_attention.py",
+      "tests/test_place_word_signals.py",
+      "tests/test_place_focus.py",
+      "tests/test_place_own_account.py",
+      "tests/test_place_custody_revision.py"
+    ],
+    "telegram": [
+      "tests/test_settings_addresses_static.py",
+      "tests/test_telegram_bot_identity.py",
+      "tests/test_telegram_bridge_safety.py",
+      "tests/test_telegram_miniapp_cloudflare_tunnel.py",
+      "tests/test_telegram_miniapp_companion.py",
+      "tests/test_telegram_miniapp_lifecycle.py",
+      "tests/test_telegram_miniapp_telegram_menu.py",
+      "tests/test_telegram_settings.py"
+    ],
+    "history": [
+      "tests/test_builtin_skill_source.py"
+    ],
+    "structural": [
+      "tests/test_docs_sync.py",
+      "tests/test_domain_manifest.py",
+      "tests/test_domain_report.py",
+      "tests/test_architecture_facts.py",
+      "tests/test_generated_inventories.py",
+      "tests/test_contracts.py",
+      "tests/test_gateway_parity.py",
+      "tests/test_hermetic_data_root.py",
+      "tests/test_packaging_sync.py",
+      "tests/test_preflight_process_containment.py",
+      "tests/test_process_custody.py",
+      "tests/test_safety_policy.py",
+      "tests/test_client_contract_doc.py",
+      "tests/test_client_contract_history.py",
+      "tests/test_gateway_client_contract.py",
+      "tests/test_persistence_inventory.py",
+      "tests/test_persistence_lifetimes.py",
+      "tests/test_cancel_protocol_inventory_s6.py",
+      "tests/test_dialogue_threads_once.py"
+    ],
+    "size": [
+      "tests/test_smoke.py",
+      "tests/test_reference_book_budgets.py",
+      "tests/test_repo_health_smoke.py"
+    ],
+    "base_controls": [
+      "tests/test_place_retry_attention.py",
+      "tests/test_telegram_miniapp_cloudflare_tunnel.py"
+    ],
+    "node": [
+      "web/tests/extension_settings_hydration.test.js",
+      "web/tests/place_sheet.test.js"
+    ]
+  }
+}
