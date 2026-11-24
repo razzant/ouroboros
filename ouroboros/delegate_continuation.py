@@ -284,9 +284,15 @@ def bind_continuation(ctx: Any, drive: Any, run_id: str, *, actor: Dict[str, Any
             f"Run {rid} was already continued by run {entry.superseded_by}, which holds its snapshot and "
             "work now; continue from that run instead.")
     if entry.patch_apply_pending:
+        from ouroboros.delegate_capture_job import ordinary_git
+
+        step = ("First call integrate_delegated_patch for it with decision='apply': an earlier Git apply it can prove "
+                "is recorded without changing a file. Only if that call answers APPLY_AMBIGUOUS, inspect the tree and "
+                "resolve it with acknowledge_ambiguous=true" if ordinary_git(entry)
+                else "Resolve it through integrate_delegated_patch(acknowledge_ambiguous=true)")
         return {}, REFUSAL_APPLY_AMBIGUOUS, (
             f"Run {rid} has a pending apply intent with no disposition: the tree MAY already carry its patch. "
-            "Resolve it through integrate_delegated_patch(acknowledge_ambiguous=true) before continuing.")
+            f"{step} before continuing.")
     this_access = str(getattr(authority, "access", "") or "")
     if (entry.access not in _ACCESS_RANK or this_access not in _ACCESS_RANK
             or _ACCESS_RANK[this_access] > _ACCESS_RANK[entry.access]) and not promoted:
@@ -759,6 +765,38 @@ def disposition_refusal(drive: Any, entry: Any) -> str:
                 f"(invocation {pending}) may be running in its snapshot. Wait for that start to settle "
                 "(or retry it with retry_of) before disposing; nothing was changed.")
     return ""
+
+
+def copy_generation_hold(drive: Any, entry: Any, record: Dict[str, Any]) -> str:
+    """Why RECORD's present checkout is not positively ENTRY's own terminal generation (``""`` when it is): the
+    durable record names the run's snapshot, its provisioning owner, target and baseline; the run's execution
+    root is that checkout or a folder in it; the run ended; no hand-over took the copy or is pending; and a
+    same-tree continuation's shared copy is its own only after its capture row (as ``_restored_from_pin``) or
+    when its predecessor's durable record names this run as the one that took this very snapshot over."""
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.subagent_worktrees import checkout_whole
+    from ouroboros.workspace_copies import same_directory
+
+    copy = Path(str(record.get("path") or "."))
+    if drive is None or (record.get("snapshot_id") != entry.snapshot_id or not entry.baseline_sha
+                         or str(record.get("task_id") or "") != (entry.snapshot_task_id or entry.task_id)
+                         or not same_directory(record.get("target_root"), entry.target_root)
+                         or str(record.get("baseline_sha") or "") != entry.baseline_sha):
+        return "its copy's record does not name this run's snapshot, owner, target and baseline"
+    if not checkout_whole(record) or not Path(entry.execution_root).is_dir():  # a released remnant is not the copy
+        return "its recorded copy is no longer present whole"
+    if not Path(entry.execution_root).resolve().is_relative_to(copy.resolve()):
+        return "the run's execution root is not its recorded copy"
+    unreceipted = bool(entry.capture_id and not entry.patch_captured)
+    try:
+        prior = run(drive, entry.continuation_of) if unreceipted and entry.continuation_of else None
+    except Exception as exc:  # noqa: BLE001 - an unreadable hand-over proves nothing either way
+        return f"its predecessor's hand-over could not be read ({type(exc).__name__})"
+    if entry.terminal_state not in custody.TERMINAL_STATES or unreceipted and (
+            prior is None or prior.superseded_by != entry.run_id or prior.patch_disposed != custody.SUPERSEDED
+            or prior.snapshot_id != entry.snapshot_id):
+        return "the copy is not provably this run's own ended generation"
+    return "a hand-over holds its copy" if disposition_refusal(drive, entry) else ""
 
 
 def terminal_continuity(run_id: str, summary: Dict[str, Any]) -> Dict[str, Any]:

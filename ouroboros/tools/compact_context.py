@@ -749,17 +749,17 @@ def get_tools() -> List[ToolEntry]:
                 "name": "compact_context",
                 "description": (
                     "Fold context under your working_note; no helper summarizes for you. Inspect needs no note; "
-                    "native review takes an empty one. Core, assignment, owner words, typed "
+                    "native restoration takes an empty one. Core, assignment, owner words, typed "
                     "owner-directed dialogue and newer tail stay whole. Each older call is atomic with its result; "
                     "exact bytes are checkpointed with CAS provenance before replacement, so raw evidence remains "
                     "retrievable. Notes stay unless replace_note_ids names them; restored sources and emergency "
-                    "records follow the keep selection. A rewrite loses signed reasoning from the earliest change. "
-                    "Through folds on Main stand the first request's host rows and each clean fold's call, "
+                    "records follow keep selection. A rewrite loses signed reasoning from the earliest change. "
+                    "Through folds on Main stand first-request host rows and each clean fold's call, "
                     "result, receipt, facts and clock, unless a "
                     "handed-over account or roster note arrived; a typed mark-change arrival ends what stands "
                     "where it lands; later clean folds can still stand. Replacing a note releases its rows. "
                     "Native review keeps no fold rows of its own and ignores schema_names, review_notes and "
-                    "review_transfers; it reports window evidence, serialized characters and previous input, "
+                    "review_transfers; it reports window evidence, serialized chars and previous input, "
                     "never free tokens."
                 ),
                 "parameters": {
@@ -792,7 +792,7 @@ def get_tools() -> List[ToolEntry]:
                             "type": "integer",
                             "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20).",
                         },
-                        "fold_last_n": {"type": "integer", "minimum": 1, "description": "With working_note, alone: fold the newest N completed tool units and everything after the first."},
+                        "fold_last_n": {"type": "integer", "minimum": 1, "description": "With nonblank working_note, alone: fold the newest N completed tool units and everything after the first."},
                     },
                     "required": [],
                 },

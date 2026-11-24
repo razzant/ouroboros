@@ -234,6 +234,7 @@ class RunCustody:
     # rejects ("rejected") the captured patch — only then may the snapshot be removed —
     # or a successor continues in the snapshot (``SUPERSEDED``: its capture is the one).
     patch_captured: bool = False
+    patch_manifest_sha: str = ""  # the exact manifest the receipt named; empty on older rows
     patch_disposed: str = ""
     # #1651: the PATCH_DISPOSED row's own facts, so readers never replay the chain: the task that recorded
     # it ("" = not recorded, as on rows reduced before this field) and a reject over a result proven lost.
@@ -244,6 +245,7 @@ class RunCustody:
     # row), so any later disposition over this run is ambiguous until inspected.
     patch_apply_pending: bool = False
     patch_apply_key: str = ""  # Existing apply intent's engine idempotency key.
+    patch_apply_by: str = ""  # The task that wrote that intent and its verdict ("" on older rows).
     # Facts the readers used to re-read from the chain, now reduced onto the row: the
     # STARTED row's clock (``run_timing``), the SETTLED receipt's disclosed spend, engine
     # model and applied access (``task_execution_evidence``), the open containment
@@ -569,7 +571,7 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
         setattr(entry, attr, copy.deepcopy(getattr(previous, attr)))
     entry.output_reader_receipts = previous.output_reader_receipts
     entry.daemon_store_id = previous.daemon_store_id or entry.daemon_store_id
-    entry.patch_apply_key = previous.patch_apply_key
+    entry.patch_apply_key, entry.patch_apply_by = previous.patch_apply_key, previous.patch_apply_by
     entry.project_owned = previous.project_owned and entry.project_owned
     entry.project_persistent = previous.project_persistent or entry.project_persistent
     for attr in _STARTED_FIRST_WINS_FACTS:
@@ -723,7 +725,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
                 pair for pair in custody.output_reader_receipts if pair[0] != reader
             ) + ((reader, ack_sha),)
     elif kind == PATCH_CAPTURED:
-        custody.patch_captured = True
+        custody.patch_captured, custody.patch_manifest_sha = True, str(row.get("manifest_sha256") or "")
     elif kind in (NAMED_EVIDENCE_RETAINED, COLLECTION_ATTEMPTED):
         if isinstance(row.get("outcome"), dict):
             setattr(custody, "named_evidence" if kind == NAMED_EVIDENCE_RETAINED else "collection_attempt",
@@ -734,6 +736,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     elif kind == PATCH_APPLY_STARTED:
         custody.patch_apply_pending = True
         custody.patch_apply_key = str(row.get("apply_idempotency_key") or "")
+        custody.patch_apply_by = str(row.get("applied_by_task_id") or "")
     elif kind == PATCH_APPLY_RESOLVED:
         custody.patch_apply_pending = False
     elif kind == SOURCE_RANGE_VERIFIED:
@@ -879,7 +882,7 @@ def record_patch_captured(drive_root: Any, custody: RunCustody, **payload: Any) 
         "snapshot_id": custody.snapshot_id, **payload,
     })
     if recorded:
-        custody.patch_captured = True
+        custody.patch_captured, custody.patch_manifest_sha = True, str(payload.get("manifest_sha256") or "")
     return recorded
 
 
@@ -890,16 +893,15 @@ def record_patch_disposed(drive_root: Any, custody: RunCustody, *, disposition: 
     This is the row that releases the execution snapshot for cleanup: until it
     lands, the snapshot and the captured patch persist as conflict material.
     """
-    custody.patch_disposed = str(disposition or "")
-    custody.patch_disposed_by = str(payload.get("disposed_by_task_id") or "")
-    custody.patch_result_lost = bool(payload.get("result_lost"))
-    custody.patch_apply_pending = False  # a disposition completes the intent story
-    return emit(drive_root, PATCH_DISPOSED, {
+    row = {
         "run_id": custody.run_id, "task_id": custody.task_id,
         "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
         "snapshot_id": custody.snapshot_id, "disposition": str(disposition or ""),
         **payload,
-    })
+    }
+    if recorded := emit(drive_root, PATCH_DISPOSED, row):
+        _apply({custody.run_id: custody}, {**row, "type": PATCH_DISPOSED})
+    return recorded
 
 
 def record_patch_apply_started(drive_root: Any, custody: RunCustody, **payload: Any) -> bool:
@@ -910,13 +912,9 @@ def record_patch_apply_started(drive_root: Any, custody: RunCustody, **payload: 
     where a modified tree replays as "never applied" — the false-rejection class
     this row exists to close. Same doctrine as ``record_start_requested``.
     """
-    landed = emit(drive_root, PATCH_APPLY_STARTED, {
-        "run_id": custody.run_id, "task_id": custody.task_id,
-        "snapshot_id": custody.snapshot_id, **payload,
-    })
-    if landed:
-        custody.patch_apply_pending = True
-        custody.patch_apply_key = str(payload.get("apply_idempotency_key") or "")
+    row = {"run_id": custody.run_id, "task_id": custody.task_id, "snapshot_id": custody.snapshot_id, **payload}
+    if landed := emit(drive_root, PATCH_APPLY_STARTED, row):
+        _apply({custody.run_id: custody}, {**row, "type": PATCH_APPLY_STARTED})  # the one reducer, as replay
     return landed
 
 

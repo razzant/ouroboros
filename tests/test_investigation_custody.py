@@ -167,9 +167,14 @@ def test_retention_leaves_candidates_and_unready_captures_alone(tmp_path, monkey
     assert retain_investigation_evidence(tmp_path, entry, block) is block and rows == [] and released == []
 
 
-@pytest.mark.parametrize("engine_status,retained", [("discarded", True), ("pending", False)])
+@pytest.mark.parametrize("receipt,retained", [
+    ({"accepted": True, "status": "discarded"}, True),
+    ({"status": "discarded"}, False),
+    ({"accepted": False, "status": "discarded"}, False),
+    ({"accepted": True, "status": "pending"}, False),
+])
 def test_a_directory_investigation_discards_its_engine_copy_with_a_receipt(tmp_path, monkeypatch,
-                                                                          engine_status, retained):
+                                                                          receipt, retained):
     from ouroboros.tools.subagent_integration_delegated import retain_investigation_evidence
 
     rows, released = _retention_world(monkeypatch)
@@ -178,7 +183,7 @@ def test_a_directory_investigation_discards_its_engine_copy_with_a_receipt(tmp_p
     class Gateway:
         def decide_run(self, run_id, body, *, idempotency_key):
             decided.append((run_id, body, idempotency_key))
-            return {"status": engine_status}
+            return receipt
 
     entry = custody.RunCustody(run_id="inv", task_id="t", route_id="x", settled=True,
                                resource_ref={"workspace_kind": "directory", "strategy": "copy"},
@@ -188,10 +193,126 @@ def test_a_directory_investigation_discards_its_engine_copy_with_a_receipt(tmp_p
     assert [(run_id, body) for run_id, body, _key in decided] == [("inv", {"action": "discard"})]
     assert released == []  # no Git snapshot to release
     if retained:
-        assert rows[0]["engine_receipt"] == {"status": "discarded"}
+        assert rows[0]["engine_receipt"] == receipt
         assert block["disposition"] == custody.EVIDENCE_RETAINED
     else:
         assert rows == [] and "unconfirmed" in block["note"] and "disposition" not in block
+        assert block["retry"] == "transient"
+
+
+@pytest.mark.parametrize("surface", ["wait", "run_wait"])
+def test_directory_investigation_explicit_wait_retries_discard_in_same_generation(tmp_path, monkeypatch, surface):
+    import json
+
+    from ouroboros import (
+        claudexor_daemon,
+        delegate_collection as body,
+        delegate_custody_current as current,
+        delegate_supervision,
+        usage_accounting,
+    )
+    from ouroboros.delegate_directory import capture_directory_result
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.tools import delegate
+    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_after_gap, retained_terminal_result
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_delegated_directory import DirectoryEngine
+
+    monkeypatch.setattr(usage_accounting, "record_subscription_session", lambda *a, **kw: None)
+    drive, target = tmp_path / "drive", tmp_path / "folder"
+    target.mkdir()
+    engine = DirectoryEngine(target)
+    entry = custody.RunCustody(
+        run_id="dir-inv-1", task_id="task-inv", invocation_id="inv-dir-1", route_id="test",
+        model="test", access="workspace_write", mode="agent", target_root=str(target),
+        resource_ref={"workspace_kind": "directory", "strategy": "copy", "scopePaths": ["."]},
+        authority_source=INVESTIGATION_AUTHORITY, ledger_root=str(drive))
+    answer = "directory investigation findings"
+    detail = {"summary": {"runId": entry.run_id, "state": "succeeded", "spendUsd": 0.1,
+                          "spendEstimated": False, "effectiveAccess": "workspace_write"},
+              "lastSeq": 4,
+              "primaryOutput": {"text": answer, "bytes": len(answer.encode()), "truncated": False}}
+    ctx = ToolContext(repo_dir=target, drive_root=drive, task_id=entry.task_id)
+    try:
+        assert custody.record_started(drive, entry)
+        assert body.observe_run(drive, entry, detail)
+        capture_directory_result(drive, current.run(drive, entry.run_id), engine)
+        # 1. Offline collection retains output and settles money, but leaves discard open without a receipt.
+        first = body.collect_terminal(drive, entry.run_id, background=False, gateway=None)
+        fresh = current.run(drive, entry.run_id)
+        assert first["status"] == "pending" and first["workspace_capture"]["retry"] == "transient"
+        assert "disposition" not in first["workspace_capture"] and not engine.decisions
+        assert fresh.settled and fresh.patch_captured and not fresh.patch_disposed
+        assert current.collection_pending(fresh) and entry.run_id in current.runs(drive, "state=?", (current.HELD,))
+
+        mode = ["offline"]
+        opens, closes = [], []
+        original_decide = engine.decide_run
+        monkeypatch.setattr(engine, "close", lambda: closes.append(True))
+
+        def decide(rid, request, *, idempotency_key):
+            row = original_decide(rid, request, idempotency_key=idempotency_key)
+            return {"accepted": False, "status": "discarded"} if mode[0] == "unconfirmed" else row
+
+        monkeypatch.setattr(engine, "decide_run", decide)
+
+        def attach_only():
+            opens.append(mode[0])
+            if mode[0] == "offline":
+                raise ClaudexorUnavailable("daemon_unavailable", "daemon offline")
+            return engine
+
+        monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", attach_only)
+        # Passive retained reads and absent-gateway fallback deliver text without opening a gateway.
+        passive = retained_terminal_result(ctx, entry.run_id)
+        gap = retained_terminal_after_gap(ctx, entry.run_id, "daemon_unavailable")
+        assert passive["primary_output"]["text"] == answer and passive["collection"] == {"status": "pending"}
+        assert gap["primary_output"]["text"] == answer and gap["collection"] == {"status": "pending"}
+        assert opens == []
+
+        # 2. Same-generation explicit wait stays pending while gateway is unavailable or discard is unconfirmed.
+        for state in ("offline", "unconfirmed"):
+            mode[0] = state
+            pending = json.loads(delegate._read_run(ctx, entry.run_id))
+            fresh = current.run(drive, entry.run_id)
+            assert pending["primary_output"]["text"] == answer and pending["collection"] == {"status": "pending"}
+            assert not fresh.patch_disposed and current.collection_pending(fresh)
+        assert opens == ["offline", "unconfirmed"] and len(engine.decisions) == 1 and len(closes) == 1
+
+        # 2b. A failed local read of a saved file blocks discard while still returning retained terminal text.
+        saved_file = custody.delegated_capture_dir(drive, entry.task_id, entry.run_id) / "after-0"
+        backup = saved_file.with_suffix(".bak")
+        mode[0] = "local_unreadable"
+        saved_file.rename(backup)
+        try:
+            unreadable = json.loads(delegate._read_run(ctx, entry.run_id))
+            fresh = current.run(drive, entry.run_id)
+            assert unreadable["primary_output"]["text"] == answer and unreadable["collection"] == {"status": "pending"}
+            assert not fresh.patch_disposed and current.collection_pending(fresh)
+            assert len(engine.decisions) == 1 and len(closes) == 2
+        finally:
+            if backup.exists():
+                backup.rename(saved_file)
+
+        # 3. Same-generation explicit wait with a healthy attach-only gateway confirms discard and closes custody.
+        mode[0] = "ok"
+        done = (json.loads(delegate._read_run(ctx, entry.run_id)) if surface == "wait"
+                else json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text))
+        fresh = current.run(drive, entry.run_id)
+        assert done["primary_output"]["text"] == answer and done["collection"] == {"status": "retained"}
+        assert fresh.patch_disposed == custody.EVIDENCE_RETAINED and not current.collection_pending(fresh)
+        assert entry.run_id not in current.runs(drive, "state=?", (current.HELD,))
+        assert not engine.posts and not engine.applies and len(closes) == 3
+        assert len(engine.decisions) == 2 and engine.decisions[0] == engine.decisions[1]
+        assert engine.decisions[1][0] == {"action": "discard"}
+        disposed = [row for row in custody.custody_rows(drive)
+                    if row.get("type") == custody.PATCH_DISPOSED and row.get("run_id") == entry.run_id]
+        assert len(disposed) == 1 and disposed[0]["engine_receipt"] == {"accepted": True, "status": "discarded"}
+        # Once disposed, another explicit wait opens no gateway.
+        assert json.loads(delegate._read_run(ctx, entry.run_id))["collection"] == {"status": "retained"}
+        assert opens == ["offline", "unconfirmed", "local_unreadable", "ok"]
+    finally:
+        custody._CUSTODY.clear()
 
 
 def _real_investigation(tmp_path, monkeypatch):

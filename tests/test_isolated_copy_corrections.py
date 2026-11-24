@@ -247,7 +247,7 @@ def test_native_empty_capture_failure_leaves_a_retriable_disposition(case, monke
         if kind == custody.PATCH_DISPOSED and payload["run_id"] == entry.run_id:
             attempted.append(payload["disposition"])
             if fault == "row" and len(attempted) == 1:
-                return False  # real record_patch_disposed has already updated its in-memory object
+                return False  # record_patch_disposed changes its in-memory object only after its row lands
         return emit(drive, kind, payload, **kwargs)
 
     monkeypatch.setattr(custody, "emit", record)

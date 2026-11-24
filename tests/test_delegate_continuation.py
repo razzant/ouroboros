@@ -185,7 +185,10 @@ def test_floor_no_pending_ambiguous_apply(tmp_path):
     assert custody.emit(tmp_path, custody.PATCH_APPLY_STARTED, {"run_id": "run-snap", "task_id": "t-a",
                                                                 "snapshot_id": "snap-1", "apply_idempotency_key": "k"})
     custody._CUSTODY.clear()
-    assert _gate(tmp_path, "run-snap", **kwargs)[1] == continuation.REFUSAL_APPLY_AMBIGUOUS
+    _facts, code, detail = _gate(tmp_path, "run-snap", **kwargs)
+    assert code == continuation.REFUSAL_APPLY_AMBIGUOUS
+    # An ordinary Git run is first offered the call that records a provable apply without changing a file.
+    assert detail.index("decision='apply'") < detail.index("APPLY_AMBIGUOUS") < detail.index("acknowledge_ambiguous=true")
     assert custody.emit(tmp_path, custody.PATCH_DISPOSED, {"run_id": "run-snap", "task_id": "t-a",
                                                            "snapshot_id": "snap-1", "disposition": "rejected"})
     custody._CUSTODY.clear()

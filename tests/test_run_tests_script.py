@@ -697,7 +697,7 @@ def test_a_missing_node_is_a_red_not_run_never_a_silent_skip(run_tests, monkeypa
     from ouroboros import preflight_node
     monkeypatch.setattr(preflight_node, "resolve_node", lambda: None)
     monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/x.test.js"])
-    assert run_tests.main([]) == 1
+    assert run_tests.main([]) == run_tests._NODE_INFRA_ERROR
 
 
 def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, monkeypatch):

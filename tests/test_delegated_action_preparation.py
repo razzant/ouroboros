@@ -345,3 +345,76 @@ def test_a_retry_successor_holds_a_finished_predecessor_product_before_its_money
     custody._CUSTODY.clear()
     status, _entry, predecessor = retry_result_status(reader, tmp_path, "run-p")
     assert (status, predecessor) == (custody.OWNED, "t-old") and not current.run(tmp_path, "run-p").settled
+
+
+def test_a_prepared_empty_result_over_a_moved_head_is_shown_before_an_apply_releases_it(tmp_path, monkeypatch):
+    """A run that committed inside its copy but left no file change still holds commits an apply's release of
+    the copy and pins would discard: the call that prepared it returns it with its head_moved disclosure."""
+    from ouroboros.subagent_worktrees import find_execution_snapshot
+    from tests.test_delegated_run_isolation import _git
+
+    target, ctx, root, rid, handle = _finished_unsettled(tmp_path, monkeypatch, edit=False)
+    _git(pathlib.Path(handle.path), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+         "-m", "the run committed")
+    try:
+        shown = _shown(_integrate_delegated_patch(ctx, rid, "apply", ""))
+        assert shown["status"] == "ready_no_changes" and shown["head_moved"]["current"] != handle.baseline_sha, shown
+        assert not current.run(root, rid).patch_disposed and find_execution_snapshot(handle.snapshot_id)
+        out = _integrate_delegated_patch(ctx, rid, "apply", "inspected")  # the caller has now seen it
+        assert out.startswith("OK:") and INSPECT not in out, out
+        assert current.run(root, rid).patch_disposed == "applied"
+        assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    finally:
+        custody._CUSTODY.clear()
+
+
+def test_a_prepared_capture_stays_shown_behind_a_named_evidence_refusal(tmp_path, monkeypatch):
+    """The call that prepared a capture is the only one that counts it as prepared, so a named-evidence
+    refusal in that call carries the capture's inspection; the later apply decides the capture it showed."""
+    from ouroboros.tools import subagent_integration_delegated as delegated
+
+    target, ctx, root, rid, _handle = _finished_unsettled(tmp_path, monkeypatch)
+    evidence = delegated.run_named_evidence
+    gap = {"status": "partial", "gaps": [{"path": ".review-evidence/report.md"}]}
+    try:
+        with monkeypatch.context() as unretained:
+            unretained.setattr(delegated, "run_named_evidence", lambda *a, **kw: gap)
+            refused = _integrate_delegated_patch(ctx, rid, "apply", "")
+        assert refused.startswith("⚠️ INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED"), refused
+        assert "prepared during this call, was NOT applied" in refused, refused
+        shown = json.loads(refused.split("apply decides this same retained capture.\n", 1)[1])
+        inspected = pathlib.Path(shown["patch_artifact"]).read_bytes()
+        assert shown["status"] == "ready_with_changes" and b"finished work" in inspected
+        assert not current.run(root, rid).patch_disposed
+        assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+        assert delegated.run_named_evidence is evidence
+        applied = _integrate_delegated_patch(ctx, rid, "apply", "inspected")
+        assert "✅ Integrated" in applied and INSPECT not in applied, applied
+        assert pathlib.Path(shown["patch_artifact"]).read_bytes() == inspected
+        assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\nfinished work\n"
+    finally:
+        custody._CUSTODY.clear()
+
+
+def test_a_refusal_that_confirms_no_usable_capture_shows_none(tmp_path, monkeypatch):
+    """The capture lands, then its caller meets an error: the refusal says no usable capture is confirmed, so no
+    captured result is shown beside it, though a recorded one exists."""
+    from ouroboros.tools import delegate_integration
+
+    target, ctx, root, rid, _handle = _finished_unsettled(tmp_path, monkeypatch)
+    original = delegate_integration.capture_terminal_patch_for_drive
+
+    def lost_reply(drive, entry, **kwargs):
+        original(drive, entry, **kwargs)
+        raise OSError("capture reply lost")
+
+    monkeypatch.setattr(delegate_integration, "capture_terminal_patch_for_drive", lost_reply)
+    try:
+        refused = _integrate_delegated_patch(ctx, rid, "apply", "")
+        assert refused.startswith("⚠️ INTEGRATE_DELEGATED_CAPTURE_FAILED") and "no confirmed usable capture" in refused
+        assert "prepared during this call" not in refused and "patch_artifact" not in refused, refused
+        held = current.run(root, rid)
+        assert held.patch_captured and not held.patch_disposed  # recorded and undecided: not what the refusal confirms
+        assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    finally:
+        custody._CUSTODY.clear()
