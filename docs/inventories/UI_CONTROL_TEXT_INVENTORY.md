@@ -170,6 +170,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Make it a skill | `btn btn-default btn-sm chat-card-action` | modules/chat_cards.js | 1 |
 | Make runnable | `skills-menu-item skills-make-runnable` | modules/skill_card_renderer.js | 1 |
 | Measure sizes | `btn btn-default btn-sm` | modules/storage.js | 1 |
+| Models, agents and reviewers | `(no class)` | modules/onboarding_summary.js | 1 |
 | More | `(no class)` | modules/settings_controls.js | 1 |
 | ▸ More | `(no class)` | modules/place_sheet.js | 1 |
 | [icon] More actions | `chat-plus-btn ui-hit-area` | modules/composer.js | 1 |

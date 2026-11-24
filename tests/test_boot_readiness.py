@@ -209,6 +209,45 @@ def _ready_supervisor(srv) -> bool:
     return True
 
 
+@pytest.mark.parametrize("operator", [False, True], ids=["old-projection", "headless-operator"])
+def test_first_start_starter_and_wizard_agree_on_effective_provider_access(boot_app, monkeypatch, operator):
+    """Drive the lifespan's skills step without starting the other boot services or any provider."""
+    from starlette.testclient import TestClient
+
+    from ouroboros import config, server_runtime, skill_starter
+    from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV, PROJECTED_PROPOSALS_ENV
+
+    srv, root = boot_app
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")
+    monkeypatch.delenv(PROJECTED_SETTINGS_ENV, raising=False)
+    monkeypatch.delenv(PROJECTED_PROPOSALS_ENV, raising=False)
+    key, value = "OPENAI_COMPATIBLE_BASE_URL", "https://headless-catalog.example.invalid/v1"
+    if not operator:
+        projected = {}
+        config.apply_settings_to_env({key: value}, environ=projected)
+        monkeypatch.setenv(PROJECTED_SETTINGS_ENV, projected[PROJECTED_SETTINGS_ENV])
+    monkeypatch.setenv(key, value)
+    monkeypatch.setattr(srv, "load_settings", config.load_settings)
+    monkeypatch.setattr(srv, "apply_runtime_provider_defaults", server_runtime.apply_runtime_provider_defaults)
+    monkeypatch.setattr(srv, "_apply_settings_to_env", config.apply_settings_to_env)
+    monkeypatch.setattr(srv, "has_startup_ready_provider", server_runtime.has_startup_ready_provider)
+    monkeypatch.setattr(srv.store_switch, "start", lambda *_a, **_kw: None)
+    monkeypatch.setattr(srv.store_switch, "when_ready", lambda *_a: None)
+    monkeypatch.setattr(srv, "start_boot_coordinator", lambda steps, *, stop: dict(steps)["skills"]())
+    monkeypatch.setattr("ouroboros.skill_install_record.convert_legacy_records", lambda _root: None)
+    monkeypatch.setattr("ouroboros.skill_source_install.settle_pending_updates_at_startup", lambda _root: None)
+    monkeypatch.setattr("ouroboros.onboarding_connections.settle_later", lambda _root: None)
+    scheduled = []
+    monkeypatch.setattr(skill_starter, "schedule_starter",
+                        lambda _root, ids, *, origin, repo_dir=None: scheduled.append((ids, origin)))
+    with TestClient(srv.app) as client:
+        setup = client.get("/api/onboarding/bootstrap").json()
+        assert setup["ready"] is operator
+        assert scheduled == ([(None, "first_start")] if operator else [])
+        assert not config.SETTINGS_PATH.exists()
+
+
 def test_health_answers_with_the_phase_while_slow_boot_steps_still_run(boot_app, monkeypatch):
     from starlette.testclient import TestClient
 

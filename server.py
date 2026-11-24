@@ -185,6 +185,7 @@ from ouroboros.server_runtime import (
     setup_remote_if_configured,
     ws_heartbeat_loop,
 )
+from ouroboros.settings_integrity import skill_settings
 
 _supervisor_ready = threading.Event()  # a live generation finished init: the API's `supervisor_ready`
 # Init reached ready or `_supervisor_error`. Stop before init is deliberately no outcome:
@@ -1119,7 +1120,9 @@ async def lifespan(app):
     # re-derived by every consumer that needs the route — the task-start
     # projection, the settings GET and onboarding reads, the context-fit route
     # resolver — so writing it at start would only make boot a second author.
-    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings(migrate=True))
+    # Like the wizard, readiness takes operator input, not a previous projection.
+    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(
+        skill_settings(lambda: load_settings(migrate=True)))
     _apply_settings_to_env(settings)
     served_ui.apply(app, settings)  # this generation's main interface, before any request is served
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.

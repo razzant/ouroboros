@@ -2977,23 +2977,27 @@ all reviewers on the selected Main model, including its account and processing
 choice. It is disclosed as one model for every review, not diversity.
 Summary shows it before a separate Start saves it; later manual edits stay
 authoritative. Completion without the automatic preset
-leaves later configuration to Settings. Summary names exactly the assignments
-the one atomic Finish saves, including deep self-review. Reviewers remain
-editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
+leaves later configuration to Settings. Summary leads with the first hour's choices, one row each in the rail's
+order: connections, Main by source and model (a pinned account too), Access, Consciousness where offered, Skills with
+Change, the limits; where a first state is to come its copy says Start also begins the first conversation. One
+«Models, agents and reviewers» disclosure names exactly the assignments the one atomic Finish saves, each role
+whole, including deep self-review; it opens itself only when a note under the card starts asking to check them.
+Reviewers remain editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled. When a subscription serves a model, Summary says
 what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
 Consciousness is its own step only before a first state exists, on a new data root or after an owner Reset (owner
-decision 2026-11-20, replacing the unchecked Summary offer of 2026-11-04): one large switch of the wizard's two
-choices, its positions in Dashboard › Consciousness words, starting on. Where any state exists the step is absent,
+decision 2026-11-20): one large switch of the wizard's two choices, its positions in Dashboard › Consciousness
+words, starting on. Where any state exists the step is absent,
 whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
-Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
-switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
-own-task limit it runs under now, and where to change it later. The copy says that, on, its wakes go on within the
-allowance even before the first reply, and that Start begins the first conversation in either position (owner
-2026-11-21). Review & start lands on it; its Continue goes on
-(Skills, then Summary), one row there. The choice rides the one save: no command, no row in Main. Summary labels the
+Consciousness is the place to change it. Its copy asks what Ouroboros does while the owner is away and says Start
+begins the first conversation in either position (owner 2026-11-21); each choice answers under its name: Off works
+only on what was asked, connected places heard, not answered; On also wakes within the allowance, even before the
+first reply, and answers in places made Active (Advises: its words wait). Beneath, under «While it's on», in meta
+size, what it runs under now: the autonomy, the allowance (on a subscription alone, with the quota its wakes use:
+said once, together) and the own-task limit; then where to change it later. Review & start lands on it; its Continue goes on
+(Skills, then Summary). The choice rides the one save: no command, no row in Main. Summary labels the
 model row Consciousness model, so it does not read as this choice.
 
 Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
@@ -3008,9 +3012,9 @@ pitches are written to keep each row on one line at 980 px; where the step is na
 takes two, the title and then what it gives with its mark, one rhythm instead of breaks mid-sentence, never cut. The
 groups, by category with built-ins first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each
 group whole in its column, and one column below that and on a phone; a group's head is its name only, and categories
-of a single skill close the list together as «More». The maintainer's recommended skills are
-ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
-or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
+of a single skill close the list together as «More». Recommended skills are ticked where the host can confirm them
+(voice: its matching key); explicit ticks and unticks stay. Inside a group what works at once leads, recommended first, and what
+needs a key or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
 installs nothing. Under the list one muted line counts the catalog's other skills, «24 more skills in the catalog,
 after start» (his 4A of 2026-11-21), from the sources already read; while none is read there is no line. Where the
 hub's skills come from and how they install is one small sentence under the list (Official
@@ -3020,8 +3024,7 @@ moves no row; a refresh keeps the ticks, focus and the row being read. Entering 
 short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a 30 ms beat
 after the one above it in its own column, so both columns start at once and build at one pace, 700 ms in all; the
 boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows the
-list as it ends. Review & start passes it; Summary keeps one row back to
-it. Nothing installs before Start.
+list as it ends. Review & start passes it. Nothing installs before Start.
 
 A skill that declares a connection card stands first in the step as that card (the Telegram skill's «Phone via
 Telegram»; owner 2026-11-21, 3A: the QR right in the wizard), its box the skill's tick, with Connect. Open, it shows the
