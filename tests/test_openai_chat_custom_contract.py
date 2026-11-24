@@ -872,9 +872,12 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
 
 
 _DELEGATION_LEAD_WORDS = {
-    "schedule_subagent": ["knowledge_notes", "knowledge_read", "whole", "declared", "addresses", "reselect",
+    # Runtime data as a write_surface is SYSTEM's, resident in every mode (tests/test_tool_description_schemas.py).
+    "schedule_subagent": ["knowledge_notes", "knowledge_read", "whole", "even declared", "addresses", "reselect",
                           "none", "READ-ONLY", "self_worktree", "external_workspace", "genesis",
-                          "integrate_subagent_patch", "integrate_delegated_patch", "Runtime data",
+                          "integrate_subagent_patch", "integrate_delegated_patch",
+                          "Omit input_sources: normally shares room context, inherits declared",
+                          "deliberate blind starts only",
                           "access='readonly'", "prefix write", "continue_from", "subagent_id", "input_files",
                           "first session start", "message any task in their tree", "interim reports", "when to stop"],
     "delegate_start": ["knowledge_notes", "knowledge_read", "whole", "declared", "reselect",

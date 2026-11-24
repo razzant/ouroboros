@@ -115,9 +115,9 @@ def test_schedule_subagent_tells_the_parent_children_write_signed_memory_and_dra
     description = next(entry.schema for entry in get_tools() if entry.name == "schedule_subagent")["description"]
     # These rights belong to the child by name, independently of the write surface it gets.
     assert "own knowledge notes, memory marks, chronicle drafts" in description
-    assert "accept/reject: chronicle_write kind=decision" in description
+    assert "accept/reject: chronicle_write" in description
     assert "no commits, tool self-grants or identity/scratchpad" in description
-    assert "one objective" in description and "Returns task_id; read the handoff" in description
+    assert "one objective" in description and "read the handoff (task_id)" in description
     assert "Default native READ-ONLY: repo/data/history, web/browser" in description
     assert "no other writes or shell/review/runtime/skills" in description
     # Which records a child drafts is said once, by the tool that writes them, in the same catalog.

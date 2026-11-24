@@ -764,7 +764,7 @@ def test_burst_absorb_clause_states_the_prefix_write_cost():
     descriptions = {s["function"]["name"]: s["function"]["description"] for s in initial_tool_schemas(registry)}
     description = descriptions["schedule_subagent"]
     assert "Same-round starts run concurrently" in description
-    assert "Priced cache writes: full prefix write per start before first reply" in description
+    assert "Cold parallel starts may cost a full prefix write if priced, either input" in description
     assert "With mode=any_terminal it returns as soon as the FIRST child finishes" in descriptions["wait_tasks"]
 
 

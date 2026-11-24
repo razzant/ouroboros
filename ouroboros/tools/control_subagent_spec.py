@@ -68,19 +68,27 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "type": "string", "enum": ["shared", "declared"],
             "description": (
                 "Every child starts with my human's words for the work verbatim and dated, the marks in force "
-                "and the knowledge outline, plus full governance (SYSTEM/BIBLE) and task authority. Omit or shared: "
-                "add room-claiming and linked note heads, book maps, my identity, life's top-level account (except "
-                "Agent-session supervisors), the child's room page, full assignment and attachments. declared: add "
-                "authored objective/context/constraints for an independent first position, without automatically "
-                "loaded note heads or other shared memory (identity, life account, room page), dialogue, inherited "
-                "parent context or attachments; put common evidence in context. Either choice can select knowledge_notes: "
+                "and the knowledge outline, plus task authority (a native child or nanny also keeps full governance "
+                "SYSTEM/BIBLE and book maps). Omit or shared: "
+                "the default for research, implementation and ordinary review; a native child or nanny adds "
+                "room-claiming and linked note heads, my identity, life's top-level account (nannies "
+                "excepted), its room page, full assignment and attachments; a session leaf gets "
+                "its work order and those heads, not the whole room. declared: only for an independent first "
+                "position or judge kept deliberately blind; it adds the authored objective/context/constraints, "
+                "without automatically loaded note heads or other shared memory (identity, life account, room page), "
+                "dialogue, inherited parent context or attachments; put the question and common raw material in "
+                "context, not my answer or peers' conclusions. Either choice can select knowledge_notes: "
                 "whole notes for the first session start, addresses only for API children. Other knowledge stays one read away. "
-                "Descendants cannot widen inherited declared. Selection lasts for the task; the assignment defines retention/collaboration, "
+                "Under a declared parent, omission stays declared and shared is refused. "
+                "Selection lasts for the task; the assignment defines retention/collaboration, "
                 "and tool results/messages can broaden input. It prescribes no exchange sequence or "
                 "transport, provides no access isolation and makes no claim about provider context or priors."
             ),
         },
-        "constraints": {"type": "string", "description": "Optional constraints/non-goals for the child."},
+        "constraints": {"type": "string", "description": (
+            "Optional constraints/non-goals for the child. Limit effects (writes, running reviewed code, services, "
+            "publication). For a harness such as Codex that reads files and diffs by shell, I may leave read-only "
+            "commands available within the assignment and granted access.")},
         "memory_view": {
             "type": "object",
             "description": (

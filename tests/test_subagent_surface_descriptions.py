@@ -20,7 +20,7 @@ def test_schedule_and_integration_describe_the_three_write_surfaces():
     assert "Non-acting sessions keep configured access in private evidence-only copies" in description
     access = schedule["parameters"]["properties"]["access"]["description"]
     assert "do not call integrate_delegated_patch to apply or reject" in access
-    assert "genesis: own empty durable Git repo as deliverable" in description
+    assert "genesis: own empty durable Git repo" in description
     prop = schedule["parameters"]["properties"]["write_surface"]
     assert "native children write shared files directly" in prop["description"]
     integration = next(entry.schema for entry in integration_tools() if entry.name == "integrate_subagent_patch")

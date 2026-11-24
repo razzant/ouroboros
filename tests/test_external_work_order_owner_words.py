@@ -387,7 +387,7 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
     from ouroboros.memory_view_events import CARRIED_NAMES
     from ouroboros.projects_registry import bind_task_to_project, create_project
-    from ouroboros.subagent_work_order import session_host_references
+    from ouroboros.subagent_work_order import DECLARED_SESSION_NOTE, session_host_references
     from ouroboros.tools import control
     from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
 
@@ -407,9 +407,12 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     with monkeypatch.context() as patch:
         patch.setattr(held_notes, "turn_sections", lambda *_a, **_kw: [])
         assert started(plain)[1] == quiet and nanny._session_held_heads is None
+    assert DECLARED_SESSION_NOTE not in quiet
     _event, _stored, early = _schedule(_root(tmp_path), subagent_id="session-builder", input_sources="declared",
                                        context="Judge the quotas.")
-    assert "because its input is declared" not in started(early)[1]  # no note claims the room: nothing to name
+    early_refs = started(early)[1]
+    assert "because its input is declared" not in early_refs  # no note claims the room: nothing to name
+    assert DECLARED_SESSION_NOTE in early_refs and DECLARED_SESSION_NOTE not in compile_external_work_order(early)
 
     address = resolve_knowledge_address(tmp_path, "quotas-page", "global")
     written = write_knowledge_note(address, f"---\ntitle: Quotas page\nclaims: ['room:{room}']\n---\nQuota head.\n## Detail\nBelow.\n",
@@ -424,6 +427,7 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     assert held.startswith("### Quotas page\n\nGlobal note: memory/knowledge/quotas-page.md\n")
     assert f"Revision: {written.current.revision}\nExact reader unavailable: {held_notes.EXTERNAL_READER}\n\nQuota head.\n" in held
     assert "Below." not in held and "Exact reader: knowledge_read" not in held
+    assert DECLARED_SESSION_NOTE not in references
     assert held.split("Quota head.\n", 1)[1].startswith("\n\n" + held_notes.HELPER_NOTE)
     assert nanny._session_held_heads == [{"topic": "quotas-page", "revision": written.current.revision,
                                           "chars": len("Quota head.\n"), "text": "Quota head.\n"}]
@@ -446,7 +450,9 @@ def test_a_session_start_holds_the_heads_its_names_claim_whole_and_a_declared_on
     assert "## Held knowledge notes" not in closed and "Quota head" not in closed and nanny._session_held_heads is None
     assert "does not automatically add heads" in closed.split(head, 1)[1]
     assert "because its input is declared: quotas-page.]" in closed.split(head, 1)[1]
+    assert DECLARED_SESSION_NOTE in closed.split(head, 1)[1]
     assert "because its input is declared" not in compile_external_work_order(declared)
+    assert DECLARED_SESSION_NOTE not in compile_external_work_order(declared)
 
 
 def test_a_presence_roots_direct_session_reads_the_room_its_heads_come_from_once_a_claim_is_recorded(tmp_path, monkeypatch):
@@ -553,6 +559,7 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     shared, rest = modes.split("declared:", 1)
     declared, selected = rest.split("Either choice can select knowledge_notes:", 1)
     assert "SYSTEM/BIBLE" in common and "task authority" in common
+    assert "book maps" in common and "book maps" not in shared
     assert "room-claiming and linked note heads" in shared
     assert "my identity, life's top-level account" in shared and "originating words" not in selection
     # Declared excludes the automatic heads and the other shared inputs, not the explicit selection.
