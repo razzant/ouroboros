@@ -1743,7 +1743,9 @@ def test_a_card_that_changes_below_the_fold_has_its_height_before_it_is_scrolled
             report["since_hidden"] = since = inner.evaluate("() => window.__reports.slice(window.__kept)")
             assert abs(back["cards"]["status"]["frame"] - natural) <= 1, ("not measured when shown again", report)
             assert back["cards"]["status"]["frameTop"] >= back["viewBottom"], report
-            assert since.count(natural) == 1 and since[-1] == natural, ("one report of what it holds", report)
+            # Its one report since leaving is what it holds (while hidden or once shown, as the engine lays it out):
+            # never a height measured with no box.
+            assert since == [natural], ("one report of what it holds", report)
             assert back["scrollTop"] == start["scrollTop"] and back["scrollY"] == start["scrollY"], report
             # Scrolled to, it is already whole: nothing moves.
             page.locator(status).scroll_into_view_if_needed()
