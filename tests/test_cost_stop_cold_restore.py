@@ -102,9 +102,10 @@ def test_a_producer_allowance_is_restored_at_its_value_and_never_widened(tmp_pat
         state="active", ceiling_usd=9.0, root_cap_usd=50.0, basis="producer_allowance")
     assert refresh["refreshed"] is False and refresh["reason"] == "producer_allowance_not_expanded"
     assert ctx._cost_ceiling.ceiling_usd == 9.0
-    # Said, not implied: the launch-time allowance still binds even if its window has freed more.
+    # Said, not implied: the ceiling in force still binds even if its window has freed more (not "the launch one": an
+    # earlier Resume may have moved it).
     assert "not refreshed: producer_allowance_not_expanded" in notice
-    assert "the $9.00 producer allowance this task was launched with still binds" in notice
+    assert "the current $9.00 producer ceiling still binds" in notice
 
 
 def test_a_grouped_producer_allowance_survives_an_unreadable_group_projection(tmp_path, monkeypatch):

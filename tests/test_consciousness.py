@@ -1370,10 +1370,9 @@ def test_a_wake_held_at_the_allowance_it_started_with_is_said_so(clock, monkeypa
     described = describe_consciousness_state(snapshot, True)
     assert described["status"] == "wake_paused"
     # The fact is the headline; what follows from it is said beneath it.
-    assert described["detail"] == "Wake-up wake-held stopped at the allowance it had left when it started ($2.99)."
-    assert described["detail_note"] == ("Resume keeps that limit, so it pauses again while its known spend is at it, "
-                                        "and a higher allowance does not raise it. Stop now on its card ends it and "
-                                        "frees the clock for its next check.")
+    assert described["detail"] == "Wake-up wake-held stopped at its allowance ($2.99)."
+    assert described["detail_note"] == ("No spending estimate is available for Resume. Raising the limit alone resumes "
+                                        "nothing. Stop now on its card ends it and frees the clock for its next check.")
 
 
 def test_a_wake_held_at_a_per_task_cap_raised_before_its_resume_is_not_the_allowance(clock, monkeypatch):

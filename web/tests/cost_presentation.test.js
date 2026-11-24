@@ -827,15 +827,15 @@ test('a reached limit says what waits and, only when it can, a conditional time 
 
 test('a wake held at the allowance it started with is said apart from room returning, with its card\'s door', () => {
     const now = Date.UTC(2026, 10, 10, 19, 0);
-    const held = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up is paused at the allowance it had left when it started ($2.99).',
-        note: 'Resume keeps that limit, so it pauses again while its known spend is at it; room returning or a higher limit '
-            + 'does not raise it. Stop now on its card ends it and frees the clock for its next check.' };
+    const held = { wake: 'wake-1', tone: 'warn', text: 'The consciousness wake-up is paused at its allowance ($2.99).',
+        note: 'No spending estimate is available for Resume. Raising the limit alone resumes nothing. '
+            + 'Stop now on its card ends it and frees the clock for its next check.' };
     assert.deepEqual(allowancePresentation(state(HELD), { now }).lines, [held], 'room is back, the wake still waits');
     const both = allowancePresentation(state({ ...HELD, allowance_status: 'exhausted', allowance_room_after: '2026-11-10T21:40:30+00:00',
         live_wake_hold: { cause: 'allowance_and_cap', ceiling_usd: 50 } }), { now, timeZone: 'UTC' }).lines;
     assert.equal(both.length, 2, 'the window and the wake are two facts');
     assert.match(both[0].note, /^If its charges stay as they are, there is room again by 21:41 UTC\.$/);
-    assert.equal(both[1].text, 'The consciousness wake-up is paused at the allowance it had left when it started ($50.00, the per-task cap too).');
+    assert.equal(both[1].text, 'The consciousness wake-up is paused at its allowance ($50.00, the per-task cap too).');
     // Other proven causes are said only where they are money; the rest keep their card's word on the Consciousness tab.
     assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'per_task_cap', ceiling_usd: 10 } }), { now }).lines,
         [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' }]);
@@ -846,6 +846,42 @@ test('a wake held at the allowance it started with is said apart from room retur
     for (const cause of ['sleep', 'technical', 'total_budget', 'per_task_fence', '']) {
         assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause, ceiling_usd: null } }), { now }).lines, [], cause);
     }
+});
+
+test('a held wake says what Resume on its card may add only as the host says it', () => {
+    const now = Date.UTC(2026, 10, 10, 19, 0);
+    const note = (extra, bg = {}) => allowancePresentation(state({ ...HELD, ...bg,
+        live_wake_hold: { ...HELD.live_wake_hold, ...extra } }), { now }).lines[0].note;
+    const stop = ' Stop now on its card ends it and frees the clock for its next check.';
+    // The host's field in three states: absent, null (it cannot tell), a number (the room now).
+    assert.equal(state(HELD).holdAdditionalUsd, undefined);
+    assert.equal(state({ ...HELD, live_wake_hold: { ...HELD.live_wake_hold, resume_additional_usd: null } }).holdAdditionalUsd, null);
+    assert.equal(state({ ...HELD, live_wake_hold: { ...HELD.live_wake_hold, resume_additional_usd: -1 } }).holdAdditionalUsd, null);
+    assert.equal(state({ ...HELD, live_wake_hold: { ...HELD.live_wake_hold, resume_additional_usd: 0 } }).holdAdditionalUsd, 0);
+    assert.equal(note({}), `No spending estimate is available for Resume. Raising the limit alone resumes nothing.${stop}`);
+    // The host's estimate in one action's money, never a ceiling: no truncation, a sub-cent amount in its own digits.
+    const alone = `; raising the limit alone resumes nothing.${stop}`;
+    assert.equal(note({ resume_additional_usd: 7.6 }), `Estimated room on Resume: $7.60${alone}`);
+    assert.equal(note({ resume_additional_usd: 88.8 }), `Estimated room on Resume: $88.80${alone}`);
+    assert.equal(note({ resume_additional_usd: 0.004 }), `Estimated room on Resume: $0.0040${alone}`);
+    assert.equal(note({ resume_additional_usd: 0 }), `Estimated room on Resume: none${alone}`);
+    assert.equal(note({ resume_additional_usd: null }), `Estimated room on Resume: unknown now${alone}`);
+    // The total budget is its own limit beside the allowance: what it leaves is said beside the room, never in its place.
+    assert.equal(note({ resume_additional_usd: 7.6, resume_available_usd: 3 }),
+        `Estimated room on Resume: $7.60 from the allowance, $3.00 available now because the total budget has less left${alone}`);
+    assert.equal(note({ resume_additional_usd: null, resume_available_usd: 0 }),
+        `Estimated room on Resume: none now, the total budget has nothing left${alone}`);
+    for (const available of [7.6, 9, -1, 'soon', null]) {  // as much, or unreadable: nothing narrower is claimed
+        assert.equal(note({ resume_additional_usd: 7.6, resume_available_usd: available }), `Estimated room on Resume: $7.60${alone}`);
+    }
+    // The ceiling is where the wake stopped, with or without an estimate (a pause still settling has none): never "when it started".
+    const line = (extra) => allowancePresentation(state({ ...HELD, live_wake_hold: { ...HELD.live_wake_hold, ...extra } }), { now }).lines[0].text;
+    assert.equal(line({ resume_additional_usd: 7.6 }), line({}));
+    assert.equal(line({}), 'The consciousness wake-up is paused at its allowance ($2.99).');
+    // Only a proven allowance hold speaks of it: another cause's line never names a room.
+    assert.deepEqual(allowancePresentation(state({ ...HELD, live_wake_hold: { cause: 'per_task_cap', ceiling_usd: 10,
+        resume_additional_usd: 5 } }), { now }).lines,
+    [{ wake: 'wake-1', tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' }]);
 });
 
 test('the model its wake-ups think with: its own slot, or Main\'s said as Main, a local one as Local model; unknown says nothing', () => {

@@ -555,12 +555,13 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "", expected_
                                                   exact=exact, external=external)
     with q._queue_lock, contextlib.ExitStack() as held:
         task = next((item for item in q.PENDING if str(item.get("id") or "") == task_id), None)
-        refusal, locked_tree = held.enter_context(panic_selection_lock(q, task, expected_panic_hold_id, selected_by))
+        wake = bool((external or {}).get("wake_allowance"))
+        refusal, locked_tree = held.enter_context(panic_selection_lock(q, task, expected_panic_hold_id, selected_by, wake=wake))
         if refusal:
             return refusal
         if task is None:
             return {"ok": False, "error": "task_not_pending"}
-        if expected_panic_hold_id and (task is not located or task != located_state):
+        if (expected_panic_hold_id or wake) and (task is not located or task != located_state):
             return {"ok": False, "error": "selection_authority_changed"}
         if refusal := release_refusal(observed_control_stop(
                 q.DRIVE_ROOT, task, budget=q.BUDGET_ROOT_FENCES), resume_author()):

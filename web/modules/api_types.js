@@ -91,7 +91,7 @@
  * @property {number} max_tasks
  * @property {string} live_wake_task_id  // own wake through direct custody, queue and settlement; "" when absent
  * @property {boolean} live_wake_held  // own wake in PENDING: paused, held or awaiting dispatch
- * @property {?{cause: string, ceiling_usd: ?number}} live_wake_hold  // what its records prove holds it (consciousness_view.hold_cause); null when not held
+ * @property {?{cause: string, ceiling_usd: ?number, resume_additional_usd?: ?number, resume_available_usd?: ?number}} live_wake_hold  // pause cause and, when attributable, the allowance's additional room and what the total budget leaves of it now (null: unreadable)
  * @property {number} unknown_unmetered  // window rows without a price: spent_24h_usd is then a floor ("at least")
  * @property {boolean} integrity_degraded  // the ledger was quarantined/repaired; the numbers are best-effort
  * @property {string} allowance_status  // the current window's verdict: available | exhausted | allowance_unknown

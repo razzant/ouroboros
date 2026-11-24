@@ -26,6 +26,14 @@ const amount = (value) => {
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
 };
+// `live_wake_hold.resume_additional_usd` (the allowance's room a Resume would add) and `resume_available_usd` (what the
+// total budget leaves of it now): absent stays undefined (never a guessed zero), an unreadable or negative amount is
+// unknown (null).
+const holdAmount = (hold, key) => {
+    if (!hold || !Object.hasOwn(hold, key)) return undefined;
+    const value = amount(hold[key]);
+    return value !== null && value >= 0 ? value : null;
+};
 const placeReadiness = (value) => object(value) && text(value.text)
     ? { text: text(value.text), tone: text(value.tone) || 'muted' } : null;
 const placeLabels = (value) => object(value) && Object.values(value).every((label) => typeof label === 'string')
@@ -205,7 +213,7 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         // The switch's position by meaning and its gloss, in the host's words (consciousness_view.position_words).
         position: text(bg.position),
         gloss: text(bg.gloss),
-        // What follows from that state, said beneath it (a held wake's allowance: what Resume keeps, what ends it).
+        // What follows from that state, said beneath it (a held wake's allowance: what Resume does, what ends it).
         detailNote: text(bg.detail_note),
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
         level: text(bg.level),
@@ -218,6 +226,11 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         // What holds that wake, as far as its records prove it (consciousness_view.hold_cause; '' proves nothing).
         holdCause: text(object(bg.live_wake_hold)?.cause),
         holdCeilingUsd: amount(object(bg.live_wake_hold)?.ceiling_usd),
+        // What an explicit Resume of a wake held at its daily share may add now (an estimate until the press): a number,
+        // null when the host cannot tell, undefined when it does not say. The
+        // total budget is its own limit beside the allowance: what it leaves of that room now is `holdAvailableUsd`.
+        holdAdditionalUsd: holdAmount(object(bg.live_wake_hold), 'resume_additional_usd'),
+        holdAvailableUsd: holdAmount(object(bg.live_wake_hold), 'resume_available_usd'),
         spentUsd: amount(bg.spent_24h_usd),
         dailyUsd: amount(bg.daily_usd),
         unknownUnmetered: count(bg.unknown_unmetered) || 0,

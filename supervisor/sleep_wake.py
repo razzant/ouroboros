@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from ouroboros.store import acquisition_budget
+from ouroboros.store import acquisition_budget, bounded_wait
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ def _sleepers(q: Any, only: str) -> List[Dict[str, Any]]:
 @acquisition_budget(0)
 def authority_readable(task, row, root):
     """Re-read the named fault. A row from an older writer may have no typed cause."""
+    import math
     from ouroboros import owner_pause, queue_observation, usage_admission
 
     cause = str(row.get("cause") or "").partition(":")[0]
@@ -42,6 +43,22 @@ def authority_readable(task, row, root):
             return bool(usage_admission.task_billing_fields(task, tree, None, root))
         if cause == "start_custody_unreadable":
             return bool(usage_admission.settlement_billing_fields(root, task_id, tree))
+        if cause == "tree_accounting_unavailable":
+            if row.get("reason") != "authority":
+                return False
+            from ouroboros import usage_accounting, usage_store
+            from ouroboros.usage_ledger import USAGE_LOCK_TIMEOUT_SEC
+
+            fields = usage_admission.task_billing_fields(task, tree, None, root)
+            group = str(fields.get("billing_group_id") or tree)
+            store_root = usage_accounting._drive_root(root)
+            with usage_store.hold(store_root, timeout_sec=bounded_wait(USAGE_LOCK_TIMEOUT_SEC),
+                                  write=False, migrate=False) as txn:
+                summary = txn.summary(billing_group_id=group)
+            settled = summary.get("settled_usd") if isinstance(summary, dict) else None
+            return (not usage_store.integrity_degraded(store_root)
+                    and isinstance(settled, (int, float)) and not isinstance(settled, bool)
+                    and math.isfinite(float(settled)) and float(settled) >= 0)
         if cause == "owner_launch_authority_unavailable":
             with owner_pause.launch_lock(root, tree, wait=False):
                 return True

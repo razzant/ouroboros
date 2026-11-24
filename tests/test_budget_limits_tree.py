@@ -682,3 +682,151 @@ class TestWalletAxis:
         assert task_pacing.resolve_deciding_spend(
             tree_cost_usd=7.0, task_cost_usd=3.0, root_cap_usd=None,
         ) == (7.0, task_pacing.SPEND_BASIS_TREE)
+
+
+class TestResumedWakeCeilingEnforcement:
+    """Initial and resumed own-clock wakes (and their members) pause with ``scope='root'`` at
+    their cumulative ceiling even without a per-task hard cap; resumed wakes refuse own-cost
+    fallback with ``cause='tree_accounting_unavailable'`` on unreadable or degraded tree reads."""
+
+    def _seed_wake(self, tmp_path, *, root_id="own-wake", initial=4.0, renewed=None, additional=5.0):
+        from ouroboros.consciousness_allowance import RESUMED_ALLOWANCE_KEY
+        from ouroboros.consciousness_wake import wake_task_metadata
+        from ouroboros.task_results import write_task_result
+
+        meta = wake_task_metadata("act", "test", root_cost_ceiling_usd=initial,
+                                  root_cost_ceiling_source="allowance")
+        extra = ({RESUMED_ALLOWANCE_KEY: {"additional_usd": additional, "ceiling_usd": renewed,
+                                          "source": "allowance"}} if renewed is not None else {})
+        # Direct wakes may carry no task_contract; both root and members must still inherit the right policy.
+        write_task_result(tmp_path, root_id, "running", root_task_id=root_id, metadata=meta, **extra)
+        return meta
+
+    def _check_args(self, tmp_path, tool_ctx, ceiling, *, task_id, own_cost):
+        args = _make_args(
+            budget_remaining_usd=100.0,
+            accumulated_usage={"cost": own_cost},
+            cost_ceiling=ceiling,
+            drive_logs=tmp_path,
+            task_id=task_id,
+        )
+        args["ctx"].tools = SimpleNamespace(_ctx=tool_ctx)
+        args["ctx"].drive_root = tmp_path
+        return args
+
+    @pytest.mark.parametrize("resumed", [False, True])
+    @pytest.mark.parametrize("role", ["root", "member"])
+    def test_own_wake_and_member_pause_with_root_scope_without_hard_cap(self, tmp_path, monkeypatch, resumed, role):
+        from ouroboros import budget_pause, usage_accounting
+        from ouroboros.usage_accounting import UsageScope, usage_scope
+
+        root_id = f"wake-{'resumed' if resumed else 'init'}-{role}"
+        task_id = root_id if role == "root" else f"{root_id}-helper"
+        expected_ceiling = 9.0 if resumed else 4.0
+        meta = self._seed_wake(tmp_path, root_id=root_id, initial=4.0, renewed=9.0 if resumed else None)
+        tree_state = {"settled_usd": expected_ceiling - 1.0, "accounted_usd": expected_ceiling - 1.0,
+                      "limit_usd": None, "integrity_degraded": False}
+        monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_k: dict(tree_state))
+        pauses = []
+        monkeypatch.setattr(budget_pause, "request_pause", lambda _ctx, **kw: pauses.append(kw))
+
+        tool_ctx = SimpleNamespace(task_id=task_id, root_task_id=root_id,
+                                   drive_root=tmp_path, budget_drive_root=tmp_path,
+                                   task_metadata=meta if role == "root" else {})
+        scope = UsageScope(drive_root=tmp_path, task_id=task_id, root_task_id=root_id,
+                           root_limit_usd=None, root_cost_ceiling_usd=4.0)
+        with usage_scope(scope):
+            ceiling = task_pacing.resolve_task_cost_ceiling(tool_ctx, 100.0)
+            policy = task_pacing.cost_stop_policy(tool_ctx)
+            assert ceiling.state == task_pacing.COST_CEILING_ACTIVE and ceiling.ceiling_usd == expected_ceiling
+            assert ceiling.root_cap_usd is None
+            assert ceiling.basis == ("producer_allowance" if role == "root" else "root_resolved_ceiling")
+            assert policy["own_wake_allowance"] is True and policy["resumed_wake_allowance"] is resumed
+            assert _check_budget_limits(**self._check_args(tmp_path, tool_ctx, ceiling,
+                                                           task_id=task_id, own_cost=0.5)) is None
+            tree_state["settled_usd"] = tree_state["accounted_usd"] = expected_ceiling
+            if not resumed:
+                usage_accounting._stash_root_accounting(root_id, tree_state, None)
+            stopped = _check_budget_limits(**self._check_args(tmp_path, tool_ctx, ceiling,
+                                                              task_id=task_id, own_cost=0.5))
+        assert stopped is not None and stopped[1]["reason_code"] == "budget_exhausted"
+        assert stopped[1]["cost_stop_spend_basis"] == task_pacing.SPEND_BASIS_TREE
+        assert pauses and pauses[-1]["rail"] == budget_pause.RAIL_GRACEFUL_CEILING
+        assert pauses[-1]["scope"] == "root"
+
+    def test_other_producer_without_hard_cap_keeps_global_scope_and_exact_gte(self, tmp_path, monkeypatch):
+        from ouroboros import budget_pause, usage_accounting
+        from ouroboros.usage_accounting import UsageScope, usage_scope
+
+        tree_state = {"settled_usd": 4.0 - 1e-10, "accounted_usd": 4.0 - 1e-10,
+                      "limit_usd": None, "integrity_degraded": False}
+        monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_k: dict(tree_state))
+        pauses = []
+        monkeypatch.setattr(budget_pause, "request_pause", lambda _ctx, **kw: pauses.append(kw))
+        tool_ctx = SimpleNamespace(task_id="other-prod", root_task_id="other-prod",
+                                   drive_root=tmp_path, budget_drive_root=tmp_path, task_metadata={})
+        scope = UsageScope(drive_root=tmp_path, task_id="other-prod", root_task_id="other-prod",
+                           root_limit_usd=None, root_cost_ceiling_usd=4.0)
+        with usage_scope(scope):
+            ceiling = task_pacing.resolve_task_cost_ceiling(tool_ctx, 100.0)
+            assert _check_budget_limits(**self._check_args(tmp_path, tool_ctx, ceiling,
+                                                           task_id="other-prod", own_cost=0.5)) is None
+            tree_state["settled_usd"] = tree_state["accounted_usd"] = 4.0
+            usage_accounting._stash_root_accounting("other-prod", tree_state, None)
+            stopped = _check_budget_limits(**self._check_args(tmp_path, tool_ctx, ceiling,
+                                                              task_id="other-prod", own_cost=0.5))
+        assert stopped is not None and pauses[-1]["scope"] == "global"
+
+    @pytest.mark.parametrize("role", ["root", "member"])
+    def test_resumed_wake_and_member_refuse_own_cost_fallback_on_unreadable_or_degraded_tree(
+        self, tmp_path, monkeypatch, role,
+    ):
+        from ouroboros import budget_pause, loop_budget, usage_accounting
+        from ouroboros.usage_accounting import BillingAuthorityUnavailable, UsageScope, usage_scope
+
+        meta = self._seed_wake(tmp_path, root_id="wake-resumed-2", initial=4.0, renewed=9.0)
+        task_id = "wake-resumed-2" if role == "root" else "wake-child-2"
+        tool_ctx = SimpleNamespace(task_id=task_id, root_task_id="wake-resumed-2",
+                                   drive_root=tmp_path, budget_drive_root=tmp_path,
+                                   task_metadata=meta if role == "root" else {})
+        scope = UsageScope(drive_root=tmp_path, task_id=task_id, root_task_id="wake-resumed-2",
+                           root_limit_usd=None, root_cost_ceiling_usd=4.0)
+
+        # Even with a fresh-looking stash and tiny own cost, a failed strict read must NOT admit spend.
+        usage_accounting._stash_root_accounting("wake-resumed-2", {"settled_usd": 1.0, "accounted_usd": 1.0}, None)
+        monkeypatch.setattr(usage_accounting, "usage_projection",
+                            lambda *_a, **_k: (_ for _ in ()).throw(OSError("temporarily unreadable")))
+        with usage_scope(scope):
+            ceiling = task_pacing.resolve_task_cost_ceiling(tool_ctx, 100.0)
+            args = self._check_args(tmp_path, tool_ctx, ceiling, task_id=task_id, own_cost=0.5)
+            with pytest.raises(BillingAuthorityUnavailable) as raised:
+                _check_budget_limits(**args)
+        assert raised.value.kind == "unreadable"
+        assert raised.value.cause == "tree_accounting_unavailable"
+        assert "unreadable" in str(raised.value)
+
+        # Existing authority handler parks on member RAIL_BILLING_AUTHORITY (scope="task"), not money exhaustion.
+        pause_calls = []
+        monkeypatch.setattr(budget_pause, "request_pause",
+                            lambda ctx, **kw: pause_calls.append(kw) or (_ for _ in ()).throw(
+                                budget_pause.BudgetPauseRequested({"rail": kw["rail"], "cause": kw.get("cause")})))
+        exit_ctx = loop_budget._LoopExitContext(
+            tools=args["ctx"].tools, drive_root=tmp_path, task_id=task_id,
+            event_queue=None, drive_logs=tmp_path, accumulated_usage=args["ctx"].accumulated_usage, llm_trace={},
+        )
+        with pytest.raises(budget_pause.BudgetPauseRequested):
+            loop_budget._handle_authority_unavailable(raised.value, exit_ctx, limit_ctx=args["ctx"])
+        assert pause_calls == [{"rail": budget_pause.RAIL_BILLING_AUTHORITY, "scope": "task",
+                                "reason_text": str(raised.value), "cause": "tree_accounting_unavailable"}]
+
+        # Degraded integrity uses the same typed cause, carrying integrity_degraded in the detail message.
+        monkeypatch.setattr(usage_accounting, "usage_projection",
+                            lambda *_a, **_k: {"settled_usd": 1.0, "accounted_usd": 1.0,
+                                               "limit_usd": None, "integrity_degraded": True})
+        with usage_scope(scope):
+            with pytest.raises(BillingAuthorityUnavailable) as degraded:
+                _check_budget_limits(**self._check_args(tmp_path, tool_ctx, ceiling,
+                                                        task_id=task_id, own_cost=0.5))
+        assert degraded.value.kind == "unreadable"
+        assert degraded.value.cause == "tree_accounting_unavailable"
+        assert "integrity_degraded" in str(degraded.value)

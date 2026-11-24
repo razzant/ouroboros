@@ -2249,8 +2249,9 @@ unavailable amount is “spend unknown”; known parts retain “Tracked:” and
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
 Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door row; its other
-settings are rows of this page. A wake held at the allowance it started with says so without a
-clock; beneath it, quieter: Resume keeps that limit, a higher allowance does not raise it, Stop now frees the clock.
+settings are rows of this page. A wake held at its allowance says so without a
+clock; beneath it, quieter: the host's words on Resume (Costs and its Main card: estimated room, and what the total
+budget leaves of it when that is less) and that Stop now frees the clock.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables

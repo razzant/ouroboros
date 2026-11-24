@@ -420,46 +420,37 @@ def held_sentence(wake: str, hold: Any) -> tuple:
     if cause == "owner":
         return f"Wake-up {wake} is on an explicit pause; its card shows who paused it and how to continue.", ""
     if cause in ALLOWANCE_HOLDS:
-        facts = [f"${float(ceiling):.2f}"] if type(ceiling) in (int, float) else []
+        from ouroboros.cost_projection import usd_text
+
+        # The ceiling it stopped at, which an earlier Resume may have moved: said as the number it is, never "at start".
+        facts = [usd_text(float(ceiling))] if type(ceiling) in (int, float) else []
         facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
         said = f" ({', '.join(facts)})" if facts else ""
-        return (f"Wake-up {wake} stopped at the allowance it had left when it started{said}.",
-                "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
-                "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
+        if "resume_additional_usd" in hold:
+            return (f"Wake-up {wake} stopped at its allowance{said}.",
+                    "Resume checks what is left now; if there is room, it continues this wake without resetting its spend. "
+                    "Stop now on its card ends it and frees the clock for its next check.")
+        return (f"Wake-up {wake} stopped at its allowance{said}.",
+                "No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
+                "Stop now on its card ends it and frees the clock for its next check.")
     # The limit it launched with, as far as its stamp names it (an older record names none).
     limit = {"per_task_cap": "the per-task cost cap", "launch_ceiling": "the spending limit"}.get(cause)
     said = f"paused at {limit} it started with" if limit else "paused or waiting in the queue"
     return f"Wake-up {wake} is {said}; its card shows why. The next wake-up follows it.", ""
 
 
-def _at_launch_ceiling(pause: dict, ceiling, basis: str) -> bool:
-    """A live budget pause at the graceful ceiling the wake launched with: its saved ceiling is that number under the
-    producer's own basis (a member's inherited one), or, on a row older than the saved ceiling, the rail alone."""
-    import math
-    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING, STATE_PAUSED, STATE_PAUSING
-
-    if (pause.get("state") not in (STATE_PAUSED, STATE_PAUSING) or pause.get("reason") != "budget"
-            or pause.get("rail") != RAIL_GRACEFUL_CEILING or ceiling is None):
-        return False
-    saved = pause.get("cost_ceiling")
-    if not isinstance(saved, dict):
-        return True
-    number = saved.get("ceiling_usd")
-    return (saved.get("basis") == basis and type(number) in (int, float)
-            and math.isclose(float(number), ceiling, rel_tol=0.0, abs_tol=1e-9))
-
-
 def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
 
     ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members. The wake paused at the
-    ceiling it launched with (``root_cost_ceiling_usd``), or, child first, its tree's latch refused it while a member
+    carried ceiling (initial or renewed), or, child first, its tree's latch refused it while a member
     holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
     ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
     ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
     ``total_budget``, ``per_task_fence``. ``""`` proves nothing: no live pause, a Resume granted, a lifted allowance."""
     from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
                                         REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
+    from ouroboros.consciousness_allowance import at_wake_ceiling
     from ouroboros.task_pacing import recorded_producer_ceiling
 
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -474,9 +465,9 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
     ceiling = None if lifted else recorded_producer_ceiling({"metadata": metadata})
     refused_root = rail == RAIL_DISPATCH_REFUSED and own.get("scope") == "root"
-    tree = refused_root and any(_at_launch_ceiling(member, ceiling, "root_resolved_ceiling")
+    tree = refused_root and any(at_wake_ceiling(member, ceiling, "root_resolved_ceiling", legacy=True)
                                 for member in members if isinstance(member, dict))
-    if _at_launch_ceiling(own, ceiling, "producer_allowance") or tree:
+    if at_wake_ceiling(own, ceiling, "producer_allowance", legacy=True) or tree:
         return {"cause": _STAMPED_CAUSES.get(metadata.get("root_cost_ceiling_source"), "launch_ceiling"),
                 "ceiling_usd": ceiling}
     if rail == RAIL_GLOBAL_EXHAUSTED or rail == RAIL_DISPATCH_REFUSED and not refused_root:
@@ -484,13 +475,47 @@ def hold_cause(metadata: dict, own: dict, members=()) -> dict:
     return {"cause": "per_task_fence" if refused_root else "", "ceiling_usd": None}
 
 
-def held_wake_cause(drive_root, task_id: str) -> dict:
+def _resume_room(drive_root, task_id: str, metadata: dict, own: dict) -> dict:
+    """What an owner Resume of this stopped wake would add now, for display: the grant's own decision
+    (``allowance_resume_decision``) read with ``allow_stale`` inside a short wait, never from a window another read took;
+    an estimate that reserves and decides nothing. ``resume_additional_usd`` is the allowance's room under the tree's
+    caps (0.0 when either has none, null when it cannot be read); ``resume_available_usd`` what the total budget leaves
+    of it, named only when the decision names it. An empty total budget is a refusal of its own, not the allowance spent."""
+    from ouroboros.consciousness_allowance import allowance_resume_decision
+    from ouroboros.store import acquisition_budget
+
+    try:
+        with acquisition_budget(0.05):
+            quote = allowance_resume_decision(drive_root, {"id": task_id, "metadata": metadata}, own, allow_stale=True)
+    except Exception:
+        log.debug("The room a Resume would add to wake %s could not be read", task_id, exc_info=True)
+        quote = {}
+    error = quote.get("error")
+    if error in {"consciousness_allowance_exhausted", "root_hard_cap_exhausted"}:
+        return {"resume_additional_usd": 0.0}
+    if error == "budget_still_exhausted":
+        return {"resume_additional_usd": None, "resume_available_usd": 0.0}
+    additional, available = quote.get("additional_usd"), quote.get("available_now_usd")
+    if error or type(additional) not in (int, float):
+        return {"resume_additional_usd": None}
+    return {"resume_additional_usd": float(additional),
+            **({"resume_available_usd": float(available)} if type(available) in (int, float) else {})}
+
+
+def held_wake_cause(drive_root, task_id: str, *, window=None) -> dict:
     """``hold_cause`` of my held own wake from its records: its pool row's metadata (memory), its pause row and, only
     when its tree's latch refused it, its paused members' rows (one compact hot-facts read each, no task body). An
-    unreadable record proves nothing."""
+    unreadable record proves nothing, and only what it would have proven is lost: a pause the hot facts name as the
+    owner's, a sleep or a technical one stays that, and a money stop whose task record is unreadable falls back to the
+    launch stamp. ``window`` (the display's own read, given only while consciousness is on) asks for the room a Resume
+    would add now; the room is read afresh (``_resume_room``), never from that window."""
     from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
+    from ouroboros.consciousness_allowance import allowance_stopped, fenced_allowance_members, wake_ceiling_metadata
     from ouroboros.owner_pause import fence_closed
+    from ouroboros.store import acquisition_budget
     from ouroboros.store_hot_facts import controls
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue as q
     from supervisor.consciousness_carriers import live_task_rows, paused_tree_members
 
     try:
@@ -500,12 +525,28 @@ def held_wake_cause(drive_root, task_id: str) -> dict:
         if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
             return {"cause": "owner", "ceiling_usd": None}
         own = facts.get("budget_pause") or {}
-        members = ([budget_pause_row(root or drive_root, member) for member, root in paused_tree_members(task_id)]
-                   if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root" else [])
+        witnesses = []
+        members = []
+        if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root":
+            with q._queue_lock:
+                latch = (q.BUDGET_ROOT_FENCES.get(task_id) or {}).copy()
+            if latch and latch.get("cause") != "owner_pause":
+                witnesses = list(fenced_allowance_members(drive_root, task_id, latch.get("fence_id") or ""))
+            members = witnesses or [budget_pause_row(root or drive_root, member)
+                                    for member, root, _ in paused_tree_members(task_id)]
     except Exception:
         log.debug("The pause of held wake %s is unreadable; its cause stays unknown", task_id, exc_info=True)
         return {"cause": "", "ceiling_usd": None}
-    return hold_cause(metadata, own, members)
+    if own.get("reason") == "budget":  # only a money stop needs the record: the ceiling an earlier Resume may have moved
+        try:
+            with acquisition_budget(0.05):
+                metadata = wake_ceiling_metadata(load_task_result(drive_root, task_id, strict=True) or {}) or metadata
+        except Exception:
+            log.debug("The task record of held wake %s is unreadable; its launch stamp stands", task_id, exc_info=True)
+    result = hold_cause(metadata, own, members)
+    if window is not None and allowance_stopped(metadata, own, witnesses):
+        result.update(_resume_room(drive_root, task_id, metadata, own))
+    return result
 
 
 def off_sentence(places) -> str:

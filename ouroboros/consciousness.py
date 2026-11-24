@@ -533,7 +533,7 @@ class BackgroundConsciousness:
         # fence narrowed below that refused every wake of a nearly spent day before its
         # first call.
         ceiling = min(per_task_cap, remaining) if per_task_cap > 0 else remaining
-        # Which of the two set it, observed for the views that explain a pause (never read by a stop or a Resume).
+        # Which limit set it; one part of the evidence for an allowance stop, never authority by itself.
         source = ("allowance" if per_task_cap <= 0 or remaining < per_task_cap
                   else "per_task_cap" if per_task_cap < remaining else "both")
         metadata = {**self._routing_facts(chat_id),
@@ -857,7 +857,7 @@ class BackgroundConsciousness:
         return {**dict(zip(SNAPSHOT_KEYS, values)), **context, "appointment_at": _iso(self._appointment_at),
                 "live_wake_held": held,
                 # What holds it, proven from its records; the current window's own verdict stays beside it.
-                "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
+                "live_wake_hold": held_wake_cause(self._drive_root, wake, window=window if self._enabled else None) if held else None,
                 "allowance_status": str(window.get("status") or ""),
                 # Who turned it off (owner, panic, agent_tool): the switch's state line names a Panic (5A).
                 **({"stop_source": source} if not self._enabled and (source := self._saved_stop_source()) else {}),

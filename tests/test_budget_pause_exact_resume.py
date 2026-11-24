@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import (
-    _install_queue, _loop_ctx, _parked, _pause, _running_row, _supervisor_ctx,
+    _charge_elsewhere, _daily_wake_pause, _install_queue, _loop_ctx, _observe_allowance_reads, _parked, _pause,
+    _running_row, _supervisor_ctx, _wake_http_app,
 )
 from tests.worker_pool_support import affirm_ready
 
@@ -322,6 +323,176 @@ def test_root_resume_mints_single_use_grant_and_only_makes_children_eligible(tmp
     assert budget_pause.budget_pause_row(tmp_path, "root-2")["grant"]["grant_id"] == granted["grant_id"]
     # Now the child may be selected explicitly (Q9) under the resumed root.
     assert queue.resume_budget_paused_task("child-2")["ok"] is True
+
+
+def test_owner_resume_renews_only_the_same_wake_and_consumption_keeps_its_new_ceiling(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from ouroboros import budget_pause, owner_wait, task_pacing, usage_accounting as ua
+    from ouroboros.consciousness_allowance import allowance_window, resumed_allowance
+    from ouroboros.task_results import load_task_result
+
+    queue, task, metadata = _daily_wake_pause(tmp_path, monkeypatch)
+    # $17 of $22 in the rolling window after this recorded charge; $4 belongs to this wake's tree.
+    _charge_elsewhere(tmp_path, 2.0)
+    reads = _observe_allowance_reads(monkeypatch)
+    allowance = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
+    route = "/api/tasks/own-wake/resume"
+    with TestClient(_wake_http_app(tmp_path)) as client:
+        assert client.post("/api/settings", json={allowance: 15, "TOTAL_BUDGET": 20}).status_code == 200
+        before = client.get("/api/consciousness").json()
+        assert before["live_wake_hold"]["resume_additional_usd"] == 0.0
+        reads.clear()
+        assert client.post("/api/settings", json={allowance: 22}).status_code == 200
+        panel = client.get("/api/consciousness")
+        assert panel.status_code == 200
+        shown = panel.json()
+        assert (shown["status"], shown["live_wake_task_id"], shown["unknown_unmetered"]) == ("wake_paused", "own-wake", 1)
+        assert (shown["spent_24h_usd"], shown["daily_usd"]) == (17.0, 22.0)
+        assert shown["live_wake_hold"] == {"cause": "allowance", "ceiling_usd": 4.0,
+                                           "resume_additional_usd": 5.0, "resume_available_usd": 3.0}
+        assert "_budget_pause_resume" not in task and queue.PENDING == [task], "saving does not Resume"
+        response = client.post(route, json={})
+        assert response.status_code == 200
+        assert response.json()["consciousness_resume"] == {"additional_usd": 5.0, "available_now_usd": 3.0}
+        assert reads == [(True, False), (False, False)], "the card reads stale-tolerantly, the grant strictly, both off Q"
+        assert client.post(route, json={}).status_code == 409
+    assert not resumed_allowance(load_task_result(tmp_path, "own-wake")), "an unconsumed grant is not recovery authority"
+
+    ctx, _ = _loop_ctx(tmp_path, "own-wake")
+    ctx.budget_pause_resume = task["_budget_pause_resume"]
+    ctx.task_metadata = metadata
+    state_blob = budget_pause.load_budget_pause(ctx)
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
+    messages, usage = [], {}
+    with ua.usage_scope(ua.UsageScope(drive_root=tmp_path, task_id="own-wake", root_task_id="own-wake",
+                                      root_cost_ceiling_usd=4.0, root_limit_usd=20.0)):
+        _, _, _, _, round_idx, _ = budget_pause.resume_paused_loop(
+            SimpleNamespace(_ctx=ctx), state_blob, messages, {}, usage, set(), budget_remaining_usd=100.0)
+        assert round_idx == 4 and usage["cost"] == 1.25
+        # $1.25 on this actor + $2.75 on its child + $5 granted: the $3 the total budget leaves is no part of the ceiling.
+        assert ctx._cost_ceiling.ceiling_usd == 9.0
+        assert "$5.00" in messages[-1]["content"] and "total budget leaves $3.00" in messages[-1]["content"]
+        assert task_pacing.restore_cost_ceiling(ctx, state_blob.get("cost_ceiling")).ceiling_usd == 9.0
+    assert allowance_window(tmp_path)["settled_usd"] == 17.0
+    assert resumed_allowance(load_task_result(tmp_path, "own-wake")) == {
+        "additional_usd": 5.0, "ceiling_usd": 9.0, "source": "allowance"}, "the record keeps the cumulative projection only"
+    assert queue.PENDING == [task] and task["id"] == "own-wake"
+
+
+def test_owner_resume_renews_a_child_first_allowance_without_releasing_the_child(tmp_path, monkeypatch):
+    from ouroboros import budget_pause
+    from ouroboros.gateway.tasks import api_task_resume
+    from tests.test_continue_blocker_diagnostics import _http
+
+    _queue, root, _metadata = _daily_wake_pause(tmp_path, monkeypatch, scope="root")
+    child, _ = _parked(tmp_path, monkeypatch, task_id="first-helper", root_task_id=root["id"], scope="root")
+    borrowed = budget_pause.budget_pause_row(tmp_path, child["id"])
+    borrowed.update(rail=budget_pause.RAIL_GRACEFUL_CEILING, cost_ceiling={
+        "state": "active", "ceiling_usd": 4.0, "root_cap_usd": 20.0, "basis": "root_resolved_ceiling"})
+    budget_pause.set_budget_pause(tmp_path, child["id"], borrowed)
+    child["_budget_pause"].update(rail=borrowed["rail"])
+    pause = budget_pause.budget_pause_row(tmp_path, root["id"])
+    pause["rail"] = root["_budget_pause"]["rail"] = budget_pause.RAIL_DISPATCH_REFUSED
+    budget_pause.set_budget_pause(tmp_path, root["id"], pause)
+
+    status, receipt = _http(api_task_resume, root["id"])
+    assert status == 200 and receipt["consciousness_resume"] == {"additional_usd": 7.0, "available_now_usd": 7.0}
+    assert child["_budget_pause"] and "_budget_pause_resume" not in child
+
+
+@pytest.mark.parametrize("case,error", [("spent", "consciousness_allowance_exhausted"),
+    ("unavailable", "consciousness_allowance_unknown"), ("off", "consciousness_disabled"),
+    ("both", "root_hard_cap_exhausted"), ("wallet", "budget_still_exhausted")])
+def test_owner_resume_leaves_the_wake_parked_without_authorized_room(tmp_path, monkeypatch, case, error):
+    from ouroboros import budget_pause, consciousness_allowance
+    from ouroboros.gateway.tasks import api_task_resume
+    from ouroboros.pause_notices import RESUME_REFUSAL_WORDS
+    from supervisor import state
+    from tests.test_continue_blocker_diagnostics import _http
+
+    queue, task, _ = _daily_wake_pause(tmp_path, monkeypatch, source="both" if case == "both" else "allowance",
+                                     cap=4.0 if case == "both" else 20.0)
+    if case == "spent":
+        monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "15")
+    elif case == "unavailable":
+        def unreadable_window(*_args, **_kwargs):
+            raise OSError("rolling-window read unavailable")
+
+        monkeypatch.setattr(consciousness_allowance, "_window_rows", unreadable_window)
+    elif case == "off":
+        monkeypatch.setattr(queue, "load_state", lambda: {"bg_consciousness_enabled": False})
+    elif case == "wallet":
+        monkeypatch.setenv("TOTAL_BUDGET", "15")
+        monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 15.0)
+    status, refusal = _http(api_task_resume, "own-wake")
+    assert (status, refusal["error"]) == (409, error)
+    # The real 409 carries the one sentence every door says (``work_stop.resume_outcome`` from ``RESUME_REFUSAL_WORDS``).
+    assert refusal["message"] == f"Resume refused: {RESUME_REFUSAL_WORDS[error]}"
+    assert "_budget_pause_resume" not in task and "grant" not in budget_pause.budget_pause_row(tmp_path, "own-wake")
+
+
+@pytest.mark.parametrize("at_daily_stop", [True, False])
+def test_a_pause_that_moved_since_it_was_observed_is_never_extended_by_the_observation(tmp_path, monkeypatch, at_daily_stop):
+    """A recognized daily stop under an older locator answers ``selection_authority_changed`` (read again), never the
+    older observation; a newer pause that is not that stop is an ordinary Resume no money forecast refuses."""
+    from ouroboros import budget_pause
+    from ouroboros.gateway.tasks import api_task_resume
+    from tests.test_continue_blocker_diagnostics import _http
+
+    _queue, task, _metadata = _daily_wake_pause(tmp_path, monkeypatch)
+    row = budget_pause.budget_pause_row(tmp_path, "own-wake")
+    ceiling = {**row["cost_ceiling"], **({} if at_daily_stop else {"ceiling_usd": 5.5})}
+    budget_pause.set_budget_pause(tmp_path, "own-wake", {**row, "pause_id": "pause-newer", "cost_ceiling": ceiling})
+    status, answer = _http(api_task_resume, "own-wake")
+    if at_daily_stop:
+        assert (status, answer["error"]) == (409, "selection_authority_changed") and "_budget_pause_resume" not in task
+        status, answer = _http(api_task_resume, "own-wake")  # the locator now follows the durable pause
+        assert status == 200 and answer["consciousness_resume"]["additional_usd"] == 7.0
+    else:
+        assert status == 200 and "consciousness_resume" not in answer
+    assert budget_pause.budget_pause_row(tmp_path, "own-wake")["grant"]["pause_id"] == "pause-newer"
+
+
+@pytest.mark.parametrize("daily,total,additional,available", [
+    ("22", "100", 7.0, 7.0),  # the total budget leaves more than the room
+    ("22", "18", 7.0, 3.0),   # a $15 ledger leaves $3, without changing the allowance's room
+    ("22", "15", None, 0.0),  # total budget spent, never the allowance spent
+    ("22", None, None, None),  # unreadable ledger: neither is claimed
+    ("15", "100", 0.0, None)])  # the allowance itself spent
+def test_the_card_names_the_allowances_room_and_what_the_total_budget_leaves_of_it(
+        tmp_path, monkeypatch, daily, total, additional, available):
+    from ouroboros import usage_store
+    from ouroboros.consciousness_view import held_wake_cause
+
+    _daily_wake_pause(tmp_path, monkeypatch)
+    reads = _observe_allowance_reads(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", daily)
+    if total is None:
+        def unreadable(*_args, **_kwargs):
+            raise OSError("usage store unavailable")
+
+        monkeypatch.setattr(usage_store, "read", unreadable)
+    else:
+        monkeypatch.setenv("TOTAL_BUDGET", total)
+    assert "resume_additional_usd" not in held_wake_cause(tmp_path, "own-wake") and not reads, "no window, no read"
+    # A window another read took, disagreeing with the ledger: the card's room never comes from it.
+    hold = held_wake_cause(tmp_path, "own-wake", window={"status": "available", "limit_usd": 22.0, "remaining_usd": 99.0})
+    assert reads == [(True, False)] and hold["cause"] == "allowance" and hold["ceiling_usd"] == 4.0
+    assert (hold["resume_additional_usd"], hold.get("resume_available_usd")) == (additional, available)
+
+def test_the_notice_names_the_room_in_amounts_however_small_and_never_a_launch_number_it_cannot_know():
+    from ouroboros.budget_pause import _ceiling_words
+
+    own = {"reason": "own_wake_allowance", "ceiling_usd": 4.0}
+    assert "$0.0040" in _ceiling_words({**own, "additional_usd": 0.004}), "a sub-cent room is an amount, not $0.00"
+    narrower = _ceiling_words({**own, "additional_usd": 5.0, "available_now_usd": 3.0})
+    assert "$5.00" in narrower and "$3.00" in narrower
+    for same in (5.0, 9.0, None, "3", float("nan")):  # no narrower, or a value that proves nothing
+        assert "total budget" not in _ceiling_words({**own, "additional_usd": 5.0, "available_now_usd": same})
+    kept = _ceiling_words({"reason": "producer_allowance_not_expanded", "ceiling_usd": 9.0})
+    assert "$9.00" in kept and "launched" not in kept, "the current ceiling, equal to or moved from the launch one"
+    assert _ceiling_words({"reason": "hard_rail"}) == ""
 
 
 def test_root_grant_refuses_a_cached_tree_snapshot_and_admits_a_fresh_read(tmp_path, monkeypatch):

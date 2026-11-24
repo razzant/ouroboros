@@ -1255,6 +1255,7 @@
  * @property {string=} grant_id
  * @property {number=} grant_generation
  * @property {number=} paused_duration_sec
+ * @property {{additional_usd: number, available_now_usd?: number}=} consciousness_resume  // additional known allowance and what the total budget leaves of it at the grant, observations and no reservation
  * @property {string[]=} eligible_descendants
  * @property {string[]=} held_siblings
  * @property {string[]=} rebound_held_siblings

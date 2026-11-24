@@ -779,8 +779,8 @@ test('Costs reads the allowance from the consciousness snapshot, /api/state when
     assert.equal(mount.querySelector('[data-costs-consciousness]').getAttribute('aria-label'), 'Open Consciousness');
     const state = mount.querySelector('#costs-allowance-state');
     // The fixture reads a node's own text before its children's: the order in the page is the browser lane's.
-    assert.match(state.textContent, /The consciousness wake-up is paused at the allowance it had left when it started \(\$2\.99\)\./);
-    assert.match(state.querySelector('.costs-allowance-note').textContent, /^Resume keeps that limit, so it pauses again/,
+    assert.match(state.textContent, /The consciousness wake-up is paused at its allowance \(\$2\.99\)\./);
+    assert.match(state.querySelector('.costs-allowance-note').textContent, /^No spending estimate is available for Resume\./,
         'what follows from the fact is quieter than the fact');
     const door = state.querySelector('[data-open-task]');
     assert.equal(door.dataset.openTask, 'wake-1', 'the held wake\'s card in Main');

@@ -99,6 +99,18 @@ def authority_wait_text(cause: str) -> str:
     return f"The task will continue automatically when it can read {subject}." if subject else ""
 
 
+# A Resume refused on money (``supervisor.budget_resume``). The answer's ``message`` is what every door shows
+# (``work_stop.resume_outcome``), so no client keeps a copy of these sentences. A per-task cap is no next step for the
+# work that used it up: the setting reaches only work that starts after it.
+RESUME_REFUSAL_WORDS = {
+    "consciousness_allowance_exhausted": "the consciousness limit has nothing left for it now.",
+    "consciousness_allowance_unknown": "what is left of the consciousness limit cannot be read now.",
+    "consciousness_disabled": "consciousness is off.",
+    "budget_still_exhausted": "the total budget has nothing left; raise it, then press Resume.",
+    "root_hard_cap_exhausted": "the per-task cost cap of this work is used up.",
+}
+
+
 def notice_text(notice: dict) -> str:
     """The sentence one owed notice says; an owner Pause names the author its own fence declared, and the words that
     press recorded follow its head verbatim, whoever declared it (a press without words says none)."""

@@ -875,6 +875,46 @@ test('an accepted Resume keeps its own words and names the gap its Pause did not
     assert.match(membershipGapWords({ count: 3, rows: [] }, 'continue'), /\(…\)/, 'a count without names still counts');
 });
 
+test('a Resume refusal is said in the sentence the server answered with, never its code or a client copy of the words', async () => {
+    const { resumeRefusalWords } = await import('../modules/task_control_menu.js');
+    const refused = (body) => Object.assign(new Error(body.error), { status: 409, body });
+    // The server owns the money refusals' words (`work_stop.resume_outcome`, tested there against the real 409).
+    const message = 'Resume refused: a sentence only the server owns.';
+    for (const error of ['consciousness_allowance_exhausted', 'consciousness_disabled', 'budget_still_exhausted', 'root_hard_cap_exhausted']) {
+        assert.equal(resumeRefusalWords(refused({ error, task_id: 'w', message })), message, error);
+    }
+    const toasts = [];
+    await resumeTaskAction('wake-held', { resume: async () => { throw refused({ error: 'consciousness_disabled', message }); },
+        toast: (...args) => toasts.push(args) });
+    assert.deepEqual(toasts, [[message, 'error']]);
+    // An answer with no sentence keeps the generic failure: the client holds no words of the server's.
+    assert.equal(resumeRefusalWords(refused({ error: 'consciousness_disabled' })), 'Resume refused: consciousness_disabled');
+});
+
+test('a consciousness wake resumed at its daily share says the room its Resume gave it, and only a number says one', async () => {
+    const { resumeAcceptedWords } = await import('../modules/task_control_menu.js');
+    const toasts = [];
+    await resumeTaskAction('wake-held', { resume: async () => ({ ok: true, consciousness_resume: { additional_usd: 4.5 } }),
+        toast: (...args) => toasts.push(args) });
+    assert.deepEqual(toasts, [['Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness '
+        + 'allowance.', 'info']]);
+    assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 0 } }),
+        'Resuming: the task returns to the queue. The consciousness allowance gives it nothing more, so it may pause again.');
+    // The total budget is its own limit beside the allowance: what it leaves of the room now is said as an observation.
+    assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 4.5, available_now_usd: 1.25 } }),
+        'Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness allowance; '
+        + '$1.25 of it is available now under the total budget.');
+    for (const now of [undefined, null, '1', -1, 4.5]) {  // an older receipt, an unreadable or no narrower value says nothing of it
+        assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: 4.5, available_now_usd: now } }),
+            'Resuming: the task returns to the queue. It may spend up to $4.50 more of the consciousness allowance.', String(now));
+    }
+    for (const room of [undefined, null, '4.5', -1, Number.NaN, {}]) {
+        assert.equal(resumeAcceptedWords({ ok: true, consciousness_resume: { additional_usd: room } }),
+            'Resuming: the task returns to the queue.', `${String(room)}: no amount is guessed`);
+    }
+    assert.equal(resumeAcceptedWords({ ok: true }), 'Resuming: the task returns to the queue.');
+});
+
 test('a gap notice keeps all its words beside its close button; the page stack it cuts is a keyboard region', async (t) => {
     const { announceMembershipGap } = await import('../modules/task_control_menu.js');
     const { showToast } = await import('../modules/toast.js');

@@ -6,7 +6,7 @@ import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
-import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
+import { allowanceHold, allowanceText, modelRouteWords, wakeResumeRoomWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
 import { mountCostProjectDays } from './cost_project_days.js';
@@ -154,6 +154,13 @@ export function roomTimeText(iso, { now = Date.now(), timeZone } = {}) {
 }
 
 const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
+const STOP_NOW = 'Stop now on its card ends it and frees the clock for its next check.';
+
+function resumeWords(snapshot) {
+    const room = wakeResumeRoomWords(snapshot);
+    return room ? `${room}; raising the limit alone resumes nothing.`
+        : 'No spending estimate is available for Resume. Raising the limit alone resumes nothing.';
+}
 
 /** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
  *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables, and
@@ -183,12 +190,12 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     }
     const wake = snapshot.liveWakeTaskId;
     if (allowanceHold(snapshot)) {
+        // Its ceiling is where the wake stopped, which an earlier Resume may have moved; the room estimate's absence
+        // (an older host, or a pause still settling) does not make it what the wake had left when it started.
         const facts = [snapshot.holdCeilingUsd !== null ? formatUsd(snapshot.holdCeilingUsd) : '',
             snapshot.holdCause === 'allowance_and_cap' ? 'the per-task cap too' : ''].filter(Boolean);
-        lines.push({ wake, tone: 'warn', text: `The consciousness wake-up is paused at the allowance it had left when it started`
-            + `${facts.length ? ` (${facts.join(', ')})` : ''}.`,
-        note: 'Resume keeps that limit, so it pauses again while its known spend is at it; room returning or a higher '
-            + 'limit does not raise it. Stop now on its card ends it and frees the clock for its next check.' });
+        lines.push({ wake, tone: 'warn', text: `The consciousness wake-up is paused at its allowance${facts.length ? ` (${facts.join(', ')})` : ''}.`,
+            note: `${resumeWords(snapshot)} ${STOP_NOW}` });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'per_task_cap') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' });
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'launch_ceiling') {
@@ -229,8 +236,8 @@ const ALLOWANCE_NOTE = 'Known spend of its wake-ups, its replies in places and t
     + 'confirmed and estimated prices count, calls without a price add nothing to it, and calls still open may add more. '
     + `When it is reached, ${NEW_STARTS} wait until older spending leaves the 24 hours. A wake-up may spend at most `
     + 'what was left of this limit when it started (and no more than the per-task cap); there it pauses. A higher limit '
-    + 'does not raise what it was given and Resume keeps it, so a wake-up whose known spend is still at it pauses again. '
-    + 'Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
+    + 'alone neither raises what it was given nor resumes it; what Resume on its card would do is said beside the paused '
+    + 'wake-up. Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
     + 'consciousness may not spend.';
 
 /** The Subscriptions block's doors, from the passive quota read (`GET /api/claudexor/status?view=quota`: the roster and

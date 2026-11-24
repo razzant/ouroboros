@@ -223,6 +223,25 @@ const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
 export const allowanceHold = (snapshot) => snapshot.enabled === true && snapshot.status === 'wake_paused'
     && snapshot.liveWakeHeld === true && ALLOWANCE_HOLDS.has(snapshot.holdCause);
 
+/** What Resume of a wake held at its daily share may add, as the host estimates it now
+ *  (`live_wake_hold.resume_additional_usd`, consciousness_api.js `holdAdditionalUsd`), in one action's money (`formatUsd`:
+ *  cents, a sub-cent amount in its own digits): an estimate until the press, never a ceiling, for the grant its answer
+ *  names may differ; none, or unknown. The total budget is its own limit beside the allowance and binds every send: what
+ *  it leaves of the room (`holdAvailableUsd`) is said beside it when that is less, and an empty total budget is not the
+ *  allowance spent. '' when the host gave no estimate; that proves nothing about a subsequent Resume. Costs and Main's
+ *  card say it in these words. */
+export function wakeResumeRoomWords(snapshot) {
+    const more = snapshot?.holdAdditionalUsd;
+    if (more === undefined) return '';
+    const now = snapshot.holdAvailableUsd;
+    let words = more === null ? 'unknown now' : more > 0 ? formatUsd(more) : 'none';
+    if (more === null && now === 0) words = 'none now, the total budget has nothing left';
+    else if (more > 0 && typeof now === 'number' && now < more) {
+        words += ` from the allowance, ${formatUsd(now)} available now because the total budget has less left`;
+    }
+    return `Estimated room on Resume: ${words}`;
+}
+
 /** Whether the next step is the allowance, edited in Costs: new starts refused by it, or a wake held at it. */
 export const allowanceMove = (snapshot) => snapshot.enabled === true
     && (snapshot.status === 'allowance_exhausted' || allowanceHold(snapshot));
