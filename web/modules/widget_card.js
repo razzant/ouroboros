@@ -68,6 +68,21 @@ export function isRetainedWidget(tab, prefs) {
     return isFramedWidget(tab) && effectiveStartMode(tab, prefs) === 'retain';
 }
 
+/** The start ledger's key for a widget's code (holds.js): a start the page did not outlive holds it at its revision
+ *  wherever it shows (the board, Costs, a card in a message). */
+export const widgetCodeHoldKey = (tab) => `widget:${tab?.skill}:${tab?.tab_id}`;
+
+/**
+ * Whether a card starts by itself where it is shown (the board on entry, Costs on show): a host-drawn one always; a
+ * framed one under the owner's launch policy as read (`prefs` null: not read, so the owner's Manual is unknown) when it
+ * is not Manual, held by neither that place's Stop (`stopKey`) nor a start of this revision the page did not outlive.
+ */
+export function widgetStartsOnShow(tab, prefs, holds, stopKey) {
+    if (!isFramedWidget(tab)) return true;
+    return Boolean(prefs) && effectiveStartMode(tab, prefs) !== 'manual'
+        && !holds.reason(stopKey) && !holds.reason(widgetCodeHoldKey(tab), tab.revision);
+}
+
 /** Whole-map replace payload for `POST /api/ui/preferences` (the `widget_order` shape). */
 export function withWidgetStartMode(current, key, mode) {
     const next = current && typeof current === 'object' && !Array.isArray(current) ? { ...current } : {};

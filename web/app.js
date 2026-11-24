@@ -14,7 +14,7 @@ import { createProjectsNav } from './modules/projects_nav.js';
 import { bindRowMenuGesture } from './modules/row_menu_gesture.js';
 import { initFiles } from './modules/files.js';
 import { initCircles } from './modules/circles.js';
-import { draftPort, getContributions } from './modules/contributions.js';
+import { draftPort, getContributions, widgetCardOf } from './modules/contributions.js';
 import { modelCatalog } from './modules/model_catalog_store.js';
 import { bridgeContributedActions } from './modules/message_actions.js';
 import { registerMessageShare } from './modules/message_share.js';
@@ -1293,12 +1293,13 @@ window.addEventListener('ouro:open-project', (event) => {
         quizId: event.detail.quiz_id || '', pointer: event.detail.pointer === true });
 });
 
-// A contribution's `open.tab` (contributions.js): the Widgets page, at that skill's first card once it is drawn.
+// A contribution's `open.tab` or a placed card's door (contributions.js): the Widgets page, at the card it names once
+// it is drawn (the tab its key names; a skill alone, that skill's first card).
 window.addEventListener('ouro:open-widgets', async (event) => {
-    const skill = String(event?.detail?.skill || '');
+    const named = { skill: String(event?.detail?.skill || ''), key: String(event?.detail?.key || '') };
     const page = document.getElementById('page-widgets');
-    if (!skill || !page || !await showPage('widgets')) return;
-    const card = () => [...page.querySelectorAll('[data-widget-key]')].find((node) => node.dataset.widgetKey.startsWith(`${skill}:`));
+    if (!named.skill || !page || !await showPage('widgets')) return;
+    const card = () => widgetCardOf(page, named);
     if (card()) return card().scrollIntoView({ block: 'nearest' });
     const observer = new MutationObserver(() => {
         if (!card()) return;

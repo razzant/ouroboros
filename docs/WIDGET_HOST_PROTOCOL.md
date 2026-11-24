@@ -7,17 +7,18 @@ A widget written for Ouroboros only works in your interface if your host keeps e
 ## 1. What the core gives you
 
 - **Cards:** `GET /api/widgets` returns `ui_tabs`, one `WidgetTab` per card: `key`, `skill`, `tab_id`, `title`, `icon`, `ws_prefix`, `render`, `span`, `grid_span`, `revision` and `generation` (live skill tabs).
-- **A module card's `render`:** `{kind: "module", entry, entry_type?, assets?, start, appearance?, height?, max_height?}`.
+- **A module card's `render`:** `{kind: "module", entry, entry_type?, assets?, start, appearance?, height?, max_height?, page?}`.
   - `entry` is the reviewed script: a bare filename for classic entries, a skill-relative path for ESM entries. ESM paths retain their `/` separators; segment characters are ASCII letters, digits, `.`, `_` and `-` (CREATING_SKILLS defines the bounds).
   - `start` is `auto`, `manual` or `retain` (§7).
   - `appearance` (`host`, `independent` or `fixed`) records the author's intent only. It changes nothing in the host.
   - `height` is a fixed frame height (320 to 8192 pixels). Without it the frame sizes itself (§5).
   - `max_height` lowers the self-sizing ceiling (320 to 8192, default 8192).
+  - `page` (`costs`, any kind) also places the card on that page: the builtin host runs it on Dashboard › Costs in `widget_order`, in its own card with a door to its widgets-view card (§7); a host without the page ignores it.
 - **Classic sources:** `GET /api/extensions/{skill}/module/{entry}` answers captured JavaScript text, without caching and with any-origin CORS; network authentication still applies. `409` means no live bundle, `404` no captured file. ESM uses the lease below.
 - **Change signals:**
-  - `revision` is the skill's live content hash. A card whose `revision` changed while it runs is stopped (§6) and started again. `generation` names the live publication: an `entry_type: "module"` card's file lease is bound to it, so in board and chat mounts such a card also restarts when it changes, even with unchanged bytes. Classic cards ignore it.
+  - `revision` is the skill's live content hash. A card whose `revision` changed while it runs is stopped (§6) and starts again only as a new card would (§7, §9). `generation` names the live publication: an `entry_type: "module"` card's file lease is bound to it, so in board, Costs and chat mounts its change stops such a card the same way, even with unchanged bytes. Classic cards ignore it.
   - An `extension_lifecycle` WebSocket frame means "read `GET /api/widgets` again". A card that left the list is stopped.
-- **The owner's launch choice:** `GET /api/ui/preferences` returns `widget_start_mode`, keyed `"<skill>:<tab_id>"`. It overrides the card's own `start`. `POST /api/ui/preferences` with `{widget_start_mode}` saves it.
+- **The owner's launch choice:** `GET /api/ui/preferences` returns `widget_start_mode`, keyed `"<skill>:<tab_id>"`. It overrides the card's own `start`, except beside `unreadable: true` (saved preferences the core could not read). `POST /api/ui/preferences` with `{widget_start_mode}` saves it.
 
 For a classic entry, fetch the script with the owner's session, from the page. The builtin host gives up after 25 seconds and shows a retryable error.
 
@@ -209,7 +210,7 @@ There is no default timeout. A positive `init.timeoutMs` aborts the request afte
 
 **External links.** Open the link only while the page has a user activation. Answer with `result: {ok: true, ...}`, `{ok: false, degraded, ...}` when only a fallback (such as copying the link) was possible, or `{ok: false, error}`. The frame treats `ok` or `degraded` as success.
 
-**Faults.** Show the fault in the card's status (a card in a message shows it there) and leave the card running. The builtin host additionally posts it once per kind and message, at most 10 per mount, to `POST /api/widgets/fault` (`WidgetFaultRequest`): this card's own `skill`, `tab_id` and `revision`, `where: "board"` or `"message"`, and the frame's `kind`, `message` (clipped to 500 characters), `source` (200) and `line`; a value that is not a string is sent as `""`, a line that is not a whole number from 0 as `0`. Never take who the widget is from the message, and count per mount, not per frame: the widget's own code can read the nonce and post directly. Reporting is optional for other clients. A report is best effort: no retry, and a refusal changes nothing on the card. Until the stop finishes (§6) the frame still reports.
+**Faults.** Show the fault in the card's status (a card in a message shows it there) and leave the card running. The builtin host additionally posts it once per kind and message, at most 10 per mount, to `POST /api/widgets/fault` (`WidgetFaultRequest`): this card's own `skill`, `tab_id` and `revision`, `where` (`"board"`, `"costs"` or `"message"`), and the frame's `kind`, `message` (clipped to 500 characters), `source` (200) and `line`; a value that is not a string is sent as `""`, a line that is not a whole number from 0 as `0`. Never take who the widget is from the message, and count per mount, not per frame: the widget's own code can read the nonce and post directly. Reporting is optional for other clients. A report is best effort: no retry, and a refusal changes nothing on the card. Until the stop finishes (§6) the frame still reports.
 
 Both page and server redact capability-bearing asset URLs. The server normalizes unpaired UTF-16 surrogates in the clipped text to U+FFFD before writing UTF-8; valid emoji remain intact.
 
@@ -234,7 +235,9 @@ drop them once that port was retired.
 | `manual` | Shows the title, icon and a Start button. Runs only after Start. Leaving the view stops it. |
 | `retain` | Starts on the first visit to the widgets view and keeps running on other views until Stop, until the skill leaves the card list, or until the page goes away. |
 
-The owner's choice in `widget_start_mode` overrides `start`. Stop always wins: the builtin host keeps the owner's Stop on that device across reloads until Start or a change to `auto` / `retain`. Installing or enabling a skill never starts a widget: only showing the widgets view does. A frame never outlives the page that hosts it.
+The owner's choice in `widget_start_mode` overrides `start`. Stop always wins: the builtin host keeps the owner's Stop on that device across reloads until Start or a change to `auto` / `retain`. Installing or enabling a skill starts no widget by itself: a card starts only in a shown view, when shown or on joining its list, if `auto` or `retain` (a `manual` one waits for Start). A frame never outlives the page that hosts it.
+
+A card placed on Costs (§1) has its own frame there, started as in any shown view; leaving stops it under any policy, and a Stop there holds until Start there. A changed `revision` stops the old frame, whose card stays in view as Stopping, taking no input, until it has; the current policy then decides, as on showing. That policy is `widget_start_mode` as Costs' latest read brought it (a map, empty when none is overridden), deciding a start it made until the frame gets its document, never the owner's Start. Without the map (an error object, another shape, `unreadable` or none) nothing starts, nothing running stops, and Start stays beside Retry.
 
 On WebKit, Android WebView and Firefox a frame shares the page's thread, so a start that loops or blows up takes the page with it. The builtin host writes each frame's start to a local ledger before the frame gets its document and clears it one second after the frame's first `load`, or when the page hides (its thread outlived the start); a card whose last start with this revision the page did not outlive is not started by itself on any view (its facade, one line, Start). A page opened with `?hold=all` holds every frame for that load.
 

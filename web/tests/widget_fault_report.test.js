@@ -37,12 +37,12 @@ async function stopMounts() {
     while (stops.length) await stops.pop()();
 }
 
-async function mounted({ inline = null } = {}) {
+async function mounted({ inline = null, board = null } = {}) {
     const card = document.createElement('div');
     card.setAttribute('data-widget-key', TAB.key);
     card.innerHTML = '<div data-widget-status hidden></div><div data-widget-mount></div>';
     const mount = card.querySelector('[data-widget-mount]');
-    const dispose = await mountModuleWidget(mount, TAB, TAB.render, null, null, inline);
+    const dispose = await mountModuleWidget(mount, TAB, TAB.render, null, null, inline, board);
     const frame = mount.querySelector('iframe');
     frame.contentWindow = { postMessage() {} };
     const joined = joinFrame(frame, (event) => window.emit('message', event));
@@ -136,6 +136,25 @@ test('a failed report changes nothing: the card shows every fault and nothing is
         assert.deepEqual(unhandled, []);
     } finally {
         process.off('unhandledRejection', onUnhandled);
+        server.restore();
+        dom.restore();
+    }
+});
+
+test('a card its author placed on Costs reports its fault as where: costs, shown on its own card', async () => {
+    const dom = installCardDom();
+    const server = serve();
+    try {
+        // The Costs card's frame policy (costs_widgets.js): the board's shape, its own place.
+        const costs = { where: 'costs', starting() {}, geometry: () => ({ auto: true, height: 320, ceiling: 8192, floor: 0 }),
+            held: () => 0, measured() {}, attach: () => () => {} };
+        const { status, fault } = await mounted({ board: costs });
+        fault({});
+        await flush();
+        assert.equal(status.textContent, 'Widget script error: boom');
+        assert.equal(server.reports[0].where, 'costs');
+    } finally {
+        await stopMounts();
         server.restore();
         dom.restore();
     }

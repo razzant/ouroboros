@@ -8,6 +8,7 @@ owner's pinned model routes (``model_pins``). ``read_ahead_revisions`` and ``mod
 server-written: a POST naming either or an unknown key answers 400. ``model_pins`` changes only by
 ``pin``/``unpin`` route lists, never as a whole list.
 ``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
+Only an absent file is new: a GET of a saved one it cannot read answers the defaults with ``unreadable: true``.
 """
 from __future__ import annotations
 
@@ -418,10 +419,14 @@ def main_room_revision(drive_root: Any) -> int | None:
 
 
 def _stored_preferences(path: pathlib.Path) -> dict[str, Any]:
-    """Saved preferences. ``welcome`` has no Settings control and is edited by hand, so
+    """Saved preferences; ``None`` from the read (absent, unreadable or no object) is the defaults."""
+    return _preferences_of(read_json_dict(path))
+
+
+def _preferences_of(stored: dict[str, Any] | None) -> dict[str, Any]:
+    """``welcome`` has no Settings control and is edited by hand, so
     a value the POST contract would refuse reads as the default instead of taking every
     other key down with it; the next write stores that default."""
-    stored = read_json_dict(path)
     if stored is not None and "welcome" in stored:
         try:
             _normalize_preferences({"welcome": stored["welcome"]}, fill_defaults=False)
@@ -447,10 +452,22 @@ async def api_ui_preferences_get(request: Request) -> JSONResponse:
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
     try:
-        prefs = _stored_preferences(path)
-        return JSONResponse(prefs)
+        stored = read_json_dict(path)
+        if stored is None:
+            # Only a lookup that finds nothing (no file, its folder not created yet) is new; exists() would also say
+            # False for a lookup that failed (ENOTDIR, and on Python 3.14 any OSError), which falls through to below.
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError("saved UI preferences are not a readable JSON object")
+        return JSONResponse(_preferences_of(stored))
     except Exception:
-        return JSONResponse(dict(DEFAULT_UI_PREFERENCES))
+        # The defaults stand in for a saved file that cannot be read, or that may exist where it cannot be looked up
+        # (its bytes are left as they are), so they say so: none of them is the owner's choice (the Costs page starts no
+        # widget by itself on them).
+        return JSONResponse({**DEFAULT_UI_PREFERENCES, "unreadable": True})
 
 
 async def api_ui_preferences_post(request: Request) -> JSONResponse:

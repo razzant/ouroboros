@@ -2602,8 +2602,9 @@ Rules every module author follows:
   Windows shell (WebView2) and ordinary Chromium browsers pause animation
   frames while hidden. No tick rate is promised. Keep work that must progress
   off `requestAnimationFrame`.
-- **Install and enable never start browser code.** The first visit to Widgets
-  does; nothing runs at app load.
+- **A visible placement starts the card.** Installation and enabling do not execute
+  browser code themselves. Showing Widgets, showing Costs for a card placed there,
+  or adding a card to either page while it is open can start it under its launch policy.
 
 What the host does today: all three policies are honoured — an `auto` card
 mounts when Widgets is shown and stops when the owner leaves, a `manual` card
@@ -2840,6 +2841,16 @@ together) into the card as its `src`, and refuses a card whose image,
 audio or video has no such source instead of showing it without one
 (media shown on a `condition_key` or aimed at a `target` is left to the
 renderer).
+
+### Your widget on Costs
+
+A widget about spending or subscription quotas may add `page: costs` to its
+`render` (any kind; the value is closed). Dashboard › Costs then runs the same
+live tab in a card of its own; Widgets stays its home, where the owner arranges
+it and sets its launch policy. Its frame runs only while Costs is shown, starts
+by itself only on the policy Costs has just read and keeps the owner's Stop made
+there; a new revision stops the old frame, then that policy decides. A core that
+predates the field passes it through unused, so the widget stays on Widgets alone.
 
 ### Async job error contract
 

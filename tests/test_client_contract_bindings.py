@@ -258,6 +258,38 @@ def test_the_update_status_review_pool_and_spend_answer_their_published_shapes(c
     assert spend.json()["accounting"]["authority"] == "physical_attempt_ledger"
 
 
+def test_spend_project_days_keeps_early_ledger_refusal_bound_to_the_requested_selector(client, monkeypatch):
+    from ouroboros import usage_store
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    token, path = "GET /api/cost-breakdown", "/api/cost-breakdown"
+    selected = client.get(path, params={"project_days": "unassigned"})
+    assert assert_bound(token, selected) == "CostBreakdownResponse"
+    assert selected.json()["project_days"]["total"]["settled_usd"] is None
+    # The room card's read: the same view alone, its own published shape.
+    alone = client.get(path, params={"view": "project_days", "project_days": "unassigned"})
+    assert assert_bound(token, alone) == "CostProjectDaysResponse" and set(alone.json()) == {"project_days"}
+    assert alone.json()["project_days"]["total"] == selected.json()["project_days"]["total"]
+
+    def unavailable(*_args, **_kwargs):
+        raise UsageLockUnavailable("synthetic contention at the ledger read")
+
+    monkeypatch.setattr(usage_store, "read", unavailable)
+    plain = client.get(path)
+    assert plain.status_code == 503 and assert_bound(token, plain) == "CostBreakdownUnavailableResponse"
+    # The 503's fields and values before the room view existed, unchanged.
+    assert plain.json() == {"error": "Physical-attempt accounting unavailable", "accounting": {
+        "available": False, "authority": "physical_attempt_ledger", "cost_final": False, "error_code": "ledger_unavailable"}}
+    selected = client.get(path, params={"project_days": "project:fixture", "days": "30"})
+    assert selected.status_code == 503 and assert_bound(token, selected) == "CostBreakdownUnavailableResponse"
+    assert selected.json() == {**plain.json(), "project_days": {
+        "available": False, "selector": "project:fixture", "error_code": "ledger_unavailable"}}
+    # Alone, the view's own refusal answers 200: no totals were asked, so none failed.
+    alone = client.get(path, params={"view": "project_days", "project_days": "main", "days": "30"})
+    assert alone.status_code == 200 and assert_bound(token, alone) == "CostProjectDaysResponse"
+    assert alone.json() == {"project_days": {"available": False, "selector": "main", "error_code": "ledger_unavailable"}}
+
+
 # --- the browser mirror ----------------------------------------------------------------------
 
 def _owned_names() -> dict:

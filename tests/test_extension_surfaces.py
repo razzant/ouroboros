@@ -423,6 +423,23 @@ def test_validate_ui_render_rejects_appearance_on_non_module(kind_render):
         validate_ui_render(kind_render)
 
 
+@pytest.mark.parametrize("kind_render", [
+    {"kind": "module", "entry": "widget.js"},
+    {"kind": "iframe", "route": "view"},
+    {"kind": "declarative", "schema_version": 1, "components": []},
+])
+def test_validate_ui_render_places_any_kind_on_costs(kind_render):
+    """`render.page` asks a host page besides Widgets for the card (web/modules/costs_widgets.js); absent is legacy."""
+    assert "page" not in validate_ui_render(copy.deepcopy(kind_render))
+    assert validate_ui_render({**kind_render, "page": " costs "})["page"] == "costs"
+
+
+@pytest.mark.parametrize("page", ["", "Costs", "storage", 1, None, ["costs"]])
+def test_validate_ui_render_rejects_a_page_outside_the_closed_set(page):
+    with pytest.raises(ExtensionRegistrationError, match="ui render page"):
+        validate_ui_render({"kind": "module", "entry": "widget.js", "page": page})
+
+
 _UI_TAB_REJECTION_CASES = [
     (
         "unsupported_render_kind",

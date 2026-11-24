@@ -1507,6 +1507,7 @@
  * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
  * @property {ChatModelRoute[]} model_pins  // owner-pinned routes in pin order, at most 24; a POST changes them only by `{model_pins: {pin, unpin}}`
  * @property {boolean=} ok
+ * @property {boolean=} unreadable  // GET: true when a saved file exists but cannot be read; every value is then the default, none the owner's choice
  */
 /**
  * Host sign-in registration as its OS reports it, or (/api/desktop/background) the keep-running choice; `reason` only when unavailable.

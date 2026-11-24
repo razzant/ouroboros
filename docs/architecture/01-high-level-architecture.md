@@ -29,7 +29,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     project_activity.js, work_status.js, work_types.js, status_mark.js — Project marks and room words from the server's `rooms`/`works`; their typedefs (§3 Liveness census)
     room_work.js, project_read_state.js, chat_header.js, consciousness_status.js — a room's bar: work list (no execution authority), consciousness chip and Shade, Panic, Main's Restart/budget; read receipt (§3 Project rooms)
     model_wait.js — model waits and owner actions in chat cards (§6 Quota and auth waits)
-    task_checkpoints.js, cancel_presentation.js, dashboard.js, logs.js, worker_sha_presentation.js, costs.js, files.js — typed checkpoints and cancellation-cause text shared by Chat and Logs; Dashboard, Logs, worker-SHA presentation, Costs (unknown is not free), Files (§3)
+    task_checkpoints.js, cancel_presentation.js, dashboard.js, logs.js, worker_sha_presentation.js, costs.js, cost_project_days.js, costs_widgets.js, files.js — Chat/Logs checkpoints and stop causes; Dashboard, worker SHA, spend/room days/widget placements, Files (§3)
     extensions.js, section_levels.js, skills.js, skill_*.js — Extensions (Settings' levels), skill views, cards, publish (§3 Extensions and Widgets)
     settings_ui.js, settings_home.js, settings_rows.js, settings_provider_cards.js, settings_catalog.js, settings_controls.js, settings_policy.js, settings_secrets.js, settings_connections.js, connection_labels.js, settings_local_model.js, settings_autostart.js, mcp_settings.js, mcp_header_fields.js, mcp_import_dialog.js — Settings: catalog, binders, policy, secrets, keys, local models, MCP (§3)
     model_roles.js, model_chooser.js — the Models editor and editable chooser shared by Settings, onboarding and route editors; catalog arrival never assigns a value (§3 Navigation)
@@ -496,7 +496,7 @@ ouroboros/ — agent core and shared runtime (§6)
     host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
     history_paging.py, history_chronology.py, chat_search.py, chat_archive.py, recall.py — dialogue pages/search/read-only archive, Project `latest_arrival`, neighbour door; no history copy (§3 History reads)
-    cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
+    cost_breakdown.py, cost_period.py — Physical-attempt ledger projections: dashboard, UTC room days, cache periods, root detail
     projects.py, project_folder_contracts.py — GET/POST /api/projects, /from-task, /update, /delete, /folder
     places_api.py — Owner place and circle choices; every write there is my human's (§12)
     _helpers.py — Shared request-root/coercion, the JSON body (`request_json_or`) and error envelope, `run_sync_to_completion`, the settled worker wait for request-owned blocking work

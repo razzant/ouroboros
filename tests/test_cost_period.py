@@ -793,3 +793,301 @@ def test_a_confirmed_bill_the_text_counts_cannot_explain_stays_whole_and_is_neve
     # The Costs endpoint serves that very view beside the page's unchanged total.
     served = json.loads(asyncio.run(make_cost_breakdown_endpoint(root)(SimpleNamespace(query_params={"period": "24h"}))).body)
     assert served["total_cost"] == 0.031 and served["period"]["models"] == json.loads(json.dumps(view["models"]))
+
+
+def _record_dated_attempt(txn, attempt_id, root_id, start, *, task_id=None, finish=None, **price):
+    row = {"kind": "attempt", "attempt_id": attempt_id, "task_id": task_id or root_id,
+           "root_task_id": root_id, "parent_task_id": root_id if task_id else "",
+           "category": "task", "state": "reserved", "ts": start,
+           "reservation_upper_bound_usd": 4, "pricing_known": True}
+    reserved = txn.write(row)
+    if not price:
+        return
+    dispatched = txn.write({**row, "state": "dispatched"}, previous=reserved)
+    txn.write({**row, "state": "settled", "ts": finish or start,
+               "cost_final": True, **price}, previous=dispatched)
+
+
+def test_project_days_at_the_costs_endpoint_uses_root_room_and_the_recorded_money(root, monkeypatch):
+    import typing
+    from types import SimpleNamespace
+
+    from ouroboros import projects_registry as pr, store, store_import
+    from ouroboros.gateway import management_contracts as contracts
+    from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint
+
+    since, until = "2026-02-02T00:00:00+00:00", "2026-02-08T12:00:00+00:00"
+    today, previous_day = "2026-02-08T06:00:00Z", "2026-02-07T12:30:00+03:00"
+    a = pr.create_project(root, "alpha")["chat_id"]
+    b = pr.create_project(root, "beta")["chat_id"]
+    pr.create_project(root, "empty")
+    store_import.ensure_current_store(root, with_children=False)
+    with store.open_store(root, write=True) as txn:
+        for task, chat in (("alpha-root", a), ("child", b), ("beta-root", 1), ("main-root", 1),
+                           ("nolink", None), ("place", 2**40 + 273)):
+            is_child = task == "child"
+            txn.store_task({"task_id": task, "chat_id": chat, "status": "running",
+                            "root_task_id": "alpha-root" if is_child else task,
+                            "parent_task_id": "alpha-root" if is_child else None,
+                            "delegation_role": "subagent" if is_child else "root"})
+
+    with usage_store.hold(root) as txn:
+        # Exact literal that the codec leaves in extra; its receipt lands on a later day.
+        _record_dated_attempt(txn, "exact", "alpha-root", since,
+                              finish="2026-02-09T11:00:00Z", cost_usd="1.23456789")
+        assert txn.conn.execute("SELECT cost_usd FROM attempts WHERE attempt_id='exact'").fetchone()[0] is None
+        _record_dated_attempt(txn, "estimated", "alpha-root", since, task_id="child", cost_usd=0.5, cost_final=False)
+        _record_dated_attempt(txn, "partial", "alpha-root", since, cost_usd=0.0625,
+                              cost_final=False, cost_estimated=False, cost_partial=True)
+        _record_dated_attempt(txn, "held", "alpha-root", today)  # priced upper bound, never spent money
+        txn.write({"kind": "subscription_session", "attempt_id": "free", "state": "settled",
+                   "task_id": "child", "root_task_id": "alpha-root", "parent_task_id": "alpha-root",
+                   "category": "subagent", "ts": previous_day, "cost_usd": 0, "cost_final": True})
+        _record_dated_attempt(txn, "converted", "beta-root", today, cost_usd=2)
+        _record_dated_attempt(txn, "known-main", "main-root", today, cost_usd=3)
+        _record_dated_attempt(txn, "unknown-room", "nolink", today, cost_usd=5)
+        _record_dated_attempt(txn, "unknown-price", "place", today,
+                              cost_usd=None, reservation_upper_bound_usd=None, cost_final=False)
+        txn.write({"kind": "external_unmetered", "attempt_id": "no-root", "state": "unresolved",
+                   "category": None, "ts": today, "pricing_known": False})
+        # A fresh ledger timestamp on a compact/imported row is not a day's spend.
+        txn.write({"kind": "legacy_usage", "attempt_id": "undated", "state": "settled", "root_task_id": "nolink",
+                   "task_id": "nolink", "ts": today, "cost_usd": "13.1", "cost_final": True})
+        _record_dated_attempt(txn, "too-early", "main-root", "2026-02-02T02:59:59.999+03:00", finish=today, cost_usd=7)
+        _record_dated_attempt(txn, "at-until", "main-root", until, cost_usd=11)
+        subtotal = txn.bucket("root", "alpha-root").render_breakdown()
+
+    pr.bind_task_to_project(root, "beta-root", "beta", b, origin={"absent": "system"})
+    pr.update_project(root, "beta", closed={"at": today, "by": "test", "note": "Synthetic archive"})
+    monkeypatch.setattr(cost_period, "time", SimpleNamespace(time=lambda: _dt.datetime.fromisoformat(until).timestamp()))
+    monkeypatch.setattr(cost_period, "_DAY_PAGE", 2)  # cross page boundaries even when several rows share a stamp
+    endpoint = make_cost_breakdown_endpoint(root)
+
+    def get(**params):
+        result = asyncio.run(endpoint(SimpleNamespace(query_params=params)))
+        assert result.status_code == 200
+        return json.loads(result.body)
+
+    plain = get()
+    combined = get(project_days="project:alpha")
+    assert {key: value for key, value in combined.items() if key != "project_days"} == plain
+    view = combined["project_days"]
+    assert {key: view[key] for key in ("since", "until", "timezone", "days")} == {
+        "since": since, "until": until, "timezone": "UTC", "days": 7}
+    # The served fields are the published ones, field for field (their JSDoc twins: the shared browser-twin test).
+    day_fields = set(typing.get_type_hints(contracts.ProjectDayCost))
+    assert set(view) == set(typing.get_type_hints(contracts.ProjectDaysView))
+    assert view["integrity_degraded"] is False
+    assert all(set(row) == day_fields for row in view["rows"]) and set(view["total"]) == day_fields - {"day"}
+    hold, free, cash = view["rows"]
+    assert (hold["day"], hold["settled_usd"], hold["unknown_unmetered"], hold["accounting_open_rows"]) == (
+        "2026-02-08", None, 0, 1)
+    assert (free["day"], free["settled_usd"], free["physical_calls"], free["subscription_sessions"]) == (
+        "2026-02-07", 0.0, 0, 1)
+    assert cash["day"] == "2026-02-02" and cash["settled_usd"] == 1.79706789 and cash["confirmed_usd"] == 1.29706789
+    assert cash["price_basis"] == "mixed" and free["price_basis"] == "confirmed" and hold["price_basis"] == "unknown"
+    # Settled estimates and the partial receipt keep the ledger's accounting open; only the held call has no outcome.
+    assert (hold["open_rows"], free["open_rows"], cash["open_rows"], cash["accounting_open_rows"]) == (1, 0, 0, 2)
+    assert (view["total"]["open_rows"], view["total"]["unresolved_rows"]) == (1, 0)
+    for field in ("settled_usd", "confirmed_usd", "estimated_usd"):
+        assert round(view["total"][field], 6) == subtotal[field], field  # compatibility remains rounded
+    for field in ("unknown_unmetered", "non_final_rows", "accounting_open_rows", "physical_calls", "subscription_sessions"):
+        assert view["total"][field] == subtotal[field], field
+    assert [row["settled_usd"] for row in get(project_days="project:beta")["project_days"]["rows"]] == [2]
+    assert [row["settled_usd"] for row in get(project_days="main")["project_days"]["rows"]] == [3]
+    assert get(project_days="project:empty")["project_days"]["rows"] == []
+    (gap,) = get(project_days="unassigned")["project_days"]["rows"]
+    assert (gap["settled_usd"], gap["unknown_unmetered"]) == (5, 2)
+    # The unresolved external call ended: its money is not reconciled, and it is no call with no outcome.
+    assert (gap["open_rows"], gap["unresolved_rows"], gap["accounting_open_rows"]) == (0, 1, 1)
+    month = get(project_days="main", days="30")["project_days"]
+    assert month["since"] == "2026-01-10T00:00:00+00:00"
+    assert [row["settled_usd"] for row in month["rows"]] == [3, 7]
+    assert get(project_days="project:missing")["project_days"]["error_code"] == "unknown_selector"
+    assert get(project_days="main", days="3000")["project_days"]["error_code"] == "unknown_days"
+
+    # The room card's own read answers each view alone, field for field the combined answer's, and a room or span
+    # choice never reads the page's totals (``usage_breakdown``) again; the ordinary answer is unchanged.
+    totals = []
+    breakdown = ua.usage_breakdown
+    monkeypatch.setattr(ua, "usage_breakdown", lambda *args, **kwargs: totals.append(args) or breakdown(*args, **kwargs))
+    choices = [("project:alpha", "7"), ("main", "7"), ("unassigned", "7"), ("project:beta", "30"),
+               ("project:missing", "7"), ("main", "3000")]
+    views = [get(project_days=selector, days=days)["project_days"] for selector, days in choices]
+    assert len(totals) == len(choices)
+    totals.clear()
+    assert [get(view="project_days", project_days=selector, days=days) for selector, days in choices] == [
+        {"project_days": answer} for answer in views]
+    assert totals == [], "a room or span choice recomputed the page's totals"
+    assert get() == plain and len(totals) == 1
+
+    # A real unreadable room registry with a perfectly readable physical-attempt ledger is not a ledger outage.
+    registry = pr._registry_path(root)
+    saved_registry = registry.read_bytes()
+    try:
+        registry.write_text('{"projects":null}', encoding="utf-8")
+        refused = {"available": False, "selector": "project:alpha", "error_code": "project_source_unavailable"}
+        assert get(project_days="project:alpha") == {**plain, "project_days": refused}
+        assert get(view="project_days", project_days="project:alpha") == {"project_days": refused}
+    finally:
+        registry.write_bytes(saved_registry)
+
+    def cannot_read(*_args, **_kwargs):
+        raise RuntimeError("the optional view is unavailable")
+
+    monkeypatch.setattr(cost_period, "project_days", cannot_read)
+    assert get() == plain
+    refused = {"available": False, "selector": "main", "error_code": "ledger_unavailable"}
+    assert get(project_days="main") == {**plain, "project_days": refused}
+    assert get(view="project_days", project_days="main") == {"project_days": refused}  # its refusal answers 200
+
+
+def test_project_days_span_adds_unrounded_prices_and_keeps_zero_estimates(root):
+    from decimal import Decimal
+
+    end = "2026-02-08T12:00:00+00:00"
+    with usage_store.hold(root) as txn:
+        for attempt, stamp, price in (
+            ("tiny", "2026-02-08T06:00:00Z", {"cost_usd": 0.00000025}),
+            ("string", "2026-02-07T06:00:00Z", {"cost_usd": "0.0000002500000007"}),
+            ("unknown", "2026-02-06T06:00:00Z", {"cost_usd": None, "cost_final": False}),
+            ("zero", "2026-02-05T06:00:00Z", {"cost_usd": 0}),
+        ):
+            _record_dated_attempt(txn, attempt, "", stamp, **price)
+        for attempt, stamp in (("estimated", "2026-02-08T06:00:00Z"), ("estimate-only", "2026-02-04T06:00:00Z")):
+            txn.write({"attempt_id": attempt, "kind": "subscription_session", "state": "settled", "ts": stamp,
+                       "cost_usd": "0", "cost_final": False})
+
+    view = cost_period.project_days(root, "unassigned", "7", now=_dt.datetime.fromisoformat(end).timestamp())
+    mixed, small, unknown, confirmed, estimated = view["rows"]
+    assert (mixed["settled_usd"], mixed["estimated_usd"], mixed["price_basis"]) == (0.00000025, 0, "mixed")
+    assert (small["settled_usd"], small["price_basis"]) == (0.0000002500000007, "confirmed")
+    assert (unknown["settled_usd"], unknown["price_basis"], unknown["unknown_unmetered"]) == (None, "unknown", 1)
+    assert (confirmed["settled_usd"], confirmed["price_basis"]) == (0, "confirmed")
+    assert (estimated["settled_usd"], estimated["price_basis"], estimated["subscription_sessions"]) == (0, "estimated", 1)
+    assert Decimal(str(view["total"]["settled_usd"])) == Decimal("0.0000005000000007")
+    assert (view["total"]["price_basis"], view["total"]["estimated_usd"], view["total"]["unknown_unmetered"]) == ("mixed", 0, 1)
+
+
+def test_project_days_tells_calls_ended_unreconciled_from_calls_with_no_outcome(root, monkeypatch):
+    """An answer can arrive and its accounting still fail (``usage_accounting._account_response``): that call ended
+    ``unresolved``, so a day counts it apart from reserved and dispatched calls, which have no outcome. The ledger's own
+    ``accounting_open_rows`` keeps counting all of them and the settled estimate; the money stays as recorded."""
+    fixed = "2026-02-08T12:00:00+00:00"
+    monkeypatch.setattr(usage_store, "utc_now_iso", lambda: fixed)
+
+    def request(task):
+        return ua.AttemptRequest(model=OPUS, provider="openrouter", reservation_usd=0.5, global_limit_usd=1000.0,
+                                 drive_root=root, task_id=task, root_task_id="", category="task", source="test.days")
+
+    def accounting_fails(_response):
+        raise ValueError("synthetic accounting failure after the answer")
+
+    answer = {"choices": [{"message": {"content": "done"}}]}
+    assert ua.execute_physical_attempt(request("answered"), lambda: answer, extractor=accounting_fails) == answer
+    ua.reserve_attempt(request("reserved"))
+    ua.mark_dispatched(ua.reserve_attempt(request("dispatched")))
+    unknown = ua.reserve_attempt(request("unknown-outcome"))
+    ua.mark_dispatched(unknown)
+    ua.mark_unresolved(unknown, "provider outcome unknown")
+    for task, cost, final in (("estimate", 0.25, False), ("zero", 0, True), ("tiny", 0.00000025, True)):
+        settled = ua.reserve_attempt(request(task))
+        ua.mark_dispatched(settled)
+        ua.settle_attempt(settled, {"prompt_tokens": 10, "completion_tokens": 1}, cost_usd=cost, cost_final=final)
+    answered = next(row for row in ua.read_usage_records(root, final_only=True) if row.get("task_id") == "answered")
+    assert answered["state"] == "unresolved" and "post_response_accounting_failed" in json.dumps(answered, default=str)
+
+    view = cost_period.project_days(
+        root, "unassigned", "7", now=_dt.datetime.fromisoformat(fixed).timestamp() + 1,
+    )
+    (day,) = view["rows"]
+    assert day["day"] == "2026-02-08"
+    assert (day["open_rows"], day["unresolved_rows"], day["accounting_open_rows"]) == (2, 2, 5)
+    assert day["physical_calls"] == 6  # every dispatched call; the reservation never left
+    assert (day["settled_usd"], day["confirmed_usd"], day["estimated_usd"], day["price_basis"]) == (
+        0.25000025, 0.00000025, 0.25, "mixed")
+    ledger = ua.usage_breakdown(root)
+    for field in ("accounting_open_rows", "non_final_rows", "unknown_unmetered", "physical_calls"):
+        assert view["total"][field] == ledger[field], field  # the ledger's own counts, unchanged
+    assert {key: view["total"][key] for key in ("open_rows", "unresolved_rows")} == {"open_rows": 2, "unresolved_rows": 2}
+
+
+def test_project_days_reports_ledger_integrity_degraded_without_global_aggregation(root, monkeypatch):
+    """Ledger-wide quarantine state rides on both non-empty and empty room slices without global aggregation,
+    keeping every known sum intact."""
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint
+    from ouroboros.usage_ledger import QUARANTINE_REL
+
+    now = _dt.datetime(2026, 2, 8, 12, tzinfo=_dt.timezone.utc).timestamp()
+    with usage_store.hold(root) as txn:
+        _record_dated_attempt(txn, "known", "", "2026-02-08T08:00:00Z", cost_usd=2.5)
+
+    monkeypatch.setattr(cost_period, "time", SimpleNamespace(time=lambda: now))
+    global_reads = []
+    monkeypatch.setattr(ua, "usage_breakdown", lambda *args, **kwargs: global_reads.append((args, kwargs)))
+    endpoint = make_cost_breakdown_endpoint(root)
+
+    def get_alone(selector):
+        result = asyncio.run(endpoint(SimpleNamespace(query_params={"view": "project_days", "project_days": selector})))
+        assert result.status_code == 200
+        return json.loads(result.body)["project_days"]
+
+    intact_nonempty = get_alone("unassigned")
+    intact_empty = get_alone("main")
+    assert intact_nonempty["integrity_degraded"] is False and intact_empty["integrity_degraded"] is False
+    assert intact_nonempty["total"]["settled_usd"] == 2.5 and intact_empty["rows"] == []
+
+    quarantine = root / QUARANTINE_REL
+    quarantine.parent.mkdir(parents=True, exist_ok=True)
+    quarantine.write_text('{"corrupt": true}\n', encoding="utf-8")
+
+    degraded_nonempty = get_alone("unassigned")
+    degraded_empty = get_alone("main")
+    assert degraded_nonempty["integrity_degraded"] is True
+    assert degraded_nonempty["rows"] == intact_nonempty["rows"]
+    assert degraded_nonempty["total"] == intact_nonempty["total"]
+    assert degraded_empty["integrity_degraded"] is True
+    assert degraded_empty["rows"] == [] and degraded_empty["total"]["settled_usd"] is None
+    assert global_reads == [], "reading integrity_degraded must not trigger global aggregation"
+
+
+def test_project_days_reads_only_a_recent_index_range(root, monkeypatch):
+    from contextlib import contextmanager
+
+    from ouroboros import store_import
+
+    store_import.ensure_current_store(root, with_children=False)
+    now = _dt.datetime(2026, 2, 8, 12, tzinfo=_dt.timezone.utc).timestamp()
+    today, old = "2026-02-08T08:00:00Z", "2025-01-01T00:00:00Z"
+    with usage_store.hold(root) as txn:
+        _record_dated_attempt(txn, "recent", "", today, cost_usd=None,
+                              reservation_upper_bound_usd=None, cost_final=False)
+    read = usage_store.read
+    work = []
+
+    @contextmanager
+    def measured(*args, **kwargs):
+        with read(*args, **kwargs) as txn:
+            txn.conn.set_progress_handler(lambda: work.append(1) or 0, 100)
+            try:
+                yield txn
+            finally:
+                txn.conn.set_progress_handler(None, 0)
+
+    monkeypatch.setattr(usage_store, "read", measured)
+    before = cost_period.project_days(root, "unassigned", "7", now=now)
+    (only,) = before["rows"]
+    assert only["settled_usd"] is None and only["unknown_unmetered"] == 1
+    baseline = len(work)
+    with usage_store.hold(root) as txn:
+        # Exercise the realistic index shape with a cold-history tail; these rows need no summary writes to be a scan cost.
+        txn.conn.executemany(
+            "INSERT INTO attempts (attempt_id,revision,seq,seq_first,kind,state,category,ts_reserved,ts_last_epoch) "
+            "VALUES (?,1,?,?,'attempt','settled','task',?,?)",
+            ((f"past-{i}", i, i, old, cost_period._epoch(old)) for i in range(10_000, 20_000)),
+        )
+    work.clear()
+    assert cost_period.project_days(root, "unassigned", "7", now=now) == before
+    assert len(work) <= baseline + 2, "reading a seven-day slice must seek past the cold history"

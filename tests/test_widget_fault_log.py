@@ -98,8 +98,15 @@ def test_the_live_sink_pushes_the_row_unaddressed_and_nothing_else(tmp_path, cli
         "an unaddressed log frame: the page's card and notification readers act only on task frames")
 
 
+def test_a_fault_on_costs_is_kept_under_its_own_place(client):
+    """A card its author placed on Dashboard › Costs (web/modules/costs_widgets.js) is not the board's."""
+    assert client.post("/api/widgets/fault", json={**FAULT, "where": "costs"}).json()["logged"] is True
+    (row,) = _rows(client)
+    assert row["where"] == "costs"
+
+
 @pytest.mark.parametrize("change", [
-    {"skill": "../x"}, {"message": "m" * 501}, {"line": -1},
+    {"skill": "../x"}, {"message": "m" * 501}, {"line": -1}, {"where": "storage"},
 ])
 def test_a_report_of_another_shape_answers_400_and_writes_nothing(tmp_path, client, change):
     response = client.post("/api/widgets/fault", json={**FAULT, **change})

@@ -51,6 +51,9 @@ _START_MODE_DEFAULTS = {"module": "manual", "iframe": "manual", "declarative": "
 # Appearance is an author declaration for framed module surfaces.  Delivery is
 # still opt-in through OuroborosWidget.onTheme so legacy payloads remain live.
 WIDGET_APPEARANCE_MODES = ("host", "independent", "fixed")
+# A host page besides Widgets that also shows the card (``render.page``): Dashboard › Costs
+# (web/modules/costs_widgets.js). Absent means the Widgets board alone.
+WIDGET_PAGES = ("costs",)
 
 
 def _text(value: Any) -> str:
@@ -155,6 +158,17 @@ def _validate_appearance(render: Dict[str, Any], *, kind: str) -> None:
             f"expected one of {list(WIDGET_APPEARANCE_MODES)}"
         )
     render["appearance"] = appearance
+
+
+def _validate_page(render: Dict[str, Any]) -> None:
+    """Validate the optional page placement: one closed value, as ``start`` and ``appearance`` are."""
+    if "page" not in render:
+        return
+    raw = render.get("page")
+    page = raw.strip() if isinstance(raw, str) else raw
+    if page not in WIDGET_PAGES:
+        raise ExtensionRegistrationError(f"ui render page {page!r} is unsupported; expected one of {list(WIDGET_PAGES)}")
+    render["page"] = page
 
 
 def _validate_frame_geometry(render: Dict[str, Any], *, kind: str) -> None:
@@ -494,6 +508,7 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
         raise ExtensionRegistrationError(f"ui render kind {kind!r} is unsupported; expected one of {sorted(_UI_RENDER_KINDS - {''})}")
     _validate_start_mode(clean, kind=kind)
     _validate_appearance(clean, kind=kind)
+    _validate_page(clean)
     if kind in {"iframe", "module"}:
         _validate_frame_geometry(clean, kind=kind)
     if kind == "iframe" and not _text(clean.get("route")):
@@ -589,6 +604,7 @@ __all__ = [
     "WIDGET_FRAME_MAX_HEIGHT",
     "WIDGET_FRAME_MIN_HEIGHT",
     "WIDGET_APPEARANCE_MODES",
+    "WIDGET_PAGES",
     "WIDGET_START_MODES",
     "validate_card_components",
     "validate_runtime_ui_render",

@@ -148,6 +148,11 @@ _DERIVED = ("revision", "seq_first", "ts_reserved", "ts_dispatched", "ts_final",
             "weight", "has_root_limit", "has_group_limit", "extra")
 _COLUMNS = tuple(dict.fromkeys((*_FIELDS.values(), *_DERIVED)))
 _ATTEMPT_CAPTURE = ("extra", "revision", *dict.fromkeys(_FIELDS.values()))  # what ``_decode`` reads: no REAL column
+_DAY_COST_MAPPED = ("cost_usd", "reservation_upper_bound_usd", "cost_final", "pricing_known")
+_DAY_COST_EXTRA = (*_DAY_COST_MAPPED, "cost_partial", "cost_estimated", _NONE_KEY)
+_DAY_COST_FIELDS = {key: _FIELDS[key] for key in ("attempt_id", "kind", "state", *_DAY_COST_MAPPED)}
+_DAY_COST_COLUMNS = tuple(_DAY_COST_FIELDS.values())
+_DAY_COST_PATHS = ", ".join(f"'$.{key}'" for key in _DAY_COST_EXTRA)
 
 
 def _encode(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -187,16 +192,29 @@ def decode_attempts(captured: Captured) -> List[Dict[str, Any]]:
 
 
 def _decode(record: Any) -> Dict[str, Any]:
-    row = json.loads(record["extra"], parse_float=LiteralFloat)
-    for key in row.pop(_NONE_KEY, ()):
+    row = _apply_columns(json.loads(record["extra"], parse_float=LiteralFloat), record, _FIELDS)
+    row["revision"] = record["revision"]
+    return row
+
+
+def _apply_columns(row: dict, record: Any, fields: dict) -> dict:
+    for key in row.pop(_NONE_KEY, ()) or ():
         row[key] = None
-    for key, column in _FIELDS.items():
+    for key, column in fields.items():
         value = record[column]
         if value is None:
             continue
         row[key] = bool(value) if key in _BOOL else LiteralFloat(value) if key in _MONEY else value
-    row["revision"] = record["revision"]
     return row
+
+
+def decode_daily_cost_rows(captured: Captured) -> Iterator[Dict[str, Any]]:
+    """Decode only spend inputs after the read ends, with the attempt codec's column precedence."""
+    for record in captured.rows():
+        extra = dict(zip(_DAY_COST_EXTRA, json.loads(record["cost_extra"], parse_float=LiteralFloat)))
+        if explicit_nones := extra.get(_NONE_KEY):
+            extra[_NONE_KEY] = [key for key in explicit_nones if key in extra]
+        yield _apply_columns(extra, record, _DAY_COST_FIELDS)
 
 
 # ---- summary scopes ---------------------------------------------------------
@@ -540,6 +558,46 @@ class Txn:
             "NULLIF(json_quote(json_extract(extra, '$.cache_write_tokens_by_ttl')), 'null') END AS write_split "
             f"FROM attempts WHERE {_PERIOD_WHERE} AND state='settled' AND (cache_write_tokens>0 OR cost_usd IS NOT NULL)",
             (int(first), int(end), str(since_iso)))]
+
+    def daily_cost_bounds(self) -> Tuple[int, List[Optional[str]]]:
+        """Return a high-water rowid and the category/time index's prefixes by seeks, not a DISTINCT scan."""
+        highest = self.conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM attempts").fetchone()[0]
+        categories: List[Optional[str]] = [None]
+        prefix = "SELECT category FROM attempts INDEXED BY attempts_category_time WHERE "
+        suffix = " ORDER BY category LIMIT 1"
+        row = self.conn.execute(prefix + "category IS NOT NULL" + suffix).fetchone()
+        while row is not None:
+            categories.append(row[0])
+            row = self.conn.execute(prefix + "category>?" + suffix, (row[0],)).fetchone()
+        return highest, categories
+
+    def daily_cost_addresses(self, category: Optional[str], highest: int, after: Tuple[float, int],
+                             limit: int) -> list:
+        """Seek a short page of dated candidates: no receipts, blobs, tariff data or task bodies here.
+
+        A last stamp makes a candidate, never decides the date of a regular call; its start stamps do.
+        Folded and pre-ledger import rows lack a trustworthy per-call start by construction.
+        """
+        epoch, rowid = after
+        return self.conn.execute(
+            "SELECT ts_last_epoch, rowid, attempt_id, root_task_id, kind, ts_reserved, ts_dispatched "
+            "FROM attempts INDEXED BY attempts_category_time "
+            "WHERE category IS ? AND ts_last_epoch>=? AND (ts_last_epoch, rowid)>(?, ?) AND rowid<=? "
+            "AND COALESCE(NULLIF(kind, ''), 'attempt') IN ('attempt', 'subscription_session', 'external_unmetered') "
+            "AND state!='released' ORDER BY ts_last_epoch, rowid LIMIT ?",
+            (category, epoch, epoch, rowid, highest, limit),
+        ).fetchall()
+
+    def daily_cost_rows(self, attempt_ids: Sequence[str]) -> Captured:
+        """Only spend inputs of one matched address page, never whole receipts.
+
+        Multi-path JSON extraction returns an array of JSON literals; scalar SQLite REAL conversion
+        would lose the original monetary literal. Keep the array as text across the capture.
+        """
+        return capture(self.conn, f"SELECT {', '.join(_DAY_COST_COLUMNS)}, "
+                       f"'' || json_extract(extra, {_DAY_COST_PATHS}) AS cost_extra FROM attempts "
+                       "WHERE attempt_id IN (SELECT value FROM json_each(?))",
+                       (json.dumps(list(attempt_ids)),), (*_DAY_COST_COLUMNS, "cost_extra"))
 
     def bucket(self, scope: str, key: str = "") -> Bucket:
         address = (scope, str(key))
