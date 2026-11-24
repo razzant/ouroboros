@@ -1031,7 +1031,7 @@ def _capture_context_core(
 
     bound = normalize_task_constraint(task.get("task_constraint") or getattr(ctx, "task_constraint", None))
     installed_skills = "" if declared else _build_installed_skills_section(
-        context_env, skills=skills, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
+        context_env, skills=skills, first_view=ctx, selected_skill=bound.skill_name if bound and bound.has_selected_skill else "")
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([

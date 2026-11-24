@@ -124,11 +124,10 @@ async def api_place_rooms(request):
         place_id = str(request.path_params['place_id'])
         def read():
             from ouroboros import dialogue_store
-            from ouroboros.places import get_place
             root = request_drive_root(request)
-            get_place(root, place_id)  # An unknown Place never creates a dialogue store.
+            rooms = place_room_index(root, place_id, details=True)  # Resolve the place before reading coverage.
             coverage = dialogue_store.range_coverage(root, 'chat')
-            return {'place_id': place_id, 'rooms': place_room_index(root, place_id, details=True),
+            return {'place_id': place_id, 'rooms': rooms,
                     'coverage': {'discovery': 'arrivals', 'importing': bool(coverage['pending']),
                                  'gaps': bool(coverage['mismatch'] or coverage['gaps'])}}
         return JSONResponse(await asyncio.to_thread(read), headers={'Cache-Control': 'no-store'})

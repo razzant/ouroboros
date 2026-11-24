@@ -4,8 +4,8 @@ Built-ins are an ordinary source: installing one writes the install record every
 installer writes (trusted by default), never a synthetic review verdict. A new install
 gets only what its starter selection ticks; an existing install keeps what it has.
 Built-ins ride app releases: a changed bundled version re-seeds an unmodified copy in
-place (state, the owner's enablement and unchanged-request grants kept) and never
-rewrites local changes; nothing resurrects a built-in the owner removed; a built-in the
+place (state and enablement kept, unchanged-request grants from the proven prior release) and
+never rewrites local changes; nothing resurrects a built-in the owner removed; a built-in the
 app stops bundling is uninstalled when nobody changed it and keeps running as its owner's
 copy when someone did.
 """
@@ -174,6 +174,22 @@ def test_startup_never_installs_a_built_in(env, monkeypatch):
 
 
 # --- re-seed in place on a changed bundled version ----------------------------------
+
+
+@pytest.mark.parametrize(("changes", "observed", "expected"), [
+    pytest.param({}, "1" * 64, "1" * 64, id="verified-prior-release"),
+    pytest.param({}, "", "", id="no-installed-payload"),
+    pytest.param({"source": {"id": "catalog", "kind": "hub"}}, "1" * 64, "", id="another-source"),
+    pytest.param({"entry": "other"}, "1" * 64, "", id="another-installation"),
+    pytest.param({"base_digest": ""}, "1" * 64, "", id="unconfirmed-base"),
+    pytest.param({}, "2" * 64, "", id="different-observed-digest"),
+])
+def test_builtin_grant_predecessor_classifies_only_bound_release_metadata(changes, observed, expected):
+    from ouroboros.skill_builtin import _builtin_predecessor_digest
+
+    record = {"source": {"id": "builtin", "kind": "builtin"}, "entry": "weather", "official": True,
+              "base_digest": "1" * 64, "release": {"path": "skills/weather", "digest": "1" * 64}}
+    assert _builtin_predecessor_digest("weather", {**record, **changes}, observed) == expected
 
 
 def _reseed(seed_dir, drive_root, log=None):
@@ -376,7 +392,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.22\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.23\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_connection.py", "lib/telegram_copies.py",
                  "lib/telegram_health.py", "lib/telegram_inbound.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
                  "lib/telegram_state.py", "scripts/cloudflare_tunnel.py", "scripts/companion.py", "scripts/sidecar.py"):

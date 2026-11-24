@@ -211,7 +211,7 @@ export async function connectSkillTools(skill, { dialog = openConfirmDialog, api
             { label: server.title || server.id, value: [server.executable?.command, ...(server.executable?.args || [])].filter(Boolean).join(' ') },
             { label: 'Folder', value: server.executable?.cwd || '' },
             { label: 'Lifetime', value: `${server.task_session ? 'one process per task' : 'one process per call'}${server.browser_policy ? '; Ouroboros checks its browser requests' : ''}` },
-        ]) },
+        ]).concat(preview.grant_note ? [{ label: 'Access', value: preview.grant_note }] : []) },
         confirmLabel: 'Connect tools',
     });
     if (confirmed !== true) return null;

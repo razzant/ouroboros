@@ -53,6 +53,8 @@ def test_both_declaration_branches_supply_sanitized_icon_and_service_label(tmp_p
         "text": "Connector on" if live else "Off in Skills", "tone": "ok" if live else "warn"}
     assert row["revision"] == place.revision > 0
     assert row["facts"] == staged.contributions[0]["facts"]
+    # Installed but not on: a save refuses its declared signal until it is (core kinds are never held).
+    assert row.get("unpublished_signals") == (None if live else ["signal.words"])
     assert ("source" in row) is live and ("source" in offer) is live
     if live:
         assert row["source"]["url"] == "/api/extensions/connector/status"
@@ -68,11 +70,14 @@ def test_loader_readiness_and_unavailable_connector_keep_choices(tmp_path, conne
     skill.enabled = True
     assert projection.place_view(tmp_path, place)["readiness"] == {"text": "Review required", "tone": "warn"}
     monkeypatch.setattr(skill.review, "gate_for", lambda _hash: {"executable_review": True})
-    assert projection.place_view(tmp_path, place)["readiness"] == {"text": "Connector not running", "tone": "warn"}
+    held = projection.place_view(tmp_path, place)
+    assert held["readiness"] == {"text": "Connector not running", "tone": "warn"}
+    assert held["unpublished_signals"] == ["signal.words"]
     monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
     row = projection.place_view(tmp_path, place)
     assert row["readiness"] == {"text": "Connector unavailable", "tone": "warn"}
     assert row["icon"] == {} and row["label"] == "GitHub" and row["wakes"]
+    assert "unpublished_signals" not in row, "nothing declared is offered: the saved choice stays, removable"
 
 
 def test_http_and_tool_connect_are_silent_and_instances_are_distinct(client, tmp_path):
@@ -95,6 +100,167 @@ def test_http_and_tool_connect_are_silent_and_instances_are_distinct(client, tmp
     assert len(client.get("/api/places").json()["places"]) == 2
     assert client.post("/api/places", json={"connector": "connector", "label": None}).status_code == 400
     assert client.post("/api/places", json={"connector": "connector", "account_id": None}).status_code == 400
+
+
+def test_reading_imported_places_and_their_sheet_never_materializes_or_finishes_the_import(tmp_path, monkeypatch):
+    from tests._place_wake_import import legacy_wake_install, wake_declaration
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
+    app = Starlette(routes=places_routes())
+    app.state.drive_root = tmp_path
+    path = places.places_path(tmp_path)
+    with TestClient(app) as owner:
+        fresh, = owner.get("/api/places").json()["places"]
+        assert fresh["wake_review"] == "pending" and not path.exists()
+        assert owner.get(f"/api/places/{fresh['place_id']}/rooms").status_code == 200
+        ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+        assert json.loads(_configure_presence(ctx, "inspect", fresh["place_id"]))["place"]["wake_review"] == "pending"
+        assert not path.exists()
+        persisted, = places.load_places(tmp_path)
+        published.append(wake_declaration("direct_message"))
+        before = path.read_bytes()
+        assert "wake_review" not in json.loads(before)["places"][persisted.place_id]
+        row, = owner.get("/api/places").json()["places"]
+        assert row["wake_review"] == "pending" and row["wake_suggestions"] == ["direct_message"]
+        assert row["revision"] == fresh["revision"] == persisted.revision and path.read_bytes() == before
+
+
+def test_a_preview_reads_one_behavior_profile_for_its_several_legacy_bindings(tmp_path, monkeypatch):
+    from ouroboros import skill_loader
+    from tests._place_wake_import import legacy_wake_install
+
+    legacy_wake_install(tmp_path, monkeypatch, ids=("a" * 32, "b" * 32))
+    read, seen = skill_loader.find_skill, []
+
+    def find(root, name):
+        seen.append(name)
+        return read(root, name)
+
+    monkeypatch.setattr(skill_loader, "find_skill", find)
+    for _ in range(2):
+        first, second = places.place_records(tmp_path, persist_import=False).places.values()
+        assert first.notes == second.notes and first.conversation_id != second.conversation_id
+    assert seen == ["mind", "mind"]  # shared within one preview, not across previews
+    assert not places.places_path(tmp_path).exists()
+
+
+def test_a_finished_import_keeps_every_declared_kind_visible_and_removable(tmp_path, monkeypatch):
+    """A finished legacy import offers each contribution's kinds even after removal, with one manifest label."""
+    from tests._place_wake_import import admit_live, legacy_wake_install, wake_declaration
+    foreign = {**wake_declaration("any_message", "signal.foreign"), "id": "other", "destination": "vendor:Other",
+               "facts": ["any_message", {"id": "signal.foreign", "label": "Other item"}]}
+    rows = [foreign, wake_declaration("mention"),
+            {**wake_declaration("direct_message", "signal.inbox"), "id": "inbox",
+             "facts": ["direct_message", {"id": "signal.inbox", "label": "Inbox item"}]},
+            {**wake_declaration(), "id": "secondary-inbox",
+             "facts": [{"id": "signal.inbox", "label": "Secondary inbox item"}]}]
+    published = legacy_wake_install(tmp_path, monkeypatch, published=[foreign])
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
+    place, = places.load_places(tmp_path)
+    assert [w.fact for w in place.wakes] == ["legacy_addressed"]
+    published[:] = rows
+    admitted = admit_live(tmp_path, place)  # the first live event finishes the import
+    assert [w.fact for w in admitted.place.wakes] == [
+        "legacy_addressed", "mention", "direct_message", "signal.inbox"]
+    app = Starlette(routes=places_routes())
+    app.state.drive_root = tmp_path
+    with TestClient(app) as owner:
+        view = owner.get("/api/places").json()
+        row, = view["places"]
+        assert "wake_review" not in row
+        assert row["facts"] == [*places.WAKE_FACTS, {"id": "signal.inbox", "label": "Inbox item"}]
+        assert row["labels"] == places.declared_fact_labels(place) == {"signal.inbox": "Inbox item"}
+        assert {r["destination"]: r["connected"] for r in view["connectors"]} == {
+            "vendor:Other": False, "vendor:Slack": True}
+        assert row["destination"] == "vendor:Slack" and row["wake_suggestions"] == ["mention", "direct_message", "signal.inbox"]
+        path = f"/api/places/{place.place_id}"
+        kept = [w["fact"] for w in row["wakes"] if w["fact"] not in {"signal.inbox", "mention"}]
+        saved = owner.post(path, json={"wakes": kept, "expected_revision": row["revision"]})
+        assert saved.status_code == 200, "removing a saved kind is never an added undeclared signal"
+        assert [w["fact"] for w in saved.json()["place"]["wakes"]] == kept
+        without_legacy = [fact for fact in kept if fact != "legacy_addressed"]
+        resp = owner.post(path, json={"wakes": without_legacy,
+                                      "expected_revision": saved.json()["place"]["revision"]})
+        assert resp.status_code == 200, "the migration's own kind stays removable after the explicit review"
+        reread, = owner.get("/api/places").json()["places"]
+        assert [w["fact"] for w in reread["wakes"]] == without_legacy
+        assert reread["facts"] == row["facts"] and reread["labels"] == row["labels"]
+        again = owner.post(path, json={"wakes": [*without_legacy, "mention", "signal.inbox"],
+                                       "expected_revision": reread["revision"]})
+        assert again.status_code == 200
+        assert again.json()["place"]["wakes"] == [*reread["wakes"], {"fact": "mention", "author": "owner"},
+                                                  {"fact": "signal.inbox", "author": "owner"}]
+
+
+@pytest.mark.parametrize("store", ["original-v1", "restored-v1"])
+def test_old_ambiguous_choice_can_be_kept_from_the_sheet_or_changed_by_the_tool(tmp_path, monkeypatch, store):
+    from tests._place_wake_import import admit_live, legacy_wake_install, old_load_places, wake_declaration
+    published = legacy_wake_install(tmp_path, monkeypatch, ids=("a" * 32, "b" * 32))
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
+    first, second = places.load_places(tmp_path)
+    old_load_places(tmp_path, [places.place_summary(p) for p in (first, second)])
+    if store == "original-v1":
+        path = places.places_path(tmp_path)
+        historical = json.loads(path.read_bytes())
+        historical.pop("place_choices", None)
+        path.write_text(json.dumps(historical), encoding="utf-8")
+    published.append(wake_declaration("direct_message"))
+    app = Starlette(routes=places_routes())
+    app.state.drive_root = tmp_path
+    with TestClient(app) as owner:
+        before = places.places_path(tmp_path).read_bytes()
+        rows = owner.get("/api/places").json()["places"]
+        assert [row["wake_review"] for row in rows] == ["ambiguous", "ambiguous"]
+        assert places.places_path(tmp_path).read_bytes() == before
+        saved = owner.post(f"/api/places/{first.place_id}", json={"wakes": ["legacy_addressed"],
+                                                                 "expected_revision": first.revision}).json()["place"]
+        assert saved["revision"] > first.revision and saved["wakes"] == rows[0]["wakes"]
+        assert "wake_review" not in saved
+        ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+        saved = json.loads(_configure_presence(ctx, "add_wake", second.place_id, fact="mention"))["place"]
+        assert saved["wakes"][-1] == {"fact": "mention", "author": "ouroboros"} and "wake_review" not in saved
+        published[:] = [wake_declaration("any_message")]
+        for place in (first, second):
+            assert "any_message" not in [item.fact for item in admit_live(tmp_path, place).place.wakes]
+        assert all("wake_review" not in row for row in owner.get("/api/places").json()["places"])
+
+
+def test_an_old_place_holds_only_the_signals_its_installed_connector_has_not_published(tmp_path, monkeypatch):
+    """Review 23.11: a connector installed but not on still declares its suggestions, yet a save adds a new signal
+    only from a published declaration (``places.declared_fact_labels``), so adding the whole list was a certain
+    refusal. The projection names the held signals; a core suggestion, the saved choice and its removal still save,
+    and once the connector is on nothing is held and the signal saves."""
+    from tests._place_wake_import import legacy_wake_install, wake_declaration
+    published = legacy_wake_install(tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda _root: [])
+    inbox = {**wake_declaration("direct_message", "signal.inbox"),
+             "facts": ["direct_message", {"id": "signal.inbox", "label": "Inbox item"}]}
+    declarations = projection.place_declarations
+    # The row place_declarations gives an installed, reviewed connector that is not running: validated, unpublished.
+    monkeypatch.setattr(projection, "place_declarations",
+                        lambda _root: [{**inbox, "readiness": {"text": "Connector not running", "tone": "warn"}}])
+    app = Starlette(routes=places_routes())
+    app.state.drive_root = tmp_path
+    with TestClient(app) as owner:
+        row, = owner.get("/api/places").json()["places"]
+        assert row["wake_review"] == "pending" and row["wake_suggestions"] == ["direct_message", "signal.inbox"]
+        assert row["unpublished_signals"] == ["signal.inbox"]
+        path = f"/api/places/{row['place_id']}"
+        whole = owner.post(path, json={"wakes": ["legacy_addressed", "direct_message", "signal.inbox"]})
+        assert whole.status_code == 400 and whole.json()["code"] == "place_wake_undeclared"
+        core = owner.post(path, json={"wakes": ["legacy_addressed", "direct_message"]})
+        assert core.status_code == 200, "a core suggestion saves while the connector is off"
+        saved = core.json()["place"]
+        assert saved["unpublished_signals"] == ["signal.inbox"] and "wake_review" not in saved
+        kept = owner.post(path, json={"wakes": ["direct_message"], "expected_revision": saved["revision"]})
+        assert kept.status_code == 200, "the saved choice stays removable"
+        published.append(inbox)  # the connector is on: its declaration is published
+        monkeypatch.setattr(projection, "place_declarations", declarations)
+        row, = owner.get("/api/places").json()["places"]
+        assert "unpublished_signals" not in row
+        added = owner.post(path, json={"wakes": ["direct_message", "signal.inbox"], "expected_revision": row["revision"]})
+        assert added.status_code == 200, added.text
+        assert [wake["fact"] for wake in added.json()["place"]["wakes"]] == ["direct_message", "signal.inbox"]
 
 
 def test_a_label_that_already_names_its_connector_is_not_prefixed_again(tmp_path, connector):

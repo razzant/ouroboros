@@ -8,7 +8,7 @@ skill without a critic PASS when a host-owned fact binds them:
   or that the owner skipped the review at install (``owner_skip``), and its release
   digest equals the current digest;
 * an owner edit (``state/skills/<name>/owner_edit.json``) names the current digest: the
-  owner, or Ouroboros working on the owner's own request, produced these exact bytes.
+  owner's admitted Repair verified them against its predicted text edit.
 
 Both files live in the state plane, outside the payload and its digest, and are owner
 state that generic agent writes cannot forge (``SKILL_OWNER_STATE_FILENAMES``). Edits
@@ -17,9 +17,9 @@ that reviews each skill keeps blocker findings non-executable until the owner sk
 the review (``strict_review``); records converted from earlier installs keep the behaviour they had.
 
 The owner-edit seam is the admitted selected-skill development task
-(``skill_repair_admission.advance_repair_expected_hash``): after each payload write of a
-task whose run the owner's own door started, the observed digest is recorded here and
-the grants are re-bound to it when the requested sets did not change.
+(``skill_repair_admission.advance_repair_expected_hash``). It records the revision
+of a direct file-tool edit made in an owner-started task. The record admits code;
+it does not issue keys or permissions for that revision.
 """
 
 from __future__ import annotations
@@ -73,10 +73,12 @@ def admitted_acceptance(facts: Dict[str, Any], manifest: Any) -> Dict[str, Any]:
     return kept
 
 
-def carry_grants_to_current(drive_root: pathlib.Path, skill: Any) -> bool:
-    """Re-bind the owner's grants to the current digest when the skill still requests
-    exactly the same keys and permissions; a changed request keeps the ordinary
-    re-grant flow. Returns whether grants were carried. Never raises."""
+def carry_grants_to_current(drive_root: pathlib.Path, skill: Any, *, previous_digest: str) -> bool:
+    """Carry the proven predecessor's exact grant when both request sets are unchanged.
+
+    The built-in installer proves the predecessor before landing. This step never
+    rewrites a decision for any other digest. Returns whether it carried a grant.
+    """
     try:
         from ouroboros.skill_loader import (
             load_skill_grants,
@@ -89,7 +91,7 @@ def carry_grants_to_current(drive_root: pathlib.Path, skill: Any) -> bool:
             return False
         grants = load_skill_grants(drive_root, skill.name)
         old_hash = str(grants.get("content_hash") or "")
-        if not old_hash or old_hash == skill.content_hash:
+        if not previous_digest or old_hash != previous_digest or old_hash == skill.content_hash:
             return False
         granted_keys = list(grants.get("granted_keys") or [])
         granted_permissions = list(grants.get("granted_permissions") or [])
@@ -116,13 +118,14 @@ def record_owner_edit(
     drive_root: pathlib.Path,
     skill_dir: pathlib.Path,
     *,
+    expected_digest: str,
     task_id: str = "",
     attribution: str = "",
 ) -> Optional[str]:
     """Record that the current bytes of ``skill_dir`` are an owner edit; returns the digest.
 
-    Callers are the owner-edit seam only (see the module docstring). Grants follow the
-    edit when the requested sets are unchanged. Never raises.
+    The admitted edit supplies its verified resulting digest; a changed payload is not stamped.
+    No grant is rewritten here. Never raises.
     """
     try:
         from ouroboros.contracts.schema_versions import with_schema_version
@@ -130,7 +133,7 @@ def record_owner_edit(
         from ouroboros.utils import atomic_write_json, utc_now_iso
 
         skill = load_skill(pathlib.Path(skill_dir), pathlib.Path(drive_root))
-        if skill is None or skill.load_error or not skill.content_hash:
+        if not expected_digest or skill is None or skill.load_error or skill.content_hash != expected_digest:
             return None
         atomic_write_json(skill_state_dir(pathlib.Path(drive_root), skill.name) / OWNER_EDIT_FILENAME,
                           with_schema_version({
@@ -139,7 +142,6 @@ def record_owner_edit(
                               "attribution": str(attribution or ""),
                               "recorded_at": utc_now_iso(),
                           }, OWNER_EDIT_SCHEMA_VERSION))
-        carry_grants_to_current(pathlib.Path(drive_root), skill)
         return skill.content_hash
     except Exception:
         log.warning("Owner edit record failed for %s", skill_dir, exc_info=True)

@@ -30,7 +30,7 @@ import { installedTime } from './ui_helpers.js';
 import { readConnectedServers } from './mcp_settings.js';
 import { bindScrollFade } from './scroll_fade.js';
 import {
-    boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
+    blockingGrantItems, boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantBlocks, renderSkillRepairPrompt,
     reviewTone, reviewReady,
 } from './utils.js';
 
@@ -898,8 +898,8 @@ export function initSkills(ctx = {}) {
     // The server's typed refusal says why a skill cannot turn on; nothing is pre-judged here.
     async function turnOn(name) {
         const skill = await currentSkill(name);
-        if (!grantReady(skill)) {
-            const granted = await requestMissingKeyGrants(name, missingGrantItems(skill.grants || {}), skill.content_hash, true);
+        if (grantBlocks(skill)) {  // only access the host says stops it asks for a grant first
+            const granted = await requestMissingKeyGrants(name, blockingGrantItems(skill.grants || {}), skill.content_hash, true);
             if (stillWorking(name, granted)) return granted;  // its single job also owns the requested Enable
             if (granted?.setup_error) throw new Error(`Access granted, but ${granted.setup_error}`);
             if (granted?.enabled === true) {

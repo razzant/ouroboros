@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -249,14 +250,21 @@ def test_confirmed_bad_markers_rotate_after_grace(monkeypatch: pytest.MonkeyPatc
     asyncio.run(scenario())
 
 
-def test_fresh_tunnel_marker_lag_inside_grace_does_not_rotate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+_REGISTRATION_FAILURES = (
+    pytest.param("UNHEALTHY_RESPONSE", "public_marker_unhealthy", id="marker-missing"),
+    pytest.param("HOST_ABSENT", "public_host_absent", id="name-absent"),
+)
+
+
+@pytest.mark.parametrize(("outcome_name", "reason"), _REGISTRATION_FAILURES)
+def test_fresh_tunnel_can_verify_during_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome_name: str, reason: str,
 ) -> None:
-    """Five answers without the marker, more than the three that rotate, and then the marker: inside the grace
-    the same link becomes ready (before the grace the third answer rotated it)."""
+    """Five early failures followed by a marker make the same link ready within its grace period."""
+    outcome = companion.PublicProbeOutcome[outcome_name]
+
     async def scenario() -> None:
-        outcomes = iter([companion.PublicProbeOutcome.UNHEALTHY_RESPONSE] * 5 + [companion.PublicProbeOutcome.READY])
+        outcomes = iter([outcome] * 5 + [companion.PublicProbeOutcome.READY])
         calls = 0
 
         async def probe(*_args: Any, **_kwargs: Any) -> companion.PublicProbeOutcome:
@@ -282,16 +290,19 @@ def test_fresh_tunnel_marker_lag_inside_grace_does_not_rotate(
         assert result is None
         assert calls == 6
         assert status.transitions.count(("verifying", "public_marker_pending")) == 1
-        assert ("verifying", "public_marker_unhealthy") not in status.transitions
+        assert ("verifying", reason) not in status.transitions
 
     asyncio.run(scenario())
 
 
-def test_bad_markers_count_only_after_the_registration_grace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("outcome_name", "reason"), _REGISTRATION_FAILURES)
+def test_confirmations_start_at_the_registration_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome_name: str, reason: str,
 ) -> None:
     """Answers inside the 120 s grace are not counted, and neither a probe nor a wall-clock jump moves its one
     monotonic deadline; after it, three confirmed answers 2 s apart rotate the link, the count starting at zero."""
+    outcome = companion.PublicProbeOutcome[outcome_name]
+
     async def scenario() -> None:
         clock = _Clock()
         start = clock.mono
@@ -302,7 +313,7 @@ def test_bad_markers_count_only_after_the_registration_grace(
             if len(probes) == 10:
                 clock.wall += 3 * 3600
             assert len(probes) <= 200, "the link was never rotated"
-            return companion.PublicProbeOutcome.UNHEALTHY_RESPONSE
+            return outcome
 
         async def wait(delay: float, *_args: Any, **_kwargs: Any) -> None:
             assert delay == 2.0
@@ -319,8 +330,9 @@ def test_bad_markers_count_only_after_the_registration_grace(
         assert result is companion._GenerationResult.RECONNECT
         assert probes == [2.0 * index for index in range(63)]  # 60 inside 0..118 s, then 120, 122 and 124 s
         assert status.transitions.count(("verifying", "public_marker_pending")) == 1
-        assert [item["attempt"] for item in status.details
-                if item["reason_code"] == "public_marker_unhealthy"] == [1, 2, 3]
+        assert [(item["state"], item["attempt"]) for item in status.details if item["reason_code"] == reason] == [
+            ("verifying", 1), ("verifying", 2), ("reconnecting", 3),
+        ]
 
     asyncio.run(scenario())
 
@@ -362,6 +374,145 @@ def test_the_grace_keeps_process_death_immediate_and_an_outage_without_rotation(
         assert ("verifying", "public_marker_unhealthy") not in status.transitions
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("case", "stable"), [
+    pytest.param("served", False, id="serving-name-evicted"),
+    pytest.param("served", True, id="stable-serving-name-evicted"),
+    pytest.param("fresh", False, id="new-name-never-registers"),
+    pytest.param("unknown", False, id="observer-outage-on-serving-name"),
+])
+def test_public_dns_recovery_updates_the_menu_only_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, stable: bool,
+) -> None:
+    """Run verification, health monitoring and Telegram menu synchronization against local transports."""
+    from tests._telegram_menu_remote import FakeTelegram, web_app
+
+    old = "https://first.trycloudflare.com/"
+    new = "https://replacement.trycloudflare.com/"
+    plans = {old: {
+        # A marker while serving clears two strikes. A later resolver failure adds none and clears none.
+        "served": ["marker", "absent", "absent", "marker", "absent", "servfail", "absent", "absent"],
+        # 60 observations inside grace. Past it, both kinds of confirmed failure share the count.
+        "fresh": ["absent"] * 60 + ["absent", "servfail", "unmarked", "absent"],
+        "unknown": ["marker"] + ["servfail"] * 5 + ["marker"],
+    }[case]}
+    if case != "unknown":
+        plans[new] = ["unmarked", "marker"]
+    expected_menu = {"served": [old, new], "fresh": [new], "unknown": [old]}[case]
+    final = expected_menu[-1]
+    clock = _Clock()
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"TELEGRAM_CHAT_ID":"12345"}', encoding="utf-8")
+    observer = companion.TelegramSettingsObserver(tmp_path, 8765)
+    sidecar = companion.TelegramProxySidecar(
+        "fixture-token", 12345, 8765,
+        seams=companion.SidecarSeams(exposure_guard=lambda: observer.safe_for_exposure(12345)),
+    )
+    local_gateway = httpx.ASGITransport(app=sidecar)
+    telegram = FakeTelegram()
+    visits: list[tuple[str, str]] = []
+    started: list[str] = []
+    stopped: list[str] = []
+
+    class Status(_Status):
+        def transition(self, state: str, message: str, **fields: Any) -> None:
+            super().transition(state, message, **fields)
+            if state == "ready" and fields.get("public_url") == final and not plans[final]:
+                # The owner switches off once the final menu and its verified link are observable.
+                settings.write_text('{"TELEGRAM_CHAT_ID":"12345","TELEGRAM_MINIAPP_ENABLED":"off"}', encoding="utf-8")
+
+    class Tunnel(_RunningTunnel):
+        def __init__(self, _binary: Path, _state: Path, _port: int) -> None:
+            assert len(started) < len(plans), "unexpected replacement"
+            self.url = (old, new)[len(started)]
+
+        async def start(self) -> None:
+            assert started == stopped, "started a replacement before stopping the previous tunnel"
+            started.append(self.url)
+
+        async def wait_url(self, **_kwargs: Any) -> str:
+            return self.url
+
+        async def stop(self) -> None:
+            assert sidecar.public_url is None
+            stopped.append(self.url)
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "telegram.test":
+            if request.url.path.endswith("/setChatMenuButton"):
+                target = json.loads(request.content)["menu_button"]["web_app"]["url"]
+                assert visits[-1] == (target, "marker"), "menu moved before this link returned its marker"
+            return telegram.handler(request)
+        if request.url.host == "1.1.1.1":
+            url, result = visits[-1]
+            assert request.url.params["name"] == httpx.URL(url).host and result in {"absent", "servfail"}
+            packet = {"Status": 3 if result == "absent" else 2, "TC": False,
+                      "Question": [{"name": request.url.params["name"], "type": 1}]}
+            return httpx.Response(200, headers={"content-type": "application/dns-json"}, json=packet)
+        if request.url.host == "127.0.0.1":
+            assert request.url.path == "/api/health"
+            return httpx.Response(200, json={"status": "ok"})
+
+        url = str(request.url)
+        assert plans[url], f"unexpected extra probe of {url}"
+        result = plans[url].pop(0)
+        try:
+            if result == "marker":
+                response = await local_gateway.handle_async_request(request)
+                assert response.status_code == 200 and response.headers["X-Ouroboros-Telegram-Gateway"] == "1"
+                return response
+            if result == "unmarked":
+                return httpx.Response(200, text="Cloudflare is registering this link")
+            raise httpx.ConnectError("local lookup failed", request=request) from socket.gaierror("no address")
+        finally:
+            visits.append((url, result))
+
+    async def elapse(delay: float, *_args: Any, **_kwargs: Any) -> None:
+        clock.advance(delay)
+
+    async def binary(_state: Path) -> Path:
+        return tmp_path / "cloudflared"
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(respond), **kw))
+    monkeypatch.setattr(companion, "QuickTunnel", Tunnel)
+    monkeypatch.setattr(companion, "ensure_cloudflared", binary)
+    monkeypatch.setattr(companion, "time", clock)
+    monkeypatch.setattr(companion, "_wait_or_stop", elapse)
+    monkeypatch.setattr(companion, "_PUBLIC_HEALTH_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(companion, "_MONITOR_TICK_SEC", 0.0)
+    if stable:
+        monkeypatch.setattr(companion, "_STABLE_READY_RESET_SEC", 0.0)
+
+    status = Status()
+
+    async def scenario() -> None:
+        server = asyncio.create_task(asyncio.Event().wait())
+        menu = companion.TelegramMenuManager("fixture-token", 12345, tmp_path, api_root="https://telegram.test")
+        context = companion._GenerationContext(menu, observer, 12345, "Ouroboros", 8765, status, asyncio.Event(), server)
+        try:
+            result = await companion._run_tunnel_generations(tmp_path / "cloudflared", tmp_path, 45678, sidecar, context)
+            assert result is companion._GenerationResult.DISABLED
+        finally:
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
+            await sidecar.aclose()
+
+    asyncio.run(scenario())
+    assert all(not steps for steps in plans.values()), "rotated before collecting the confirmations"
+    assert started == stopped == list(plans)
+    assert telegram.set_calls == [web_app(url) for url in expected_menu]
+    ready = [item["public_url"] for item in status.details if item["state"] == "ready"]
+    assert ready == {"served": [old, old, new], "fresh": [new], "unknown": [old, old]}[case]
+    if case == "unknown":
+        assert [reason for state, reason in status.transitions if state == "degraded"] == ["public_observer_unavailable"]
+    else:
+        waiting = "verifying" if case == "fresh" else "degraded"
+        assert (waiting, "public_host_absent") in status.transitions
+        assert ("reconnecting", "public_host_absent") in status.transitions
+    backoffs = [item["attempt"] for item in status.details if item["reason_code"] == "tunnel_reconnect_backoff"]
+    assert backoffs == ([] if case == "unknown" else [0 if stable else 1])
 
 
 # cloudflared's stderr when Cloudflare refuses the tunnel request, as its pinned quick_tunnel.go writes it (see
@@ -452,8 +603,8 @@ def test_a_refusal_cloudflared_logs_paces_the_next_request_through_the_real_stre
         monkeypatch.setattr(companion, "_wait_or_stop", wait)
         monkeypatch.setattr(companion, "_retry_delay", lambda count: retries.append(count) or 0.0)
         monkeypatch.setattr(companion, "_wait_for_cloudflared", lambda *_args, **_kwargs: value(binary))
-        monkeypatch.setattr(companion, "_wait_for_public_verification", lambda *_args: value(None))
-        monkeypatch.setattr(companion, "_sync_menu_until_confirmed", lambda *_args: value(None))
+        monkeypatch.setattr(companion, "_wait_for_public_verification", lambda *_args, **_kw: value(None))
+        monkeypatch.setattr(companion, "_sync_menu_until_confirmed", lambda *_args, **_kw: value(None))
         monkeypatch.setattr(companion, "_monitor_generation", monitored)
         (state / "settings.json").write_text('{"TELEGRAM_CHAT_ID":"12345"}', encoding="utf-8")
         pacing = companion.CreationPacing(wall=clock.time, monotonic=clock.monotonic)
@@ -577,6 +728,10 @@ def test_menu_sync_retries_a_transport_error_and_a_timeout_in_their_own_words(
         async def no_wait(*_args: Any, **_kwargs: Any) -> None:
             return None
 
+        async def ready(*_args: Any, **_kwargs: Any) -> Any:
+            return companion.PublicProbeOutcome.READY
+
+        monkeypatch.setattr(companion, "probe_public_gateway_once", ready)
         monkeypatch.setattr(companion, "_wait_or_stop", no_wait)
         monkeypatch.setattr(companion, "_retry_delay", lambda count: float(count))
         status = _Status()
@@ -600,6 +755,66 @@ def test_menu_sync_retries_a_transport_error_and_a_timeout_in_their_own_words(
         assert [(item["state"], item["reason_code"], item["attempt"]) for item in status.details] == [
             ("syncing_menu", "menu_transport_unavailable", 1), ("syncing_menu", "menu_transport_unavailable", 2)]
         assert status.messages == ["Telegram API is unreachable.", "Telegram menu operation timed out."]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("endpoint_recovers", [False, True], ids=["dns-lost", "marker-restored"])
+def test_delayed_menu_install_needs_a_fresh_marker_without_resetting_grace(tmp_path, monkeypatch, endpoint_recovers):
+    async def scenario() -> None:
+        url = "https://replacement.trycloudflare.com/"
+        clock = _Clock()
+        start = clock.monotonic()
+        grace = companion._VERIFY_GRACE_SEC
+        interval = companion._VERIFY_PROBE_INTERVAL_SEC
+        verified_at = grace - interval - 1.0  # the replacement registered near the end of its original grace
+        clock.advance(verified_at)
+        probe = companion.PublicProbeOutcome
+        outcomes = iter([probe.UNHEALTHY_RESPONSE, probe.HOST_ABSENT, probe.OBSERVER_UNAVAILABLE]
+                        + ([probe.READY] if endpoint_recovers else [probe.HOST_ABSENT] * 2))
+        calls = []
+
+        async def observe(checked_url, _tunnel, **_kw):
+            assert checked_url == url
+            outcome = next(outcomes)
+            calls.append((outcome, clock.monotonic() - start))
+            return outcome
+
+        async def install(candidate_url, _text):
+            assert candidate_url == url
+            if not calls:  # the first attempt uses its just-verified marker but Telegram is down
+                calls.append(("install", clock.monotonic() - start))
+                raise companion.TelegramMenuTransportError("Telegram API is unreachable.")
+            assert calls[-1][0] is probe.READY
+            calls.append(("install", clock.monotonic() - start))
+            return True
+
+        async def wait(delay, *_args, **_kw):
+            clock.advance(delay)
+
+        monkeypatch.setattr(companion, "time", clock)
+        monkeypatch.setattr(companion, "_retry_delay", lambda _n: 1.0)
+        monkeypatch.setattr(companion, "_wait_or_stop", wait)
+        monkeypatch.setattr(companion, "probe_public_gateway_once", observe)
+        status = _Status()
+        server_task = asyncio.create_task(asyncio.Event().wait())
+        context = companion._GenerationContext(types.SimpleNamespace(install=install), _bridge(tmp_path), 12345,
+                                               "Ouroboros", 8765, status, asyncio.Event(), server_task)
+        try:
+            result = await companion._sync_menu_until_confirmed(url, _RunningTunnel(), context, grace_until=start + grace)
+        finally:
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+        assert calls[:4] == [("install", verified_at), (probe.UNHEALTHY_RESPONSE, grace - interval),
+                            (probe.HOST_ABSENT, grace), (probe.OBSERVER_UNAVAILABLE, grace + interval)]
+        assert ("verifying", "public_marker_pending") in status.transitions
+        assert ("degraded", "public_observer_unavailable") in status.transitions
+        if endpoint_recovers:
+            assert result is None and calls[4:] == [(probe.READY, grace + 2 * interval), ("install", grace + 2 * interval)]
+        else:
+            assert result is companion._GenerationResult.RECONNECT
+            assert calls[4:] == [(probe.HOST_ABSENT, grace + 2 * interval), (probe.HOST_ABSENT, grace + 3 * interval)]
+            assert status.transitions[-1] == ("reconnecting", "public_host_absent")
 
     asyncio.run(scenario())
 
@@ -1200,7 +1415,7 @@ def _older_release_left(tmp_path: Path, state: Path, bots: Any, *, interrupted: 
     import hashlib
     import importlib.util
 
-    from tests.test_telegram_miniapp_telegram_menu import OLD_URL
+    from tests._telegram_menu_remote import OLD_URL
 
     commit, path, digest = _SCHEMA2_WRITER
     try:
@@ -1241,7 +1456,7 @@ def test_a_cold_start_restores_an_older_releases_owner_before_exposing_the_new_o
     chat-only file no longer matches, so the next pass reads 42 once and moves on; its bytes never change."""
     import threading
 
-    from tests.test_telegram_miniapp_telegram_menu import Bots
+    from tests._telegram_menu_remote import Bots
 
     state = tmp_path / "state"
     state.mkdir()
@@ -1306,7 +1521,7 @@ def test_a_chat_only_record_without_this_bots_button_restores_nothing(tmp_path: 
     """Another bot (its menu there shows none of the record's buttons, or Telegram refuses that chat), a menu
     changed outside the skill, or a record naming the current owner: ownership there stays unestablished, so no
     previous owner is reconciled, no ledger is derived, the record and every button stay as they were."""
-    from tests.test_telegram_miniapp_telegram_menu import OLD_URL, Bots, web_app
+    from tests._telegram_menu_remote import OLD_URL, Bots, web_app
 
     state = tmp_path / "state"
     state.mkdir()
@@ -1345,7 +1560,7 @@ def test_a_restore_interrupted_after_the_derivation_resumes_from_its_ledger(tmp_
     finds it as this bot's own previous owner and completes, and the chat-only file stays as it was."""
     import hashlib
 
-    from tests.test_telegram_miniapp_telegram_menu import Bots
+    from tests._telegram_menu_remote import Bots
 
     state = tmp_path / "state"
     state.mkdir()

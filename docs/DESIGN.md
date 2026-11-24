@@ -1857,9 +1857,8 @@ Settings as <KEY>` in meta ink) and two actions, `Enter secret…` (primary) and
 shared modal: title `<plugin>: secret needed`, the sentence `The value is saved to Settings. It is not sent in this
 conversation.`, then per field Settings' own secret row (masked `.ui-control.secret-input` labelled by its id,
 `Show`/`Hide` of the typed draft only, never a saved value) with `Saved in Settings as <KEY> · not set` or `· a
-value is set (hidden)` (`· could not be read` when its read failed: an earlier form's read never shows as current), the skills that read the key (`name · enabled|disabled · its grant covers it|needs <KEY>
-granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
-are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
+value is set (hidden)` (`· could not be read` after a failed read), then readers with their On/Off state and keys
+their grants lack, not inferred readiness, and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
 re-enabled. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
 neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
@@ -2304,10 +2303,12 @@ actions.” Outgoing: “before some actions”; Off: “the Safety Supervisor i
 All add “Silent and Paused are locks; words are not.” Absent Safety keeps the old
 explanation. Notes retain authorship.
 
-“What calls it here” lists supported kinds, connector suggestions at Connect and
-saved author chips: “A checked kind calls it here at once, when <Service> reports it.”
-Sheet/reader use status labels over manifest labels; otherwise core words stay. Signals keep
-declared labels/settings.
+“What calls it here” lists supported kinds, connector suggestions at Connect and each saved kind with its author:
+“A checked kind calls it here at once, when <Service> reports it.” A saved kind can be unchecked; one no longer
+offered is not offered again, nor a signal of a connector not on (listed, held).
+Sheet/reader prefer status over manifest labels, then core words. Signals keep declared labels/settings.
+Beside the kinds, explain an unfinished import or older choice with unchecked suggestions; offer
+“Add the suggested kinds” (if all save now) and “Keep my current choice”. Either saves it for this connection.
 Bot messages both wake and permit hearing bots. Other events are own-wake observations;
 the mind decides what to read, so the sheet must not promise exhaustive reading.
 A cause that keeps the place quiet (the host's `quiet`: the switch off, Panic, the allowance spent, Advises) is the

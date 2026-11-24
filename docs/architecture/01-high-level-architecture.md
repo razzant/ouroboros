@@ -209,7 +209,7 @@ ouroboros/ — agent core and shared runtime (§6)
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
   mcp_client.py — identity, masks, names, launch admission; mcp_discovery.py — manager-owned joinable listing/settle (§6 MCP)
-  mcp_schema.py — literal-safe metadata; mcp_catalog.py — catalogs; mcp_oauth.py — sign-in
+  mcp_schema.py — literal-safe metadata; mcp_catalog.py — catalogs; mcp_oauth.py — MCP sign-in; oauth_engine.py — OAuth
   mcp_headers.py, mcp_import.py — origin-bound headers, draft import
   mcp_task_session.py, mcp_browser_guard.py, skill_mcp.py — task stdio sessions, browser policy, skill binding
   safety.py — Safety Supervisor call (§6 Safety Supervisor outcomes)
@@ -352,7 +352,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_dependencies.py — Dependency-spec resolution, the one package-readying seam and its owner sentences
   skill_repair_admission.py — selected-skill development admission against an immutable `base_content_hash`; no long shell lock or rollback (§6 Skills and extensions)
   skill_owner_attestation.py — Skip review / Turn on anyway: the owner accepts exact bytes without LLM review (§13)
-  skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_builtin.py, skill_discovery_reuse.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; the built-in source; exact discovery reuse (§13)
+  skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_grant_follow.py, skill_builtin.py, skill_discovery_reuse.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; grants; built-ins; exact discovery reuse (§13)
   skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_client.py, skill_publish_eligibility.py, skill_publish_destination.py — Publication leaves: captured bytes, Betterleaks evidence, attempt/receipt, token HTTPS transport, author authority, destination, hub entry, comparison (§6 Skill publication)
   skill_review_status.py — The review gate → `executable_review` (§13): verdicts, author acceptance, install-basis and owner facts
   skill_review.py — Skill review, the lifecycle verb: preflight and admission, then one `review_change(subject="skill")` wave projected into `review.json` (§13)
@@ -740,7 +740,8 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── custody_trash/         ← custodied drives, released files
 │   │   ├── betterleaks/           ← scanner runtime, created only by the explicit installer
 │   │   ├── cx/                    ← Claudexor: immutable `<version>-<sha12>/`, retained `node/<version>-<platform>.g-*`, install.lock
-│   │   └── skills/<name>/         ← per-skill state (§13): review.json, owner_attestation.json, enabled.json, deps.json, health.json, extension_calls/, __extension_imports/
+│   │   ├── skill_grant_receipts.json ← host grant continuity (§13)
+│   │   └── skills/<name>/         ← per-skill lifecycle and extension state (PERSISTENCE.md)
 │   ├── claudexor/                 ← Ouroboros-owned Claudexor home (`CLAUDEXOR_CONFIG_DIR`)
 │   ├── memory/
 │   │   ├── identity.md            ← durable identity

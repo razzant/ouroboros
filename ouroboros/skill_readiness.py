@@ -22,12 +22,15 @@ class SkillReadiness:
     # G3 (capinv-447): declared dependencies that need manual installation —
     # disclosed ("kind:package"), never silently dropped; not a hard blocker.
     manual_dependencies: List[str] = field(default_factory=list)
+    # Pending custom keys are not passed but do not block by themselves (``skill_grant_follow.grant_notes``).
+    notes: List[str] = field(default_factory=list)
     next_actions: List[Dict[str, str]] = field(default_factory=list)
 
 
 _SKILL_PAYLOAD_EDIT_TOOLS = frozenset({
     "write_file", "edit_text", "run_command", "run_script", "delegate_start",
 })
+_SKILL_FOLLOWUP_TOOLS = _SKILL_PAYLOAD_EDIT_TOOLS | {"skill_review", "toggle_skill"}
 _SKILL_PAYLOAD_SELECTOR_KEYS = {
     "run_command": "cwd", "run_script": "cwd", "delegate_start": "root",
 }
@@ -72,6 +75,178 @@ def _skill_tool_identity_mapping() -> Dict[str, str]:
     }
 
 
+def note_enabled_skill_digests(ctx: Any, skills: Any) -> None:
+    """Keep the first enabled digests and changes seen on later catalog reads in this ToolContext, not across workers."""
+    if ctx is None or not isinstance(skills, list):
+        return
+    start = getattr(ctx, "_skill_digests_at_start", None)
+    if start is None:
+        ctx._skill_digests_at_start = {
+            str(skill.name): str(skill.content_hash) for skill in skills or []
+            if getattr(skill, "enabled", False) and getattr(skill, "content_hash", "")
+            and not getattr(skill, "identity_collision", False)}
+    else:
+        ctx._skill_changes_observed = getattr(ctx, "_skill_changes_observed", set()) | {
+            skill.name for skill in skills if not skill.identity_collision and skill.content_hash
+            and skill.name in start and skill.content_hash != start[skill.name]}
+
+
+def observe_named_skills(drive_root: pathlib.Path, names: List[str]) -> tuple[Dict[str, Any], List[Any]]:
+    """One location/peer view for named subjects; only those subjects need payload identity."""
+    if not names:
+        return {}, []
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_loader import _skill_location_inventory, discover_skill_identity
+    from ouroboros.skill_peer_inventory import discover_skill_peers
+
+    repo_path = get_skills_repo_path() or None
+    locations = _skill_location_inventory(drive_root, repo_path=repo_path)
+    subjects: Dict[str, Any] = {}
+    for name in names:
+        try:
+            if selected := discover_skill_identity(drive_root, name, repo_path=repo_path, locations=locations):
+                subjects[name] = selected[0]
+        except Exception:
+            log.debug("Skill observation unavailable for %s", name, exc_info=True)
+    peers = discover_skill_peers(drive_root, repo_path=repo_path, locations=locations) if subjects else ()
+    return subjects, list(peers)
+
+
+def _diagnostic_preview(text: Any, source: str, limit: int = 300) -> str:
+    from ouroboros.utils import truncate_within_limit
+
+    text = str(text or "").strip()
+    return text if len(text) <= limit else f"{truncate_within_limit(text, limit)}; more at {source}"
+
+
+def _runtime_diagnostic(drive_root: pathlib.Path, skill: Any, state: Dict[str, Any], reader: str) -> str:
+    """An in-process load attempt matches the current files; retained server health has no payload digest."""
+    from ouroboros.extension_health import (
+        BROKEN, COMPANION_FAILED, COMPANION_RESTART_EXHAUSTED, read_extension_health,
+    )
+
+    if state.get("reason") == "load_error":
+        detail = _diagnostic_preview(state.get("load_error"), reader)
+        return "a load attempt for the current extension failed in this process" + (f": {detail}" if detail else "")
+    if state.get("foreign_publication"):
+        return "this installation's server health could not be verified"
+
+    health_reader = f"query_data(op='json', kind='skill_state', ids=[{skill.name!r}], state_file='health')"
+    if state.get("process") == "server":
+        if state.get("companion_failed"):
+            _, _, names = str(state.get("reason") or "").partition(":")
+            component = f" ({names})" if names else ""
+            detail = _diagnostic_preview(state.get("load_error") or state.get("reason"), health_reader)
+            return f"the server reports a companion failure{component} (payload revision not established): {detail}"
+        return ""
+
+    server = ((read_extension_health(drive_root, skill.name) or {}).get("observations") or {}).get("server")
+    if not isinstance(server, dict) or server.get("status") != BROKEN:
+        return ""
+    reason = str(server.get("reason") or "")
+    prefix, _, component = reason.partition(":")
+    if prefix in {COMPANION_FAILED, COMPANION_RESTART_EXHAUSTED}:
+        subject = f"companion failure ({component})" if component else "companion failure"
+    else:
+        subject = "extension load failure" if reason == "load_error" else "extension health failure"
+    detail = _diagnostic_preview(server.get("load_error") or reason, health_reader)
+    return f"last recorded server {subject} (payload revision not recorded)" + (f": {detail}" if detail else "")
+
+
+def _skill_status_fact(drive_root: pathlib.Path, skill: Any, peers: List[Any], *, warned: bool = False) -> str:
+    """Configuration, then process evidence: never infer runtime success from a grant or from an old health record."""
+    from ouroboros.skill_catalogue import skill_status
+    from ouroboros.skill_grant_follow import files_accepted
+
+    readiness = skill_readiness_for_execution(drive_root, skill, skills=peers)
+    if warned and getattr(skill, "is_self_authored", False) and not readiness.ready:
+        return ""
+    state, runtime_note = {}, ""
+    reader = f"list_skills(name={skill.name!r})"
+    if readiness.ready and skill.manifest.is_extension():
+        from ouroboros.extension_liveness import runtime_state_for_loaded_skill
+
+        state = runtime_state_for_loaded_skill(skill, drive_root, skills=peers)
+        if state.get("desired_live"):
+            runtime_note = _runtime_diagnostic(drive_root, skill, state, reader)
+    status = skill_status({"type": skill.manifest.type,
+                           "readiness": {"blockers": readiness.blockers, "notes": readiness.notes},
+                           "entry_gap": skill.entry_gap if readiness.ready and skill.manifest.is_script() else "",
+                           "declares_mcp": bool(skill.manifest.mcp_servers),
+                           "desired_live": state.get("desired_live"), "live_reason": state.get("reason"),
+                           "load_error": state.get("load_error")})
+    facts = []
+    if status["reasons"]:
+        facts.append("not ready: " + _diagnostic_preview("; ".join(status["reasons"]), reader))
+        if readiness.next_actions:
+            facts.append("next actions: " + _diagnostic_preview(readiness.next_actions, reader, limit=480))
+    elif not files_accepted(readiness.review_gate):
+        facts.append("no recorded acceptance or clean/warnings review for the current files")
+    if status["notes"]:
+        facts.append(_diagnostic_preview("; ".join(status["notes"]), reader))
+    if runtime_note:
+        facts.append(runtime_note)
+    return "; ".join(facts)
+
+
+def changed_skill_facts(drive_root: pathlib.Path, llm_trace: Dict[str, Any], ctx: Any) -> List[str]:
+    """Follow up only named subjects or differences seen on an existing catalog read; no finish-wide search.
+
+    Tool arguments tell us where to look, never whether files changed or who changed them. Off stays quiet.
+    Untargeted edits after the last existing observation and edits before this ToolContext's first view are unknown.
+    """
+    from ouroboros.contracts.task_constraint import normalize_task_constraint
+
+    start = getattr(ctx, "_skill_digests_at_start", None) or {}
+    trace = llm_trace or {}
+    touched = skill_names_touched_by_trace(trace)
+    selected = normalize_task_constraint(getattr(ctx, "task_constraint", None))
+    names = list(dict.fromkeys([
+        *skill_names_for_followup(trace), *(name for name in touched if name in start),
+        *sorted(getattr(ctx, "_skill_changes_observed", ())),
+        *([selected.skill_name] if selected and selected.has_selected_skill else []),
+    ]))
+    facts: List[str] = []
+    try:
+        subjects, peers = observe_named_skills(drive_root, names)
+    except Exception:
+        log.debug("Skill follow-up view unavailable", exc_info=True)
+        return []
+    for name, skill in subjects.items():
+        if not skill.enabled or skill.identity_collision:
+            continue
+        before = start.get(skill.name)
+        if before and skill.content_hash:
+            if before == skill.content_hash:
+                continue
+            lead = f"files of skill {skill.name} changed since this work's first observation (author not established)"
+        else:
+            lead = f"current state of skill {skill.name} (file changes not verified)"
+        try:
+            warned = name in touched and getattr(ctx, "_skill_finalization_injected", False)
+            if fact := _skill_status_fact(drive_root, skill, peers, warned=warned):
+                facts.append(f"{lead}; {fact}")
+        except Exception:
+            log.debug("Skill follow-up fact unavailable for %s", skill.name, exc_info=True)
+    return facts
+
+
+def changed_skills_notice(drive_root: pathlib.Path, llm_trace: Dict[str, Any], ctx: Any) -> str:
+    """A neutral end-of-work line, compared once per ToolContext whether or not it finds a fact."""
+    if ctx is None or getattr(ctx, "_skill_change_compared", False):
+        return ""
+    ctx._skill_change_compared = True
+    facts = changed_skill_facts(pathlib.Path(drive_root), llm_trace, ctx)
+    return "Skill status observations: " + "; ".join(facts) if facts else ""
+
+
+def skill_names_for_followup(llm_trace: Dict[str, Any]) -> List[str]:
+    """Subjects named by an attempted edit, review or toggle, not evidence of an effect."""
+    calls = [call for call in llm_trace.get("tool_calls") or []
+             if isinstance(call, dict) and str(call.get("tool") or "") in _SKILL_FOLLOWUP_TOOLS]
+    return skill_names_touched_by_trace({"tool_calls": calls})
+
+
 def skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
     """Names of the skills a task's tool trace touched.
 
@@ -79,9 +254,12 @@ def skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
     the skill lifecycle tools name it directly, which is the only carrier for a
     delegated payload the root never wrote with ``write_file``/``edit_text``.
     """
+    calls = llm_trace.get("tool_calls") or []
+    if not calls:
+        return []
     names: List[str] = []
     identity_keys = _skill_tool_identity_mapping()
-    for call in llm_trace.get("tool_calls") or []:
+    for call in calls:
         if not isinstance(call, dict):
             continue
         tool = str(call.get("tool") or "")
@@ -148,12 +326,10 @@ def acceptance_skill_lifecycle(
             names.append(name)
     if not names:
         return []
-    from ouroboros.skill_loader import discover_skills, find_skill
-
-    peers = discover_skills(root)
+    subjects, peers = observe_named_skills(root, names)
     rows: List[Dict[str, Any]] = []
     for name in names:
-        skill = find_skill(root, name)
+        skill = subjects.get(name)
         if skill is None:
             rows.append({"name": name, "present": False})
             continue
@@ -164,7 +340,8 @@ def acceptance_skill_lifecycle(
                 from ouroboros.extension_loader import runtime_state_for_loaded_skill
 
                 live = runtime_state_for_loaded_skill(skill, root, skills=peers)
-                runtime = {key: live.get(key) for key in ("desired_live", "live_loaded", "reason", "load_error", "process")}
+                runtime = {key: live.get(key) for key in ("desired_live", "live_loaded", "reason", "load_error", "process",
+                                                          "grant_note")}
             except Exception as exc:
                 runtime = {"live_loaded": None, "reason": "unavailable", "load_error": str(exc)}
         rows.append({
@@ -281,22 +458,24 @@ def skill_readiness_for_execution(
         next_actions.append({"phase": "conflict", "tool": "toggle_skill", "reason": "Resolve conflicting enablement according to owner intent."})
 
     grants: Dict[str, Any] = {}
+    notes: List[str] = []
     if require_grants:
+        from ouroboros.skill_grant_follow import blocking_lists, grant_notes
         from ouroboros.skill_loader import grant_status_for_skill
 
         grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
-        if not grants.get("all_granted", True):
-            missing_keys = grants.get("missing_keys") or []
-            missing_permissions = grants.get("missing_permissions") or []
+        notes = grant_notes(grants)
+        if grants.get("blocked"):
+            missing_keys, missing_permissions = blocking_lists(grants)
             cause = grant_gap_sentence(grants)
             msg = f"missing_grants:keys={missing_keys},permissions={missing_permissions}" + (f"; {cause}" if cause else "")
             blockers.append(msg)
             owner_action.append(msg)
-            reason = "Grant only manifest items covered by expressed owner intent; repeating review does not supply owner permission."
+            reason = ("Use skill_owner_action grant for items the owner actually approved. With automatic grants on, "
+                      "an executable review, qualified author finish, owner Skip, or accepted install/update can "
+                      "grant declared items for these files. A recorded Repair edit admits files but grants nothing.")
             if cause:
-                reason += (" A grant for the current files restores it: skill_owner_action grant carrying the owner's words, "
-                           "or, for a skill installed from a source, an accepted release (skill_update), which re-grants when "
-                           "automatic grants for reviewed skills are on; its replace mode also replaces in-place edits of the payload.")
+                reason += " The grant for earlier files does not cover the current files. Settings values stay saved."
             next_actions.append({"phase": "grants", "tool": "skill_owner_action", "reason": reason})
 
     try:
@@ -341,5 +520,6 @@ def skill_readiness_for_execution(
         grant_status=grants,
         conflict=conflict,
         manual_dependencies=manual_dependencies,
+        notes=notes,
         next_actions=next_actions,
     )

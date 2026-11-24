@@ -304,6 +304,182 @@ def _choice(drive):
     return (skill_state_dir(drive, "pinger") / "enabled.json").read_bytes()
 
 
+@pytest.fixture
+def hub_calendar(drive, tmp_path, live_extensions, monkeypatch):
+    """A prepared local Hub snapshot; use real install, review and extension effects, no remote transport. Like the
+    real calendar it declares ``notify_owner``, and its read tool returns the meetings of its own local store for the
+    calendars its granted fields name. All values are synthetic; nothing here sends a notice."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros import config, extension_loader
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.tools.extension_dispatch import dispatch_extension_tool
+    from ouroboros.tools.registry import ToolContext
+    from tests._extension_loader_shared import _write_ext_skill
+
+    name, primary, other = "fixture-calendar", "FIXTURE_CALENDAR_PRIMARY", "FIXTURE_CALENDAR_SECONDARY"
+    settings = drive / "settings.json"
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(drive))
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings)
+    settings.write_text(json.dumps({primary: "example-primary", other: "example-secondary"}))
+    repo = Path(__file__).resolve().parents[1]
+    root = tmp_path / "catalog"
+    row = {"kind": "hub", "id": "fixture-hub", "name": "Fixture Hub", "trust": "trusted", "url": root.as_uri()}
+    snapshot = {}
+    monkeypatch.setattr(catalog, "snapshot_for", lambda *_a, **_k: (snapshot, {"state": "ready"}))
+    monkeypatch.setattr(catalog, "checkout_at_commit", lambda *_a, **_k: root)
+
+    def offer(label):
+        folder = _write_ext_skill(root, name, permissions=["tool", "read_settings", "notify_owner"],
+                                  env_from_settings=[primary, other],
+                                  extra_frontmatter='plugin_api: "2.0"\ntools:\n  - name: events\n    effect: read\n',
+                                  plugin_body=(
+                                      "import json\nimport pathlib\n\n\n"
+                                      "def register(api):\n"
+                                      "    def events(ctx):\n"
+                                      f"        keys = ({primary!r}, {other!r})\n"
+                                      "        fields = api.get_settings(list(keys))\n"
+                                      "        store = json.loads((pathlib.Path(api.get_state_dir()) / 'meetings.json')"
+                                      ".read_text(encoding='utf-8'))\n"
+                                      "        found = [m['start'] + ' ' + m['title'] for key in keys\n"
+                                      "                 for m in store.get(fields.get(key) or '', [])]\n"
+                                      f"        return str(({label!r}, found))\n"
+                                      "    api.register_tool('events', events, description='Read meetings',"
+                                      " schema={})\n"))
+        digest = catalog.tree_release_digest(folder)
+        snapshot.update(commit="1" * 40, entries=[{"name": name, "digest": digest, "version": "0.1.0",
+                                                  "source": {"kind": "hosted", "path": name}}])
+        return digest
+
+    initial = offer("before")
+    installed = installer.run_in_lane(drive, "install", name, lambda: installer.install_item(
+        drive, f"{row['id']}/{name}", rows=[row], repo_dir=repo, turn_on_when_ready=False))
+    assert installed["digest"] == initial and installed["acceptance"]["accepted"]
+    # The calendar's local data in its state folder, keyed by the calendar each fictitious field names.
+    (skill_state_dir(drive, name) / "meetings.json").write_text(json.dumps({
+        "example-primary": [{"start": "2026-11-25T10:00+03:00", "title": "Demo standup"}],
+        "example-secondary": [{"start": "2026-11-25T15:00+03:00", "title": "Demo review"}]}), encoding="utf-8")
+    owner = ToolContext(repo_dir=repo, system_repo_dir=repo, drive_root=drive)
+    granted = run_skill_action(owner, name, "grant", expected_content_hash=initial, items=[primary, "notify_owner"],
+                               _owner_actor="owner_ui", _enable_after_grant=True)
+    assert granted["ok"] and granted["granted_keys"] == [primary] and granted["enabled"]
+    assert granted["granted_permissions"] == ["notify_owner"]
+
+    def events():
+        tool_name = extension_loader.extension_surface_name(name, "events")
+        tool = extension_loader.get_tool(tool_name)
+        assert tool is not None
+        return dispatch_extension_tool(owner, tool_name, tool, {})
+
+    return SimpleNamespace(name=name, primary=primary, other=other, initial=initial, drive=drive,
+                           events=events, offer=offer, repo=repo, row=row, owner=owner)
+
+
+@pytest.mark.parametrize("owner_off,kept", [(False, False), (True, False), (False, True)],
+                         ids=["keeps-on", "keeps-off", "after-keep"])
+def test_hub_repair_keeps_only_the_explicit_field_at_the_final_reviewed_digest(hub_calendar, monkeypatch, owner_off,
+                                                                                kept):
+    from ouroboros import extension_loader
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.gateway.host_service import HostServiceAuthError, HostServiceContext
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, load_enabled
+    from ouroboros.skill_repair_admission import record_repair_admission
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor.message_ingress import ui_control_fact
+    from tests.test_skill_review_persist_guard import _clean_wave
+
+    h = hub_calendar
+    assert h.events() == "('before', ['2026-11-25T10:00+03:00 Demo standup'])"
+    if kept:  # Keep skips the upstream release: the installation the receipt names stays
+        upstream = h.offer("upstream replacement")
+        installer.run_in_lane(h.drive, "update", h.name, lambda: installer.update_installed(
+            h.drive, h.name, mode="keep", digest=upstream, rows=[h.row], repo_dir=h.repo))
+    if owner_off:
+        assert run_skill_action(h.owner, h.name, "disable", _owner_actor="owner_ui")["ok"]
+    sends = _clean_wave(monkeypatch)  # Only the external reviewer answer is synthetic.
+    registry = ToolRegistry(repo_dir=h.repo, drive_root=h.drive)
+    repair = registry._ctx
+    repair.system_repo_dir = h.repo
+    repair.task_id = "fixture-calendar-repair"
+    repair.task_constraint = TaskConstraint(skill_name=h.name, payload_root=f"skills/ouroboroshub/{h.name}")
+    repair.task_metadata = {"origin_suppressed": True, "ui_control": ui_control_fact(
+        {"name": "skill_repair"}, pressed_at="2026-11-21T12:00:00Z")}
+    record_repair_admission(h.drive, h.name, task_id=repair.task_id, base_content_hash=h.initial, owner_request=True)
+    hashes = [h.initial]
+    for before, after in [("before", "intermediate"), ("intermediate", "final")]:
+        result = registry.execute("edit_text", {"root": "skill_payload", "path": "plugin.py",
+                                               "old_str": repr(before), "new_str": repr(after)})
+        assert "Replaced" in result, result
+        current = find_skill(h.drive, h.name)
+        hashes.append(current.content_hash)
+        assert grant_status_for_skill(h.drive, current)["granted_keys"] == []  # edits do not grant
+    assert len(set(hashes)) == 3
+    reviewed = run_skill_review_lifecycle_blocking(repair, h.name, reviewers=["t1"], reason="fixture extension")
+    assert (reviewed["status"], reviewed["content_hash"]) == ("clean", hashes[-1]), reviewed
+    assert len(sends) == 1 and not reviewed.get("auto_granted_keys")
+    grants = grant_status_for_skill(h.drive, find_skill(h.drive, h.name))
+    assert (grants["granted_keys"], grants["granted_permissions"], grants["pending_permissions"]) == (
+        [h.primary], [], ["notify_owner"]) and not grants["blocked"], "the field follows; the notice is only held"
+    with pytest.raises(HostServiceAuthError, match="notify_owner"):  # the host's decision, no notice is sent
+        HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")
+    if owner_off:
+        assert not load_enabled(h.drive, h.name) and not extension_loader.is_extension_live(h.name, h.drive)
+    else:  # the repaired files read the granted field's meeting while the notice still waits for its own grant
+        assert h.events() == "('final', ['2026-11-25T10:00+03:00 Demo standup'])"
+        assert run_skill_action(h.owner, h.name, "grant", expected_content_hash=hashes[-1], items=["notify_owner"],
+                                _owner_actor="owner_ui")["ok"]
+        HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")  # its own grant admits it
+        (skill_state_dir(h.drive, h.name) / "grants.json").unlink()  # the owner's decision withdrawn
+        with pytest.raises(HostServiceAuthError, match="notify_owner"):
+            HostServiceContext(h.drive).require_permission(h.name, {}, "notify_owner")
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_hub_update_keeps_auto_grant_a_separate_decision(hub_calendar, monkeypatch, automatic):
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill
+
+    h = hub_calendar
+    before = read_install_record(h.drive, h.name)
+    digest = h.offer("upstream replacement")
+    if automatic:
+        monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    outcome = installer.run_in_lane(h.drive, "update", h.name, lambda: installer.update_installed(
+        h.drive, h.name, mode="replace", digest=digest, local_digest=h.initial, rows=[h.row], repo_dir=h.repo))
+    after = read_install_record(h.drive, h.name)
+    assert before["release"]["digest"] == h.initial != after["release"]["digest"] == digest
+    expected = [h.primary, h.other] if automatic else []
+    assert outcome["acceptance"]["accepted"] and outcome["acceptance"]["granted_keys"] == expected
+    status = grant_status_for_skill(h.drive, find_skill(h.drive, h.name))
+    assert status["granted_keys"] == expected and status["pending_permissions"] == []  # a landing holds nothing
+    assert status["blocked"] is not automatic
+    if automatic:  # both fields granted by the policy: both local calendars are read
+        assert h.events() == ("('upstream replacement', ['2026-11-25T10:00+03:00 Demo standup', "
+                              "'2026-11-25T15:00+03:00 Demo review'])")
+
+
+def test_hub_keep_continues_the_grant_receipt_and_replace_ends_it(hub_calendar):
+    """The explicit grant's receipt names this installation: Keep skips a release and is no landing; Replace lands a
+    new installation, and the receipt does not follow it."""
+    from ouroboros.skill_grant_follow import installation_of, load_receipt
+    from ouroboros.skill_loader import find_skill
+
+    h = hub_calendar
+    receipt = load_receipt(h.drive, h.name)
+    assert (receipt["keys"], receipt["digest"], receipt["via"]) == ([h.primary], h.initial, "owner_ui")
+    upstream = h.offer("upstream replacement")
+    kept = installer.run_in_lane(h.drive, "update", h.name, lambda: installer.update_installed(
+        h.drive, h.name, mode="keep", digest=upstream, rows=[h.row], repo_dir=h.repo))
+    assert kept["mode"] == "keep" and load_receipt(h.drive, h.name) == receipt
+    assert installation_of(h.drive, h.name, find_skill(h.drive, h.name).skill_dir) == receipt["installation"]
+    installer.run_in_lane(h.drive, "update", h.name, lambda: installer.update_installed(
+        h.drive, h.name, mode="replace", digest=upstream, local_digest=h.initial, rows=[h.row], repo_dir=h.repo))
+    assert load_receipt(h.drive, h.name) == {}, "a new landing is a new installation"
+
+
 @pytest.mark.parametrize("turn_on_when_ready", [True, False])
 def test_an_accepted_update_brings_an_extension_that_is_on_back_at_its_new_release(drive, hub, live_extensions,
                                                                                     turn_on_when_ready):

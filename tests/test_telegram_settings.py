@@ -525,19 +525,20 @@ def test_only_the_local_settings_page_may_change_the_bot_api_server(tmp_path: Pa
     refused = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081", "TELEGRAM_API_FILES_DIR": "",
                     "TELEGRAM_COMMAND_MODE": "strict"}, host=host, marker=marker)
     assert refused["ok"] is True and refused["server_ignored"] is True
-    assert "change them from the Settings page on the computer running Ouroboros" in refused["message"]
+    local_form = "Open the Telegram skill's settings on the computer running Ouroboros"
+    assert local_form in refused["message"]
     saved = load_settings(tmp_path)
     assert (saved["TELEGRAM_API_BASE"], saved["TELEGRAM_API_FILES_DIR"]) == ("http://127.0.0.1:8081", store)
     assert saved["TELEGRAM_COMMAND_MODE"] == "strict"
     # The remote form sends back what it was shown: unchanged values pass without a notice.
     quiet = save({"TELEGRAM_API_BASE": "http://127.0.0.1:8081/", "TELEGRAM_API_FILES_DIR": store},
                  host=host, marker=marker)
-    assert quiet["server_ignored"] is False and "Settings page" not in quiet["message"]
+    assert quiet["server_ignored"] is False and local_form not in quiet["message"]
     # So do values saved by hand in another spelling of the same server and store.
     merge_settings(tmp_path, {"TELEGRAM_API_BASE": "https://bot.example:443/", "TELEGRAM_API_FILES_DIR": store + os.sep})
     hand_edited = save({"TELEGRAM_API_BASE": "https://bot.example", "TELEGRAM_API_FILES_DIR": store},
                        host=host, marker=marker)
-    assert hand_edited["server_ignored"] is False and "Settings page" not in hand_edited["message"]
+    assert hand_edited["server_ignored"] is False and local_form not in hand_edited["message"]
     assert load_settings(tmp_path)["TELEGRAM_API_BASE"] == "https://bot.example:443/"
     merge_settings(tmp_path, {"TELEGRAM_API_BASE": "http://127.0.0.1:8081", "TELEGRAM_API_FILES_DIR": store})
     local = save({"TELEGRAM_API_BASE": "http://198.51.100.9:8081"}, host="127.0.0.1")

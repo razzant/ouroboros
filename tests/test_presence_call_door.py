@@ -493,7 +493,8 @@ def test_a_call_freezes_what_its_connector_calls_each_matched_kind(tmp_path, pla
     connector gives no words of its own adds none (a text turn's carrier: ``test_conversation_lane_presence``)."""
     from ouroboros.subagent_messages import place_origin
 
-    declared = [{"provides": "place", "skill": "meet_bridge", "facts": [
+    # A live place declaration names its provider (``vendor:<Name>``, any case): it speaks for this place's ``meet``.
+    declared = [{"provides": "place", "skill": "meet_bridge", "destination": "vendor:Meet", "facts": [
         "mention", {"id": "signal.new_discussion", "label": "New discussion"},
         {"id": "direct_message", "label": "Mail addressed to you"}]}]
     monkeypatch.setattr("ouroboros.extension_registry_state.live_contribution_projection", lambda: declared)

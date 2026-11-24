@@ -22,7 +22,7 @@ import urllib.parse
 import httpx
 import pytest
 
-from ouroboros import config, mcp_client, mcp_oauth
+from ouroboros import config, mcp_client, mcp_oauth, oauth_engine
 from tests.test_mcp_headers_loopback import loopback  # noqa: F401 -- the SSE fixture
 
 
@@ -371,7 +371,7 @@ def _mock_as(monkeypatch, tmp_path, *, issuer="https://auth.example", token_scop
             return httpx.Response(200, json=body)
         raise AssertionError(str(request.url))
 
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
     return cfg, metadata, seen
 
 
@@ -482,7 +482,7 @@ def test_two_requests_of_one_event_loop_share_one_refresh_without_blocking_it(mo
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     mcp_oauth._save(cfg, {"tokens": {"access_token": "old-access", "expires_at": 1, "refresh_token": "synthetic-refresh"},
                           "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
-    monkeypatch.setattr(mcp_oauth, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)  # only the failure wait is shortened
+    monkeypatch.setattr(oauth_engine, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)  # only the failure wait is shortened
     refreshes = []
 
     async def answer(request):
@@ -490,7 +490,7 @@ def test_two_requests_of_one_event_loop_share_one_refresh_without_blocking_it(mo
         await asyncio.sleep(0.05)
         return httpx.Response(200, json={"access_token": "new-access", "expires_in": 3600})
 
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
 
     async def both():
         return await asyncio.gather(mcp_oauth.current_token(cfg), mcp_oauth.current_token(cfg), return_exceptions=True)
@@ -508,6 +508,10 @@ def test_a_scope_the_token_endpoint_does_not_repeat_survives_a_step_up(monkeypat
     again = asyncio.run(mcp_oauth.begin(cfg))
     asked = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(again["url"]).query))["scope"]
     assert set(asked.split()) == {"files:read", "files:write"}
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(again), code="c2", iss="https://auth.example"))["ok"]
+    assert not {"required_scope", "required_scope_since", "challenge", "pending"} & _file(cfg).keys()
+    row = mcp_oauth.status(cfg)
+    assert (row["state"], row.get("reason")) == ("signed_in", None)
 
 
 def test_a_malformed_refresh_keeps_the_grant_and_a_refused_one_asks_for_sign_in(monkeypatch, tmp_path):
@@ -516,7 +520,7 @@ def test_a_malformed_refresh_keeps_the_grant_and_a_refused_one_asks_for_sign_in(
              "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}}
     for error, kept in (("invalid_request", True), ("invalid_grant", False)):
         mcp_oauth._save(cfg, grant)
-        monkeypatch.setattr(mcp_oauth, "_client", lambda error=error: httpx.AsyncClient(transport=httpx.MockTransport(
+        monkeypatch.setattr(oauth_engine, "http_client", lambda error=error: httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(400, json={"error": error}))))
         with pytest.raises(httpx.HTTPStatusError if kept else mcp_oauth.MCPAuthRequired):
             asyncio.run(mcp_oauth.current_token(cfg))
@@ -550,7 +554,7 @@ def test_parallel_streams_of_a_real_session_survive_one_rejected_access_token(si
 
     monkeypatch.setattr(provider, "load_access_token", reject_after_initialize)
     monkeypatch.setattr(provider, "exchange_refresh_token", slow_refresh)
-    monkeypatch.setattr(mcp_oauth, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)
+    monkeypatch.setattr(oauth_engine, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)
     assert manager.refresh_server("docs")["ok"] is True
 
 
@@ -588,7 +592,7 @@ def test_a_revoked_registration_is_not_reused_from_an_unfinished_sign_in(signin,
         return httpx.Response(401, json={"error": "invalid_client"}, request=httpx.Request("POST", endpoint))
 
     with monkeypatch.context() as stub:
-        stub.setattr(mcp_oauth, "_token_request", invalid_client)
+        stub.setattr(oauth_engine, "token_request", invalid_client)
         with pytest.raises(mcp_oauth.MCPAuthRequired):
             asyncio.run(mcp_oauth.current_token(cfg, rejected=original["tokens"]["access_token"]))
     assert not _file(cfg).get("client") and not _file(cfg).get("pending") and not _file(cfg).get("tokens")
@@ -605,7 +609,7 @@ def test_invalid_client_keeps_a_pending_sign_in_of_another_registration(monkeypa
     mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1}, "pending": pending,
                           "metadata": {"token_endpoint": "https://auth.example/token"},
                           "client": {"client_id": "old-client", "issuer": "https://auth.example"}})
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(401, json={"error": "invalid_client"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -617,7 +621,7 @@ def test_refresh_refusals_without_a_body_ask_for_sign_in(monkeypatch, tmp_path, 
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(status, **({"json": {"error": error}} if error else {})))))
     with pytest.raises(mcp_oauth.MCPAuthRequired) as caught:
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -630,7 +634,7 @@ def test_saving_a_new_address_while_an_old_refresh_finishes_allows_the_new_sign_
     _complete(cfg, _provider_return(cfg))
     old_access = _file(cfg)["tokens"]["access_token"]
     newer = {**settings, "MCP_SERVERS": [{**settings["MCP_SERVERS"][0], "url": cfg.url + "?saved-new-address=1"}]}
-    real_token_request = mcp_oauth._token_request
+    real_token_request = oauth_engine.token_request
 
     async def interleave():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -641,7 +645,7 @@ def test_saving_a_new_address_while_an_old_refresh_finishes_allows_the_new_sign_
             return await real_token_request(http, endpoint, client, data)
 
         with monkeypatch.context() as stub:
-            stub.setattr(mcp_oauth, "_token_request", delayed)
+            stub.setattr(oauth_engine, "token_request", delayed)
             refresh = asyncio.create_task(mcp_oauth.current_token(cfg, rejected=old_access))
             await entered.wait()
             manager.configuration_changed(newer, reason="settings")  # Save prunes the old address's file
@@ -701,7 +705,7 @@ def test_invalid_client_of_the_old_grant_keeps_a_pending_sign_in_with_new_creden
         return httpx.Response(401, json={"error": "invalid_client"}, request=httpx.Request("POST", endpoint))
 
     with monkeypatch.context() as stub:
-        stub.setattr(mcp_oauth, "_token_request", refused_old_client)
+        stub.setattr(oauth_engine, "token_request", refused_old_client)
         with pytest.raises(mcp_oauth.MCPAuthRequired):
             asyncio.run(mcp_oauth.current_token(cfg, rejected=old_access))
     assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="new", iss=new_issuer))["ok"]
@@ -714,15 +718,15 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
     _complete(cfg, _provider_return(cfg))
     old_access = _file(cfg)["tokens"]["access_token"]
     newer = {**settings, "MCP_SERVERS": [{**settings["MCP_SERVERS"][0], "url": cfg.url + "?saved=2"}]}
-    real_token_request, real_save, real_name_lock = mcp_oauth._token_request, mcp_oauth._save, store.name_lock
+    real_token_request, real_save, real_name_lock = oauth_engine.token_request, oauth_engine.save, store.name_lock
     entered, release, failures = threading.Event(), threading.Event(), []
     main_thread = threading.current_thread()
 
     # The old refresh resumes when the new begin either writes its pending (the broken order) or finds the
     # lock busy (the fixed one); no scheduling sleep decides the order.
-    def saved(new_cfg, doc):
-        real_save(new_cfg, doc)
-        if new_cfg.url == newer["MCP_SERVERS"][0]["url"]:
+    def saved(grant, doc):
+        real_save(grant, doc)
+        if grant.binding.get("url") == newer["MCP_SERVERS"][0]["url"]:
             release.set()
 
     @contextlib.contextmanager
@@ -747,8 +751,8 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
         except BaseException as exc:  # noqa: BLE001 -- reported below
             failures.append(exc)
 
-    monkeypatch.setattr(mcp_oauth, "_token_request", delayed)
-    monkeypatch.setattr(mcp_oauth, "_save", saved)
+    monkeypatch.setattr(oauth_engine, "token_request", delayed)
+    monkeypatch.setattr(oauth_engine, "save", saved)
     monkeypatch.setattr(store, "name_lock", observed_lock)
     thread = threading.Thread(target=old_refresh, name="mcp-oauth-old-refresh")
     thread.start()
@@ -767,7 +771,7 @@ def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(si
 def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_starts_anew(monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T08:00:00+00:00"])
-    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    monkeypatch.setattr(oauth_engine, "utc_now_iso", lambda: next(times))
     challenge = lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"})  # noqa: E731
     _bearer_call(cfg, challenge)
     assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "not_signed_in",
@@ -777,7 +781,7 @@ def test_a_repeated_sign_in_refusal_keeps_the_open_states_start_and_a_later_one_
     mcp_oauth._save(cfg, {**_file(cfg), "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"},
                           "sign_in": {"state": "signed_in", "since": "2026-11-19T21:47:00+00:00"}})
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -836,13 +840,14 @@ def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_un
         monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     times = iter(["2026-11-20T08:00:00+00:00", "2026-11-20T09:00:00+00:00"])
-    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    monkeypatch.setattr(oauth_engine, "utc_now_iso", lambda: next(times))
     old = {"v": 1, "url": cfg.url, "client": {"client_id": "c", "issuer": "https://auth.example"},
            "pending": {"nonce": "n", "started": "2026-11-19T21:00:00+00:00"},  # what the v1 writer left
            "sign_in": {"state": "sign_in_required", "reason": "token_rejected", "since": "2026-11-19T21:07:00+00:00"}}
     mcp_oauth._path(cfg.id).parent.mkdir(parents=True, exist_ok=True)
     mcp_oauth._path(cfg.id).write_text(json.dumps(old), encoding="utf-8")
     assert mcp_oauth.status(cfg)["since"] is None  # 21:07 was only its latest refusal; the start is unknown
+    assert _file(cfg) == old  # reading upgrades in memory only; the v1 file is untouched
     _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
     upgraded = _file(cfg)
     assert upgraded["v"] == 2 and upgraded["sign_in"]["since"] is None  # a repeat keeps the unknown start
@@ -850,7 +855,7 @@ def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_un
     mcp_oauth._save(cfg, {**upgraded, "tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
                           "metadata": {"token_endpoint": "https://auth.example/token"},
                           "sign_in": {"state": "signed_in", "since": "2026-11-20T07:00:00+00:00"}})
-    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+    monkeypatch.setattr(oauth_engine, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(400, json={"error": "invalid_grant"}))))
     with pytest.raises(mcp_oauth.MCPAuthRequired):
         asyncio.run(mcp_oauth.current_token(cfg))
@@ -860,7 +865,7 @@ def test_an_open_sign_in_requirement_written_before_starts_were_kept_reads_as_un
 def test_sign_out_keeps_an_open_requirements_start_and_dates_one_after_a_sign_in(monkeypatch, tmp_path):
     cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
     times = iter(["2026-11-19T09:50:00+00:00", "2026-11-20T10:00:00+00:00"])
-    monkeypatch.setattr(mcp_oauth, "utc_now_iso", lambda: next(times))
+    monkeypatch.setattr(oauth_engine, "utc_now_iso", lambda: next(times))
     _bearer_call(cfg, lambda request: httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}))
     assert asyncio.run(mcp_oauth.sign_out(cfg))["ok"]  # cancelling an unfinished sign-in: still the same state
     assert _file(cfg)["sign_in"] == {"state": "sign_in_required", "reason": "signed_out",

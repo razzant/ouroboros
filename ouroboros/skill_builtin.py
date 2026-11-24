@@ -16,9 +16,9 @@ ticked). An existing install keeps what it has and gets each default-on built-in
 update: installed and asked to turn on when ready, or, when already installed with no
 enablement choice, asked to turn on; a removal or an Off stands. Built-ins ride
 app releases: at startup an unmodified built-in whose bundled version changed is re-seeded
-in place, keeping its enablement, its Telegram state and the owner's grants while the
-requested keys and permissions are unchanged; a copy with local changes is kept and the
-owner chooses on update. Nothing re-installs a built-in the owner removed.
+in place, keeping enablement and Telegram state. Grants follow only from the verified
+prior built-in release when the requests are unchanged. A copy with local changes is
+kept and the owner chooses on update. Nothing re-installs a built-in the owner removed.
 A built-in no longer bundled is uninstalled when its copy is unchanged (grants survive), after a
 clean re-seed of the same pass; an edited or unknown copy loses its launcher marker and keeps running
 as the owner's skill. A built-in whose manifest ``os`` excludes this host is not offered or newly
@@ -140,6 +140,20 @@ def _write_record(drive_root: pathlib.Path, name: str, *, version: str, digest: 
     return write_install_record(drive_root, name, record)
 
 
+def _builtin_predecessor_digest(name: str, record: Dict[str, Any], installed_digest: str) -> str:
+    """Bind the measured pre-landing payload to the app's previous unmodified release."""
+    from ouroboros.skill_identity import is_release_digest
+
+    source, release = record.get("source"), record.get("release")
+    if (is_release_digest(installed_digest) and isinstance(source, dict) and isinstance(release, dict)
+            and source.get("id") == BUILTIN_SOURCE["id"] and source.get("kind") == BUILTIN_SOURCE["kind"]
+            and record.get("official") is True and record.get("entry") == name
+            and release.get("path") == f"skills/{name}"
+            and release.get("digest") == record.get("base_digest") == installed_digest):
+        return installed_digest
+    return ""
+
+
 def install_builtin_skill(
     name: str,
     *,
@@ -152,13 +166,14 @@ def install_builtin_skill(
 ) -> Dict[str, Any]:
     """Install, or re-seed in place, one bundled built-in; returns a typed result.
 
-    Lands the bundled folder atomically, writes the install record, carries the owner's
-    grants across a re-seed and applies the auto-grant setting. Enablement is left to the
-    caller's ``reconcile_turn_on_when_ready`` (inside its lifecycle job) or the owner.
+    Lands the bundled folder atomically, writes the install record, carries unchanged-request
+    grants only from a proven predecessor, and separately applies the auto-grant setting.
+    Enablement is left to the caller's lifecycle job or the owner.
     Refuses a name another installed payload already uses.
     """
     from ouroboros.config import DATA_DIR
     from ouroboros.skill_acceptance import carry_grants_to_current
+    from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import auto_grant_if_enabled, discover_skill_identity, load_skill
 
     drive = pathlib.Path(drive_root or DATA_DIR)
@@ -173,11 +188,19 @@ def install_builtin_skill(
         return {"ok": False, "name": name, "code": "other_platform",
                 "error": f"built-in {name!r} is for another operating system"}
     resolved_target = target.resolve()
-    occupants = [skill for skill in discover_skill_identity(drive, name)
-                 if pathlib.Path(skill.skill_dir).resolve() != resolved_target]
+    installed = discover_skill_identity(drive, name)
+    occupants = [skill for skill in installed if pathlib.Path(skill.skill_dir).resolve() != resolved_target]
     if occupants:
         return {"ok": False, "name": name, "code": "name_taken",
                 "error": f"another installed skill already uses the name {name!r}: {occupants[0].skill_dir}"}
+    previous_digest = ""
+    if resolved_target == drive.resolve() / "skills" / "native" / name and target.is_dir():
+        # Discover hides built-ins for other platforms; their installed copies still update.
+        previous = installed[0] if installed else load_skill(target, drive)
+        if previous is not None and not previous.load_error:
+            previous_digest = _builtin_predecessor_digest(
+                name, read_install_record(drive, name) or {}, previous.content_hash,
+            )
     native_root = drive / "skills" / "native"
     staging_root = native_root / ".staging"
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -206,7 +229,8 @@ def install_builtin_skill(
                            base_digest=None, turn_on_when_ready=turn_on_when_ready,
                            installed_by=installed_by, reason=reason, task_id=task_id)
     skill = load_skill(target, drive)  # the gate now reads the record just written
-    carried = carry_grants_to_current(drive, skill)
+    carried = bool(previous_digest and skill is not None and skill.content_hash == record["release"]["digest"]
+                   and carry_grants_to_current(drive, skill, previous_digest=previous_digest))
     granted = auto_grant_if_enabled(drive, load_skill(target, drive))
     return {"ok": True, "name": skill.name, "digest": skill.content_hash, "basis": record["basis"],
             "turn_on_when_ready": bool(turn_on_when_ready), "grants_carried": carried,

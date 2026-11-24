@@ -696,7 +696,7 @@ def _run_supervisor(settings: dict) -> None:
         interrupted_running: list = []
         restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", lambda: restore_pending_from_snapshot(terminalized=interrupted_running))
         _start_preparation_generation(stop=stop_requested)
-        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True))
+        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True, startup=True))
         run_startup_phase(_loop_liveness, "startup:worker_spawn", spawn_workers)
         from ouroboros.server_process import record_applied_restart_settings
         record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})

@@ -91,10 +91,17 @@ def read_install_record(drive_root: pathlib.Path, name: str) -> Optional[Dict[st
     return data
 
 
+def _landing(record: Dict[str, Any]) -> tuple:
+    source, release = record.get("source") or {}, record.get("release") or {}
+    return (source.get("kind"), source.get("id"), release.get("digest"), record.get("installed_at"))
+
+
 def write_install_record(drive_root: pathlib.Path, name: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and atomically persist ``record``; returns what was written.
 
     ``release.digest`` is required, except on a ``legacy`` record whose original release is unknown.
+    A new landing of the name (Replace, reinstall, another source) ends its grant receipt; Keep's skipped
+    release and other changes of the same landing do not (``skill_grant_follow``).
     """
     basis = str(record.get("basis") or "")
     if basis not in INSTALL_BASES:
@@ -111,6 +118,10 @@ def write_install_record(drive_root: pathlib.Path, name: str, record: Dict[str, 
     payload.setdefault("base_digest", str(release.get("digest") or ""))
     payload.setdefault("installed_at", utc_now_iso())
     payload["updated_at"] = utc_now_iso()
+    if _landing(read_install_record(drive_root, name) or {}) != _landing(payload):
+        from ouroboros.skill_grant_follow import end_receipt
+
+        end_receipt(drive_root, name)
     atomic_write_json(skill_state_dir(drive_root, name) / INSTALL_RECORD_FILENAME, payload)
     return payload
 
