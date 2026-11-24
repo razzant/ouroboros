@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from scripts.run_external_review import _probe_model_for_key
+from tests._ollama import install_http as install_http
 
 
 def test_external_review_probe_uses_canonical_app_attribution(monkeypatch):
@@ -128,6 +129,16 @@ def _keepalive_wire(monkeypatch, handler):
     monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *_a, **_kw: httpx.MockTransport(handler))
 
 
+def _private_gateway(monkeypatch, install_http, handler, base_url):
+    """``base_url`` is a private gateway that names no program, admitted to ``/v1`` by the owner's consent: the
+    check before each send reads its service paths (answered here, never recorded), the chat reaches ``handler``."""
+    import httpx
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED", base_url)
+    install_http(lambda request: handler(request) if request.url.path.endswith("/chat/completions")
+                 else httpx.Response(404, json={"detail": "Not Found"}))
+
+
 def _socket_wire(monkeypatch, handler):
     """Whatever client the SDK or httpx builds itself: only the connection layer records."""
     import httpx
@@ -160,7 +171,7 @@ _ABSENT = dict.fromkeys(OPENROUTER_APP_HEADERS)
 _DELIVERIES = ["sync", "async", "no_proxy_sync", "no_proxy_async"]
 
 
-_LOCAL = "http://localhost:11434/v1"
+_LOCAL = "http://localhost:11434/v1"  # private: a synthetic gateway (``_private_gateway``), never a socket
 _EDGE_ENDPOINTS = [
     ("https://OpenRouter.ai:443/api/v1/", True),
     ("http://openrouter.ai/api/v1", False),
@@ -178,9 +189,11 @@ _EDGE_ENDPOINTS = [
     *[(url, attributed, "sync") for url, attributed in _EDGE_ENDPOINTS],
 ])
 def test_compatible_endpoint_sends_app_identity_only_to_openrouter(
-        isolated, monkeypatch, base_url, attributed, delivery):
+        isolated, monkeypatch, install_http, base_url, attributed, delivery):
     sent = []
     _keepalive_wire(monkeypatch, _peer(sent))
+    if base_url == _LOCAL:
+        _private_gateway(monkeypatch, install_http, _peer(sent), base_url)
     model = _configure(monkeypatch, base_url)
     client, (msg, _usage) = _chat(model, delivery)
     client, (again, _usage) = _chat(model, delivery, client)  # the cached client serves the repeat

@@ -1012,6 +1012,18 @@ def test_unknown_rail_capture_cannot_be_overwritten_by_later_terminal_status():
 
     assert custody == {"physical_attempt_state": "unresolved"}
 
+    # A later Ollama metadata read did not submit its prepared model request.
+    # Its HTTP status cannot resolve the earlier attempt on the same rail.
+    from ouroboros.llm_ollama import OllamaRouteUnsettledError
+    from ouroboros.review_custody import _review_exception_projection
+    withheld = OllamaRouteUnsettledError("metadata not available")
+    withheld.status_code = 429
+    withheld.physical_attempt_capture = SimpleNamespace(state="released", provider_status_code=None)
+    history.observe(withheld)
+    facts, _, status, state, code = _review_exception_projection(withheld, {}, history, None)
+    assert (facts["physical_attempt_state"], status, state, code) == (
+        "unresolved", None, "custody_lost", "provider_outcome_unknown")
+
 
 def test_agent_session_config_refusal_is_zero_send_not_dispatched(tmp_path):
     """A typed route-construction failure is visible but spends no review cycle."""

@@ -283,25 +283,19 @@ is where a deliberate exception states its reason.
 
 ### External facts: unknown is not no
 
-Model/provider inputs, capacity, prices, ids and availability change independently.
+Model inputs, capacity, prices, IDs and availability vary separately.
 
-1. Use exact-route metadata/refusals, dated probes beside provider-keyed wire
-   projections with recovery, or owner settings; never infer from names, prefixes,
-   families or another route's catalog.
-2. Unknown is not no: pass input, tools and explicit requests unchanged. Unevidenced
-   literals cannot drop input, refuse tools, rewrite saved choices or narrow requests.
-3. A refusal describes one request; repair that attempt. Durable absence needs scoped evidence.
-4. Declare our transport limits at their lane and name them to the model as Ouroboros's.
-5. Retained wire facts below keep source/date, exact scope and both stale risks;
-   requested, sent and provider-reported values remain distinct.
+1. Use exact-route metadata/refusals, owner settings or dated probes beside provider-keyed wire projections with recovery. Names, prefixes, families and other routes' catalogs prove nothing.
+2. Without evidence, never narrow input, tools or requests, or rewrite saved choices.
+3. Repair the refused request; durable absence needs scoped evidence.
+4. Name each lane's transport limits as Ouroboros's own.
+5. Keep source/date, scope, both stale risks; separate requested, sent and provider-reported.
 
-Guards: `tests/test_image_capability_contract.py` preserves unseen models' images;
-`tests/test_model_name_invariance.py` checks name-independent unevidenced payloads
-(exceptions below); `tests/test_tristate_truthiness_guard.py` forbids truth-testing
-tri-state facts. Provenance grants no runtime authority; cited docstrings/contracts hold probes.
+In `tests/`, `test_image_capability_contract.py` keeps unseen models' images; `test_model_name_invariance.py` guards name-independent payloads (exceptions below); `test_tristate_truthiness_guard.py` bans truth tests on tri-state facts. Cited docstrings/contracts hold probes, not runtime authority.
 
 | Location | Fact | Evidence & re-probe | If stale |
 |---|---|---|---|
+| `llm_ollama.py` | Private Ollama: guards ≥0.12.6 (#12582), optional cache count | [0.40.16](https://github.com/ollama/ollama/blob/v0.40.16/api/types.go), 2026-11-18. Read version/ps/show; refresh max/think on new digest or expiry | Input loss, wrong load/effort |
 | `ouroboros/tools/imagegen.py`; `ouroboros/gateways/image_api.py` | Image wire facts | [Dated sources](../IMAGE_GENERATION.md#direct-api-contracts); re-check each exact route | Stale positives refuse requests; negatives hide capability |
 | `ouroboros/opencode_go.py` | Go Chat URL: own User-Agent, `x-opencode-session` per conversation | [Go](https://opencode.ai/docs/console/go/#where-can-i-use-it), 2026-11-18, docs only; recheck a real tool exchange | A missing ID can refuse a send; a shared one can mix conversations |
 | `ouroboros/llm_attempt.py::supports_message_cache_control` | Cache markers OpenRouter accepts or translates (`anthropic/`, `google/gemini-`, `openai/`) | `openai/`: OpenRouter caching guide in docstring, no live probe; re-probe before widening | False positive invalidates a request; false negative loses the prompt cache |

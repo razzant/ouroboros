@@ -44,6 +44,12 @@ Fixture pairs are separate live requests, so parity is structural (message keys,
 names, argument key sets, `reasoning_details` type sequence and per-record key sets,
 finish reason, usage keys), never exact text.
 
+`ollama/ollama-0.40.16-synthetic-canary.ndjson` is a successful native `/api/chat`
+response from the Ollama 0.40.16 stand using synthetic input (model tag `qwen-stand:latest`).
+Timestamps and durations are anonymized; frame boundaries, text and token counters
+are preserved. `tests/test_llm_ollama_wire.py` replays the response through the native
+decoder. It contains no tool call; the separate synthetic cases exercise those shapes.
+
 Cases — the same synthetic prompt and `lookup` tool everywhere except `twoblock_stream`;
 what differs is the request knob (or simply the reply the model chose to give on that run):
 

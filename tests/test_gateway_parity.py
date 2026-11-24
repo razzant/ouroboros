@@ -149,10 +149,12 @@ def test_provider_test_gateway_contract_shape_is_exact():
     assert get_origin(overrides_type) is dict
     assert get_args(overrides_type) == (str, str)
 
-    assert set(response_hints) == {"ok", "error"}
-    assert _notrequired_fields(ProviderTestResponse) == {"error"}
+    assert set(response_hints) == {"ok", "error", "caution", "code"}
+    assert _notrequired_fields(ProviderTestResponse) == {"error", "caution", "code"}
     assert response_hints["ok"] is bool
-    assert get_args(response_hints["error"]) == (str,)
+    assert get_args(response_hints["error"]) == get_args(response_hints["caution"]) == (str,)
+    assert get_args(get_args(response_hints["code"])[0]) == (
+        "ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable")
 
     text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
         encoding="utf-8"
@@ -166,6 +168,8 @@ def test_provider_test_gateway_contract_shape_is_exact():
     assert _js_typedef_properties(text, "ProviderTestResponse") == {
         ("boolean", "ok"),
         ("string=", "error"),
+        ("string=", "caution"),
+        ("('ollama_guard_consent'|'ollama_guard_held'|'ollama_guard_unavailable')=", "code"),
     }
 
 

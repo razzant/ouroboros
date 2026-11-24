@@ -459,6 +459,11 @@ def _physical_image_urls(value: Any, depth: int = 0) -> Iterator[str]:
             yield from _physical_image_urls(value["content"], depth + 1)
 
 
+def payload_image_digests(payload):
+    return frozenset(_url_digest(url) for part in (payload.get("messages"), payload.get("input"))
+                     for url in _physical_image_urls(part) if url)
+
+
 def note_candidate_images(raw_sha256: Optional[str], payload: Any) -> None:
     """Record which images one final physical candidate carries, under its raw sha256.
 
@@ -473,8 +478,7 @@ def note_candidate_images(raw_sha256: Optional[str], payload: Any) -> None:
                 _CANDIDATE_IMAGES[key] = _CANDIDATE_IMAGES.pop(key)
             if not key or key in _CANDIDATE_IMAGES or not isinstance(payload, Mapping):
                 return
-        found = frozenset(_url_digest(url) for part in (payload.get("messages"), payload.get("input"))
-                          for url in _physical_image_urls(part) if url)
+        found = payload_image_digests(payload)
         with _CANDIDATE_IMAGES_LOCK:
             _CANDIDATE_IMAGES[key] = found
             while len(_CANDIDATE_IMAGES) > _CANDIDATE_IMAGES_KEPT:
@@ -483,8 +487,12 @@ def note_candidate_images(raw_sha256: Optional[str], payload: Any) -> None:
         log.debug("candidate image digests unavailable", exc_info=True)
 
 
-def candidate_images(raw_sha256: Optional[str]) -> Optional[frozenset]:
-    """The image digests a final candidate carried, or None when it was never recorded."""
+def candidate_images(candidate: Any) -> Optional[frozenset]:
+    """Images of an attempt or capture. A raw digest suffices on self-describing wires."""
+    digests = getattr(candidate, "candidate_image_digests", None)
+    if digests is not None:
+        return frozenset(digests)
+    raw_sha256 = candidate if isinstance(candidate, str) else getattr(candidate, "candidate_raw_sha256", None)
     with _CANDIDATE_IMAGES_LOCK:
         return _CANDIDATE_IMAGES.get(str(raw_sha256 or ""))
 
@@ -631,7 +639,7 @@ def image_refusal(accumulated_usage: Mapping[str, Any], failed: Any) -> Optional
         kind == "provider_transient" and 500 <= status <= 599
         and accumulated_usage.get(RETRY_WALL_EXHAUSTED_KEY) is True
         and accumulated_usage.get(RETRY_ATTEMPTS_SPENT_KEY) is True)
-    digests = candidate_images(getattr(failed, "candidate_raw_sha256", None)) if completed else None
+    digests = candidate_images(failed) if completed else None
     return {"status": status, "kind": kind, "code": str(getattr(failed, "provider_code", "") or ""),
             "message": str(accumulated_usage.get("_last_llm_provider_message") or getattr(failed, "provider_error", "") or ""),
             "digests": digests} if digests else None
@@ -904,7 +912,7 @@ def _without_refused_images(failed: Any, refused: frozenset) -> Callable[[Any], 
     """Admit only the retry this refusal earned: no refused image in the physical candidate, the same
     model, route and account, round, and at most its reply allowance (a wait onto another route is not it)."""
     def predicate(request: Any) -> bool:
-        sent = candidate_images(getattr(request, "candidate_raw_sha256", None))
+        sent = candidate_images(request)
         context, failed_context = request.physical_context, failed.physical_context
         same_round = (context is None and failed_context is None) or (
             context is not None and failed_context is not None

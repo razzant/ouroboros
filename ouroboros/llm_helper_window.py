@@ -49,7 +49,7 @@ def _helper_attempt_context(target: Dict[str, Any], payload: Dict[str, Any]):
     from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
     provider = target.get("provider", "")
-    if provider in {"", "claudexor"} or payload_prompt_rows(payload) is None:
+    if target.get("settings_test") or provider in {"", "claudexor"} or payload_prompt_rows(payload) is None:
         return None  # no inspectable input rows: an engine's opaque body
     # Production targets carry the original route from resolution. Literal legacy
     # targets keep only their own supplied identity; never reconstruct it or read Settings.

@@ -16,7 +16,7 @@ import pytest
 
 import ouroboros.loop as loop_mod
 from ouroboros import config, owner_wait, route_choice
-from ouroboros.loop_model_call import _apply_round_route_overrides
+from ouroboros.loop_routes import _apply_round_route_overrides
 from ouroboros.tools.control_runtime import _switch_model
 from ouroboros.tools.registry import ToolRegistry
 from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- the shared isolated, sealed root

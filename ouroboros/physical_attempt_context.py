@@ -59,6 +59,9 @@ class PhysicalAttemptContext:
     first_contact_plan: InitVar[Optional[Tuple[str, bool]]] = None
     window_boundary_tokens: InitVar[Optional[int]] = None  # stated boundary, not admission's reserve-adjusted total
     window_record: InitVar[Optional[WindowRecord]] = None  # live capacity terms; not an extra ledger projection
+    # The native Ollama load this send's plan asked for (0: Auto), None for every other route. A record field, so the
+    # ledger row and a restored receipt carry it; last, so a positional caller of the fields above is unchanged.
+    requested_load_window: Optional[int] = None
 
     def __post_init__(self, base_prompt_source: Optional[Tuple[str, str, int, str]], first_contact_scope: str,
                       first_contact_dispatch: Optional[Tuple[int, str]],
