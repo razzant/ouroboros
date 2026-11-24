@@ -129,6 +129,24 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
                               continuation_version=continuation_version)
 
 
+def admitted_facts(root, task_id, identity):
+    """The facts the Host admitted with a settled arrival, as its settlement keeps them: a heard arrival's attention
+    record, else its turn's own record (``presence_runner._build_task``); () when neither names them. A turn record
+    proves its identity as it is read (``presence_runner._stored_turn``), a heard one in the replay that follows."""
+    from ouroboros.presence_runner import _stored_turn
+    if dialogue_store.present(root):
+        with dialogue_store.transaction(root, write=False) as conn:
+            row = _record(conn, task_id)
+        attention = json.loads(row['dispatch_input'] or '{}').get('place_attention', {}) if row is not None else {}
+        if attention.get('decision') == 'heard':
+            return tuple(attention.get('facts') or ())
+    metadata = _stored_turn(root, task_id, identity).get('metadata')
+    presence = metadata.get('presence') if isinstance(metadata, dict) else None
+    event = presence.get('event') if isinstance(presence, dict) else None
+    facts = event.get('facts') if isinstance(event, dict) else None
+    return tuple(facts) if isinstance(facts, list) else ()
+
+
 def heard_attention(root, seqs):
     """``{seq: place_attention}`` of these chat rows' heard decisions from their dedup records, in one read transaction
     (batched under SQLite's parameter floor), decoded after it closes. A row without one is absent from the answer:

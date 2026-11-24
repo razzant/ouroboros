@@ -1318,13 +1318,14 @@ def run_presence_turn(
                 and not any(row.get("direction") == "in" for row in prior_rows)):
             log_dialogue(direction="in", user_id=actor_id, text=event.text or task["text"])
         if admission.place is not None:
-            from ouroboros.place_intake import decide_attention, settle_heard
+            from ouroboros.place_intake import WAKE_IMPORT_PENDING, decide_attention, settle_heard
             decision, allowance = decide_attention(Path(drive_root), admission, event)
             if decision == "silent":
                 return settle_heard(Path(drive_root), task, event, allowance["reason"],
                                     captured_task_id=_task_id(admission, event))
             if decision == "retry":
-                error = PresenceTurnError("consciousness_allowance_exhausted", "allowance")
+                error = (PresenceTurnError(WAKE_IMPORT_PENDING, "place") if allowance.get("reason") == WAKE_IMPORT_PENDING
+                         else PresenceTurnError("consciousness_allowance_exhausted", "allowance"))
                 error.disposition, error.retry_after = "retry", allowance["retry_after"]
                 raise error
             task["metadata"]["focus_allowance"] = allowance

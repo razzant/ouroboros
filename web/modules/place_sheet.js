@@ -136,23 +136,52 @@ function stateHtml(place, ui) {
         ${silent ? `<p class="place-silent-card" role="note">${escapeHtml(`${state.note} ${SILENT_CARD}`)}</p>` : ''}`;
 }
 
+/** The suggested kinds the saved choice lacks, and whether one press adds them all now: not while one of them is a
+ *  signal a save refuses until the connector is on (the projection's `unpublished_signals`). It never adds some. */
+function missingSuggestions(place) {
+    const saved = new Set(place.wakes.map((item) => item.fact));
+    const missing = (place.wakeSuggestions || []).filter((fact) => !saved.has(fact));
+    const waiting = new Set(place.unpublishedSignals || []);
+    return { missing, addable: missing.length > 0 && !missing.some((fact) => waiting.has(fact)) };
+}
+
 function wakesHtml(place, ui) {
     const labels = { ...signalLabels(place.facts), ...place.labels, ...ui.labels };
-    const vocabulary = place.facts ?? Object.keys(WAKE_FACT_WORDS).filter((fact) => fact !== 'legacy_addressed'
+    const declared = place.facts ?? Object.keys(WAKE_FACT_WORDS).filter((fact) => fact !== 'legacy_addressed'
         || place.wakes.some((item) => item.fact === fact));
-    const items = vocabulary.map((item) => {
-        const fact = typeof item === 'string' ? item : item?.id;
+    const selected = place.wakes.map((item) => item.fact);
+    const suggestions = place.wakeSuggestions || [];
+    const supported = declared.map((item) => typeof item === 'string' ? item : item?.id);
+    // The saved choice is listed whole, whatever the connector declares now: a kind collected from another
+    // contribution of the same transport, or saved before the connector stopped declaring it, stays visible and
+    // removable. Adding stays bound to the declared vocabulary (and the review's suggestions). A signal an installed
+    // connector declares before it is on stays listed and says so, unchecked and held: a save refuses it until then.
+    const vocabulary = [...new Set([...supported, ...selected, ...(place.wakeReview ? suggestions : [])])];
+    const { missing, addable } = missingSuggestions(place);
+    const waiting = new Set(place.unpublishedSignals || []);
+    const items = vocabulary.map((fact) => {
         if (!fact) return '';
         const chosen = place.wakes.find((wake) => wake.fact === fact);
+        const held = !chosen && waiting.has(fact);
         const authored = Boolean(labels[fact]);
         const label = authored ? labels[fact] : capitalized(wakeFactWord(fact));
-        return `<li class="place-wake-item"><label class="place-wake-toggle ui-hit-area"><input class="ui-checkbox" type="checkbox" data-place-act="${chosen ? 'remove-wake' : 'add-wake'}" data-fact="${escapeHtml(fact)}"${chosen ? ' checked' : ''}>
-            <span${authored ? ' data-i18n-authored' : ''}>${escapeHtml(label)}</span></label>${chosen ? chipHtml(tr(`places.author.${chosen.author}`, authorWord(chosen.author)), 'neutral') : ''}</li>`;
+        const name = `<span${authored ? ' data-i18n-authored' : ''}>${escapeHtml(label)}</span>`;
+        const credit = chosen ? tr(`places.author.${chosen.author}`, authorWord(chosen.author))
+            : place.wakeReview && missing.includes(fact) ? tr('places.wake.suggested', 'Suggested') : '';
+        return `<li class="place-wake-item"><label class="place-wake-toggle ui-hit-area"><input class="ui-checkbox" type="checkbox" data-place-act="${chosen ? 'remove-wake' : 'add-wake'}" data-fact="${escapeHtml(fact)}"${chosen ? ' checked' : ''}${held ? ' disabled data-disabled' : ''}>
+            ${held ? `<span>${name} <span class="muted" data-place-waiting>· ${escapeHtml(tr('places.wake.waiting', 'once the connector is on'))}</span></span>` : name}</label>${credit ? chipHtml(credit, 'neutral') : ''}</li>`;
     }).join('');
     const service = `<span data-i18n-authored>${escapeHtml(ui.serviceLabel || place.serviceLabel || place.provider)}</span>`;
     const unchecked = noKindChecked(place);
     return `<p class="place-sheet-note">${fmt('A checked kind calls it here at once, when {service} reports it.', { service })}</p>
         <ul class="place-wake-list">${items}</ul>
+        ${place.wakeReview ? `<p class="place-sheet-note">${escapeHtml(place.wakeReview === 'pending'
+            ? tr('places.wake.import_pending', 'Once the connector supplies its suggested kinds, its next event will add them here.')
+            : tr('places.wake.import_ambiguous', 'This older connection has unchecked suggestions. Choose which kinds should wake it.'))}</p>
+            <div class="place-sheet-actions">
+                <button type="button" class="btn btn-default btn-sm" data-place-act="add-suggestions"${addable ? '' : ' disabled data-disabled'}>${escapeHtml(tr('places.wake.add_suggestions', 'Add the suggested kinds'))}</button>
+                <button type="button" class="btn btn-default btn-sm" data-place-act="keep-wakes">${escapeHtml(tr('places.wake.keep', 'Keep my current choice'))}</button>
+            </div>` : ''}
         ${vocabulary.includes('from_bot') ? `<p class="place-sheet-note">${tr('places.wake.bots', 'Bot messages need this check; once checked, they can wake it without another checked kind.')}</p>` : ''}
         ${['off', 'panic'].includes(place.quiet?.cause) ? `<p class="place-sheet-note">${tr('places.wake.consciousness_off', 'While consciousness is off, nothing here wakes it.')}</p>`
         : place.quiet?.cause === 'allowance' ? `<p class="place-sheet-note">${tr('places.wake.allowance', 'While its allowance is spent, nothing here starts a new wake.')}</p>`
@@ -388,8 +417,14 @@ export function placeChangeFor(action, place, { value = '', fact = '', note = ''
     const facts = place.wakes.map((item) => item.fact);
     switch (action) {
     case 'state': return value && value !== place.state ? { state: value } : null;
-    case 'add-wake': return facts.includes(fact) ? null : { wakes: [...facts, fact] };
+    // A signal a save refuses until the connector is on is never sent (its box is held too).
+    case 'add-wake': return facts.includes(fact) || (place.unpublishedSignals || []).includes(fact) ? null : { wakes: [...facts, fact] };
     case 'remove-wake': return { wakes: facts.filter((entry) => entry !== fact) };
+    case 'add-suggestions': {
+        const { missing, addable } = missingSuggestions(place);
+        return addable ? { wakes: [...facts, ...missing] } : null;
+    }
+    case 'keep-wakes': return { wakes: facts };
     case 'add-note': return String(drafts.note || '').trim() ? { add_note: String(drafts.note).trim() } : null;
     case 'remove-note': return note ? { remove_note: note } : null;
     case 'confirm': return actor ? { confirm_owner_account: { platform_actor_id: actor, label: actorLabel } } : null;
@@ -412,6 +447,7 @@ export function placeChangeFor(action, place, { value = '', fact = '', note = ''
 
 const SECTION_OF = {
     state: 'state', 'add-wake': 'wakes', 'remove-wake': 'wakes', 'add-note': 'notes', 'remove-note': 'notes',
+    'add-suggestions': 'wakes', 'keep-wakes': 'wakes',
     confirm: 'accounts', 'confirm-typed': 'accounts', revoke: 'accounts', 'save-folder': 'folder', 'save-model': 'more',
     circle: 'circle', 'keep-circle': 'circle', 'save-description': 'circle',
 };
@@ -420,6 +456,8 @@ const SECTION_OF = {
 const REPLACING = { 'save-description': 'description', 'save-folder': 'folder', 'save-model': 'model' };
 const DONE_WORDS = {
     state: (place) => `Now ${placeStateOf(place.state)?.label || place.state}.`, 'add-wake': () => 'Added.', 'remove-wake': () => 'Removed.',
+    'add-suggestions': () => tr('places.wake.added_suggestions', 'Suggested kinds added.'),
+    'keep-wakes': () => tr('places.wake.kept', 'Current choice kept.'),
     'add-note': () => 'Note added.', 'remove-note': () => 'Note removed.', confirm: () => 'Confirmed as you.',
     'confirm-typed': () => 'Confirmed as you.', revoke: () => 'Removed from your accounts.',
     'save-folder': () => 'Folder saved.',

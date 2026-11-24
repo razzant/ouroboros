@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.22
+version: 1.4.23
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -15,7 +15,7 @@ subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.docu
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants, enables or resumes nothing; the enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: Setup can request the bot token with the existing showSecretHitl('telegram', ['botToken']). Its protected form saves the token in Settings → Accounts and keys. Saving grants, enables or resumes nothing. The enabled bridge applies a saved or cleared token by itself. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never instructions to running work; a Reply to any message of a Project opens its own turn in that Project. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -95,7 +95,7 @@ message continues from its first part that did not arrive. When the answer is lo
 after a request was sent (a timeout, a dropped connection, a server error), the
 message or edit may already be on the phone, so nothing is sent again for it. One
 still waiting after a day is no longer sent, nor one that mirroring settings changed to
-leave out while it waited. Delivery, in this skill's Telegram settings, says what waits and
+leave out while it waited. Delivery, in the Telegram skill's settings, says what waits and
 whether the outbox can save; Delivery issues lists each recent one whose delivery was not
 confirmed (without a clear answer it may still have arrived), never its words: when, what,
 from which room, how many parts arrived, what happened, and where its content is: in the
@@ -201,8 +201,8 @@ batch unconfirmed at the upgrade may repeat a turn.
 
 Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can
 ask for the bot token with `showSecretHitl('telegram', ['botToken'])`: the owner types it
-into Ouroboros's protected form in the web or desktop app, it goes to Settings, and the
-agent learns only that it was saved. Saving grants, enables and resumes nothing. Another
+into Ouroboros's protected form in the web or desktop app. The token goes to Settings → Accounts and keys,
+and the agent learns only that it was saved. Saving grants, enables and resumes nothing. Another
 secret request mirrored here arrives as a short note saying where to enter it, without
 buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice message, a
 slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
@@ -291,19 +291,19 @@ when retained), followed by problems and compact activity counts. These are
 attributed observations, not the supervising task's narration or a completion
 receipt; journal gaps and preview omissions remain visible.
 
-Set `TELEGRAM_BOT_TOKEN` in Settings (or enter it in the form setup asks with),
+Set `TELEGRAM_BOT_TOKEN` in Settings → Accounts and keys (or enter it in the form setup asks with),
 grant it to this skill, enable the skill, and send the bot a private message to
 bind the owner. No legacy Telegram skill
 state is copied or changed. Installations that use `telegram-bridge` or
 `telegram-miniapp-poc` must disable or remove those skills before enabling this
 one.
 
-If Telegram requires a proxy, open this skill's Telegram settings and enter
+On the Telegram skill's card, choose **⋮ → Settings** to open its form. If Telegram requires a proxy, enter
 `TELEGRAM_PROXY` as `scheme://[user:password@]host[:port]` (`socks5`, `socks5h`,
 `http` or `https`; SOCKS needs an explicit port). Leave the masked field empty
 to keep a saved value, or use **Clear saved Telegram proxy** to remove it.
 Disable and re-enable the skill after changing the proxy so its poller and
-companion also pick up the change. No additional Secrets grant is needed.
+companion also pick up the change. No additional grant in Settings is needed.
 
 A Bot API server you already run (`tdlib/telegram-bot-api`) can replace
 `https://api.telegram.org`. `TELEGRAM_API_BASE` names its origin: `http://` or
@@ -311,8 +311,8 @@ A Bot API server you already run (`tdlib/telegram-bot-api`) can replace
 example `http://127.0.0.1:8081`). Every Telegram call of this skill then goes
 there: polling, replies, downloads, notifications and the Mini App menu button.
 Moving the bot to a different server follows the procedure with Ouroboros quit,
-below. Another address of the same running server can be saved live in this
-skill's Telegram settings on the Settings page of the computer running
+below. Another address of the same running server can be saved live in the
+Telegram skill's settings on the computer running
 Ouroboros (the Mini App and remote clients cannot change it, as with the owner
 binding). A Save applies to the next send; polling moves after its current long
 poll or retry wait (up to about a minute). An empty value means
@@ -412,9 +412,13 @@ fallback. A nonempty machine value takes precedence over the interpreter build;
 macOS and Linux use only the machine value.
 
 The Mini App is Beta. Its best-effort Cloudflare Quick Tunnel has no SLA and
-lacks Server-Sent Events (SSE). Every new link is one more request to Cloudflare, so a
-new link has two minutes to register before answers without the Mini App's marker count
-toward replacing it. When cloudflared reports Cloudflare's HTTP 429 for that request,
+lacks Server-Sent Events (SSE). Each new link costs a request to Cloudflare and gets two minutes
+to register. A response with the Mini App's marker can make it ready immediately. After that
+grace, or once a link has served, three confirmations that its hostname is absent from public DNS
+or its endpoint responds without the marker trigger a replacement. An unavailable observer adds
+no confirmation. A replacement must return the marker before installing the menu
+button and again after a menu retry delay, without extending the grace.
+When cloudflared reports Cloudflare's HTTP 429 for that request,
 the companion plans the next one for an hour later (90 minutes after each further
 refusal until a link is allocated), and the Mini App status shows that planned time.
 The wait ends at that time on this computer's clock or after its full length, whichever

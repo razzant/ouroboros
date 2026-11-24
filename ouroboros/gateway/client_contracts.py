@@ -594,6 +594,8 @@ class PlaceSummary(TypedDict):
     icon: PlaceIcon
     readiness: PlaceReadiness
     wake_suggestions: List[str]
+    wake_review: NotRequired[Literal["pending", "ambiguous"]]
+    unpublished_signals: NotRequired[List[str]]  # declared signals a save refuses until the connector is on
     facts: NotRequired[List[Any]]
     source: NotRequired[Dict[str, Any]]
     settings: NotRequired[str]

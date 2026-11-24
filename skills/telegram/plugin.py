@@ -1481,7 +1481,7 @@ def register(api):
                 {
                     "type": "markdown",
                     "text": (
-                        "The bot token lives in Settings → Secrets (TELEGRAM_BOT_TOKEN). While this skill is on, a saved, "
+                        "The bot token lives in Settings → Accounts and keys (TELEGRAM_BOT_TOKEN). While this skill is on, a saved, "
                         "replaced or cleared token reaches the text bridge and the Mini App within seconds; saving it grants, "
                         "turns on or resumes nothing; Connection below shows what actually runs. "
                         "If Telegram needs a proxy, configure Telegram proxy below. It applies to all Telegram API calls, "
