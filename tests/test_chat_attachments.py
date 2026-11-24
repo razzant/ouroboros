@@ -468,6 +468,7 @@ def _history(tmp_path, chat_id=1):
     endpoint = make_chat_history_endpoint(tmp_path)
     query = {"limit": "20", **({"chat_id": str(chat_id)} if chat_id != 1 else {})}
     response = asyncio.run(endpoint(SimpleNamespace(query_params=query)))
+    assert response.status_code == 200, response.body
     return json.loads(response.body.decode("utf-8"))["messages"]
 
 

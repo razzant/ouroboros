@@ -283,7 +283,7 @@ def test_the_theme_cookie_never_hides_the_gates_session(monkeypatch, order):
 # --- #3294 (R14): the serving WebSocket connection admits chat frames against its confirmed data profile ---
 
 
-def _ws_client(root, monkeypatch):
+def _ws_client(root, monkeypatch, *, applied=True):
     """The real ``ws_endpoint`` behind a fake bridge that records admitted ``ui_send`` payloads."""
     import supervisor.message_bus as message_bus
     from starlette.routing import WebSocketRoute
@@ -294,6 +294,9 @@ def _ws_client(root, monkeypatch):
     monkeypatch.setattr(message_bus, "try_get_bridge", lambda: bridge)
     app = Starlette(routes=[WebSocketRoute("/ws", endpoint=ws_endpoint)])
     app.state.drive_root = root
+    if applied:
+        monkeypatch.setattr("ouroboros.server_process.record_applied_restart_settings", lambda settings: None)
+        ServedUI(REPO).apply(app, {})
     return TestClient(app), sent
 
 
@@ -348,7 +351,7 @@ def test_ws_chat_admission_binds_to_the_serving_connections_confirmed_profile(tm
 def test_ws_admission_stays_open_when_the_connection_proves_no_profile(tmp_path, monkeypatch):
     root = _mint(tmp_path / "data", "c" * 32)  # no state/witness pair: no proven profile
     assert data_profile_scope(root) == ""
-    client, sent = _ws_client(root, monkeypatch)
+    client, sent = _ws_client(root, monkeypatch, applied=False)
     with client:
         with client.websocket_connect("/ws") as ws:
             # No proven profile: nothing is issued — the first frame is the schema log below.

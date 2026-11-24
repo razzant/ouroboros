@@ -11,7 +11,13 @@ from tests import _dialogue as dialogue_test
 from tests.test_chat_attachments import _history, _web_bridge
 
 
-def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monkeypatch):
+@pytest.fixture
+def healthy_main(tmp_path):
+    from ouroboros.project_registry_recovery import initialize_new_root
+    initialize_new_root(tmp_path)
+
+
+def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monkeypatch, healthy_main):
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
     original = message_bus.log_chat("out", 1, 0, "  One\n\t" + "word " * 80, ts="2026-10-01T00:00:00Z")
     address = format_address(row_address(original))
@@ -257,7 +263,7 @@ def _reply_to(bridge, stored, cmid):
     return address, bridge._inbox.get_nowait()["task_metadata"]["reply_reference"]
 
 
-def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, monkeypatch):
+def test_reply_to_authored_completion_mirror_quotes_the_shown_answer(tmp_path, monkeypatch, healthy_main):
     from ouroboros.context import build_runtime_section
     from tests._context_shared import _make_health_env
     bridge, echoes = _web_bridge(tmp_path, monkeypatch)
@@ -971,7 +977,7 @@ def test_c12_message_bus_keeps_its_reply_binding_dependency_lazy():
     assert any(imports_binding(node) for node in ast.walk(body))
 
 
-def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_path, monkeypatch):
+def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_path, monkeypatch, healthy_main):
     """A call's opening enters by the owner's door (``direction: in``) yet is the host's row (``role: system``): a Reply
     to it signs System on the reference, on the row's live frame and on its replay, and nobody can quote a passage of it."""
     from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply, projection_fields
@@ -1001,7 +1007,7 @@ def test_a_reply_to_a_system_row_names_system_on_every_surface_never_you(tmp_pat
 
 
 @pytest.mark.parametrize("comment", ["", "  Follow the creek at dawn.  "])
-def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment):
+def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_path, monkeypatch, comment, healthy_main):
     from ouroboros.chat_references import ReplyExcerptNotAuthored, ingress_reply
     from ouroboros.gateway.task_decision import deliver_as_owner_message
     from ouroboros.owner_quiz import late_answer_owner_text
@@ -1041,7 +1047,7 @@ def test_late_quiz_bubble_is_selectable_only_when_it_contains_entered_words(tmp_
         assert target["author"] == "System", "a model reads the account as the host's"
 
 
-def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp_path, monkeypatch):
+def test_selected_reply_preserves_source_author_citation_and_replay_identity(tmp_path, monkeypatch, healthy_main):
     from ouroboros.chat_references import stored_reply
     from ouroboros.dialogue_provenance import quote_words, relation_text
     from ouroboros.owner_words import reply_target
@@ -1181,7 +1187,7 @@ def test_older_reply_with_only_a_short_address_requires_the_source_for_more_digi
     ({"source": "web"}, "You"),
     ({"source": "presence:telegram", "transport": {"provider": "telegram"}}, "author not recorded"),
 ], ids=["actor-name", "actor-id", "sender-label-first", "owner-door", "unrecorded-place-author"])
-def test_a_replied_row_is_signed_with_the_author_its_record_names(tmp_path, monkeypatch, fields, expected):
+def test_a_replied_row_is_signed_with_the_author_its_record_names(tmp_path, monkeypatch, fields, expected, healthy_main):
     """Without a ``sender_label`` the actor its transport recorded is the author; only a row of the owner's own door
     is You, and a place row whose author nothing records is not."""
     from ouroboros.chat_references import ingress_reply, projection_fields
@@ -1203,7 +1209,7 @@ def test_a_replied_row_is_signed_with_the_author_its_record_names(tmp_path, monk
     assert selected["author_label"] == expected and selected["excerpt"] == {"text": "noon", "start_utf16": 8}
 
 
-def test_a_late_answer_stored_without_its_snapshot_echoes_selectable_as_history_replays_it(tmp_path, monkeypatch):
+def test_a_late_answer_stored_without_its_snapshot_echoes_selectable_as_history_replays_it(tmp_path, monkeypatch, healthy_main):
     """The card's answer of an older late answer lives in the store: a skill's live echo reads it as history does, so
     its entered words are selectable at once, not only after a reload."""
     from ouroboros.owner_quiz import late_answer_owner_text

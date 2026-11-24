@@ -576,8 +576,10 @@ def test_a_panic_input_the_owner_confirmed_over_stays_for_the_new_profile(root):
     assert marker.read_bytes() == b"panic" and panic_input(root) == known and installation_panic(root)
 
 
-def _reset(root):
-    state_initialization.request_runtime_reset(root, launch_protection=lambda: "local")
+def _reset(root, asked=None):
+    identity = state_initialization.request_runtime_reset(root, launch_protection=lambda: "local")
+    if asked is not None:
+        asked.append(identity)
     assert _hand_off(root) == "reset_requested"
     state_initialization.accept_runtime_reset(root, boot_protection=lambda: "local")
     return state_initialization.reset_status(root)
@@ -902,13 +904,15 @@ def test_a_set_aside_that_fails_puts_every_shelf_back_and_names_no_folder(root, 
     def unsaved(path):
         return refuse(path) if failure == "save" and path.name.startswith(".before-reset-") else sync(path)
 
+    asked = []
     with monkeypatch.context() as cut:
         cut.setattr(platform_file_rename, "rename_exclusive", another_volume)
         cut.setattr(pathlib.Path, "mkdir", no_folder)
         cut.setattr(state_initialization, "fsync_folder", unsaved)
-        first = _reset(root)
+        first = _reset(root, asked)
     # The profile that keeps running has every note where it was, byte for byte; nothing was deleted either.
-    assert set(first) == {"status", "error"} and first["status"] == "interrupted", first
+    assert set(first) == {"status", "error", "reset_id"} and first["status"] == "interrupted", first
+    assert asked == [first["reset_id"]]
     assert _tree(root / "projects") == whole and seen == renames
     assert state_initialization.SET_ASIDE_KEY not in state_initialization.read_witness(root)[1]
     assert state.STATE_PATH.read_bytes() == before and (root / "archive/chat_20260101.jsonl").read_bytes() == archived
@@ -917,9 +921,10 @@ def test_a_set_aside_that_fails_puts_every_shelf_back_and_names_no_folder(root, 
             "save": "could not save the moves into " + str(root / "projects/.before-reset-")}[failure]
     assert first["error"].startswith("Reset moved no Project notes: " + said) and f"[Errno {code}]" in first["error"]
 
-    done = _reset(root)  # the explicit repeat, with nothing in its way
+    done = _reset(root, asked)  # the explicit repeat, with nothing in its way
     container = _set_aside(root, done)
     assert done["status"] == "complete" and {name: _tree(container / name) for name in shelves} == shelves
+    assert asked == [first["reset_id"], done["reset_id"]] and done["reset_id"] == first["reset_id"]
     assert sorted(entry.name for entry in (root / "projects").iterdir()) == [".DS_Store", container.name]
     assert not (root / "archive").exists() and not state.STATE_PATH.exists()
 
@@ -984,13 +989,15 @@ def test_a_volume_without_exclusive_rename_still_sets_shelves_aside_and_never_re
 
     assert state.init_state().quality == "current"
     shelves = _shelves(root, "alpha")
-    plain = []
+    plain, real_rename = [], os.rename
 
     def unavailable(source, target, **kwargs):
         raise OSError(errno.ENOTSUP, "this volume has no rename without replacement")
 
     def plain_rename(source, target):
         assert not os.path.lexists(target), "the plain rename runs only to a name proven absent"
+        if pathlib.Path(source).parent != root / "projects":
+            return real_rename(source, target)
         plain.append(pathlib.Path(source).name)
         return os.replace(source, target)
 

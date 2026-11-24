@@ -3,7 +3,7 @@ import test from 'node:test';
 import { taskTerminalSummary, taskTerminalPhase } from '../modules/log_events.js';
 import { buildTimelineItemHtml, candidateRemainderBody, syncCandidateRemainderItem } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const id = 'candidate-task';
 const fact = (state = 'known', count = 2) => ({ state, count, surfaces: [{ root: '/saved/candidate', commit: 'abc123', paths: count ? ['src/one.py', 'src/two.py'] : [] }] });
@@ -87,7 +87,7 @@ for (const replay of [false, true]) test(`real chat card ${replay ? 'cold replay
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/tasks/') ? detail(fact())
-            : String(url).startsWith('/api/chat/history') ? { messages: replay ? rows : [] } : { active_direct_turns: [] } }));
+            : String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: replay ? rows : [] } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let instance;
     try {

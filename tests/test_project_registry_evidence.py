@@ -589,7 +589,7 @@ def test_new_registration_keeps_the_first_project_chat_reservation(tmp_path, mon
 @pytest.mark.parametrize("entry", ["create", "startup", "returned_primary"])
 def test_first_registration_can_publish_without_link_or_exclusive_rename(tmp_path, monkeypatch, entry):
     import json
-    from ouroboros import project_registry_recovery as recovery
+    from ouroboros import platform_layer as platform, project_registry_recovery as recovery
 
     path = recovery.registry_path(tmp_path)
     other_primary = b'{"projects": []}\n'
@@ -613,7 +613,8 @@ def test_first_registration_can_publish_without_link_or_exclusive_rename(tmp_pat
         assert json.loads(path.read_bytes())["projects"] == []
     first = projects.create_project(tmp_path, "first")
     assert first["created"] and projects.reserved_project_chat_ids(tmp_path, strict=True) == {first["chat_id"]}
-    assert recovery.witness_path(tmp_path).read_bytes() == b""
+    qualified = os.name == "nt" and platform.kernel_file_locks_enforced(path.with_name(path.name + ".lock"))
+    assert recovery.witness_path(tmp_path).read_bytes() == (path.read_bytes() if qualified else b"")
     assert recovery.recovery_notice(tmp_path) is None
 
 
@@ -776,7 +777,6 @@ def test_the_web_ingress_proof_is_recomputed_only_when_its_sources_move(tmp_path
     WAL, owner bindings, initialization witness) keeps the hot re-proofs off the growing history; a moved
     source re-reads all of it."""
     import json
-    from ouroboros import project_registry_recovery as recovery
     from supervisor.message_ingress import accept_chat
     from supervisor.state_initialization import complete, mark_pending
 
@@ -817,7 +817,6 @@ def test_the_web_ingress_proof_is_recomputed_only_when_its_sources_move(tmp_path
 def test_ingress_proof_reads_one_cached_answer_and_never_mixes_source_generations(tmp_path, monkeypatch):
     """One lookup tolerates a concurrent cache clear. Before and after a scan the captured key
     must still name every source: otherwise only ambiguity is safe, and no answer is memoized."""
-    from ouroboros import project_registry_recovery as recovery
 
     proof = ("synthetic-dialogue",)
 

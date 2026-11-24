@@ -10,8 +10,10 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests import test_ui_smoke_playwright as ui_smoke
 from tests.settings_browser_helpers import commit_row, open_settings, setting_row, settings_page
-from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
+
+direct_server_with_data = ui_smoke.direct_server_with_data
 
 META = "() => document.querySelector('#page-settings [data-setting-row=\"{row}\"] [data-setting-meta]').textContent"
 
