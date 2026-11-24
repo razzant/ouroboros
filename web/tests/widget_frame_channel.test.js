@@ -147,6 +147,12 @@ test('a board frame takes no report from before its latest fresh fit, and every 
         assert.deepEqual([measured, height()], [[197, 198], '320px']);
         own.send({ type: 'ouro-widget-resize', height: 199, fit: 2 });
         assert.deepEqual([measured, height()], [[197, 198, 199], '199px']);
+        // Unchanged bounds are not sent again, except when Widgets shows the frame it kept running.
+        const replies = own.replies.length;
+        refit();
+        assert.equal(own.replies.length, replies);
+        refit({ shown: true });
+        assert.deepEqual(own.replies.at(-1), { type: 'ouro-widget-viewport', floor: 0, ceiling: 8192, nonce: own.nonce });
         const stopped = dispose();
         own.send({ type: 'ouro-widget-disposed' });
         await stopped;

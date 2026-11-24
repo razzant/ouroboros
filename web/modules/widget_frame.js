@@ -207,8 +207,8 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // (100vh with margins outside it, 110vh, a bar at the window's bottom) asks for at least as much extra in
             // every frame it is given, up to the ceiling otherwise. The sign is measured, not a CSS cause: the frame
             // has become exactly the height last asked for, below the ceiling (an echo), the document asks for more,
-            // no less than at the last echo (growing did not bring it nearer), and did so one animation frame later
-            // too, unchanged. Then the reporter stops asking, says so, and lets the document scroll where it stands: a
+            // no less than at the last echo (growing did not bring it nearer), and did so at its next measurement too,
+            // unchanged. Then the reporter stops asking, says so, and lets the document scroll where it stands: a
             // conservative fallback, so what it places below the frame stays reachable. An echo at which the
             // document fits ends the episode; a different extra at a held height (content that really changed), new
             // bounds or another frame height take the hold off, and it measures on; a held height is also
@@ -287,9 +287,6 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // scrollbar shown or hidden, a stop): its caller then measures again. measured is a measure just taken.
             const reportOnce = (measured) => {
                 if (!root || disposed || !entryRan) return measured ?? null;
-                // A board frame out of the page (Widgets left, the frame kept running) has no window to measure in: its
-                // document is measured again when it has one (resize), not as nothing, which would toggle its scrollbar.
-                if (wholeDocument && !window.innerHeight) return measured ?? null;
                 if (awaitedFrame) {
                     if (!near(window.innerHeight, awaitedFrame)) return measured ?? null;
                     awaitedFrame = 0;
@@ -319,7 +316,12 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // What a change in the document can move: the height it measures (what its body holds, placed boxes
             // included, where its layout draws them) in the window it has now. Reading it changes nothing.
             const measuredNow = () => (root && document.body ? window.innerHeight + '/' + measure() : '');
+            // Whether a board frame has something to measure in: a window and a box. One its page hides (Widgets left,
+            // the frame kept running) may keep its window and have no box (Chromium): it is measured on its next cue,
+            // the board showing it again among them, never as nothing, which would toggle its scrollbar.
+            const measurable = () => Boolean(window.innerHeight && document.documentElement.getClientRects().length);
             const report = (measured) => {
+                if (wholeDocument && !measurable()) return;
                 const height = reportOnce(measured);
                 if (wholeDocument) seenMeasure = height === null ? measuredNow() : window.innerHeight + '/' + height;
             };
@@ -328,22 +330,46 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // browser fires a loop error on window, which the bridge's fault
             // channel reports as a widget script error. A microtask would still
             // run inside delivery; an animation frame runs before the next
-            // observation pass, coalesces bursts into one measurement and is
-            // cancelled on dispose. Hidden pages pause both alike.
+            // observation pass and coalesces bursts into one measurement. A browser
+            // may give a board frame out of view (below the fold) no animation
+            // frames, so there a timer scheduled for 100 ms (not a deadline) races
+            // it, also outside delivery: whichever runs first measures, once. The
+            // timer reads nothing in a frame that is not measurable or while the
+            // browser tab is hidden: it ends the attempt there (its callback hears
+            // false), and the next cue measures it (the board's showing it again,
+            // the tab's). Dispose cancels both.
+            let owedToVisible = false;
+            const nextFrame = (callback) => {
+                let frame = 0;
+                let timer = 0;
+                const cancel = () => {
+                    window.cancelAnimationFrame(frame);
+                    window.clearTimeout(timer);
+                };
+                frame = window.requestAnimationFrame(() => { cancel(); callback(!wholeDocument || measurable()); });
+                if (wholeDocument) {
+                    timer = window.setTimeout(() => {
+                        cancel();
+                        if (document.hidden) owedToVisible = true;
+                        callback(!document.hidden && measurable());
+                    }, 100);
+                }
+                return cancel;
+            };
             const scheduleReport = () => {
                 if (disposed || resizeFrame !== null) return;
-                resizeFrame = window.requestAnimationFrame(() => {
+                resizeFrame = nextFrame((measurable) => {
                     resizeFrame = null;
-                    report();
+                    if (measurable) report();
                 });
             };
-            // A change in a board document is measured once an animation frame, and reported only when it moved that;
+            // A change in a board document is measured once a frame (nextFrame), and reported only when it moved that;
             // the report goes on from that same measure.
             const scheduleChange = () => {
                 if (disposed || changeFrame !== null) return;
-                changeFrame = window.requestAnimationFrame(() => {
+                changeFrame = nextFrame((measurable) => {
                     changeFrame = null;
-                    if (!root || !document.body) return;
+                    if (!measurable || !root || !document.body) return;
                     if (held?.moving && !settling()) {
                         held = null;
                         echoed = null;
@@ -355,6 +381,13 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
                     const height = measure();
                     if (window.innerHeight + '/' + height !== seenMeasure) report(height);
                 });
+            };
+            // A return cue (the board showing a frame it kept running, the tab shown again) measures anew even where it
+            // sees the dimensions it last saw: what it gave up while it could not measure (a confirmation, the refit
+            // after its scrollbar, the module's entry) waits on it. Ordinary changes still compare with that measure.
+            const refresh = () => {
+                seenMeasure = '';
+                scheduleChange();
             };
             const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleReport) : null;
             if (observer && root) observer.observe(root);
@@ -371,8 +404,15 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // showing a box (a menu) without any change to the document.
             const layoutCues = ['transitionend', 'animationend', 'load', 'loadedmetadata', 'pointerover', 'pointerout',
                 'focusin', 'focusout'];
+            // A measurement the timer gave up in a hidden tab is taken once the tab is shown again.
+            const onVisible = () => {
+                if (document.hidden || !owedToVisible) return;
+                owedToVisible = false;
+                refresh();
+            };
             if (wholeDocument) {
                 window.addEventListener('resize', scheduleReport);
+                document.addEventListener('visibilitychange', onVisible);
                 layoutCues.forEach((type) => document.addEventListener(type, scheduleChange, true));
                 if (typeof MutationObserver === 'function') {
                     mutations = new MutationObserver(scheduleChange);
@@ -382,6 +422,12 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             // New bounds end a hold (the owner's height, Show all, Back); Natural height and Reset (frame: the height
             // being applied, fit: that fresh fit's number) also make it measure anew, once its window has that height.
             window.__ouroWidgetOnViewport?.((viewport) => {
+                // The same bounds again (Widgets shows a frame it kept running): measured anew as after a change, which a
+                // stop made while something moved and whose end came while the frame had no box also takes off.
+                if (!viewport.frame && viewport.floor === floor && viewport.ceiling === ceiling) {
+                    refresh();
+                    return;
+                }
                 floor = viewport.floor;
                 ceiling = viewport.ceiling;
                 held = null;
@@ -398,14 +444,15 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             });
             window.__ouroWidgetOnDispose?.(() => {
                 disposed = true;
-                if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+                resizeFrame?.();
                 resizeFrame = null;
-                if (changeFrame !== null) window.cancelAnimationFrame(changeFrame);
+                changeFrame?.();
                 changeFrame = null;
                 observer?.disconnect();
                 mutations?.disconnect();
                 mutations = null;
                 if (wholeDocument) layoutCues.forEach((type) => document.removeEventListener(type, scheduleChange, true));
+                document.removeEventListener('visibilitychange', onVisible);
                 window.removeEventListener('load', onLoad);
                 window.removeEventListener('resize', scheduleReport);
                 setVerticalOverflowSuppressed(false);

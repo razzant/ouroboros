@@ -154,7 +154,8 @@ async function openRouteLease(tab, mountSignal) {
 // height when the report came (`at`); `held()` answers
 // that remembered extra for a new document; `attach(refit)` hands the board this mount's refit, which re-applies
 // `geometry()` after the owner changes the card's height or Show all (`refit({ fresh: true })` after Natural height
-// or Reset, so its reporter measures anew from the frame now applied) and returns the detach.
+// or Reset, so its reporter measures anew from the frame now applied; `refit({ shown: true })` when Widgets shows a
+// frame it kept running, its bounds sent again so that it measures anew) and returns the detach.
 export async function mountRouteIframeWidget(mount, tab, render, mountSignal = null, inline = null, messageHandlers = null,
     board = null) {
     const route = cleanExtensionRoute(render.route);
@@ -304,7 +305,7 @@ function attachFrameBridge(iframe, mount, tab, {
     // so a report still on its way from the old window (an older number) is ignored rather than taken as the fit.
     let sentViewport = baked ? `${baked.floor}/${baked.ceiling}` : '';
     let freshFits = 0;
-    const refit = ({ fresh = false } = {}) => {
+    const refit = ({ fresh = false, shown = false } = {}) => {
         if (disposed || !board) return;
         const geometry = board.geometry();
         const content = Number(iframe.dataset.widgetContentHeight);
@@ -316,7 +317,7 @@ function attachFrameBridge(iframe, mount, tab, {
             setFrameHeight(iframe, appliedHeight);
         }
         const viewport = `${geometry.floor}/${geometry.ceiling}`;
-        if (autoHeight && port && (fresh || viewport !== sentViewport)) {
+        if (autoHeight && port && (fresh || shown || viewport !== sentViewport)) {
             sentViewport = viewport;
             if (fresh) freshFits += 1;
             post({ type: 'ouro-widget-viewport', floor: geometry.floor, ceiling: geometry.ceiling,
