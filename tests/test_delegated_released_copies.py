@@ -7,7 +7,9 @@ work from the saved patch and the pinned B. An empty result (C equals B, HEAD un
 nothing retained beside it) closes itself as ``no_changes``; a Git repository made inside the
 copy or a folder Git cannot open keeps the checkout until disposition. A continuation gets the
 checkout back with the files and index of C and HEAD at B. A copy recorded before this update keeps
-its old capture and its checkout. A legacy 64 MiB-capped investigation receipt is retaken
+its old capture and its checkout. A saved ready capture that is not proven to be this run's own
+pinned attempt stays readable but is never published as ready and never captured over. A legacy
+64 MiB-capped investigation receipt is retaken
 whole once and then the copy goes. The patch never follows porcelain diff config, and a
 same-size edit inside the index's timestamp tick still reaches B and C.
 """
@@ -141,11 +143,30 @@ def test_a_lost_capture_row_heals_from_the_saved_result_when_the_checkout_is_gon
     healed = capture_terminal_patch_for_drive(drive, lost)
     assert healed["status"] == "ready_with_changes" and healed["result_commit"] == capture["result_commit"]
     assert lost.patch_captured is True and len(rows()) == before + 1 and not copy.exists()
-    # The other direction: a saved manifest that names another result is no proof; the run is "missing".
+    # The other direction: a saved manifest that names another result is no proof of this run's own
+    # pinned attempt. The bytes stay readable and unchanged, but the run is never handed a ready
+    # result it cannot prove: no capture row, no checkout, nothing applied.
+    manifest_bytes = pathlib.Path(capture["manifest_artifact"]).read_bytes()
+    patch_bytes = pathlib.Path(capture["patch_artifact"]).read_bytes()
     subagent_worktrees._update_record(handle.path, lambda row: {**row, "result_sha": "0" * 40}, op="test")
     stranger = dataclasses.replace(entry, patch_captured=False)
-    assert capture_terminal_patch_for_drive(drive, stranger)["status"] == "missing"
-    assert stranger.patch_captured is False
+    block = capture_terminal_patch_for_drive(drive, stranger)
+    assert block["status"] == "failed", block
+    assert "does not name the run's baseline and pinned result commit" in block["note"], block
+    assert "neither published nor captured over" in block["note"], block
+    assert not block.get("retry"), block  # a proven mismatch, not an unreadable fact to retry
+    assert stranger.patch_captured is False  # an unproven result is never captured
+    assert len(rows()) == before + 1  # and no second capture row is published for it
+    assert block["patch_artifact"] == capture["patch_artifact"]
+    assert block["manifest_artifact"] == capture["manifest_artifact"]
+    assert pathlib.Path(capture["manifest_artifact"]).read_bytes() == manifest_bytes
+    assert pathlib.Path(capture["patch_artifact"]).read_bytes() == patch_bytes
+    assert not copy.exists()  # the released checkout is not recreated for an unproven result
+    assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert not (target / "new.txt").exists()  # nothing reached the shared tree
+    record = find_execution_snapshot(handle.snapshot_id)
+    assert sorted(_pins(target)) == sorted([record["baseline_ref"], record["result_ref"]])
+    assert _ref(target, record["result_ref"]) == capture["result_commit"]  # the pins are kept
 
 
 # --------------------------------------------------------------------------- no changes

@@ -322,7 +322,7 @@ def test_git_apply_keeps_its_typed_effect_when_native_and_verdict_file_writes_fa
     monkeypatch.setattr("ouroboros.tools.patch_verdict.task_artifact_dir_path",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("artifact folder unavailable")))
     first = call(ctx, "integrate_delegated_patch", run_id=entry.run_id, reason="apply")
-    assert first.status == "error" and (target / changed_path).read_text() == expected, first.text
+    assert (first.status, first.code) == ("blocked", "INTEGRATION_BLOCKED") and (target / changed_path).read_text() == expected, first.text
     facts = {key: first.meta[key] for key in ("target_files_changed", "files_changed", "unindexed",
                                               "disposition_recorded", "native_capture_effect")}
     assert facts == {"target_files_changed": True, "files_changed": 1, "unindexed": [], "disposition_recorded": False,
@@ -342,6 +342,154 @@ def test_git_apply_keeps_its_typed_effect_when_native_and_verdict_file_writes_fa
     assert receipts == [(key, 0, [])]
     rows = [row for row in custody.custody_rows(custody.custody_root(ctx)) if row["type"] == custody.PATCH_DISPOSED]
     assert len(rows) == 1 and rows[0]["reason"] == "apply"
+
+
+@pytest.mark.parametrize("refresh", ["native_owner", "owner_read"])
+def test_git_effect_survives_a_failed_refresh_after_its_unwritten_disposition(tmp_path, monkeypatch, refresh):
+    from contextlib import contextmanager as owned
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.loop_tool_execution import _typed_result_metadata
+    from ouroboros.outcomes import reviewable_effect_projection
+    from ouroboros.tools import subagent_integration as integration
+    from tests.test_delegated_run_isolation import _git
+
+    ctx, entry, target, changed_path, expected = captured_result(tmp_path, monkeypatch, "git")
+    drive, rid, index = custody.custody_root(ctx), entry.run_id, target / ".git" / "index"
+    apply, emit, applied = integration._locked_apply, custody.emit, []
+    monkeypatch.setattr(integration, "_locked_apply", lambda *a, **kw: applied.append(a[1]) or apply(*a, **kw))
+    with monkeypatch.context() as down:  # the custody store refuses the disposition, then the refresh fails
+        down.setattr(custody, "emit", lambda root, event, row, **kw: event != custody.PATCH_DISPOSED
+                     and emit(root, event, row, **kw))
+        unavailable = lambda *_a, **_k: (_ for _ in ()).throw(OSError("task result store unavailable"))
+        if refresh == "native_owner":  # this run's copy is a registered native write root
+            def native_owner(*_a):
+                yield {"id": entry.task_id}
+
+            down.setattr("ouroboros.headless.native_capture_custody", owned(native_owner))
+            down.setattr("ouroboros.headless.refresh_native_capture", unavailable)
+        else:
+            down.setattr(integration, "load_task_result", unavailable)
+        first = call(ctx, "integrate_delegated_patch", run_id=rid, reason="apply")
+    assert (first.status, first.code) == ("blocked", "INTEGRATION_BLOCKED"), first.text
+    assert "INTEGRATE_DISPOSITION_UNWRITTEN" in first.text and "records this apply without changing a file" in first.text
+    assert ((f"Native capture publication is still owed: task {entry.task_id}'s capture was not refreshed"
+             if refresh == "native_owner" else f"Whether task {entry.task_id}'s native capture needs a refresh is unknown")
+            in first.text), first.text
+    assert "task result store unavailable" in first.text, first.text
+    facts = {key: first.meta[key] for key in ("target_files_changed", "files_changed", "unindexed", "disposition_recorded")}
+    assert facts == {"target_files_changed": True, "files_changed": 1, "unindexed": [], "disposition_recorded": False}
+    typed = _typed_result_metadata("integrate_delegated_patch", first.text, True, first)
+    assert len(reviewable_effect_projection({"tool_calls": [{"tool": "integrate_delegated_patch", "is_error": True,
+                                                             "result": first.text, **typed}]}, observed_only=True)) == 1
+    assert (target / changed_path).read_text() == expected and _git(target, "show", f":{changed_path}").stdout == expected
+    before = hashlib.sha256(index.read_bytes()).hexdigest()
+    custody._CUSTODY.clear()  # the store recovers; an ordinary retry records the apply once, changing no file
+    second = call(copy(ctx), "integrate_delegated_patch", run_id=rid)
+    assert second.status == "ok" and second.meta["target_files_changed"] is False, second.text
+    assert len(applied) == 1 and hashlib.sha256(index.read_bytes()).hexdigest() == before
+    receipt, = [row for row in custody.custody_rows(drive) if row["type"] == custody.PATCH_DISPOSED]
+    assert receipt["reason"] == "apply" and run(drive, rid).patch_disposed == "applied"
+
+
+def legacy_result(tmp_path, monkeypatch):
+    """A copy recorded before result commits, with a copied file input, whose capture row did not land."""
+    from ouroboros.subagent_worktrees import _update_record, provision_execution_snapshot
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+    from ouroboros.workspace_file_outputs import _side
+    from tests.test_delegated_run_isolation import _seed_target
+
+    ctx = retry_context(tmp_path, monkeypatch, chain=("retry-a", "retry-b", "retry-c"), split=True,
+                        fixed_ownership_clock=True)
+    data = custody.custody_root(ctx)
+    (tmp_path / "git-project").mkdir()
+    target = _seed_target(tmp_path / "git-project")
+    handle = provision_execution_snapshot(target_root=target, task_id="retry-a", snapshot_id="retry-snapshot")
+    copy_root = Path(handle.path)
+    for root in (target, copy_root):  # an input copied beside Git, as such copies received it
+        (root / "input.dat").write_bytes(b"input before\n")
+    _update_record(handle.path, lambda row: {**row, "file_baseline": {"input.dat": _side(copy_root / "input.dat")}},
+                   op="test")
+    ctx.workspace_root = target
+    entry = durable_run(ctx, execution_root=handle.path, snapshot_id=handle.snapshot_id, baseline_sha=handle.baseline_sha,
+                        authority_source="external_workspace_root", resource_ref={}, access="workspace_write")
+    (copy_root / "tracked.txt").write_text("one\ntwo\nCHILD-EDIT\n", encoding="utf-8")
+    (copy_root / "input.dat").write_bytes(b"input after\n")
+    emit = custody.emit
+    with monkeypatch.context() as unavailable:  # the capture saves its files; its receipt row does not land
+        unavailable.setattr(custody, "emit", lambda root, event, row, **kw:
+                            event != custody.PATCH_CAPTURED and emit(root, event, row, **kw))
+        first = capture_terminal_patch_for_drive(data, entry)
+    assert (first["status"], first["retry"]) == ("failed", "transient"), first
+    manifest = json.loads(Path(first["manifest_artifact"]).read_bytes())
+    assert "result_commit" not in manifest and [row["path"] for row in manifest["file_output_changes"]] == ["input.dat"]
+    custody._CUSTODY.clear()
+    return ctx, entry, target, copy_root, Path(first["manifest_artifact"]).parent
+
+
+@pytest.mark.parametrize("case", ["apply", "reject", "copy_changed", "copy_gone", "member_mismatch",
+                                  "diffstat_only_apply", "diffstat_only_reject"])
+def test_saved_legacy_capture_is_decided_only_on_its_own_copy_captured_again(tmp_path, monkeypatch, case):
+    import shutil
+    from ouroboros import workspace_patch_capture
+    from ouroboros.delegate_custody_current import run
+    from tests.test_delegated_run_isolation import _git
+
+    ctx, entry, target, copy_root, cap_dir = legacy_result(tmp_path, monkeypatch)
+    drive, rid = custody.custody_root(ctx), entry.run_id
+    restyled: list[str] = []
+    if case.startswith("diffstat_only"):  # only --stat text re-renders; the patch bytes come from another command
+        stat = workspace_patch_capture._git_stdout
+
+        def reformat(cmd, cwd, **kw):
+            out = stat(cmd, cwd, **kw)
+            if "--stat" in cmd:
+                out = "".join(f"  {line}\n" for line in out.splitlines())
+                restyled.append(out)
+            return out
+
+        monkeypatch.setattr(workspace_patch_capture, "_git_stdout", reformat)
+    if case == "copy_changed":  # the copy no longer holds what the saved bytes name
+        (copy_root / "tracked.txt").write_text("one\ntwo\nANOTHER EDIT\n", encoding="utf-8")
+    elif case == "copy_gone":
+        shutil.rmtree(copy_root)
+    elif case == "member_mismatch":  # an archive whose own record agrees, but whose member is not the named bytes
+        import zipfile
+        manifest_path = cap_dir / "workspace_patch.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        record, = [row for row in manifest["file_outputs"] if str(row["name"]).endswith(".zip")]
+        with zipfile.ZipFile(cap_dir / record["name"], "w") as zipped:
+            zipped.writestr("input.dat", b"other bytes\n")
+        record.update(size=(cap_dir / record["name"]).stat().st_size,
+                      sha256=hashlib.sha256((cap_dir / record["name"]).read_bytes()).hexdigest())
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    saved = {path.name: path.read_bytes() for path in cap_dir.iterdir() if path.is_file()}
+    before = {name: (target / name).read_bytes() for name in ("tracked.txt", "input.dat")}
+    receipts = lambda: [row for row in custody.custody_rows(drive) if row["type"] == custody.PATCH_CAPTURED]
+    first = call(ctx, "integrate_delegated_patch", run_id=rid,
+                 decision="reject" if case in ("reject", "diffstat_only_reject") else "apply")
+    current = {name: (target / name).read_bytes() for name in before}
+    if case in ("copy_changed", "copy_gone", "member_mismatch"):
+        refused = [first, call(copy(ctx), "integrate_delegated_patch", run_id=rid, decision="reject")]
+        for result in refused:
+            assert "INTEGRATE_DELEGATED_CAPTURE_FAILED" in result.text and "LOST" not in result.text, result.text
+            assert {"copy_changed": "does not yield these bytes", "copy_gone": "no longer present whole",
+                    "member_mismatch": "retained file result differs"}[case] in result.text, result.text
+        assert not receipts() and not run(drive, rid).patch_disposed and current == before
+    elif case in ("reject", "diffstat_only_reject"):
+        assert first.status == "ok" and "Rejected" in first.text, first.text
+        assert run(drive, rid).patch_disposed == "rejected" and current == before
+    else:
+        assert "INTEGRATE_DELEGATED_INSPECT_CAPTURE" in first.text and current == before, first.text
+        receipt, = receipts()
+        assert receipt["manifest_sha256"] == hashlib.sha256(saved["workspace_patch.json"]).hexdigest()
+        second = call(copy(ctx), "integrate_delegated_patch", run_id=rid)
+        assert second.status == "ok" and second.meta["target_files_changed"] is True, second.text
+        assert (target / "tracked.txt").read_text() == "one\ntwo\nCHILD-EDIT\n"
+        assert (target / "input.dat").read_bytes() == b"input after\n"
+        assert "tracked.txt" in _git(target, "diff", "--cached", "--name-only").stdout
+    if case.startswith("diffstat_only"):  # the stat-only drift was real, and it was not a reason to refuse
+        assert restyled and restyled[-1] != json.loads(saved["workspace_patch.json"])["diffstat"]
+    assert {name: (cap_dir / name).read_bytes() for name in saved} == saved  # advertised bytes are never replaced
 
 
 def test_staged_postimage_reads_the_head_basis_and_only_the_touched_index_entries(tmp_path, monkeypatch):
@@ -417,7 +565,9 @@ def test_git_disposition_write_failure_preserves_effect_and_never_applies_twice(
         first = call(ctx, "integrate_delegated_patch", run_id=rid, reason=reason)
     # A proven apply whose native receipt failed withholds its disposition instead of closing it unreceipted.
     assert len(attempted) == (state != "native_unwritten") and len(applied) == 1
-    assert (first.status, first.code) == ("error", "TOOL_REPORTED_FAILURE")
+    # The published code is the INTEGRATE_ family's answer: only the receipt is missing,
+    # and the failure must keep counting in the verification ledger (not TOOL_REPORTED_FAILURE).
+    assert (first.status, first.code) == ("blocked", "INTEGRATION_BLOCKED")
     assert "INTEGRATE_DISPOSITION_UNWRITTEN" in first.text and "staging completed" in first.text
     # The transfer stays a typed effect: where, how many files and which were delivered unstaged.
     assert first.meta["target_files_changed"] is True and first.meta["disposition_recorded"] is False
@@ -461,7 +611,8 @@ def test_git_disposition_write_failure_preserves_effect_and_never_applies_twice(
         with monkeypatch.context() as unavailable:
             unavailable.setattr(custody, "emit", fail)
             unrecorded = call(copy(caller), "integrate_delegated_patch", run_id=rid)
-        assert unrecorded.status == "error" and "INTEGRATE_DISPOSITION_UNWRITTEN" in unrecorded.text
+        assert (unrecorded.status, unrecorded.code) == ("blocked", "INTEGRATION_BLOCKED")
+        assert "INTEGRATE_DISPOSITION_UNWRITTEN" in unrecorded.text
         assert unrecorded.meta["target_files_changed"] is False and not effects(unrecorded, True)
         assert hashlib.sha256(index.read_bytes()).hexdigest() == before
     if state == "busy":  # a busy target is retried later; the intent stays and nothing changes
@@ -473,7 +624,8 @@ def test_git_disposition_write_failure_preserves_effect_and_never_applies_twice(
         assert "acknowledge_ambiguous" not in later.text and run(drive, rid).patch_apply_pending
     if state == "native_unwritten":  # while the native write still fails, nothing is disposed or applied
         held = call(copy(caller), "integrate_delegated_patch", run_id=rid)
-        assert held.status == "error" and "INTEGRATE_DISPOSITION_UNWRITTEN" in held.text, held.text
+        assert (held.status, held.code) == ("blocked", "INTEGRATION_BLOCKED")
+        assert "INTEGRATE_DISPOSITION_UNWRITTEN" in held.text, held.text
         assert "native copy's capture could not record" in held.text and held.meta["target_files_changed"] is False
         assert run(drive, rid).patch_apply_pending and not run(drive, rid).patch_disposed
         monkeypatch.setattr("ouroboros.headless.record_native_capture_effect", lambda *_a, **_k: None)

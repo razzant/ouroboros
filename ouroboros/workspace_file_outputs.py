@@ -202,6 +202,21 @@ def file_output_changes(manifest, cap_dir, *, locations=None):
     return result
 
 
+def verify_retained_outputs(rows):
+    """Each retained postimage member holds exactly the bytes its row names (an archive's own digest is its
+    manifest's claim, so the member itself is read); ValueError otherwise. ``rows``: ``file_output_changes``."""
+    for row in rows:
+        after = row["after"]
+        if after and after["kind"] == "file":
+            digest, size = sha256(), 0
+            with zipfile.ZipFile(row["archive_path"]) as archive, archive.open(row["member"]) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+            if (size, digest.hexdigest()) != (after["size"], after["sha256"]):
+                raise ValueError(f"retained file result differs from its record: {row['path']}")
+
+
 def verify_file_outputs(rows, target):
     """Verify already-applied shared-workspace results without preparing another apply."""
     return all(_matches(_side(_path(target, row["path"])), row["after"], exact_mode=True) for row in rows)

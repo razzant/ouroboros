@@ -699,8 +699,7 @@ def capture_receipt_unwritten(block: Dict[str, Any]) -> Dict[str, Any]:
                     "The result and any private copy and pins are kept. Inspect the readers; the capture is still owed."}
 
 
-def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_dir: pathlib.Path,
-                                   evidence: str) -> Dict[str, Any]:
+def _write_result_commit_artifacts(entry: _RunCustody, snapshot: Dict[str, Any], cap_dir: pathlib.Path) -> Dict[str, Any]:
     """Capture a Git snapshot as its result commit C (parent B) with the ordinary manifest.
 
     The patch is B..C from git's plumbing; large and binary files ride in it as
@@ -716,8 +715,8 @@ def _write_result_commit_artifacts(entry: _RunCustody, clone: pathlib.Path, cap_
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
 
-    patch_path = cap_dir / "workspace.patch"
-    base = entry.baseline_sha
+    patch_path, base = cap_dir / "workspace.patch", entry.baseline_sha
+    clone, evidence = _capture_root(entry, snapshot)
     manifest: Dict[str, Any] = {
         "schema_version": 1, "created_at": utc_now_iso(), "workspace_root": str(clone),
         "patch_name": "workspace.patch", "manifest_name": "workspace_patch.json",
@@ -790,12 +789,12 @@ def _capture_terminal_patch(ctx: ToolContext, entry: Optional[_RunCustody], *, g
 
 
 def _declared_capture_gap(entry: _RunCustody, cap_dir: pathlib.Path, raw: bytes,
-                          manifest: Dict[str, Any]) -> tuple[str, str]:
+                          manifest: Dict[str, Any], drive: Any = None) -> tuple[str, str]:
     """Why saved ready Git capture bytes are not proven this run's own pinned attempt (``""`` when they are),
     with the retry class of an unreadable fact. Proof: no receipt names other bytes, a prepared child result
     names these manifest bytes, the manifest binds the run's baseline and its pinned result commit (a copy its
-    record positively names as older: the run's own bound prepared result instead), and the patch file holds
-    exactly the bytes the manifest names."""
+    record positively names as older, captured without one: the run's own bound prepared result, or else its own
+    copy captured again, ``_legacy_recapture_gap``), and the patch file holds exactly the bytes the manifest names."""
     from ouroboros.subagent_worktrees import find_execution_snapshot
 
     if entry.patch_captured:
@@ -810,10 +809,8 @@ def _declared_capture_gap(entry: _RunCustody, cap_dir: pathlib.Path, raw: bytes,
     except Exception as exc:  # noqa: BLE001 - an unreadable record proves nothing either way
         return f"the run's pinned result could not be read ({type(exc).__name__})", "transient"
     if "file_baseline" in record or "untracked_baseline" in record:
-        # A copy made before result commits is captured without one (write_workspace_patch_artifacts): only
-        # this run's own bound, prepared result naming exactly these manifest bytes stands in for the pin.
-        if not (owed and ready_result_owed(entry)):
-            return "an older copy's capture is published only from this run's own prepared result", ""
+        if not (owed and ready_result_owed(entry)) and (gap := _legacy_recapture_gap(drive, entry, record, cap_dir, manifest))[0]:
+            return gap
     elif (not record.get("result_sha") or str(manifest.get("result_commit") or "") != str(record["result_sha"])
             or str(manifest.get("base_ref") or "") != str(entry.baseline_sha or "")):
         return "it does not name the run's baseline and pinned result commit", ""
@@ -830,6 +827,59 @@ def _declared_capture_gap(entry: _RunCustody, cap_dir: pathlib.Path, raw: bytes,
     except OSError as exc:
         return f"its patch file could not be read ({type(exc).__name__})", "transient"
     return "", ""
+
+
+# Capture-time facts only: archives name scratch bytes (members are read instead); diffstat is --stat display text.
+_LEGACY_UNBOUND = frozenset({"created_at", "diffstat", "file_outputs", "diagnostics"})
+
+
+def _legacy_recapture_gap(drive: Any, entry: _RunCustody, record: Dict[str, Any], cap_dir: pathlib.Path,
+                          manifest: Dict[str, Any]) -> tuple[str, str]:
+    """Why saved older-copy bytes are not this run's own result (``""`` when they are): record and hand-over bind
+    the present copy to the run's own ended generation (``copy_generation_hold``), the retained file results hold
+    the bytes they name, and that copy, captured again the same way into a scratch folder, yields the same manifest
+    (every decision input: patch bytes, root, base, file results with modes and preimages, exclusions; a field the
+    older writer never emits, as ``baseline_entries`` or ``capture_kind``, stays absent). Nothing is written over them."""
+    import tempfile
+    from ouroboros.delegate_continuation import copy_generation_hold
+    from ouroboros.workspace_file_outputs import file_output_changes, verify_retained_outputs
+
+    if hold := copy_generation_hold(drive, entry, record):
+        return f"an older copy's capture is published only from this run's own prepared result or copy, and {hold}", ""
+    try:  # ValueError: a retained file result differs from what its record names
+        verify_retained_outputs(file_output_changes(manifest, cap_dir))
+        with tempfile.TemporaryDirectory(prefix="ouroboros-legacy-capture-") as scratch:
+            again = _legacy_copy_capture(entry, record, pathlib.Path(scratch), scratch_dir=cap_dir)
+    except ValueError as exc:
+        return f"its saved file results do not verify ({exc})", ""
+    except Exception as exc:  # noqa: BLE001 - an unreadable copy or file proves nothing either way
+        return f"its files or copy could not be read again ({type(exc).__name__})", "transient"
+    if any(again.get(key) != manifest.get(key) for key in (again.keys() | manifest.keys()) - _LEGACY_UNBOUND):
+        return "its copy, captured again, does not yield these bytes", ""
+    return "", ""
+
+
+def _capture_root(entry: _RunCustody, snapshot: Dict[str, Any]) -> tuple[pathlib.Path, str]:
+    """The whole recorded copy a capture diffs (a Git-subdirectory investigation runs in a folder of it) and the
+    run's untracked named-evidence folder, retained beside the capture, never carried in it (#2070)."""
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+    exec_root = pathlib.Path(entry.execution_root)
+    clone = pathlib.Path(str(snapshot.get("path") or exec_root))
+    try:
+        return clone, (exec_root.resolve().relative_to(clone.resolve()) / EVIDENCE_DIRNAME).as_posix()
+    except ValueError:
+        return clone, ""
+
+
+def _legacy_copy_capture(entry: _RunCustody, snapshot: Dict[str, Any], out_dir: pathlib.Path,
+                         scratch_dir: Optional[pathlib.Path] = None) -> Dict[str, Any]:
+    """A copy provisioned before the one-primitive update keeps its own capture: its file inputs live outside
+    Git and would read as new files in C."""
+    from ouroboros.headless import write_workspace_patch_artifacts
+    clone, evidence = _capture_root(entry, snapshot)
+    return write_workspace_patch_artifacts(clone, out_dir, scratch_dir=scratch_dir, task={"metadata": {
+        "workspace_preflight": {"git": {"head": entry.baseline_sha}},
+        "file_baseline": snapshot.get("file_baseline") or {}, "host_evidence": evidence}})[1]
 
 
 def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
@@ -947,7 +997,7 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         if str(manifest.get("status") or "") in ready and entry.authority_source != "skill_payload":
             # Ready Git bytes readers were already shown are never captured over (the caller holds the
             # disposition lock): proven as this run's pinned attempt they get their receipt, else they stay.
-            gap, retry = _declared_capture_gap(entry, cap_dir, raw, manifest)
+            gap, retry = _declared_capture_gap(entry, cap_dir, raw, manifest, drive)
             if not gap:
                 return finish(_capture_block(entry, cap_dir, manifest), record=True)
             return {**_capture_block(entry, cap_dir, manifest), "status": "failed", "retry": retry,
@@ -996,27 +1046,8 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             manifest = (capture_work_payload(exec_root, cap_dir, entry, _write_payload_patch_artifacts)
                         if work_domain.is_work(exec_root) else _write_payload_patch_artifacts(exec_root, cap_dir, entry))
         else:
-            from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
-            # A Git-subdirectory investigation runs in a folder of its copy; the
-            # capture always diffs the whole recorded copy. The run's untracked
-            # named evidence is retained beside the capture, never carried in it (#2070).
-            clone = pathlib.Path(str(snapshot.get("path") or exec_root))
-            try:
-                evidence = (exec_root.resolve().relative_to(clone.resolve()) / EVIDENCE_DIRNAME).as_posix()
-            except ValueError:
-                evidence = ""
-            if "file_baseline" in snapshot or "untracked_baseline" in snapshot:
-                # A copy provisioned before the one-primitive update keeps its own capture:
-                # its file inputs live outside Git and would read as new files in C.
-                from ouroboros.headless import write_workspace_patch_artifacts
-                _, manifest = write_workspace_patch_artifacts(
-                    clone, cap_dir,
-                    task={"metadata": {"workspace_preflight": {"git": {"head": entry.baseline_sha}},
-                                       "file_baseline": snapshot.get("file_baseline") or {},
-                                       "host_evidence": evidence}},
-                )
-            else:
-                manifest = _write_result_commit_artifacts(entry, clone, cap_dir, evidence)
+            manifest = (_legacy_copy_capture if "file_baseline" in snapshot or "untracked_baseline" in snapshot
+                        else _write_result_commit_artifacts)(entry, snapshot, cap_dir)
     except Exception as exc:
         log.warning("Delegated run patch capture failed for %s", entry.run_id, exc_info=True)
         return {
