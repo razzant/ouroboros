@@ -48,7 +48,9 @@ def _is_runtime_secret_data_path(norm: str, *, include_owner_state: bool = True)
         return False
     # These are stores at the runtime root, not directory-name patterns in
     # task payloads, source trees or artifact stores beneath it.
-    if parts[0] in {"auth", "credentials", "secrets", "tokens"}:
+    if parts[0] in {"auth", "credentials", "secrets", "tokens"} or (
+        ".." not in parts and parts[:2] == ["state", "sign_in"]
+    ):
         return True
     name = parts[-1]
     normalized_names = {name, name.lstrip(".")}

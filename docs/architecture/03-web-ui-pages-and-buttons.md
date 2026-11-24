@@ -27,12 +27,12 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `ui_hint.js` ← the one hint: a control's words over the page (DESIGN "Hints").
 - `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press; `gesture_tail.js` ← release click (DESIGN §10).
 - `scroll_fade.js` ← `bindScrollFade` (x/y), `restoreFocusWithoutReveal`.
-- `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` / `logs_types.js` ← browser API calls with typed errors; mirrors of browser-facing contract shapes.
+- `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` / `logs_types.js` / `sign_in_contract_types.js` (`gateway/sign_in_contracts.py`) ← API calls with typed errors; contract mirrors.
 - `ui_primitives.js` ← safe fields, tone/status, attribute escaping, action results (`setResult`, `clearResultOnEdit`, `errorWords`); `ui_helpers.js`/`utils.js` re-export it.
 - `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), `copyTextToClipboard`, older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).
 - `desktop_shell.js` ← window facts from `shell_info()` (legacy `app_version`: health); installed/loaded stay distinct. Failed reads are not unsupported; no update advice.
 - `interface_size.js` ← Interface size's one setter, also `ouroInterfaceSize` for the macOS View menu: the app's `set_interface_size`, a touch screen's viewport (`theme.js` `ouroViewportScale`), else browser zoom.
-- `skill_card_renderer.js`, `skill_presentation.js` ← skill cards and the words every skill surface shares.
+- `skill_card_renderer.js`, `skill_presentation.js`, `skill_sign_in.js` ← skill cards, shared words, sign-in & client UI.
 - `client_surface.js` ← send-time raw observables in each chat frame, no device taxonomy.
 - `chat_markdown.js` ← marked+DOMPurify, chat URLs, KaTeX, lazy Mermaid, bounded charts, unloaded images (DESIGN §5; vendors: `web/vendor/VENDOR-MANIFEST.md`).
 - `selection_lifecycle.js` ← document-level stale-selection dismissal for desktop mouse/pen; touch and intentional selection remain native (DESIGN §5).
@@ -230,7 +230,7 @@ Each key row's **Test** (`POST /api/providers/test`, §4) is bounded and physica
 
 A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS.
 
-`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, or `/api/mcp/sign-in`); protocol and outcomes: CREATING_SKILLS “Provider sign-in return”.
+`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, `/api/mcp/sign-in` or a declared service's `/api/sign-in`); protocol and outcomes: CREATING_SKILLS “Provider sign-in return”.
 
 #### Agent accounts
 

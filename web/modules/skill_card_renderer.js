@@ -21,6 +21,7 @@ import {
 import { installedTime } from './ui_helpers.js';
 import { HELD_LINES } from './holds.js';
 import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
+import { signInMetaHtml, signInTray } from './skill_sign_in.js';
 import {
     buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, declaredPermissionWords, grantPhrases, officialMarkHtml,
     plural, relativeAge, shortDate, skillIconHtml, skipReviewButtonHtml, trayHtml, updateRejectionSentence, versionText,
@@ -269,7 +270,7 @@ const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionA
  * whether it needs the owner, whether an update waits, whether a review of these files runs (`reviewing`, the fact its
  * Reviewing… chip is drawn from) and why the switch is locked. Pure over the listing row.
  */
-export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {} } = {}) {
+export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {}, signIn = null } = {}) {
     const name = String(skill.name || '');
     const install = installFacts(skill);
     const modified = modifiedFacts(skill);
@@ -414,6 +415,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const secrets = secretConfigTray(skill);
     if (secrets.tray) trays.push(secrets.tray);
     if (secrets.needs) needs = true;
+    const signInNeed = skill.enabled ? signInTray(name, signIn) : '';  // a sign-in the owner owes an enabled skill
+    if (signInNeed) { trays.push(signInNeed); needs = true; }
 
     // Declared MCP servers: Connect is the owner's continuation once the skill itself is ready (DESIGN §4). A running
     // review or a pending update names the state above ahead of the current bytes' gate, access and start facts.
@@ -871,7 +874,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     const safeRowKey = skill.collision_row_id || skill.lifecycle_name_level ? escapeHtml(installedSkillRowKey(skill)) : '';
     const reviewing = reviewingSkills.has(skill.name);
     const repairing = repairingSkills.has(skill.name);
-    const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules });
+    const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules, signIn: options.signIn });
     const description = skill.lifecycle_virtual && [skill.lifecycle_error, skill.load_error].includes(skill.description) ? '' : skill.description;
     const submit = submitHubReady(skill, options.githubTokenConfigured);
     const lockReason = model.lockReason;
@@ -929,7 +932,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             <div class="skills-card-title">
                 <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}${headName}<span class="skills-card-marks">${marks}</span></div>
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
-                <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
+                <div class="skills-card-who">${installedWhoHtml(skill, model)}${signInMetaHtml(skill.name, options.signIn)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit, settings: model.settings })}</div>

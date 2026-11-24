@@ -1034,7 +1034,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/capability_breakage.py`` ``_keep_main``), so Main's next turn hears a repair.
 # 488 -> 490: the subscription census and its refresh request (``ouroboros/subscription_census.py``), each with
 # its row.
-EXPECTED_SCAN_PATHS = 490
+# 490 -> 494: ``service_sign_in`` names ``state/sign_in``, its ``clients.json``,
+# its ``grants`` directory and ``grants/*/*/*.json``. Pending and account files
+# share the latter spelling and its PERSISTENCE.md row.
+EXPECTED_SCAN_PATHS = 494
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1043,6 +1046,8 @@ EXPECTED_SCAN_PATHS = 490
 SENTINELS = frozenset({
     "settings.json",
     "state/state.json",
+    "state/sign_in/clients.json",
+    "state/sign_in/grants/*/*/*.json",
     "state/queue_snapshot.json",
     "state/process_ledger.jsonl",
     "state/consciousness_observations.jsonl",

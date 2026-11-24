@@ -212,6 +212,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/mcp/status` | Read-only listing facts |
 | POST | `/api/mcp/refresh` | Lists and publishes |
 | POST | `/api/mcp/sign-in` | Sign-in steps |
+| POST | `/api/sign-in` | a skill's service sign-in steps (§13) |
+| GET | `/api/sign-in/status` | Read-only sign-in status (§13) |
 | POST | `/api/mcp/test` | Draft probe, unpublished |
 | POST | `/api/mcp/import/preview` | |
 | WS | `/ws` | |
@@ -236,6 +238,9 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/presence/work/{work_ref}` | retains transport queue observations |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/ui/ws-message` | |
+| GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/accounts` | the calling skill's accounts per declared service (§13) |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/token` | the calling skill's own access token (§13) |
+| POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/sign-in/handover` | the calling skill's earlier sign-ins, taken over (§13) |
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `notify_owner` grant: one signed `skill_notice` System row, no model turn |
 | WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | |
 

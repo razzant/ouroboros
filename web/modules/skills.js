@@ -18,6 +18,7 @@ import {
 import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
+import { readSignInStatus, SIGN_IN_STATUS_EVENT } from './skill_sign_in.js';
 import { getContributions } from './contributions.js';
 import { getHostModules } from './host_modules.js';
 import {
@@ -272,10 +273,10 @@ export function matchesInstalledFilter(skill, filter, model = installedSkillMode
 }
 
 /** «All 62 · Needs you 10 · Updates 12 · Off 41 · Made here 43», as facts of the loaded list. */
-export function installedFilterCounts(skills, pageModules = {}) {
+export function installedFilterCounts(skills, pageModules = {}, signIn = null) {
     const counts = Object.fromEntries(INSTALLED_FILTERS.map(([key]) => [key, 0]));
     for (const skill of skills) {
-        const model = installedSkillModel(skill, { pageModules });
+        const model = installedSkillModel(skill, { pageModules, signIn });
         for (const [key] of INSTALLED_FILTERS) if (matchesInstalledFilter(skill, key, model)) counts[key] += 1;
     }
     return counts;
@@ -411,6 +412,7 @@ export function initSkills(ctx = {}) {
     let openRequest = 0;
     let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
+    let signIn = null, signInRead = 0, signInAccepted = 0;
     let installedFailed = false;
     let activeMenu = null;
     let sheet = null;
@@ -538,15 +540,27 @@ export function initSkills(ctx = {}) {
         const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
         return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
     };
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(), signIn,
         contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
+    // Listing and sheet accept a single status view; a late earlier read cannot replace a newer accepted one.
+    async function reloadSignIn({ signal } = {}) {
+        const read = ++signInRead;
+        const data = await readSignInStatus({ signal });
+        if (destroyed || signal?.aborted) return null;
+        if (read < signInAccepted) return signIn;
+        signInAccepted = read;
+        signIn = data;
+        window.dispatchEvent(new CustomEvent(SIGN_IN_STATUS_EVENT, { detail: data }));
+        if (snapshot) paintInstalled();
+        return data;
+    }
 
     // What the section's list says about these views, from reads already made (never a read of its own).
     function sectionFacts() {
         return {
             installed: snapshot?.rawSkills ? snapshot.rawSkills.length : null,
             installedFailed,
-            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts()).needs : 0,
+            needs: snapshot?.rawSkills ? installedFilterCounts(projected(), pageModuleFacts(), signIn).needs : 0,
             working: inFlightCount(lifecycleEventsFromQueue(snapshot?.queue)),
             sources: Array.isArray(cache.sourcesValue) ? cache.sourcesValue.length : null,
             sourcesFailed: Boolean(cache.sourcesError),
@@ -555,7 +569,7 @@ export function initSkills(ctx = {}) {
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
-        const counts = skills ? installedFilterCounts(skills, pageModuleFacts()) : null;
+        const counts = skills ? installedFilterCounts(skills, pageModuleFacts(), signIn) : null;
         filtersEl.innerHTML = INSTALLED_FILTERS.map(([key, label]) => {
             const count = counts ? counts[key] : null;
             const hide = key !== 'all' && count === 0 && filter !== key;
@@ -571,7 +585,7 @@ export function initSkills(ctx = {}) {
         let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
             const skill = byRow.get(cardRowKey(card));
-            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
+            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules, signIn }));
             const ok = member && (!skill || !query
                 || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
             card.hidden = !ok;
@@ -725,6 +739,8 @@ export function initSkills(ctx = {}) {
             if (snapshot === next) paintInstalled();
             showReads();
         }, () => { if (current()) { optional.state = 'failed'; showReads(); } });
+        // Skills' service sign-ins (the card's meta line and tray); an unread status shows none and keeps the last one.
+        void reloadSignIn({ signal: controller.signal }).catch(() => {});
         apiClient.skillLifecycleQueue({ signal: controller.signal }).then((data) => {
             if (!current()) return;
             const ok = Array.isArray(data?.events) || (data?.active && typeof data.active === 'object');
@@ -1112,7 +1128,7 @@ export function initSkills(ctx = {}) {
         const titleOf = () => Array.from(container.querySelectorAll(':scope > .skills-card'))
             .find((listed) => cardRowKey(listed) === pendingKey && !listed.hidden)?.querySelector('.skills-card-name') || null;
         sheet = openSkillDetailSheet({
-            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access,
+            item, installed: skill, returnFocus: pendingKey ? titleOf : opener, access, signIn: { status: signIn, reload: reloadSignIn, open: opener },
             readDetail: origin?.id && origin.kind !== 'registry' ? ({ signal } = {}) => skillSourcesApi.item(origin.id, name, { signal }) : null,
         });
         sheetPending = job ? { key: pendingKey, job } : null;

@@ -41,3 +41,5 @@
     font-size: var(--type-body);
 }
 .provider-return-card a { text-decoration: none; }
+/* `.btn` sets its own display, which beats the browser's rule for hidden: a hidden control needs its own word. */
+.provider-return-card [hidden] { display: none; }
