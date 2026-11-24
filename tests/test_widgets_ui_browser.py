@@ -1371,6 +1371,30 @@ def test_ui_smoke_beautiful_context_reads_the_selected_attempt(
                 choose(gap(body="manifest_over_limit", recorded_bytes=2258277, max_bytes=2097152,
                            retry_max_bytes=2258277, file_trace="not_read"), "sealed record is larger", "#headline")
                 assert "The sealed record was not read" in frame.locator("#source-versions").text_content()
+                # Design reference groups show the recorded form without overclaiming when retained_source is absent.
+                retained_path = "source_handles/context_checkpoints/host-design_bible.md"
+                choose(gap(body="not_linked", attempt_id="design-bible-forms", assembly_source_map=[
+                    {"block": 0, "status": "located", "groups_omitted": 0, "chars": 900, "groups": [
+                        {"family": "design_bible", "form": "rendered", "start": 0, "chars": 600},
+                        {"family": "design_bible", "form": "shorter", "reason": "physical_window",
+                         "retained_source": {"path": retained_path, "sha256": "ab" * 32}, "start": 600, "chars": 300},
+                    ]},
+                    {"block": 1, "status": "position_unverified", "groups_omitted": 0, "chars": 162, "groups": [
+                        {"family": "design_bible", "form": "shorter", "reason": "mode_or_start_allowance",
+                         "start": 0, "chars": 120},
+                        {"family": "design_bible", "form": "unknown_form", "start": 120, "chars": 42},
+                    ]},
+                ]), "design-bible-forms", "#attempt-facts")
+                expect(frame.locator("#source-versions")).to_be_visible()
+                design_lines = frame.locator("#source-versions").inner_text().splitlines()
+                assert design_lines == [
+                    "Design reference · Design bible section in full; rest as table of contents · 600 characters",
+                    "Design reference · table of contents only; Design bible retained · to fit the model window · 300 characters",
+                    "Design reference · shorter form · to fit the starting allowance · position not verified · 120 characters",
+                    "Design reference · form not recorded · position not verified · 42 characters",
+                ], design_lines
+                assert retained_path not in "\n".join(design_lines)
+                assert retained_path in frame.locator("#source-technical").text_content()
                 # A file the page cannot open says how to read that request elsewhere, not only that it is too large.
                 large = tmp_path / "large-report.json"
                 with large.open("wb") as handle:

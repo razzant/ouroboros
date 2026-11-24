@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-hJEJgDpuh22MRmLEVHT2H2D4xSblifnA8TdN8j4Okog='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-E984XqEs7OsHk5QxQpYiEt2m/QGz2sxrUEDzHh5J9aw='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -630,7 +630,7 @@ function show(facts, name, example = false) {
 }
 const SOURCE_NAMES = new Map(Object.entries({
   system: 'Base instructions', bible: 'Constitution', architecture: 'Architecture reference',
-  development: 'Development handbook', identity: 'Identity', world: 'World map',
+  development: 'Development handbook', design_bible: 'Design reference', identity: 'Identity', world: 'World map',
   scratchpad: 'Working notes', story: 'Story and settled retellings', memory_fit_notes: 'Memory fitting notes',
   registry: 'Source register', shared_understanding: 'Shared understanding', knowledge_index: 'Knowledge index',
   project_knowledge_index: 'Project knowledge index', project_workpad: 'Project workpad',
@@ -646,12 +646,22 @@ const SOURCE_FORMS = new Map(Object.entries({
   whole_view: 'whole captured view', shorter: 'shorter form', summary: 'summary', count: 'count and reader',
   framing: 'section framing', rendered: 'as assembled',
 }));
+function sourceForm(group) {
+  if (group.family === 'design_bible') {
+    if (group.form === 'rendered') return 'Design bible section in full; rest as table of contents';
+    if (group.form === 'shorter' && isRecord(group.retained_source)
+        && typeof group.retained_source.path === 'string' && group.retained_source.path.trim()) {
+      return 'table of contents only; Design bible retained';
+    }
+  }
+  return SOURCE_FORMS.get(group.form) || 'form not recorded';
+}
 function layoutWords(layout) {
   const rows = new Map();
   for (const block of layout) {
     for (const group of Array.isArray(block.groups) ? block.groups.filter(isRecord) : []) {
       const name = SOURCE_NAMES.get(group.family) || 'Other context section';
-      const form = SOURCE_FORMS.get(group.form) || 'form not recorded';
+      const form = sourceForm(group);
       const reason = group.reason === 'physical_window' ? ' · to fit the model window'
         : group.reason === 'mode_or_start_allowance' ? ' · to fit the starting allowance' : '';
       const position = block.status === 'located' ? '' : ' · position not verified';
