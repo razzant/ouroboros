@@ -34,8 +34,10 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 LIMIT = tool_result_limit("memory_read")
 LEGACY = {"kind": "legacy_helper", "writer": "old_consolidator", "attribution": "retelling by Light, not lived"}
 LIGHT = {"kind": "helper", "route": "configured-light"}
-MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
-           "record's tokens and the pages no part or account holds yet.")
+NO_FRAME = "prices: no comparable frame: this task holds no captured memory view"  # a ctx with no captured plan
+CLOSE = ("Originals remain readable by address; memory_read(story=true) measures my story as it stands now. This "
+         "task's view is not refreshed; the next start measures its Max room again and rewrites the cached story from "
+         "the first changed retelling.")
 
 
 def ctx_for(root: pathlib.Path, task_id: str = "root0001", **fields) -> ToolContext:
@@ -165,9 +167,8 @@ def test_task_page_takes_task_rows_and_bound_owner_words_and_leaves_an_interleav
     # The interleaved task's page passes: its rows were never sealed by the first page.
     second = write(ctx, kind="page", text="I drafted the release note.", covers={"task_ids": ["taskB001"]})
     assert second["ok"] and second["rows"] == 2  # promote annotation binds the owner's words
-    # A page's receipt names what it wrote and where my story's whole drawn size is measured; it re-reads no story.
-    assert second["effect"] == ("this page: 27 characters. " + MEASURE + " This task's view is not refreshed; the "
-                                "next start re-measures its Max room.")
+    # A page's receipt names what it now tells by room; with no captured frame it prices nothing and says so.
+    assert second["effect"] == "\n".join(["this page tells 2 rows by room: 1 (2)", NO_FRAME, CLOSE])
     sealed = ChronicleStore(tmp_path).sealed_row_refs("1")
     assert sha(unbound) not in sealed and sha(ask_a) in sealed and sha(ask_b) in sealed
     # A range over rows the task pages hold is refused with their ids, never their text.
@@ -402,20 +403,19 @@ def test_part_correction_and_decision_go_through_the_store_rules(tmp_path):
     part = write(ctx, kind="part", text="I lived 30.07-25.09 like this.", member_ids=["legacy-b00-r5"],
                  expected_sequence=head)
     assert part["ok"] and part["room_id"] == "5"
-    # The receipt measures what the fold did and names what it did not: this view and the Max room stay as they were.
-    assert part["effect"] == ("folded 1 record: 11 -> 30 characters. " + MEASURE + " Originals remain readable by "
-                              "address. This task's view is not refreshed; the next start re-measures its Max room "
-                              "and rewrites the cached story from the first changed retelling.")
+    # The receipt names what the fold now tells and what it did not do: this view and the Max room stay as they were.
+    assert part["effect"] == "\n".join(["this part tells 1 record by room: 5 (1)", NO_FRAME, CLOSE])
     refused = json.loads(_chronicle_write(ctx, kind="part", text="again", member_ids=["legacy-b00-r5"],
                                           expected_sequence=part["room_head"]))
     assert refused["reason"] == "already_folded" and "effect" not in refused
     account = write(ctx, kind="account", text="Across rooms.", sources=[part["node_id"]], room_id="5")
-    assert account["effect"].startswith("wrote an account over 1 record: 30 -> 13 characters.")
-    assert "It tells nothing in their place until a selection shows it." in account["effect"]
+    assert account["effect"].startswith("wrote an account over 1 record by room: 5 (1); it tells nothing in their "
+                                        "place until a selection shows it\n")
     shown = write(ctx, kind="selection", target_id=account["node_id"], replaces=[part["node_id"]], reason="the account says it")
-    assert shown["effect"].startswith("the account now tells 1 record: 30 -> 13 characters. " + MEASURE)
+    assert shown["effect"] == "\n".join(["the account now tells 1 record by room: 5 (1)", NO_FRAME, CLOSE])
     hidden = write(ctx, kind="selection", target_id=account["node_id"], replaces=[], shown=False, reason="back")
-    assert hidden["effect"].startswith("withdrawal saved: other selections and folds still determine what appears.")
+    assert hidden["effect"] == "\n".join(["withdrawal saved: other selections and folds still determine what appears",
+                                         NO_FRAME, CLOSE])
     first = write(ctx, kind="correction", target_id="legacy-b01-r5", text="It was 26.09, not 25.09.")
     assert first["ok"] and first["revision"] == first["node_id"]
     again = json.loads(_chronicle_write(ctx, kind="correction", target_id="legacy-b01-r5", text="second"))
@@ -1203,7 +1203,8 @@ def test_delegated_tools_cannot_withdraw_an_integrators_page(tmp_path, role):
     before = store.log_path.read_bytes()
     refused = write(delegated, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
     assert refused["reason"] == "not_integrator" and store.log_path.read_bytes() == before
-    assert write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")["ok"]
+    rejected = write(root, kind="decision", target_id=page["node_id"], accepted=False, reason="Withdraw")
+    assert rejected["ok"] and rejected["effect"].startswith(f"rejected: the draft {page['node_id']} leaves my story")
 
 
 def test_writer_receipts_read_no_whole_story_and_survive_a_migrating_store(tmp_path, monkeypatch):
@@ -1283,3 +1284,103 @@ def test_form_quotes_and_marks_stay_inside_one_submitted_field(tmp_path):
         mark = json.loads(_memory_mark(ctx_for(tmp_path), text="Record the dates", address=addr(row), quote=words))
         assert mark["ok"] is accepted
     assert "moonrise\nsunset" not in quote_words(row)
+
+
+# --- a fold's receipt in the writer's one captured frame (memory_fold_receipt) -------------------------------------
+
+def _framed(snap, floor=None):
+    """A writer whose context plan captured ``snap`` and delivered it at the level ``floor`` names."""
+    from types import SimpleNamespace
+
+    plan = SimpleNamespace(core=SimpleNamespace(memory_view_json=mv.snapshot_json(snap)), initial_mode="max",
+                           projection=lambda _mode: SimpleNamespace(memory_facts={"floor": floor} if floor else {}))
+    return SimpleNamespace(context_fit_plan=plan, active_context_mode="max")
+
+
+def _far_words_snapshot():
+    from tests import _memory_view_synthetic as syn
+
+    room = syn.room("1", lane1=[syn.spoken(i, "ouroboros", 300) for i in range(2)], lane2=1)
+    groups = [syn.conversation(i, words=12, word_chars=500) for i in range(2)]
+    for word in (w for group in groups for place in group["rooms"] for w in place["words"]):
+        word["rank"] = 1  # words I read and considered: untold until a page tells them
+    return syn.snapshot(room_facts=room, story=syn.pages(3, 600), conversations=groups)
+
+
+def test_a_page_over_counted_far_words_gains_a_telling_while_the_gates_price_rises_and_says_both():
+    from ouroboros import memory_fold_receipt as fr
+
+    snap = _far_words_snapshot()
+    words = [w for w in snap.conversations[0]["rooms"][0]["words"]]
+    rows = [w["address"].rsplit("#", 1)[1] + "0" * 52 for w in words]
+    record = {"kind": "page", "id": "page-far", "room_id": "2000", "text": "What Sasha asked, in my words. " * 120,
+              "metadata": {"room_label": "Project room 0"}}
+    text = fr.fold_receipt(_framed(snap), told="this page tells 12 rows by room: 2000 (12)", after={
+        "add": [fr.story_entry(record)], "rows": rows})
+    untold, told = ([int(n.replace(",", "")) for n in re.search(rf"{name} \([^)]*\) ([\d,]+) -> ([\d,]+) tokens",
+                                                                 text).groups()] for name in ("untold amount", "telling"))
+    assert untold[1] < untold[0] and told[1] > told[0]  # matter gained my telling, and the gate's price rose: both said
+    assert "what it tells, as my delivered view held it: 12 whole in my delivered view" in text
+    assert "pages no part or account holds 3 -> 4" in text and "(page-far joins at the end)" in text
+    assert "in my one captured frame, before -> after" in text
+    assert not re.search(r"tokens? saved|saving|\bsaves?\b", text)  # one frame: no saving is claimed
+
+
+def test_an_accounts_sources_are_named_by_how_this_task_held_them():
+    from ouroboros import memory_fold_receipt as fr
+    from ouroboros.memory_floor import FORMS_VERSION
+
+    snap = _far_words_snapshot()
+    ctx = _framed(snap, {"forms_version": FORMS_VERSION, "addressed": [["F5l", ["page-001"]], ["F5", ["page-002"]]]})
+    fr.note_read(ctx, "page-002")  # read whole by address in this task: held, though the view showed its pointer
+    text = fr.fold_receipt(ctx, told="wrote an account over 4 records", sources=["page-000", "page-001", "page-002",
+                                                                                 "page-elsewhere"], after={})
+    assert ("its sources as this task held them: 1 whole in my delivered view; 1 read whole with memory_read in this "
+            "task; 1 only as a lead; 1 not in my captured view") in text
+    assert re.search(r"untold amount \([^)]*\) ([\d,]+) -> \1 tokens", text)  # an account alone changes no view
+    assert "the cached story's retellings stay as they were" in text
+    fresh = _framed(snap, {"forms_version": FORMS_VERSION, "addressed": [["F5", ["page-002"]]]})
+    assert "1 only as an opening, a pointer, an address or a count" in fr.fold_receipt(
+        fresh, told="x", sources=["page-002"], after={})  # without the read, the pointer is all it held
+
+
+def test_a_rejection_undoes_a_standing_page_and_a_superseding_choice_is_said_plainly(tmp_path, monkeypatch):
+    from ouroboros import memory_fold_receipt as fr
+
+    snap = _far_words_snapshot()
+    rejected = fr.fold_receipt(_framed(snap), told="rejected: the draft page-001 leaves my story and the 3 rows it "
+                               "sealed stand untold again, open rows my captured view did not hold", after=None)
+    assert rejected.startswith("rejected: the draft page-001 leaves my story")
+    assert "prices: comparison at the next comparable start" in rejected
+    superseded = fr.fold_receipt(_framed(snap), told="the account now tells 1 record by room: 1 (1)", sources=["page-000"],
+                                 outcome="Superseded: another selection is now acting.", after=None)
+    assert superseded.splitlines()[0] == "Superseded: another selection is now acting."
+    assert "comparison at the next comparable start" in superseded and "->" not in superseded
+
+
+def test_a_page_over_rows_the_writers_frame_never_held_defers_its_comparison():
+    from ouroboros import memory_fold_receipt as fr
+
+    snap = _far_words_snapshot()
+    held = snap.conversations[0]["rooms"][0]["words"][0]["address"].rsplit("#", 1)[1] + "0" * 52
+    page = {"add": [fr.story_entry({"kind": "page", "id": "page-late", "room_id": "2000", "text": "Later words."})]}
+    later = fr.fold_receipt(_framed(snap), told="this page tells 2 rows", after={**page, "rows": [held, "f" * 64]})
+    assert "1 whole in my delivered view; 1 not in my captured view" in later
+    assert "prices: comparison at the next comparable start" in later and "->" not in later
+    framed = fr.fold_receipt(_framed(snap), told="this page tells 1 row", after={**page, "rows": [held]})
+    assert "in my one captured frame, before -> after" in framed  # a row the frame held: priced now
+
+
+def test_the_gates_telling_splits_this_room_by_the_stage_of_its_forms():
+    from tests import _memory_view_synthetic as syn
+    from ouroboros import memory_floor as mf
+    from ouroboros.memory_fold_receipt import telling_parts
+
+    lane = [syn.spoken(i, "ouroboros" if i % 2 else "human", 900) for i in range(6)]
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=lane, lane2=3), story=syn.pages(4, 2_000), mark_count=2)
+    view = mf.render_view_for_mode(snap, mode="max", owner_mode="max", window_tokens=10**6, known_window=True,
+                                   output_reserve=1_000, ratio=1.0, non_memory_tokens=1_000, level=mf.telling_level(snap))
+    parts = dict(telling_parts(view))
+    assert sum(parts.values()) == mf.telling_fact(view)["telling"]
+    assert parts["my replies"] > 0 and parts["my human's words in this room"] > 0 and parts["marks"] > 0
+    assert "this room" not in parts and "task fact lines" in parts

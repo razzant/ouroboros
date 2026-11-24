@@ -62,9 +62,13 @@ def view_tokens(text: str) -> int:
     return tokens_of(mv.json_chars(str(text))) if text else 0
 
 
-def memory_tokens(view: Any) -> int:
-    """A priced view's two memory texts, story and room, in tokens, as a start's Max room counts them."""
-    return tokens_of(view.story_chars) + tokens_of(view.room_chars)
+def telling_fact(view: Any) -> Dict[str, Any]:
+    """The gate's shortest telling as a start's Max room records it: ``telling``, its two memory texts in tokens, and
+    ``telling_parts``, the same tokens by kind (``memory_fold_receipt.telling_parts``; absent where not itemized)."""
+    from ouroboros.memory_fold_receipt import telling_parts
+
+    parts = telling_parts(view)
+    return {"telling": tokens_of(view.story_chars) + tokens_of(view.room_chars), **({"telling_parts": parts} if parts else {})}
 
 
 class ViewFit:
@@ -381,11 +385,13 @@ def addressed_text(steps: Mapping[str, Any]) -> str:
     return ", ".join(text.format(steps[step]) for step, text in _SHOWN if steps.get(step))
 
 
-def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None) -> str:
+def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None,
+                 composition: bool = False) -> str:
     """The host's measure of one start in the provable parts; the mind judges what they mean: the gate's need
     (``gate_need``: whole books, my memory at the gate's level, the work's room, the reply reserve) against the window,
     the ordinary need (my memory with no shortened form) under that name and the need with no memory; with ``parts``
-    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too. ``pages``
+    the measure by whose part it is (``WHOSE``), else the tool schemas and the need without them too; ``composition``
+    names my memory at the gate's level by kind (``telling_parts``) where the start itemized it. ``pages``
     (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
     window, gate = fact["window"], gate_need(fact)
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
@@ -395,7 +401,9 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
         text += f"; tool schemas {fact['schemas']:,}; without them {fact['floor_need']:,}"
     if parts:
         named, grouped = dict(fact["parts"]), {name for _whose, names in WHOSE for name in names}
-        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}"],
+        kinds = (" (" + ", ".join(f"{kind} {int(tokens):,}" for kind, tokens in fact["telling_parts"]) + ")"
+                 if composition and fact.get("telling_parts") else "")  # what keeps the books out, by kind
+        listed = {"mine": [f"my memory at the gate's level {fact.get('telling', fact['story'] + fact['room']):,}{kinds}"],
                   "what the request itself carries": [f"tool schemas {fact['schemas']:,}"], "my human's": []}
         for whose, names in WHOSE:
             listed[whose] += [f"{name} {named[name]:,}" for name in names if name in named]

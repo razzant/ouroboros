@@ -1181,7 +1181,7 @@ def test_a_start_shaped_like_the_owners_keeps_all_six_heads_whole_while_memory_g
         unheld = replace(_core(world), memory_view_json=captured.memory_view_json)
     plain = _plan(world, 60_000, core=unheld)
     assert facts(plain)["floor"]["steps"] and not _held(plain)
-    assert context_view_facts.memory_facts(plain, "low").endswith(
+    assert context_view_facts.memory_facts(plain, "low").split(" | flow")[0].endswith(
         f"; shown only by address: {memory_floor.addressed_text(facts(plain)['floor']['steps'])}; marks in view 0")
 
     # A work already running in whole books: where my telling no longer fits beside them the books go to their maps,

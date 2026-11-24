@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import math
+import re
 
 from types import SimpleNamespace
 
@@ -479,3 +480,84 @@ def test_an_unknown_window_whose_read_failed_is_read_anew_not_from_its_record(mo
         route = resolver if ask == "direct" else cf.RouteQuestion(task, resolver)
         plan = cf.build_context_fit_plan(None, _core(), task, preferred_mode="max", route_resolver=route)
         assert plan.start == ("max", "unmeasured") and asked == [False, again], (status, read)
+
+
+_VERDICTS = re.compile(r"\b(too|should|must|consider|warning|critical|huge|tiny|enough|healthy|bad|good|over budget|"
+                       r"needs folding|fold more)\b", re.IGNORECASE)
+
+
+def test_the_gate_s_shortest_telling_is_itemized_by_kind_summing_to_its_figure_in_the_facts_row_alone(monkeypatch):
+    """What keeps the books out, by kind: the gate's telling split over the drawn parts of both blocks sums to the
+    figure the gate priced; the facts row (the changing tail) names it, while the floor note in the room block stays
+    as it was, so no cached byte moves."""
+    core = _core()
+    held = _fact(_start(core, 2_000_000, monkeypatch))
+    assert "telling_parts" not in held  # a held Max priced no telling: nothing to itemize
+    plan = _start(core, _crowded_window(held), monkeypatch)
+    fact = _fact(plan)
+    parts = dict(fact["telling_parts"])
+    assert sum(parts.values()) == fact["telling"] and all(tokens > 0 for tokens in parts.values())
+    assert {"pages whole (no lead rule)", "this room: headings, records, notes and other rows", "the floor note"} <= set(parts)
+    assert "this room" not in parts  # this room is split by the stage of its forms, never one lump
+    kinds = ", ".join(f"{kind} {tokens:,}" for kind, tokens in fact["telling_parts"])
+    line = memory_facts(plan, "low")
+    assert f"; mine: my memory at the gate's level {fact['telling']:,} ({kinds}); what the request " in line
+    shown = plan.low_projection.system_content_json
+    assert f"my memory at the gate's level {fact['telling']:,}; what the request" in shown and kinds not in shown
+    assert not _VERDICTS.search(line.split(" | ")[0].split("; marks in view")[0])
+
+
+def _flow_snapshot(lane2=3, *, groups=3):
+    lane = [syn.spoken(i, "ouroboros" if i % 2 else "human", 600) for i in range(4)]
+    room = syn.room("1", lane1=lane, lane2=lane2)
+    return syn.snapshot(room_facts=room, story=syn.pages(4, 800),
+                        conversations=[syn.conversation(i, words=3, owner=i == 1) for i in range(groups)])
+
+
+def test_the_flow_line_names_its_comparison_capture_or_its_absence_and_states_facts_only():
+    from ouroboros.memory_fold_receipt import flow_line
+
+    snap = _flow_snapshot()
+    line = flow_line(snap, {}, task_id="t002")  # this task is t002: the previous start of this room is t001
+    assert line.startswith("flow since this room's previous start (task t001, 2026-09-07T00:02:00+00:00): "
+                           "4 open rows arrived in 1 room; 0 retellings cover time after it; untold of what I read or "
+                           "said: ")
+    assert "4 of those rows dated after that start" in line and "pages no part or account holds: 4" in line
+    assert "Main: " in line and "oldest 2026-09-08" in line and "no telling there in my story" in line
+    first = flow_line(_flow_snapshot(lane2=0), {}, task_id="t000")
+    assert first.startswith("flow: no comparable capture (this capture holds no earlier start of this room); ")
+    assert "dated after that start" not in first
+    assert not _VERDICTS.search(line) and not _VERDICTS.search(first)
+
+
+def test_the_flow_line_names_why_max_was_lost_with_the_numbers_of_its_cause():
+    from ouroboros.memory_fold_receipt import flow_line
+
+    route = {"cause": "route", "window": 200_000, "floor_need": 260_000, "zero_need": 270_000, "need": 300_000,
+             "telling_need": 280_000}
+    assert flow_line(_flow_snapshot(), {"max_room": route}).endswith(
+        "; Max lost, cause route: with no memory this start needs 260,000 of 200,000, so with all my memory folded the "
+        "fixed part alone stays above the window")
+    crowded = {**route, "cause": "crowded", "floor_need": 120_000, "zero_need": 150_000, "allowance": 90_000,
+               "telling": 180_000, "telling_parts": [["pages whole (no lead rule)", 175_000],
+                                                     ["my human's words in this room", 5_000]]}
+    assert flow_line(_flow_snapshot(), {"max_room": crowded}).endswith(
+        "; Max lost, cause memory: the gate's need 280,000 of 200,000; with all my memory folded the rest needs "
+        "150,000; the Max room for memory 90,000 against my shortest telling 180,000, of which my human's words, which "
+        "only my own page folds, 5,000")
+    assert "Max lost" not in flow_line(_flow_snapshot(), {"max_room": {**route, "cause": "held"}})
+
+
+def test_the_flow_line_rides_the_facts_row_after_the_cache_marker_and_moves_no_prefix_byte(monkeypatch):
+    """The flow is a part of the integrating focus's memory facts, a host row of the changing tail: the projection's
+    system content (every cached block) is byte-identical whether or not that row is read or carries it."""
+    import ouroboros.context_view_facts as cvf
+
+    plan = _start(_core(), 2_000_000, monkeypatch)
+    before = plan.max_projection.system_content_json
+    line = memory_facts(plan, "max")
+    head, flow = line.split(" | ", 1)
+    assert flow.startswith("flow since this room's previous start (task t002, ") and "flow" not in before
+    assert plan.max_projection.system_content_json == before
+    monkeypatch.setattr(cvf, "flow_line", lambda *_a, **_k: "")
+    assert memory_facts(plan, "max").split(" | ", 1)[0] == head and plan.max_projection.system_content_json == before

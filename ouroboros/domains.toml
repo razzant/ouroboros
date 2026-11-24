@@ -282,6 +282,7 @@ D20 = "Presence"
 "ouroboros/chronicle_lead.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_forms.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_form_facts.py" = "D03"  # captured memory forms and their provenance
+"ouroboros/memory_fold_receipt.py" = "D03"  # what a fold returns, the gate's telling by kind, a start's flow
 "ouroboros/memory_view_work.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_conversation_forms.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_events.py" = "D03"  # ordinary place event facts and their catalogue readers

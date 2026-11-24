@@ -312,7 +312,7 @@ def test_the_selection_answers_with_a_counted_receipt_of_what_it_tells_never_the
 
     readers = ", ".join(f"memory_read(room_id='{room}')" for room in sorted({"1", alpha}))
     chosen = _write(tmp_path, kind="selection", target_id=g, replaces=[a1, part], reason="told through it")
-    assert chosen["effect"].startswith("the account now tells 2 records: ")  # the measured effect, as before
+    assert chosen["effect"].startswith("the account now tells 2 records by room: ")  # counted by the records' rooms
     assert chosen["receipt"] == (
         "counted from the chronicle as read after this write: teller relations only, never display or what this write "
         "displaced (a later choice by any account changes them; what my story and a room's page show is read there, "
@@ -365,6 +365,7 @@ def test_receipt_does_not_attribute_a_later_selection_to_this_write(tmp_path, mo
     assert result["ok"] is True and later[0] != result["node_id"]
     assert "another selection is now acting" in result["receipt"]
     assert "leave my story" not in result["receipt"]
+    assert result["effect"].startswith("Superseded: another selection is now acting.\n")  # said plainly, priced nowhere
 
 
 def test_receipt_reads_teller_relations_and_claims_no_displacement_another_accounts_choice_made(tmp_path, monkeypatch):
@@ -411,10 +412,8 @@ def test_withdrawing_one_teller_does_not_claim_a_page_hidden_by_another_returns(
     result = _write(tmp_path, kind="selection", target_id=later, replaces=[a1], shown=False, reason="withdraw later")
     assert result["shown"] is False
     assert "Alpha asked again and I counted." not in _story(tmp_path)
-    assert result["effect"] == (
-        "withdrawal saved: other selections and folds still determine what appears. My story's drawn size is not "
-        "re-measured by a write: memory_read(story=true) measures it whole, each record's tokens and the pages no part "
-        "or account holds yet. This task's view is not refreshed; the next start re-measures its Max room.")
+    assert result["effect"].startswith(
+        "withdrawal saved: other selections and folds still determine what appears\nprices: no comparable frame")
     assert "the account tells 0 records" in result["receipt"]
     assert "the records it told return there" not in str(result)
 

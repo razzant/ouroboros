@@ -773,7 +773,9 @@ def physical_floor(snapshot, level, mode):
 
 
 def holding_lines(held, *, short=False):
-    """Host facts only: kinds, their source counts and the largest addressable units."""
+    """Host facts only: kinds, their source counts and the largest addressable units. A full receipt merges kinds at a
+    reader and names up to three largest distinct readers, rooms and ranges holding counted rows; ``short`` (Nano and
+    retained ``physical_floor`` stages) shows only the totals by kind."""
     kinds = []
     for kind, tokens in held["tokens"].items():
         # Remote untold words are priced whole, what folding them would have to tell, though most stand by count.

@@ -71,6 +71,7 @@ from ouroboros.dialogue_provenance import (memory_row_header, quote_parts, quote
                                           row_author, stamp_summary, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
+from ouroboros import memory_fold_receipt as receipts
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
 from ouroboros.store import StoreError
@@ -455,13 +456,6 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
     return result, covers, facts, stamp
 
 
-# A writer saves one record and names what it changed; it re-reads no whole story around the write (a capture is a
-# read of all history, and a store the importer holds would fail a choice already saved). The whole drawn measure is
-# its reader's, on demand; a selection's full before/after view is memory_read(proposed_selection=...) before it.
-_STORY_MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
-                  "record's tokens and the pages no part or account holds yet.")
-
-
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     room = _room(ctx, root, a["room_id"])
     covers_arg = a["covers"]
@@ -478,13 +472,16 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     if not result.ok:
         return _published(ctx, result)
     statuses = Counter(entry["status"] or "unknown" for entry in stamp["tasks"])
+    rows = [sha for sha in covers["rows"] if not str(sha).startswith("note:")]
+    where = {r: len([s for s in shas if not s.startswith("note:")]) for r, shas in covers["rooms"].items()} \
+        if covers.get("rooms") else {room: len(rows)}
     return _published(ctx, result, rows=covers["count"], notes=len(covers["note_ids"]), coverage_facts=facts,
                       rooms=sorted(covers["rooms"]) if covers.get("rooms") else None,
                       first=chat_chain.format_address(covers["first"]) if covers["first"] else None,
                       last=chat_chain.format_address(covers["last"]) if covers["last"] else None,
-                      stamp=dict(sorted(statuses.items())),
-                      effect=f"this page: {len(a['text'] or ''):,} characters. {_STORY_MEASURE} This task's view is "
-                      "not refreshed; the next start re-measures its Max room.")
+                      stamp=dict(sorted(statuses.items())), effect=receipts.fold_receipt(
+                          ctx, told=f"this page tells {len(rows)} rows by room: {receipts.by_room(where)}", after={
+                              "add": [receipts.story_entry(result.record, span=covers.get("ts_span"))], "rows": rows}))
 
 
 def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> bool:
@@ -499,16 +496,11 @@ def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> 
         str(signer.get("task_id") or "") == str(author.get("task_id") or ""))
 
 
-def _fold_effect(store: ChronicleStore, action: str, ids: Iterable[Any], text: str,
-                 drawn: str = "") -> str:
-    """What a fold did, measured (the records' own words before, the new text after, then ``drawn``: where my story's
-    drawn size is measured, ``_STORY_MEASURE``); never a claim about Max."""
+def _told(store: ChronicleStore, action: str, ids: Iterable[Any]) -> str:
+    """``action N records by room: …``: what a fold now tells, counted by the records' own rooms."""
     ids = [str(ident) for ident in ids]
-    before = sum(len(str((store.get(ident) or {}).get("text") or "")) for ident in ids)
-    return (f"{action} {len(ids)} record{'' if len(ids) == 1 else 's'}: {before:,} -> {len(text or ''):,} characters. "
-            + (drawn + " " if drawn else "") + "Originals remain readable by address. This task's view is not "
-            "refreshed; the next start re-measures its Max room and rewrites the cached story from the first changed "
-            "retelling.")
+    return f"{action} {len(ids)} record{'' if len(ids) == 1 else 's'} by room: " + receipts.by_room(
+        Counter(str((store.get(ident) or {}).get("room_id")) for ident in ids))
 
 
 def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -529,8 +521,8 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     result = store.publish_part(room_id=room, text=a["text"], member_ids=[str(m) for m in members], author=author,
                                 expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver,
                                 metadata=chronicle_lead_metadata())
-    return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"], _STORY_MEASURE)
-                      if result.ok else None)
+    return _published(ctx, result, effect=receipts.fold_receipt(ctx, told=_told(store, "this part tells", members), after={
+        "add": [receipts.story_entry(result.record)], "drop": [str(m) for m in members]}) if result.ok else None)
 
 
 def _write_note(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -550,7 +542,12 @@ def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[
 def _write_decision(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     if not a["target_id"] or not isinstance(a["accepted"], bool):
         return _arg_error(ctx, "a decision needs target_id (a page or part), accepted true/false and a reason")
-    return _published(ctx, store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")))
+    result, target = store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")), str(a["target_id"])
+    count = int(((store.get(target) or {}).get("covers") or {}).get("count") or 0)
+    return _published(ctx, result, effect=None if not result.ok else receipts.fold_receipt(
+        ctx, told=f"accepted: the draft {target} now stands in my story as mine", after={}) if a["accepted"] else
+        receipts.fold_receipt(ctx, told=f"rejected: the draft {target} leaves my story and the {count} rows it "
+                              "sealed stand untold again, open rows my captured view did not hold", after=None))
 
 
 def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -560,9 +557,9 @@ def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str
     result = store.publish_account(room_id=_room(ctx, root, a["room_id"]), text=a["text"], sources=sources, author=author,
                                    quotes=a["quotes"] or (), quote_resolver=_quote_resolver(root, row_lineage(root)))
     ids = [src.get("id") if isinstance(src, dict) else src for src in sources]
-    return _published(ctx, result, sources=len(sources) if result.ok else None, effect=_fold_effect(
-        store, "wrote an account over", ids, a["text"]) + " It tells nothing in their place until a selection shows it."
-        if result.ok else None)
+    return _published(ctx, result, sources=len(sources) if result.ok else None, effect=receipts.fold_receipt(
+        ctx, told=_told(store, "wrote an account over", ids) + "; it tells nothing in their place until a selection "
+        "shows it", sources=ids, after={}) if result.ok else None)
 
 
 def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -575,14 +572,15 @@ def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[s
     shown = True if a["shown"] is None else a["shown"]
     result = store.select_account(str(a["target_id"]), replaces=[str(r) for r in replaces], author=author,
                                   reason=str(a["reason"] or ""), shown=shown)
-    drawn = _STORY_MEASURE
-    effect = (_fold_effect(store, "the account now tells", replaces,
-                           str((store.get(str(a["target_id"])) or {}).get("text") or ""), drawn)
-              if shown else f"withdrawal saved: other selections and folds still determine what appears. {drawn} This "
-              "task's view is not refreshed; the next start re-measures its Max room.")
-    return _published(ctx, result, replaces=len(replaces) if result.ok else None, shown=shown if result.ok else None,
-                      effect=effect if result.ok else None,
-                      receipt=_selection_receipt(root, store, result.record) if result.ok else None)
+    if not result.ok:
+        return _published(ctx, result)
+    receipt, account = _selection_receipt(root, store, result.record), store.get(str(a["target_id"])) or {}
+    effect = receipts.fold_receipt(  # a selection another one superseded or a withdrawal has no after in my frame
+        ctx, told=_told(store, "the account now tells", replaces) if shown else "withdrawal saved: other selections "
+        "and folds still determine what appears", sources=replaces, outcome="Superseded: another selection is now "
+        "acting." if "another selection is now acting" in receipt else "", after=None if not shown or "another "
+        "selection" in receipt else {"add": [receipts.story_entry(account)], "told_by": (account.get("id"), replaces)})
+    return _published(ctx, result, replaces=len(replaces), shown=shown, effect=effect, receipt=receipt)
 
 
 def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, Any]) -> str:
@@ -1350,6 +1348,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
             text = _window(head, body, start, limit, lambda n: f"memory_read(room_id='{room_id}', start={n})")
         elif node_id:
             text = _read_node(root, str(node_id), start, limit, str(revision or ""))
+            receipts.note_read(ctx, node_id)  # held, for this task's fold receipts
         elif rows:
             text = _read_rows(root, _room(ctx, root, room_id), {**bounds, "task_id": task_id, "period": period},
                               start, limit)

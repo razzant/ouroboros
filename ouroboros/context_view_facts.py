@@ -9,6 +9,7 @@ import pathlib
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY, bound_host_row, host_row_intact
+from ouroboros.memory_fold_receipt import flow_line
 from ouroboros.memory_waiting import text as waiting_text
 from ouroboros.utils import update_json_locked, utc_now_iso
 
@@ -70,7 +71,8 @@ def memory_facts(plan, mode, messages=()):
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
     most of them) and the rooms' lines; what this view shows only by address and, beside it, the held note heads
     that stand whole where the window took that from memory (``held_heads_fact``); marks and waiting classes
-    with their count, oldest date, list reader and closure act.
+    with their count, oldest date, list reader and closure act; then the flow since this room's previous start
+    (``memory_fold_receipt.flow_line``).
     Counted from the captured snapshot and its receipt; measures only, no advice and no
     threshold. Without a Max room fact (the owner's Low or Nano, an unknown window) it names the memory alone."""
     snapshot = memory_snapshot(plan)
@@ -82,7 +84,7 @@ def memory_facts(plan, mode, messages=()):
         line = (f"memory: story {blocks.get('story_tokens', 0):,} ({floor.pages_text(pages)}) + rooms "
                 f"{blocks.get('room_tokens', 0):,}")
     else:
-        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages)
+        line = "Max room in this captured build: " + floor.measure_text(room, parts=True, pages=pages, composition=True)
         if room.get("cause") == "held":
             line += "; Max held" + (f" by cuts {', '.join(room['cuts'])}" if room.get("cuts") else "")
         elif room.get("cause") in ("crowded", "route"):  # any other value is a measure without a settled cause
@@ -98,7 +100,8 @@ def memory_facts(plan, mode, messages=()):
         line += f"; first send chose {form} after a refusal on its planned connection; that refusal stated no window"
     shown = floor.addressed_text((receipt.get("floor") or {}).get("steps") or {})
     line += ((f"; shown only by address: {shown}" if shown else "") + held_heads_fact(plan, receipt)
-             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting))
+             + f"; marks in view {len(snapshot.marks)}" + waiting_text(snapshot.waiting)
+             + " | " + flow_line(snapshot, receipt, str(getattr(plan.core, "section_task_id", "") or "")))
     return "" if any(message.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME
                      and f" | {line} | " in f" | {message.get('content') or ''} | " for message in messages) else line
 

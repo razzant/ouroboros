@@ -124,7 +124,7 @@ def test_memory_line_names_where_unfolded_pages_pile_up_what_is_addressed_and_th
     assert "Room D" not in line  # the three rooms holding most of them
     assert ("; shown only by address: 3 other conversations as their lines, 1 count line of my other conversations "
             "(the window's last rung), 2 task fact lines;") in line
-    assert line.endswith("; marks in view 3")
+    assert line.split(" | flow")[0].endswith("; marks in view 3")  # the flow line follows (memory_fold_receipt)
 
 
 def test_memory_facts_appear_once_while_visible_then_after_rebuild_or_change(monkeypatch):

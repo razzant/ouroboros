@@ -826,7 +826,7 @@ def _max_start_room(snapshot, texts, books, *, fixed, ratio, schemas, forms, win
         fact.update(need=need, story=floor.tokens_of(ordinary.story_chars), room=floor.tokens_of(ordinary.room_chars))
         if need > window:
             told, telling_need = need_at(floor.telling_level)
-            fact.update(telling_need=telling_need, telling=floor.memory_tokens(told))
+            fact.update(telling_need=telling_need, **floor.telling_fact(told))
     return fact
 
 
