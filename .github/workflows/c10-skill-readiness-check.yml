@@ -1,0 +1,142 @@
+name: C10 eight regressions
+
+'on':
+  push:
+    branches: ['ci-check/c10-eight-*']
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    name: C10 eight regressions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Put Windows test temp on the work disk
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: test
+          interpreter: shipped
+          install-project: 'false'
+
+      - name: Run exactly thirteen cases and reject skips
+        shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: '*'
+          NO_PROXY: '127.0.0.1,localhost'
+        run: |
+          set -euo pipefail
+          python -c "import sentry_sdk as s; print('sentry-sdk==' + s.VERSION); assert s.VERSION == '2.71.0'"
+          nodes=(
+            'tests/test_architecture_r1_contracts.py::test_skill_lifecycle_facts_match_the_current_contract[preflight]'
+            'tests/test_loop_skill_finalization.py::test_finish_reports_an_unavailable_script_without_blocking_its_separate_mcp'
+            'tests/test_monitoring_examples.py::test_the_real_sdk_reports_accepted_refused_and_unreachable_without_stopping_work'
+            'tests/test_persistence_inventory.py::test_scan_is_populated_and_pinned'
+            'tests/test_persistence_inventory.py::test_every_scanned_path_has_an_inventory_row'
+            'tests/test_persistence_inventory.py::test_every_inventory_row_is_still_real'
+            'tests/test_provider_connection_sentinel.py::test_only_the_resolver_names_provider_credential_settings'
+            'tests/test_skill_enable_dependencies.py::test_agent_facing_texts_send_packages_to_the_enable_owner_never_to_a_paid_review'
+            'tests/test_skill_loader.py::test_readiness_names_the_earlier_version_a_grant_belongs_to'
+            'tests/test_workflow_skill_finality.py::test_exec_schema_states_the_author_path_its_gate_permits'
+            'tests/test_deployment_extensions.py::test_required_fixed_grant_reaches_all_readiness_consumers[hold]'
+            'tests/test_deployment_extensions.py::test_required_fixed_grant_reaches_all_readiness_consumers[warn]'
+            'tests/test_extension_generation_adoption.py::test_worker_adopts_published_key_changes_without_new_payload'
+          )
+          python -m pytest -o addopts= -vv -rs --tb=short --timeout=300 \
+            --junitxml=c10-eight.xml "${nodes[@]}"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('c10-eight.xml').findall('.//testcase')
+          bad = [c.get('name') for c in cases
+                 if any(c.find(t) is not None for t in ('skipped', 'failure', 'error'))]
+          if len(cases) != 13 or bad:
+              raise SystemExit(f'Expected thirteen passes; got {len(cases)} cases, non-passes: {bad}')
+          print('13 passed, 0 skipped, 0 failures, 0 errors')
+          PY
+
+      - name: Two Skills render checks
+        shell: bash
+        run: >-
+          node --test --test-name-pattern='^(an unmet requirement says why first|the list says every unmet requirement)' web/tests/deployment_extensions_ui.test.js
+      - name: Install test Chromium (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --attempt-seconds 180 chromium
+      - name: Open Skills in a disposable installation (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
+          OUROBOROS_RUN_UI_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          cat > tests/test_c10_tracker_readiness_view.py <<'PY'
+          from pathlib import Path
+          import pytest
+          from playwright.sync_api import expect, sync_playwright
+          from tests.test_ui_smoke_playwright import direct_server_with_data
+          from tests.test_deployment_extensions_ui_browser import _seed, _policy, _skills, NOTES
+
+          @pytest.mark.ui_browser
+          def test_required_tracker_named_in_skills(direct_server_with_data, tmp_path):
+              fixture = direct_server_with_data
+              fixture['stop_server']()
+              pins = _seed(fixture['data_dir'])
+              policy = tmp_path / 'policy.json'
+              fixture['env']['OUROBOROS_DEPLOYMENT_POLICY'] = str(policy)
+              with sync_playwright() as playwright:
+                  browser = playwright.chromium.launch(headless=True)
+                  try:
+                      for mode, width, theme, expected in [('hold', 1100, 'light', 'Ordinary work waits'), ('warn', 390, 'dark', 'Ordinary work can continue.')]:
+                          _policy(policy, mode, [pins[NOTES], pins['error_tracker']])
+                          fixture['start_server']()
+                          page = browser.new_page()
+                          try:
+                              _skills(page, fixture['url'], theme, width)
+                              notice = page.locator('[data-skills-org-requirements]')
+                              expect(notice).to_contain_text('It needs your grant for SENTRY_DSN.')
+                              expect(notice).to_contain_text(expected)
+                              assert page.evaluate('document.querySelector("#page-skills").scrollWidth <= innerWidth + 1')
+                              out = Path('CI_SCREEN_DESTINATION')
+                              out.mkdir(parents=True, exist_ok=True)
+                              notice.scroll_into_view_if_needed()
+                              page.screenshot(path=str(out / (mode + '.png')))
+                          finally:
+                              page.close()
+                              fixture['stop_server']()
+                  finally:
+                      browser.close()
+          PY
+          python - <<'PY'
+          import os, pathlib
+          p = pathlib.Path('tests/test_c10_tracker_readiness_view.py')
+          p.write_text(p.read_text().replace('CI_SCREEN_DESTINATION', os.environ['RUNNER_TEMP']+'/c10-ready-screen'))
+          PY
+          python -I -S scripts/safe_test.py -- python -m pytest -o addopts= -vv -m ui_browser --timeout=400 tests/test_c10_tracker_readiness_view.py::test_required_tracker_named_in_skills
+          test -s "$RUNNER_TEMP/c10-ready-screen/hold.png"
+          test -s "$RUNNER_TEMP/c10-ready-screen/warn.png"
+      - name: Save the two fixture screens
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c10-readiness-views
+          path: ${{ runner.temp }}/c10-ready-screen/*.png
+          if-no-files-found: error
