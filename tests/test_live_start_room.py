@@ -376,6 +376,101 @@ def test_a_new_nano_setup_can_raise_the_reply_after_pricing_its_wire(host_world,
     print(f'opening {canonical=}, actual {wire=}, window={width}; reply {old} → {reply}')
 
 
+def test_nano_wire_reply_pricing_converges_across_digit_and_density_boundaries(host_world, monkeypatch):
+    from ouroboros import capability_evidence as ce
+    from ouroboros.context_budget import reply_allowance_tokens
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+    from ouroboros.context_window import WindowLimit, WindowRecord
+    from ouroboros.contracts.realtime import canonical_json, sha256
+    from ouroboros.llm_attempt import main_context_fit_refusal
+    from skills.gemini_live.plugin import GeminiSession
+
+    builds = []
+    factory = lambda *a, **kw: (builds.append(a[0].output_allowance_tokens) or
+        GeminiSession(*a, connect=lambda *_a, **_kw: pytest.fail('only the Gemini serializer is used'), **kw))
+    host, options = host_world.host, LiveOptions()
+    base = list(host.messages)
+    for pad in range(4):
+        host.messages[:] = [*base, {'role': 'user', 'content': '"\\' * 24_000 + 'a' * pad}]
+        probe, _, _, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options,
+                                              _room_fact=False, opening_allowance_tokens=8_192)
+        chars4 = estimate_context_prompt_tokens([probe.wire], chars=True)
+        if chars4 % 4 == 0:
+            break
+    canonical, raw4, raw5 = estimate_context_prompt_tokens(host.messages, host.schemas), (chars4 + 3) // 4, (chars4 + 4) // 4
+    assert raw5 == raw4 + 1
+
+    def set_window(width):
+        limit = WindowLimit(width, 'total', 'provider_metadata') if width else None
+        host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=width))
+        host.plan = replace(host.plan, output_reserve_tokens=65_536, window_tokens=width or 0,
+            window_record=WindowRecord('voice', total=limit, declared=(limit,) if limit else (), reserve=10_000))
+
+    def width_for(measured_input, target):
+        w = math.ceil((measured_input + target) * 8 / 7)
+        while w - math.ceil(w / 8) != measured_input + target:
+            w += 1 if w - math.ceil(w / 8) < measured_input + target else -1
+        return w
+
+    def check(width, density_fn=None):
+        set_window(width)
+        if density_fn is not None:
+            monkeypatch.setattr(ce, 'resolve_main_token_density', density_fn)
+        builds.clear()
+        sess, req, ev, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options, _room_fact=False)
+        reply = sess.events[0]['setup']['generationConfig']['maxOutputTokens']
+        allowed = reply_allowance_tokens(caller_max_tokens=65_536, nano=True, owner_nano=True,
+            input_tokens=req.prompt_tokens_estimate, raw_input_tokens=req.prompt_tokens_bounded_estimate, window_tokens=width)
+        assert reply == ev['fit']['measurement']['reply_allowance_tokens'] == req.max_completion_tokens
+        assert ev['fit']['measurement']['response_reserve_tokens'] == max(10_000, reply)
+        assert req.candidate_raw_sha256 == ev['wire_sha256'] == sha256(canonical_json(sess.wire))
+        assert reply <= allowed and main_context_fit_refusal(req) is None
+        return reply, allowed, req.prompt_tokens_bounded_estimate
+
+    # Real local density witness valid for canonical and raw4 (raw4/2), dropping out at raw5: two fixed points
+    # (8,192 refused at raw4 vs 5-digit reply fitting at raw5); top-down pricing picks the larger safe one.
+    ce.record_token_density(host.ctx.drive_root, host.plan.model, prompt_chars=2 * raw4, prompt_tokens=raw4,
+        route_fp=host.plan.route_fp, basis=ce.MAIN_DENSITY_BASIS, view_kind=host.plan.view_kind)
+    reply, allowed, raw = check(raw5 + 28_000)
+    assert raw == raw5 and reply == allowed > 10_000
+
+    # Fixed-point raise/shrink, no-fixed-point 4<->5 edges (density 1 and 2), and upward density jump at raw5.
+    cold = lambda *_a, **_kw: (1.0, 'cold_estimate')
+    raise_d = lambda *_a, estimate_tokens, **_kw: (
+        (2.0, 'fresh_route_usage') if estimate_tokens <= (raw5 + canonical) // 2 else (1.0, 'cold_estimate'))
+    cases = [
+        (raw5 + 28_000, raise_d, raw5, None, True),
+        (width_for(raw4, 9_500), cold, raw4, 9_500, True),
+        (width_for(raw4, 10_000), raise_d, raw4, 9_999, False),
+        (width_for(raw4, 10_000), cold, raw4, 9_999, False),
+        (width_for(2 * raw4, 10_000), lambda *_a, estimate_tokens, **_kw: (
+            (4.0, 'fresh_route_usage') if estimate_tokens <= (raw5 + canonical) // 2 else (2.0, 'fresh_route_usage')), raw4, 9_999, False),
+        (width_for(2 * raw4, 10_000), lambda *_a, **_kw: (2.0, 'fresh_route_usage'), raw4, 9_999, False),
+        (raw5 + 28_000, lambda *_a, estimate_tokens, **_kw: (
+            (2.0, 'fresh_route_usage') if estimate_tokens <= (raw5 + canonical) // 2
+            else (1.0, 'cold_estimate') if estimate_tokens <= raw4 else (1.5, 'fresh_route_usage')), raw4, 9_999, False),
+    ]
+    for width, fn, exp_raw, exp_reply, exact in cases:
+        reply, allowed, raw = check(width, fn)
+        assert raw == exp_raw and (reply == allowed if exact else reply < allowed)
+        if exp_reply is not None:
+            assert reply == exp_reply
+
+    # Unknown window keeps the initial Nano allowance in one build; an open socket keeps its opening allowance.
+    set_window(None)
+    monkeypatch.setattr(ce, 'resolve_main_token_density', cold)
+    builds.clear()
+    sess, req, _, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options, _room_fact=False)
+    expected_unknown = reply_allowance_tokens(caller_max_tokens=65_536, nano=True, owner_nano=True, input_tokens=canonical)
+    assert builds == [expected_unknown] and req.max_completion_tokens == expected_unknown
+    set_window(raw5 + 28_000)
+    builds.clear()
+    sess, req, ev, _ = measure_session_wire(host, host.plan, host.messages, host.schemas, factory, options,
+                                            _room_fact=False, opening_allowance_tokens=12_345)
+    assert builds == [12_345] and sess.events[0]['setup']['generationConfig']['maxOutputTokens'] == 12_345
+    assert req.max_completion_tokens == ev['fit']['measurement']['response_reserve_tokens'] == 12_345
+
+
 @pytest.mark.parametrize('host_world', [('max', 1_000_000, 'estimator')], indirect=True)
 def test_running_low_trial_prices_the_catalog_it_will_send(host_world, monkeypatch):
     from ouroboros.llm_attempt import main_context_fit_refusal

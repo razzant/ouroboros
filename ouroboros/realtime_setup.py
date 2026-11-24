@@ -180,7 +180,7 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
     """
     import math
     from dataclasses import asdict, replace
-    from ouroboros.context_budget import reply_allowance_tokens
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS, reply_allowance_tokens
     from ouroboros.context_fit import estimate_context_prompt_tokens, measure_main_fit
     from ouroboros.context_measurement import reclaim_low_water_margin, required_book_addition
     from ouroboros.context_window import resolve_window
@@ -230,9 +230,9 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
         output_allowance_tokens=opening_allowance_tokens or min(ceiling, fit.measurement.reply_allowance_tokens), messages=messages)
     canonical = estimate_context_prompt_tokens(rows, schemas)
     raw_book = required_book_addition(plan, plan.initial_mode)
-    price_reply = plan.initial_mode == 'nano' and opening_allowance_tokens is None
-    while True:
-        session = factory(selected, options, observe=host.observe)
+    def measure(allowance):
+        item = replace(selected, output_allowance_tokens=allowance)
+        session = factory(item, options, observe=host.observe)
         bound = session.output_bound_tokens
         if bound is not None and (type(bound) is not int or bound < 1):
             raise RealtimeSetupError("output_bound", "provider output bound must be positive or unknown")
@@ -243,22 +243,43 @@ def measure_session_wire(host, plan, messages, schemas, factory, options, *, _ro
         request = AttemptRequest(model=host.turn.model, provider=host.turn.route.accounting_provider,
             drive_root=host.ctx.drive_root, task_id=host.ctx.task_id, source="agent.live_conversation",
             prompt_tokens_estimate=measured, prompt_tokens_bounded_estimate=raw,
-            max_completion_tokens=bound or selected.output_allowance_tokens, working_reserve_tokens=working,
+            max_completion_tokens=bound or item.output_allowance_tokens, working_reserve_tokens=working,
             allow_live_fetch=False, candidate_measurement_kind="canonical_json_v1",
             physical_context=replace(_physical_context_for_fit(fit), response_reserve_tokens=working))
         reserve = main_context_response_reserve(request)
         window = resolve_window(plan, reserve, root=host.ctx.drive_root, bound=plan.window_witness_bound)
-        if not price_reply or window.usable is None:
-            break
-        # The provider's archive may escape the transcript again. Rebuild once with the reply that the
-        # measured wire leaves, then measure those final bytes and the adapter's effective bound again.
-        reply = reply_allowance_tokens(caller_max_tokens=ceiling, nano=True,
+        reply = (reply_allowance_tokens(caller_max_tokens=ceiling, nano=True,
             owner_nano=plan.preferred_mode == 'nano', input_tokens=measured - book,
             raw_input_tokens=raw - raw_book, window_record=window)
-        if reply == selected.output_allowance_tokens:
-            break
-        selected = replace(selected, output_allowance_tokens=reply)
-        price_reply = False
+            if window.usable is not None else allowance)
+        return item, session, request, window, raw, ratio, basis, measured, book, reserve, reply
+
+    price_reply = (plan.initial_mode == 'nano' and opening_allowance_tokens is None
+                   and resolve_window(plan, plan.output_reserve_tokens, root=host.ctx.drive_root,
+                                      bound=plan.window_witness_bound).usable is not None)
+    if price_reply:
+        floor = min(NANO_MIN_HEADROOM_TOKENS, ceiling)
+        # Try representable decimal widths in [floor, ceiling] from largest to smallest: serialized
+        # allowance length depends at most on digit width on supported wires, while token density can
+        # drop as well as rise on +1 raw token. Always verify the actual candidate's final wire.
+        result = None
+        for width in range(len(str(ceiling)), len(str(floor)) - 1, -1):
+            band_lo, band_hi = max(floor, 10 ** (width - 1)), min(ceiling, 10 ** width - 1)
+            probe = selected.output_allowance_tokens if band_lo <= selected.output_allowance_tokens <= band_hi else band_hi
+            trial = measure(probe)
+            reply = trial[-1]
+            if reply < band_lo:
+                continue
+            candidate = min(reply, band_hi)
+            final = trial if candidate == probe else measure(candidate)
+            if candidate <= final[-1]:
+                result = final
+                break
+        if result is None:
+            result = measure(floor)
+    else:
+        result = measure(selected.output_allowance_tokens)
+    selected, session, request, window, raw, ratio, basis, measured, book, reserve, _ = result
     wire = canonical_json(session.wire)
     capacity = window.total_equivalent if window.usable is not None else None
     deficit = max(0, measured + reserve - capacity) if capacity is not None else None
