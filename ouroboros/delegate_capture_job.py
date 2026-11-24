@@ -132,7 +132,7 @@ def accept_result(root, entry, result, *, custody_held=None):
             # The same proof a reopened Git capture needs: these bytes are the run's pinned attempt.
             from ouroboros.tools.delegate_integration import _declared_capture_gap
 
-            gap, retry = _declared_capture_gap(entry, path.parent, raw, json.loads(raw.decode("utf-8")))
+            gap, retry = _declared_capture_gap(entry, path.parent, raw, json.loads(raw.decode("utf-8")), root)
             if gap:
                 raise (OSError if retry == "transient" else ValueError)(f"prepared capture not published: {gap}")
         if (not entry.patch_captured or entry.patch_manifest_sha != sha) and not custody.record_patch_captured(

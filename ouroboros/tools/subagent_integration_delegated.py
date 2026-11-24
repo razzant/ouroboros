@@ -330,7 +330,7 @@ def _git_unwritten_disposition(ctx, entry, disposition: str, *, staging_proof: b
                 f"{facts.get('target_root') or entry.target_root} ({staged}) and Git staging completed, but its "
                 f"durable disposition was not recorded.{delivered} {next_step} The saved result and pins are kept."
                 f"{_native_gap_note(native_gap)}")
-    return _publish_tool_result(ctx, ToolResult("error", "TOOL_REPORTED_FAILURE", text,
+    return _publish_tool_result(ctx, ToolResult("blocked", "INTEGRATION_BLOCKED", text,
         {"target_files_changed": False, **(transfer if transfer and changed else {}), "disposition_recorded": False,
          **({"native_capture_effect": "unknown"} if native_gap else {})}))
 
@@ -677,11 +677,18 @@ def _integrate_delegated_patch(
                                                        captured_before=captured_before,
                                                        custody_held=(drive, entry.task_id) if owner else None)
             note = ""
-            if owner:
-                note = refresh_native_capture(drive, entry.task_id, locked=True,
-                    read_refusal=lambda: _si()._shared_read_refusal(ctx, pathlib.Path(entry.target_root), "read_file"))
-            elif (_si().load_task_result(drive, entry.task_id) or {}).get("workspace_mode") == "self_worktree":
-                note = "Native capture promotion refused: this run target does not match a registered native write root."
+            try:  # this decision's published result and its typed effect stand whatever the refresh meets
+                if owner:
+                    note = refresh_native_capture(drive, entry.task_id, locked=True,
+                        read_refusal=lambda: _si()._shared_read_refusal(ctx, pathlib.Path(entry.target_root), "read_file"))
+                elif (_si().load_task_result(drive, entry.task_id) or {}).get("workspace_mode") == "self_worktree":
+                    note = "Native capture promotion refused: this run target does not match a registered native write root."
+            except Exception as exc:  # noqa: BLE001 - reported beside the decision, never raised over it
+                log.warning("Native capture refresh after run %s's decision failed", rid, exc_info=True)
+                note = ((f"Native capture publication is still owed: task {entry.task_id}'s capture was not refreshed"
+                         if owner else f"Whether task {entry.task_id}'s native capture needs a refresh is unknown: "
+                         "its task result could not be read") + f" after this decision ({type(exc).__name__}: {exc}); "
+                        "this decision's result above is unchanged.")
             result = append_published_text(ctx, result, "\n" + note if note else "")
         from ouroboros.delegate_terminal import refresh_disposed_reconciliation
 
@@ -1120,7 +1127,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
             " ⚠️ the durable disposition row could ALSO not be written — record this "
             "outcome yourself before any further integration attempt."
         )
-        return _publish_tool_result(ctx, ToolResult("error", "TOOL_REPORTED_FAILURE", (
+        return _publish_tool_result(ctx, ToolResult("blocked", "INTEGRATION_BLOCKED", (
             f"⚠️ INTEGRATE_APPLIED_UNSTAGED: run {rid}'s result transfer in {target} "
             f"({len(touched)} file(s)) is incomplete ({staging_failure[:300]}), "
             "and the apply could not be cleanly reversed. Do NOT retry this call — the "

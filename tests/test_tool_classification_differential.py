@@ -564,6 +564,16 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "INTEGRATE_NATIVE_CAPTURE": (True, "integration_blocked"),
     "INTEGRATE_NATIVE_CAPTURE_UNAVAILABLE": (True, "integration_blocked"),
     "INTEGRATE_RESULT_UNREADABLE": (True, "integration_blocked"),
+    # The delegated Git lane's own refusals: an unreceipted disposition
+    # (INTEGRATE_DISPOSITION_UNWRITTEN) and an incomplete, unreversed staging
+    # (INTEGRATE_APPLIED_UNSTAGED) are the INTEGRATE_ family's texts. The retired
+    # pair recorded (True, integration_blocked) for both identifiers, and their
+    # typed publications restore that exact answer instead of the generic provider
+    # failure, so the bare text and the native pair are asserted live here.
+    "INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_DISPOSITION_UNWRITTEN": (True, "integration_blocked"),
+    "native:INTEGRATION_BLOCKED:INTEGRATE_APPLIED_UNSTAGED": (True, "integration_blocked"),
     # The harvest puts every identifier first. A standalone capture failure
     # is an error; the actual successful-write suffix is pinned separately.
     "OUTPUT_CAPTURE_FAILED": (True, "error"),
