@@ -1059,3 +1059,42 @@ def automatic_launch_allowed(intent: str, data_dir: pathlib.Path, log: Any) -> b
             print("Ouroboros is stopped. Use Start to resume.", flush=True)
             return False
     return True
+
+
+def launch_settings(data_dir: pathlib.Path, document: pathlib.Path, load: Callable[[], dict],
+                    apply: Callable[[dict], None], *, attest_password: bool) -> tuple[dict, str]:
+    """Keep normal launcher settings; report what this producer can preserve through Reset."""
+    from ouroboros.launch_roots import reset_handed_off, same_location
+    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
+    from ouroboros.settings_integrity import (
+        drop_projection, own_reset_settings, reset_bind_protection, reset_operator_password,
+    )
+
+    password = reset_operator_password(os.environ)
+    post = os.environ.copy()
+    drop_projection(post)
+    key = "OUROBOROS_SERVER_HOST"
+    host = (post.get(key) or "").strip() or SETTINGS_DEFAULTS[key]
+    proof = (reset_bind_protection(host, password)
+             if password is not None and (attest_password or not password)
+             and own_reset_settings(data_dir, document, os.environ) else "")
+    if same_location(document, pathlib.Path(data_dir) / "settings.json") and reset_handed_off(data_dir):
+        drop_projection(os.environ)
+        settings = {}
+    else:
+        settings = load()
+        apply(settings)
+    return settings, f"{proof} {host}" if proof and reset_operator_password(os.environ) == password else ""
+
+
+def apply_launcher_bind(environ: dict, settings: dict, protection: str) -> str:
+    """Publish this spawn's bind inputs and their source, not the last server's protection fact."""
+    from ouroboros.settings_integrity import LAUNCHER_RESET_PROTECTION_ENV
+
+    key = "OUROBOROS_SERVER_HOST"  # not exported by ordinary Settings projection
+    saved_host = str(settings.get(key) or "").strip()
+    source = "environment" if str(environ.get(key) or "").strip() else "settings"
+    if saved_host:
+        environ.setdefault(key, saved_host)  # preserve operator override over an unauthored default
+    environ[LAUNCHER_RESET_PROTECTION_ENV] = protection
+    return source

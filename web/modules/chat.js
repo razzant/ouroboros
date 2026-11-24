@@ -18,7 +18,7 @@ import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
 import { createTextBubbles } from './chat_text_bubble.js';
 import { noticeLine } from './host_notice_text.js';
 import { createCatchUp } from './room_retire.js';
-import { createChatPreview } from './chat_preview.js';
+import { createChatPreview, createRoomProfileLifecycle } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
@@ -116,6 +116,7 @@ import {
     upsertToolFoldRow,
 } from './chat_render_batch.js';
 import { measure } from './layout_batch.js';
+import { archiveDoor } from './room_archive.js';
 import { placeToolDiagnostic, placeReplayedEvidence } from './verification_presentation.js';
 import {
     boundActivityPreview,
@@ -194,8 +195,14 @@ export function createChatInstance({
     const container = mountEl || document.getElementById('content');
     const chatSessionId = getOrCreateChatSessionId(sessionStorage, globalThis.crypto);
     const isMain = chatId === 1;
-    // Per-thread storage so a project thread never bleeds into the main chat.
-    const storeKey = (base) => (isMain ? base : `${base}:${chatId}`);
+    const roomProfile = createRoomProfileLifecycle({
+        ws, doc: document, chatId, isMain, isProjectOpening,
+        isDestroyed: () => destroyed, isLeaving: () => leaving,
+        readHistory: args => apiClient.chatHistory(args), nextRecentVersion: () => ++recentRequest,
+        syncHistory, loadUiPreferences, getPreview: () => preview, reconcileSavedSends,
+        onPreviewShown: () => { updateMessagesPadding(); reading.followAfterLayout(true); },
+    });
+    const { storeKey, foreignProfile, fetchHistory, awaitInitialHydration, waitForHydrationWindow } = roomProfile;
 
     const page = document.createElement('div');
     page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
@@ -328,10 +335,6 @@ export function createChatInstance({
     let historyLoaded = false;
     let historySyncPromise = null;
     let lastHistorySyncSucceeded = false;
-    // Initial hydration stays shared after success; failure resets it. Reconnect and scheduled reads bypass it.
-    let initialHydrationPromise = null;
-    // one-shot idle gate for Main's deferred first hydration.
-    let hydrationGatePromise = null;
     // One derived physical coverage/status for the mounted reading window.
     let historyWindow = null;
     let _hasNewActivity = false;
@@ -2137,23 +2140,6 @@ export function createChatInstance({
     // Host-owned empty state: never a bubble, a history row or a model reply.
     const emptyWelcome = isMain ? mountEmptyChatWelcome(messagesDiv) : null;
 
-    // Hydration triggers share one sticky request; reconnect/resync read again.
-    const awaitInitialHydration = () => leaving ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory());
-
-    // Main briefly yields hydration to an opening Project, with a hard bound.
-    const MAIN_HYDRATION_MAX_DEFER_MS = 3500;
-    function waitForHydrationWindow() {
-        if (!isMain) return Promise.resolve();
-        return hydrationGatePromise ||= new Promise((resolve) => {
-            const deadline = Date.now() + MAIN_HYDRATION_MAX_DEFER_MS;
-            // Each look waits while a Project is still opening, until the bound; a destroyed room waits for nothing.
-            const attempt = () => (!destroyed && Date.now() < deadline && isProjectOpening?.()
-                ? setTimeout(attempt, 200) : resolve());
-            if (typeof requestIdleCallback === 'function') requestIdleCallback(attempt, { timeout: 1000 });
-            else setTimeout(attempt, 50);
-        });
-    }
-
     const historicalTerminals = new Map();
     const pendingHistoryUpserts = new Map();
     const pendingLiveEvictions = new Set();
@@ -2415,6 +2401,7 @@ export function createChatInstance({
 
     async function syncHistory({ fromReconnect = false } = {}) {
         if (destroyed || leaving) return false;
+        if (foreignProfile()) return false;  // the socket serves another profile: read nothing into this window (#3294)
         if (historySyncPromise) return historySyncPromise;
         historySyncPromise = (async () => {
             const startedVisit = visit;
@@ -2430,10 +2417,10 @@ export function createChatInstance({
                 // An empty feed shows the read in flight (#1102); a painted one stays.
                 if (historyControls.beginRecent()) syncLoadOlderControl();
                 const data = await fetchHistory(null, { signal: abort.signal });
-                // Closed or left since (`leave` counts a visit), a room takes no late response.
-                if (destroyed || startedVisit !== visit) {
+                // A closed, left or superseded room takes no late response.
+                if (destroyed || startedVisit !== visit || foreignProfile()) {
                     lastHistorySyncSucceeded = false;
-                    initialHydrationPromise = null;
+                    roomProfile.resetInitialHydration();
                     return false;
                 }
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
@@ -2471,7 +2458,7 @@ export function createChatInstance({
                 liveCardBound.settle({ rebuilt: wasFirstLoad || armedAtStart, size: liveCardRecords.size });
                 modelWaits.retainCards(liveCardRecords);
                 // Later hydration joins this successful source read.
-                initialHydrationPromise = historySyncPromise;
+                roomProfile.settleInitialHydration(historySyncPromise);
                 syncLoadOlderControl();
                 // A first opening follows the newest message (owner 2026-07-10,
                 // 2026-10-05); an in-room intent still awaiting data lands first.
@@ -2483,13 +2470,14 @@ export function createChatInstance({
                     reading.followAfterLayout();
                 }
                 readReceipt.settle();
+                roomProfile.noteCanonicalHistory(wasFirstLoad);
                 return messages.length > 0;
             } catch (err) {
-                if (destroyed || startedVisit !== visit) { initialHydrationPromise = null; return false; }
+                if (destroyed || startedVisit !== visit) { roomProfile.resetInitialHydration(); return false; }
                 lastHistorySyncSucceeded = false;
                 preview.failed(err);
                 emptyWelcome?.historyRead(false);
-                initialHydrationPromise = null;
+                roomProfile.resetInitialHydration();
                 // Migration keeps a calm note and retries through the existing 700 ms scheduler.
                 historyControls.endRecent(err); syncLoadOlderControl();
                 if (isStoreMigrating(err)) { historyResyncScheduler.schedule(true); return false; }
@@ -2514,13 +2502,13 @@ export function createChatInstance({
         shown: () => !destroyed && !leaving && !page.hidden && isInstanceVisible() });
     const readReceipt = createProjectReadReceipt({ onNote: sharedRead.sample,
         read: async (fresh, whole) => {
-            await (!fresh && (catchUp.reading || !catchUp.owed && initialHydrationPromise) || historyPager.read({ whole }));
+            await (!fresh && (catchUp.reading || !catchUp.owed && roomProfile.initialHydration) || historyPager.read({ whole }));
             return lastHistorySyncSucceeded && !catchUp.owed;
         },
         // A destroyed page reports hidden===false, hence the lifecycle flag.
-        isShown: () => !destroyed && !leaving && !page.hidden,
+        isShown: () => !destroyed && !leaving && !page.hidden && !archive?.active,
         // A place still being restored is not where the reader is.
-        isReadingLatest: latest => !destroyed && !catchUp.owed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
+        isReadingLatest: latest => !archive?.active && !destroyed && !catchUp.owed && !reading.pending && !replies.revealing && isInstanceVisible() && isAtNewestMessage(latest, {
             ...newestFacts, atBottom: () => reading.nearBottom() && !historyPager.getState().canNewer,
         }),
         onReadingLatest, arriving: () => reading.arriving, delivered: newestFacts.delivered,
@@ -2536,19 +2524,12 @@ export function createChatInstance({
         land: (latest, token) => reading.land(() => newestMessageOffset(latest, newestFacts), token),
     });
 
-    const opening = (async () => {
-        // The owners below exist first: no read stands between opening and saved text.
-        await null;
-        if (!destroyed && preview.show()) { updateMessagesPadding(); reading.followAfterLayout(true); }
-        await loadUiPreferences();
-        // Main waits for hydration; Projects pass through. History reads share one flight.
-        await waitForHydrationWindow();
-        if (destroyed) return;
-        await awaitInitialHydration();
-        // A message this tab kept across a reload that the first read did not show saved is in doubt.
-        if (!destroyed) unconfirmed.reconcile(({ frame, reply, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
+    function reconcileSavedSends() {
+        unconfirmed.reconcile(({ frame, reply, views, ts }) => addMessage(frame.content, 'user', false, ts || null,
             false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views, reply }));
-    })();
+    }
+
+    const opening = roomProfile.startOpening();
 
     // The composer (composer.js): its field, the room's capsules, attachments and the send path.
     composer = createComposer({ page, byId, ws, replies, chatSessionId, isMain, chatId, projectId, storeKey,
@@ -2768,16 +2749,6 @@ export function createChatInstance({
     let beforePartialIds = null;
     const retainedRecentIds = () => new Set([...recentHistoryIds, ...(beforePartialIds || [])]);
     let recentRequest = 0, recentApplied = 0;
-    // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
-    async function fetchHistory(cursor, options = {}) {
-        const recentVersion = cursor == null ? ++recentRequest : 0;
-        try {
-            return { ...await apiClient.chatHistory({ chatId, cursor, ...options }), recentVersion };
-        } catch (error) {
-            if (!destroyed && !leaving && !options.signal?.aborted) preview.refused(error);
-            throw error;
-        }
-    }
     // Admit each newest response once, including ↓; the preview follows it.
     function acceptRecentWindow(data, messages) {
         if (data.recentVersion <= recentApplied) return false;
@@ -2785,7 +2756,7 @@ export function createChatInstance({
         const whole = catchUp.confirmWindow(data);
         preview.save(messages, data);
         // The newest admitted window (↓ too) owns the failure note.
-        historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor));
+        historyControls.endRecent(whole ? null : new Error('Some saved history could not be loaded.'), Boolean(data.page_cursor), data);
         recentCoverage = data.coverage ?? null;
         recentHasOrigins = messages.some(row => row.origin_projected);
         readReceipt.recent(data);
@@ -2874,10 +2845,13 @@ export function createChatInstance({
         }
     }
 
+    const historyVisible = () => isInstanceVisible() && !messagesDiv.closest('[inert]')
+        && !document.body.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
+        && !document.body.classList.contains('project-panel-open')));
+    const archive = isMain && !asPanel ? archiveDoor({ notes: pageNote, returnFocus: messagesDiv,
+        readReceipt, syncHistory, isVisible: historyVisible }) : null;
     const historyControls = createHistoryControls(messagesDiv, pageNote || page.querySelector('.chat-panel-statusbar'), {
-        isVisible: () => isInstanceVisible() && !messagesDiv.closest('[inert]')
-            && !document.body.classList.contains('nav-drawer-open') && (asPanel || (!isProjectOpening?.()
-            && !document.body.classList.contains('project-panel-open'))),
+        archive, isVisible: historyVisible,
     });
     const { olderButton: loadOlderBtn } = historyControls;
 
@@ -2885,6 +2859,7 @@ export function createChatInstance({
         fetchPage: fetchHistory,
         isAlive: () => !destroyed && !leaving,
         applyPage: (messages, descriptor) => {
+            if (foreignProfile()) return;  // another profile's history rows never paint here (#3294)
             const oldRecentIds = retainedRecentIds();
             const admitted = descriptor.direction === 'latest' && (acceptRecentWindow(descriptor, messages) || descriptor.rechained);
             pageHistoryIds.set(descriptor.id, new Set(messages.flatMap(historyRowIds)));
@@ -2906,6 +2881,7 @@ export function createChatInstance({
         },
         // Rows stored since the newest read join its window (and the saved preview).
         applyArrivals: (messages, { window, fromReconnect }) => {
+            if (foreignProfile()) return;
             preview.append(messages);
             for (const id of messages.flatMap(historyRowIds)) recentHistoryIds.add(id);
             applyHistoryMessages(messages, { fromReconnect });
@@ -2919,7 +2895,7 @@ export function createChatInstance({
     // The saved text shown until the first canonical read (chat_preview.js); `self` carries room_retire.js's kept selection.
     let self = null;
     const preview = createChatPreview({ feed: messagesDiv, room: [chatId, projectId], label: senderLabel,
-        mutate: withStableViewport, kept: () => self?.keptRanges });
+        mutate: withStableViewport, kept: () => self?.keptRanges, canShow: () => ws?.canShowSavedProfile?.() === true });
 
     function syncLoadOlderControl(snapshot = historyPager.getState()) {
         if (destroyed || leaving) return;
@@ -3168,6 +3144,7 @@ export function createChatInstance({
     const isMyLogThread = msg => chatLogThreadAccepts(msg, isMain, chatId, state.projectChatIds);
 
     onWs('chat', (msg) => {
+        if (foreignProfile()) return;  // live frames of another profile never render (#3294)
         if (!isMyThread(msg)) return;
         if (msg.system_type === 'initialization_notice') {
             unconfirmed.unsettle(msg.client_message_id ? [msg.client_message_id] : undefined);
@@ -3468,12 +3445,13 @@ export function createChatInstance({
         // True once a history snapshot has actually been fetched and painted;
         // app.js uses it to decide whether a reopen needs a forced repaint.
         hasPaintedHistory: () => historyLoaded && lastHistorySyncSucceeded,
+        archiveOpen: () => archive?.active,
         // Unsendable state (staged Files, an upload in flight, an unsaved send and its Send again): room_retire.js keeps
         // such a room even when its project goes away.
         hasPendingWork: () => composer.hasPendingWork() || unconfirmed.count > 0,
         // Another place covers the room: a reader or file dialog its card opened closes, its place is kept; `pause`
         // (another place replaces it) also pauses what plays. Staged files stay.
-        closeTransient: (pause) => { roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
+        closeTransient: (pause) => { archive?.close(); roomWork?.leave(); keepPlace(); chatMedia.closeTransient(pause); },
         // Room leaving screen (room_retire.js), on exit, while away: place kept, paint receipt and
         // reads stopped, neither shown nor read (reader and playback `closeTransient`'s); `stay` returns.
         leave: () => {

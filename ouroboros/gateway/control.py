@@ -13,9 +13,10 @@ from starlette.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ouroboros import deployment_policy as _deployment_policy, get_version
-from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion
 from ouroboros.gateway.ws import broadcast_ws_sync
 from ouroboros.gateway import update_progress
+from ouroboros.server_control import request_owner_restart, restart_consumer_is_live
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -24,17 +25,8 @@ _RECENT_VISIBLE_COMMANDS: Dict[str, float] = {}
 _VISIBLE_COMMAND_DEDUPE_SEC = 5.0
 
 
-def _request_restart(request: Request) -> bool:
-    # Every caller here is an OWNER action through the control surface (Reset All
-    # Data, Rollback, Apply Update) — never the agent's own restart tool, which
-    # goes through the supervisor. Saying so lets the re-exec re-read the runtime
-    # mode from settings instead of re-pinning the inherited boot baseline. The
-    # bool tells the caller whether a restart callback existed to accept it.
-    callback = getattr(getattr(request.app, "state", None), "request_restart", None)
-    if callable(callback):
-        callback(owner=True)
-        return True
-    return False
+def _request_restart(request: Request, *, require_consumer: bool = False) -> bool:
+    return request_owner_restart(getattr(request.app, "state", None), require_consumer=require_consumer)
 
 
 def _runtime_branch_defaults(request: Request) -> tuple[str, str]:
@@ -136,45 +128,50 @@ def _release_repo_mutation_lock(lock_fh: Any) -> None:
 
 
 async def api_reset(request: Request) -> JSONResponse:
-    """Reset all runtime data (state, memory, logs, settings) but keep repo."""
-    import shutil
-
+    """Read the durable outcome or admit a versioned Reset to its restart owner."""
+    from supervisor.state_initialization import (RESET_CONFIRMATION, ResetProtectionUnavailable, confirmation_refusal,
+                                                hand_off_runtime_reset, request_runtime_reset, reset_status)
     data_dir = request_drive_root(request)
-    lock_fh, lock_error = _acquire_repo_mutation_lock()
-    if lock_error is not None:
-        return lock_error
-    try:
-        from supervisor.message_bus import try_get_bridge
+    if request.method in {"GET", "HEAD"}:
+        return JSONResponse(reset_status(data_dir))
+    body = await request_json_or(request, {})
+    # Version both the door and confirmation so old clients cannot mistake acceptance for refusal.
+    if (request.url.path.rstrip("/") != "/api/reset/v1"
+            or not isinstance(body, dict) or body.get("confirm") != f"{RESET_CONFIRMATION}:v1"):
+        return json_error(confirmation_refusal({}), 400, reason="reset_confirmation_required")
+    state = request.app.state
+    if not callable(getattr(state, "request_restart", None)) or not restart_consumer_is_live(state):
+        return json_error("This server cannot hand Reset to a new process.", 409)
 
-        bridge = try_get_bridge()
-        if bridge is not None:
-            bridge.panic.invalidate_owner()
-        from ouroboros.launch_roots import durable_basis
-        from supervisor.state_initialization import mark_pending, supervisor_evidence
-
-        basis, _why = durable_basis(data_dir, evidence=supervisor_evidence)  # read before state/ goes: Reset keeps it
-        deleted = []
-        # Keep synchronization files until restart. Removing the directory that
-        # contains the held managed-update lock would let a second updater enter.
-        for subdir in ("state", "memory", "logs", "archive", "task_results", "uploads"):
-            target = data_dir / subdir
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-                deleted.append(subdir)
-        settings_file = data_dir / "settings.json"
-        if settings_file.exists():
-            settings_file.unlink()
-            deleted.append("settings.json")
-        # The owner's explicit fresh start (#1307): boot initializes a new state from
-        # this pending witness instead of reading the wiped root as a lost one; the work
-        # folders it never deletes keep their basis (#1239).
-        mark_pending(data_dir, origin="owner_reset", work_root_basis=basis)
-        _request_restart(request)
-        return JSONResponse({"status": "ok", "deleted": deleted, "restarting": True})
-    except Exception as exc:
-        return json_exception(exc)
-    finally:
-        _release_repo_mutation_lock(lock_fh)
+    def request_and_restart() -> JSONResponse:
+        from ouroboros.store_switch import read_switch_intent
+        proof = getattr(state, "reset_launch_protection", None)
+        if not restart_consumer_is_live(state):
+            return json_error("This server cannot hand Reset to a new process.", 409)
+        if not callable(proof) or not proof(data_dir):
+            return json_error(str(ResetProtectionUnavailable()), 409, reason="reset_protection_unproved")
+        lock_fh, lock_error = _acquire_repo_mutation_lock()
+        if lock_error is not None:
+            return lock_error
+        try:
+            if read_switch_intent(data_dir) is not None:
+                return json_error("A version switch is pending.", 409)
+            reset_id = request_runtime_reset(data_dir, launch_protection=lambda: proof(data_dir))
+            try:  # old credentials and the old generation's Panic door remain valid until exit
+                if not _request_restart(request, require_consumer=True):
+                    raise RuntimeError("No restart callback accepted Reset")
+            except Exception as exc:
+                hand_off_runtime_reset(data_dir, [str(exc)])
+                raise
+            state.reset_update_lock, lock_fh = lock_fh, None  # held until exit
+            return JSONResponse({"status": "requested", "restarting": True, "reset_id": reset_id})
+        except ResetProtectionUnavailable as exc:
+            return json_error(str(exc), 409, reason="reset_protection_unproved")
+        except Exception as exc:
+            return json_exception(exc)
+        finally:
+            _release_repo_mutation_lock(lock_fh)
+    return await run_sync_to_completion(request_and_restart)
 
 
 async def api_command(request: Request) -> JSONResponse:
@@ -326,7 +323,7 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
     Returns the HTTP status and payload."""
     from supervisor.git_ops import DRIVE_ROOT, REPO_DIR, git_capture, rollback_to_version
     from supervisor.git_ops_reset import IndexLockRefusal, refusal_parts
-    from ouroboros.store_switch import switch_or_reset
+    from ouroboros.store_switch import reset_profile_refusal, switch_or_reset
 
     reason = _ROLLBACK_REASONS[door]
     if managed := _body_refusal():
@@ -341,6 +338,8 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
         rc, target_sha, error = git_capture(["git", "rev-parse", "--verify", f"{target}^{{commit}}"])
         if rc != 0:
             return 400, {"error": error or f"cannot resolve {target}"}
+        if incompatible := reset_profile_refusal(DRIVE_ROOT, REPO_DIR, target_sha.strip()):
+            return 409, {"error": incompatible, "reason": "reset_profile_unavailable_in_target"}
         blockers = _quiesce_repo_writers("manual_rollback")
         if blockers:
             fence = _fence_failure(blockers)

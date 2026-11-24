@@ -166,7 +166,9 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/schedules/{schedule_id}/action` | explicit action and reason (§5 Schedules and follow-ups) |
 | DELETE | `/api/schedules/{schedule_id}` | |
 | POST | `/api/command` | |
-| POST | `/api/reset` | |
+| GET | `/api/reset` | status (§15) |
+| POST | `/api/reset` | legacy; refuses |
+| POST | `/api/reset/v1` | confirmed intent (CLIENT_CONTRACT §15) |
 | GET | `/api/git/log` | |
 | POST | `/api/git/rollback` | |
 | POST | `/api/git/promote` | |
@@ -195,6 +197,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/projects/{project_id}/folder` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
+| GET | `/api/chat/archive` | |
 | GET | `/api/chat/search` | |
 | GET | `/api/recall` | neighbour door (CLIENT_CONTRACT) |
 | GET | `/api/logs/{name}` | |

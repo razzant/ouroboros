@@ -283,7 +283,7 @@ def _run_docker_ui_assertions(url: str) -> None:
 
 
 @pytest.fixture()
-def direct_server_with_data(tmp_path, ui_candidate_checkout):
+def direct_server_with_data(tmp_path, ui_candidate_checkout, request):
     # The session's copy (tests/conftest.py) in this case's custody; its sentinels prove each boot's origin.
     with case_checkout(pathlib.Path(REPO_ROOT), ui_candidate_checkout) as candidate, MockLLMServer() as llm:
         checkout = candidate.path
@@ -303,6 +303,8 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             OUROBOROS_STARTER_SKILLS='["builtin/telegram"]', OUROBOROS_STARTER_SKILLS_TURN_ON=False,
         )
         (data_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        if seed_before_boot := getattr(request, "param", None):
+            seed_before_boot(data_dir)  # e.g. a witnessed old install, before the first registry writer
         env = isolated_environment(tmp_path, checkout, process_temp=owned_process_temp())
         env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1",

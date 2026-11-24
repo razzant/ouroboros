@@ -34,12 +34,16 @@ class _Connection:
     its receive loop directly, as before.
     """
 
-    __slots__ = ("ws", "outbox", "writer")
+    __slots__ = ("ws", "outbox", "writer", "profile_scope")
 
-    def __init__(self, ws: Any) -> None:
+    def __init__(self, ws: Any, profile_scope: str = "") -> None:
         self.ws = ws
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.writer = asyncio.get_running_loop().create_task(self._write(), name="ws-writer")
+        # The serving generation's ONE frozen data-profile scope (ServedUI.apply at admission,
+        # via ServedUI.serving_profile_scope); "" when no generation was applied. Live chat
+        # admission compares a frame's claim against it (#3294).
+        self.profile_scope = profile_scope
 
     async def _write(self) -> None:
         while True:
@@ -141,12 +145,23 @@ async def close_all_ws(*, code: int = 1012, reason: str = "Server restarting") -
             pass
 
 
-def _register(ws: Any) -> _Connection:
-    """Open the socket's writer (on the loop) and list the connection for broadcasts."""
-    connection = _Connection(ws)
+def _register(ws: Any, profile_scope: str = "") -> _Connection:
+    """Queue the connection's own scope before listing it for broadcasts, without awaiting a send."""
+    connection = _Connection(ws, profile_scope)
+    if profile_scope:
+        frame = json.dumps({"type": "connection_profile", "profile_scope": profile_scope})
+        connection.outbox.put_nowait((frame, "connection_profile"))
     with _ws_lock:
         _ws_clients.append(connection)
     return connection
+
+
+def _profile_scope_mismatch(serving_scope: str, claimed: str) -> bool:
+    """True only on POSITIVE proof that a frame's page belongs to another data profile: the serving
+    connection's scope and the frame's claim are both proven (non-empty) and differ. An unproven
+    serving connection, or a frame that carries no claim (a legacy page), is no proof and admits;
+    Panic and the product controls never pass through this check at all (#3294)."""
+    return bool(serving_scope) and bool(claimed) and claimed != serving_scope
 
 
 def _unregister(connection: _Connection) -> int:
@@ -438,7 +453,14 @@ async def _accept_chat_after(websocket: WebSocket, previous: asyncio.Task | None
 
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    connection = _register(websocket)
+    # This connection's data-profile scope is the serving generation's ONE scope, frozen at
+    # admission (ServedUI.apply, after the data root is admitted) and read here from memory:
+    # no disk I/O and no awaited read before the receive loop, so Panic and the control path
+    # never wait behind it. "" only on an app that never applied a generation: no proof,
+    # admission stays as it was (#3294).
+    served_ui = getattr(getattr(websocket.app, "state", None), "served_ui", None)
+    profile_scope = served_ui.serving_profile_scope() if served_ui is not None else ""
+    connection = _register(websocket, profile_scope)
     with _ws_lock:
         total = len(_ws_clients)
     log.info("WebSocket client connected (total: %d)", total)
@@ -506,6 +528,16 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                                 "level": "warning", "message": "Panic emergency owner is unavailable."}}))
                         continue  # Never enter ordered chat acceptance or ordinary command admission.
                     if msg_type == "chat":
+                        # Live admission is bound to this serving connection's confirmed profile:
+                        # a frame whose page proves a DIFFERENT profile is not saved here (#3294).
+                        # Panic above and the command controls below never pass through this gate.
+                        claimed_scope = str(msg.get("profile_scope") or "")
+                        if _profile_scope_mismatch(connection.profile_scope, claimed_scope):
+                            await websocket.send_text(_initialization_notice(
+                                str(msg.get("client_message_id") or ""), thread_id,
+                                reason="⚠️ This page was opened under a different data profile; the message "
+                                       "was not saved. Reload the page to continue."))
+                            continue
                         client_surface = normalize_client_surface(msg.get("client_surface"))
                         task_metadata: dict[str, Any] = {
                             "reply_to": msg.get("reply_to", ""),

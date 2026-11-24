@@ -326,7 +326,14 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert by_token["GET /api/tasks/{task_id}"]["path_params"] == ["task_id"]
     assert by_token["GET /api/extensions/{skill}/module/{entry:path}"]["path_params"] == ["skill", "entry"]
     assert all(entry["typed"] for entry in document["http"]), "every indexed route publishes its shapes"
-    assert by_token["POST /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
+    assert by_token["GET /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
+    reset = by_token["POST /api/reset/v1"]
+    assert reset["request"]["schemas"] == ["ResetRequest"]
+    assert reset["responses"]["200"]["schemas"] == ["ResetResponse"]
+    legacy = by_token["POST /api/reset"]["responses"]
+    assert {status: body["schemas"] for status, body in legacy.items()} == {
+        "400": ["ErrorResponse"], "409": ["ErrorResponse"],
+    }
     assert by_token["POST /api/claudexor/account-resets"]["headers"] == ["Idempotency-Key!"]
     login = by_token["POST /api/claudexor/login"]["responses"]
     assert login["200"]["schemas"] == ["ClaudexorLoginJobResponse"]

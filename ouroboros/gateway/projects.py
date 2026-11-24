@@ -462,7 +462,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
         if working_dir and not str(entry.get("working_dir") or "").strip():
             # create_project was idempotent for an existing row — bind the folder now.
             update_project(drive_root, entry["id"], working_dir=working_dir)
-        if _existing and provenance == "none":
+        if not entry["created"] and provenance == "none":
             # Source-less repeat create of an EXISTING project is a pure idempotent
             # lookup: provenance/clone_url/trusted_at are ADDITIVE HISTORICAL FACTS
             # (registry docstring + ARCHITECTURE) and must not be clobbered to
@@ -480,7 +480,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
             return JSONResponse({"error": f"project {entry['id']!r} changed while it was being created, so No folder "
                                           "was not recorded; see its Working folder…", "reason_code": exc.reason},
                                 status_code=409)
-        payload: dict = {"project": stamped or entry}
+        payload: dict = {"project": {**(stamped or entry), "created": entry["created"]}}
         if init_git_warnings:
             from ouroboros.utils import append_jsonl
             payload["init_git_warnings"] = init_git_warnings

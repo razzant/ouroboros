@@ -87,7 +87,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/schedules/{schedule_id}/action",
     "DELETE /api/schedules/{schedule_id}",
     "POST /api/command",
+    "GET /api/reset",
     "POST /api/reset",
+    "POST /api/reset/v1",
     "GET /api/git/log",
     "POST /api/git/rollback",
     "POST /api/git/promote",
@@ -118,6 +120,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/chat/history",
     "GET /api/chat/search",
     "GET /api/recall",
+    "GET /api/chat/archive",
     "GET /api/logs/{name}",
     "GET /api/logs/{name}/raw",
     "POST /api/chat/upload",
@@ -252,7 +255,7 @@ _MAINTENANCE = "400,409,503:ClaudexorMaintenanceProblem"
 _CLAWHUB_ERRORS = "400,404,429,502:ErrorResponse"
 _INSTALL = "200:MarketplaceInstallResponse 400:MarketplaceInstallResponse|ErrorResponse 404,429:MarketplaceInstallResponse"
 _IN_LANE = "runs in the one skill lifecycle lane until it settles (watch GET /api/skills/lifecycle-queue)"
-_SOURCES_WRITE = "503:SettingsWriteRefusal"
+_SOURCES_WRITE = "409,503:SettingsWriteRefusal"
 _INSTALL_REFUSAL = "404,409,429,502:SkillCatalogInstallResponse"
 _ENGINE = "relays the bundled Claudexor engine"
 
@@ -262,21 +265,24 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
     "GET /api/consciousness": Shape("200:json 503:json", query="switch", note="?switch=on|off: SwitchPreview {to, lines, places[{place_id, label, state, people, people_capped?}] | places null when unread} read at the press; else status/detail, position/gloss, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
-    "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
-    "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
-    "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),
+    "GET /onboarding": Shape("200:html 303:empty", query="builtin",
+                             note="selected setup or builtin wizard; builtin=1 forces builtin; interrupted Reset redirects to the selected main interface"),
+    "GET /api/onboarding": Shape("200:html 204:empty 409:ErrorResponse",
+                                note="204: a ready provider exists; 409 reset_interrupted: finish Reset in Settings"),
+    "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse 409:ErrorResponse",
+                                           note="read-only; writes nothing; 409 reset_interrupted: finish Reset in Settings"),
     "POST /api/onboarding/subagents/preview": Shape(
-        "200:OnboardingSubagentsPreviewResponse 400,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
+        "200:OnboardingSubagentsPreviewResponse 400,409,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
         note="read-only actor draft for the same payload completion would save"),
     "POST /api/onboarding/model-catalog": Shape(
-        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
+        "200:ModelCatalogResponse 400,409:SettingsWriteRefusal", "OnboardingCompleteRequest", query="provider_id",
         note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
     "POST /api/onboarding/connection/identity": Shape(
         "200:ConnectionIdentityResponse 400,404,500,503:ConnectionIdentityResponse", "ConnectionIdentityRequest",
         note="writes nothing; the declared function of a built-in skill's connection card names the token's account"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
-        "OnboardingCompleteRequest", note="the one atomic setup writer; a 503 with can_skip offers completion without agent presets"),
+        "OnboardingCompleteRequest", note="the one atomic setup writer; 409 reset_interrupted: finish Reset first; a 503 with can_skip offers completion without agent presets"),
     "GET /api/onboarding/complete": Shape(
         "200:OnboardingAttemptResponse 400:ErrorResponse", query="attempt",
         note="read-only; what became of the completion attempt whose attempt_id is given"),
@@ -285,7 +291,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         note="masked secrets read back as placeholders; sending a placeholder keeps the stored value"),
     "POST /api/settings": Shape(
         f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "SettingsSaveRequest",
-        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values"),
+        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values; 409 reset_interrupted: finish Reset first"),
     "POST /api/settings/secret": Shape("200:SettingsSecretResponse 400,404,409:ErrorResponse", "SettingsSecretRequest",
                                        note="reveals one stored secret, no-store; writes nothing"),
     "GET /api/ui/preferences": Shape("200:UiPreferencesResponse"),
@@ -408,6 +414,9 @@ HTTP_SHAPES: dict[str, Shape] = {
         query="words room_id voice order date_from date_to count offset snapshot row",
         note="read-only neighbour door: a raw loopback peer without forwarding headers only (403 recall_peer_closed "
              "before any read, whatever the password); words (repeatable) or one row; no model turn"),
+    "GET /api/chat/archive": Shape(
+        "200:ChatArchiveResponse 400,404,409,503:ErrorResponse", query="room before",
+        note="read-only, no read credit; while Main's history refuses for the Project registry: rows evidence places, oldest first"),
     "POST /api/chat/upload": Shape("200:UploadResponse 400:ErrorResponse", "multipart", note="form field file"),
     "DELETE /api/chat/upload": Shape("200:ChatUploadDeleteResponse 400,404,409:ErrorResponse", "ChatUploadDeleteRequest",
                                      note="pending uploads only; a repeat answers 404"),
@@ -529,8 +538,11 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/command": Shape(
         "200:CommandResponse 400,409:CommandRefusal 503:ErrorResponse", "CommandRequest",
         note="queued, not done, except /panic: accepted immediately, never queued; /panic and /restart may end the connection before or after the answer"),
-    "POST /api/reset": Shape("200:ResetResponse 409:ErrorResponse",
-                             note="irreversible: deletes data and settings, then restarts; never resend"),
+    "GET /api/reset": Shape("200:ResetResponse"),
+    "POST /api/reset": Shape("400,409:ErrorResponse", "ResetRequest",
+                             note="legacy path: refused; the versioned request is POST /api/reset/v1"),
+    "POST /api/reset/v1": Shape("200:ResetResponse 400,409:ErrorResponse", "ResetRequest",
+                                note="confirm reset_all_data:v1 through the live restart coordinator; read GET /api/reset for the outcome; never resend"),
     "GET /api/git/log": Shape("200:GitLogResponse 500:ErrorResponse"),
     "POST /api/git/rollback": Shape("200:GitRollbackResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse",
                                     "GitRollbackRequest", note="interrupts running work and restarts the core; no check, not safe to repeat"),

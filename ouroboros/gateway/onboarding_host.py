@@ -33,10 +33,10 @@ import functools
 import json
 import threading
 from collections import OrderedDict
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ouroboros.config import load_settings
 from ouroboros.gateway._helpers import json_error
@@ -93,7 +93,34 @@ def _live_setup(request: Request) -> tuple[dict, dict]:
                                            starter_choice=starter_choice_open(request_drive_root(request), settings))
 
 
-async def onboarding_page(_request: Request) -> HTMLResponse:
+def _reset_interrupted_response(request: Any = None, *, settings_write: bool = False) -> Optional[JSONResponse]:
+    """The held Reset's existing boot witness, as this surface's refusal; no setup or settings write may proceed."""
+    from ouroboros.server_liveness import boot_document, reset_boot_failed
+
+    boot = boot_document(None, getattr(getattr(request, "app", None), "state", None), jobs=False)
+    if not reset_boot_failed(boot):
+        return None
+    if settings_write:
+        return unsaved_error(boot["error"], 409, code="reset_interrupted", reason_code="reset_interrupted")
+    return json_error(boot["error"], 409, reason_code="reset_interrupted")
+
+
+async def read_onboarding_draft(request: Request) -> Dict[str, Any] | JSONResponse:
+    """The wizard's POSTs share a held-Reset refusal and read an object before any setup work."""
+    if (refusal := _reset_interrupted_response(request, settings_write=True)) is not None:
+        return refusal
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return unsaved_error("JSON body must be an object.", 400)
+    return body
+
+
+async def onboarding_page(_request: Request) -> Response:
+    if _reset_interrupted_response(_request) is not None:
+        return RedirectResponse("/", status_code=303)
     served_ui = getattr(_request.app.state, "served_ui", None)
     if served_ui is not None and _request.query_params.get("builtin") != "1":
         page = served_ui.custom_page("onboarding.html")
@@ -106,6 +133,8 @@ async def onboarding_page(_request: Request) -> HTMLResponse:
 
 async def api_onboarding_bootstrap(_request: Request) -> JSONResponse:
     """``OnboardingBootstrapResponse``: readiness plus the wizard's bootstrap, written nowhere."""
+    if (refusal := _reset_interrupted_response(_request)) is not None:
+        return refusal
     settings, bootstrap = _live_setup(_request)
     return JSONResponse({"ready": has_startup_ready_provider(settings), "bootstrap": bootstrap}, headers=_NO_STORE)
 

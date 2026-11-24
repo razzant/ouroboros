@@ -318,7 +318,10 @@ class ChatHistoryResponse(TypedDict, total=False):
     regardless of timestamp and recur across pages. An error answer (400 history_cursor_invalid or
     history_around_invalid, 409 history_view_changed or history_delta_reset, 503 history_source_unavailable
     or migrating) keeps this shape with no rows, ``has_more`` true and the cursor that was sent as ``next_cursor``;
-    a 503 history_source_unavailable may name the store's cause in ``detail``."""
+    a 503 history_source_unavailable may name the store's cause in ``detail``. ``project_registry`` is Main's
+    alone: ``"unavailable"`` on its refusal while the registry cannot tell its rows from a Project's (its read-only
+    archive is ``GET /api/chat/archive``), ``"restored"`` on a successful newest page after the registry came back
+    from its saved copy; an absent field says neither."""
 
     messages: Required[List[ChatHistoryMessage]]
     has_more: Required[bool]
@@ -332,6 +335,9 @@ class ChatHistoryResponse(TypedDict, total=False):
     anchor: ChatHistoryAnchor  # an ``around`` read only
     reason_code: str
     detail: str  # a 503 history_source_unavailable: the store's cause, when it has one
+    project_registry: Literal["unavailable", "restored"]  # Main only: its refusal, or the list back from its copy
+    profile_scope: str  # the serving generation's frozen data-profile scope, on a successful page; the
+                        # browser binds a delayed body to it before consuming it (#3294)
 
 
 class ChatSearchAttachment(TypedDict):
@@ -503,10 +509,54 @@ class RecallRowResponse(TypedDict):
     notes: List[str]
 
 
+class ChatArchiveRoom(TypedDict, total=False):
+    """A room the archive reads: ``main``, or a historical Project room the saved records name (``project_id``,
+    ``name``; ``evidence`` lists the kinds that name it: ``registry``, ``binding``, ``marker``, ``main_record``)."""
+
+    room: Required[str]
+    name: Required[str]
+    chat_id: int
+    project_id: str
+    evidence: List[str]
+
+
+class ChatArchiveMessage(TypedDict, total=False):
+    """Speaker, saved words, time, pinned notice kind and attachment names. A handoff names its destination;
+    a completion notice includes its stored label, status and any detail. ``id`` is a key within this read-only
+    archive, not an address for replies, continuations, moves or links."""
+
+    id: Required[str]
+    role: Required[Literal["user", "assistant", "system"]]
+    text: Required[str]
+    ts: Required[str]
+    kind: Literal["project_started", "project_handoff", "project_completion_summary"]
+    attachments: List[str]
+
+
+class ChatArchiveResponse(TypedDict, total=False):
+    """``GET /api/chat/archive?room=&before=``: while Main's history refuses for the Project registry, one page of
+    a room's rows that positive evidence places there, oldest first; ``before=<next_cursor>`` continues older,
+    and a page may hold none and still continue. ``complete`` is always false: rows whose room is not proven are
+    not shown, and ``limits`` names what the read could not include (``placement_unproven``,
+    ``bindings_unavailable``, ``rooms_withheld_unverified``, ``legacy_origins_limited``, ``importing``),
+    never a count. ``state: "not_needed"`` alone: the registry reads,
+    so Main's history answers."""
+
+    state: Required[Literal["available", "not_needed"]]
+    room: str
+    rooms: List[ChatArchiveRoom]
+    messages: List[ChatArchiveMessage]
+    has_more: bool
+    next_cursor: Optional[str]
+    complete: bool
+    limits: List[str]
+
+
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "HistoricalTerminal", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
     "ChatSearchAttachment", "ChatSearchLink", "ChatSearchQuestion", "ChatSearchCandidate", "ChatSearchSpan",
     "ChatSearchResponse", "RecallReader", "RecallField", "RecallRow", "RecallSearchResponse", "RecallRowResponse",
+    "ChatArchiveRoom", "ChatArchiveMessage", "ChatArchiveResponse",
 ]

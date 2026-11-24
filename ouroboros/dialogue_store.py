@@ -307,15 +307,16 @@ def ensure(root: Any) -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def transaction(root: Any, *, write: bool, wait_sec: float = WAIT_SEC) -> Iterator[sqlite3.Connection]:
-    """One transaction on the root's store (``store.connection`` + ``store.transaction``): the name
-    lock around a name-tier access, ``StoreBusy`` on contention, the cutover for a root whose
-    chain files were never cut over (its own files; unknown is never answered empty), an empty
-    in-memory schema for a read of a root that holds no dialogue at all."""
+def transaction(root: Any, *, write: bool, wait_sec: float = WAIT_SEC,
+                existing_only: bool = False) -> Iterator[sqlite3.Connection]:
+    """Lease the store under its tier's lock. Ordinary access cuts over legacy files and an empty read
+    uses memory. Existing-only access requires the file. Contention raises ``StoreBusy``."""
     wait_sec = store.bounded_wait(wait_sec)
     root = pathlib.Path(root)
     identity = store.file_identity(path(root))  # one stat: the presence and the file its header's tier is kept for
     if identity is None:
+        if existing_only:
+            raise StoreLost(f"Existing dialogue store is unavailable: {path(root)}")
         if write or holds_dialogue_files(root):
             ensure(root)
         else:

@@ -953,24 +953,30 @@ def test_history_replays_the_offer_so_a_collapsed_card_needs_no_opening(tmp_path
     import json
     from types import SimpleNamespace
 
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.project_registry_recovery import initialize_new_root
     from ouroboros.task_results import write_task_result
     from supervisor.continuation_admission import admit_continuation
 
     _install_queue(tmp_path, monkeypatch)
-    _interrupted(tmp_path, "pred-1")
-    _interrupted(tmp_path, "pred-2")
-    write_task_result(tmp_path, "done-1", "completed", chat_id=7, root_task_id="done-1", result="done")
+    # A healthy Main already has its empty Project registry before the history is written.
+    initialize_new_root(tmp_path)
+    _interrupted(tmp_path, "pred-1", chat_id=WEB_UI_CHAT_ID)
+    _interrupted(tmp_path, "pred-2", chat_id=WEB_UI_CHAT_ID)
+    write_task_result(tmp_path, "done-1", "completed", chat_id=WEB_UI_CHAT_ID, root_task_id="done-1", result="done")
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "logs" / "chat.jsonl").write_text("".join(json.dumps({
         "ts": f"2026-09-27T00:00:0{i}Z", "direction": "system", "type": "task_summary", "task_id": task_id,
-        "chat_id": 7, "text": "summary"}) + "\n" for i, task_id in enumerate(("pred-1", "pred-2", "done-1"))),
+        "chat_id": WEB_UI_CHAT_ID, "text": "summary"}) + "\n" for i, task_id in enumerate(("pred-1", "pred-2", "done-1"))),
         encoding="utf-8")
     (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
     successor = admit_continuation("pred-2", action_nonce=NONCE)["successor_task_id"]
 
     endpoint = make_chat_history_endpoint(tmp_path)
-    payload = json.loads(asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "20"}))).body)["messages"]
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "20"})))
+    assert response.status_code == 200, response.body
+    payload = json.loads(response.body)["messages"]
     offers = {row["task_id"]: row.get("continuation_offer") for row in payload if row.get("task_id")}
     assert offers["pred-1"] == {"eligible": True, "cause": "snapshot_restore", "refusal": ""}
     assert offers["pred-2"]["successor_task_id"] == successor and offers["pred-2"]["eligible"] is False

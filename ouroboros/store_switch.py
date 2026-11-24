@@ -186,6 +186,18 @@ def lacks_wake_chain_reader(repo_dir: Any, target_sha: str) -> bool:
 _DEFERRING = ("facts", "dialogue", "threads")  # the needs only the seam meets, at the restart exit (every writer dead)
 
 
+def reset_profile_refusal(root: Any, repo_dir: Any, target_sha: str) -> str:
+    """Can the target finish a Reset that is still unfinished? A completed Reset set the old Project
+    shelves aside under a dot name no body reads as a room, so it never restricts a rollback."""
+    from ouroboros.launch_roots import RESETTING, read_witness
+
+    if read_witness(root)[0] != RESETTING:
+        return ""
+    initializer = target_file_bytes(repo_dir, target_sha, "supervisor/state_initialization.py") or b""
+    return ("" if b"def accept_runtime_reset(" in initializer
+            else "The target version cannot preserve the unfinished Reset.")
+
+
 def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
                     reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
     """A door's one decision after its writers are stopped: a target WITHOUT the store, or one that cannot
@@ -193,6 +205,8 @@ def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: st
     switches at the restart exit the door requests next); any other runs the door's own reset now, after the
     accepted wake transitions are written in the form a target without their reader reads (best effort, its
     outcome logged: ``_export_wake_transitions``). Returns ``(ok, message, deferred)``."""
+    if refusal := reset_profile_refusal(root, repo_dir, target_sha):
+        return False, refusal, False
     needs = switch_needs(repo_dir, target_sha)
     if any(needs.get(name) for name in _DEFERRING):
         record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
@@ -230,12 +244,12 @@ def _export_wake_transitions(root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _hand_off_stores(root: pathlib.Path) -> str:
-    """Every present store of the root and its retained drives leaves WAL before the door moves the
-    checkout (``store.hand_off``); the refusal text when one cannot."""
+    """Return the root and its retained drives to compatible journal and Project lock formats."""
     try:
-        from ouroboros import dialogue_store
+        from ouroboros import dialogue_store, project_registry_recovery
 
         for drive in (root, *store_import.descendant_drives(root)):
+            project_registry_recovery.hand_off(drive)
             store.hand_off(drive)
             dialogue_store.hand_off(drive)
         usage_store.hand_off(root)
@@ -450,6 +464,8 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         return _refuse(root, intent, receipt, "second_failure", attempts=receipt["attempts"])
     if blockers:
         return _refuse(root, intent, receipt, "quiescence_unconfirmed", blockers=list(blockers))
+    if refusal := reset_profile_refusal(root, repo_dir, intent["target_sha"]):
+        return _refuse(root, intent, receipt, refusal)
     needs, wake = switch_needs(repo_dir, intent["target_sha"]), lacks_wake_chain_reader(repo_dir, intent["target_sha"])
     roots, refusal = _roots(root) if needs["facts"] else ([], "")
     _progress(root, "preflight", needs=needs, attempt=receipt["attempts"])
@@ -687,7 +703,7 @@ def when_ready(root: Any, *steps: Callable[[], Any]) -> None:
     threading.Thread(target=lambda: [_step(step) for step in steps], daemon=True, name="store-ready-steps").start()
 
 
-def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
+def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any, *, restart_drained: bool = False) -> Dict[str, Any]:
     """The seam at the restart exit. ``cleanup`` is ``server._emergency_process_cleanup``'s
     census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
     ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
@@ -696,7 +712,27 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
     exit's own finalization (``shell_process.exit_finalization``); Panic still ends it. Never raises."""
     root = pathlib.Path(root)
     owner = None
-    if read_switch_intent(root) is None:
+    facts = cleanup if isinstance(cleanup, dict) else {}
+    stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
+    census = facts.get("worker_exits") if isinstance(facts.get("worker_exits"), dict) else None
+    blockers = [name for name, blocked in (
+        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
+        ("child_processes_alive", bool(facts.get("live_children"))),
+        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+    ) if blocked]
+    from supervisor.state_initialization import hand_off_runtime_reset
+
+    intent = read_switch_intent(root)
+    reset_blockers = blockers.copy()
+    if (not restart_drained or not isinstance(facts.get("live_children"), list) or census is None
+            or not isinstance(census.get("unconfirmed"), list) or not isinstance(stop.get("unconfirmed"), list)):
+        reset_blockers.append("shutdown_unconfirmed")
+    if intent:
+        reset_blockers.append("version_switch_pending")
+    reset = hand_off_runtime_reset(root, reset_blockers)
+    if reset and not intent:
+        return {"status": reset}
+    if intent is None:
         head = rev_parse(repo_dir, "HEAD")
         needs = switch_needs(repo_dir, head) if head else {}
         if not any(needs.get(name) for name in _DEFERRING):
@@ -708,14 +744,6 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
                                           reason="the checked-out tree cannot read the current stores")
         owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
     wait_ready(root)  # a boot-smoke rollback can arrive while this process still imports: the export reads a published store
-    facts = cleanup if isinstance(cleanup, dict) else {}
-    stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
-    census = facts.get("worker_exits") if isinstance(facts.get("worker_exits"), dict) else None
-    blockers = [name for name, blocked in (
-        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
-        ("child_processes_alive", bool(facts.get("live_children"))),
-        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
-    ) if blocked]
     try:
         from ouroboros.tools.shell_process import exit_finalization
 

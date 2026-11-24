@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
+import os
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,61 +21,509 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, result_signature, seed_result, unreadable_result
 from tests._cases import chosen_rows
 
-
-
-def test_registry_loss_blocks_admission_until_reconstruction_with_new_identity(tmp_path, monkeypatch):
+def test_exact_registry_loss_preserves_every_row_and_binding(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery
     from ouroboros.project_admission import project_scope_admission
     from supervisor import state
 
     state.init(tmp_path)
-    project = registry.create_project(tmp_path, "target")
-    original_basis = registry.project_admission_view(tmp_path, "target", frozen=True)
-    (tmp_path / "projects" / "target").mkdir(parents=True)  # a store reconcile could rebuild from
-    registry._registry_witness_path(tmp_path).unlink()  # committed by a build without the witness
-    registry.reconcile_projects(tmp_path)
-    registry._registry_path(tmp_path).unlink()
-    writers = (lambda: registry.create_project(tmp_path, "other"),
-               lambda: registry.update_project(tmp_path, "target", name="renamed"),
-               lambda: registry.bind_task_to_project(tmp_path, "task", "other", origin={"absent": "system"}),
-               lambda: registry.begin_project_deletion(tmp_path, "target"),
-               lambda: project_scope_admission(tmp_path, project_id="target"))
-    for write in writers:  # absence after a commit is unavailable authority, never zero rooms
+    project = registry.create_project(tmp_path, "target", working_dir="/synthetic/folder")
+    registry.update_project(tmp_path, "target", working_dir="/synthetic/new-folder")
+    basis = registry.project_admission_view(tmp_path, "target", frozen=True)
+    for pid in ("gone", "deleting"):
+        registry.create_project(tmp_path, pid)
+        registry.begin_project_deletion(tmp_path, pid)
+    registry.complete_project_deletion(tmp_path, "gone")
+    registry.create_project(tmp_path, "folderless")
+    registry.bind_task_to_project(tmp_path, "task", "target", origin={"absent": "system"})
+    path = registry._registry_path(tmp_path)
+    original = path.read_bytes()
+    bindings = registry._bindings_path(tmp_path).read_bytes()
+    assert recovery.recovery_notice(tmp_path) is None
+    path.unlink()
+    for write in (lambda: registry.create_project(tmp_path, "other"),
+                  lambda: registry.update_project(tmp_path, "target", name="rename"),
+                  lambda: registry.bind_task_to_project(tmp_path, "later", "target", origin={"absent": "system"}),
+                  lambda: registry.begin_project_deletion(tmp_path, "target"),
+                  lambda: project_scope_admission(tmp_path, project_id="target")):
         with pytest.raises(FileNotFoundError):
             write()
     direct, receipts = owner_turn(tmp_path, monkeypatch, project["chat_id"], "web")
     assert not direct and receipts[-1]["status"] == "project_unavailable"
+    assert not path.exists() and recovery.recovery_notice(tmp_path) is None
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == original and registry._bindings_path(tmp_path).read_bytes() == bindings
+    assert recovery.recovery_notice(tmp_path) == {"kind": "exact_registry_restored"}
+    with registry.project_admission_guard(tmp_path, basis) as current:
+        assert current["working_dir"] == "/synthetic/new-folder"
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == original
+    path.unlink()
+    assert recovery.recovery_notice(tmp_path) is None
+
+
+@pytest.mark.parametrize("proof", ["clean", "old_writer", "before_new_primary", "after_new_primary", "foreign",
+                                   "bad_copy", "legacy", "name_tier", "body_rollback"])
+def test_registry_loss_from_the_same_active_room_requires_proven_freshness(tmp_path, monkeypatch, proof):
+    from ouroboros import platform_layer as platform, project_registry_recovery as recovery, utils
+
+    if proof == "name_tier":
+        monkeypatch.setattr(platform, "kernel_file_locks_enforced", lambda *args, **kwargs: False)
+    if proof == "body_rollback":
+        body = tmp_path / "project_registry_recovery.py"
+        body.write_bytes(b"# synthetic upgraded body")
+        monkeypatch.setattr(recovery, "__file__", str(body))
+    active = registry.create_project(tmp_path, "target")
+    path = registry._registry_path(tmp_path)
+    witness = registry._registry_witness_path(tmp_path)
+    before = path.read_bytes()
+    if proof == "old_writer":
+        # The base version takes this exact O_EXCL lock; it must enter immediately.
+        # Crash after replacing the primary, BEFORE touching its witness. Its stale
+        # lock is reclaimed at the next boot, after the usual grace has elapsed.
+        lock = path.with_suffix(".json.lock")
+        fd = platform.acquire_exclusive_file_lock(lock, timeout_sec=0)
+        assert fd is not None
+        try:
+            utils.atomic_write_json(path, {"projects": [{**active, "lifecycle": "tombstoned"}]})
+        finally:
+            os.close(fd)
+        os.utime(lock, ns=(0, 0))
+    elif proof == "before_new_primary":
+        with monkeypatch.context() as fault:
+            def interrupted(target, *args, **kwargs):
+                assert target == path and recovery.recovery_notice(tmp_path) is None
+                raise OSError("Cut before primary replacement")
+            fault.setattr(utils, "write_bytes_atomic", interrupted)
+            with pytest.raises(OSError, match="Cut before"):
+                registry.begin_project_deletion(tmp_path, "target")
+        assert path.read_bytes() == before
+    elif proof == "after_new_primary":
+        with monkeypatch.context() as fault:
+            def interrupted(*args):
+                raise OSError("Cut after primary replacement")
+            fault.setattr(recovery, "_qualify", interrupted)
+            registry.begin_project_deletion(tmp_path, "target")
+        assert json.loads(path.read_bytes())["projects"][0]["lifecycle"] == "deleting"
+    elif proof == "foreign":
+        import shutil
+        other = tmp_path / "other-install"
+        registry.create_project(other, "foreign")
+        for item in (witness, path.with_suffix(".json.lock")):
+            shutil.copyfile(other / "state" / item.name, item)
+    elif proof == "bad_copy":
+        witness.write_bytes(b'{"projects":[]}')
+    elif proof == "legacy":
+        witness.write_bytes(b"")
+        path.with_suffix(".json.lock").unlink(missing_ok=True)
+    elif proof == "body_rollback":
+        # An older checkout lacks this module. Model even a pre-lock writer
+        # retaining both the new witness and the new lock verbatim.
+        body.rename(body.with_suffix(".previous"))
+        utils.atomic_write_json(path, {"projects": [{**active, "lifecycle": "tombstoned"}]})
+        body.write_bytes(b"# synthetic upgraded body")
+    saved_witness = witness.read_bytes()
+    path.unlink()
+    store = tmp_path / "projects/target"
+    store.mkdir(parents=True)
+    marker = store / ".project.json"
+    marker.write_text(json.dumps(active))
+    registry._save_bindings(tmp_path, {"bindings": {"t": {"project_id": "target"}}})
+    if proof == "clean":
+        import subprocess
+        import sys
+        # A cold interpreter takes the real boot reconciliation step. No server,
+        # worker or queue has been started in that process.
+        subprocess.run([sys.executable, "-c",
+                        "from pathlib import Path; import sys; from ouroboros.server_boot import reconcile_projects; "
+                        "reconcile_projects(Path(sys.argv[1]))", str(tmp_path)], check=True)
+        assert path.read_bytes() == before
+        assert recovery.recovery_notice(tmp_path) == {"kind": "exact_registry_restored"}
+        return
+    registry.reconcile_projects(tmp_path)
+    assert not path.exists() and witness.read_bytes() == saved_witness and marker.is_file()
+    assert recovery.recovery_notice(tmp_path) is None
+    with pytest.raises(FileNotFoundError):
+        registry.create_project(tmp_path, "replacement")
+
+
+def test_healthy_legacy_seed_is_byte_exact_and_rejects_malformed_sources(tmp_path):
+    from ouroboros import project_registry_recovery as recovery
+
+    path, witness = registry._registry_path(tmp_path), registry._registry_witness_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    witness.touch()
+    for broken in (b'{"projects":[null]}', b'{"projects":[],"projects":[]}', b'{"_schema_version":88,"projects":[]}'):
+        path.write_bytes(broken)
+        registry.reconcile_projects(tmp_path)
+        assert path.read_bytes() == broken and witness.read_bytes() == b""
+    # No cognition migration is owed by this already-healthy legacy row.
+    legacy = b'{ "projects" : [{"id":"target","cognition":{},"opaque":{"keep":1}}] }\n'
+    path.write_bytes(legacy)
+    path.chmod(0o600)
+    registry.reconcile_projects(tmp_path)
+    assert witness.read_bytes() == legacy and path.read_bytes() == legacy
+    assert recovery.recovery_notice(tmp_path) is None
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == legacy and recovery.recovery_notice(tmp_path)
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(witness.stat().st_mode) == 0o600
+
+
+def test_an_independently_returned_primary_wins_and_revokes_the_outdated_copy(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery
+
+    registry.create_project(tmp_path, "target")
+    path = registry._registry_path(tmp_path)
+    path.unlink()
+    publish = recovery._publish_new_file
+    returned = b'{ "projects": [] }'
+    with monkeypatch.context() as fault:
+        def return_primary(source, target):
+            target.write_bytes(returned)
+            return publish(source, target)
+        fault.setattr(recovery, "_publish_new_file", return_primary)
+        registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == returned and recovery.recovery_notice(tmp_path) is None
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert not path.exists()
+
+
+def test_a_primary_replaced_during_seeding_cannot_certify_the_old_bytes(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery, utils
+
+    path, witness = registry._registry_path(tmp_path), registry._registry_witness_path(tmp_path)
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b'{"projects":[{"id":"old","cognition":{}}]}')
+    witness.touch()
+    replace = utils.replace_atomic
+    with monkeypatch.context() as fault:
+        def put_back_the_original(src, dst, **kwargs):
+            result = replace(src, dst, **kwargs)
+            if dst == witness:
+                path.write_bytes(b'{"projects":[]}')
+            return result
+        fault.setattr(utils, "replace_atomic", put_back_the_original)
+        registry.reconcile_projects(tmp_path)
+    assert json.loads(path.read_bytes()) == {"projects": []}
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert not path.exists() and recovery.recovery_notice(tmp_path) is None
+
+
+@pytest.mark.parametrize("peer_kernel", [True, False])
+def test_current_and_legacy_writers_exclude_each_other(tmp_path, monkeypatch, peer_kernel):
+    import hashlib
+    from ouroboros import platform_layer as platform, project_registry_recovery as recovery
+
+    registry.create_project(tmp_path, "active")
+    path = registry._registry_path(tmp_path)
+    lock = path.with_suffix(".json.lock")
+    magic, payload = lock.read_bytes().split(b"\n", 1)
+    assert magic == b"ouroboros-project-registry-v1"
+    assert json.loads(payload)["digest"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    with recovery.writer_lock(path):
+        with monkeypatch.context() as peer:
+            peer.setattr(platform, "kernel_file_locks_enforced", lambda *_: peer_kernel)
+            assert platform.acquire_exclusive_file_lock(lock, timeout_sec=0) is None
+    with monkeypatch.context() as peer:
+        peer.setattr(platform, "kernel_file_locks_enforced", lambda *_: peer_kernel)
+        fd = platform.acquire_exclusive_file_lock(lock, timeout_sec=0)
+    assert fd is not None
+    try:
+        with pytest.raises(TimeoutError), recovery.writer_lock(path, timeout=0):
+            pytest.fail("recovery acquired an occupied legacy lock")
+    finally:
+        platform.release_exclusive_file_lock(lock, fd)
+
+
+def test_code_update_renews_the_unchanged_primary_and_keeps_legacy_maintenance(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery
+
+    body = tmp_path / "body.py"
+    body.write_text("# earlier body")
+    monkeypatch.setattr(recovery, "__file__", str(body))
+    room = registry.create_project(tmp_path, "existing")
+    (tmp_path / "projects" / "legacy").mkdir(parents=True)
+    updated = tmp_path / "new.py"
+    updated.write_text("# updated body")
+    updated.replace(body)
+
     assert registry.reconcile_projects(tmp_path) == 1
-    restored = project_scope_admission(tmp_path, project_id="target")
-    assert restored["project"]["chat_id"] == project["chat_id"]
-    assert restored["project"]["routing_incarnation"] != project["routing_incarnation"]
-    with pytest.raises(registry.ProjectAdmissionError, match="changed"):
-        with registry.project_admission_guard(tmp_path, original_basis):
-            pytest.fail("A reconstructed room cannot authorize the previous assignment")
+    assert registry.get_project(tmp_path, "existing")["routing_incarnation"] == room["routing_incarnation"]
+    assert recovery.recovery_notice(tmp_path) is None
+    path = recovery.registry_path(tmp_path)
+    current = path.read_bytes()
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == current
+    assert recovery.recovery_notice(tmp_path) == {"kind": "exact_registry_restored"}
+
+
+def test_ordinary_maintenance_keeps_healthy_neighbours_of_a_partial_registry(tmp_path):
+    path = registry._registry_path(tmp_path)
+    path.parent.mkdir()
+    invalid = {"id": "partial", "lifecycle": None, "history": "retained"}
+    path.write_text(json.dumps({"projects": [
+        invalid, {"id": "healthy"}, {"id": "gone", "lifecycle": "tombstoned"},
+    ]}))
+    retained = tmp_path / "projects/gone/.project.json"
+    retained.parent.mkdir(parents=True)
+    retained.write_text('{"id":"gone"}')
+    (tmp_path / "projects/other").mkdir()
+    assert registry.reconcile_projects(tmp_path) == 0
+    rows = json.loads(path.read_bytes())["projects"]
+    assert rows[0] == invalid
+    assert rows[1]["cognition"] and rows[2]["lifecycle"] == "tombstoned"
+    assert not retained.exists()
+    assert {row["id"] for row in rows} == {"healthy", "gone", "partial"}
+    assert registry._registry_witness_path(tmp_path).read_bytes() == b""
+
+
+def test_unchanged_registry_tick_reads_one_snapshot_and_keeps_its_witness(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery, utils
+
+    room = registry.create_project(tmp_path, "existing")
+    path, witness = recovery.registry_path(tmp_path), recovery.witness_path(tmp_path)
+    original = path.read_bytes()
+    witnessed = utils.file_identity(witness.stat())
+    decode = recovery.read_bytes
+    decoded = []
+
+    def count_snapshot(raw):
+        decoded.append(raw)
+        return decode(raw)
+
+    monkeypatch.setattr(recovery, "read_bytes", count_snapshot)
+    assert registry.reconcile_projects(tmp_path) == 0
+    assert decoded == [original]
+    assert utils.file_identity(witness.stat()) == witnessed
+    assert registry.get_project(tmp_path, "existing")["routing_incarnation"] == room["routing_incarnation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows rename publishes only to an absent name")
+def test_linkless_volume_publishes_only_to_an_absent_name(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery
+
+    def linkless(*args):
+        raise OSError(errno.ENOTSUP, "no hard links on this volume")
+
+    monkeypatch.setattr(os, "link", linkless)
+    room = registry.create_project(tmp_path, "first")
+    assert registry.get_project(tmp_path, "first")["chat_id"] == room["chat_id"]
+    path = recovery.registry_path(tmp_path)
+    original = path.read_bytes()
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == original and recovery.recovery_notice(tmp_path)
+    assert registry.get_project(tmp_path, "first")["routing_incarnation"] == room["routing_incarnation"]
+    staged = path.with_name("synthetic-staged")
+    staged.write_bytes(b"other")
+    with pytest.raises(FileExistsError):
+        recovery._publish_new_file(staged, path)
+    assert path.read_bytes() == original and staged.read_bytes() == b"other"
+
+
+def test_registry_write_guard_precedes_creation_of_state_or_locks(tmp_path, monkeypatch):
+    from ouroboros import project_registry_recovery as recovery
+
+    root = tmp_path / "guarded"
+    monkeypatch.setenv("OUROBOROS_PYTEST_ACTIVE", "1")
+    monkeypatch.delenv("OUROBOROS_ALLOW_LIVE_DATA_TESTS", raising=False)
+    monkeypatch.setenv("OUROBOROS_TEST_LIVE_DATA_ROOT", str(root))
+    with pytest.raises(RuntimeError, match="PYTEST_LIVE_DATA_WRITE_BLOCKED"):
+        recovery.initialize_new_root(root)
+    assert not root.exists()
+
+
+def test_first_lock_probe_cannot_certify_a_name_only_writer(tmp_path, monkeypatch):
+    from ouroboros import platform_layer as platform, project_registry_recovery as recovery
+
+    path = registry._registry_path(tmp_path)
+    registry_lock = path.with_suffix(".json.lock")
+    normal_tier = platform.kernel_file_locks_enforced
+    probes = iter((True, False))
+
+    def lock_tier(lock, **kwargs):
+        return next(probes, False) if lock == registry_lock else normal_tier(lock, **kwargs)
+
+    monkeypatch.setattr(platform, "kernel_file_locks_enforced", lock_tier)
+    registry.create_project(tmp_path, "target")
+    witness = registry._registry_witness_path(tmp_path)
+    assert witness.read_bytes() == b""
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert not path.exists() and recovery.recovery_notice(tmp_path) is None
+
+
+def test_corruption_after_an_exact_restore_preserves_the_primary_and_hides_the_notice(tmp_path):
+    from ouroboros import project_registry_recovery as recovery
+
+    registry.create_project(tmp_path, "target")
+    path = registry._registry_path(tmp_path)
+    path.unlink()
+    registry.reconcile_projects(tmp_path)
+    assert recovery.recovery_notice(tmp_path)
+    path.write_bytes(b"{")
+    assert recovery.recovery_notice(tmp_path) is None
+    registry.reconcile_projects(tmp_path)
+    assert path.read_bytes() == b"{" and recovery.recovery_notice(tmp_path) is None
+
+
+@pytest.mark.parametrize("receipt", ["recorded", "interrupted"])
+def test_legacy_store_waits_through_repeated_ticks_of_a_restored_revision(tmp_path, monkeypatch, receipt):
+    from ouroboros import project_registry_recovery as recovery, utils
+
+    registry.create_project(tmp_path, "kept")
+    path = registry._registry_path(tmp_path)
+    saved = path.read_bytes()
+    (tmp_path / "projects" / "legacy-store" / "knowledge").mkdir(parents=True)
+    path.unlink()
+    with monkeypatch.context() as fault:
+        if receipt == "interrupted":
+            write = utils.atomic_write_json
+
+            def cut_receipt(target, data, **kwargs):
+                if target == recovery._restore_receipt(path) and "primary" in data:
+                    raise OSError("notice write interrupted")
+                return write(target, data, **kwargs)
+
+            fault.setattr(utils, "atomic_write_json", cut_receipt)
+        assert registry.reconcile_projects(tmp_path) == 0
+    restored = utils.file_identity(path.stat())
+    for _ in range(2):
+        assert registry.reconcile_projects(tmp_path) == 0
+        assert path.read_bytes() == saved and utils.file_identity(path.stat()) == restored
+        assert bool(recovery.recovery_notice(tmp_path)) == (receipt == "recorded")
+    registry.update_project(tmp_path, "kept", name="Renamed")
+    assert recovery.recovery_notice(tmp_path) is None
+    assert registry.reconcile_projects(tmp_path) == 1
+    assert {row["id"] for row in registry.list_projects(tmp_path)} == {"kept", "legacy-store"}
+
+
+def test_malformed_primary_cannot_import_a_named_legacy_store(tmp_path):
+    path = registry._registry_path(tmp_path)
+    path.parent.mkdir()
+    invalid = b'{"projects":[{"id":"held","lifecycle":null}]}'
+    path.write_bytes(invalid)
+    store = tmp_path / "projects" / "legacy-store" / "knowledge"
+    store.mkdir(parents=True)
+    assert registry.reconcile_projects(tmp_path) == 0
+    assert path.read_bytes() == invalid and store.is_dir()
+
+
+def test_first_explicit_creation_requires_a_root_without_project_evidence(tmp_path):
+    assert not registry._registry_path(tmp_path).exists()
+    assert registry.reconcile_projects(tmp_path) == 0
+    assert registry.create_project(tmp_path, "fresh")["created"] is True
+    legacy = tmp_path / "legacy"
+    (legacy / "projects" / "old").mkdir(parents=True)
+    registry.reconcile_projects(legacy)
+    with pytest.raises(FileNotFoundError):
+        registry.create_project(legacy, "new")
 
 
 def test_never_committed_install_still_creates_and_reconciles_rooms(tmp_path):
+    from supervisor.state_initialization import initialization_decision
+
+    assert initialization_decision(tmp_path)["create"]
     (tmp_path / "projects" / "legacy").mkdir(parents=True)
-    assert registry.reconcile_projects(tmp_path) == 1  # legacy stores register on a fresh install
+    assert registry.reconcile_projects(tmp_path) == 1
     assert registry._registry_witness_path(tmp_path).exists()
     assert registry.create_project(tmp_path, "fresh")["created"] is True
     assert {row["id"] for row in registry.list_reserved_projects(tmp_path, strict=True)} == {"legacy", "fresh"}
 
 
-def test_registry_loss_is_refused_only_once_a_witness_stamp_lands(tmp_path, monkeypatch):
-    """The exact guarantee, not universal no-loss: a save whose stamp failed and is lost
-    before any re-stamp reads as a first boot (disclosed gap); the next save stamps it."""
-    witness = registry._registry_witness_path
-    monkeypatch.setattr(registry, "_registry_witness_path", lambda root: tmp_path / "unwritable" / "witness")
-    registry.create_project(tmp_path, "first")  # the commit lands; only its stamp fails
-    assert registry._registry_path(tmp_path).exists() and not witness(tmp_path).exists()
-    registry._registry_path(tmp_path).unlink()
-    assert registry.list_reserved_projects(tmp_path, strict=True) == []  # the disclosed gap
-    monkeypatch.setattr(registry, "_registry_witness_path", witness)
-    assert registry.create_project(tmp_path, "second")["created"] is True  # this save stamps it
-    assert witness(tmp_path).exists()
-    registry._registry_path(tmp_path).unlink()
-    with pytest.raises(FileNotFoundError):  # from here a loss is unavailable, never zero rooms
-        registry.list_reserved_projects(tmp_path, strict=True)
+@pytest.mark.parametrize("cut", ["before_first_primary", "after_first_primary", "before_first_room"])
+def test_interrupted_first_registry_write_allows_retry(tmp_path, monkeypatch, cut):
+    from ouroboros import project_registry_recovery as recovery, utils
+
+    path, witness = registry._registry_path(tmp_path), registry._registry_witness_path(tmp_path)
+    write, sync = utils._write_fd_fully, utils.fsync_folder
+
+    def cut_write(fd, raw, target):
+        if target.parent == path.parent and target.name.startswith(f".{path.name}.tmp."):
+            rows = json.loads(raw)["projects"]
+            if (not rows and cut == "before_first_primary") or (rows and cut == "before_first_room"):
+                raise OSError("first write interrupted")
+        return write(fd, raw, target)
+
+    def cut_sync(folder):
+        if cut == "after_first_primary" and folder == path.parent and path.is_file() and not witness.exists():
+            raise OSError("first write interrupted")
+        return sync(folder)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(utils, "_write_fd_fully", cut_write)
+        fault.setattr(utils, "fsync_folder", cut_sync)
+        with pytest.raises(OSError, match="first write interrupted"):
+            registry.create_project(tmp_path, "first")
+    if cut == "before_first_primary":
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_bytes())["projects"] == []
+    assert witness.exists() == (cut == "before_first_room")
+    assert recovery.recovery_notice(tmp_path) is None
+    assert registry.create_project(tmp_path, "first")["created"] is True
+    assert [row["id"] for row in json.loads(path.read_bytes())["projects"]] == ["first"]
+
+
+@pytest.mark.parametrize("history", [
+    "first_boot", "first_boot_linkless", "empty_primary_lost", "shelf_before_boot", "completed_boot",
+])
+def test_first_project_with_a_bare_workspace_shelf(tmp_path, monkeypatch, history):
+    from ouroboros import config, project_facts, project_registry_recovery as recovery
+    from supervisor import state_initialization as initialization
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    path = registry._registry_path(tmp_path)
+    first_boot = history in {"first_boot", "first_boot_linkless", "empty_primary_lost"}
+    if history == "first_boot_linkless":
+        def unsupported_link(*args):
+            raise OSError(errno.ENOTSUP, "hard links unavailable")
+        monkeypatch.setattr(os, "link", unsupported_link)
+    if first_boot:
+        assert initialization.initialization_decision(tmp_path)["create"]
+        assert json.loads(path.read_bytes())["projects"] == []
+    elif history == "completed_boot":
+        identity = initialization.mark_pending(tmp_path, origin="first_boot")
+        assert initialization.complete(tmp_path, identity, adopted=False)
+
+    pid = project_facts.resolve_project_id({"workspace_root": str(tmp_path / "bare-workspace")})
+    assert pid.startswith("proj_")
+    shelf = project_facts.project_knowledge_dir(pid)
+    shelf.mkdir(parents=True)
+    note = shelf / "fact.md"
+    note.write_bytes(b"independent workspace fact")
+    if history == "empty_primary_lost":
+        path.unlink()
+    if not first_boot:
+        decision = initialization.initialization_decision(tmp_path)
+        assert decision["create"] == (history == "shelf_before_boot")
+    registry.reconcile_projects(tmp_path)
+    assert bool(recovery.recovery_notice(tmp_path)) == (history == "empty_primary_lost")
+    assert registry.reserved_project_chat_ids(tmp_path, strict=True) == set()
+    assert registry.create_project(tmp_path, "first")["created"] is True
+    assert [row["id"] for row in json.loads(path.read_bytes())["projects"]] == ["first"]
+    assert note.read_bytes() == b"independent workspace fact"
+    assert not (shelf.parent / ".project.json").exists()
+
+
+def test_empty_legacy_witness_alone_holds_through_first_boot(tmp_path):
+    from ouroboros import project_registry_recovery as recovery
+    from supervisor import state_initialization as initialization
+
+    path, witness = registry._registry_path(tmp_path), registry._registry_witness_path(tmp_path)
+    path.parent.mkdir()
+    witness.touch()
+    assert initialization.initialization_decision(tmp_path)["create"]
+    registry.reconcile_projects(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        registry.create_project(tmp_path, "first")
+    assert not path.exists() and witness.read_bytes() == b""
+    assert recovery.recovery_notice(tmp_path) is None
 
 
 @pytest.mark.parametrize("veto", [None, "possible", "started"])
