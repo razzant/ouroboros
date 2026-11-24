@@ -82,7 +82,8 @@ _META_FIELDS = ("chat_id", "ts", "type", "kind",  # ``kind``: the display stamp 
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
                 "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin",
                 "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
-                "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "fold_read",  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
+                "read_spans")  # what that work was shown whole of its room: what its acts there count as read
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 # ``telegram_room_chat_id``: the room the host decided for the bundled bridge's Reply (``room_membership``); no
 # stored prefix lacks it wrongly, since no released body wrote it before it joined this list.

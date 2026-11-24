@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import row_lineage
-from ouroboros.chronicle_store import ChronicleStore, PublishResult, source_time_span
+from ouroboros.chronicle_store import ChronicleStore, PublishResult
 from ouroboros.consolidator import LIGHT_ANSWER_CEILING_TOKENS
 from ouroboros.dialogue_provenance import (memory_row_header, recorded_finality, render_memory_row, render_row_text,
                                            row_class)
@@ -572,11 +572,9 @@ def _trimmed(covers: Dict[str, Any], kept: List[_Row]) -> Dict[str, Any]:
     The helper's input holds no note of the mind, so its draft seals none; a note stays
     open and in the view until a page of the mind covers it.
     """
-    shas = [item.entry[0]["row_sha256"] for item in kept]
-    return {**covers, "rows": shas, "note_ids": [], "first": kept[0].entry[0], "last": kept[-1].entry[0],
-            "count": len(kept), "task_ids": list(dict.fromkeys(item.task for item in kept if item.task)),
-            "ts_span": source_time_span(item.entry[1].get("ts") for item in kept),
-            "stream_span": [kept[0].entry[2], kept[-1].entry[2]]}
+    from ouroboros.memory_reading import restrict  # the one predicate delegated writers' covers are bounded by
+
+    return restrict(covers, [item.entry for item in kept])
 
 
 def _page_input(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, budget: Optional[int],

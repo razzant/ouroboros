@@ -568,7 +568,11 @@ def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_
     group = _event_group(_overheard_view(tmp_path))
     ours = next(r for r in group["rooms"] if not r["overheard"])
     others = [r for r in group["rooms"] if r["overheard"]]
+    # Words nobody was shown owe no telling, where I spoke too (``memory_reading``); a word an act of mine counted does.
+    assert not forms.owed([group])
+    ours["words"][0]["rank"] = 1
     assert forms.owed([group])[0]["rooms"] == [ours]
+    ours["words"][0]["rank"] = 2
     assert not forms.owed([{**group, "rooms": others}])
     for step, ids in (("F6g", [group["key"]]), ("F6a", [group["key"]]), ("F6a", [group["key"], "unread"])):
         expected = [] if "unread" in ids else [ours["room_id"]]

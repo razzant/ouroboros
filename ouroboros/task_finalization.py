@@ -385,6 +385,8 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
             fields["suggested_name"] = first_sentence(fields["wake_summary"])
         fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
+    if isinstance(usage.get("read_spans"), dict):  # what this work was shown whole of its room (``memory_reading``)
+        fields["read_spans"] = dict(usage["read_spans"])
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:

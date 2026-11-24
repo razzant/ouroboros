@@ -306,7 +306,7 @@ _ENDING_FIELDS = (
     "final_answer", "terminal_origin", "terminal_host_notice", "terminal_provider_notice", "terminal_provider_cause",
     "terminal_salvage_path",
     "trace_summary", "trace_refs", "model_execution", "completion_observations", "tool_calls", "resource_limit",
-    "child_status", "wake_summary", "suggested_name", "model_coined_name", "wake_silent", "fold_read", "owner_message_sent",
+    "child_status", "wake_summary", "suggested_name", "model_coined_name", "wake_silent", "fold_read", "read_spans", "owner_message_sent",
     "_result_text_present", "cancel_origin", "schedule_name", "review_overrides", "finalization_recovery",
     "body_adoptions",
     *_TERMINAL_ACCOUNTING_SCRUB_FIELDS,

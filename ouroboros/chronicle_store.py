@@ -1510,6 +1510,13 @@ class ChronicleStore:
                                            "metadata": {"candidate": candidate}}) not in ("rejected", "candidate")
                        for ident, kind, candidate in look.acting_parts())
 
+    def waiting_drafts(self) -> List[Tuple[str, str]]:
+        """``(room, published)`` of each acting helper draft no decision of mine met (a retired candidate is none)."""
+        with self._reading() as look:
+            records = [(room, ts, {"id": i, "kind": "page", "author": {"kind": k}}) for _s, room, i, k, ts, _e in look.acting_pages()]
+            records += [("", "", {"id": i, "kind": "part", "author": {"kind": k}, "metadata": {"candidate": c}}) for i, k, c in look.acting_parts()]
+            return [(str(room), str(ts or "")) for room, ts, record in records if self._status(look, record) == "draft"]
+
     def sealed_row_refs(self, room_id: Any) -> set:
         """Row refs (``row_sha256`` and ``note:<id>``) the room's acting pages seal; the rest is open."""
         with self._reading() as look:

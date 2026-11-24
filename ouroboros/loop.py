@@ -402,11 +402,13 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     included, is counted in ``prompt_prefix_breaks``; a seam's
     ``transcript_prefix.sanction_rewrite`` names its origin, never exempts it. Never gated.
     """
+    from ouroboros.memory_reading import note_view
     from ouroboros.tools.compact_context import record_context_view
 
     # Before the view replaces it: a restored slot's baseline is its context observation.
     fact = _observe_transcript_send(ctx, messages, round_idx=round_idx, tools=tool_schemas, usage=accumulated_usage)
     record_context_view(ctx, messages, tool_schemas, physical_capture=getattr(ctx, "_usable_main_capture", None))
+    note_view(ctx, accumulated_usage)  # what this accepted request held whole of its room (``memory_reading``)
     from ouroboros.own_time_seed import spend_offer  # the same usable answer's physical request spends a one-time fact
 
     spend_offer(ctx, getattr(ctx, "_usable_main_capture", None))

@@ -6,6 +6,7 @@ forms to account for every escaped character, without keeping its words in the m
 """
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
 from ouroboros.memory_view_work import works, folded_work_rows, task_line, task_gist_line, task_gists_before_work_lines
+from ouroboros.memory_view_conversation_forms import folds
 
 
 def _aggregate_source(source, room_id):
@@ -108,8 +109,8 @@ def _composition_source(source, room_id=None, *, citation=False):
     for key in ("words", "notes", "tasks"):
         if isinstance(source.get(key), (list, tuple)):
             result[key] = [_composition_source(item, room_id) for item in source[key]]
-    if source.get("folded"):
-        result["folded"] = _composition_source(source["folded"], room_id)
+    if held := folds(source):
+        result["folds"] = [_composition_source(fold, room_id) for fold in held]
     if source.get("events"):
         event = source["events"]
         result["events"] = {key: event[key] for key in ("count", "unknown_count", "unknown_chars", "unknown_last") if key in event}
@@ -502,10 +503,10 @@ def _group_counts(group, data, sources, state, aggregate_unread):
     for remote in group["rooms"]:
         unread, owner, rest = sources[remote["room_id"]]
         if count:
-            lost += len(rest) + len(remote["notes"]) + len(remote["tasks"]) + int((remote.get("folded") or {}).get("count", 0))
+            lost += len(rest) + len(remote["notes"]) + len(remote["tasks"]) + sum(int(f.get("count", 0)) for f in folds(remote))
             lost += int(not remote["engaged"] and not remote.get("events"))
             kinds = data["rooms"][remote["room_id"]]
-            telling_lost |= bool(kinds["untold"] or kinds["told"] or remote["notes"] or remote.get("folded")
+            telling_lost |= bool(kinds["untold"] or kinds["told"] or remote["notes"] or folds(remote)
                                  or any(t.get("gist") for t in remote["tasks"]))
         elif form:
             if form == 1:
@@ -516,7 +517,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
             global_unread += len(unread)
         elif not (form and remote.get("overheard")):
             add("host", "unread", int(bool(unread)), len(unread))
-        if not count and (fold := remote.get("folded")):
+        for fold in folds(remote) if not count else ():
             add("retold", "read and folded", 1, fold["count"])
         for word in owner:
             if word["id"] in owners:
@@ -712,8 +713,8 @@ def _hold_conversations(snapshot, gone, hold, price, counts):
                             _rows_reader(remote["room_id"], whole))
                         if folded:
                             add("unread host facts", conv._unread_line(folded), _rows_reader(remote["room_id"], folded))
-                if form < 4 and (fold := remote.get("folded")):
-                    add("read and folded", conv._fold_line(remote),
+                for fold, line in zip(conv.folds(remote), conv._fold_lines(remote)) if form < 4 else ():
+                    add("read and folded", line,
                         f"memory_read(room_id='{remote['room_id']}', rows=true, from='{fold['from']}', to='{fold['to']}')")
             if form and not aggregate_unread:
                 readers = [(_rows_reader(r["room_id"], data["rooms"][r["room_id"]]["unread"]),

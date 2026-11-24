@@ -82,6 +82,11 @@ def registry_for(root: pathlib.Path, task_id: str, meta=None, mode: str = "", mo
 
 
 def call(registry: ToolRegistry, **args) -> dict:
+    """A page's rows are read first by the same writer: a delegated draft covers only what its writer read
+    (``memory_reading``; its refusal is pinned in ``test_memory_reading_follows_delivery``)."""
+    covers = args.get("covers") or {}
+    if args.get("kind") == "page" and covers.get("from") and covers.get("to"):
+        registry.execute("memory_read", {"room_id": "1", "rows": True, "from": covers["from"], "to": covers["to"]})
     return json.loads(registry.execute("chronicle_write", args))
 
 

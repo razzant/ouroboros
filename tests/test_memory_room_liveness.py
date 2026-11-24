@@ -384,12 +384,12 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     assert "beta words" in beta_section and "one more beta question" in beta_section  # my human's, and later words
     assert ("beta reply" in beta_section) is not fold  # my reply there: folded into the sentence, or whole
     if fold:
-        assert item["folded"]["count"] == 1 and _addr(rows[14]) in item["folded"]["to"]
+        assert [f["count"] for f in item["folds"]] == [1] and _addr(rows[14]) in item["folds"][0]["to"]
         assert f"[{_addr(rows[14])}] «Read Beta's thread; nothing owed.»: 1 words read and folded" in beta_section
         assert ("Read row addresses with memory_read(room_id=<the room showing them, not always the chat in the "
                 "address>, rows=true, from=<first>, to=<last>)") in text  # one reader for this block: the projection
     else:
-        assert not item["folded"] and "read and folded" not in text
+        assert not item["folds"] and "read and folded" not in text
     assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
     own, own_text = _view(tmp_path, {"id": "turn-beta", "type": "task", "chat_id": int(beta)})
     assert "beta reply" in own_text and "read and folded" not in own_text  # the room itself reads every row
@@ -417,7 +417,7 @@ def test_a_fold_read_finish_leaves_a_relay_row_whole_elsewhere_and_still_folds_m
     beta_section = text[text.index(f"### Project Beta [chat_id={beta}]"):]
     assert any(word["address"] == _addr(relay) for word in item["words"])  # the relay row stands in the block
     assert ("Keep the March batch frozen until Friday." in beta_section) is quoted
-    assert "beta reply" not in beta_section and item["folded"]["count"] == 1  # my reply there still folds
+    assert "beta reply" not in beta_section and [f["count"] for f in item["folds"]] == [1]  # my reply still folds
 
 
 def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_path):

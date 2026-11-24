@@ -22,6 +22,11 @@ WAITING_CLASSES = MappingProxyType({
                  "reader": "list_projects(closed=false, oldest_first=true)",
                  "act": "close_project(project_id=..., note=...)",
                  "focus": "integrating", "moment": "when folding"},
+    "drafts": {"subject": "helper drafts awaiting my decision", "action": "chronicle_write",
+               "parameter": ("target_id", "accepted"),
+               "reader": "memory_read(story=true, start=0)",
+               "act": "chronicle_write(kind='decision', target_id=..., accepted=true|false, reason=...)",
+               "focus": "integrating", "moment": "when folding"},
     "conversations": {"subject": "conversations whose words no page holds", "action": "chronicle_write",
                       "parameter": ("covers", "conversation"),
                       "reader": "memory_read(room_id='conversations', start=0)",
@@ -38,9 +43,10 @@ def mind_notes(notes):
     return [(room, note) for room, items in notes.items() for note in items if note.get("author_kind") == "mind"]
 
 
-def measure(marks, notes, projects, conversations=()):
-    """Captured active marks, unsealed notes, registry view (None when its census is unavailable) and my other
-    conversations (``memory_view_conversations.capture``'s groups: what of them no page holds, no extra read)."""
+def measure(marks, notes, projects, conversations=(), drafts=None):
+    """Captured active marks, unsealed notes, registry view (None when its census is unavailable), my other
+    conversations (``memory_view_conversations.capture``'s groups: what of them no page holds, no extra read) and
+    the acting helper drafts no decision has met (``ChronicleStore.waiting_drafts``; None: not read)."""
     from ouroboros.memory_view_conversations import owed
 
     reviews, unsealed, debts = late_reviews(marks), mind_notes(notes), owed(conversations)
@@ -59,6 +65,8 @@ def measure(marks, notes, projects, conversations=()):
                       "rooms": sorted(rooms.items(), key=lambda item: (-item[1], item[0]))[:3]},
             "projects": (facts(projects, lambda project: project.get("last_active_at")) if projects is not None
                          else {"count": "unknown", "oldest": "unknown"}),
+            **({"drafts": {**facts(drafts, lambda item: item[1][:10]),
+                           "in_rooms": len({room for room, _ts in drafts if room})}} if drafts is not None else {}),
             "conversations": {**facts(debts, lambda item: str(item["earliest"])[:10]),
                               "largest": [[item["group"]["label"], item["chars"]] for item in  # JSON-stable pairs
                                           sorted(debts, key=lambda item: -item["chars"])[:3]]}}
@@ -86,6 +94,25 @@ def text(waiting):
         lines.append(f"{cls['subject']} {facts['count']}{where}, oldest {facts['oldest']}{told}"
                      + (f", most in {rooms}" if rooms else "") + f"; {cls['reader']}; act {cls['act']}")
     return "; waiting for me at the start: " + " | ".join(lines)
+
+
+def owed_listing(groups):
+    """``(head, body)`` of the conversations whose words no page holds (``owed``), oldest first, each with its rooms
+    that owe a telling and their readers; rooms of other people alone that nobody considered owe none."""
+    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+
+    owed = conversations.owed(groups)
+
+    def whole(item):  # one page over every room of the conversation, held by the room of its newest row
+        room, newest = item["newest"]
+        return (f"  seal it whole: chronicle_write(kind='page', room_id='{room}', covers={{'to': '{newest}', "
+                "'conversation': true})") if len(item["group"]["rooms"]) > 1 else ""
+
+    lines = [line for item in owed for line in (conversations.identity_line(item["group"]), whole(item), *(
+        f"  - {room['label']}; open since {mv._minute(room['facts']['earliest'])}; ~{room['facts']['chars']} chars; "
+        f"memory_read(room_id='{room['room_id']}', rows=true); seal: chronicle_write(kind='page', "
+        f"room_id='{room['room_id']}', covers={{'to': '{room['newest']}'}})" for room in item["rooms"])) if line]
+    return f"Conversations whose words no page holds: {len(owed)}", "\n".join(lines)
 
 
 def listing(kind, marks, notes, label=None, outcome=mark_outcome, landing=None):

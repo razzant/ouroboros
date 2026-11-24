@@ -22,7 +22,7 @@ def _unread(word):
 
 def _gist_records(group):
     found = {}
-    folded = {(room.get("folded") or {}).get("task") for room in group["rooms"]}
+    folded = {fold.get("task") for room in group["rooms"] for fold in folds(room)}
     for room in group["rooms"]:
         for item in [*room["tasks"], *room["words"]]:
             gist = item.get("gist")
@@ -90,18 +90,28 @@ def _overheard_line(group, data):
             f"memory_read(room_id='*', start={group['catalogue_start']})")
 
 
-def _fold_line(room):
+def folds(room):
+    """A room's ``fold_read`` tellings, earliest first, each over the rows its work read that no earlier one told;
+    a view saved before several were kept holds one (``folded``)."""
+    return room.get("folds") or ([room["folded"]] if isinstance(room.get("folded"), dict) and room["folded"] else [])
+
+
+def _fold_lines(room):
     from ouroboros.memory_view_work import row_range
-    fold = room.get("folded")
-    if not fold:
-        return ""
-    span = row_range(fold["from"], fold["to"])
-    if any(address.partition("@")[0] != "row:" + str(room["room_id"]) for address in (fold["from"], fold["to"])):
-        # Bounds are stream positions; membership belongs to the block's room,
-        # even when its related rows were originally written in other rooms.
-        span = (f"memory_read(room_id='{room['room_id']}', rows=true, "
-                f"from='{fold['from']}', to='{fold['to']}')")
-    return f"[{span}] «{fold['sentence']}»: {fold['count']} words read and folded"
+    lines = []
+    for fold in folds(room):
+        span = row_range(fold["from"], fold["to"])
+        if any(address.partition("@")[0] != "row:" + str(room["room_id"]) for address in (fold["from"], fold["to"])):
+            # Bounds are stream positions; membership belongs to the block's room,
+            # even when its related rows were originally written in other rooms.
+            span = (f"memory_read(room_id='{room['room_id']}', rows=true, "
+                    f"from='{fold['from']}', to='{fold['to']}')")
+        lines.append(f"[{span}] «{fold['sentence']}»: {fold['count']} words read and folded")
+    return lines
+
+
+def _fold_line(room):
+    return "\n".join(_fold_lines(room))
 
 
 def _overheard_lines(group, data, part, *, prefix=""):
@@ -133,7 +143,7 @@ def _has_compact_rows(group, data, state, aggregate_unread):
     unread = any(parts["unread"] for parts in data["rooms"].values())
     if form == 4:
         return unread and not aggregate_unread
-    folded = any(room.get("folded") for room in group["rooms"])
+    folded = any(folds(room) for room in group["rooms"])
     return (folded or bool(data["gists"]) or unread) if form else (
         folded or any(data["kinds"].get(ident) == "unread" for ident in gone) or bool(_visible_gists(group, data, gone)))
 
@@ -305,8 +315,8 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
                                   "lead" if "lead_rule" in note else "opening", room["room_id"])
             if (unread := data["rooms"][room["room_id"]]["unread"]) and not room.get("overheard"):
                 lines += emit([_unread_line(unread)], "conversation_unread", unread, "host_fact", room["room_id"])
-            if fold := _fold_line(room):
-                lines += emit([fold], "conversation_fold", [room["folded"]], "gist", room["room_id"])
+            if fold := _fold_lines(room):
+                lines += emit(fold, "conversation_fold", folds(room), "gist", room["room_id"])
         lines += _overheard_lines(group, data, part)
         for room in group["rooms"]:  # each count reads in the room that holds those tasks
             if no_gist := sum(not task.get("gist") for task in room["tasks"]):
@@ -331,8 +341,8 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
                          f"memory_read(room_id='{room['room_id']}', rows=true)"], "conversation_room", [room["facts"]], "facts", room["room_id"])
         for note in room["notes"]:
             lines += emit(_note_lines([note]), "conversation_note", [note], "whole", room["room_id"])
-        if fold := _fold_line(room):
-            lines += emit([fold], "conversation_fold", [room["folded"]], "gist", room["room_id"])
+        if fold := _fold_lines(room):
+            lines += emit(fold, "conversation_fold", folds(room), "gist", room["room_id"])
         unread = [word for word in data["rooms"][room["room_id"]]["unread"] if word["id"] in gone]
         if unread:
             lines += emit([_unread_line(unread)], "conversation_unread", unread, "host_fact", room["room_id"])
@@ -371,12 +381,12 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None, part=None):
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
     sources = {rid: data for g in groups for rid, data in index[g["key"]]["rooms"].items()}
     rooms = [room for group in groups for room in group["rooms"]]
-    folds = sum(int((room.get("folded") or {}).get("count", 0)) for room in rooms)
+    folded = sum(int(fold.get("count", 0)) for room in rooms for fold in folds(room))
     silent = sum(not room["engaged"] for room in rooms)
     event_rooms, arrivals = events.totals(rooms)
     lines = [f"{len(groups)} conversations by count: " + _rooms_line(rooms)
              + (f"; {event_rooms} event rooms, {arrivals} arrivals" if event_rooms else f"; {silent} silent rooms" if silent else "")
-             + (f"; {folds} read-and-folded rows by count" if folds else "")]
+             + (f"; {folded} read-and-folded rows by count" if folded else "")]
     if part:
         lines = part(lines, "conversation_count", groups, "count")
     unread = [(room, word) for room in rooms for word in sources[room["room_id"]]["unread"]]
@@ -442,13 +452,21 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
     return parts
 
 
+def _owes(room) -> bool:
+    """A room holds untold words someone of mine was shown or said: my human's, mine, a person's word an act of mine
+    counted as read (``memory_reading``), or a fold of them. Words nobody was shown stay counts and owe nothing."""
+    return bool(folds(room)) or any(not word.get("again") and (word.get("owner_side") or word.get("kind") == "ouroboros"
+                                                               or word.get("kind") == "human" and word.get("rank") != 2)
+                                    for word in room["words"])
+
+
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Open conversations with a recorded word of my human or reply of mine (S4); rooms of other people alone
-    carry host facts, not a page debt. Oldest open word first (``memory_waiting``'s class)."""
+    """Open conversations holding untold words of my human, mine, or a person's an act of mine counted as read, in an
+    engaged room, overheard ones too (``_owes``); rooms and words nobody was shown carry host facts, not a page debt.
+    Oldest open word first (``memory_waiting``'s class)."""
     found = []
     for group in groups:
-        rooms = [room for room in group["rooms"] if room["engaged"] and not room.get("overheard")
-                 and (room["words"] or room.get("folded"))]
+        rooms = [room for room in group["rooms"] if room["engaged"] and _owes(room)]
         if rooms:  # a conversation page seals all its rooms up to its newest row: the act names that row
             newest = max(group["rooms"], key=lambda room: room["last"])
             found.append({"group": group, "rooms": rooms, "chars": sum(int(room["facts"].get("chars") or 0) for room in rooms),

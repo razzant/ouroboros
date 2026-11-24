@@ -46,7 +46,7 @@ def test_folded_line_reads_all_related_rows_and_no_unrelated_room_words(tmp_path
     captured = mv.capture_memory_view(tmp_path, task, replace(mv.ROLE_DEFAULTS['integrator'], room_id=str(rooms['beta'])))
     group = next(g for g in captured.conversations if any(r['room_id'] == str(room_id) for r in g['rooms']))
     room = next(r for r in group['rooms'] if r['room_id'] == str(room_id))
-    fold = room['folded']
+    [fold] = room['folds']
     assert fold['count'] == 3
     shown = _fold_line(room)
     assert shown.count(' → ') == (0 if inherited else 1)
