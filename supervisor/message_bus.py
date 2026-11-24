@@ -370,7 +370,7 @@ class LocalChatBridge:
         image_b64 = str(image_base64 or "").strip()
         if not clean_text and caption_text:
             clean_text = caption_text
-        if self.panic.request(clean_text, source=source, user_id=user_id, chat_id=chat_id):
+        if not (task_metadata or {}).get("literal_text") and self.panic.request(clean_text, source=source, user_id=user_id, chat_id=chat_id):
             return
         if not clean_text and not image_b64 and not (task_metadata or {}).get("chat_attachment_uploads"):
             return  # nothing to say and nothing attached (a file-only message carries uploads)

@@ -112,8 +112,11 @@ is available in every command mode, including strict: it sends once through the 
 never queues or replays. Telegram dates before the host's whole-second import time are refused;
 their previous outcome is unknown. This assumes aligned clocks: a host ahead rejects fresh Panic
 until Telegram reaches that second; a host behind can accept retained commands. Dates in the
-boundary second are accepted. Other slash commands keep their command-mode rules even in replies; quote a literal command
-as code or include it inside an explanation to send it as a quiz answer.
+boundary second are accepted. Other slash commands keep their command-mode rules even in replies;
+quote a literal command as `code` or `pre` (or include it inside an explanation) to send it as literal
+text or as a quiz answer (never executed as a Host command, including `/panic` and `/restart`).
+Skill state is confined to this skill's state directory (`settings.json`, `owner_pairing.json`,
+`secret_guard.sqlite3`, `quiz_state.json`, `outbox/`, `custody.sqlite3`, `outbox_files/`, `staging/`).
 
 A Project's mirrored messages lead with its name in italics; named work of its own
 in Main leads with that work's name. Direct replies in Main, completion and refusal notices
@@ -332,9 +335,10 @@ keeps the core's `private, no-cache` revalidation (ETag, 304), so reopening the
 app downloads only what changed; bodies, gzip included, pass raw. Requests wait
 for an upstream socket with no pool timeout (32 connections, 8 kept alive). An
 upstream response closes however delivery ends; a stream stops
-once its phone leaves, which uvicorn tells only `receive()`. A request whose phone
-left while waiting still reaches the core when a socket frees, and reading its body ends
-it; closing the HTTP client alone cancels no queued wait. It is on
+once its phone leaves, which uvicorn tells only `receive()`. Session revocation
+(URL change, clear, expiry, exposure loss, or LRU eviction) immediately aborts
+queued upstream waits, active streaming responses, and WebSockets; closing the
+gateway (`aclose`) refuses new upstream requests. It is on
 by default after owner binding; turning it off keeps the text bridge. Disabling it destroys process-memory Mini App
 sessions, stops public exposure and best-effort restores Telegram's prior
 menu button. While it is on, a token saved, replaced or cleared applies within

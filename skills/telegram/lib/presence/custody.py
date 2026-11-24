@@ -12,9 +12,9 @@ from .custody_schema import (
     HELD_REPORTS_SQL, PRESENCE_WORK_TABLE, REACTION_ATTEMPTS_MARKED, REACTION_WITHHELD, REMEMBER_MESSAGE,
     STAMP_PATH, UNANSWERED_ATTEMPT, UNMARKED_NO_EFFECT, UNRECORDED_SEND_NO_EFFECT, InboxFullError, InboxLease,
     OutboxLease, WorkLease, anchor_message_id, build_delivery_receipt, build_status_snapshot, chat_forum,
-    compact_json, held_by_clause, migrate_custody_schema, newest_chat_forum, recorded_calls, remember_event,
-    reply_payload, retained_message, schema_script, token_binding_prefix, unmarked_reaction,
-    unproven_earlier_attempt, with_album_position, with_reaction_target,
+    compact_json, held_by_clause, lease_releasable, migrate_custody_schema, newest_chat_forum, recorded_calls,
+    register_runtime_owner, remember_event, reply_payload, retained_message, schema_script, token_binding_prefix,
+    unmarked_reaction, unregister_runtime_owner, unproven_earlier_attempt, with_album_position, with_reaction_target,
 )
 from .delivery import stored_answers
 from .events import TelegramEvent
@@ -28,11 +28,21 @@ class CustodyStore:
     """SQLite custody over one kept connection; SQLite owns queue truth across restarts."""
 
     def __init__(self, path: pathlib.Path):
-        self.path = pathlib.Path(path)
+        self.path, self._lock, self._conn = pathlib.Path(path), threading.Lock(), None
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._owner_id = uuid.uuid4().hex[:12]
         self._initialize()
+
+    def register_owner(self, owner_id: Optional[str] = None) -> str:
+        with _SHARED_LOCK:
+            return register_runtime_owner(str(owner_id or self._owner_id))
+
+    def unregister_owner(self, owner_id: Optional[str] = None) -> None:
+        with _SHARED_LOCK:
+            unregister_runtime_owner(str(owner_id or self._owner_id))
+
+    def _mint_lease_token(self, owner_id: Optional[str] = None) -> str:
+        return f"{os.getpid()}:{owner_id or self._owner_id}:{uuid.uuid4().hex}"
 
     @classmethod
     def shared(cls, path: pathlib.Path) -> "CustodyStore":
@@ -148,7 +158,7 @@ class CustodyStore:
         return row
 
     def claim_inbox(self, *, lease_sec: float = 90.0) -> Optional[InboxLease]:
-        now, token = time.time(), uuid.uuid4().hex
+        now, token = time.time(), self._mint_lease_token()
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_INBOX, now)
             if row is None:
@@ -202,17 +212,18 @@ class CustodyStore:
             return cur.rowcount == 1
 
     def release_own_leases(self) -> Dict[str, int]:
-        now = time.time()
-        released: Dict[str, int] = {}
+        now, released = time.time(), {}
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for table in ("inbox", "outbox", "presence_work"):
-                cursor = conn.execute(
-                    f"UPDATE {table} SET state='pending', available_at=?, lease_until=0, lease_token='', "
-                    "last_error='released_at_runtime_start' WHERE state='leased'",
-                    (now,),
-                )
-                released[table] = cursor.rowcount
+            for table, pk in (("inbox", "event_id"), ("outbox", "delivery_id"), ("presence_work", "work_ref")):
+                rows = conn.execute(f"SELECT {pk}, lease_until, lease_token FROM {table} WHERE state='leased'").fetchall()
+                stale = [r[pk] for r in rows if lease_releasable(r["lease_until"], str(r["lease_token"] or ""), now)]
+                for row_id in stale:
+                    conn.execute(
+                        f"UPDATE {table} SET state='pending', available_at=?, lease_until=0, lease_token='', "
+                        f"last_error='released_at_runtime_start' WHERE {pk}=? AND state='leased'", (now, row_id),
+                    )
+                released[table] = len(stale)
             conn.commit()
         return released
 
@@ -493,7 +504,7 @@ class CustodyStore:
         )
 
     def claim_work(self, *, lease_sec: float = 90.0) -> Optional[WorkLease]:
-        now, token = time.time(), uuid.uuid4().hex
+        now, token = time.time(), self._mint_lease_token()
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_WORK, now)
             if row is None:
@@ -634,7 +645,7 @@ class CustodyStore:
             return True
 
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
-        now, token = time.time(), uuid.uuid4().hex
+        now, token = time.time(), self._mint_lease_token()
         with self._connect() as conn:
             row = self._claim_candidate(conn, CLAIMABLE_OUTBOX, now)
             if row is None:

@@ -54,8 +54,8 @@ def is_reaction(payload: Dict[str, Any]) -> bool:
 
 
 def not_performed(exc: BaseException) -> bool:
-    """Telegram's own answer that the call did nothing, or a request proved never to have left."""
-    return isinstance(exc, TelegramRequestNotSent) or (
+    """Telegram's own answer that the call did nothing, or a pre-send check/request proved never to have left."""
+    return isinstance(exc, (TelegramRequestNotSent, PlaceHeld, PlaceBindingRevoked)) or (
         isinstance(exc, TelegramApiError) and exc.error_code in NOT_PERFORMED_CODES
     )
 
@@ -191,16 +191,17 @@ class ProviderCalls:
         self.open = None
 
 
-def _with_before_send(fn: Any, before_send: Any) -> Dict[str, Any]:
-    if before_send is None:
-        return {}
+def _with_opt(fn: Any, **kwargs: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
     try:
         import inspect
-        if "before_send" in inspect.signature(fn).parameters:
-            return {"before_send": before_send}
+        params = inspect.signature(fn).parameters
+        for k, v in kwargs.items():
+            if v is not None and k in params:
+                out[k] = v
     except (TypeError, ValueError):
         pass
-    return {}
+    return out
 
 
 async def deliver_outbox(
@@ -212,6 +213,7 @@ async def deliver_outbox(
     account_id: str = "",
     delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
     calls: Optional[ProviderCalls] = None,
+    verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     calls = calls or ProviderCalls(store, lease)
     payload = lease.payload
@@ -247,7 +249,7 @@ async def deliver_outbox(
                     parse_mode=ch["parse_mode"],
                     topic_id=topic_id,
                     reply_to_message_id=reply_id if idx == 0 else None,
-                    **_with_before_send(client.send_text_chunk, before_send),
+                    **_with_opt(client.send_text_chunk, before_send=before_send),
                 ),
             )
             if not names_message(result):
@@ -314,6 +316,7 @@ async def deliver_outbox(
             account_id=account_id,
             delivered=delivered,
             calls=calls,
+            verified_fds=verified_fds,
         )
     if kind not in MEDIA_METHODS:
         raise ValueError(f"unsupported Telegram outbox kind: {kind}")
@@ -335,7 +338,7 @@ async def deliver_outbox(
             prepared_caption=caption,
             topic_id=topic_id,
             reply_to_message_id=reply_id,
-            **_with_before_send(client.send_media, before_send),
+            **_with_opt(client.send_media, before_send=before_send, verified_fds=verified_fds),
         ),
     )
     if not names_message(result):
@@ -370,6 +373,7 @@ async def deliver_album(
     account_id: str = "",
     delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
     calls: Optional[ProviderCalls] = None,
+    verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, Any]:
     calls = calls or ProviderCalls(store, lease)
     payload = lease.payload
@@ -395,7 +399,7 @@ async def deliver_album(
         "sendMediaGroup",
         lambda: client.send_media_group(
             chat_id, items, topic_id=topic_id, reply_to_message_id=optional_int(payload.get("reply_to_message_id")),
-            **_with_before_send(client.send_media_group, before_send),
+            **_with_opt(client.send_media_group, before_send=before_send, verified_fds=verified_fds),
         ),
     )
     messages, reports, rows = [], [], []

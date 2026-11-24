@@ -229,6 +229,7 @@ def lookup_secret_message(
     api: Any, bot_id: str, chat_id: int, message_id: int, *, api_base: str = ""
 ) -> Optional[Dict[str, Any]]:
     """Look up a secret card or refused secret reply in the durable ledger (raises on corrupt DB)."""
+    del api_base  # Secret protection keys on (bot_id, chat_id, message_id) so API base changes never fail open.
     cid, mid = _int_or_zero(chat_id), _int_or_zero(message_id)
     if cid == 0 or mid <= 0:
         return None
@@ -239,11 +240,11 @@ def lookup_secret_message(
         with _LOCK:
             conn = _open(db)
             try:
-                norm_bot, norm_base = _norm_bot(bot_id), _norm_base(api_base)
+                norm_bot = _norm_bot(bot_id)
                 row = conn.execute(
                     "SELECT * FROM secret_messages WHERE chat_id=? AND message_id=? "
-                    "AND (bot_id=? OR bot_id='') AND (api_base=? OR ?='') LIMIT 1",
-                    (cid, mid, norm_bot, norm_base, str(api_base or "")),
+                    "AND (bot_id=? OR bot_id='') LIMIT 1",
+                    (cid, mid, norm_bot),
                 ).fetchone()
                 if row is None and not norm_bot:
                     row = conn.execute(
@@ -268,7 +269,8 @@ def lookup_secret_message(
 
 
 def has_uncertain_secret(api: Any, bot_id: str, chat_id: int, *, api_base: str = "") -> Optional[int]:
-    """Return ``min_epoch`` if ``(bot_id, api_base, chat_id)`` has an uncertain or in-flight secret card."""
+    """Return ``min_epoch`` if ``(bot_id, chat_id)`` has an uncertain or in-flight secret card."""
+    del api_base  # Keyed by (bot_id, chat_id) so API base changes never hide uncertain secret sends.
     cid = _int_or_zero(chat_id)
     if cid == 0:
         return None
@@ -279,17 +281,50 @@ def has_uncertain_secret(api: Any, bot_id: str, chat_id: int, *, api_base: str =
         with _LOCK:
             conn = _open(db)
             try:
-                norm_bot, norm_base = _norm_bot(bot_id), _norm_base(api_base)
+                norm_bot = _norm_bot(bot_id)
                 vals = []
                 for table in ("secret_uncertain", "secret_inflight"):
                     row = conn.execute(
                         f"SELECT MIN(min_epoch) AS ep FROM {table} WHERE chat_id=? "
-                        "AND (bot_id=? OR bot_id='') AND (api_base=? OR ?='')",
-                        (cid, norm_bot, norm_base, str(api_base or "")),
+                        "AND (bot_id=? OR bot_id='')",
+                        (cid, norm_bot),
                     ).fetchone()
                     if row is not None and row["ep"] is not None:
                         vals.append(int(row["ep"]))
                 return min(vals) if vals else None
+            finally:
+                conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        raise SecretGuardUnreadable(f"secret guard unreadable ({type(exc).__name__})") from exc
+
+
+def _bot_has_secret_records(api: Any, bot_id: str, chat_id: int = 0, *, kind: str = "") -> bool:
+    """True when ``bot_id`` has recorded secret cards, refused replies, or uncertain secret sends."""
+    db = _db_path(api)
+    if not db.exists():
+        return False
+    try:
+        with _LOCK:
+            conn = _open(db)
+            try:
+                norm_bot = _norm_bot(bot_id)
+                clauses = ["(bot_id=? OR bot_id='')"]
+                params: list[Any] = [norm_bot]
+                if chat_id:
+                    clauses.append("chat_id=?")
+                    params.append(int(chat_id))
+                if kind:
+                    clauses.append("kind=?")
+                    params.append(kind)
+                if conn.execute(f"SELECT 1 FROM secret_messages WHERE {' AND '.join(clauses)} LIMIT 1", params).fetchone():
+                    return True
+                if not kind:
+                    u_clauses = ["(bot_id=? OR bot_id='')"] + (["chat_id=?"] if chat_id else [])
+                    u_params: list[Any] = [norm_bot] + ([int(chat_id)] if chat_id else [])
+                    for table in ("secret_uncertain", "secret_inflight"):
+                        if conn.execute(f"SELECT 1 FROM {table} WHERE {' AND '.join(u_clauses)} LIMIT 1", u_params).fetchone():
+                            return True
+                return False
             finally:
                 conn.close()
     except (sqlite3.Error, OSError) as exc:
@@ -345,12 +380,13 @@ def _referenced_targets(message: Dict[str, Any], chat_id: int) -> list[tuple[int
 def _ref_looks_like_bot(ref: Optional[Dict[str, Any]], bot_id: str) -> bool:
     if not isinstance(ref, dict):
         return False
-    sender = ref.get("from")
-    if isinstance(sender, dict):
-        if sender.get("is_bot") is True:
-            return True
-        if bot_id and str(sender.get("id") or "") == str(bot_id):
-            return True
+    for key in ("from", "sender_user"):
+        sender = ref.get(key)
+        if isinstance(sender, dict):
+            if sender.get("is_bot") is True:
+                return True
+            if bot_id and str(sender.get("id") or "") == str(bot_id):
+                return True
     origin = ref.get("origin")
     if isinstance(origin, dict):
         su = origin.get("sender_user")
@@ -433,7 +469,24 @@ def classify_secret_exposure(
                     if target_mid in rec_ids:
                         return _quarantine({**rec, "secret": True})
 
-        # 4) Uncertain / in-flight secret card send in this chat: fail closed on replies/quotes to
+        # 4) Unresolvable forward_origin / external_reply (e.g. Telegram user/hidden_user forward lacks message_id):
+        #    fail closed whenever this bot/chat has secret cards or refused secret replies and origin cannot prove safety.
+        fwd = message.get("forward_origin")
+        if isinstance(fwd, dict) and _int_or_zero(fwd.get("message_id")) <= 0:
+            fwd_user = fwd.get("sender_user") if isinstance(fwd.get("sender_user"), dict) else {}
+            fwd_uid = _int_or_zero(fwd_user.get("id"))
+            if _ref_looks_like_bot(fwd, norm_bot) and _bot_has_secret_records(api, norm_bot):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
+            if fwd_uid > 0 and _bot_has_secret_records(api, norm_bot, fwd_uid, kind="refused_reply"):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
+            if str(fwd.get("type") or "") == "hidden_user" and _bot_has_secret_records(api, norm_bot, kind="refused_reply"):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_forward": True})
+        ext = message.get("external_reply")
+        if isinstance(ext, dict) and _int_or_zero(ext.get("message_id")) <= 0:
+            if _ref_looks_like_bot(ext, norm_bot) and _bot_has_secret_records(api, norm_bot):
+                return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "unresolvable_external_reply": True})
+
+        # 5) Uncertain / in-flight secret card send in this chat: fail closed on replies/quotes to
         #    bot or unproven messages (not positively recorded as a non-secret message in message_refs).
         uncertain_epoch = has_uncertain_secret(api, norm_bot, chat_id, api_base=api_base)
         if uncertain_epoch is not None and has_ref:
@@ -451,8 +504,8 @@ def classify_secret_exposure(
                         "chat_id": chat_id, "message_id": target_mid, "options": [],
                         "secret": True, "uncertain": True,
                     })
-            # Quote without identifiable message_id when chat has uncertain secret card -> fail closed!
-            if isinstance(message.get("quote"), dict) and not targets:
+            # Quote/forward/external_reply without identifiable message_id when chat has uncertain secret card -> fail closed!
+            if not targets:
                 return _quarantine({"chat_id": chat_id, "message_id": 0, "options": [], "secret": True, "uncertain": True})
     except SecretGuardUnreadable:
         if has_ref or edited:

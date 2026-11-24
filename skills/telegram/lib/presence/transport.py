@@ -303,6 +303,7 @@ class PresenceBotClient:
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Dict[str, Any]:
         endpoint = MEDIA_METHODS.get(kind)
         if endpoint is None:
@@ -320,7 +321,9 @@ class PresenceBotClient:
             fields["reply_parameters"] = json.dumps({"message_id": int(reply_to_message_id)})
 
         try:
-            result = await self._post_multipart(endpoint, fields, [(kind, pathlib.Path(file_path))], timeout=60.0)
+            result = await self._post_multipart(
+                endpoint, fields, [(kind, pathlib.Path(file_path))], timeout=60.0, verified_fds=verified_fds
+            )
         except TelegramApiError as exc:
             if not caption or parse_mode != "HTML" or exc.error_code != 400:
                 raise
@@ -328,7 +331,9 @@ class PresenceBotClient:
                 await before_send()
             fields.pop("parse_mode", None)
             fields["caption"] = _telegram_html_to_plain(caption)
-            result = await self._post_multipart(endpoint, fields, [(kind, pathlib.Path(file_path))], timeout=60.0)
+            result = await self._post_multipart(
+                endpoint, fields, [(kind, pathlib.Path(file_path))], timeout=60.0, verified_fds=verified_fds
+            )
         if not isinstance(result, dict):
             return {}
         fmt = "html" if fields.get("parse_mode") == "HTML" else "plain"
@@ -342,6 +347,7 @@ class PresenceBotClient:
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
         before_send: Optional[Callable[[], Awaitable[None]]] = None,
+        verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> List[Dict[str, Any]]:
         media: List[Dict[str, Any]] = []
         files: List[Tuple[str, pathlib.Path]] = []
@@ -362,7 +368,8 @@ class PresenceBotClient:
 
         try:
             result = await self._post_multipart(
-                "sendMediaGroup", {**fields, "media": json.dumps(media, ensure_ascii=False)}, files, timeout=120.0
+                "sendMediaGroup", {**fields, "media": json.dumps(media, ensure_ascii=False)}, files,
+                timeout=120.0, verified_fds=verified_fds,
             )
         except TelegramApiError as exc:
             if exc.error_code != 400 or not any(entry.get("parse_mode") == "HTML" for entry in media):
@@ -377,7 +384,8 @@ class PresenceBotClient:
                 for entry in media
             ]
             result = await self._post_multipart(
-                "sendMediaGroup", {**fields, "media": json.dumps(media, ensure_ascii=False)}, files, timeout=120.0
+                "sendMediaGroup", {**fields, "media": json.dumps(media, ensure_ascii=False)}, files,
+                timeout=120.0, verified_fds=verified_fds,
             )
         observed = []
         for index, message in enumerate(result if isinstance(result, list) else []):
@@ -464,10 +472,11 @@ class PresenceBotClient:
         file_specs: Sequence[Tuple[str, pathlib.Path]],
         *,
         timeout: float = 60.0,
+        verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> Any:
         self._check_binding(endpoint)
         try:
-            stream = await asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs)
+            stream = await asyncio.to_thread(_AsyncMultipartStream.open, fields, file_specs, verified_fds)
         except TelegramRequestNotSent:
             raise
         except OSError as exc:
@@ -516,7 +525,12 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
         self._closed = False
 
     @classmethod
-    def open(cls, fields: Dict[str, str], file_specs: Sequence[Tuple[str, pathlib.Path]]) -> "_AsyncMultipartStream":
+    def open(
+        cls,
+        fields: Dict[str, str],
+        file_specs: Sequence[Tuple[str, pathlib.Path]],
+        verified_fds: Optional[Dict[str, Tuple[int, int]]] = None,
+    ) -> "_AsyncMultipartStream":
         boundary = f"ouro-tg-{uuid.uuid4().hex}"
         b_bytes = boundary.encode("ascii")
         field_parts: List[bytes] = []
@@ -529,18 +543,28 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                 + b"\r\n"
             )
             field_parts.append(part)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
         file_parts: List[Tuple[bytes, int, int]] = []
         try:
             for field_name, file_path in file_specs:
                 path = pathlib.Path(file_path)
-                fd = os.open(path, flags)
+                v_entry = (verified_fds or {}).get(str(file_path)) or (verified_fds or {}).get(os.fspath(path))
+                if v_entry is not None:
+                    fd = os.dup(int(v_entry[0]))
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                    except BaseException:
+                        os.close(fd)
+                        raise
+                else:
+                    fd = os.open(path, flags)
                 try:
                     st = os.fstat(fd)
                     if not stat.S_ISREG(st.st_mode):
                         raise TelegramRequestNotSent("upload", "upload source is not a regular file")
-                    if st.st_size > CLOUD_UPLOAD_LIMIT:
-                        raise TelegramRequestNotSent("upload", "file exceeds Telegram Bot API upload limit")
+                    size = int(v_entry[1]) if v_entry is not None else int(st.st_size)
+                    if size > CLOUD_UPLOAD_LIMIT or int(st.st_size) != size:
+                        raise TelegramRequestNotSent("upload", "file exceeds limit or changed size")
                     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
                     safe_name = path.name.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
                     safe_field = str(field_name).replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
@@ -549,7 +573,7 @@ class _AsyncMultipartStream(httpx.AsyncByteStream):
                         + f'Content-Disposition: form-data; name="{safe_field}"; filename="{safe_name}"\r\n'.encode("utf-8")
                         + f"Content-Type: {mime}\r\n\r\n".encode("utf-8")
                     )
-                    file_parts.append((hdr, fd, int(st.st_size)))
+                    file_parts.append((hdr, fd, size))
                 except BaseException:
                     os.close(fd)
                     raise

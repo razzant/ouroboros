@@ -509,9 +509,9 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         panic_text = str(payload.get("text") or payload.get("image_caption") or "")
-        is_panic = (not payload.get("literal_text")) and (lambda t: t == "/panic" or (t.startswith("/panic@") and len(t) > 7))((panic_text.strip().split(None, 1) or [""])[0].lower())
         from ouroboros.panic_source import source_evidence
-        from ouroboros.server_control import request_panic
+        from ouroboros.server_control import is_exact_panic_command, request_panic
+        is_panic = (not payload.get("literal_text")) and is_exact_panic_command(panic_text)
         if is_panic and request_panic(
             ctx.bridge_getter(), panic_text, source=f"skill:{skill_name}",
             user_id=int(payload.get("user_id") or 0), chat_id=int(payload.get("chat_id") or 0),
@@ -631,8 +631,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             return _json_error(str(exc), 400)
         if control and client_message_id:  # a correlated operation is its accepted owner row; a press writes none
             return _json_error("ui_control cannot name a client_message_id: a press is not an owner message", 400)
-        if control:
-            metadata["ui_control"] = control
+        if control: metadata["ui_control"] = control
+        if payload.get("literal_text"): metadata["literal_text"] = True
         bridge = ctx.bridge_getter()
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}

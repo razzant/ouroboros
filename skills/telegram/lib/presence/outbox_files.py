@@ -207,7 +207,7 @@ def keep_fd(
 def keep(source: pathlib.Path, state_dir: Any, max_bytes: int, *, storage_cap: int = MAX_OUTBOX_FILES_BYTES) -> Dict[str, Any]:
     """Copy ``source`` into a new folder of its own and return the row's record of the copy."""
     source = pathlib.Path(source)
-    read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     src_fd = os.open(source, read_flags)
     try:
         return keep_fd(src_fd, source, state_dir, max_bytes, storage_cap=storage_cap)
@@ -222,7 +222,7 @@ def records(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _open_frozen_copy_fd(path_str: str, state_dir: Optional[Any]) -> int:
-    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     if state_dir is None:
         return os.open(path_str, leaf_flags)
     root = (pathlib.Path(state_dir) / DIRECTORY).resolve(strict=True)
@@ -245,11 +245,25 @@ def _open_frozen_copy_fd(path_str: str, state_dir: Optional[Any]) -> int:
         os.close(sub_fd)
 
 
-def verify(payload: Dict[str, Any], *, state_dir: Optional[Any] = None, require_for_media: bool = False) -> None:
-    """Verify every frozen copy matches its size, SHA-256, and (when ``state_dir`` is given) lives in ``outbox_files/``.
+def close_verified(verified_fds: Optional[Dict[str, Tuple[int, int]]]) -> None:
+    """Close all open verified descriptors returned by :func:`open_verified`."""
+    if not verified_fds:
+        return
+    for fd, _size in verified_fds.values():
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    verified_fds.clear()
 
-    When ``require_for_media=True``, media and album rows without complete, matching ``_frozen`` records raise
-    :class:`FrozenFileMissing` so legacy or tampered rows cannot read raw ``file_path`` from disk.
+
+def open_verified(
+    payload: Dict[str, Any], *, state_dir: Optional[Any] = None, require_for_media: bool = False
+) -> Dict[str, Tuple[int, int]]:
+    """Open, verify (size, SHA-256, confinement), rewind, and return ``{path: (fd, size)}`` for frozen copies.
+
+    Callers own the returned descriptors and MUST close them via :func:`close_verified`. On any failure,
+    every opened descriptor is closed before raising so zero-TOCTOU uploads never reopen by pathname.
     """
     kept = records(payload)
     kind = str(payload.get("kind") or "message")
@@ -265,25 +279,49 @@ def verify(payload: Dict[str, Any], *, state_dir: Optional[Any] = None, require_
             for idx, item in enumerate(items):
                 if not isinstance(item, dict) or str(item.get("file_path") or "") != str(kept[idx].get("path") or ""):
                     raise FrozenFileMissing("album item path does not match its verified frozen copy; held")
-    for record in kept:
-        name = pathlib.PurePath(str(record["path"])).name
-        digest, size = hashlib.sha256(), 0
-        try:
-            fd = _open_frozen_copy_fd(str(record["path"]), state_dir)
-            with os.fdopen(fd, "rb") as reader:
-                if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode):
+    opened: Dict[str, Tuple[int, int]] = {}
+    try:
+        for record in kept:
+            path_str = str(record["path"])
+            name = pathlib.PurePath(path_str).name
+            digest, size = hashlib.sha256(), 0
+            try:
+                fd = _open_frozen_copy_fd(path_str, state_dir)
+            except FrozenFileMissing:
+                raise
+            except OSError as exc:
+                raise ValueError(
+                    f"the copy of {name} kept when it was queued cannot be read ({type(exc).__name__}); not sent"
+                ) from exc
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise ValueError(f"the copy of {name} is not a regular file; not sent")
-                while chunk := reader.read(_CHUNK):
+                while True:
+                    chunk = os.read(fd, _CHUNK)
+                    if not chunk:
+                        break
                     size += len(chunk)
                     digest.update(chunk)
-        except FrozenFileMissing:
-            raise
-        except OSError as exc:
-            raise ValueError(
-                f"the copy of {name} kept when it was queued cannot be read ({type(exc).__name__}); not sent"
-            ) from exc
-        if size != record.get("size") or digest.hexdigest() != record.get("sha256"):
-            raise ValueError(f"the copy of {name} kept when it was queued has changed since; not sent")
+                if size != record.get("size") or digest.hexdigest() != record.get("sha256"):
+                    raise ValueError(f"the copy of {name} kept when it was queued has changed since; not sent")
+                os.lseek(fd, 0, os.SEEK_SET)
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            opened[path_str] = (fd, size)
+        return opened
+    except BaseException:
+        close_verified(opened)
+        raise
+
+
+def verify(payload: Dict[str, Any], *, state_dir: Optional[Any] = None, require_for_media: bool = False) -> None:
+    """Verify every frozen copy matches its size, SHA-256, and (when ``state_dir`` is given) lives in ``outbox_files/``."""
+    opened = open_verified(payload, state_dir=state_dir, require_for_media=require_for_media)
+    close_verified(opened)
 
 
 def discard(kept: List[Dict[str, Any]], state_dir: Any) -> None:

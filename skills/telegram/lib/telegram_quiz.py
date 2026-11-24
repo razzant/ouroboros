@@ -41,6 +41,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import pathlib
 import weakref
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -239,12 +241,11 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
     chunker, then the compact keyboard message; nothing authored is truncated.
     """
     def _record_mid(mid: int) -> None:
-        if mid <= 0:
-            return
+        val = int(mid or 0)
         if sent_ids is not None:
-            sent_ids.append(mid)
-        if callable(on_part):
-            on_part(mid)
+            sent_ids.append(val)
+        if val > 0 and callable(on_part):
+            on_part(val)
 
     async def send(text: str) -> int:
         # An open question (no options) carries no keyboard: a plain message
@@ -353,11 +354,23 @@ def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
             }
         for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
             secrets.pop(stale, None)
-    path = _state_file(api, _QUIZ_STATE_FILE)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_quiz_state(_state_file(api, _QUIZ_STATE_FILE), data)
+
+
+def _write_quiz_state(path: pathlib.Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(path)
+    raw = json.dumps(data).encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def remember_secret_message(api, bot: str, chat_id: int, message_id: int,
@@ -378,11 +391,7 @@ def remember_secret_message(api, bot: str, chat_id: int, message_id: int,
     }
     for stale in list(secrets)[:-_MAX_SECRET_MESSAGES]:
         secrets.pop(stale, None)
-    path = _state_file(api, _QUIZ_STATE_FILE)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(path)
+    _write_quiz_state(_state_file(api, _QUIZ_STATE_FILE), data)
 
 
 def quiz_for_token(api, bot: str, token: str) -> Optional[Dict[str, Any]]:

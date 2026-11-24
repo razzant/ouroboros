@@ -337,14 +337,15 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             )
             client_message_id = f"host-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
 
-        lowered = text.strip().lower()
+        lowered = "" if (msg.get("task_metadata") or {}).get("literal_text") else text.strip().lower()
         is_slash_command = lowered.startswith("/")
         is_external_transport = source != "web"
         external_identity_present = (not is_external_transport) or (chat_id > 0 and user_id > 0)
         # Emergency Stop Invariant (#1307): the local door stops before any state read,
         # chat record, state update or reply; an external transport needs a POSITIVELY
         # bound owner (one lock-free read) and never registers a stranger from an unknown slot.
-        panic = lowered.startswith("/panic")
+        from ouroboros.server_control import external_owner_binding, is_exact_panic_command
+        panic = is_exact_panic_command(lowered)
         if panic and not is_external_transport:
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
             return offset  # Never drain another already-queued message after Panic.
@@ -353,8 +354,6 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         st = ctx.load_state()
         if getattr(bridge, "panic", None) is not None:
             bridge.panic.observe_owner(st)
-        from ouroboros.server_control import external_owner_binding
-
         ext_known, owner_ext_id, bound_pair = external_owner_binding(st)
         bound_owner = external_identity_present and ext_known and owner_ext_id is not None and bound_pair == (user_id, chat_id)
         if panic and bound_owner:

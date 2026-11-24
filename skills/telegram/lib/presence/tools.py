@@ -689,14 +689,18 @@ def _reaction_values_or_refuse(reaction: Any) -> list[dict[str, Any]]:
         raise ValueError("reaction must be a list of Telegram reaction objects")
     if len(reaction) > 1:
         raise ValueError("a Telegram bot can set at most one reaction per message; [] removes it")
+    cleaned: list[dict[str, Any]] = []
     for item in reaction:
-        if item.get("type") == "paid":
+        rtype = item.get("type")
+        if rtype == "paid":
             raise ValueError("Telegram does not let bots set paid reactions")
-        if not (item.get("type") == "emoji" and item.get("emoji")) and not (
-            item.get("type") == "custom_emoji" and item.get("custom_emoji_id")
-        ):
+        if rtype == "emoji" and item.get("emoji"):
+            cleaned.append({"type": "emoji", "emoji": str(item["emoji"])})
+        elif rtype == "custom_emoji" and item.get("custom_emoji_id"):
+            cleaned.append({"type": "custom_emoji", "custom_emoji_id": str(item["custom_emoji_id"])})
+        else:
             raise ValueError("a reaction is {type: emoji, emoji} or {type: custom_emoji, custom_emoji_id}")
-    return [dict(item) for item in reaction]
+    return cleaned
 
 
 def _reaction_conversation(

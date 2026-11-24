@@ -216,8 +216,11 @@ def test_validate_bot_single_getme_scopes_commands_and_populates_presence(tmp_pa
     api = _FakeApi(state_dir, data_dir=tmp_path)
     client = _RecordingClient()
 
-    # 1) Unbound install: clears public default scope and installs NO owner commands globally
+    # 1) Unbound install: _validate_bot makes only getMe (never blocks getUpdates behind setMyCommands);
+    #    _sync_bot_commands clears public default scope and installs NO owner commands globally.
     asyncio.run(plugin._validate_bot(api, client, "full_access", "en"))
+    assert [m for m, _ in client.calls] == ["getMe"]
+    asyncio.run(plugin._sync_bot_commands(api, client, "full_access", "en", ""))
     assert [m for m, _ in client.calls] == ["getMe", "setMyCommands"]
     default_call = client.calls[1][1]
     assert json.loads(default_call["scope"]) == {"type": "default"}
@@ -237,9 +240,11 @@ def test_validate_bot_single_getme_scopes_commands_and_populates_presence(tmp_pa
     assert cmd_names[0] == "menu"
     assert {"mode", "main", "panic", "bg", "status"} <= set(cmd_names)
 
-    # 3) Bound validation clears default scope + sets chat scope + populates Presence identity
+    # 3) Bound validation makes single getMe + populates Presence identity; _sync_bot_commands clears default + sets chat scope
     client.calls.clear()
     asyncio.run(plugin._validate_bot(api, client, "full_access", "en"))
+    assert [m for m, _ in client.calls] == ["getMe"]
+    asyncio.run(plugin._sync_bot_commands(api, client, "full_access", "en", "42"))
     assert [m for m, _ in client.calls] == ["getMe", "setMyCommands", "setMyCommands"]
     rt = plugin._presence_runtime(api)
     assert rt.recorded_bot() == "123456"

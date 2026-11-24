@@ -761,3 +761,127 @@ def test_group8_i18n_passive_read_only_no_shared_writes(tmp_path, monkeypatch):
     assert texts["btn_metrics"] == "📉 Status & Metrics"
     assert i18n.host_sentence("Fallback sentence.", "fr") == "Fallback sentence."
     assert list(data_dir.rglob("*")) == []  # ZERO writes to shared installation state!
+
+
+def test_round14_adversarial_regressions(tmp_path, monkeypatch):
+    import concurrent.futures
+    import stat
+
+    plugin = _load_plugin("tg_sec_r14")
+    from tg_sec_r14.lib import telegram_outbox, telegram_owner_auth, telegram_presence_bridge, telegram_quiz, telegram_secret_guard as sg
+    from tg_sec_r14.lib.presence import custody, file_access, host, outbox_files, outbox_worker, tools, transport
+    from tg_sec_r14.scripts.telegram_settings import merge_settings
+    from ouroboros.server_control import PanicIngress, dispatch_accepted_restart, is_exact_panic_command
+    from supervisor.message_bus import LocalChatBridge
+
+    # 1A) Outbox admission binds owner & api_base; changing owner stops resumed delivery (never delivers to successor)
+    api = _StubApi(tmp_path / "r14_state")
+    merge_settings(tmp_path / "r14_state", {"TELEGRAM_CHAT_ID": "18"})
+    ob = telegram_outbox.Outbox(api)
+    rec = ob._new_record("outbound", {"text": "private to 18"}, 1, "pending")
+    assert rec["chat_id"] == 18 and rec["api_base"] == "https://api.telegram.org"
+    quiz_rec = asyncio.run(ob._custody("quiz", {"task_id": "t1", "quiz_id": "q1", "secret_request": {"field": "tok"}}, 2))
+    assert quiz_rec is not None and quiz_rec.get("secret") is True
+
+    # 1B) Concurrent pairing redemption: exactly 1 of 20 threads wins; corrupted expires_at fails closed;
+    #     /pair and /start <code> are consumed locally on both owner and non-owner lanes (never enter Presence or Main).
+    pair_api = _StubApi(tmp_path / "r14_pair")
+    code = telegram_owner_auth.issue_owner_pairing_code(pair_api)["code"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(lambda i: telegram_owner_auth.redeem_owner_pairing_code(pair_api, 100 + i, f"/pair {code}"), range(20)))
+    assert sum(1 for ok in results if ok) == 1
+    assert telegram_owner_auth.is_pairing_command(pair_api, {"chat": {"id": -1001, "type": "supergroup"}, "text": f"/pair {code}"}) is True
+    assert telegram_owner_auth.is_pairing_command(pair_api, {"chat": {"id": 100, "type": "private"}, "text": f"/start {code}"}) is True
+    # Tampered expires_at fails closed without raising ValueError
+    pair_api2 = _StubApi(tmp_path / "r14_pair2")
+    c2 = telegram_owner_auth.issue_owner_pairing_code(pair_api2)["code"]
+    (tmp_path / "r14_pair2" / "owner_pairing.json").write_text(json.dumps({"code": c2, "expires_at": "not-a-float", "failed_attempts": 0}))
+    assert telegram_owner_auth.redeem_owner_pairing_code(pair_api2, 42, f"/pair {c2}") is False
+
+    # 2) Secret guard: custom api_base lookup still blocks; channel_post & user forward blocked; multi-part mid=0 marks uncertain; quiz_state 0o600
+    sg.record_secret_message(api, "123456", 18, 501, api_base="https://api.telegram.org", kind="card", task_id="t1", quiz_id="q1")
+    sg.record_secret_message(api, "123456", 18, 502, api_base="https://api.telegram.org", kind="refused_reply", task_id="t1", quiz_id="q1")
+    assert sg.classify_secret_exposure(api, "123456", {"chat": {"id": 18}, "message_id": 503, "reply_to_message": {"message_id": 501}}, api_base="http://127.0.0.1:8081") is not None
+    # User-origin forward (no message_id) from chat with refused_reply fails closed
+    assert sg.classify_secret_exposure(api, "123456", {"chat": {"id": -10099}, "message_id": 9, "forward_origin": {"type": "user", "sender_user": {"id": 18}, "date": 1700000000}}) is not None
+    # channel_post referencing secret is blocked BEFORE Presence ingest
+    ingested: list = []
+    fake_rt = types.SimpleNamespace(ingest_update=lambda u, **k: asyncio.sleep(0, result=ingested.append(u)))
+    fake_cl = types.SimpleNamespace(bot_id="123456", api_base_origin="http://127.0.0.1:8081")
+    asyncio.run(telegram_presence_bridge.handle_non_owner_update(
+        api, fake_cl, {"update_id": 1, "channel_post": {"chat": {"id": -10077, "type": "channel"}, "message_id": 10, "forward_origin": {"type": "channel", "chat": {"id": 18}, "message_id": 501}}},
+        "18", runtime_getter=lambda _a: fake_rt,
+    ))
+    assert ingested == []
+    # Multi-part secret send where chunk 1 returns mid=0 keeps 0 in sent_ids so secret_confirmed is False
+    part_results = iter([0, 200, 201])
+    fake_quiz_cl = types.SimpleNamespace(
+        send_message=lambda *a, **k: asyncio.sleep(0, result=next(part_results)),
+        send_message_with_inline_keyboard=lambda *a, **k: asyncio.sleep(0, result=next(part_results)),
+    )
+    sids: list[int] = []
+    asyncio.run(telegram_quiz.send_quiz_card(fake_quiz_cl, 18, body="x" * 5000, compact="c", hint_text="h", keyboard=[], sent_ids=sids))
+    assert 0 in sids
+    telegram_quiz.remember_quiz(api, "123456", "tok1", {"task_id": "t1", "quiz_id": "q1", "chat_id": 18, "message_id": 200, "options": [], "text": "Q"})
+    assert stat.S_IMODE((tmp_path / "r14_state" / "quiz_state.json").stat().st_mode) == 0o600
+
+    # 3) Exact /panic & literal_text end-to-end across PanicIngress, dispatch_accepted_restart, message_bus, quiz replies, and _validate_bot
+    assert is_exact_panic_command("/panic") is True and is_exact_panic_command("/panicking") is False
+    stopped: list[str] = []
+    bus = LocalChatBridge()
+    bus.panic = PanicIngress(lambda: stopped.append("PANIC"))
+    bus.panic._owner = [True, (18, 18)]
+    bus.enqueue_local_message("/panicking right now", source="skill:telegram", user_id=18, chat_id=18)
+    bus.enqueue_local_message("/panic", source="skill:telegram", user_id=18, chat_id=18, task_metadata={"literal_text": True})
+    assert stopped == []
+    restarted: list[str] = []
+    dispatch_accepted_restart(bus, "/restart", callback=lambda *a, **k: (lambda: restarted.append("R")), source="skill:telegram", user_id=18, chat_id=18, task_metadata={"literal_text": True})
+    assert restarted == []
+    # /main + code `/panic` marks inner span as literal
+    main_code_msg = {"text": "/main /panic", "entities": [{"type": "bot_command", "offset": 0, "length": 5}, {"type": "code", "offset": 6, "length": 6}]}
+    assert telegram_owner_auth.is_panic_command(main_code_msg) is False
+    assert telegram_owner_auth.is_literal_span(main_code_msg, "/panic") is True
+    # _validate_bot makes ONLY getMe (zero blocking setMyCommands ahead of getUpdates)
+    val_calls: list[str] = []
+    val_cl = types.SimpleNamespace(bot_id="123456", token="123456:TOK_A", api_base_origin="https://api.telegram.org",
+                                   call=lambda m, **k: (val_calls.append(m), asyncio.sleep(0, result={"ok": True, "result": {"id": 123456, "username": "bot"}}))[1])
+    asyncio.run(plugin._validate_bot(api, val_cl, "full_access", "en"))
+    assert val_calls == ["getMe"]
+
+    # 4) HTML-400 fallback PlaceHeld clears CALL_STARTED; eventless focus receipt isolation; reaction key whitelist
+    assert outbox_worker.not_performed(outbox_worker.PlaceHeld("paused")) is True
+    assert outbox_worker.not_performed(host.PlaceBindingRevoked("revoked")) is True
+    focus_ctx = types.SimpleNamespace(task_id="task-other", task_metadata={"focus": {"place_id": "place-1"}})
+    row_payload = {"account_id": "123456", "chat_id": "-1001", "topic_id": "99", "_caller_scope": {"task_id": "task-owner", "place_id": "place-1"}}
+    assert file_access.receipt_visible_to(focus_ctx, row_payload) is False
+    assert tools._reaction_values_or_refuse([{"type": "emoji", "emoji": "👍", "evil_extra": 1}]) == [{"type": "emoji", "emoji": "👍"}]
+
+    # 5) Zero-TOCTOU verified fd continuity: unlinking/swapping file on disk after open_verified still streams original bytes!
+    src = tmp_path / "orig.txt"
+    src.write_bytes(b"ORIGINAL_VERIFIED_BYTES")
+    frozen = outbox_files.keep(src, tmp_path / "r14_state", 1024)
+    p_payload = {"kind": "document", "file_path": frozen["path"], "_frozen": [frozen]}
+    vfds = outbox_files.open_verified(p_payload, state_dir=tmp_path / "r14_state", require_for_media=True)
+    try:
+        # Swap on-disk frozen file AFTER verification — stream MUST still transmit ORIGINAL_VERIFIED_BYTES from verified fd!
+        pathlib.Path(frozen["path"]).unlink()
+        pathlib.Path(frozen["path"]).write_bytes(b"ATTACKER_SWAPPED_BYTES!")
+        stream = transport._AsyncMultipartStream.open({"chat_id": "1"}, [("document", pathlib.Path(frozen["path"]))], vfds)
+        async def _drain():
+            chunks = [c async for c in stream]
+            return b"".join(chunks)
+        body = asyncio.run(_drain())
+        assert b"ORIGINAL_VERIFIED_BYTES" in body and b"ATTACKER_SWAPPED_BYTES" not in body
+    finally:
+        outbox_files.close_verified(vfds)
+
+    # 6) Scoped lease recovery preserves live registered owner leases & releases retired owner leases
+    st_store = custody.CustodyStore(tmp_path / "r14_leases.sqlite3")
+    st_store.register_owner()
+    st_store.enqueue_outbox("d-live", {"kind": "message", "chat_id": "1", "text": "hi"})
+    live_lease = st_store.claim_outbox(lease_sec=120.0)
+    assert live_lease is not None
+    assert st_store.release_own_leases()["outbox"] == 0  # Live registered owner lease is NOT stolen!
+    st_store.unregister_owner()
+    assert st_store.release_own_leases()["outbox"] == 1  # Retired owner lease IS released!
+    st_store.close()

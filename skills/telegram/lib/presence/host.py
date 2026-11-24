@@ -477,6 +477,14 @@ class PresenceHostClient:
         self.delivery_reporting_status = "unknown"
         self._identity_discovered_at = 0.0
 
+    def identity_is_fresh(self) -> bool:
+        """True only while cached ``/identity`` protocol flags are within the identity TTL."""
+        return (
+            self.delivery_reporting_status in {"supported", "unsupported"}
+            and self._identity_discovered_at > 0.0
+            and (time.monotonic() - self._identity_discovered_at) < _IDENTITY_TTL_SEC
+        )
+
     async def discover_delivery_support(self, *, force: bool = False) -> int:
         if (
             not force

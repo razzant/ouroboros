@@ -262,6 +262,11 @@ class TelegramMenuManager:
 
     async def verify_private_owner(self) -> str:
         bot = await self._call("getMe", {})
+        expected_bot_id = self._token.split(":", 1)[0].strip()
+        raw_bot_id = bot.get("id") if isinstance(bot, dict) else None
+        if expected_bot_id.isdigit():
+            if type(raw_bot_id) is not int or raw_bot_id <= 0 or str(raw_bot_id) != expected_bot_id:
+                raise TelegramMenuRejectedError("Telegram getMe bot identity does not match token.")
         self.bot = _bot_identity(bot)
         chat = await self._call("getChat", {"chat_id": self.chat_id})
         if not isinstance(chat, dict) or str(chat.get("type") or "") != "private":

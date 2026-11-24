@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -11,24 +12,25 @@ import secrets
 import time
 from typing import Any, Dict, Optional
 
-from ..scripts.telegram_settings import TelegramSettingsError, load_settings, merge_settings, telegram_api_base
+from ..scripts.telegram_settings import (
+    TelegramSettingsError,
+    load_settings,
+    merge_settings_unlocked,
+    settings_lock,
+    telegram_api_base,
+)
 
 _PAIRING_FILE = "owner_pairing.json"
 _PAIRING_TTL_SEC = 600.0
 _PAIRING_MAX_ATTEMPTS = 5
+_REDEEMED_MEMORY_SEC = 86400.0
+_MIN_START_PAIR_LEN = 16
 _MAIN_CMD_RE = re.compile(r"^/(?:main|m)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _PANIC_CMD_RE = re.compile(r"^/panic(?:@([A-Za-z0-9_]+))?(?:\s|$)", re.IGNORECASE)
-_PAIR_CMD_RE = re.compile(r"^/(?:start|pair)(?:@[A-Za-z0-9_]+)?\s+(\S+)\s*$", re.IGNORECASE)
-_LITERAL_ENTITY_TYPES = frozenset({
-    "code",
-    "pre",
-    "blockquote",
-    "expandable_blockquote",
-    "url",
-    "text_link",
-    "email",
-    "phone_number",
-})
+_PAIR_CMD_RE = re.compile(r"^/(start|pair)(?:@[A-Za-z0-9_]+)?\s+(\S+)\s*$", re.IGNORECASE)
+_PAIR_ANY_RE = re.compile(r"^/pair(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
+_START_ARG_RE = re.compile(r"^/start(?:@[A-Za-z0-9_]+)?\s+(\S+)", re.IGNORECASE)
+_LITERAL_ENTITY_TYPES = frozenset({"code", "pre"})
 
 
 def _resolve_state_dir(state_dir: Any) -> pathlib.Path:
@@ -38,6 +40,10 @@ def _resolve_state_dir(state_dir: Any) -> pathlib.Path:
 
 def _pairing_path(state_dir: Any) -> pathlib.Path:
     return _resolve_state_dir(state_dir) / _PAIRING_FILE
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
@@ -59,15 +65,35 @@ def _write_private_json(path: pathlib.Path, payload: Dict[str, Any]) -> None:
         raise
 
 
-def clear_owner_pairing(state_dir: Any) -> None:
+def _read_pairing_record(path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    if not path.is_file():
+        return None
     try:
-        _pairing_path(state_dir).unlink(missing_ok=True)
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _clear_pairing_unlocked(path: pathlib.Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
     except OSError:
         pass
 
 
+def clear_owner_pairing(state_dir: Any) -> None:
+    root = _resolve_state_dir(state_dir)
+    try:
+        with settings_lock(root):
+            _clear_pairing_unlocked(_pairing_path(root))
+    except (TelegramSettingsError, OSError):
+        _clear_pairing_unlocked(_pairing_path(root))
+
+
 def issue_owner_pairing_code(state_dir: Any, *, ttl_sec: float = _PAIRING_TTL_SEC, now: Optional[float] = None) -> Dict[str, Any]:
     """Issue a single-use, time-bounded owner confirmation code from Ouroboros (loopback-only)."""
+    root = _resolve_state_dir(state_dir)
     ts = time.time() if now is None else float(now)
     ttl = max(30.0, min(float(ttl_sec), 3600.0))
     code = secrets.token_urlsafe(24)
@@ -77,7 +103,8 @@ def issue_owner_pairing_code(state_dir: Any, *, ttl_sec: float = _PAIRING_TTL_SE
         "expires_at": ts + ttl,
         "failed_attempts": 0,
     }
-    _write_private_json(_pairing_path(state_dir), record)
+    with settings_lock(root):
+        _write_private_json(_pairing_path(root), record)
     return {"code": code, "expires_at": record["expires_at"], "ttl_sec": ttl}
 
 
@@ -90,40 +117,99 @@ def redeem_owner_pairing_code(
     match = _PAIR_CMD_RE.match(str(text or "").strip())
     if not match:
         return False
-    candidate = match.group(1)
-    path = _pairing_path(state_dir)
-    if not path.is_file():
-        return False
+    cmd, candidate = match.group(1).lower(), match.group(2)
+    root = _resolve_state_dir(state_dir)
+    path = _pairing_path(root)
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        clear_owner_pairing(state_dir)
-        return False
-    if not isinstance(record, dict):
-        clear_owner_pairing(state_dir)
-        return False
-    ts = time.time() if now is None else float(now)
-    expected = str(record.get("code") or "")
-    expires_at = float(record.get("expires_at") or 0.0)
-    failed = int(record.get("failed_attempts") or 0)
-    if not expected or ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
-        clear_owner_pairing(state_dir)
-        return False
-    if not hmac.compare_digest(expected, candidate):
-        failed += 1
-        if failed >= _PAIRING_MAX_ATTEMPTS:
-            clear_owner_pairing(state_dir)
-        else:
-            record["failed_attempts"] = failed
+        with settings_lock(root):
+            # Refuse redemption if an owner is already bound under the same lock.
             try:
-                _write_private_json(path, record)
+                existing_owner = int(str(load_settings(root).get("TELEGRAM_CHAT_ID") or "").strip() or "0")
+            except (TelegramSettingsError, TypeError, ValueError):
+                existing_owner = 0
+            if existing_owner > 0:
+                return False
+            if not path.is_file():
+                return False
+            record = _read_pairing_record(path)
+            if record is None:
+                _clear_pairing_unlocked(path)
+                return False
+            expected = str(record.get("code") or "")
+            if not expected:
+                return False
+            try:
+                expires_at = float(record.get("expires_at") or 0.0)
+                failed = int(record.get("failed_attempts") or 0)
+            except (TypeError, ValueError):
+                _clear_pairing_unlocked(path)
+                return False
+            ts = time.time() if now is None else float(now)
+            if ts > expires_at or failed >= _PAIRING_MAX_ATTEMPTS:
+                _clear_pairing_unlocked(path)
+                return False
+            if not hmac.compare_digest(expected, candidate):
+                # Always count /pair attempts; count /start only for plausible token lengths so stray short /start args don't burn a code.
+                if cmd == "pair" or len(candidate) >= _MIN_START_PAIR_LEN:
+                    failed += 1
+                    if failed >= _PAIRING_MAX_ATTEMPTS:
+                        _clear_pairing_unlocked(path)
+                    else:
+                        record["failed_attempts"] = failed
+                        try:
+                            _write_private_json(path, record)
+                        except OSError:
+                            _clear_pairing_unlocked(path)
+                return False
+            # Atomically replace active challenge with redeemed-hash sentinel (no plaintext code) BEFORE persisting owner.
+            sentinel = {"redeemed_sha256": _sha256_text(expected), "redeemed_at": ts}
+            try:
+                _write_private_json(path, sentinel)
             except OSError:
-                clear_owner_pairing(state_dir)
+                return False
+            merge_settings_unlocked(root, {"TELEGRAM_CHAT_ID": str(int(chat_id))})
+            return True
+    except (TelegramSettingsError, OSError):
         return False
-    # Consume single-use token BEFORE persisting TELEGRAM_CHAT_ID so replay is impossible.
-    clear_owner_pairing(state_dir)
-    merge_settings(_resolve_state_dir(state_dir), {"TELEGRAM_CHAT_ID": str(int(chat_id))})
-    return True
+
+
+def is_pairing_command(state_dir: Any, message: Any) -> bool:
+    """True when ``message`` carries a pairing command/code that must be consumed locally, never forwarded."""
+    if not isinstance(message, dict):
+        return False
+    raw, _entities = _message_text_and_entities(message)
+    cleaned = raw.strip()
+    if not cleaned:
+        return False
+    if _PAIR_ANY_RE.match(cleaned):
+        return True
+    start_match = _START_ARG_RE.match(cleaned)
+    if not start_match:
+        return False
+    arg = start_match.group(1)
+    root = _resolve_state_dir(state_dir)
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    is_private = str(chat.get("type") or "") == "private"
+    owner = live_owner_chat_id(root)
+    if owner <= 0 and is_private:
+        return True
+    record = _read_pairing_record(_pairing_path(root))
+    if not record:
+        return False
+    active_code = str(record.get("code") or "")
+    if active_code and hmac.compare_digest(active_code, arg):
+        # Owner is already bound and sent an unused active pairing code: clear it locally and never forward.
+        clear_owner_pairing(root)
+        return True
+    redeemed_hash = str(record.get("redeemed_sha256") or "")
+    if redeemed_hash:
+        try:
+            redeemed_at = float(record.get("redeemed_at") or 0.0)
+        except (TypeError, ValueError):
+            redeemed_at = 0.0
+        if (time.time() - redeemed_at) <= _REDEEMED_MEMORY_SEC and hmac.compare_digest(redeemed_hash, _sha256_text(arg)):
+            return True
+    return False
 
 
 def live_owner_chat_id(state_dir: Any) -> int:
@@ -152,18 +238,15 @@ def api_base_matches_live(state_dir: Any, expected_origin: str) -> bool:
         return False
 
 
-def _leading_utf16_offset(raw: str) -> int:
-    stripped = raw.lstrip()
-    lead = raw[: len(raw) - len(stripped)]
-    return len(lead.encode("utf-16-le")) // 2
+def _utf16_offset_for_pos(raw: str, pos: int) -> int:
+    return len(raw[:pos].encode("utf-16-le")) // 2
 
 
-def _entity_marks_literal(raw: str, entities: Any) -> bool:
-    """True when Telegram formatting entities mark the leading token as literal text (e.g. code/pre)."""
-    if not isinstance(entities, list) or not entities or not raw.strip():
+def _entity_marks_literal_at(raw: str, entities: Any, char_pos: int) -> bool:
+    """True ONLY when a Telegram ``code`` or ``pre`` entity covers ``char_pos``."""
+    if not isinstance(entities, list) or not entities or char_pos < 0 or char_pos >= len(raw):
         return False
-    start = _leading_utf16_offset(raw)
-    covering = []
+    start = _utf16_offset_for_pos(raw, char_pos)
     for entity in entities:
         if not isinstance(entity, dict):
             continue
@@ -171,14 +254,17 @@ def _entity_marks_literal(raw: str, entities: Any) -> bool:
         length = entity.get("length")
         etype = str(entity.get("type") or "").strip().lower()
         if type(offset) is int and type(length) is int and length > 0 and offset <= start < offset + length:
-            covering.append(etype)
-    if not covering:
+            if etype in _LITERAL_ENTITY_TYPES:
+                return True
+    return False
+
+
+def _entity_marks_literal(raw: str, entities: Any) -> bool:
+    """True when Telegram ``code`` or ``pre`` entities mark the leading token as literal text."""
+    stripped = raw.lstrip()
+    if not stripped:
         return False
-    if any(etype in _LITERAL_ENTITY_TYPES for etype in covering):
-        return True
-    # If entities cover offset 0 and none is bot_command (e.g. bold/italic/spoiler/etc. on a non-command),
-    # Telegram never parsed a slash command at offset 0.
-    return "bot_command" not in covering
+    return _entity_marks_literal_at(raw, entities, len(raw) - len(stripped))
 
 
 def _message_text_and_entities(message: Dict[str, Any]) -> tuple[str, Any]:
@@ -189,8 +275,19 @@ def _message_text_and_entities(message: Dict[str, Any]) -> tuple[str, Any]:
     return "", None
 
 
+def is_literal_span(message: Any, substring: str) -> bool:
+    """True when ``substring`` inside ``message`` starts with '/' and is covered by a ``code``/``pre`` entity."""
+    if not isinstance(message, dict) or not substring or not substring.strip().startswith("/"):
+        return False
+    raw, entities = _message_text_and_entities(message)
+    pos = raw.find(substring.strip())
+    if pos < 0:
+        return False
+    return _entity_marks_literal_at(raw, entities, pos)
+
+
 def is_literal_slash_message(message: Any) -> bool:
-    """True when a message starting with '/' is explicitly formatted as literal text by Telegram entities."""
+    """True when a message starting with '/' is formatted as ``code`` or ``pre`` by Telegram entities."""
     if not isinstance(message, dict):
         return False
     raw, entities = _message_text_and_entities(message)
@@ -200,7 +297,7 @@ def is_literal_slash_message(message: Any) -> bool:
 
 
 def is_panic_command(message: Any, *, bot_username: str = "") -> bool:
-    """True ONLY for a genuine /panic command (optionally wrapped in /main or /m), never code/literal or /panicking."""
+    """True ONLY for a genuine /panic command (optionally wrapped in /main or /m), never code/pre or /panicking."""
     if not isinstance(message, dict):
         return False
     raw, entities = _message_text_and_entities(message)
@@ -212,19 +309,8 @@ def is_panic_command(message: Any, *, bot_username: str = "") -> bool:
     wrapped = _MAIN_CMD_RE.match(cleaned)
     if wrapped:
         inner = (wrapped.group(1) or "").strip()
-        # Check if an entity marks the inner /panic token as literal code/pre too!
-        if inner and isinstance(entities, list) and entities:
-            inner_pos = raw.find(inner)
-            if inner_pos >= 0:
-                inner_u16 = len(raw[:inner_pos].encode("utf-16-le")) // 2
-                for entity in entities:
-                    if not isinstance(entity, dict):
-                        continue
-                    off, length = entity.get("offset"), entity.get("length")
-                    etype = str(entity.get("type") or "").strip().lower()
-                    if type(off) is int and type(length) is int and length > 0 and off <= inner_u16 < off + length:
-                        if etype in _LITERAL_ENTITY_TYPES:
-                            return False
+        if inner and is_literal_span(message, inner):
+            return False
         cleaned = inner
     match = _PANIC_CMD_RE.match(cleaned)
     if not match:
@@ -245,6 +331,8 @@ __all__ = [
     "api_base_matches_live",
     "clear_owner_pairing",
     "is_literal_slash_message",
+    "is_literal_span",
+    "is_pairing_command",
     "is_panic_command",
     "is_panic_text",
     "issue_owner_pairing_code",

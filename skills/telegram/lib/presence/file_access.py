@@ -153,7 +153,7 @@ def _open_confined_regular_fd(root: pathlib.Path, target: pathlib.Path) -> tuple
         raise PermissionError("file_path must name a regular file inside an authorized root")
     dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     step_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
-    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     cur_fd = os.open(root_real, dir_flags)
     try:
         for segment in parts[:-1]:
@@ -331,9 +331,8 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
     presence = meta.get("presence") if isinstance(meta.get("presence"), dict) else {}
     focus = meta.get("focus") if isinstance(meta.get("focus"), dict) else {}
     lineage = _safe_lineage_ids(ctx)
-    if row_task and row_task in lineage:
-        return True
-    # Presence focus or delegated descendant of a Presence turn: restrict strictly to own place / conversation / lineage.
+    # Presence focus or delegated descendant of a Presence turn: restrict strictly to own conversation tuple
+    # (and lineage when no explicit event is carried). Never bypass exact conversation isolation via lineage or place_id alone.
     caller_binding = None
     try:
         from ouroboros.presence_authority import presence_caller_binding
@@ -343,14 +342,10 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
         caller_binding = None
     if presence or focus or caller_binding is not None:
         event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
-        focus_place = str(
-            presence.get("place_id") or focus.get("place_id") or getattr(caller_binding, "place_id", "") or ""
-        ).strip()
+        focus_place = str(presence.get("place_id") or focus.get("place_id") or "").strip()
         row_place = str(scope.get("place_id") or (payload.get("_place_binding") or {}).get("place_id") or "").strip()
         if focus_place and row_place and focus_place != row_place:
             return False
-        # One Place may span multiple conversations (account-level or group+topics):
-        # never let focus_place == row_place bypass exact (account, chat, topic) isolation!
         if event.get("provider") == "telegram":
             ev_acct = str(event.get("account_id") or "").strip()
             ev_chat = str(event.get("conversation_id") or "").strip()
@@ -361,21 +356,17 @@ def receipt_visible_to(ctx: Any, payload: Dict[str, Any]) -> bool:
             if not (ev_acct and ev_chat):
                 return False
             return row_acct == ev_acct and row_chat == ev_chat and row_topic == ev_topic
-        if focus_place and row_place and focus_place == row_place:
-            cb_acct = str(getattr(caller_binding, "account_id", "") or "").strip()
-            cb_chat = str(getattr(caller_binding, "conversation_id", "") or "").strip()
-            cb_topic = str(getattr(caller_binding, "thread_id", "") or "").strip()
-            row_acct = str(payload.get("account_id") or "").strip()
-            row_chat = str(payload.get("chat_id") or "").strip()
-            row_topic = str(payload.get("topic_id") or "").strip()
-            if cb_acct and cb_acct != "*" and row_acct and row_acct != cb_acct:
-                return False
-            if cb_chat and row_chat != cb_chat:
-                return False
-            if cb_topic and row_topic != cb_topic:
-                return False
-            return True
-        return False
+        # Eventless Presence focus or delegated descendant: require task-lineage ownership AND matching place/binding.
+        if not (row_task and row_task in lineage):
+            return False
+        if focus_place and row_place != focus_place:
+            return False
+        row_binding = str((payload.get("_reporting") or {}).get("binding_id") or (payload.get("_place_binding") or {}).get("binding_id") or "").strip()
+        if isinstance(caller_binding, str) and caller_binding and row_binding and row_binding != caller_binding:
+            return False
+        return True
+    if row_task and row_task in lineage:
+        return True
     # Restricted subagent: only rows from its own task lineage.
     try:
         from ouroboros.tool_access import active_tool_profile

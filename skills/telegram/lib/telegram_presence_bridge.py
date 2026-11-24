@@ -27,7 +27,7 @@ from .telegram_mirror import (
     VALID_OWNER_CHAT_MODES,
     owner_chat_mode,
 )
-from .telegram_owner_auth import owner_matches_live
+from .telegram_owner_auth import is_pairing_command, owner_matches_live
 from .telegram_panels import _MODE_TEXTS, build_mode_panel, presence_readiness_hint
 from .telegram_poll_binding import InjectNotAccepted, update_key
 from .telegram_secret_guard import classify_secret_exposure
@@ -186,13 +186,15 @@ async def handle_non_owner_update(
         raise InjectNotAccepted("Presence runtime unavailable")
     record_only = False
     api_base = str(getattr(client, "api_base_origin", "") or "")
-    for key in ("message", "edited_message"):
+    for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
         payload = update.get(key)
         if isinstance(payload, dict):
+            if is_pairing_command(api, payload):
+                return  # Credential-bearing pairing commands never enter Presence custody or turns.
             chat = payload.get("chat") or {}
             chat_id = int(chat.get("id") or 0)
             secret_ref = classify_secret_exposure(
-                api, client.bot_id, payload, api_base=api_base, is_edit=(key == "edited_message"),
+                api, client.bot_id, payload, api_base=api_base, is_edit=key.startswith("edited_"),
                 known_non_secret_fn=lambda cid, mid: bool(_message_ref(api, client.bot_id, cid, mid)),
             )
             if secret_ref is not None:

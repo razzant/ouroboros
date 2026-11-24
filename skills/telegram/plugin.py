@@ -92,8 +92,8 @@ from .lib.telegram_poll_binding import (
     saved_server as _saved_server, server_fingerprint, update_key,
 )
 from .lib.telegram_owner_auth import (
-    api_base_matches_live, is_literal_slash_message, is_panic_command, is_panic_text,
-    issue_owner_pairing_code, owner_matches_live, redeem_owner_pairing_code,
+    api_base_matches_live, is_literal_slash_message, is_literal_span, is_pairing_command,
+    is_panic_command, is_panic_text, issue_owner_pairing_code, owner_matches_live, redeem_owner_pairing_code,
 )
 from .lib.telegram_secret_guard import (
     begin_secret_send, classify_secret_exposure, finish_secret_send, record_secret_message,
@@ -425,35 +425,41 @@ def _poller_preferences(api):
     return settings, pinned, maximum, mode, telegram_i18n.language()
 
 
-_LAST_COMMAND_SCOPE: Dict[str, tuple[str, str, tuple[str, str] | None, float]] = {}
+_LAST_COMMAND_SCOPE: Dict[str, tuple[str, str, str, tuple[str, str, str] | None, float]] = {}
 
 
-def _should_sync_commands(state_key: str, bot_id_val: str, pinned_chat: str) -> bool:
-    target = (bot_id_val, pinned_chat)
-    synced_bot, synced_chat, failed_target, failed_at = _LAST_COMMAND_SCOPE.get(state_key, ("", "", None, 0.0))
-    return (synced_bot, synced_chat) != target and (failed_target != target or time.monotonic() - failed_at >= 60.0)
+def _should_sync_commands(state_key: str, bot_id_val: str, pinned_chat: str, api_base: str = "") -> bool:
+    target = (bot_id_val, pinned_chat, api_base)
+    synced_bot, synced_chat, synced_base, failed_target, failed_at = _LAST_COMMAND_SCOPE.get(state_key, ("", "", "", None, 0.0))
+    return (synced_bot, synced_chat, synced_base) != target and (failed_target != target or time.monotonic() - failed_at >= 60.0)
 
 
 async def _sync_bot_commands(api, client, command_mode: str, lang: str, pinned_chat: str) -> None:
     """Keep owner admin commands scoped to the bound owner DM and clear the public default scope."""
-    state_key = os.path.realpath(api.get_state_dir())
-    prev_bot, prev_chat, _, _ = _LAST_COMMAND_SCOPE.get(state_key, ("", "", None, 0.0))
+    state_key, api_base = os.path.realpath(api.get_state_dir()), str(getattr(client, "api_base_origin", "") or "")
+    prev_bot, prev_chat, prev_base, _, _ = _LAST_COMMAND_SCOPE.get(state_key, ("", "", "", None, 0.0))
     try:
         if prev_bot == client.bot_id and prev_chat and prev_chat != pinned_chat and prev_chat.isdigit() and int(prev_chat) > 0:
             await client.call("setMyCommands", data={"commands": "[]", "scope": json.dumps({"type": "chat", "chat_id": int(prev_chat)})})
             prev_bot, prev_chat = "", ""
-        # Always clear Telegram's default scope so owner commands never appear in groups or non-owner DMs.
         await client.call("setMyCommands", data={"commands": "[]", "scope": json.dumps({"type": "default"})})
         if pinned_chat.isdigit() and int(pinned_chat) > 0:
             await client.call("setMyCommands", data={"commands": json.dumps(_bot_commands(command_mode, lang)),
                                                      "scope": json.dumps({"type": "chat", "chat_id": int(pinned_chat)})})
-        _LAST_COMMAND_SCOPE[state_key] = (client.bot_id, pinned_chat, None, 0.0)
+        _LAST_COMMAND_SCOPE[state_key] = (client.bot_id, pinned_chat, api_base, None, 0.0)
         api.log("info", "Telegram bot commands configured successfully")
     except TelegramBindingChanged:
         raise  # a stale client is never reported ready
     except Exception as exc:
-        _LAST_COMMAND_SCOPE[state_key] = (prev_bot, prev_chat, (client.bot_id, pinned_chat), time.monotonic())
+        _LAST_COMMAND_SCOPE[state_key] = (prev_bot, prev_chat, prev_base, (client.bot_id, pinned_chat, api_base), time.monotonic())
         api.log("warning", f"Failed to set Telegram bot commands: {exc}")
+
+
+def _schedule_command_sync(api, client, command_mode: str, lang: str, pinned_chat: str) -> None:
+    if not _should_sync_commands(os.path.realpath(api.get_state_dir()), client.bot_id, pinned_chat, str(getattr(client, "api_base_origin", "") or "")): return
+    async def _bg() -> None:
+        with contextlib.suppress(TelegramBindingChanged, asyncio.CancelledError): await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
+    asyncio.create_task(_bg())
 
 
 async def _authorized_owner(api, client, update, pinned_chat: str, lang: str) -> str | None:
@@ -510,12 +516,6 @@ async def _validate_bot(api, client, command_mode: str, lang: str, generation: i
             raise TelegramRequestRejected("Telegram getMe bot identity does not match token.", status_code=401)
     me_id = str(raw_me_id if type(raw_me_id) is int and raw_me_id > 0 else client.bot_id or "").strip()
     me_username = str(me.get("username") or "").strip()
-    pinned_chat = ""
-    try:
-        pinned_chat = str(_load_settings(api).get("TELEGRAM_CHAT_ID") or "").strip()
-    except TelegramSettingsError:
-        pinned_chat = ""
-    await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
     if generation is not None:
         binding = binding_for(api)
         if not binding.current(generation):
@@ -539,6 +539,7 @@ async def _start_poller(api):
         cursor = PollCursor(_state_file(api, "poll_offset.json"), server[0], bot_id(client.token))
         try:
             await _validate_bot(api, client, command_mode, lang, generation)
+            _schedule_command_sync(api, client, command_mode, lang, pinned_chat)
             validated = True
         except Exception as exc:
             if not is_transient_telegram_error(exc):
@@ -848,6 +849,7 @@ async def _poller(api) -> None:
                 revalidating = True
                 await _validate_bot(api, client, command_mode, lang, generation)  # it records ready
                 revalidating, validated, degraded = False, True, ""
+                _schedule_command_sync(api, client, command_mode, lang, pinned_chat)
             updates = await client.get_updates(cursor.offset)
             if not binding.current(generation):
                 # Answered for the previous token: neither confirmed nor handled, so the same bot's
@@ -875,9 +877,8 @@ async def _poller(api) -> None:
                 authorize=_authorized_owner, is_panic=_panic_update, on_message=_handle_owner_message,
                 on_callback=_handle_poll_callback, on_non_owner=_handle_non_owner_update,
             )
-            # Never sync Telegram menu commands ahead of already-fetched updates (especially /panic).
-            if validated and not deferred and _should_sync_commands(os.path.realpath(api.get_state_dir()), client.bot_id, pinned_chat):
-                await _sync_bot_commands(api, client, command_mode, lang, pinned_chat)
+            # Never block emergency polling behind slow Telegram menu syncs.
+            if validated and not deferred: _schedule_command_sync(api, client, command_mode, lang, pinned_chat)
             await asyncio.sleep(_NOT_ACCEPTED_RETRY_SEC if deferred else 0.1)
         except (TelegramBindingChanged, TelegramTokenMissing):
             continue  # the next cycle builds the client of the accepted token, or waits for one
@@ -1009,8 +1010,8 @@ async def _handle_owner_message_inner(
         await client.send_message(chat_id, help_text)
         return
 
-    # Never forward /pair <code...> or a consumed /start <pairing_code> into chat history or Presence custody.
-    if update.get("_owner_paired") or _is_exact_bot_command(cleaned_text, "/pair") or cleaned_text.startswith("/pair ") or cleaned_text.startswith("/pair@"):
+    # Never forward /pair <code...> or /start <pairing_code> into chat history or Presence custody.
+    if update.get("_owner_paired") or is_pairing_command(api, message):
         await client.send_message(chat_id, _LOCALIZED_TEXTS[lang].get("paired_ok", "Owner chat confirmed."))
         return
 
@@ -1083,10 +1084,11 @@ async def _handle_owner_message_inner(
         text = inner
         if caption and _MAIN_CMD_RE.match(caption):
             caption = (_MAIN_CMD_RE.match(caption).group(1) or "").strip()
+        literal_slash = is_literal_span(message, text) or (bool(caption) and is_literal_span(message, caption))
 
     is_slash_cmd = (not literal_slash) and bool(_SLASH_COMMAND_RE.match(text) or (caption and _SLASH_COMMAND_RE.match(caption)))
 
-    # Translate commands to safe natural-language text (literal code/pre text bypasses slash blocking).
+    # Translate commands to safe natural-language text (code/pre literal text stays non-command).
     safe_text = text if literal_slash else _translate_command(text, command_mode)
     safe_caption = caption if literal_slash else (_translate_command(caption, command_mode) if caption else caption)
     if safe_text is None or safe_caption is None:
@@ -1102,13 +1104,13 @@ async def _handle_owner_message_inner(
             )
         return
 
-    if not force_direct and quiz_ref is not None and quiz_ref.get("ambiguous") and not _SLASH_COMMAND_RE.match(text):
+    if not force_direct and quiz_ref is not None and quiz_ref.get("ambiguous") and not is_slash_cmd:
         # An old card's number names no question for sure: an answer or a turn meant for it stays
         # here, before any download; a command keeps its dispatch, as below.
         await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
                                               request_key=update_key(update), lang=lang, post=_host_post)
         return
-    if not force_direct and safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
+    if not force_direct and safe_text and not is_slash_cmd and isinstance(reply_to, dict) and reply_to:
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
             # that question, not a new chat turn (#472).
@@ -1120,6 +1122,13 @@ async def _handle_owner_message_inner(
                 request_key=update_key(update), lang=lang, post=_host_post,
             )
             return
+
+    if literal_slash:
+        # Defense in depth: re-quote leading-slash code/pre text so neither Host nor legacy paths treat it as a command.
+        if safe_text.startswith("/"):
+            safe_text = f"`{safe_text}`"
+        if safe_caption.startswith("/"):
+            safe_caption = f"`{safe_caption}`"
 
     # Dual-lane Owner DM routing: in `presence` mode, ordinary non-command messages commit to
     # Presence SQLite custody and fail closed (never silently falling back to Main `/chat/inject`).

@@ -6,10 +6,18 @@ import contextlib
 import os
 import json
 import pathlib
+import re
 import sys
 from typing import Any
 
 from ouroboros.platform_layer import IS_WINDOWS
+
+_PANIC_EXACT_RE = re.compile(r"^/panic(?:@[A-Za-z0-9_]+)?(?:\s|$)", re.IGNORECASE)
+
+
+def is_exact_panic_command(text: Any) -> bool:
+    """True ONLY for exact ``/panic`` or ``/panic@<bot>`` at token boundary (rejects ``/panicking``)."""
+    return bool(_PANIC_EXACT_RE.match(str(text or "").strip()))
 
 # The successor this generation spawned, published before custody I/O so Panic can stop it.
 _restart_successors: list = []
@@ -35,7 +43,7 @@ def dispatch_accepted_restart(bridge, text: str, *, callback=None, **message) ->
     import threading
 
     callback = callback or getattr(bridge, "startup_owner_command", None)
-    if text.strip().lower() != "/restart" or not callable(callback):
+    if (message.get("task_metadata") or {}).get("literal_text") or text.strip().lower() != "/restart" or not callable(callback):
         bridge.enqueue_local_message(text, **message)
         return
     from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -93,8 +101,8 @@ class PanicIngress:
     def invalidate_owner(self) -> None:
         self._owner = [False, None]
 
-    def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None) -> bool:
-        if self._stop is None or not str(text).strip().lower().startswith("/panic"):
+    def request(self, text: str, *, source="web", user_id=0, chat_id=0, evidence=None, literal_text: bool = False) -> bool:
+        if literal_text or self._stop is None or not is_exact_panic_command(text):
             return False
         pair = self._owner[1]
         if source != "web" and (pair is None or pair != (user_id, chat_id)):
@@ -125,12 +133,14 @@ class PanicIngress:
 
 
 def request_panic(bridge, text: str, *, startup_owner_command=None, evidence=None,
-                  source="web", user_id=0, chat_id=0) -> bool:
+                  source="web", user_id=0, chat_id=0, literal_text: bool = False) -> bool:
     """Accept an emergency through its owner, never ordinary command admission.
 
     Only authenticated web ingress may use the startup callback. External
     senders need the bridge's positively bound owner pair even during startup.
     """
+    if literal_text:
+        return False
     panic = getattr(bridge, "panic", None)
     identity = {"source": source, "user_id": user_id, "chat_id": chat_id}
     if panic is not None and panic.request(text, evidence=evidence, **identity):

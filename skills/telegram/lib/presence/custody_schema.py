@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sqlite3
@@ -413,6 +414,40 @@ def recorded_calls(payload: Dict[str, Any]) -> bool:
     if kind in SEND_KINDS or kind == "moderation":
         return True
     return kind == "operation" and payload.get("method") != "setMessageReaction"
+
+
+_ACTIVE_OWNERS: set[str] = set()
+
+
+def register_runtime_owner(owner_id: str) -> str:
+    _ACTIVE_OWNERS.add(str(owner_id))
+    return str(owner_id)
+
+
+def unregister_runtime_owner(owner_id: str) -> None:
+    _ACTIVE_OWNERS.discard(str(owner_id))
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def lease_releasable(lease_until: float, lease_token: str, now: float) -> bool:
+    if float(lease_until or 0.0) <= now or not lease_token:
+        return True
+    parts = str(lease_token).split(":", 2)
+    if len(parts) != 3 or not parts[0].isdigit():
+        return False
+    pid, owner = int(parts[0]), parts[1]
+    return (owner not in _ACTIVE_OWNERS) if pid == os.getpid() else (not _pid_alive(pid))
 
 
 def held_by_clause(attempts: Optional[int] = None, lease_token: Optional[str] = None) -> tuple:

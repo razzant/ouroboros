@@ -248,7 +248,12 @@ def miniapp_enabled(state_dir: Path) -> bool:
     return raw in _TRUE
 
 
-def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
+from contextlib import contextmanager
+
+
+@contextmanager
+def settings_lock(state_dir: Path):
+    """Cross-process exclusive lock guarding Telegram settings and owner pairing transitions."""
     path = _settings_path(state_dir)
     lock_path = path.with_name(_LOCK_NAME)
     if path_is_link_or_reparse(lock_path):
@@ -257,6 +262,14 @@ def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
         fd = acquire_file_lock(lock_path, timeout_sec=2.0)
     except Exception as exc:
         raise TelegramSettingsError("Telegram settings are busy.") from exc
+    try:
+        yield path
+    finally:
+        release_file_lock(fd)
+
+
+def merge_settings_unlocked(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
+    path = _settings_path(state_dir)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
         current = load_settings(path.parent)
@@ -272,11 +285,15 @@ def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     except OSError as exc:
         raise TelegramSettingsError("Could not persist Telegram settings.") from exc
     finally:
-        release_file_lock(fd)
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def merge_settings(state_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
+    with settings_lock(state_dir):
+        return merge_settings_unlocked(state_dir, patch)
 
 
 def request_may_change_owner(request: Any) -> bool:
@@ -502,10 +519,12 @@ __all__ = [
     "TelegramSettingsObserver",
     "load_settings",
     "merge_settings",
+    "merge_settings_unlocked",
     "make_settings_save",
     "miniapp_enabled",
     "owner_chat_id",
     "request_may_change_owner",
+    "settings_lock",
     "telegram_api_base",
     "telegram_files_dir",
     "telegram_proxy",

@@ -31,10 +31,23 @@ from .telegram_api import (
     TelegramTransportError,
     next_telegram_retry_delay,
 )
-from .telegram_owner_auth import owner_matches_live
+from urllib.parse import urlsplit
+from .telegram_owner_auth import live_owner_chat_id, owner_matches_live
 from .telegram_secret_guard import mark_secret_uncertain
 from .telegram_state import _data_dir
 from .telegram_token import binding_for
+from ..scripts.telegram_settings import TelegramSettingsError, telegram_api_base
+
+
+def _same_api_authority(state_dir, recorded_base: str) -> bool:
+    if not recorded_base:
+        return True
+    try:
+        live = telegram_api_base(pathlib.Path(state_dir))
+    except (TelegramSettingsError, ValueError, OSError):
+        return False
+    a, b = urlsplit(recorded_base), urlsplit(live)
+    return (a.scheme.lower(), (a.hostname or "").lower()) == (b.scheme.lower(), (b.hostname or "").lower())
 
 SCHEMA = 1
 MAX_AGE_SEC = 24 * 3600  # still waiting after a day: stopped, never delivered that late
@@ -211,9 +224,12 @@ class _Operation:
 
     async def _send(self, client, part: dict, method: str, data, files, timeout) -> Dict[str, Any]:
         record, target_chat = self.record, _chat(data)
-        if (record.get("chat_id") and record["chat_id"] != target_chat) or (
-            target_chat > 0 and not owner_matches_live(self.outbox.api.get_state_dir(), target_chat)
-        ):
+        state_dir = self.outbox.api.get_state_dir()
+        rec_chat = int(record.get("chat_id") or 0)
+        rec_base = str(record.get("api_base") or "")
+        if (rec_chat and rec_chat != target_chat) or (
+            target_chat > 0 and not owner_matches_live(state_dir, target_chat)
+        ) or (rec_base and not _same_api_authority(state_dir, rec_base)):
             await self.outbox._stop(self, "changed")
         strict = bool(getattr(client, "strict_reply", False))
         if strict:  # an exact Reply's turn: the anchor of its first attempt holds for every part and retry
@@ -276,8 +292,8 @@ class _Operation:
 
     async def _unknown(self, part: dict, exc: BaseException) -> Dict[str, Any]:
         part.update(state="unknown", reason=_cause(exc))
-        if self.topic == "chat.quiz" and (isinstance(self.event.get("secret_request"), dict) or (self.record or {}).get("secret")):
-            mark_secret_uncertain(self.outbox.api, str((self.record or {}).get("bot") or ""), int((self.record or {}).get("chat_id") or 0), reason=_cause(exc))
+        if self.topic in {"quiz", "chat.quiz"} and (isinstance(self.event.get("secret_request"), dict) or (self.record or {}).get("secret")):
+            mark_secret_uncertain(self.outbox.api, str((self.record or {}).get("bot") or ""), int((self.record or {}).get("chat_id") or 0), api_base=str((self.record or {}).get("api_base") or ""), reason=_cause(exc))
         await self.outbox._save(self)
         self.outbox._log("warning", f"Telegram {self.topic} part {part['n'] + 1}: delivery unknown ({_cause(exc)}); "
                                     "nothing is sent again for it.")
@@ -497,7 +513,7 @@ class Outbox:
     async def _custody(self, topic: str, event: dict, seq: int) -> Optional[dict]:
         """Save an event that must wait, before it waits; None when the journal cannot hold it (not sent)."""
         record = self._new_record(topic, event, seq, "pending")
-        if topic == "chat.quiz" and isinstance(event.get("secret_request"), dict):
+        if topic in {"quiz", "chat.quiz"} and isinstance(event.get("secret_request"), dict):
             record["secret"] = True
         kind, home, saved = await asyncio.to_thread(copies.classify, _data_dir(self.api), topic, event)
         record.update(copy=kind, **({"home": home} if home else {}))
@@ -578,7 +594,19 @@ class Outbox:
                 record["next_at"] = now + TOKEN_WAIT_SEC  # no token: a quiet wait, as for every send
                 self._refresh()
                 return
-            body = self._bodies.get(str(record.get("topic") or ""))
+            state_dir = self.api.get_state_dir()
+            rec_chat = int(record.get("chat_id") or 0)
+            rec_base = str(record.get("api_base") or "")
+            topic_name = str(record.get("topic") or "")
+            if (
+                (rec_chat > 0 and not owner_matches_live(state_dir, rec_chat))
+                or (rec_chat <= 0 and topic_name != "quiz_state")
+                or (rec_base and not _same_api_authority(state_dir, rec_base))
+            ):
+                record.update(state="failed", reason="changed")
+                await self._finish(record)
+                return
+            body = self._bodies.get(topic_name)
             try:
                 event = json.loads(await asyncio.to_thread(self._payload_path(record).read_bytes))
             except (OSError, ValueError) as exc:
@@ -621,8 +649,15 @@ class Outbox:
     # --- the journal ---
 
     def _new_record(self, topic: str, event: dict, seq: int, state: str) -> dict:
+        state_dir = pathlib.Path(self.api.get_state_dir())
+        chat_id = live_owner_chat_id(state_dir)
+        try:
+            api_base = telegram_api_base(state_dir)
+        except (TelegramSettingsError, ValueError, OSError):
+            api_base = ""
         return {"schema": SCHEMA, "id": f"{seq:012d}-{uuid.uuid4().hex[:8]}", "seq": seq, "topic": topic,
-                "created_at": self.clock(), "state": state, "parts": [], "bot": "", "chat_id": 0, "next_at": 0.0,
+                "created_at": self.clock(), "state": state, "parts": [], "bot": "",
+                "chat_id": chat_id, "api_base": api_base, "next_at": 0.0,
                 "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "", "source": _source(event),
                 "subject": copies.subject_of(topic, event)}
 
@@ -849,7 +884,7 @@ class Outbox:
                 record["state"] = "pending"
             if interrupted:
                 if record.get("secret"):
-                    mark_secret_uncertain(self.api, str(record.get("bot") or ""), int(record.get("chat_id") or 0), reason="interrupted")
+                    mark_secret_uncertain(self.api, str(record.get("bot") or ""), int(record.get("chat_id") or 0), api_base=str(record.get("api_base") or ""), reason="interrupted")
                 self._log("warning", f"Telegram {record.get('topic')}: a part was in flight at the last stop; "
                                      "its delivery is unknown and it is not sent again.")
                 try:

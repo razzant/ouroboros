@@ -459,6 +459,7 @@ class TelegramProxySidecar:
             self._sessions[digest] = session
             while len(self._sessions) > self._max_sessions:
                 self._sessions.popitem(last=False)
+                self._notify_revocation_locked()
             return token, session
 
     def _prune_sessions_locked(self, now: float) -> None:
@@ -602,6 +603,8 @@ class TelegramProxySidecar:
         return None
 
     async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._closed:
+            raise RuntimeError("gateway closed")
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
                 follow_redirects=False,
@@ -761,6 +764,7 @@ class TelegramProxySidecar:
         if not is_valid():
             return _plain_response(401, "Telegram owner session expired.")
 
+        if self._closed: return _plain_response(502, "Ouroboros is unavailable.")
         request = Request(scope, receive=receive)
         client = await self._get_http_client()
         upstream_request = client.build_request(

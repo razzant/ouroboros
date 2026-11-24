@@ -241,6 +241,7 @@ class PresenceRuntime:
         self._run_task = asyncio.current_task()
         workers: List[asyncio.Task[Any]] = []
         try:
+            self.store.register_owner()
             released = self.store.release_own_leases()
             if any(released.values()):
                 self._log("info", f"telegram presence: released stale leases {released}")
@@ -285,12 +286,11 @@ class PresenceRuntime:
                 await asyncio.gather(stop_wait, return_exceptions=True)
         finally:
             self._stopping = True
-            if self._stop_event is not None:
-                self._stop_event.set()
-            for task in workers:
-                task.cancel()
+            if self._stop_event is not None: self._stop_event.set()
+            for task in workers: task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
             self._runtime_state, self._run_task, self._loop = "stopped", None, None
+            self.store.unregister_owner()
             self.store.close()
             self._stopped_event.set()
 
@@ -326,16 +326,18 @@ class PresenceRuntime:
             self._stopped_event.set()
 
     def bind_place_sync(self, account_id: str, conversation_id: str, thread_id: str = "") -> Optional[Dict[str, Any]]:
-        host_base = getattr(self.submitter, "host_base", "")
-        token_provider = getattr(self.submitter, "token_provider", None)
+        host_base, token_provider = getattr(self.submitter, "host_base", ""), getattr(self.submitter, "token_provider", None)
         if not host_base or not callable(token_provider):
             return None
+        fresh_fn = getattr(self.submitter, "identity_is_fresh", None)
+        fresh = bool(fresh_fn()) if callable(fresh_fn) else True
+        status = str(getattr(self.submitter, "delivery_reporting_status", "unknown") or "unknown") if fresh else "unknown"
         return bind_place_sync(
-            host_base=host_base, token_provider=token_provider,
-            account_id=account_id, conversation_id=conversation_id, thread_id=thread_id,
-            places_version=getattr(self.submitter, "places_version", None),
-            place_binding_version=getattr(self.submitter, "place_binding_version", None),
-            delivery_reporting_status=str(getattr(self.submitter, "delivery_reporting_status", "unknown") or "unknown"),
+            host_base=host_base, token_provider=token_provider, account_id=account_id,
+            conversation_id=conversation_id, thread_id=thread_id,
+            places_version=getattr(self.submitter, "places_version", None) if fresh else None,
+            place_binding_version=getattr(self.submitter, "place_binding_version", None) if fresh else None,
+            delivery_reporting_status=status,
         )
 
     def confirmed_bot(self) -> Tuple[str, str]:
@@ -414,16 +416,10 @@ class PresenceRuntime:
                 self._log("warning", f"telegram presence: inbox worker error: {self._last_error}")
                 await self._pause(1.0)
 
-    async def _ensure_inbox_binding(
-        self, lease: InboxLease, pb: Optional[Dict[str, Any]], *, require: bool = False, stage: str = "staging"
-    ) -> Optional[Dict[str, Any]]:
+    async def _ensure_inbox_binding(self, lease: InboxLease, pb: Optional[Dict[str, Any]], *, require: bool = False, stage: str = "staging") -> Optional[Dict[str, Any]]:
         binder = getattr(self.submitter, "bind_place", None)
         if pb is None and callable(binder) and (not require or getattr(self.submitter, "place_binding_version", 0) >= 1):
-            pb = await binder(
-                str(lease.payload.get("account_id") or self._bot_id),
-                str(lease.payload.get("conversation_id") or ""),
-                str(lease.payload.get("thread_id") or ""),
-            )
+            pb = await binder(str(lease.payload.get("account_id") or self._bot_id), str(lease.payload.get("conversation_id") or ""), str(lease.payload.get("thread_id") or ""))
             if require and pb is None:
                 raise PlaceBindingUnavailable(f"Place binding unavailable for {stage} on Places host")
         if isinstance(pb, dict) and lease.payload.get("_place_binding") != pb:
@@ -548,73 +544,75 @@ class PresenceRuntime:
         attempt_dir = f"{outbox_files.safe_component(lease.event_id)}--{tok[:16]}" if tok else outbox_files.safe_component(lease.event_id)
         event_dir = self.state_dir / "staging" / attempt_dir
         staged, settled, waiting = [], False, None
-        for index, attachment in enumerate(attachments):
-            if not isinstance(attachment, dict):
-                continue
-            if attachment.get("status") in _NOT_STAGED or not attachment.get("file_id"):
-                continue
-            declared = outbox_files.declared_size(attachment)
-            marks = too_large_marks(declared, limit)
-            if marks:
-                attachment.update(marks)
-                settled = True
-                continue
-            name = outbox_files.safe_filename(str(attachment.get("file_name") or f"attachment-{index}"))
-            destination = event_dir / f"{index}-{name}"
-            if not destination.is_file() or destination.stat().st_size == 0:
-                remaining = outbox_files.stage_budget_remaining(self.state_dir, _MAX_STAGING_BYTES)
-                if remaining <= 0 or declared > remaining:
-                    attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
+        try:
+            for index, attachment in enumerate(attachments):
+                if not isinstance(attachment, dict) or attachment.get("status") in _NOT_STAGED or not attachment.get("file_id"):
+                    continue
+                declared = outbox_files.declared_size(attachment)
+                marks = too_large_marks(declared, limit)
+                if marks:
+                    attachment.update(marks)
                     settled = True
                     continue
-                tmp_dest = self.state_dir / "staging_tmp" / f"{uuid.uuid4().hex}-{index}-{name}"
-                try:
-                    if "max_bytes" in inspect.signature(client.download_file).parameters:
-                        await client.download_file(str(attachment["file_id"]), tmp_dest, max_bytes=remaining)
-                    else:
-                        await client.download_file(str(attachment["file_id"]), tmp_dest)
-                    if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
-                        raise LeaseLost("inbox lease lost during attachment download")
-                    outbox_files.commit_staged_file(self.state_dir, tmp_dest, destination, _MAX_STAGING_BYTES)
-                except outbox_files.StagingStorageFull:
-                    attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
-                    settled = True
-                    continue
-                except TelegramFileTooLarge as exc:
-                    if not exc.error_code and remaining < limit and declared <= limit:
+                name = outbox_files.safe_filename(str(attachment.get("file_name") or f"attachment-{index}"))
+                destination = event_dir / f"{index}-{name}"
+                if not destination.is_file() or destination.stat().st_size == 0:
+                    remaining = outbox_files.stage_budget_remaining(self.state_dir, _MAX_STAGING_BYTES)
+                    if remaining <= 0 or declared > remaining:
                         attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
-                    else:
-                        attachment.update(status="too_large", note=too_large_note(declared, limit, exc.description if exc.error_code else ""))
-                    settled = True
-                    continue
-                except TelegramFileUnavailable as exc:
-                    attachment.update(status="failed", note=f'Telegram answered "{exc.description}"')
-                    settled = True
-                    continue
-                except TelegramApiError as exc:
-                    note = self._bounded_failure(lease.event_id, index, exc)
-                    if note is None:
-                        if waiting is None or (exc.retry_after or 0) > (waiting.retry_after or 0):
-                            waiting = exc
-                        if exc.error_code == 429:
-                            break
+                        settled = True
                         continue
-                    attachment.update(status="failed", note=note)
-                    settled = True
-                    continue
-                finally:
-                    with contextlib.suppress(OSError):
-                        tmp_dest.unlink(missing_ok=True)
-            attachment["status"] = "staged"
-            staged.append(destination)
-        if settled and not self.store.checkpoint_inbox(lease.event_id, lease.payload, lease_token=tok or None):
-            raise LeaseLost("inbox lease lost while checkpointing attachment status")
-        if waiting is not None:
-            raise waiting
-        if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
-            raise LeaseLost("inbox lease lost after staging")
-        self.store.forget_download_failures(lease.event_id)
-        return staged
+                    tmp_dest = self.state_dir / "staging_tmp" / f"{uuid.uuid4().hex}-{index}-{name}"
+                    try:
+                        if "max_bytes" in inspect.signature(client.download_file).parameters:
+                            await client.download_file(str(attachment["file_id"]), tmp_dest, max_bytes=remaining)
+                        else:
+                            await client.download_file(str(attachment["file_id"]), tmp_dest)
+                        if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
+                            raise LeaseLost("inbox lease lost during attachment download")
+                        outbox_files.commit_staged_file(self.state_dir, tmp_dest, destination, _MAX_STAGING_BYTES)
+                    except outbox_files.StagingStorageFull:
+                        attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
+                        settled = True
+                        continue
+                    except TelegramFileTooLarge as exc:
+                        if not exc.error_code and remaining < limit and declared <= limit:
+                            attachment.update(status="failed", note="staging disk cap reached; attachment not downloaded")
+                        else:
+                            attachment.update(status="too_large", note=too_large_note(declared, limit, exc.description if exc.error_code else ""))
+                        settled = True
+                        continue
+                    except TelegramFileUnavailable as exc:
+                        attachment.update(status="failed", note=f'Telegram answered "{exc.description}"')
+                        settled = True
+                        continue
+                    except TelegramApiError as exc:
+                        note = self._bounded_failure(lease.event_id, index, exc)
+                        if note is None:
+                            if waiting is None or (exc.retry_after or 0) > (waiting.retry_after or 0):
+                                waiting = exc
+                            if exc.error_code == 429:
+                                break
+                            continue
+                        attachment.update(status="failed", note=note)
+                        settled = True
+                        continue
+                    finally:
+                        with contextlib.suppress(OSError):
+                            tmp_dest.unlink(missing_ok=True)
+                attachment["status"] = "staged"
+                staged.append(destination)
+            if settled and not self.store.checkpoint_inbox(lease.event_id, lease.payload, lease_token=tok or None):
+                raise LeaseLost("inbox lease lost while checkpointing attachment status")
+            if waiting is not None:
+                raise waiting
+            if tok and not self.store.inbox_lease_valid(lease.event_id, tok):
+                raise LeaseLost("inbox lease lost after staging")
+            self.store.forget_download_failures(lease.event_id)
+            return staged
+        except BaseException:
+            self._remove_staged_files(staged)
+            raise
 
     def _bounded_failure(self, event_id: str, ordinal: int, exc: TelegramApiError) -> Optional[str]:
         now = time.time()
@@ -745,7 +743,7 @@ class PresenceRuntime:
         if recorded_calls(lease.payload) and self._settled_by_record(lease):
             return True
         calls, client, val_gen = ProviderCalls(self.store, lease), None, self._validation_gen
-        tok = calls.lease_token or None
+        tok, verified_fds = calls.lease_token or None, {}
         try:
             client = await self._ready_client()
             if client is None:
@@ -766,15 +764,16 @@ class PresenceRuntime:
                 _ensure_current()
                 await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
                 try:
-                    await asyncio.to_thread(outbox_files.verify, lease.payload, state_dir=self.state_dir, require_for_media=True)
+                    fresh_fds = await asyncio.to_thread(outbox_files.open_verified, lease.payload, state_dir=self.state_dir, require_for_media=True)
                 except outbox_files.FrozenFileMissing as exc:
                     raise PlaceHeld(f"Held: {exc}") from exc
+                outbox_files.close_verified(verified_fds)
+                verified_fds.update(fresh_fds)
                 _ensure_current()
 
             receipt = await deliver_outbox(
-                client, lease, self.store, before_send=before_send,
-                account_id=str(lease.payload.get("account_id") or self._bot_id),
-                delivered=self._note_delivered, calls=calls,
+                client, lease, self.store, before_send=before_send, verified_fds=verified_fds,
+                account_id=str(lease.payload.get("account_id") or self._bot_id), delivered=self._note_delivered, calls=calls,
             )
             if self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence, lease_token=tok):
                 outbox_files.discard(outbox_files.records(lease.payload), self.state_dir)
@@ -815,11 +814,7 @@ class PresenceRuntime:
                 return True
             if lease.attempts >= MAX_OUTBOX_ATTEMPTS:
                 payload = self.store.outbox_payload(lease.delivery_id)
-                state = (
-                    "failed"
-                    if (recorded_calls(payload) or isinstance(exc, TelegramRequestNotSent) or (isinstance(exc, RuntimeError) and str(exc) == "telegram token is unavailable") or (isinstance(exc, TelegramApiError) and exc.error_code))
-                    else "uncertain"
-                )
+                state = "failed" if (recorded_calls(payload) or isinstance(exc, TelegramRequestNotSent) or (isinstance(exc, RuntimeError) and str(exc) == "telegram token is unavailable") or (isinstance(exc, TelegramApiError) and exc.error_code)) else "uncertain"
                 report = delivery_report(lease.delivery_id, payload, part_id="status", state=state, error=format_error(exc))
                 if self.store.mark_outbox_failed(lease.delivery_id, reason=format_error(exc), report=report, state=state, attempts=calls.fence, lease_token=tok) and state == "failed":
                     outbox_files.discard(outbox_files.records(payload), self.state_dir)
@@ -827,6 +822,8 @@ class PresenceRuntime:
                 self.store.release_outbox(lease.delivery_id, reason=format_error(exc), retry_after_sec=wait, attempts=calls.fence, lease_token=tok)
             self._last_error = format_error(exc)
             return True
+        finally:
+            outbox_files.close_verified(verified_fds)
 
     def _settled_by_stored_record(self, lease: OutboxLease, exc: Exception) -> bool:
         try:
