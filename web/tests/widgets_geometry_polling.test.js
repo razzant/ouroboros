@@ -843,6 +843,74 @@ test('a board frame with no box when its entry has run measures nothing then, an
     assert.ok(harness.messages[0].height >= 600, JSON.stringify(harness.messages));
 });
 
+test('a follower whose confirmation is given up while hidden (its page, or the tab) finishes it once shown', () => {
+    const follower = { floor: 0, wholeDocument: true, followsViewport: true, paddingBottom: 0, borderBottom: 0,
+        bodyTop: 8, marginBottom: 8, maxHeight: 8192, innerHeight: 320 };
+    // Below the fold: timers only. The parent applies each report; then the timers run.
+    const settle = (harness, rounds) => {
+        for (let round = 0; round < rounds; round += 1) {
+            harness.frame(harness.messages.at(-1).height, { timers: true });
+            harness.flushTimers();
+        }
+        return harness.messages.map((item) => [item.height, item.held ?? null]);
+    };
+    const reference = settle(resizeHarness(follower), 8);
+    assert.deepEqual(reference, [[336, null], [352, null], [352, 16]]);
+    const finished = {};
+    for (const [label, hide, show] of [
+        ['its page', (h) => h.hide(), (h) => { h.show(336); h.viewport({ floor: 0, ceiling: 8192 }); }],
+        ['the tab', (h) => h.pageHidden(true), (h) => h.pageHidden(false)],
+    ]) {
+        const harness = resizeHarness(follower);
+        // The frame takes 336: the document asks for 352 there and looks once more before asking (a confirmation).
+        harness.frame(336, { timers: true });
+        assert.equal(harness.pendingTimers(), 1, `${label}: the confirmation is on its way`);
+        hide(harness);
+        harness.flushTimers();
+        assert.deepEqual(harness.messages.map((item) => item.height), [336], `${label}: nothing while hidden`);
+        show(harness);
+        harness.flushTimers();
+        finished[label] = settle(harness, 8);
+    }
+    assert.deepEqual(finished, { 'its page': reference, 'the tab': reference }, 'the same stop as without the hiding');
+});
+
+test('a module that draws before its entry returns, which returns while its page hides it, is reported when shown', () => {
+    // A delayed entry: its root is drawn and measured (no report: the entry has not run), then the page is left.
+    const harness = resizeHarness({ wholeDocument: true, maxHeight: 8192, entryRan: false, initialHeight: 400 });
+    harness.documentListeners.get('transitionend')();
+    harness.flushTimers();
+    assert.deepEqual(harness.messages, []);
+    harness.hide();
+    harness.entryRan();
+    assert.deepEqual(harness.messages, [], 'no box: nothing yet');
+    harness.show(768);
+    harness.viewport({ floor: WIDGET_FRAME_DEFAULT_HEIGHT, ceiling: 8192 });
+    harness.flushTimers();
+    assert.equal(harness.messages.length, 1, JSON.stringify(harness.messages));
+    assert.ok(harness.messages[0].height >= 400, JSON.stringify(harness.messages));
+    assert.equal(harness.overflowState().html.value, 'hidden', 'it fits: its document does not scroll');
+});
+
+test('an animation frame delivered after the page hid a board frame reads nothing, and showing it measures', () => {
+    let boxTop = 40;
+    const harness = resizeHarness({ wholeDocument: true, maxHeight: 8192, placed: [{ top: () => boxTop, height: 20 }] });
+    harness.flushFrame();
+    const shown = harness.messages.length;
+    boxTop = 1400;
+    harness.documentListeners.get('transitionend')();
+    harness.hide();
+    const reads = harness.geometryReads();
+    harness.flushFrame();
+    assert.equal(harness.geometryReads(), reads, 'no box: nothing is measured');
+    assert.equal(harness.messages.length, shown);
+    harness.show(768);
+    harness.viewport({ floor: WIDGET_FRAME_DEFAULT_HEIGHT, ceiling: 8192 });
+    harness.flushFrame();
+    assert.equal(harness.messages.length, shown + 1);
+    assert.ok(harness.messages.at(-1).height >= 1420, JSON.stringify(harness.messages));
+});
+
 test('new bounds end a hold, and a fresh start measures only once the frame has the height it was given', () => {
     const heights = (harness) => harness.messages.map((item) => item.height);
     const follower = { floor: 0, wholeDocument: true, followsViewport: true, paddingBottom: 0, borderBottom: 0,

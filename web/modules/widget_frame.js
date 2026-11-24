@@ -346,7 +346,7 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
                     window.cancelAnimationFrame(frame);
                     window.clearTimeout(timer);
                 };
-                frame = window.requestAnimationFrame(() => { cancel(); callback(true); });
+                frame = window.requestAnimationFrame(() => { cancel(); callback(!wholeDocument || measurable()); });
                 if (wholeDocument) {
                     timer = window.setTimeout(() => {
                         cancel();
@@ -382,6 +382,13 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
                     if (window.innerHeight + '/' + height !== seenMeasure) report(height);
                 });
             };
+            // A return cue (the board showing a frame it kept running, the tab shown again) measures anew even where it
+            // sees the dimensions it last saw: what it gave up while it could not measure (a confirmation, the refit
+            // after its scrollbar, the module's entry) waits on it. Ordinary changes still compare with that measure.
+            const refresh = () => {
+                seenMeasure = '';
+                scheduleChange();
+            };
             const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleReport) : null;
             if (observer && root) observer.observe(root);
             const onLoad = () => {
@@ -401,7 +408,7 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
             const onVisible = () => {
                 if (document.hidden || !owedToVisible) return;
                 owedToVisible = false;
-                scheduleChange();
+                refresh();
             };
             if (wholeDocument) {
                 window.addEventListener('resize', scheduleReport);
@@ -418,7 +425,7 @@ export function moduleResizeScript(frameFloor, maxHeight, borderReserve, { whole
                 // The same bounds again (Widgets shows a frame it kept running): measured anew as after a change, which a
                 // stop made while something moved and whose end came while the frame had no box also takes off.
                 if (!viewport.frame && viewport.floor === floor && viewport.ceiling === ceiling) {
-                    scheduleChange();
+                    refresh();
                     return;
                 }
                 floor = viewport.floor;
