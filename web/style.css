@@ -7822,6 +7822,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-tray-text { min-width: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .skills-tray-note { margin-top: 2px; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-tray-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+[data-sign-in-permissions] { overflow-wrap: anywhere; }
 .skills-card-quiet-actions { display: flex; justify-content: flex-end; }
 @container skillcard (max-width: 560px) {
     .skills-card-head { flex-direction: column; align-items: stretch; }

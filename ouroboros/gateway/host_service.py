@@ -25,7 +25,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
-from ouroboros.deployment_extensions import trust_gap
+from ouroboros.deployment_extensions import admission_refusal
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.config import WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC
 from ouroboros.gateway._helpers import run_sync_to_completion
@@ -56,6 +56,15 @@ NOTIFY_VERSION = 1
 
 class HostServiceAuthError(Exception):
     """Raised when a skill token cannot be authenticated."""
+
+
+# The words of ``deployment_extensions.admission_refusal``, which a service sign-in reads too.
+_ADMISSION_WORDS = {
+    "not_installed": "skill {name!r} is not installed",
+    "not_reviewed": "skill {name!r} has no current executable review authority",
+    "disabled": "skill {name!r} is disabled",
+    "not_trusted": "skill {name!r} is not code this deployment's service runs",
+}
 
 
 class _RateLimiter:
@@ -304,14 +313,9 @@ class HostServiceContext:
 
     def _assert_active_token(self, skill_name: str, token_payload: Dict[str, Any]) -> None:
         loaded = find_skill(self.data_dir, skill_name)
-        if loaded is None:
-            raise HostServiceAuthError(f"skill {skill_name!r} is not installed")
-        if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
-            raise HostServiceAuthError(f"skill {skill_name!r} has no current executable review authority")
-        if not loaded.enabled:  # the effective switch (``deployment_extensions``), as the loader reads it
-            raise HostServiceAuthError(f"skill {skill_name!r} is disabled")
-        if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
-            raise HostServiceAuthError(f"skill {skill_name!r} is not code this deployment's service runs")
+        refusal = admission_refusal(loaded)  # one answer with a service sign-in's start and return
+        if refusal:
+            raise HostServiceAuthError(_ADMISSION_WORDS[refusal].format(name=skill_name))
         if str(token_payload.get("content_hash") or "") != str(loaded.content_hash or ""):
             raise HostServiceAuthError(f"skill {skill_name!r} token is stale")
 
@@ -443,6 +447,7 @@ async def _api_identity(request: Request) -> JSONResponse:
     from ouroboros.presence_owner_contact import MAIN_CONTACT_VERSION
     from ouroboros.presence_recovery import WORK_OUTPUT_VERSION
     from ouroboros.place_guard import PLACE_BINDING_VERSION
+    from ouroboros.gateway.host_sign_in import SIGN_IN_VERSION
 
     return JSONResponse({"ok": True, "name": name, "description": description,
                          "presence_delivery_version": DELIVERY_VERSION, "places_version": 1,
@@ -459,7 +464,7 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_change_context": 1,
                          "presence_identity": 1,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
-                         "notify_version": NOTIFY_VERSION})
+                         "notify_version": NOTIFY_VERSION, "sign_in_version": SIGN_IN_VERSION})
 
 
 async def _api_tool_schemas(request: Request) -> JSONResponse:
@@ -1434,10 +1439,12 @@ def create_host_service_app(
     # host_notify imports this module's helpers; mounted here, imported lazily.
     from ouroboros.gateway.host_notify import _api_notify
     from ouroboros.gateway.host_call import host_call_routes
+    from ouroboros.gateway.host_sign_in import host_sign_in_routes
 
     app = Starlette(
         routes=[
             *host_call_routes(),
+            *host_sign_in_routes(),
             Route("/identity", _api_identity, methods=["GET"]),
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),

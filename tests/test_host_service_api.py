@@ -1375,3 +1375,17 @@ def test_chat_inject_allows_slash_command_caption_even_with_text(tmp_path: pathl
 def _focus_authority_available(monkeypatch):
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
     monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
+
+
+def test_identity_says_the_host_holds_sign_ins_and_the_token_route_keeps_the_token_floor(tmp_path, monkeypatch):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _seed_token(tmp_path, permissions=["inject_chat"])
+    client = TestClient(create_host_service_app(tmp_path, bridge_getter=FakeBridge))
+    headers = {"X-Skill-Token": "token"}
+    assert client.get("/identity", headers=headers).json()["sign_in_version"] == 1
+    assert client.post("/sign-in/token", headers=headers, json={"service": "google"}).status_code == 404  # undeclared
+    save_enabled(tmp_path, "test_skill", False)
+    assert client.post("/sign-in/token", headers=headers, json={"service": "google"}).status_code == 403
+    assert client.get("/sign-in/accounts", headers=headers).status_code == 403

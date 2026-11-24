@@ -2186,6 +2186,22 @@ load (`Held back: this page was opened with everything held.`), each released by
 its own control. Ouroboros reads the fact in one System row in the chat that
 owns the item.
 
+### Sign-ins on a skill's card
+
+A skill that declares a service to sign in to is painted from one status read. Its
+card's who block ends with one meta line, `Signed in to Google: a@x · b@y` or `Not signed in to Google`, that opens
+the skill's sheet at Sign-ins; one tray, within the card's two, shows only while an enabled skill's sign-in needs the
+owner (a refused refresh, a permission withheld or newly asked for, a required service with no account). On the sheet
+each service is a group whose head holds `Add account` (`Sign in` for a one-account service) and `Clients…` above a §6
+row per account: the account, `via` its client, a status word, what is and is not allowed, `Sign in again` when
+needed and a ⋮ menu with Sign in again, Disconnect here and Revoke at the provider. The sign-in and clients editors
+open in place under the head, never as a modal: the client is chosen before the provider (the account's own, else the
+one a sibling skill used for that address, else the only one). Show the literal scope words with each permission before the sign-in page opens; the press answers for exactly what was shown (those words and the saved client's registration, or the provider's address for a client the host registers), so a client, provider or permission changed meanwhile says so and starts nothing. A skill whose current bytes may not act now (off, no review that lets them run, not run here) starts no sign-in: its sheet says why in place of Sign in, and Disconnect and Revoke stay. The loopback note (the sign-in comes back to the computer where Ouroboros runs) shows exactly when the page is not
+on a loopback host and the client returns to loopback, by its rule or by an exact loopback address; a client secret is a password field sent once, never shown
+back. Disconnect and Revoke ask in place first and answer for the consent shown (a token refresh keeps it, a new sign-in changes it). Disconnect forgets the sign-in here and says the provider keeps its permission until it is removed in the provider's account. Revoke names the sibling sign-ins it may end and forgets the sign-in only once the provider confirmed; when it did not, or was not asked, the sign-in stays and the result sends the owner to the provider's account settings and then to Disconnect, with no retry offered. A refusal the provider returns is worded as the provider's; an answer that never arrived never says nothing changed, names the one next step and sends its one-time code only once (a saved answer is read again by Finish sign-in, on the return page only by the owner's press). A result stays on the
+line of its control (the group head's once its row is gone), and the skill's own words (service label, permission
+labels, notes) stay as written.
+
 ### Dashboard › Consciousness
 
 The switch is one (owner 15.11, 5A): its name stays Consciousness, glossed “When Ouroboros acts”, and its positions

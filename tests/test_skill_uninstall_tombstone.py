@@ -94,19 +94,40 @@ def _seed_receipt(data_root):
     return (skill_loader.skill_state_dir(data_root, "demo") / PUBLICATION_FILENAME).read_bytes()
 
 
+def _seed_sign_in_records(data_root, skill):
+    """Inert account and control records: no tokens or provider requests."""
+    folder = data_root / "state" / "sign_in" / "grants" / skill / "fixture"
+    folder.mkdir(parents=True)
+    account = "a-" + "0" * 20
+    binding = {"v": 1, "skill": skill, "service": "fixture"}
+    records = {
+        folder / f"{account}.json": {**binding, "account": {"key": account}},
+        folder / "pending.json": {**binding, "withdrawn_accounts": ["a-" + "1" * 20]},
+    }
+    saved = {path: json.dumps(doc).encode("utf-8") for path, doc in records.items()}
+    for path, contents in saved.items():
+        path.write_bytes(contents)
+    return saved
+
+
 def test_publication_receipt_survives_hub_uninstall_sweep_and_reinstall(tmp_path, monkeypatch):
+    monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", "[]")
     data = tmp_path / "data"
     _hub_install(monkeypatch, data)
     state = _seed_state(data, "demo")
     receipt_bytes = _seed_receipt(data)
+    sign_ins = _seed_sign_in_records(data, "demo")
 
     assert uninstall_installed(data, "demo")["ok"]
+    assert {path: path.read_bytes() for path in sign_ins} == sign_ins
     report = sweep_uninstalled_skill_state(data)
 
     assert report["swept"] == ["demo"] and not report["errors"]
     assert sorted(p.name for p in state.iterdir()) == sorted(
         ["grants.json", PUBLICATION_FILENAME, UNINSTALL_TOMBSTONE_FILENAME])
     assert (state / PUBLICATION_FILENAME).read_bytes() == receipt_bytes
+    assert {path: path.read_bytes() for path in sign_ins} == sign_ins
     # A second startup keeps it too: the sweep is idempotent over kept files.
     assert not sweep_uninstalled_skill_state(data)["swept"]
 
@@ -116,6 +137,7 @@ def test_publication_receipt_survives_hub_uninstall_sweep_and_reinstall(tmp_path
     assert report["restored"] == ["demo"] and not report["swept"]
     assert (state / PUBLICATION_FILENAME).read_bytes() == receipt_bytes
     assert read_publication_record(data, "demo") == (_RECEIPT, None)
+    assert {path: path.read_bytes() for path in sign_ins} == sign_ins
 
 
 def test_publication_receipt_survives_reinstall_before_the_sweep(tmp_path, monkeypatch):
@@ -133,7 +155,11 @@ def test_publication_receipt_survives_reinstall_before_the_sweep(tmp_path, monke
     assert (state / PUBLICATION_FILENAME).read_bytes() == receipt_bytes
 
 
-def test_explicit_local_delete_still_removes_the_receipt(tmp_path):
+def test_explicit_local_delete_still_removes_the_receipt(tmp_path, monkeypatch):
+    from ouroboros.service_sign_in import at_data_dir
+
+    monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", "[]")
     data = tmp_path / "data"
     payload = data / "skills" / "external" / "demo"
     (payload / "scripts").mkdir(parents=True)
@@ -141,13 +167,23 @@ def test_explicit_local_delete_still_removes_the_receipt(tmp_path):
     (payload / "scripts" / "check.py").write_text("print('fixture')\n", encoding="utf-8")
     state = _seed_state(data, "demo")
     _seed_receipt(data)
+    sign_ins = _seed_sign_in_records(data, "demo")
+    other_sign_ins = _seed_sign_in_records(data, "other-demo")  # same service and account key
+    clients = data / "state" / "sign_in" / "clients.json"
+    client_bytes = b'{"v": 1, "clients": []}'
+    clients.write_bytes(client_bytes)
     loaded = skill_loader.find_skill(data, "demo")
 
-    result = delete_local_skill(data, loaded, payload_root="skills/external/demo")
+    # The delete must address the supplied drive, not the ambient sign-in root.
+    with at_data_dir(tmp_path / "ambient-data"):
+        result = delete_local_skill(data, loaded, payload_root="skills/external/demo")
 
     assert result["ok"] and result["deleted_state"], result
     assert not state.exists() and not payload.exists()
     assert read_publication_record(data, "demo") == (None, None)
+    assert all(not path.exists() for path in sign_ins)
+    assert {path: path.read_bytes() for path in other_sign_ins} == other_sign_ins
+    assert clients.read_bytes() == client_bytes
 
 
 def test_sweep_self_heals_a_reinstalled_skill(tmp_path, monkeypatch):

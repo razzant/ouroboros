@@ -135,6 +135,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/mcp/status",
     "POST /api/mcp/refresh",
     "POST /api/mcp/sign-in",
+    "POST /api/sign-in",
+    "GET /api/sign-in/status",
     "POST /api/mcp/test",
     "POST /api/mcp/import/preview",
     "GET /api/review-pool",
@@ -601,6 +603,12 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",
                                    note="begin answers the provider page; a refused step is 200 with ok false"),
+    "POST /api/sign-in": Shape("200:SignInResponse 400,404:ErrorResponse", "SignInRequest",
+                               note="a skill's service sign-in; begin answers the provider page; a refused step "
+                                    "is 200 with ok false"),
+    "GET /api/sign-in/status": Shape("200:SignInStatusResponse 503:SignInStatusProblem",
+                                     note="503: a saved sign-in, client or account list cannot be read (reason "
+                                          "sign_in_storage_unavailable); the answer is never an empty list"),
     "POST /api/mcp/test": Shape("200:McpTestResponse 400,404,409:ErrorResponse", "McpTestRequest",
                                 note="connects once and saves nothing; a failed test is 200 with ok false"),
     "POST /api/mcp/import/preview": Shape("200,400:MCPImportPreviewResponse", "MCPImportPreviewRequest",

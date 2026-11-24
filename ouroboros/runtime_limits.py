@@ -98,6 +98,9 @@ MCP_BROWSER_GUARD_WORKERS = 16
 MCP_BROWSER_GUARD_PENDING = 64
 MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
 MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
+# The most a caller of the OAuth client (oauth_engine.current_token) may ask a token to stay valid: a stored
+# token that expires sooner is refreshed first (a transport bound, not a refresh schedule).
+OAUTH_MIN_VALID_MAX_SEC = 300.0
 # A remote MCP sign-in (mcp_oauth): one authorization-server request is bounded by HTTP_TIMEOUT; a refresh holds
 # its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
 MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0

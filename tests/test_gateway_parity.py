@@ -935,3 +935,12 @@ def test_the_reset_receipt_names_the_accepted_reset_in_python_and_javascript():
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
     assert _js_typedef_fields(text, "ResetResponse") == set(hints)
+
+
+def test_sign_in_contracts_have_field_identical_javascript_twins():
+    from ouroboros.gateway import sign_in_contracts as contracts
+
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "web/modules/sign_in_contract_types.js").read_text(encoding="utf-8")
+    for name in contracts.__all__:
+        assert _js_typedef_fields(text, name) == set(get_type_hints(getattr(contracts, name))), name

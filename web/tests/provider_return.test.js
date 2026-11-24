@@ -6,8 +6,9 @@ const state = (skill = 'calendar', extra = {}) => Buffer.from(JSON.stringify({ v
 const href = (value = state(), query = 'code=synthetic') => `https://example.test/instance/onboarding/static/provider-return.html?${query}&state=${value}`;
 
 function page() {
-    const nodes = Object.fromEntries(['status', 'detail', 'account', 'home'].map((name) => [name, {
+    const nodes = Object.fromEntries(['status', 'detail', 'account', 'home', 'next', 'again'].map((name) => [name, {
         textContent: '', hidden: true, dataset: {}, setAttribute(key, value) { this[key] = value; },
+        addEventListener(type, handler) { this.handlers = { ...this.handlers, [type]: handler }; },
     }]));
     return { nodes, root: { querySelector(selector) { return nodes[selector.match(/data-return-(\w+)/)[1]]; } } };
 }
@@ -42,6 +43,19 @@ test('a remote MCP server return completes on the core sign-in route, and every 
     }
 });
 
+const signInState = (extra = {}) => Buffer.from(JSON.stringify({ v: 1, sign_in: 'calendar', svc: 'google', nonce: 'nonce', ...extra })).toString('base64url');
+
+test('a skill\'s declared-service return completes on the core sign-in route; one recipient and its service only', () => {
+    const request = completionRequest(href(signInState(), 'code=synthetic&iss=https%3A%2F%2Fissuer.test'));
+    assert.equal(request.url, 'https://example.test/instance/api/sign-in');
+    assert.deepEqual(JSON.parse(request.init.body),
+        { action: 'complete', state: signInState(), code: 'synthetic', iss: 'https://issuer.test' });
+    for (const value of [signInState({ svc: undefined }), signInState({ svc: '../x' }), signInState({ skill: 'calendar' }),
+        signInState({ mcp: 'docs' })]) {
+        assert.throws(() => completionRequest(href(value)));
+    }
+});
+
 test('unrelated destinations, malformed envelopes and ambiguous results never become a request', () => {
     for (const skill of ['../settings', '.', 'calendar/complete', 'https://other.test', 'a%2fb']) {
         assert.throws(() => completionRequest(href(state(skill))));
@@ -69,6 +83,21 @@ test('actual startup sends once and paints the confirmed account without exposin
     assert.doesNotMatch(Object.values(nodes).map((node) => node.textContent).join(' '), /must-not-render/);
 });
 
+test('a declared-service return names the confirmed account, including when access is partial', async () => {
+    for (const [state, reason, scopes] of [['signed_in', '', []], ['sign_in_required', 'insufficient_scope', ['records.read']]]) {
+        const { root, nodes } = page();
+        const partial = state === 'sign_in_required';
+        await mountProviderReturn(root, { href: href(signInState()), history: null, lifecycle: null, send: async () => ({ ok: true,
+            json: async () => ({ ok: true, label: 'Fixture service', state, reason, attempt_id: 'fixture-attempt',
+                account: { key: 'fixture-account', label: 'work@example.test' }, missing_required: scopes }),
+        }) });
+        assert.equal(nodes.account.textContent, 'work@example.test');
+        assert.equal(nodes.account.hidden, false);
+        assert.equal(nodes.status.dataset.tone, partial ? 'warn' : 'ok');
+        assert.equal(nodes.status.textContent === 'Account connected', !partial);
+    }
+});
+
 test('denied consent reaches the skill, and unconfirmed outcomes never claim connected or replay', async () => {
     for (const failure of ['denied', 'network', 'not-json']) {
         const { root, nodes } = page();
@@ -84,7 +113,13 @@ test('denied consent reaches the skill, and unconfirmed outcomes never claim con
         assert.equal(count, 1);
         assert.equal(nodes.status.textContent, 'Could not finish connecting');
         assert.equal(nodes.account.hidden, true);
-        if (failure === 'denied') assert.equal(nodes.detail.textContent, 'Permission was not granted.');
+        const check = 'Return to Ouroboros and check the account before starting sign-in again.';
+        if (failure === 'denied') {
+            assert.equal(nodes.detail.textContent, 'Permission was not granted.');
+            assert.deepEqual([nodes.next.textContent, nodes.next.hidden], [check, false], 'the host message never replaces the next step');
+        } else {
+            assert.deepEqual([nodes.detail.textContent, nodes.next.hidden], [check, true], 'without a message the next step is the detail itself');
+        }
     }
 });
 
@@ -100,4 +135,48 @@ test('history restrictions do not prevent a valid connection, and page exit disp
         } });
     assert.equal(nodes.status.textContent, '');
     assert.equal(events.size, 0);
+});
+
+test('a saved provider answer is finished again only by the owner pressing Finish, from memory and as the same return', async () => {
+    const { root, nodes } = page();
+    const sent = [];
+    const replies = [
+        { ok: false, code: 'SIGN_IN_REQUIRED', reason: 'answer_saved', attempt_id: 'fixture-attempt', error: 'kept' },
+        { ok: true, label: 'Fixture service', state: 'signed_in', attempt_id: 'fixture-attempt', account: { key: 'fixture-account', label: 'work@example.test' } },
+    ];
+    const history = { replaceState() {} };
+    await mountProviderReturn(root, { href: href(signInState()), history, lifecycle: null, send: async (_url, init) => {
+        sent.push(init.body);
+        return { ok: true, json: async () => replies.shift() };
+    } });
+    assert.equal(sent.length, 1, 'no automatic second send');
+    assert.equal(nodes.again.hidden, false);
+    assert.equal(nodes.next.hidden, true, 'the press itself is the next step');
+    assert.match(nodes.detail.textContent, /the one-time code isn’t sent to the provider a second time/);
+    assert.equal(nodes.account.hidden, true);
+    await nodes.again.handlers.click();
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1], sent[0], 'the same return, from memory');
+    assert.equal(nodes.status.textContent, 'Account connected');
+    assert.equal(nodes.account.textContent, 'work@example.test');
+    assert.equal(nodes.again.hidden, true);
+    const bare = page();
+    await mountProviderReturn(bare.root, { href: href(signInState()), history, lifecycle: null,
+        send: async () => ({ ok: true, json: async () => ({ ok: false, reason: 'answer_saved', error: 'kept' }) }) });
+    assert.equal(bare.nodes.again.hidden, true, 'without the host receipt of an attempt there is nothing to finish');
+});
+
+test('consent repair keeps the three supported return destinations and their instance prefix', () => {
+    const service = Buffer.from(`{"v":1.0,"sign_in":"календарь_${'界'.repeat(54)}",` +
+        '"svc":"calendar","nonce":"nonce"}').toString('base64url');
+    for (const [value, route, action] of [
+        [state('почта_1'), '/api/extensions/%D0%BF%D0%BE%D1%87%D1%82%D0%B0_1/oauth/complete', undefined],
+        [mcpState('work_docs'), '/api/mcp/sign-in', 'complete'],
+        [service, '/api/sign-in', 'complete'],
+    ]) {
+        const request = completionRequest(href(value, 'code=synthetic&iss=https%3A%2F%2Fissuer.test'));
+        assert.equal(request.url, `https://example.test/instance${route}`);
+        assert.deepEqual(JSON.parse(request.init.body), { state: value, code: 'synthetic', iss: 'https://issuer.test',
+            ...(action && { action }) });
+    }
 });

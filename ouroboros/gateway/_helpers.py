@@ -124,6 +124,12 @@ def coerce_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def request_base(request: Request) -> str:
+    """Where this browser reached the server (its Origin, the deployment prefix kept): a sign-in returns there."""
+    origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+    return origin.rstrip("/") + str(request.scope.get("root_path") or "")
+
+
 async def request_json_or(request: Request, default: Any) -> Any:
     """The JSON object the request carries, ``default`` for an empty body, else ``None``.
 
