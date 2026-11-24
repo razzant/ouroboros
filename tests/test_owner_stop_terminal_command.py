@@ -23,6 +23,7 @@ from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION as OWNER_STOP
 from ouroboros.project_dialogue import _completion_verdict, completion_status_label, outcome_phase
 from ouroboros.task_results import load_task_result, write_task_result
 from supervisor.owner_stop import owner_stop_ending, owner_stop_origin
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 STOPPED_TEXT = "⏹ The owner stopped this chat turn; no further work was done."
 WRAP_FALLBACK = ("⚠️ The owner requested finalize-then-stop; no final answer could be "
@@ -236,7 +237,7 @@ def test_owner_stop_origin_answers_nothing_it_cannot_read(root, tmp_path):
     assert owner_stop_origin(root, "any") == {}
 
 
-def test_history_task_detail_and_terminal_row_say_the_same_word(root, monkeypatch):
+def test_history_task_detail_and_terminal_row_say_the_same_word(root, healthy_main, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient

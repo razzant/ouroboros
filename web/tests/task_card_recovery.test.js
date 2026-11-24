@@ -4,7 +4,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { fetchTaskDetailStrict } from '../modules/api_client.js';
 import { createReviewHydrator } from '../modules/review_presentation.js';
 import { clock } from '../modules/work_status.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
 
 const chatId = 77;
@@ -75,7 +75,7 @@ function fixture(rows = [progress]) {
     const env = installDom(async (url) => {
         calls.push(String(url));
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: data.rows }) };
+            return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: data.rows }) };
         }
         if (String(url).startsWith('/api/tasks/')) {
             if (data.detailError) throw new Error('task detail unavailable');

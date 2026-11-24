@@ -4,6 +4,9 @@ import { ResizeObserverStub } from './helpers/resize_observer.js';
 // The proven data profile a core-served document names before the chat mounts (server_web.chat_preview_scope):
 // the saved preview keys its rooms by this fact, so a test document that never says it opens cold.
 export const PREVIEW_SCOPE = '0123456789abcdef';
+// The key a room keeps its session record (reply, unconfirmed sends, draft) under once its document proves that
+// profile (chat_preview.roomStoreKey): Main's is `base:scope`, another room's `base:scope:chatId`; `base` is the bare name.
+export const roomKey = (base, chatId = 1) => (chatId === 1 ? `${base}:${PREVIEW_SCOPE}` : `${base}:${PREVIEW_SCOPE}:${chatId}`);
 
 export class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }

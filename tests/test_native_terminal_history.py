@@ -7,6 +7,7 @@ import pytest
 
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.cost_projection import carry_cost_meta
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 
 def test_unknown_task_facts_counts_remain_readable_in_history(tmp_path, monkeypatch):
@@ -64,7 +65,7 @@ def test_host_fact_replay_keeps_the_counters_with_their_producing_attempt(tmp_pa
 
 
 @pytest.mark.parametrize("stream", ["chat", "progress"])
-def test_legacy_transient_history_does_not_invent_execution_facts(tmp_path, stream):
+def test_legacy_transient_history_does_not_invent_execution_facts(tmp_path, stream, healthy_main):
     """Retained historical rows remain readable after their producer is removed."""
     logs = tmp_path / "logs"
     logs.mkdir()

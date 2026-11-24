@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const taskId = 'headline-reconciliation';
 const at = second => `2026-10-25T12:00:${String(second).padStart(2, '0')}Z`;
@@ -16,7 +16,7 @@ const cause = 'Only some of the plan reviewers answered; the work went on with t
 const warned = { task_id: taskId, chat_id: 2, role: 'system', is_progress: false, system_type: 'task_summary',
     text: 'Done with warnings.', ts: at(40), outcome_final: true, outcome_phase: 'warn', reason_code: 'plan_review_advisory',
     outcome_axes: { execution: { status: 'degraded', reason_code: 'plan_review_advisory', plan_review: 'unanswered' } } };
-const history = (messages, next = null) => ({ messages, page_cursor: 'recent', next_cursor: next,
+const history = (messages, next = null) => ({ profile_scope: PREVIEW_SCOPE, messages, page_cursor: 'recent', next_cursor: next,
     has_more: Boolean(next), window: { complete: !next, truncated_by: next ? ['quota'] : [] } });
 
 function fixture(t) {

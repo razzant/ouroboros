@@ -19,6 +19,7 @@ from ouroboros.gateway import history_paging
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.store import StoreError
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from tests.test_dialogue_addressed_readers import metered
 
 TS = "2026-10-13T{:02d}:{:02d}:{:02d}Z"
@@ -199,7 +200,7 @@ def test_the_page_after_a_task_reads_on_across_archives(tmp_path):
     assert status == 200 and _texts(again) == _texts(page)
 
 
-def test_an_unfound_task_is_still_importing_never_absent_until_the_archive_is_in(tmp_path):
+def test_an_unfound_task_is_still_importing_never_absent_until_the_archive_is_in(tmp_path, healthy_main):
     """A task whose rows lie in an archive segment the import has not reached is not known absent:
     the read answers 503 migrating; once imported, the same read lands on it."""
     dialogue_test.seed(tmp_path, archives={"chat_20261013T110000.jsonl": [_said("t-x", 1)]},

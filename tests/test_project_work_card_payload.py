@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._dialogue import chat_rows
+from tests._dialogue import chat_rows, healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 from ouroboros.gateway import state as gateway_state
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.task_results import load_task_result, write_task_result
@@ -207,7 +207,8 @@ def test_project_work_name_survives_real_outbox_bus_live_and_history(tmp_path, m
     # Nameless work of a Project is called by that Project, never a bare "Task" (audit 05.11, U012).
     ({}, "Project"),
 ])
-def test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name(tmp_path, activity_queue, monkeypatch, fields, expected):
+def test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name(
+        tmp_path, activity_queue, monkeypatch, fields, expected, healthy_main):
     from ouroboros import task_status
 
     write_task_result(tmp_path, "root", "completed", **fields)

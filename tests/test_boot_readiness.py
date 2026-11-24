@@ -433,6 +433,10 @@ def test_an_owner_message_is_accepted_durably_while_recovery_still_runs_and_a_ta
                 socket.send_json({"type": "chat", "content": "hello before repairs", "chat_id": 1,
                                   "client_message_id": "boot-readiness-1", "sender_session_id": "s1"})
                 echo = socket.receive_json()
+                if isinstance(echo, dict) and echo.get("type") == "connection_profile":
+                    assert set(echo) == {"type", "profile_scope"}
+                    assert isinstance(echo["profile_scope"], str) and bool(echo["profile_scope"])
+                    echo = socket.receive_json()
             assert echo["type"] == "chat" and echo["role"] == "user" and echo["ingress_accepted"] is True
             assert echo["client_message_id"] == "boot-readiness-1"
             rows = stored()

@@ -33,6 +33,10 @@ class ChatInbound(TypedDict):
     # chat frame whose claim positively differs from the serving connection's own confirmed scope (#3294);
     # absent or empty is no proof and is admitted, so legacy pages and unproven profiles keep working.
     profile_scope: NotRequired[str]
+    # A Send again of a copy the page showed only on a newest history read's 503 word
+    # (``ChatHistoryResponse.ordinary_room``): the room that word named. The ordered acceptance asks it again before
+    # saving or handing over anything (gateway/ws.py ``_accept_on_room_word``); frames without it pass as before.
+    ordinary_room: NotRequired[int]
 
 
 class ConnectionProfileOutbound(TypedDict):

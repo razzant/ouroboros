@@ -190,7 +190,7 @@ test('history replay places stamped rows on their cards and keeps unplaceable on
           text: 'Open delegated execution: run-y.' },
     ];
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: rows } : { active_direct_turns: [] } }));
     const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
     let instance;
     try {
@@ -228,7 +228,7 @@ test('an older page places its content-only row inside the recent owner card', a
         if (!String(url).startsWith('/api/chat/history')) return { ok: true, json: async () => ({ active_direct_turns: [] }) };
         const cursor = new URL(url, 'http://local').searchParams.get('cursor');
         calls.push(cursor);
-        return { ok: true, json: async () => ({ messages: cursor ? [receipt] : [recent],
+        return { ok: true, json: async () => ({ profile_scope: PREVIEW_SCOPE, messages: cursor ? [receipt] : [recent],
             page_cursor: cursor || 'page:0', next_cursor: cursor ? null : 'page:1', has_more: !cursor }) };
     });
     let instance;
@@ -475,7 +475,7 @@ for (const ordering of ['history-first/live', 'live/history/redelivery']) {
         assert.equal(new Set(frames.map((frame) => frame.ts)).size, said.length);
         let page = running_history;
         const { prior, instance, handlers, messages } = openCardChat(async (url) => ({ ok: true, json: async () =>
-            (String(url).startsWith('/api/chat/history') ? { messages: page } : { active_direct_turns: [] }) }));
+            (String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: page } : { active_direct_turns: [] }) }));
         try {
             const markup = captureRenderedLines();
             if (ordering.startsWith('live/')) {

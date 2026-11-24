@@ -57,12 +57,12 @@ def _js_pause_cards(snapshots: list[dict]) -> list[dict]:
     """Consume the real gateway bodies (census rows and work projection) through history, hydration and card rendering."""
     script = """
 import { createChatInstance } from './modules/chat.js';
-import { installDom, restoreDom, walkCard } from './tests/chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './tests/chat_dom_fixture.js';
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
 const snapshots = JSON.parse(raw), task = snapshots[0].active_chat_activities[0].activity_id;
 const env = installDom(async url => ({ ok: true, json: async () =>
-    String(url).startsWith('/api/chat/history') ? { messages: [{task_id: task, chat_id: 7,
+    String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: [{task_id: task, chat_id: 7,
         role: 'assistant', is_progress: true, text: 'Checking retained work',
         ts: '2026-10-08T12:00:00Z', history_id: 'progress:1'}] } : {} }));
 const instance = createChatInstance({

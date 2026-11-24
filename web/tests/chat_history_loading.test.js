@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom } from './chat_dom_fixture.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text) => ({
@@ -27,7 +27,7 @@ function fixture(t, options = {}) {
             return { ok: true, json: async () => ({ active_direct_turns: [] }) };
         }
         return new Promise((resolve, reject) => reads.push({
-            ok: data => resolve({ ok: true, status: 200, json: async () => data }),
+            ok: data => resolve({ ok: true, status: 200, json: async () => ({ profile_scope: PREVIEW_SCOPE, ...data }) }),
             http: (status, reason_code) => resolve({ ok: false, status, json: async () => ({ error: `HTTP ${status}`, reason_code }) }),
             drop: () => reject(new TypeError('Failed to fetch')),
         }));

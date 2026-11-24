@@ -9,7 +9,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { applyPayload, createTranslator, setMissTransport } from '../modules/i18n.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { noteOrigin, paintOrigin, placeOriginParts } from '../modules/task_origin.js';
-import { ElementStub, installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { ElementStub, installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 import { installCardDom } from './helpers/card_dom.js';
 
 // The flat fixture's querySelector does not descend; card internals need a real descendant lookup.
@@ -32,7 +32,7 @@ const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((r
 
 function fixture(history = []) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? { messages: history, window: { complete: true } }
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, messages: history, window: { complete: true } }
             : String(url).startsWith('/api/tasks/') ? { status: 'running' } : { active_direct_turns: [] } }));
     const handlers = new Map();
     let generation = 0;

@@ -11,6 +11,7 @@ from ouroboros.gateway import history
 from ouroboros.gateway.state import _chat_activities_snapshot_safe as _real_census  # before the autouse stub
 from ouroboros.store_import import ensure_current_store
 from ouroboros.tool_call_log import replay_evidence_for_tasks
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 
 TS = "2026-10-04T09:00:00Z"
 
@@ -136,7 +137,7 @@ def test_child_cannot_address_parent_tool_evidence_to_its_own_room(tmp_path, mon
         assert carriers[0]["task_terminal_status"] == "completed"
 
 
-def test_current_root_narration_outside_page_keeps_evidence_without_fake_cursor(tmp_path, monkeypatch):
+def test_current_root_narration_outside_page_keeps_evidence_without_fake_cursor(tmp_path, monkeypatch, healthy_main):
     monkeypatch.setattr("ouroboros.gateway.state._chat_activities_snapshot_safe", lambda *_, **__: [
         {"activity_id": "root", "chat_id": 1, "phase": "working", "kind": "managed_task"}])
     _write(tmp_path / "logs/chat.jsonl", [
@@ -153,7 +154,7 @@ def test_current_root_narration_outside_page_keeps_evidence_without_fake_cursor(
 
 
 @pytest.mark.parametrize("witness", ["summary", "result", "parent_delivery"])
-def test_empty_known_missing_replay_is_carried_as_incomplete(tmp_path, witness):
+def test_empty_known_missing_replay_is_carried_as_incomplete(tmp_path, witness, healthy_main):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": "root", "text": "Saved speech", "ts": TS}])
     if witness == "summary":
         _write(tmp_path / "logs/chat.jsonl", [{"direction": "system", "type": "task_summary", "task_id": "root",
@@ -177,7 +178,7 @@ def test_empty_known_missing_replay_is_carried_as_incomplete(tmp_path, witness):
 
 
 @pytest.mark.parametrize("archive_count", [0, 3, 12])
-def test_unrelated_archive_bound_does_not_invent_tool_work(tmp_path, archive_count):
+def test_unrelated_archive_bound_does_not_invent_tool_work(tmp_path, archive_count, healthy_main):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": "greeting", "text": "Hello", "ts": TS}])
     for index in range(archive_count):
         _write(tmp_path / "archive" / f"tools_{index:02}.jsonl", [_tool("other")])
@@ -188,7 +189,7 @@ def test_unrelated_archive_bound_does_not_invent_tool_work(tmp_path, archive_cou
     assert evidence["coverage"]["archives_bounded"] is (archive_count > 3), "raw read bounds remain honest"
 
 
-def test_empty_reader_gap_still_has_an_inert_carrier(tmp_path, monkeypatch):
+def test_empty_reader_gap_still_has_an_inert_carrier(tmp_path, monkeypatch, healthy_main):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": "root", "text": "Saved speech", "ts": TS}])
     monkeypatch.setattr("ouroboros.tool_call_log.replay_evidence_for_tasks", lambda _root, _ids: {
         "root": {"observations": [], "legacy": {"calls": 0}, "coverage": {
@@ -224,7 +225,7 @@ def test_shared_noisy_log_windows_are_decoded_once_per_request(tmp_path, monkeyp
     assert len(decoded) > before, "no cross-request memo can hide new settlements"
 
 
-def test_known_unfinished_speech_does_not_claim_completion(tmp_path, monkeypatch):
+def test_known_unfinished_speech_does_not_claim_completion(tmp_path, monkeypatch, healthy_main):
     monkeypatch.setattr("ouroboros.task_status.load_effective_task_result", lambda *_args, **_kwargs: {"status": "running"})
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": "root", "text": "Still investigating", "ts": TS}])
     _write(tmp_path / "logs/tools.jsonl", [_tool("root")])
@@ -279,7 +280,7 @@ def _counting_listing(monkeypatch, redirect=None):
     return listed
 
 
-def test_one_history_request_lists_the_archive_directory_once(tmp_path, monkeypatch):
+def test_one_history_request_lists_the_archive_directory_once(tmp_path, monkeypatch, healthy_main):
     _archived_tools_for(tmp_path, ["a", "b"])
     listed = _counting_listing(monkeypatch)
     carriers = {row["task_id"]: row for row in _read_wide(tmp_path)["messages"] if row.get("system_type") == "task_evidence"}
@@ -305,7 +306,7 @@ def test_shared_archive_listing_keeps_the_history_body_byte_identical(tmp_path, 
     assert json.loads(shared)["messages"][-1]["tool_evidence"]["coverage"]["archives"] == 2
 
 
-def test_unreadable_archive_directory_reports_the_same_gap_on_every_carrier(tmp_path, monkeypatch):
+def test_unreadable_archive_directory_reports_the_same_gap_on_every_carrier(tmp_path, monkeypatch, healthy_main):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "task_id": task, "text": f"{task} spoke", "ts": TS, "chat_id": 1}
                                           for task in ("a", "b")])
     _write(tmp_path / "logs/tools.jsonl", [_tool("a"), _tool("b")])
@@ -366,7 +367,7 @@ def test_a_row_main_pins_for_a_project_task_does_not_mint_its_card_in_main(tmp_p
     assert carriers[0]["tool_evidence"]["observations"][0]["key"] == "tool:root:root-call"
 
 
-def test_a_main_rooted_tasks_own_main_notice_still_carries_its_tools(tmp_path):
+def test_a_main_rooted_tasks_own_main_notice_still_carries_its_tools(tmp_path, healthy_main):
     _write(tmp_path / "logs/chat.jsonl", [{"direction": "out", "type": "main_notice", "task_id": "root",
                                            "text": "Owner action", "ts": TS, "chat_id": 1}])
     _write(tmp_path / "logs/tools.jsonl", [_tool("root")])
@@ -430,7 +431,7 @@ def test_a_main_parent_with_zero_tools_is_carried_for_its_child_in_main(tmp_path
     assert (carrier["system_type"], carrier["ts"], carrier["task_terminal_status"]) == ("task_evidence", TS, "completed")
 
 
-def test_a_notice_naming_a_child_anchors_no_parent(tmp_path):
+def test_a_notice_naming_a_child_anchors_no_parent(tmp_path, healthy_main):
     from ouroboros.task_results import write_task_result
 
     write_task_result(tmp_path, "npar", "completed", root_task_id="npar", chat_id=1)
@@ -441,7 +442,7 @@ def test_a_notice_naming_a_child_anchors_no_parent(tmp_path):
     assert [row["task_id"] for row in _room_read(tmp_path, 1)["messages"]] == ["nkid"]
 
 
-def test_an_empty_ts_census_anchor_with_zero_tools_gets_no_carrier(tmp_path, monkeypatch):
+def test_an_empty_ts_census_anchor_with_zero_tools_gets_no_carrier(tmp_path, monkeypatch, healthy_main):
     from ouroboros.task_results import write_task_result
 
     write_task_result(tmp_path, "live", "running", root_task_id="live", chat_id=1)
@@ -507,7 +508,7 @@ def test_census_rows_carry_started_at_and_never_ts(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
-def test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end(tmp_path, monkeypatch, status):
+def test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end(tmp_path, monkeypatch, status, healthy_main):
     # The answer was delivered; only its late work remains, here upkeep the owner's Pause is
     # ending. Its own rows left the page, so a census anchor would mint a timestamp-free card
     # below the newest message (14.10 phantom "Done/Failed · Paused · owner pause" cards).
@@ -533,7 +534,7 @@ def test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end(tm
     assert carrier["system_type"] == "task_evidence" and carrier["task_id"] == "root" and carrier["ts"] == ""
 
 
-def test_rotated_out_calls_reach_the_card_as_host_totals_on_reload_and_reconnect(tmp_path):
+def test_rotated_out_calls_reach_the_card_as_host_totals_on_reload_and_reconnect(tmp_path, healthy_main):
     """#2400 end to end: a finished run's rows rotated past the archives one history read opens,
     so the response carries its host totals with no per-call rows; the Chat card rebuilt from
     that response (``chat_activity_block.test.js``) counts them without inventing unknown outcomes,

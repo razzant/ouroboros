@@ -244,12 +244,24 @@ export function createChatPreview({ feed, room, label, mutate, kept = () => null
 }
 
 const MAIN_HYDRATION_MAX_DEFER_MS = 3500;
+// The reasons a newest read fails for while its room may stay what it was (gateway/history.py).
+const PASSING = ['history_source_unavailable', 'migrating'];
+
+/** A failed newest read the core answered as its room's ordinary, passing unavailability: a 503 with a passing reason
+ * and no archive offer, naming this exact room as one of this page's profile's ordinary rooms now (`ordinary_room` under
+ * its `profile_scope`: history_paging.failed_read_facts). Any other answer (a refusal, another profile or room, the
+ * archive, a room no longer ordinary, an answer that cannot be read, none at all) confirms nothing. */
+export const ordinaryUnavailability = (error, chatId, scope) => {
+    const body = error?.body;
+    return error?.status === 503 && PASSING.includes(body?.reason_code) && !body.project_registry && Boolean(scope)
+        && provenScope(body.profile_scope) === scope && body.ordinary_room === chatId;
+};
 
 /** Profile-bound first opening and the room's canonical history read door (chat.js). */
 export function createRoomProfileLifecycle({
     ws, doc, chatId, isMain, isProjectOpening,
     isDestroyed, isLeaving, readHistory, nextRecentVersion, syncHistory, loadUiPreferences,
-    getPreview, onPreviewShown, reconcileSavedSends,
+    getPreview, onPreviewShown, reconcileSavedSends, kept = () => null,
 }) {
     // Per-thread storage so a project thread never bleeds into the main chat. A document that proves
     // its data profile scopes these keys with it too: after a profile change the new profile's room
@@ -263,6 +275,37 @@ export function createRoomProfileLifecycle({
     let initialHydrationPromise = null;
     // one-shot idle gate for Main's deferred first hydration.
     let hydrationGatePromise = null;
+    // The sends this tab kept show once the room's first canonical read settles them, or while its newest read fails, on
+    // the core's word alone (`ordinaryUnavailability`), read on the socket that serves this page's profile and asked
+    // since the room last changed or was left. That word holds while its socket stays current and confirmed, until another
+    // outcome of the newest read, the registry's `projects_changed` naming the room or the room leaving the screen (a new
+    // serving generation ends every socket). Then what it showed leaves the feed, kept (chat_attachments.js `proven`); a
+    // return shows it again only on a word read after it, and its Send again asks anew.
+    let canonical = false, proof = null, failure = null, epoch = 0;
+    const asked = new WeakMap();  // a failed read -> the socket and the room's epoch it was sent under
+    const servingSocket = () => (profileScope && ws?.isConnected?.() !== false
+        && ws?.servingProfileScope?.() === profileScope ? ws.ws || null : null);
+    const lapse = () => { proof = null; kept()?.withdraw(); };
+    // A press of Send again on such a copy asks the core again. A newest read begun now must answer that this exact room
+    // is still one of this page's profile's ordinary rooms, the room neither changed nor left meanwhile, and the socket
+    // current at the press must still serve that profile: the ordinary write path the frame then takes (ws.js `send`,
+    // which checks it again), where the core's acceptance asks the room once more (gateway/ws.py). Only then `true`.
+    // Readable history hands the copy to the ordinary read; another current answer of the core ends the word; an answer
+    // asked before the room changed or was left, or on another socket, changes nothing, nor does no answer.
+    async function confirmNow() {
+        const socket = servingSocket(), at = epoch;
+        if (canonical || !socket || proof !== socket) return false;
+        let answer = null, readable = false;
+        try { await readHistory({ chatId, cursor: null }); readable = true; } catch (error) { answer = error; }
+        if (isDestroyed() || isLeaving()) return false;
+        if (readable) { void syncHistory(); return false; }
+        if (servingSocket() !== socket || epoch !== at) return false;
+        if (ordinaryUnavailability(answer, chatId, profileScope)) { proof = socket; return true; }
+        if (answer?.status || answer?.foreignProfile) lapse();
+        return false;
+    }
+    // `room`: the room the word names, which a Send again standing on it names to the core (`ChatInbound.ordinary_room`).
+    const word = { room: chatId, holds: () => canonical || (proof !== null && proof === servingSocket()), confirm: confirmNow };
 
     // Hydration triggers share one sticky request; reconnect/resync read again.
     const awaitInitialHydration = () => isLeaving() ? Promise.resolve(false) : (initialHydrationPromise ||= syncHistory());
@@ -282,10 +325,11 @@ export function createRoomProfileLifecycle({
 
     // Every read of this room (newest, a page, ↓, arrivals): a current one refused for authentication takes the saved text.
     async function fetchHistory(cursor, options = {}) {
-        const recentVersion = cursor == null ? nextRecentVersion() : 0;
+        const recentVersion = cursor == null ? nextRecentVersion() : 0, sent = { socket: servingSocket(), epoch };
         try {
             return { ...await readHistory({ chatId, cursor, ...options }), recentVersion };
         } catch (error) {
+            if (error && typeof error === 'object') asked.set(error, sent);
             if (!isDestroyed() && !isLeaving() && !options.signal?.aborted) getPreview().refused(error);
             throw error;
         }
@@ -300,8 +344,6 @@ export function createRoomProfileLifecycle({
         await waitForHydrationWindow();
         if (isDestroyed()) return;
         await awaitInitialHydration();
-        // A scoped room restores sending echoes only after its first confirmed canonical history.
-        if (!isDestroyed() && !profileScope) reconcileSavedSends();
     }
 
     return {
@@ -309,8 +351,44 @@ export function createRoomProfileLifecycle({
         get initialHydration() { return initialHydrationPromise; },
         settleInitialHydration(promise) { initialHydrationPromise = promise; },
         resetInitialHydration() { initialHydrationPromise = null; },
+        // A canonical read settles the kept sends (the healthy path, any document), and from then on stands for them.
         noteCanonicalHistory(wasFirstLoad) {
-            if (wasFirstLoad && profileScope) reconcileSavedSends();
+            canonical = true; proof = null; failure = null;
+            kept()?.canonicalRead();
+            if (wasFirstLoad) reconcileSavedSends();
         },
+        /** The newest read failed (chat.js): only the core's word on this room, read on this socket, shows the kept sends. */
+        noteHistoryFailure(error) {
+            if (canonical) return;
+            const sent = asked.get(error), ordinary = ordinaryUnavailability(error, chatId, profileScope);
+            if (ordinary && sent?.socket && sent.socket === servingSocket() && sent.epoch === epoch) {
+                proof = sent.socket;
+                failure = null;
+                if (kept()?.unreconciled) reconcileSavedSends(word);
+                return;
+            }
+            lapse();
+            // The word came before this socket proved the profile, or before the room changed: asked again on this one.
+            failure = ordinary ? error : null;
+            if (failure && servingSocket()) void Promise.resolve().then(() => syncHistory());
+        },
+        /** A socket proved the profile it serves (ws.js `connection_profile`): a word read on another socket lapses, and one
+         *  that waited for this proof is asked again. */
+        profileConfirmed() {
+            kept()?.withdraw();
+            if (failure && !canonical) void syncHistory();
+        },
+        /** The registry's `projects_changed` naming this Project room, or no room: the core's word on it lapses, asked again. */
+        roomChanged(frame) {
+            const named = Number(frame?.chat_id) || 0;
+            if (isMain || canonical || (named && named !== chatId)) return;
+            const held = proof !== null || failure !== null;
+            epoch += 1;
+            lapse();
+            if (held) void syncHistory();
+        },
+        /** The room leaves the screen (chat.js `leave`): the core's word lapses and what it showed leaves the feed, kept; no
+         *  answer asked before can bring it back, so a return shows it only on a word read after it. */
+        left() { epoch += 1; lapse(); },
     };
 }

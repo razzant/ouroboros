@@ -234,6 +234,17 @@ def test_owner_update_keeps_sleep_readiness_and_returns_saved_work_after_ack(tmp
     assert not in_progress
 
 
+def _kept_once(source, name, literal):
+    """Whether ``literal`` occurs once in ``source``, as a direct item of its one module-level tuple ``name``."""
+    import ast
+
+    tree = parse(source)
+    [kept] = [node.value for node in tree.body if isinstance(node, ast.Assign)
+              and [target.id for target in node.targets if isinstance(target, ast.Name)] == [name]]
+    uses = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == literal]
+    return isinstance(kept, ast.Tuple) and len(uses) == 1 and uses[0] in kept.elts
+
+
 def test_restart_flag_names_exist_only_in_the_boot_compatibility_reader():
     import subprocess
 
@@ -249,7 +260,11 @@ def test_restart_flag_names_exist_only_in_the_boot_compatibility_reader():
                 continue
             source = path.read_text(encoding="utf-8")
             assert "owner_restart_no_resume" not in source, path
-            if path.name not in {"installation_stop.py", "server_control.py"}:
+            if path.relative_to(root).as_posix() == "supervisor/state_initialization.py":
+                # Owner Reset keeps Panic's flag by name: its ``state/`` clearing skips ``_STATE_KEPT``, the one tuple
+                # that holds the literal, once, and nothing else in the module names it.
+                assert _kept_once(source, "_STATE_KEPT", "panic_stop.flag"), path
+            elif path.name not in {"installation_stop.py", "server_control.py"}:
                 assert '"panic_stop.flag"' not in source, path
     assert "owner_restart_no_resume" not in (root / "server.py").read_text(encoding="utf-8")
 

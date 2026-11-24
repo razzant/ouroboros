@@ -1847,12 +1847,21 @@ def test_ws_endpoint_reconciles_and_unloads_not_live_extension(tmp_path, monkeyp
 
         with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({"type": extension_loader.extension_surface_name("ext_ws_guarded", "message")}))
-            reply = json.loads(ws.receive_text())
+            reply = _receive_after_connection_profile(ws)
         assert reply["type"] == "log"
         assert "not live" in reply["data"]["message"]
         assert "ext_ws_guarded" not in extension_loader.snapshot()["extensions"]
     finally:
         _stop_patches(patches)
+
+
+def _receive_after_connection_profile(ws) -> dict:
+    frame = json.loads(ws.receive_text())
+    if isinstance(frame, dict) and frame.get("type") == "connection_profile":
+        assert set(frame) == {"type", "profile_scope"}
+        assert isinstance(frame["profile_scope"], str) and bool(frame["profile_scope"])
+        frame = json.loads(ws.receive_text())
+    return frame
 
 
 def test_ws_endpoint_dispatches_first_message_after_lazy_load(tmp_path, monkeypatch):
@@ -1886,7 +1895,7 @@ def test_ws_endpoint_dispatches_first_message_after_lazy_load(tmp_path, monkeypa
         msg_type = extension_loader.extension_surface_name("ext_ws_lazy", "message")
         with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({"type": msg_type, "payload": "first"}))
-            reply = json.loads(ws.receive_text())
+            reply = _receive_after_connection_profile(ws)
         assert reply == {"type": f"{msg_type}.reply", "data": {"acked": "first"}}
     finally:
         _stop_patches(patches)
@@ -1921,7 +1930,7 @@ def test_ws_endpoint_surfaces_extension_load_error(tmp_path, monkeypatch):
 
         with client.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({"type": extension_loader.extension_surface_name("ext_ws_broken", "message")}))
-            reply = json.loads(ws.receive_text())
+            reply = _receive_after_connection_profile(ws)
         assert reply["type"] == "log"
         assert "failed to go live" in reply["data"]["message"]
     finally:

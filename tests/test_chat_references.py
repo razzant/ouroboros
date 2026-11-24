@@ -8,13 +8,8 @@ from ouroboros.chat_chain import format_address, row_address
 from ouroboros.chat_references import reference_from_row, resolve_reply
 from supervisor import message_bus
 from tests import _dialogue as dialogue_test
+from tests._dialogue import healthy_main_fixture as healthy_main_fixture  # noqa: F401
 from tests.test_chat_attachments import _history, _web_bridge
-
-
-@pytest.fixture
-def healthy_main(tmp_path):
-    from ouroboros.project_registry_recovery import initialize_new_root
-    initialize_new_root(tmp_path)
 
 
 def test_reply_is_host_resolved_and_replay_uses_the_same_address(tmp_path, monkeypatch, healthy_main):

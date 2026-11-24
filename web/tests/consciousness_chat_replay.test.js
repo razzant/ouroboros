@@ -3,12 +3,12 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { fullText } from '../modules/text_fit.js';
-import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
+import { installDom, PREVIEW_SCOPE, restoreDom, walkCard } from './chat_dom_fixture.js';
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 
 async function replay(history, check) {
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith('/api/chat/history') ? structuredClone(history) : {} }));
+        String(url).startsWith('/api/chat/history') ? { profile_scope: PREVIEW_SCOPE, ...structuredClone(history) } : {} }));
     const handlers = new Map();
     const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); }, isConnected: () => true, send() {} };
     let instance, generation = 0;

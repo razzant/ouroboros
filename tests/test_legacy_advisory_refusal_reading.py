@@ -21,6 +21,7 @@ import pytest
 
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.project_dialogue import _completion_verdict, completion_status_label, outcome_phase
+from tests._dialogue import healthy_main_fixture  # noqa: F401 -- the "healthy_main" fixture
 
 SENTENCE = "Nothing had changed since the last review, so the recorded verdict stands."
 
@@ -140,7 +141,8 @@ def test_only_affirmative_answer_evidence_survives_the_compact_projection():
     ({"result": ""}, "Failed"),
     ({"status": "failed", "outcome_axes": {"objective": {"status": "fail", "source": "acceptance"}}}, "Failed"),
 ])
-def test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it(tmp_path, monkeypatch, change, label):
+def test_stamp_sources_keep_raw_objective_while_compact_history_interprets_it(tmp_path, monkeypatch, change, label,
+                                                                             healthy_main):
     from pathlib import Path
     import subprocess
 
@@ -218,7 +220,7 @@ def test_display_view_carries_answer_presence_without_reading_full_bodies(tmp_pa
     assert "_result_text_present" not in before, "the existence bit is a read projection, not storage"
 
 
-def test_task_detail_and_history_read_it_the_same_way_and_the_published_main_row_keeps_its_words(tmp_path):
+def test_task_detail_and_history_read_it_the_same_way_and_the_published_main_row_keeps_its_words(tmp_path, healthy_main):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
