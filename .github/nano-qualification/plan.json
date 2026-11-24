@@ -1,0 +1,450 @@
+{
+  "head": {
+    "commit": "807a23e80f6bcf4cb258115b145068c90c9f8f71",
+    "tree": "25c7e77cfc1d50ff726303ade57ce775cc8c881d"
+  },
+  "base": {
+    "commit": "dc0f161dc2a69c677ec7b17503c3be2a405608ba",
+    "tree": "479c8b13faf94be472f516a37c9530d95ce5a7ec"
+  },
+  "selection_profile": "targeted_rerun",
+  "size": [
+    "tests/test_smoke.py::test_no_oversized_modules",
+    "tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree",
+    "tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base",
+    "tests/test_smoke.py::test_no_extremely_oversized_functions",
+    "tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact",
+    "tests/test_reference_book_budgets.py::test_a_change_does_not_grow_a_reference_book",
+    "tests/test_reference_book_budgets.py::test_a_change_does_not_grow_bible_or_the_prompts"
+  ],
+  "seams": [
+    "tests/test_context_budget_ssot.py",
+    "tests/test_gateway_parity.py",
+    "tests/test_provider_key_test.py",
+    "tests/test_llm_ollama_gateway.py",
+    "tests/test_llm_ollama_physical_admission.py",
+    "tests/test_llm_extraction.py::test_native_ollama_imports_do_not_cycle_back_to_the_router",
+    "tests/test_context_minimum_view_unfit.py::test_a_child_whose_start_cannot_fit_ends_as_context_capacity_and_its_parent_is_told",
+    "tests/test_context_minimum_view_unfit.py::test_a_child_on_an_ollama_that_cannot_keep_history_ends_with_its_own_upgrade_sentence",
+    "tests/test_unknown_fallback_first.py",
+    "tests/test_wrapup_real_send_parity.py",
+    "tests/test_provider_token_presence.py::test_anthropic_web_search_leg_reports_the_native_total",
+    "tests/test_context_attention_mind.py::test_memory_step_passes_the_actual_window_and_current_transcript",
+    "tests/test_context_comparable_density.py::test_memory_coarsening_uses_the_density_that_measured_the_saving",
+    "tests/test_context_refused_density.py::test_the_client_capture_pairs_the_refusal_with_the_estimate_it_submitted",
+    "tests/test_continuation_tools.py::test_a_ceiling_never_forgets_a_selection_across_cold_resumes",
+    "tests/test_continuation_tools.py::test_a_cold_rebuild_names_one_cut_once_in_the_history",
+    "tests/test_continuation_tools.py::test_ceiling_keeps_enabled_or_legacy_resident_without_inventing_intent",
+    "tests/test_continuation_tools.py::test_history_check_is_after_the_route_ceiling",
+    "tests/test_loop_compaction.py::test_fallback_success_preserves_complete_candidate_fit_facts",
+    "tests/test_memory_floor_measurements.py::test_the_slack_alone_never_outlines_the_knowledge_index",
+    "tests/test_quota_rotation_fallback.py::test_an_owners_switch_stays_the_owners_choice_after_the_backup_answers",
+    "tests/test_quota_rotation_fallback.py::test_ordinary_task_keeps_intermediate_fallback_quota_for_owner_wait",
+    "tests/test_quota_rotation_fallback.py::test_the_last_backup_keeps_its_quota_for_the_rounds_own_outage_wait",
+    "tests/test_restricted_child_schema_selector.py::test_a_cold_continuation_keeps_the_loaded_late_schema_and_a_callable_selector",
+    "tests/test_route_switch_facts.py::test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorded_call",
+    "tests/test_route_tool_schema_limit.py::test_main_fits_its_resident_list_in_place_and_names_what_it_left_out",
+    "tests/test_supervisor_route_flow.py::test_restart_restores_frozen_binding_and_later_switch",
+    "tests/test_native_fallback_binding_acceptance.py",
+    "tests/test_llm_fallback.py",
+    "tests/test_loop_llm_call.py",
+    "tests/test_llm_extraction.py::test_llm_leaf_import_graph_is_acyclic_and_shallow",
+    "tests/test_working_checkpoint.py::test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery",
+    "tests/test_own_time_seed.py::test_a_forced_final_answer_that_carried_the_offer_spends_it",
+    "tests/test_own_time_seed.py::test_a_send_answered_by_nothing_spends_nothing",
+    "tests/test_own_time_seed.py::test_a_tight_window_admits_the_offer_in_one_line_and_its_answered_send_spends_it",
+    "tests/test_own_time_seed.py::test_an_older_install_hears_the_offer_in_direct_main_only_and_building_requests_spends_nothing",
+    "tests/test_own_time_seed.py::test_only_an_answered_physical_request_that_carried_the_offer_spends_it",
+    "tests/test_onboarding_attempt_status.py",
+    "tests/test_onboarding_host.py::test_local_readiness_across_launcher_and_server_projection",
+    "tests/test_onboarding_host.py::test_server_boot_never_writes_the_settings_file",
+    "tests/test_onboarding_consciousness_offer.py::test_the_limits_are_the_runtime_readers_values",
+    "tests/test_onboarding_starter_choices.py::test_start_uses_current_endpoint_metadata_like_the_bootstrap",
+    "tests/test_onboarding_starter_choices.py::test_untouched_starter_offer_and_saved_default_select_the_same_skills",
+    "tests/test_consciousness_switch_words.py::test_the_first_run_offer_carries_the_switch_words",
+    "tests/test_boot_readiness.py::test_first_start_starter_and_wizard_agree_on_effective_provider_access",
+    "tests/test_transport_b_stream_deadlines.py",
+    "tests/test_keyless_compatible_transport.py",
+    "tests/test_openai_responses.py",
+    "tests/test_docs_sync.py",
+    "tests/test_module_handle_extraction.py",
+    "tests/test_domain_manifest.py",
+    "tests/test_domain_report.py",
+    "tests/test_architecture_facts.py",
+    "tests/test_generated_inventories.py",
+    "tests/test_reference_book_validation.py",
+    "tests/test_persistence_inventory.py",
+    "tests/test_gateway_client_contract.py",
+    "tests/test_client_contract_doc.py",
+    "tests/test_client_contract_history.py",
+    "tests/test_client_contract_bindings.py",
+    "tests/test_wake_start_floor.py",
+    "tests/test_primary_view_return.py"
+  ],
+  "all_tests": [
+    "tests/test_architecture_facts.py",
+    "tests/test_boot_readiness.py",
+    "tests/test_client_contract_bindings.py",
+    "tests/test_client_contract_doc.py",
+    "tests/test_client_contract_history.py",
+    "tests/test_consciousness_switch_words.py",
+    "tests/test_context_attention_mind.py",
+    "tests/test_context_budget_ssot.py",
+    "tests/test_context_comparable_density.py",
+    "tests/test_context_minimum_view_unfit.py",
+    "tests/test_context_refused_density.py",
+    "tests/test_continuation_tools.py",
+    "tests/test_docs_sync.py",
+    "tests/test_domain_manifest.py",
+    "tests/test_domain_report.py",
+    "tests/test_gateway_client_contract.py",
+    "tests/test_gateway_parity.py",
+    "tests/test_generated_inventories.py",
+    "tests/test_keyless_compatible_transport.py",
+    "tests/test_llm_extraction.py",
+    "tests/test_llm_fallback.py",
+    "tests/test_llm_ollama_gateway.py",
+    "tests/test_llm_ollama_physical_admission.py",
+    "tests/test_loop_compaction.py",
+    "tests/test_loop_llm_call.py",
+    "tests/test_memory_floor_measurements.py",
+    "tests/test_module_handle_extraction.py",
+    "tests/test_native_fallback_binding_acceptance.py",
+    "tests/test_onboarding_attempt_status.py",
+    "tests/test_onboarding_consciousness_offer.py",
+    "tests/test_onboarding_host.py",
+    "tests/test_onboarding_starter_choices.py",
+    "tests/test_openai_responses.py",
+    "tests/test_own_time_seed.py",
+    "tests/test_persistence_inventory.py",
+    "tests/test_primary_view_return.py",
+    "tests/test_provider_key_test.py",
+    "tests/test_provider_token_presence.py",
+    "tests/test_quota_rotation_fallback.py",
+    "tests/test_reference_book_budgets.py",
+    "tests/test_reference_book_validation.py",
+    "tests/test_repo_health_smoke.py",
+    "tests/test_restricted_child_schema_selector.py",
+    "tests/test_route_switch_facts.py",
+    "tests/test_route_tool_schema_limit.py",
+    "tests/test_smoke.py",
+    "tests/test_supervisor_route_flow.py",
+    "tests/test_transport_b_stream_deadlines.py",
+    "tests/test_unknown_fallback_first.py",
+    "tests/test_wake_start_floor.py",
+    "tests/test_working_checkpoint.py",
+    "tests/test_wrapup_real_send_parity.py"
+  ],
+  "jsunit": {
+    "cwd": "web",
+    "files": [
+      "tests/provider_test.test.js",
+      "tests/connection_server_check.test.js",
+      "tests/api_connections.test.js",
+      "tests/settings_accounts.test.js",
+      "tests/onboarding_agents_step.test.js",
+      "tests/onboarding_wizard_render.test.js",
+      "tests/ui_primitives.test.js",
+      "tests/onboarding_summary.test.js",
+      "tests/onboarding_consciousness.test.js",
+      "tests/onboarding_starter_skills.test.js"
+    ]
+  },
+  "observation": {
+    "test": "tests/test_qa_settings_observation_browser.py",
+    "sha256": "e22cabb7b9a1a633f256b1dcee87457f9386d0604f0168e671b10bef57ced73b",
+    "nodes": [
+      "tests/test_qa_settings_observation_browser.py::test_each_state_of_an_unidentified_compatible_key_in_a_real_browser",
+      "tests/test_qa_settings_observation_browser.py::test_a_ticked_consent_travels_with_test_and_the_caution_shows_beside_the_outcome",
+      "tests/test_qa_settings_observation_browser.py::test_first_run_from_nothing_asks_then_tests_goes_back_and_saves"
+    ],
+    "existing": [],
+    "expect": {
+      "never-checked": {
+        "consent_shown": true,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "unchecked",
+        "admission": "",
+        "consent_offer": "facts"
+      },
+      "unconfirmed": {
+        "consent_shown": true,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "unconfirmed",
+        "admission": "",
+        "consent_offer": "facts"
+      },
+      "consent-stands": {
+        "consent_shown": true,
+        "consent_ticked": true,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "unconfirmed",
+        "admission": "consent",
+        "consent_offer": null
+      },
+      "prior-route": {
+        "consent_shown": true,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "unconfirmed",
+        "admission": "prior",
+        "consent_offer": "facts"
+      },
+      "identified-llama-cpp": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "identified",
+        "admission": "",
+        "consent_offer": null
+      },
+      "held-ollama-seen": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "held",
+        "admission": "",
+        "consent_offer": null
+      },
+      "held-with-standing-consent": {
+        "consent_shown": true,
+        "consent_ticked": true,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "held",
+        "admission": "consent",
+        "consent_offer": "ticked"
+      },
+      "update-needed-ollama": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "update",
+        "admission": "",
+        "consent_offer": null
+      },
+      "saved-address-edited": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "draft",
+        "admission": "",
+        "consent_offer": null
+      },
+      "public-address-no-fact": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": false,
+        "address": "public",
+        "server_state": null,
+        "admission": null,
+        "consent_offer": null
+      },
+      "private-draft-no-fact": {
+        "consent_shown": false,
+        "consent_ticked": false,
+        "note_shown": false,
+        "address": "private",
+        "server_state": null,
+        "admission": null,
+        "consent_offer": null
+      },
+      "private-draft-asks-consent": {
+        "consent_shown": true,
+        "consent_ticked": false,
+        "note_shown": false,
+        "address": "private",
+        "server_state": null,
+        "admission": null,
+        "consent_offer": "test"
+      },
+      "held-with-standing-consent-phone": {
+        "consent_shown": true,
+        "consent_ticked": true,
+        "note_shown": true,
+        "address": "private",
+        "server_state": "held",
+        "admission": "consent",
+        "consent_offer": "ticked"
+      }
+    },
+    "lines": [
+      "passed",
+      "failed",
+      "plain"
+    ],
+    "line_expect": {
+      "consent_sent": [
+        "address"
+      ]
+    },
+    "journey": {
+      "address-typed": {
+        "frames": true,
+        "expect": {
+          "files_before_boot": 0,
+          "secret_env": [],
+          "served_secrets": [],
+          "address_typed": true,
+          "consent_shown": false,
+          "consent_ticked": false
+        }
+      },
+      "unticked-test-refused": {
+        "frames": true,
+        "expect": {
+          "refusal_code": "ollama_guard_consent",
+          "refusal_tone": "warn",
+          "refusal_names_reason": true,
+          "chat_posts_seen": 0,
+          "consent_sent": [],
+          "settings_writes": 0,
+          "consent_shown": true,
+          "consent_ticked": false,
+          "consent_offer": "test"
+        }
+      },
+      "ticked-test-works": {
+        "frames": true,
+        "expect": {
+          "result_tone": "warn",
+          "result_has_caution": true,
+          "chat_posts_seen": 1,
+          "consent_sent": [
+            "address"
+          ],
+          "settings_writes": 0,
+          "consent_shown": true,
+          "consent_ticked": true
+        }
+      },
+      "ticked-test-works-phone": {
+        "frames": true,
+        "expect": {
+          "consent_shown": true,
+          "consent_ticked": true,
+          "address_exact": true,
+          "address_home": true,
+          "address_end": true,
+          "result_tone": "warn",
+          "result_has_caution": true,
+          "test_enabled": true,
+          "continue_enabled": true
+        }
+      },
+      "back-keeps-input": {
+        "frames": true,
+        "expect": {
+          "address_kept": true,
+          "consent_shown": true,
+          "consent_ticked": true
+        }
+      },
+      "summary-final-choice": {
+        "frames": true,
+        "expect": {
+          "back_kept_first_choice": true,
+          "new_steps_served": true,
+          "summary_last": true,
+          "summary_reached": true,
+          "summary_names_final": true,
+          "summary_names_first": false
+        }
+      },
+      "saved": {
+        "frames": false,
+        "expect": {
+          "status": 200,
+          "consent_sent": [
+            "address"
+          ],
+          "address_saved": true,
+          "consent_saved": "endpoint_id",
+          "start_posts": 1,
+          "other_writes": 0,
+          "model_sent": "final",
+          "model_saved": "final",
+          "starter_sent": []
+        }
+      },
+      "key-page-after": {
+        "frames": true,
+        "expect": {
+          "note_shown": true,
+          "note_names_risk": true,
+          "consent_shown": true,
+          "consent_ticked": true
+        }
+      }
+    },
+    "codes": [
+      "selector_missing",
+      "text_differs",
+      "classifier_disagrees",
+      "form_not_drawn",
+      "timeout",
+      "assertion",
+      "browser_error",
+      "other"
+    ]
+  },
+  "known_red": {
+    "from": {
+      "run": "45287197598/1",
+      "head": "140e1c9fbc16",
+      "base": "3d606cbb0adb"
+    },
+    "pairs": {
+      "size": [
+        "tests/test_smoke.py::test_no_oversized_modules",
+        "tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree",
+        "tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact"
+      ],
+      "seams": [
+        "tests/test_context_refused_density.py::test_the_client_capture_pairs_the_refusal_with_the_estimate_it_submitted",
+        "tests/test_continuation_tools.py::test_a_ceiling_never_forgets_a_selection_across_cold_resumes",
+        "tests/test_continuation_tools.py::test_a_cold_rebuild_names_one_cut_once_in_the_history",
+        "tests/test_continuation_tools.py::test_ceiling_keeps_enabled_or_legacy_resident_without_inventing_intent",
+        "tests/test_continuation_tools.py::test_history_check_is_after_the_route_ceiling",
+        "tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks",
+        "tests/test_provider_token_presence.py::test_anthropic_web_search_leg_reports_the_native_total",
+        "tests/test_route_tool_schema_limit.py::test_main_fits_its_resident_list_in_place_and_names_what_it_left_out"
+      ]
+    },
+    "identity": {
+      "tests/test_smoke.py::test_no_oversized_modules": "equal_blob",
+      "tests/test_smoke.py::test_size_ratchet_manifest_matches_live_tree": "equal_blob",
+      "tests/test_repo_health_smoke.py::test_checked_in_manifest_generator_check_is_exact": "equal_blob",
+      "tests/test_context_refused_density.py::test_the_client_capture_pairs_the_refusal_with_the_estimate_it_submitted": "equal_blob",
+      "tests/test_continuation_tools.py::test_a_ceiling_never_forgets_a_selection_across_cold_resumes": "equal_blob",
+      "tests/test_continuation_tools.py::test_a_cold_rebuild_names_one_cut_once_in_the_history": "equal_blob",
+      "tests/test_continuation_tools.py::test_ceiling_keeps_enabled_or_legacy_resident_without_inventing_intent": "equal_blob",
+      "tests/test_continuation_tools.py::test_history_check_is_after_the_route_ceiling": "equal_blob",
+      "tests/test_docs_sync.py::test_resident_docs_residue_only_shrinks": "equal_blob",
+      "tests/test_provider_token_presence.py::test_anthropic_web_search_leg_reports_the_native_total": "equal_test_and_module_harness_ast",
+      "tests/test_route_tool_schema_limit.py::test_main_fits_its_resident_list_in_place_and_names_what_it_left_out": "equal_blob"
+    },
+    "no_pair": [
+      {
+        "node": "tests/test_smoke.py::test_size_ratchet_transition_against_explicit_base",
+        "kind": "size",
+        "why": "compares_head_to_base"
+      },
+      {
+        "node": "tests/test_wrapup_real_send_parity.py::test_pricing_view_does_not_survive_exact_budget_resume",
+        "kind": "seams",
+        "why": "changed_in_head"
+      }
+    ]
+  }
+}
