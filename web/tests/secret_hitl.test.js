@@ -79,7 +79,8 @@ test('the card names fields and keys; the form opens only from it and reads stat
         assert.equal(fx.reveals[0].input, input(fx), 'Show/Hide is the Settings reveal over this local draft');
         assert.equal(q(fx.host, 'secret-request-readers-title').textContent, 'Skills that read this key:');
         assert.deepEqual(fx.host.querySelectorAll('secret-request-reader').map((row) => row.textContent),
-            ['telegram · enabled · its grant covers it', 'mailer · disabled · needs TELEGRAM_BOT_TOKEN granted in Skills']);
+            ['telegram · enabled · its grant covers the listed keys',
+                'mailer · disabled · its grant does not cover TELEGRAM_BOT_TOKEN; use Grant access in Skills']);
         assert.equal(ok(fx).textContent, 'Save');
         assert.equal(ok(fx).disabled, true);
         type(input(fx), CANARY);
@@ -106,7 +107,7 @@ test('Save posts the values once with what the form showed, then empties the con
         assert.equal(fx.accepted.at(-1).state, 'answered');
         assert.match(q(fx.card, 'chat-secret-status').textContent, /^Saved to Settings: botToken\. Access and enablement are unchanged\./);
         assert.deepEqual(fx.card.querySelectorAll('chat-secret-reader').map((row) => row.textContent)[1],
-            'mailer · disabled · needs TELEGRAM_BOT_TOKEN granted in Skills');
+            'mailer · disabled · its grant does not cover TELEGRAM_BOT_TOKEN; use Grant access in Skills');
         assert.equal(q(fx.card, 'chat-secret-actions'), null, 'a settled card has no actions');
         assert.equal(fx.stored.length, 0);
         assert.ok(!everything(fx.host).includes(CANARY) && !everything(fx.card).includes(CANARY));
@@ -374,9 +375,11 @@ test("the form's Show and Hide speak the installed language: the overlay never w
 });
 
 test('readers keep enabled and grant facts apart', () => {
-    assert.equal(readerLine({ name: 'a', enabled: false, reads: ['K'], granted: ['K'] }), 'a · disabled · its grant covers it');
-    assert.equal(readerLine({ name: 'b', enabled: true, reads: ['K'], granted: [] }),
-        'b · enabled · needs K granted in Skills; after saving, this enabled skill cannot run until the keys are granted');
+    assert.match(readerLine({ name: 'a', enabled: false, reads: ['K'], granted: ['K'] }), /^a · disabled · its grant covers/);
+    // Grant facts only (RV1 A11): no claim about whether the enabled skill runs, which the card cannot keep current.
+    const partial = readerLine({ name: 'b', enabled: true, reads: ['FIRST', 'NEXT', 'LAST'], granted: ['FIRST'] });
+    assert.match(partial, /^b · enabled · .*NEXT, LAST.*Grant access/);
+    assert.doesNotMatch(partial, /FIRST|can.t run/);
     assert.equal(readerLine({ name: 'c', enabled: true, reads: ['K'], unsupported: true }), 'c · enabled · this skill type receives no Settings keys');
     assert.equal(readerLine({ name: 'd', enabled: true, reads: ['K'], grant_unknown: true }), 'd · enabled · its grant could not be read');
 });

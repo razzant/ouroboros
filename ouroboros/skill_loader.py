@@ -17,7 +17,19 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, canonical_skill_name, parse_skill_manifest_text
-from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.contracts.skill_payload_policy import skill_state_dir_path as skill_state_dir_path
+from ouroboros.skill_grant_follow import (
+    FORBIDDEN_SKILL_SETTINGS as FORBIDDEN_SKILL_SETTINGS,
+    GRANTS_FILENAME as GRANTS_FILENAME,
+    REQUESTABLE_WHEN_ABSENT as REQUESTABLE_WHEN_ABSENT,
+    SKILL_OWNER_STATE_SCHEMA_VERSION as SKILL_OWNER_STATE_SCHEMA_VERSION,
+    grant_view,
+    held_use_permissions,
+    load_skill_grants as load_skill_grants,
+    requested_core_setting_keys as requested_core_setting_keys,
+    requested_skill_permissions as requested_skill_permissions,
+    save_skill_grants as save_skill_grants,
+)
 from ouroboros.contracts.schema_versions import with_schema_version
 # Peer-conflict projection lives in its own leaf (module-size gate); it is
 # re-exported here so every historical import site keeps working unchanged.
@@ -50,11 +62,7 @@ def review_status_allows_execution(status: str) -> bool:
     return bool(skill_review_gate(status)["executable_review"])
 
 
-GRANTS_FILENAME = "grants.json"
 SELF_AUTHORED_MARKER_FILENAME = ".self_authored.json"
-# Stamp every authored skill owner-state document (CPL4-C10 / ABI-2);
-# legacy-0 readers never retrofit a stamp on read.
-SKILL_OWNER_STATE_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -183,26 +191,6 @@ class _SkillLocationCandidate:
     name: str
     location: str
     skill_dir: pathlib.Path
-
-
-def _skills_state_root(drive_root: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(drive_root) / "state" / "skills"
-
-
-def skill_state_dir_path(drive_root: pathlib.Path, name: str) -> pathlib.Path:
-    """The skill's state dir path WITHOUT creating it — for read-only
-    consumers (``load_review_state``, the RC auditor's admission reuse):
-    reading state must never mutate the root it reads from.
-
-    The generation-fenced companion recovery resolves the state dir through
-    here BEFORE its fence (fix-round-6); creation belongs to the post-fence
-    attach in ``_publish_registrations``, so a stale refusal creates no
-    directories. ``skill_state_dir`` is the creating variant for load paths.
-
-    The name is normalized to its alnum-dashes shape before joining so a
-    malicious manifest ``name: ../foo`` cannot escape the state root.
-    """
-    return _skills_state_root(drive_root) / _sanitize_skill_name(name)
 
 
 def skill_state_dir(drive_root: pathlib.Path, name: str) -> pathlib.Path:
@@ -623,142 +611,6 @@ def save_review_state(
     )
 
 
-def requested_core_setting_keys(env_keys: List[str], settings: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Return manifest-requested setting keys that require explicit owner grants.
-
-    A reader exposing values passes the ``settings`` it read them from: the same mapping names its custom
-    secrets, so a key saved between two reads can never be exposed unclassified. Otherwise this reads them."""
-    if not env_keys:
-        return []  # nothing requested, nothing to classify: no settings read
-    forbidden_upper = {key.upper() for key in FORBIDDEN_SKILL_SETTINGS}
-    requestable_when_absent = {"TELEGRAM_BOT_TOKEN"}
-    try:
-        from ouroboros.config import SETTINGS_DEFAULTS, load_settings
-        settings = load_settings() if settings is None else settings
-        custom_secret_upper = {
-            str(key).upper() for key in settings
-            if str(key).upper() not in SETTINGS_DEFAULTS and str(key).upper().replace("_", "").isalnum()
-        }
-    except Exception:
-        custom_secret_upper = set()
-    out: List[str] = []
-    for raw_key in env_keys or []:
-        key = str(raw_key or "").strip().upper()
-        if key and (key in forbidden_upper or key in custom_secret_upper or key in requestable_when_absent) and key not in out:
-            out.append(key)
-    return out
-
-
-
-# The privileged permissions an owner grants, in the order a request lists them; subscribe_event is granted by topic.
-_GRANTABLE_PERMISSIONS = ("inject_chat", "presence", "notify_owner", "page_module", "context_snapshot",
-                          "live_conversation", "call_peer")
-_GRANTABLE_SKILL_PERMISSIONS = frozenset({*_GRANTABLE_PERMISSIONS, *(
-    f"subscribe_event:chat.{topic}" for topic in ("outbound", "typing", "photo", "video"))})
-
-
-def requested_skill_permissions(
-    permissions: List[str],
-    subscribe_events: Optional[List[str]] = None,
-) -> List[str]:
-    """Return manifest-requested privileged permissions needing owner grants."""
-    permission_set = {str(item or "").strip() for item in (permissions or [])}
-    requested = [permission for permission in _GRANTABLE_PERMISSIONS if permission in permission_set]
-    if "subscribe_event" in permission_set:
-        for raw_topic in subscribe_events or []:
-            topic = str(raw_topic or "").strip()
-            grant = f"subscribe_event:{topic}"
-            if grant in _GRANTABLE_SKILL_PERMISSIONS and grant not in requested:
-                requested.append(grant)
-    return requested
-
-
-def _unique_text(values: Any, *, upper: bool = False) -> List[str]:
-    out: List[str] = []
-    for raw in values or []:
-        item = str(raw or "").strip()
-        item = item.upper() if upper else item
-        if item and item not in out:
-            out.append(item)
-    return out
-
-
-def _merge_allowed(*value_groups: Any, allowed: set[str], upper: bool = False) -> List[str]:
-    return [
-        item
-        for item in _unique_text(
-            (raw for group in value_groups for raw in (group or [])),
-            upper=upper,
-        )
-        if item in allowed
-    ]
-
-
-def load_skill_grants(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
-    data = read_json_dict(skill_state_dir_path(drive_root, name) / GRANTS_FILENAME)
-    if not isinstance(data, dict):
-        return {"granted_keys": [], "granted_permissions": [], "updated_at": ""}
-    keys = _unique_text(data.get("granted_keys"), upper=True)
-    requested = _unique_text(data.get("requested_keys"), upper=True)
-    permissions = _unique_text(data.get("granted_permissions"))
-    requested_permissions = _unique_text(data.get("requested_permissions"))
-    return {
-        "granted_keys": keys,
-        "requested_keys": requested,
-        "granted_permissions": permissions,
-        "requested_permissions": requested_permissions,
-        "content_hash": str(data.get("content_hash") or ""),
-        "updated_at": str(data.get("updated_at") or ""),
-    }
-
-
-def save_skill_grants(
-    drive_root: pathlib.Path,
-    name: str,
-    granted_keys: List[str],
-    *,
-    content_hash: str,
-    requested_keys: List[str],
-    granted_permissions: Optional[List[str]] = None,
-    requested_permissions: Optional[List[str]] = None,
-) -> None:
-    """Persist grants, merging partial approvals only for the same content hash. The same bytes keep
-    earlier approvals of items still requested: a key set grown by saved Settings adds a missing key,
-    never revokes another or grants it (``_merge_allowed`` keeps only the current request)."""
-    allowed = set(requested_core_setting_keys(requested_keys))
-    existing = load_skill_grants(drive_root, name)
-    persisted_match = str(existing.get("content_hash") or "") == str(content_hash or "")
-    merged = _merge_allowed(
-        existing.get("granted_keys") if persisted_match else [],
-        granted_keys,
-        allowed=allowed,
-        upper=True,
-    )
-    allowed_permissions = set(requested_permissions or [])
-    existing_permissions = _merge_allowed(
-        existing.get("granted_permissions") if persisted_match else [],
-        granted_permissions,
-        allowed=allowed_permissions,
-    )
-    # Stamp at write (CPL4-C10): load_skill_grants normalizes to a fixed key
-    # set, so the stamp must be re-authored here rather than carried through
-    # the read-merge round trip.
-    atomic_write_json(
-        skill_state_dir(drive_root, name) / GRANTS_FILENAME,
-        with_schema_version(
-            {
-                "granted_keys": merged,
-                "requested_keys": sorted(allowed),
-                "granted_permissions": sorted(existing_permissions),
-                "requested_permissions": sorted(allowed_permissions),
-                "content_hash": str(content_hash or ""),
-                "updated_at": utc_now_iso(),
-            },
-            SKILL_OWNER_STATE_SCHEMA_VERSION,
-        ),
-    )
-
-
 def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict[str, Any]:
     if bool(getattr(skill, "identity_collision", False)):
         # Collision placeholders deliberately carry no manifest/state payload.
@@ -773,6 +625,7 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
             "missing_permissions": [],
             "all_granted": True,
             "usable": False,
+            "blocked": False, "pending_keys": [], "pending_permissions": [],
             "unsupported_for_skill_type": False,
             "content_hash": "",
             "updated_at": "",
@@ -784,49 +637,27 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
         list(getattr(skill.manifest, "subscribe_events", []) or []),
     )
     grants = load_skill_grants(drive_root, skill.name)
-    grant_hash_ok = str(grants.get("content_hash") or "") == str(skill.content_hash or "")
-    permission_request_ok = sorted(grants.get("requested_permissions") or []) == sorted(requested_permissions)
-    # Same bytes: an approved key stays approved while still requested, whatever else saved Settings
-    # now adds to the request (a newly present custom key joins it missing, never granted).
-    persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok else set()
-    persisted_permissions = (
-        set(grants.get("granted_permissions") or [])
-        if grant_hash_ok and permission_request_ok
-        else set()
-    )
-    granted = [key for key in requested if key in persisted_grants]
-    granted_permissions = [perm for perm in requested_permissions if perm in persisted_permissions]
-    # A grant saved for other bytes belongs to an earlier version of the skill's files. Readiness, the
-    # execution refusal and the card name that fact instead of reporting the keys as absent; the
-    # binding to bytes itself is unchanged.
-    earlier_grant = None
-    if grants.get("content_hash") and not grant_hash_ok:
-        earlier_keys = [key for key in requested if key in set(grants.get("granted_keys") or [])]
-        earlier_permissions = [
-            perm for perm in requested_permissions if perm in set(grants.get("granted_permissions") or [])
-        ]
-        if earlier_keys or earlier_permissions:
-            earlier_grant = {"keys": earlier_keys, "permissions": earlier_permissions}
-    missing = [key for key in requested if key not in set(granted)]
-    missing_permissions = [perm for perm in requested_permissions if perm not in set(granted_permissions)]
-    review_ready = skill.review.gate_for(skill.content_hash)["executable_review"]
+    # A grant for other bytes is only a fact for the reader. A pending key for accepted files stays separate from
+    # blocking missing grants and is not passed; a permission a Repair receipt holds stays ungranted the same way.
+    gate = skill.review.gate_for(skill.content_hash)
+    view = grant_view(skill.content_hash, grants, requested, requested_permissions, gate,
+                      held_use_permissions(drive_root, skill, grants, requested_permissions))
+    review_ready = gate["executable_review"]
     # Scripts receive core keys via _scrub_env; extensions via PluginAPI.
     # Instruction skills cannot receive core keys.
     eligible_type = skill.manifest.is_script() or skill.manifest.is_extension()
     unsupported = bool((requested or requested_permissions) and not eligible_type)
+    blocked = view.pop("blocks") or unsupported
     return {
         "requested_keys": requested,
-        "granted_keys": granted,
-        "missing_keys": missing,
         "requested_permissions": requested_permissions,
-        "granted_permissions": granted_permissions,
-        "missing_permissions": missing_permissions,
-        "all_granted": not missing and not missing_permissions and not unsupported,
-        "usable": review_ready and not missing and not missing_permissions and not unsupported,
+        **view,
+        "all_granted": not view["missing_keys"] and not view["missing_permissions"] and not unsupported,
+        "usable": review_ready and not blocked,
+        "blocked": blocked,
         "unsupported_for_skill_type": unsupported,
         "content_hash": grants.get("content_hash", ""),
         "updated_at": grants.get("updated_at", ""),
-        "earlier_grant": earlier_grant,
     }
 
 

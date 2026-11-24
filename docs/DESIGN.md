@@ -1857,9 +1857,8 @@ Settings as <KEY>` in meta ink) and two actions, `Enter secret…` (primary) and
 shared modal: title `<plugin>: secret needed`, the sentence `The value is saved to Settings. It is not sent in this
 conversation.`, then per field Settings' own secret row (masked `.ui-control.secret-input` labelled by its id,
 `Show`/`Hide` of the typed draft only, never a saved value) with `Saved in Settings as <KEY> · not set` or `· a
-value is set (hidden)` (`· could not be read` when its read failed: an earlier form's read never shows as current), the skills that read the key (`name · enabled|disabled · its grant covers it|needs <KEY>
-granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
-are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
+value is set (hidden)` (`· could not be read` after a failed read), then readers with their On/Off state and keys
+their grants lack, not inferred readiness, and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
 re-enabled. Extensions › Skills shows an enabled skill's unset (or unreadable) declared secret as one
 neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
