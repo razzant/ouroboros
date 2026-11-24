@@ -537,6 +537,7 @@ D20 = "Presence"
 "ouroboros/mcp_schema.py" = "D05"
 "ouroboros/mcp_headers.py" = "D05"
 "ouroboros/mcp_oauth.py" = "D05"
+"ouroboros/oauth_engine.py" = "D05"  # the provider-neutral OAuth client remote MCP sign-ins run on
 "ouroboros/mcp_import.py" = "D05"
 "ouroboros/mcp_result_images.py" = "D05"
 "ouroboros/mcp_task_session.py" = "D05"

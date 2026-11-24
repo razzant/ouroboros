@@ -209,7 +209,7 @@ ouroboros/ — agent core and shared runtime (§6)
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
   mcp_client.py — identity, masks, names, launch admission; mcp_discovery.py — manager-owned joinable listing/settle (§6 MCP)
-  mcp_schema.py — literal-safe metadata; mcp_catalog.py — catalogs; mcp_oauth.py — sign-in
+  mcp_schema.py — literal-safe metadata; mcp_catalog.py — catalogs; mcp_oauth.py — MCP sign-in; oauth_engine.py — OAuth
   mcp_headers.py, mcp_import.py — origin-bound headers, draft import
   mcp_task_session.py, mcp_browser_guard.py, skill_mcp.py — task stdio sessions, browser policy, skill binding
   safety.py — Safety Supervisor call (§6 Safety Supervisor outcomes)
