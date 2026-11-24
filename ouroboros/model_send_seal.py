@@ -137,30 +137,50 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
 
 
-def _file_trace(candidate: Dict[str, Any], source: Any) -> Dict[str, Any]:
-    """Bind the captured SYSTEM file to the actual leading system part only.
+def _matched_governance_file(source: Any, path: str, content: str, carrier: str, start: int,
+                             contribution: str, boundary: str) -> Dict[str, Any]:
+    if not isinstance(source, (tuple, list)) or len(source) != 4 or source[0] != path:
+        return {}
+    _, digest, chars, text_sha = source
+    if type(chars) is not int or not 0 < chars <= len(content) - start:
+        return {}
+    end = start + chars
+    if ((end < len(content) and not content.startswith(boundary, end))
+            or hashlib.sha256(content[start:end].encode("utf-8")).hexdigest() != text_sha):
+        return {}
+    return {"source_path": path, "source_sha256": digest, "contribution": contribution, "text_sha256": text_sha,
+            "normalized_chars": chars, "prepared_text": {"path": carrier, "start_char": start, "end_char": end}}
 
-    ``source`` is the capture's witness as its sender carried it (``PhysicalAttemptContext.base_prompt_source``):
-    unverified, and never written as it is. Scope is intentionally narrow. A different wire shape, repriced
-    fallback or recovered transcript that cannot prove this prefix simply gets no trace.
-    No offsets are asserted in the redacted body.
+
+def _file_trace(candidate: Dict[str, Any], source: Any, bible: Any = None) -> Dict[str, Any]:
+    """Verify the captured governance witnesses in the leading prepared system text, before redaction.
+
+    Scope is deliberately narrow. Unsupported layouts and changed content stay unbound; nothing is inferred from
+    a heading alone or from today's files. Positions are Unicode characters in prepared text, not JSON offsets.
     """
     messages = candidate.get("messages")
-    if not isinstance(source, (tuple, list)) or len(source) != 4 or not isinstance(messages, list) or not messages:
+    if not isinstance(messages, list) or not messages:
         return {}
     leading = messages[0]
     if not isinstance(leading, dict) or leading.get("role") != "system":
         return {}
     content = leading.get("content")
+    carrier = "$.messages[0].content"
     if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "text":
         content = content[0].get("text")
-    path, digest, chars, text_sha = source
-    if (not isinstance(content, str) or type(chars) is not int or len(content) < chars
-            or len(content) > chars and not content.startswith("\n\n## BIBLE.md\n\n", chars)
-            or hashlib.sha256(content[:chars].encode("utf-8")).hexdigest() != text_sha):
+        carrier += "[0].text"
+    if not isinstance(content, str):
         return {}
-    return {"file_trace": [{"source_path": path, "source_sha256": digest,
-                            "contribution": "leading_system_prefix", "text_sha256": text_sha}]}
+    separator = "\n\n## BIBLE.md\n\n"
+    system = _matched_governance_file(source, "prompts/SYSTEM.md", content, carrier, 0,
+                                     "leading_system_prefix", separator)
+    if not system:
+        return {}
+    constitution_start = system["normalized_chars"]
+    constitution = (_matched_governance_file(bible, "BIBLE.md", content, carrier, constitution_start + len(separator),
+                                             "core_constitution", "\n\n")
+                    if content.startswith(separator, constitution_start) else {})
+    return {"file_trace": [system, *([constitution] if constitution else [])]}
 
 
 def persist_physical_candidate(
@@ -176,7 +196,7 @@ def persist_physical_candidate(
     ``candidate_facts`` describe the pre-redaction canonical object. The normal
     ``persist_call`` refs describe the redacted-by-default CAS blob; the two
     digest domains are deliberately labelled rather than equated. Its optional
-    ``file_witness`` (the capture's prompt-file version) is consumed here, never
+    governance file witnesses (the capture's prompt and constitution versions) are consumed here, never
     stored: the manifest keeps the verified ``file_trace`` alone.
 
     The manifest carries the ``model_send_seal`` block (additive key under
@@ -195,9 +215,32 @@ def persist_physical_candidate(
     from ouroboros.anthropic_native_custody import physical_custody_projection
     from ouroboros.observability import persist_call
     from ouroboros.chronicle_lead import delivered_lead_rule
+    from ouroboros.context_assembly_trace import prepared_inventory, verified_contributions, verified_layout
 
     facts = dict(candidate_facts)
     witness = facts.pop("file_witness", None)  # only what ``_file_trace`` proves of it reaches the manifest
+    bible = facts.pop("bible_witness", None)
+    assembly_witnesses = facts.pop('assembly_witnesses', ())
+    contribution_input = facts.pop('contribution_input', None)
+    try:
+        layout = verified_layout(candidate, assembly_witnesses)
+    except Exception:  # only these optional, effect-free projections are guarded
+        log.debug('Context assembly observations could not be bound', exc_info=True)
+        layout = []
+    contributions = None
+    if contribution_input is not None:
+        try:
+            contributions = verified_contributions(candidate, contribution_input)
+        except Exception:
+            log.debug('Context contribution observations could not be bound', exc_info=True)
+            contributions = {'status': 'unavailable'}
+    file_trace = _file_trace(candidate, witness, bible)
+    try:
+        inventory = prepared_inventory(candidate, layout, (contributions or {}).get('entries', ()),
+                                       verified_ranges=file_trace.get('file_trace', ()))
+    except Exception:
+        log.debug('Prepared request inventory unavailable', exc_info=True)
+        inventory = {'status': 'unavailable'}
     lead_rule = delivered_lead_rule(candidate)
     projected = physical_custody_projection(candidate)
     custody_projected = projected != candidate
@@ -216,7 +259,10 @@ def persist_physical_candidate(
             "anthropic_native_custody_projected": custody_projected,
             **_exposure_atoms_manifest(candidate),
             **facts,
-            **_file_trace(candidate, witness),
+            **file_trace,
+            **({'assembly_source_map': layout} if layout else {}),
+            **({'prepared_inventory': inventory} if inventory else {}),
+            **({'late_contributions': contributions} if contributions is not None else {}),
         },
         finalize_manifest=lambda redacted: {
             "model_send_seal": build_model_send_seal(

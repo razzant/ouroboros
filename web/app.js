@@ -328,7 +328,7 @@ function mergeMainSeenRevision(prefs) {
 }
 
 async function markMainViewed(revision) {
-    if (!ownerReads()) return false;  // the observer mode: nothing is the owner's read
+    if (!ownerReads() || mainChat?.archiveOpen?.()) return false;  // observer or archive: no Main read credit
     try {
         const prefs = await fetchJson('/api/ui/preferences', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -345,7 +345,7 @@ async function markMainViewed(revision) {
 let mainPaintRequest = null;
 async function acknowledgeMainAfterPaint() {
     const revision = state.mainVisibleRevision;
-    if (!mainOnScreen() || !mainChat?.refreshHistory || !Number.isSafeInteger(revision)
+    if (!mainOnScreen() || mainChat?.archiveOpen?.() || !mainChat?.refreshHistory || !Number.isSafeInteger(revision)
         || !Number.isSafeInteger(state.mainSeenRevision) || revision <= state.mainSeenRevision) return;
     if (mainPaintRequest && mainPaintRequest.revision >= revision) return mainPaintRequest.promise;
     const promise = (async () => {
@@ -1389,8 +1389,6 @@ const updateStatus = initUpdateStatus(ctx);
 // The interface size's one controller: the desktop keys work on every page, the slider lives in Settings.
 getInterfaceSize();
 
-initOnboardingOverlay();
-
 const disposeScrollFades = Array.from(document.querySelectorAll('.scroll-fade-y'), bindScrollFade);
 // Inside Telegram the host's chrome follows the shell (host_telegram.js); a no-op elsewhere.
 const telegramHost = createTelegramHost({ layers });
@@ -1411,6 +1409,8 @@ window.addEventListener('pagehide', (event) => {
 loadVersion();
 syncNavigationState();
 openInitialPage(showPage, state.activePage);
+// A new, unconfigured profile keeps the tab's About handback through the setup reload.
+initOnboardingOverlay({ onReady: () => { void settingsControls.returnResetAbout(); } });
 
 releaseMobileKeyboardForDrawer = bindKeyboardViewport({ telegramHost, shownRoom });
 

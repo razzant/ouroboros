@@ -772,6 +772,31 @@ def _hinted_start(seam, tmp_path, monkeypatch, *, maps_rung=False):
                            admit=admit, fit=fit, task=task, drive=memory.drive_root, capture=capture, env=env)
 
 
+@pytest.mark.parametrize('maps_rung', [False, True], ids=['fold-keeps-max', 'selects-low-maps'])
+def test_first_contact_witnesses_bind_final_selected_blocks(seam, tmp_path, monkeypatch, maps_rung):
+    from hashlib import sha256
+
+    seed = _hinted_start(seam, tmp_path, monkeypatch, maps_rung=maps_rung)
+    mode = 'low' if maps_rung else 'max'
+    selected = seed.plan.projection(mode)
+    blocks = json.loads(selected.system_content_json)
+    by_index = {row['block']: row for row in selected.assembly_witnesses}
+    assert sorted(by_index) == list(range(len(blocks)))
+    for index, block in enumerate(blocks):
+        text, witness = block['text'], by_index[index]
+        assert witness['carrier_chars'] == len(text)
+        assert witness['carrier_sha256'] == sha256(text.encode()).hexdigest()
+        assert all(0 <= group['start'] < group['start'] + group['chars'] <= len(text)
+                   for group in witness['groups'])
+    tail = blocks[-1]['text']
+    appendix = '\n\n### First-send composition' + tail.split('### First-send composition', 1)[1]
+    group = by_index[len(blocks) - 1]['groups'][-1]
+    assert group == {'family': 'memory_fit_notes', 'form': 'rendered',
+                     'start': len(tail) - len(appendix), 'chars': len(appendix)}
+    assert ('uses chapter maps' in appendix) is maps_rung
+    assert NOTE not in seed.plan.ordinary_first_contact().max_projection.system_content_json
+
+
 @pytest.mark.parametrize("early_key,late_key", [("a", None), ("b", "a"), ("a", "b")],
                          ids=["known-window-one-read", "unknown-window-adopts-hint", "unknown-window-drops-old-hint"])
 def test_start_hint_uses_only_the_final_horizon_binding(seam, tmp_path, monkeypatch, early_key, late_key):

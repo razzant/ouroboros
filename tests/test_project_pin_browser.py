@@ -3,8 +3,8 @@
 The existing shell server supplies assets and non-project APIs. Project list/update
 requests exercise the real gateway and registry in a private TestClient drive.
 Pin and Unpin are the first actions of a row's menu (its ⋯ under a mouse, a long press on touch) and the row's own
-glyph over its time for a hovering pointer or the keyboard; pinned rows lead the one keyed list and one step of
-air parts them from the rest, with no caption or column and no glyph at rest.
+glyph at the end of line 1 for a hovering pointer or the keyboard; pinned rows lead the one keyed list with a quiet
+resting pin glyph beside their shifted time, and one step of air parts them from the rest, with no caption or column.
 Find a project and Show more reach every room beyond the feed; a reference opens its own room by its id.
 """
 import json
@@ -54,9 +54,12 @@ def pins_ui(request, monkeypatch, tmp_path):
     app = Starlette(routes=collect_routes(data_dir=root))
     app.state.drive_root = root
     control = {"fail": False, "hold": False, "held": [], "hold_writes": False, "held_writes": [],
-               "writes": [], "unread": set(), "activities": [], "fail_lookup": False, "hold_lookups": False,
+               "writes": [], "unread": set(), "activities": [], "message_times": {},
+               "fail_lookup": False, "hold_lookups": False,
                "held_lookups": [], "fail_list": False, "hold_lists": False, "held_lists": [],
-               "shared_cursors": False, "null_project_count": False, "sent": [], "sockets": []}
+               "shared_cursors": False, "null_project_count": False, "sent": [], "sockets": [],
+               # A page made while these are set boots with that language payload, Main's revision and its read cursor.
+               "i18n": None, "main_revision": None, "main_seen": None}
     pages = []
     with TestClient(app) as client:
         def forward(route, path, body):
@@ -68,13 +71,15 @@ def pins_ui(request, monkeypatch, tmp_path):
             response = client.get(url.path + (f"?{url.query}" if url.query else ""))
             route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
 
-        def respond(route):
+        def respond(route, language=None):
             path = urlparse(route.request.url).path
             if path == "/api/state":
                 rows = registry.projects_summary(root, include_pinned=True, by_message=True)  # as gateway/state.py
                 for project in rows:
                     if project['id'] in control['unread']:
                         project['visible_revision'] = 2
+                    if project['id'] in control['message_times']:
+                        project['last_message_at'] = control['message_times'][project['id']]
                 # The sidebar's live marks read the server's projection of the census rows (its rooms).
                 state = with_work_fields({"sha": "pin-fixture", "supervisor_ready": True,
                                           "active_chat_activities_complete": True,
@@ -84,6 +89,8 @@ def pins_ui(request, monkeypatch, tmp_path):
                                           else len(registry.list_sidebar_projects(root)),
                                           # Every reserved room, as gateway/state.py answers: rooms beyond the feed too.
                                           "project_chat_ids": sorted(registry.reserved_project_chat_ids(root))})
+                if control["main_revision"] is not None:
+                    state["main_visible_revision"] = control["main_revision"]
                 if control["hold"]:
                     control["held"].append((route, json.dumps(state)))
                     return
@@ -110,6 +117,10 @@ def pins_ui(request, monkeypatch, tmp_path):
                     control["held_lists"].append((route, response.text))
                 else:
                     forward_get(route)
+            elif path in ("/api/ui/i18n", "/api/ui/i18n/missing") and language is not None:
+                route.fulfill(json=language if path == "/api/ui/i18n" else {"ok": True})
+            elif path == "/api/ui/preferences" and control["main_seen"] is not None and route.request.method == "GET":
+                route.fulfill(json={"main_seen_revision": control["main_seen"]})
             elif path == "/api/ui/preferences" and control["shared_cursors"]:
                 # The real shared read cursors, for a case where another client reads a room.
                 if route.request.method == "POST":
@@ -125,13 +136,16 @@ def pins_ui(request, monkeypatch, tmp_path):
             ws.on_message(lambda message: control["sent"].append(message))
             ws.send(json.dumps({"type": "heartbeat"}))
 
-        def new_page(height=900):
-            page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
+        def new_page(height=900, now=None, **options):
+            """A page whose clock starts at ``now`` when given, before its first paint reads the time."""
+            page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720, **options)
             pages.append(page)
             page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
-            page.route("**/api/**", respond)
+            # The language a page boots with stays its own: a later page's language never reaches it on a re-read.
+            language = control["i18n"]
+            page.route("**/api/**", lambda route: respond(route, language))
             page.route_web_socket("**/ws", socket)
-            page.clock.install()
+            page.clock.install(**({"time": now} if now else {}))
             page.goto(ui["url"])
             page.locator('.nav-project-item').first.wait_for()
             open_drawer(page, width)
@@ -238,26 +252,48 @@ def assert_one_boundary(groups):
 
 
 # Each row's glyphs outside its Pin and ⋯ (none), and whether its Pin is drawn or a target; a Pin at rest has no
-# pointer on its row and no keyboard on itself.
-REST = """() => [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].map((item) => {
-    const pin = item.querySelector(':scope > .nav-project-pin'), style = pin && getComputedStyle(pin);
-    return {id: item.dataset.navProjectId, resting: !item.matches(':hover') && !pin?.matches(':focus-visible'),
-            stray: [...item.querySelectorAll('svg')].filter((svg) => !svg.closest('.nav-project-pin, .nav-project-kebab')).length,
-            drawn: Boolean(style) && style.opacity !== '0', target: Boolean(style) && style.pointerEvents !== 'none'};
-})"""
+# pointer on its row and no keyboard on itself. On touch, a focused or open ⋯ owns the row's end and hides the Pin.
+REST = """async () => {
+    const { SHELL_ICONS } = await import('/static/modules/page_icons.js');
+    const paths = (node) => [...node.querySelectorAll('path')].map((p) => p.getAttribute('d'));
+    const parse = (html) => { const d = document.createElement('div'); d.innerHTML = html; return paths(d); };
+    const pinPaths = parse(SHELL_ICONS.pin), unpinPaths = parse(SHELL_ICONS.unpin);
+    const same = (a, b) => a.length > 0 && a.length === b.length && a.every((v, i) => v === b[i]);
+    return [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].map((item) => {
+        const pin = item.querySelector(':scope > .nav-project-pin'), style = pin && getComputedStyle(pin);
+        const kebab = item.querySelector(':scope > .nav-project-kebab');
+        const shown = pin ? [...pin.querySelectorAll(':scope > svg')].filter((svg) => getComputedStyle(svg).display !== 'none') : [];
+        const shownPaths = shown.length === 1 ? paths(shown[0]) : [];
+        return {id: item.dataset.navProjectId, pinned: item.hasAttribute('data-pinned'),
+                deleting: item.classList.contains('is-deleting'),
+                resting: !item.matches(':hover') && !pin?.matches(':focus-visible'),
+                kebabHidden: matchMedia('(pointer: coarse)').matches && Boolean(kebab?.matches('[data-focused], [aria-expanded="true"]')),
+                stray: [...item.querySelectorAll('svg')].filter((svg) => !svg.closest('.nav-project-pin, .nav-project-kebab')).length,
+                drawn: Boolean(style) && style.opacity !== '0' && style.visibility !== 'hidden',
+                target: Boolean(style) && style.pointerEvents !== 'none',
+                restGlyph: same(shownPaths, pinPaths),
+                actGlyph: same(shownPaths, unpinPaths)};
+    });
+}"""
 
 
 def assert_flat_and_unlabelled(page):
-    """One flat keyed list: every child a Project row, the word Pinned only in names, and at rest no row draws its
-    Pin or lets it take a press."""
+    """One flat keyed list: every child a Project row, the word Pinned only in names, and at rest only pinned rows
+    draw their quiet pin glyph (hit-testable on a primary fine pointer; mark-only on coarse, never on unpinned rows)."""
     children = page.locator('#nav-projects-list > *').evaluate_all(
         'els => els.map(el => [el.className, el.dataset.navProjectId || ""])')
     assert children and all(cls.startswith('nav-project-item') and pid for cls, pid in children), children
     assert len({pid for _, pid in children}) == len(children)
     assert "Pinned" not in page.locator('#primary-sidebar').inner_text()
+    fine = page.evaluate("matchMedia('(hover: hover) and (pointer: fine)').matches")
     for item in page.evaluate(REST):
         assert item["stray"] == 0, item
-        assert not (item["resting"] and (item["drawn"] or item["target"])), item
+        if item["resting"]:
+            if item["pinned"] and not item["deleting"] and not item["kebabHidden"]:
+                assert item["drawn"] and item["restGlyph"] and not item["actGlyph"], item
+                assert item["target"] is fine, item
+            else:
+                assert not item["drawn"] and not item["target"], item
 
 
 def test_menu_pin_reorders_keyed_rows_without_opening_or_reading_across_reload_and_windows(pins_ui, tmp_path):
@@ -502,6 +538,8 @@ def test_pins_keep_unread_live_rows_menu_anchor_other_windows_and_deleting(pins_
     expect()(row(page, "older").locator('.nav-project-row')).to_be_disabled()
     expect()(row(page, "older").locator('.nav-project-deleting-status')).to_have_text("Deleting…")
     assert row(page, "older").locator('.nav-project-kebab').count() == 0
+    assert row(page, "older").locator('.nav-project-pin').count() == 0
+    assert row(page, "older").locator('.nav-project-time').evaluate("el => getComputedStyle(el).marginRight") == "0px"
     title = row(page, "older").locator('.nav-project-row').get_attribute("title")
     assert title.startswith("Changed elsewhere · Pinned — Deleting…"), title
 
@@ -669,20 +707,40 @@ def test_local_pin_reveal_respects_input_and_visible_scroll_region(pins_ui, heig
     expect()(page.locator('#toast-stack').filter(has_text="Could not save project pin")).to_have_count(0)
 
 
-# A row's own Pin as it stands: drawn, a target, what it does and says, its ink beside the row's, and the boxes of
-# the Pin, the name and the time it replaces on the approved row's first line.
-PIN = """(pid) => {
+# A row's own Pin as it stands: drawn, a target, what it does and says, its ink beside the row's, real SVG path
+# identity against SHELL_ICONS, and the boxes of the Pin, its rendered glyph, its ⋯, the name, the time and the mark.
+PIN = """async (pid) => {
+    const { SHELL_ICONS } = await import('/static/modules/page_icons.js');
+    const paths = (node) => [...node.querySelectorAll('path')].map((p) => p.getAttribute('d'));
+    const parse = (html) => { const d = document.createElement('div'); d.innerHTML = html; return paths(d); };
+    const pinPaths = parse(SHELL_ICONS.pin), unpinPaths = parse(SHELL_ICONS.unpin);
+    const same = (a, b) => a.length > 0 && a.length === b.length && a.every((v, i) => v === b[i]);
     const item = document.querySelector(`.nav-project-item[data-nav-project-id="${pid}"]`);
     const pin = item.querySelector(':scope > .nav-project-pin'), row = item.querySelector('.nav-project-row');
+    const kebab = item.querySelector(':scope > .nav-project-kebab');
     const box = (el) => { const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, top: r.top, bottom: r.bottom}; };
-    const style = getComputedStyle(pin);
-    return {drawn: style.opacity === '1', target: style.pointerEvents !== 'none', action: pin.dataset.action,
-            name: pin.getAttribute('aria-label'), title: pin.title, ink: style.color, ring: style.outlineStyle,
-            rowInk: getComputedStyle(row).color, rowFill: getComputedStyle(row).backgroundColor,
+    const style = getComputedStyle(pin), kebabStyle = kebab && getComputedStyle(kebab);
+    const svgs = [...pin.querySelectorAll(':scope > svg')];
+    const visible = svgs.filter((svg) => getComputedStyle(svg).display !== 'none');
+    const shownSvg = visible.length === 1 ? visible[0] : null;
+    const shownPaths = shownSvg ? paths(shownSvg) : [];
+    const slot = row.querySelector('.nav-mark-slot'), mark = row.querySelector('.status-mark');
+    const markStyle = mark && getComputedStyle(mark);
+    return {drawn: style.opacity === '1' && style.visibility !== 'hidden', target: style.pointerEvents !== 'none',
+            action: pin.dataset.action, name: pin.getAttribute('aria-label'), title: pin.title, ink: style.color,
+            ring: style.outlineStyle, rowInk: getComputedStyle(row).color, rowFill: getComputedStyle(row).backgroundColor,
             focused: pin === document.activeElement, keyboard: pin.matches(':focus-visible'),
-            first: item.firstElementChild === pin, item: box(item), pin: box(pin), label: box(row.querySelector('.nav-row-label')),
-            time: box(row.querySelector('.nav-project-time')), line: box(row.querySelector('.nav-project-line1')),
-            timeDrawn: getComputedStyle(row.querySelector('.nav-project-time')).visibility !== 'hidden'};
+            first: item.firstElementChild === pin, item: box(item), pin: box(pin),
+            glyph: shownSvg ? box(shownSvg) : null, kebab: kebab ? box(kebab) : null,
+            kebabDrawn: Boolean(kebabStyle) && kebabStyle.opacity === '1' && kebabStyle.visibility !== 'hidden',
+            ariaHidden: svgs.length === (pin.dataset.action === 'unpin' ? 2 : 1)
+                && svgs.every((svg) => svg.getAttribute('aria-hidden') === 'true'),
+            restGlyph: same(shownPaths, pinPaths), actGlyph: same(shownPaths, unpinPaths),
+            label: box(row.querySelector('.nav-row-label')), time: box(row.querySelector('.nav-project-time')),
+            line: box(row.querySelector('.nav-project-line1')),
+            timeDrawn: getComputedStyle(row.querySelector('.nav-project-time')).visibility !== 'hidden',
+            markDrawn: Boolean(markStyle) && markStyle.display !== 'none' && markStyle.visibility !== 'hidden',
+            slot: slot ? box(slot) : null};
 }"""
 # Records what the next click in the document lands on (`window.__landed`): a row's Pin, its row or something else,
 # with that row's id.
@@ -697,34 +755,81 @@ def middle(box):
     return (box["left"] + box["right"]) / 2, (box["top"] + box["bottom"]) / 2
 
 
+def width_of(box):
+    return box["right"] - box["left"]
+
+
+def end_inset(state, key, rtl=False):
+    return (state[key]["left"] - state["item"]["left"]) if rtl else (state["item"]["right"] - state[key]["right"])
+
+
+def wait_row_paint(page, pid):
+    """Flush style and finish finite row/control transitions (skipping infinite status-mark bounce)."""
+    row(page, pid).evaluate("""item => {
+        void item.offsetWidth;
+        return Promise.all(item.getAnimations({subtree: true})
+            .filter((a) => a.playState === 'running' && Number.isFinite(a.effect?.getTiming?.().iterations))
+            .map((a) => a.finished.catch(() => null)));
+    }""")
+
+
+def keyboard_focus(page, target):
+    """Switch input modality to keyboard, then focus ``target``, so `:focus-visible` holds on Chromium and WebKit (whose
+    Tab need not stop on buttons); callers assert what landed."""
+    page.locator('.nav-find-input').focus()
+    page.keyboard.press("ArrowRight")
+    target.evaluate("el => el.focus()")
+
+
+def focus_pin_via_keyboard(page, pid):
+    """Focus ``pid``'s Pin as the keyboard does."""
+    glyph = row(page, pid).locator('.nav-project-pin')
+    keyboard_focus(page, glyph)
+    state = page.evaluate(PIN, pid)
+    assert state["focused"] and state["keyboard"], state
+    return glyph, state
+
+
+def cdp_touch(cdp, x, y, hold_ms=0, page=None):
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y, "id": 1}]})
+    if hold_ms and page is not None:
+        page.clock.run_for(hold_ms)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+
 def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger(pins_ui, tmp_path):
-    """The row's own Pin or Unpin over its time: drawn and pressable only while a pointer
-    hovers the row or the keyboard is on it. A finger there presses the row, on a phone and on a screen that also
-    hovers; the ⋯ and the long press keep Pin and Unpin."""
+    """Unpinned rows reveal Pin only on hover or keyboard focus; pinned rows keep a quiet pin glyph at rest beside
+    their 20px-shifted time, swap to Unpin only on the Pin button's own hover or keyboard focus, coexist with status
+    marks, keep their [W-56, W-30] Pin box clear of ⋯ (a pinned time's last letters stay the row's: the RTL test
+    below), and keep touch taps opening the row."""
     ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
     evidence = producer_evidence_dir(tmp_path, "pin-glyph", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     pin = lambda pid: page.evaluate(PIN, pid)  # noqa: E731
     landed = lambda: page.evaluate("window.__landed")  # noqa: E731
+    control["message_times"] = {"newer": "2026-03-10T11:20:00Z", "older": "2026-03-10T10:15:00Z"}
+    refresh(page)
     settle(page)  # a phone's drawer has slid in: boxes are read where they stay
-    rest = pin("older")
-    assert rest["first"] and rest["action"] == "pin" and not rest["drawn"] and not rest["target"], rest
+    rest, newer_rest = pin("older"), pin("newer")
+    assert rest["first"] and rest["action"] == "pin" and rest["ariaHidden"] and not rest["drawn"] and not rest["target"], rest
     assert (rest["name"], rest["title"]) == (f"Pin {LONG}", "Pin")
     assert rest["label"]["right"] == pytest.approx(rest["time"]["left"] - 8, abs=0.01), rest
-    assert rest["pin"]["left"] <= middle(rest["time"])[0] <= rest["pin"]["right"], rest
-    assert rest["pin"]["right"] == pytest.approx(rest["time"]["right"] + 5, abs=0.5), rest
+    assert width_of(rest["time"]) > 0 and rest["timeDrawn"], rest
+    assert rest["pin"]["left"] < rest["time"]["right"] <= rest["pin"]["right"], rest
+    assert rest["pin"]["right"] == pytest.approx(rest["time"]["right"] + (5 if coarse(page) else 3), abs=0.5), rest
     assert rest["pin"]["top"] == pytest.approx(rest["item"]["top"] + 3, abs=0.5), rest
     assert rest["pin"]["bottom"] - rest["pin"]["top"] == pytest.approx(24, abs=0.5), rest
-    assert rest["timeDrawn"], rest
+    assert width_of(rest["pin"]) == pytest.approx(44 if coarse(page) else 26, abs=0.5), rest
+    if not coarse(page):
+        assert end_inset(rest, "pin") == pytest.approx(30, abs=0.5), rest
+        assert rest["item"]["right"] - rest["pin"]["left"] == pytest.approx(56, abs=0.5), rest
+        assert rest["pin"]["right"] <= rest["kebab"]["left"] + 0.01, rest
     assert_flat_and_unlabelled(page)
     if coarse(page):
         assert page.evaluate("matchMedia('(hover: none)').matches")
-        # The keyboard or assistive technology that moves the focus there draws it with its ring (this engine's Tab
-        # skips buttons, so after a key in the find field the focus moves on by script); once it leaves, nothing is.
-        page.locator('.nav-find-input').focus()
-        page.keyboard.press("ArrowRight")
-        row(page, "older").locator('.nav-project-pin').evaluate("el => el.focus()")
-        focused = pin("older")
-        assert focused["keyboard"] and focused["drawn"] and focused["target"] and focused["ring"] == "solid", focused
+        # Unpinned coarse row keeps its centred 44px keyboard target; blur hides it and tapping opens the row.
+        _, focused = focus_pin_via_keyboard(page, "older")
+        assert focused["drawn"] and focused["target"] and focused["ring"] == "solid" and focused["restGlyph"], focused
+        assert middle(focused["glyph"])[0] == pytest.approx(middle(focused["pin"])[0], abs=0.5), focused
         page.evaluate("document.activeElement.blur()")
         resting = pin("older")
         assert not resting["drawn"]
@@ -739,19 +844,76 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
         expect()(row(page, "older").locator('.nav-project-row')).to_have_attribute("aria-current", "page")
         expect()(page.locator('#project-panel')).to_be_visible()
         assert control["writes"] == [] and registry.get_project(ui["root"], "older")["pinned"] is False
+        # Close and pin older with live status: same-frame geometry proves 20px time/label shift and aligned rail.
+        page.locator('#project-panel-close').click()
+        settle(page)
+        expect()(page.locator('#project-panel')).to_be_hidden()
+        open_drawer(page, ui["width"])
+        assert ui["client"].post("/api/projects/older/update", json={"pinned": True}).status_code == 200
+        control["unread"].add("older")
+        control["activities"] = [{"activity_id": "work-pin", "project_id": "older",
+                                  "chat_id": registry.get_project(ui["root"], "older")["chat_id"],
+                                  "kind": "managed_task", "phase": "working"}]
+        refresh(page)
+        expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+        settle(page)
+        pinned_rest, newer_after = pin("older"), pin("newer")
+        assert pinned_rest["drawn"] and pinned_rest["restGlyph"] and not pinned_rest["actGlyph"] and not pinned_rest["target"], pinned_rest
+        assert pinned_rest["ariaHidden"] and pinned_rest["timeDrawn"] and pinned_rest["markDrawn"], pinned_rest
+        assert pinned_rest["slot"]["left"] == pytest.approx(newer_after["slot"]["left"], abs=0.5), (pinned_rest, newer_after)
+        assert end_inset(pinned_rest, "time") - end_inset(newer_after, "time") == pytest.approx(20, abs=0.5), (pinned_rest, newer_after)
+        assert width_of(rest["label"]) - width_of(pinned_rest["label"]) == pytest.approx(20, abs=0.5), (rest, pinned_rest)
+        assert width_of(newer_rest["label"]) == pytest.approx(width_of(newer_after["label"]), abs=0.5), (newer_rest, newer_after)
+        assert pinned_rest["glyph"]["left"] - pinned_rest["time"]["right"] == pytest.approx(4, abs=0.5), pinned_rest
+        assert not newer_after["drawn"] and not newer_after["target"], newer_after
+        # Even after keyboard focus on a pinned row's Pin, tapping the glyph still passes through and opens the row.
+        _, pinned_kb = focus_pin_via_keyboard(page, "older")
+        assert pinned_kb["drawn"] and pinned_kb["actGlyph"] and not pinned_kb["restGlyph"], pinned_kb
+        assert pinned_kb["ring"] == "solid" and not pinned_kb["timeDrawn"] and not pinned_kb["markDrawn"] and not pinned_kb["target"], pinned_kb
+        gx, gy = middle(pinned_kb["glyph"])
+        assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).closest('.nav-project-row')?.dataset.projectId",
+                             [gx, gy]) == "older"
+        page.evaluate(CLICK_TARGET)
+        page.touchscreen.tap(gx, gy)
+        assert landed() == ["row", "older"]
+        settle(page)
+        expect()(row(page, "older").locator('.nav-project-row')).to_have_attribute("aria-current", "page")
+        assert control["writes"] == [] and registry.get_project(ui["root"], "older")["pinned"] is True
+        # Reopen drawer over active pinned row: chosen ink at rest, hidden when ⋯ owns the end, long press offers Unpin.
+        page.locator('#project-panel [data-mobile-nav-toggle]').click()
+        page.locator('#primary-sidebar.open').wait_for()
+        settle(page)
+        chosen = pin("older")
+        assert chosen["drawn"] and chosen["restGlyph"] and not chosen["actGlyph"] and chosen["ink"] == chosen["rowInk"], chosen
+        kebab = row(page, "older").locator('.nav-project-kebab')
+        kebab.focus()
+        assert not pin("older")["drawn"]
+        page.keyboard.press("Enter")
+        expect()(menu(page)).to_be_visible()
+        assert not pin("older")["drawn"]
+        page.keyboard.press("Escape")
+        expect()(menu(page)).to_have_count(0)
+        page.evaluate("document.activeElement.blur()")
+        assert pin("older")["drawn"]
+        long_press(page, row(page, "older").locator('.nav-project-row'))
+        expect()(menu(page)).to_be_visible()
+        expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Unpin")
+        page.keyboard.press("Escape")
+        expect()(menu(page)).to_have_count(0)
         return
     assert page.evaluate("matchMedia('(hover: hover) and (pointer: fine)').matches")
     older = row(page, "older").locator('.nav-project-row')
-    # A hovering pointer draws the row's Pin; the name keeps its box, and no other row draws one.
+    # Hovering an unpinned row draws Pin over its hidden time; moving onto Pin takes primary ink and click pins.
     page.mouse.move(*middle(rest["label"]))
+    wait_row_paint(page, "older")
     hovered = pin("older")
-    assert hovered["drawn"] and hovered["target"] and hovered["label"] == rest["label"], hovered
+    assert hovered["drawn"] and hovered["target"] and hovered["restGlyph"] and hovered["label"] == rest["label"], hovered
     assert not hovered["timeDrawn"] and hovered["time"] == rest["time"], hovered
-    assert hovered["ink"] != hovered["rowInk"], hovered  # quieter than the name it serves
-    assert not pin("newer")["drawn"]
+    assert hovered["item"]["right"] - middle(hovered["glyph"])[0] == pytest.approx(42, abs=0.5), hovered
+    assert hovered["ink"] != hovered["rowInk"] and not pin("newer")["drawn"], hovered
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-pin-{ui['tag']}.png"), animations="disabled")
-    # On the Pin the row keeps its hover, and the glyph takes the name's ink; a press pins without opening.
     page.mouse.move(*middle(hovered["pin"]))
+    wait_row_paint(page, "older")
     on = pin("older")
     assert on["rowFill"] == hovered["rowFill"] and on["ink"] == on["rowInk"], on
     page.mouse.down()
@@ -760,19 +922,48 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     assert order(page) == ["older", "newer"] and control["writes"] == [{"pinned": True}]
     assert page.locator('.nav-project-row.active').count() == 0 and page.locator('#project-panel').is_hidden()
     assert no_read_acknowledged(ui)
-    # A pointer's press leaves no glyph behind once the pointer leaves, though this engine keeps the focus there.
+    # Pinned row at rest without blur: non-visible focus stays on Pin while ⋯ hides, mark/time return, glyph stays at W-42.
     page.mouse.move(ui["width"] - 40, 300)
-    left = pin("older")
-    assert left["focused"] and not left["keyboard"] and not left["drawn"] and not left["target"], left
+    control["unread"].add("older")
+    control["activities"] = [{"activity_id": "work-pin", "project_id": "older",
+                              "chat_id": registry.get_project(ui["root"], "older")["chat_id"],
+                              "kind": "managed_task", "phase": "working"}]
+    refresh(page)
+    settle(page)
+    left, newer_after = pin("older"), pin("newer")
+    assert left["focused"] and not left["keyboard"] and left["drawn"] and left["restGlyph"] and not left["actGlyph"] and left["target"], left
+    assert not newer_after["drawn"] and not newer_after["target"], newer_after
+    assert left["ariaHidden"] and left["timeDrawn"] and left["markDrawn"] and not left["kebabDrawn"], left
+    assert left["slot"]["left"] == pytest.approx(newer_after["slot"]["left"], abs=0.5), (left, newer_after)
+    assert left["glyph"]["left"] == pytest.approx(hovered["glyph"]["left"], abs=0.5), (left, hovered)
+    assert left["glyph"]["right"] == pytest.approx(hovered["glyph"]["right"], abs=0.5), (left, hovered)
+    assert left["pin"]["right"] <= left["kebab"]["left"] + 0.01, left
+    assert end_inset(left, "time") - end_inset(newer_after, "time") == pytest.approx(20, abs=0.5), (left, newer_after)
+    assert width_of(rest["label"]) - width_of(left["label"]) == pytest.approx(20, abs=0.5), (rest, left)
+    assert width_of(newer_rest["label"]) == pytest.approx(width_of(newer_after["label"]), abs=0.5), (newer_rest, newer_after)
+    assert left["glyph"]["left"] - left["time"]["right"] == pytest.approx(3, abs=0.5), left
     assert_flat_and_unlabelled(page)
-    page.mouse.move(*middle(pin("older")["label"]))
-    pinned = pin("older")
-    assert pinned["drawn"] and pinned["action"] == "unpin", pinned
-    assert (pinned["name"], pinned["title"]) == (f"Unpin {LONG}", "Unpin")
+    # 1) Hover pinned row label: resting pin and time stay visible while ⋯ opens, with zero shift.
+    page.mouse.move(*middle(left["label"]))
+    wait_row_paint(page, "older")
+    row_hover = pin("older")
+    assert row_hover["drawn"] and row_hover["target"] and row_hover["kebabDrawn"], row_hover
+    assert row_hover["restGlyph"] and not row_hover["actGlyph"] and row_hover["ink"] != row_hover["rowInk"], row_hover
+    assert row_hover["timeDrawn"] and not row_hover["markDrawn"] and row_hover["action"] == "unpin", row_hover
+    assert (row_hover["name"], row_hover["title"]) == (f"Unpin {LONG}", "Unpin")
+    for key in ("item", "label", "time", "glyph", "pin"):
+        assert row_hover[key] == left[key], (key, left[key], row_hover[key])
+    # 2) Hover Pin button itself: swaps in place to slashed Unpin in primary ink, keeping time and row hover fill.
+    page.mouse.move(*middle(row_hover["pin"]))
+    wait_row_paint(page, "older")
+    btn_hover = pin("older")
+    assert btn_hover["drawn"] and btn_hover["target"] and btn_hover["actGlyph"] and not btn_hover["restGlyph"], btn_hover
+    assert btn_hover["ink"] == btn_hover["rowInk"] and btn_hover["rowFill"] == row_hover["rowFill"], btn_hover
+    assert btn_hover["timeDrawn"] and not btn_hover["markDrawn"], btn_hover
+    for key in ("item", "label", "time", "glyph", "pin"):
+        assert btn_hover[key] == left[key], (key, left[key], btn_hover[key])
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-unpin-{ui['tag']}.png"), animations="disabled")
-    # A double click whose first press unpins: the row moves before the second press, which lands on the Pin of the
-    # row now under the pointer and pins or opens nothing.
-    page.mouse.move(*middle(pinned["pin"]))
+    # Double-click unpin guard: the second press lands on the moved neighbour's Pin and pins or opens nothing.
     control["hold_writes"] = True
     page.mouse.down(click_count=1)
     page.mouse.up(click_count=1)
@@ -791,46 +982,95 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     assert control["writes"] == [{"pinned": True}, {"pinned": False}], control["writes"]
     assert registry.get_project(ui["root"], "newer")["pinned"] is False
     assert page.locator('.nav-project-row.active').count() == 0 and page.locator('#project-panel').is_hidden()
-    # The keyboard: Find leads through New project to the first row's Pin before its name; it is drawn with the one
-    # ring, Enter pins, and the moved row keeps it, drawn.
+    # Moving pointer off after mouse click restores resting unpinned state without blur (focus on newer's Pin). Newer
+    # gets a mark of its own (its new messages' dot), so the keyboard stops below have one to hide.
     page.mouse.move(ui["width"] - 40, 300)
+    control["unread"].add("newer")
+    refresh(page)
+    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    settle(page)
+    unpinned_rest, newer_left = pin("older"), pin("newer")
+    assert not unpinned_rest["drawn"] and not unpinned_rest["kebabDrawn"] and unpinned_rest["timeDrawn"] and unpinned_rest["markDrawn"], unpinned_rest
+    assert newer_left["focused"] and not newer_left["keyboard"] and not newer_left["drawn"] and not newer_left["kebabDrawn"], newer_left
+    assert newer_left["markDrawn"], newer_left
+    # 3) Keyboard traversal Pin -> row -> ⋯ -> Escape: Tab -> Enter pins, each keyboard stop keeps ⋯ and hides mark.
     page.locator('.nav-find-input').focus()
     page.keyboard.press("Tab")
     assert page.evaluate("document.activeElement.id") == "nav-projects-add"
     page.keyboard.press("Tab")
     keyed = pin("newer")
-    assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid", keyed
+    assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid" and keyed["kebabDrawn"], keyed
     page.keyboard.press("Enter")
     expect()(row(page, "newer")).to_have_attribute("data-pinned", "")
     assert control["writes"][-1] == {"pinned": True} and len(control["writes"]) == 3
     kept = pin("newer")
-    assert kept["focused"] and kept["drawn"] and kept["action"] == "unpin", kept
+    assert kept["focused"] and kept["keyboard"] and kept["drawn"] and kept["actGlyph"] and not kept["restGlyph"], kept
+    assert kept["kebabDrawn"] and not kept["timeDrawn"] and not kept["markDrawn"] and kept["target"] and kept["action"] == "unpin", kept
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"keyboard-{ui['tag']}.png"), animations="disabled")
-    page.keyboard.press("Tab")  # on to the name: the Pin rests again
-    assert page.evaluate("document.activeElement.dataset.projectId") == "newer" and not pin("newer")["drawn"]
-    # A finger on this hovering screen (touch through the browser's own input, hit-tested natively): it began on
-    # the row where the Pin was not drawn, so its tap opens that row even when its hover drew the Pin under the click.
+    page.keyboard.press("Tab")  # on to the name: resting pin & time return, ⋯ stays drawn over hidden mark
+    after_tab = pin("newer")
+    assert page.evaluate("document.activeElement.dataset.projectId") == "newer"
+    assert after_tab["drawn"] and after_tab["restGlyph"] and not after_tab["actGlyph"] and after_tab["target"], after_tab
+    assert after_tab["timeDrawn"] and after_tab["kebabDrawn"] and not after_tab["markDrawn"], after_tab
+    page.keyboard.press("Tab")  # on to ⋯: open menu -> Escape keeps keyboard focus and hidden mark
+    assert page.evaluate("document.activeElement.classList.contains('nav-project-kebab')")
+    assert pin("newer")["kebabDrawn"] and not pin("newer")["markDrawn"]
+    page.keyboard.press("Enter")
+    expect()(menu(page)).to_be_visible()
+    page.keyboard.press("Escape")
+    expect()(menu(page)).to_have_count(0)
+    assert pin("newer")["kebabDrawn"] and not pin("newer")["markDrawn"]
+    page.keyboard.press("Tab")  # the keyboard leaves the row: its mark returns, the next row's gives way
+    left_row, next_row = pin("newer"), pin("older")
+    assert left_row["markDrawn"] and not left_row["kebabDrawn"] and next_row["keyboard"] and not next_row["markDrawn"], (left_row, next_row)
+    page.keyboard.press("Shift+Tab")
+    # Hybrid touch guard on an unpinned row: tap begins on the row, so it opens even if hover drew Pin under the click.
     page.mouse.move(ui["width"] - 40, 300)
     x, y = middle(pin("older")["pin"])
     assert not pin("older")["drawn"]
     cdp = page.context.new_cdp_session(page)
-    page.evaluate(CLICK_TARGET)
-    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
-    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
-    assert landed() == ["pin", "older"]  # the click the tap brought, once its hover drew the Pin
-    settle(page)
-    expect()(older).to_have_attribute("aria-current", "page")
-    assert len(control["writes"]) == 3 and registry.get_project(ui["root"], "older")["pinned"] is False
-    # Over the chosen row the Pin wears the row's ink, and the row keeps its chosen fill under it.
-    page.mouse.move(*middle(pin("older")["label"]))
-    chosen = pin("older")
-    page.mouse.move(*middle(chosen["pin"]))
-    chosen_on = pin("older")
-    assert chosen["drawn"] and chosen["ink"] == chosen["rowInk"], chosen
-    assert chosen_on["ink"] == chosen["rowInk"] and chosen_on["rowFill"] == chosen["rowFill"], chosen_on
+    try:
+        page.evaluate(CLICK_TARGET)
+        cdp_touch(cdp, x, y)
+        assert landed() == ["pin", "older"]  # the click the tap brought, once its hover drew the Pin
+        settle(page)
+        expect()(older).to_have_attribute("aria-current", "page")
+        assert len(control["writes"]) == 3 and registry.get_project(ui["root"], "older")["pinned"] is False
+        # Over the chosen unpinned row the Pin wears the row's ink, and the row keeps its chosen fill under it.
+        page.mouse.move(*middle(pin("older")["label"]))
+        wait_row_paint(page, "older")
+        chosen = pin("older")
+        page.mouse.move(*middle(chosen["pin"]))
+        wait_row_paint(page, "older")
+        chosen_on = pin("older")
+        assert chosen["drawn"] and chosen["ink"] == chosen["rowInk"], chosen
+        assert chosen_on["ink"] == chosen["rowInk"] and chosen_on["rowFill"] == chosen["rowFill"], chosen_on
+        # Hybrid touch on a keyboard-focused pinned row's glyph still opens it without unpinning; chosen pinned ink holds.
+        page.mouse.move(ui["width"] - 40, 300)
+        _, focused_pin = focus_pin_via_keyboard(page, "newer")
+        assert focused_pin["actGlyph"] and focused_pin["target"], focused_pin
+        page.evaluate(CLICK_TARGET)
+        cdp_touch(cdp, *middle(focused_pin["glyph"]))
+        assert landed()[1] == "newer"
+        settle(page)
+        expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("aria-current", "page")
+        assert len(control["writes"]) == 3 and registry.get_project(ui["root"], "newer")["pinned"] is True
+    finally:
+        cdp.detach()
+    page.mouse.move(ui["width"] - 40, 300)
+    page.evaluate("document.activeElement?.blur()")
+    wait_row_paint(page, "newer")
+    chosen_pin = pin("newer")
+    assert chosen_pin["drawn"] and chosen_pin["restGlyph"] and not chosen_pin["actGlyph"] and chosen_pin["ink"] == chosen_pin["rowInk"], chosen_pin
+    page.mouse.move(*middle(chosen_pin["pin"]))
+    wait_row_paint(page, "newer")
+    chosen_pin_on = pin("newer")
+    assert chosen_pin_on["drawn"] and chosen_pin_on["actGlyph"] and not chosen_pin_on["restGlyph"], chosen_pin_on
+    assert chosen_pin_on["ink"] == chosen_pin["rowInk"] and chosen_pin_on["rowFill"] == chosen_pin["rowFill"], chosen_pin_on
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"chosen-{ui['tag']}.png"), animations="disabled")
     page.evaluate("document.documentElement.dataset.theme = 'light'")  # the other theme's frame, for the record
     page.mouse.move(*middle(pin("newer")["label"]))
+    wait_row_paint(page, "newer")
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-light-{ui['tag']}.png"), animations="disabled")
 
 
@@ -839,12 +1079,8 @@ def test_focused_pin_accepts_semantic_activation_without_a_pointer_press(pins_ui
     This fixes the event contract; it is not a native screen-reader qualification."""
     ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
     settle(page)
-    page.locator('.nav-find-input').focus()
-    page.keyboard.press("ArrowRight")
-    glyph = row(page, "older").locator('.nav-project-pin')
-    glyph.evaluate("el => el.focus()")
-    focused = page.evaluate(PIN, "older")
-    assert focused["keyboard"] and focused["drawn"] and focused["focused"], focused
+    glyph, focused = focus_pin_via_keyboard(page, "older")
+    assert focused["drawn"], focused
     glyph.dispatch_event("click", {"detail": 1})
     expect()(row(page, "older")).to_have_attribute("data-pinned", "")
     assert control["writes"] == [{"pinned": True}]
@@ -853,6 +1089,377 @@ def test_focused_pin_accepts_semantic_activation_without_a_pointer_press(pins_ui
     expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
     assert control["writes"] == [{"pinned": True}, {"pinned": False}]
     assert page.locator('#project-panel').is_hidden() and no_read_acknowledged(ui)
+
+
+def test_hovered_hybrid_touch_and_stale_menu_gestures(pins_ui):
+    """A finger opens a pinned row at rest or when mouse hover exposed Pin; long press on the pin spot opens the
+    menu with Unpin without writing/opening on lift; right-click/long-press + Escape never poison semantic detail=1."""
+    ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
+    pin = lambda pid: page.evaluate(PIN, pid)  # noqa: E731
+    assert ui["client"].post("/api/projects/older/update", json={"pinned": True}).status_code == 200
+    refresh(page)
+    expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+    settle(page)
+    if coarse(page):
+        gx, gy = middle(pin("older")["glyph"])
+        assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).closest('.nav-project-row')?.dataset.projectId",
+                             [gx, gy]) == "older"
+        finger = {"pointerType": "touch", "isPrimary": True, "pointerId": 47, "clientX": gx, "clientY": gy}
+        older_row = row(page, "older").locator('.nav-project-row')
+        older_row.dispatch_event("pointerdown", finger)
+        page.clock.run_for(500)
+        expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Unpin")
+        older_row.dispatch_event("pointerup", finger)
+        settle(page)
+        expect()(menu(page)).to_be_visible()
+        assert page.locator('#project-panel').is_hidden() and control["writes"] == []
+        page.keyboard.press("Escape")
+        expect()(menu(page)).to_have_count(0)
+        glyph, _ = focus_pin_via_keyboard(page, "older")
+        glyph.dispatch_event("click", {"detail": 1})
+        expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
+        assert control["writes"] == [{"pinned": False}] and page.locator('#project-panel').is_hidden()
+        return
+    cdp = page.context.new_cdp_session(page)
+    try:
+        for hover_part in (None, "label", "pin"):
+            if hover_part is None:
+                page.mouse.move(ui["width"] - 40, 300)
+            else:
+                page.mouse.move(*middle(pin("older")[hover_part]))
+            wait_row_paint(page, "older")
+            hovered = pin("older")
+            assert hovered["target"], (hover_part, hovered)
+            page.evaluate(CLICK_TARGET)
+            cdp_touch(cdp, *middle(hovered["pin"]))
+            assert page.evaluate("window.__landed") == ["pin", "older"], hover_part
+            settle(page)
+            expect()(row(page, "older").locator('.nav-project-row')).to_have_attribute("aria-current", "page")
+            assert control["writes"] == [] and registry.get_project(ui["root"], "older")["pinned"] is True
+            page.locator('#project-panel-close').click()
+            settle(page)
+            expect()(page.locator('#project-panel')).to_be_hidden()
+        page.mouse.move(*middle(pin("older")["pin"]))
+        wait_row_paint(page, "older")
+        gx, gy = middle(pin("older")["pin"])
+        cdp_touch(cdp, gx, gy, hold_ms=500, page=page)
+        settle(page)
+        expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Unpin")
+        assert page.locator('#project-panel').is_hidden() and control["writes"] == []
+        page.keyboard.press("Escape")
+        expect()(menu(page)).to_have_count(0)
+    finally:
+        cdp.detach()
+    # Long-press -> Escape and right-click -> Escape must not leave stale press state for a no-pointer detail=1 click.
+    page.mouse.move(ui["width"] - 40, 300)
+    glyph, _ = focus_pin_via_keyboard(page, "older")
+    glyph.dispatch_event("click", {"detail": 1})
+    expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
+    assert control["writes"] == [{"pinned": False}] and page.locator('#project-panel').is_hidden()
+    page.mouse.click(*middle(pin("older")["label"]), button="right")
+    expect()(menu(page)).to_be_visible()
+    page.keyboard.press("Escape")
+    expect()(menu(page)).to_have_count(0)
+    page.mouse.move(ui["width"] - 40, 300)
+    glyph, _ = focus_pin_via_keyboard(page, "older")
+    glyph.dispatch_event("click", {"detail": 1})
+    expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+    assert control["writes"] == [{"pinned": False}, {"pinned": True}] and page.locator('#project-panel').is_hidden()
+
+
+# A right-to-left install: its language profile says `rtl`, which i18n.js applies to <html dir>. Answered from the
+# page's first read, no later English answer can take the direction back.
+RTL = {"language": "ar", "english": False, "revision": 1, "profile": {"direction": "rtl"}, "entries": {}}
+# One frame of the mark column: Main's slot, mark, count and the words of its label beside each Project row's slot and
+# mark, so both are measured in the same layout.
+COLUMN = """() => {
+    const box = (el) => { if (!el) return null; const r = el.getBoundingClientRect();
+        return {left: r.left, right: r.right, top: r.top, bottom: r.bottom}; };
+    const shown = (el) => Boolean(el) && !el.hidden && getComputedStyle(el).visibility !== 'hidden';
+    const card = document.querySelector('.nav-row-main'), count = card.querySelector('.unread-badge');
+    const mark = card.querySelector('.nav-mark'), label = card.querySelector('.nav-ouro-line1 > .nav-row-label');
+    const words = document.createRange();
+    words.selectNodeContents(label);
+    const rows = {};
+    for (const item of document.querySelectorAll('#nav-projects-list > .nav-project-item')) {
+        const own = item.querySelector('.nav-project-row .status-mark');
+        rows[item.dataset.navProjectId] = {item: box(item), slot: box(item.querySelector('.nav-mark-slot')),
+                                           mark: shown(own) ? box(own) : null, shape: own?.dataset.shape || ''};
+    }
+    return {dir: document.documentElement.dir, lang: document.documentElement.lang, rows,
+            main: {card: box(card), slot: box(card.querySelector('.nav-mark-slot')), shape: mark.dataset.shape,
+                   mark: shown(mark) ? box(mark) : null, count: box(count), countText: count?.textContent || '',
+                   label: box(label), words: box(words)}};
+}"""
+
+
+def column_frame(ui, rtl, evidence):
+    """A fresh page in one direction with Main's count shown (a Project open over Main, three of Main's messages
+    unread): Main's mark and both rows' marks measured in one frame, which is saved beside its picture."""
+    control = ui["control"]
+    control.update(i18n=RTL if rtl else None, main_revision=0, main_seen=0)
+    # Pago Pago puts this morning-UTC stamp on the local day before; the rows share it, so their times are one width.
+    # The page's clock starts on a Monday before its first paint, so a stamp three days before reads as its short
+    # weekday (projects_nav.js whenOf, en-US in every language) whatever day the test runs, from that first paint.
+    page = ui["make_page"](timezone_id="Pacific/Pago_Pago", now="2026-11-23T12:00:00Z")
+    page.wait_for_function("dir => document.documentElement.dir === dir", arg="rtl" if rtl else "")
+    first = page.evaluate("""() => ({now: new Date().toISOString().slice(0, 10), times: Object.fromEntries(
+        [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].map((item) =>
+            [item.dataset.navProjectId, item.querySelector('.nav-project-time')?.textContent ?? '']))})""")
+    assert first["now"] == "2026-11-23", first
+    assert (first["times"]["friday"], first["times"]["older"], first["times"]["newer"]) == ("Fri", "9 Mar", "9 Mar"), first
+    with page.expect_response(lambda response: urlparse(response.url).path == '/api/state'):
+        refresh(page)  # Main's cursor is read and its revision seen: nothing of Main's is unread yet
+    opened = row(page, "opened").locator('.nav-project-row')
+    if coarse(page):
+        opened.tap()
+        settle(page)
+        page.locator('#project-panel [data-mobile-nav-toggle]').click()
+        page.locator('#primary-sidebar.open').wait_for()
+    else:
+        opened.click()
+        page.mouse.move(ui["width"] / 2, 300)  # over the room, so no row draws its hover controls in the frame
+    expect()(opened).to_have_attribute("aria-current", "page")
+    control["main_revision"] = 3
+    refresh(page)
+    expect()(page.locator('.nav-row-main .unread-badge')).to_be_visible()
+    settle(page)
+    frame = page.evaluate(COLUMN)
+    name = f"column-{'rtl' if rtl else 'ltr'}-{ui['tag']}"
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"{name}.png"), animations="disabled")
+    (evidence / f"{name}.json").write_text(json.dumps(frame, ensure_ascii=False, indent=1))
+    return page, frame
+
+
+def assert_one_column(frame, rtl):
+    """Main's mark stands in the Project rows' column: its slot over theirs, its moving dots where a working row's
+    stand, its count one gap and one step before it, and the words of its label after Ouroboros's name."""
+    main, rows = frame["main"], frame["rows"]
+    assert frame["dir"] == ("rtl" if rtl else ""), frame
+    assert main["mark"] and rows["older"]["mark"] and rows["newer"]["mark"] and main["countText"], frame
+    assert (main["shape"], rows["older"]["shape"], rows["newer"]["shape"]) == ("moving", "moving", "dot"), frame
+    for pid in ("older", "newer"):
+        for side in ("left", "right"):
+            assert main["slot"][side] == pytest.approx(rows[pid]["slot"][side], abs=0.5), (pid, side, frame)
+    for side in ("left", "right"):
+        assert main["mark"][side] == pytest.approx(rows["older"]["mark"][side], abs=0.5), (side, frame)
+    gap = main["count"]["left"] - main["slot"]["right"] if rtl else main["slot"]["left"] - main["count"]["right"]
+    assert gap == pytest.approx(12, abs=0.5), frame  # the line's 8px gap and the count's 4px step
+    start = main["label"]["right"] - main["words"]["right"] if rtl else main["words"]["left"] - main["label"]["left"]
+    assert start == pytest.approx(0, abs=1), frame
+
+
+# A row's name beside its own Pin: the name's box, the letters it shows (its text clipped to that box), the shown glyph,
+# the Pin's box and whether the keyboard's ring is drawn around it, the time's own text width and the room it keeps
+# (its box and end margin).
+NAME_BY_PIN = """(pid) => {
+    const item = document.querySelector(`.nav-project-item[data-nav-project-id="${pid}"]`);
+    const label = item.querySelector('.nav-row-label'), time = item.querySelector('.nav-project-time');
+    const pin = item.querySelector(':scope > .nav-project-pin'), style = getComputedStyle(pin), words = document.createRange();
+    const glyph = [...pin.querySelectorAll(':scope > svg')].find((svg) => getComputedStyle(svg).display !== 'none');
+    const box = label.getBoundingClientRect(), g = glyph.getBoundingClientRect(), p = pin.getBoundingClientRect();
+    words.selectNodeContents(label);
+    const ink = [...words.getClientRects()].filter((r) => r.bottom > box.top && r.top < box.bottom)
+        .map((r) => [Math.max(r.left, box.left), Math.min(r.right, box.right)]).filter(([l, r]) => r > l);
+    const own = document.createRange();
+    own.selectNodeContents(time);
+    return {label: [box.left, box.right], glyph: [g.left, g.right], pin: [p.left, p.right],
+            ink: [Math.min(...ink.map((i) => i[0])), Math.max(...ink.map((i) => i[1]))], time: time.textContent,
+            natural: own.getBoundingClientRect().width,
+            room: time.getBoundingClientRect().width + parseFloat(getComputedStyle(time).marginInlineEnd),
+            drawn: style.opacity === '1' && style.visibility !== 'hidden', ring: style.outlineStyle !== 'none'};
+}"""
+
+
+def assert_drawn_pin_clears_the_name(page, pid, rtl, evidence, tag):
+    """At rest a row's time keeps its own width (a pinned row's 20px for its resting glyph beside it), so no name loses
+    width. While the Pin is drawn (a hovering pointer, the keyboard) the Pin stays put and the name, whose box clips
+    every letter, ends where the one reserve leaves it: as at rest when the time already kept the drawn Pin clear, else
+    the row's 1px border short of the Pin's box, which holds the glyph and the keyboard's ring."""
+    rest, pinned = page.evaluate(NAME_BY_PIN, pid), row(page, pid).get_attribute("data-pinned") is not None
+    assert rest["room"] == pytest.approx(rest["natural"] + (20 if pinned else 0), abs=0.5) and rest["drawn"] is pinned, rest
+    for way in ("keyboard",) if coarse(page) else ("hover", "keyboard"):
+        if way == "keyboard":
+            focus_pin_via_keyboard(page, pid)
+        else:
+            row(page, pid).locator('.nav-row-label').hover()
+            wait_row_paint(page, pid)
+        drawn = page.evaluate(NAME_BY_PIN, pid)
+        name = f"pin-room-{'rtl' if rtl else 'ltr'}-{pid}-{way}-{tag}"
+        page.locator('#primary-sidebar').screenshot(path=str(evidence / f"{name}.png"), animations="disabled")
+        (evidence / f"{name}.json").write_text(json.dumps({"rest": rest, "drawn": drawn}, ensure_ascii=False, indent=1))
+        box = drawn["pin"]
+        end = max(rest["label"][0], box[1] + 1) if rtl else min(rest["label"][1], box[0] - 1)
+        assert drawn["drawn"] and box == rest["pin"], (pid, way, rest, drawn)
+        assert drawn["label"][0 if rtl else 1] == pytest.approx(end, abs=0.5), (pid, way, end, rest, drawn)
+        if way == "keyboard":
+            page.evaluate("document.activeElement.blur()")
+        else:
+            page.mouse.move(page.viewport_size["width"] / 2, 300)
+            wait_row_paint(page, pid)
+
+
+def assert_time_edge_opens_row(page, pid, rtl, ui, evidence):
+    """A pinned row's time ends inside its Pin's box (the box keeps the glyph's place and the button's size), yet every
+    letter of the time is the row's: its last pixel, at rest and with the pointer on the row, hits the row, the glyph
+    still hits the Pin under a mouse, and a press on that last pixel opens the room and leaves it pinned."""
+    hit = """([x, y]) => { const el = document.elementFromPoint(x, y)?.closest('.nav-project-pin, .nav-project-row');
+        return el ? el.className.split(' ').find((c) => c === 'nav-project-pin' || c === 'nav-project-row') : ''; }"""
+    if not coarse(page):
+        page.mouse.move(page.viewport_size["width"] / 2, 300)
+        wait_row_paint(page, pid)
+    state = page.evaluate(PIN, pid)
+    x = (state["time"]["left"] + 0.5) if rtl else (state["time"]["right"] - 0.5)
+    y = middle(state["time"])[1]
+    assert page.evaluate("document.documentElement.dir") == ("rtl" if rtl else ""), state
+    assert state["drawn"] and state["timeDrawn"] and state["pin"]["left"] < x < state["pin"]["right"], state
+    facts = {"time": page.locator(f'.nav-project-item[data-nav-project-id="{pid}"] .nav-project-time').text_content(),
+             "point": [x, y], "pin": state["pin"], "timeBox": state["time"], "glyph": state["glyph"],
+             "rest": page.evaluate(hit, [x, y])}
+    if not coarse(page):
+        page.mouse.move(*middle(state["label"]))
+        wait_row_paint(page, pid)
+        facts["rowHover"] = page.evaluate(hit, [x, y])
+        facts["glyphHit"] = page.evaluate(hit, list(middle(state["glyph"])))
+        facts["timeDrawnOnHover"] = page.evaluate(PIN, pid)["timeDrawn"]
+        assert facts["glyphHit"] == "nav-project-pin" and facts["timeDrawnOnHover"], facts
+        assert facts["rowHover"] == "nav-project-row", facts
+    assert facts["rest"] == "nav-project-row", facts
+    name = f"time-edge-{'rtl' if rtl else 'ltr'}-{pid}-{ui['tag']}"
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"{name}.png"), animations="disabled")
+    writes = len(ui["control"]["writes"])
+    page.evaluate(CLICK_TARGET)
+    if coarse(page):
+        page.touchscreen.tap(x, y)
+    else:
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.up()
+    facts["landed"] = page.evaluate("window.__landed")
+    settle(page)
+    facts["opened"] = row(page, pid).locator('.nav-project-row').get_attribute("aria-current") == "page"
+    facts["pinned"] = registry.get_project(ui["root"], pid)["pinned"]
+    facts["writes"] = ui["control"]["writes"][writes:]
+    (evidence / f"{name}.json").write_text(json.dumps(facts, ensure_ascii=False, indent=1))
+    assert facts["landed"] == ["row", pid] and facts["opened"], facts
+    assert facts["pinned"] is True and facts["writes"] == [], facts
+
+
+def test_pinned_row_layout_in_rtl(pins_ui, tmp_path):
+    """Right to left (the install's language profile, i18n.js), Main's mark and count keep the Project rows' column,
+    mirrored from the left-to-right frame, and a pinned row's glyph, shifted time, ⋯ and mark anchor to the inline
+    end without colliding with long Arabic names, on desktop and phone. With no time, a short weekday or a date, and
+    long names in either direction, a drawn Pin stays clear of every letter in both directions, and at rest no row
+    loses width to it."""
+    ui, control, root = pins_ui, pins_ui["control"], pins_ui["root"]
+    evidence = producer_evidence_dir(tmp_path, "pin-rtl", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    registry.create_project(root, "opened", name="Opened project with a long Latin working title and عنوان عربي",
+                            origin="owner_ui")
+    registry.create_project(root, "quiet", name="مشروع هادئ بلا رسائل بعد وعنوانه العربي طويل with a Latin tail",
+                            origin="owner_ui")
+    registry.create_project(root, "quietpin", name="مشروع مثبت بلا رسائل بعد وعنوانه العربي طويل with a Latin tail",
+                            origin="owner_ui")
+    assert ui["client"].post("/api/projects/quietpin/update", json={"pinned": True}).status_code == 200
+    registry.create_project(root, "friday", name="Friday room with a long Latin working title and عنوان عربي",
+                            origin="owner_ui")
+    assert ui["client"].post("/api/projects/older/update", json={
+        "name": "مشروع بحث طويل جداً لاختبار اتجاه النص العربي في القائمة الجانبية", "pinned": True}).status_code == 200
+    assert ui["client"].post("/api/projects/newer/update", json={
+        "name": "مشروع حديث طويل لاختبار عدم تداخل التاريخ مع العنوان"}).status_code == 200
+    control["message_times"] = {"newer": "2026-03-10T10:15:00Z", "older": "2026-03-10T10:15:00Z",
+                                "friday": "2026-11-20T12:00:00Z"}  # Fri, beside the regular date and no time
+    control["unread"].update({"older", "newer"})
+    control["activities"] = [{"activity_id": "work-rtl", "project_id": "older",
+                              "chat_id": registry.get_project(root, "older")["chat_id"],
+                              "kind": "managed_task", "phase": "working"},
+                             {"activity_id": "main", "project_id": "", "chat_id": 1,
+                              "kind": "direct_chat", "phase": "thinking"}]
+    ltr_page, ltr = column_frame(ui, False, evidence)
+    page, rtl = column_frame(ui, True, evidence)
+    assert_one_column(ltr, rtl=False)
+    assert_one_column(rtl, rtl=True)
+    # The column mirrors: Main's slot ends as far from the card's start-side edge in RTL as from its end in LTR.
+    assert rtl["main"]["slot"]["left"] - rtl["main"]["card"]["left"] == pytest.approx(
+        ltr["main"]["card"]["right"] - ltr["main"]["slot"]["right"], abs=0.5), (ltr, rtl)
+    for at_rtl, at_page in ((False, ltr_page), (True, page)):
+        for pid in ("opened", "quiet", "quietpin", "friday", "newer", "older"):
+            assert_drawn_pin_clears_the_name(at_page, pid, at_rtl, evidence, ui["tag"])
+    pin = lambda pid: page.evaluate(PIN, pid)  # noqa: E731
+    pinned, unpinned = pin("older"), pin("newer")
+    assert pinned["drawn"] and pinned["restGlyph"] and not pinned["actGlyph"] and pinned["target"] is (not coarse(page)), pinned
+    assert pinned["timeDrawn"] and pinned["markDrawn"] and unpinned["markDrawn"], (pinned, unpinned)
+    assert not unpinned["drawn"] and not unpinned["target"], unpinned
+    assert end_inset(pinned, "time", rtl=True) - end_inset(unpinned, "time", rtl=True) == pytest.approx(20, abs=0.5), (pinned, unpinned)
+    assert width_of(unpinned["label"]) - width_of(pinned["label"]) == pytest.approx(20, abs=0.5), (pinned, unpinned)
+    assert pinned["time"]["left"] - pinned["glyph"]["right"] == pytest.approx(4 if coarse(page) else 3, abs=0.5), pinned
+    assert pinned["label"]["left"] == pytest.approx(pinned["time"]["right"] + 8, abs=0.5), pinned
+    assert pinned["label"]["left"] > pinned["glyph"]["right"] and pinned["label"]["left"] > pinned["pin"]["right"], pinned
+    if coarse(page):
+        assert end_inset(pinned, "pin", rtl=True) == pytest.approx(0, abs=0.5), pinned
+        assert width_of(pinned["pin"]) == pytest.approx(44, abs=0.5), pinned
+        assert end_inset(pinned, "glyph", rtl=True) == pytest.approx(5, abs=0.5), pinned
+        for at_rtl, at_page in ((False, ltr_page), (True, page)):
+            assert_time_edge_opens_row(at_page, "older", at_rtl, ui, evidence)
+        return
+    assert end_inset(pinned, "kebab", rtl=True) == pytest.approx(2, abs=0.5), pinned
+    assert pinned["kebab"]["right"] <= pinned["pin"]["left"] + 0.01, pinned
+    assert end_inset(pinned, "pin", rtl=True) == pytest.approx(30, abs=0.5), pinned
+    assert width_of(pinned["pin"]) == pytest.approx(26, abs=0.5), pinned
+    assert middle(pinned["glyph"])[0] - pinned["item"]["left"] == pytest.approx(42, abs=0.5), pinned
+    page.mouse.move(*middle(pinned["pin"]))
+    wait_row_paint(page, "older")
+    hovered = pin("older")
+    assert hovered["drawn"] and hovered["target"] and hovered["actGlyph"] and not hovered["restGlyph"], hovered
+    assert hovered["glyph"] == pinned["glyph"] and hovered["time"] == pinned["time"], (pinned, hovered)
+    for at_rtl, at_page in ((False, ltr_page), (True, page)):
+        assert_time_edge_opens_row(at_page, "older", at_rtl, ui, evidence)
+
+
+@pytest.mark.parametrize("pins_ui", [("webkit", 1280, "light")], ids=["webkit-1280-light-mouse"], indirect=True)
+def test_keyboard_in_a_row_hides_its_mark_until_it_leaves_with_a_webkit_mouse(pins_ui, tmp_path):
+    """WebKit with a mouse (hover, a fine pointer): a row's mark gives way at each keyboard stop in its row (Pin, name,
+    ⋯ and back from its menu) and while hovered, and returns once the keyboard or the pointer leaves; a pinned row's
+    mark stands beside its resting pin, and a press on its time's last letter opens the room. Chromium's mouse walks
+    the same stops in the glyph test above."""
+    ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
+    pin = lambda pid: page.evaluate(PIN, pid)  # noqa: E731
+    assert ui["client"].post("/api/projects/older/update", json={"pinned": True}).status_code == 200
+    control["message_times"] = {"older": "2026-03-10T10:15:00Z"}
+    control["unread"].update({"older", "newer"})
+    refresh(page)
+    expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    settle(page)
+    assert page.evaluate("matchMedia('(hover: hover) and (pointer: fine)').matches")
+    rest = pin("older"), pin("newer")
+    assert all(state["markDrawn"] and not state["kebabDrawn"] for state in rest), rest
+    assert rest[0]["drawn"] and rest[0]["restGlyph"] and rest[0]["timeDrawn"], rest
+    newer = row(page, "newer")
+    for stop in ('.nav-project-pin', '.nav-project-row', '.nav-project-kebab'):
+        keyboard_focus(page, newer.locator(stop))
+        assert newer.locator(stop).evaluate("el => el === document.activeElement && el.matches(':focus-visible')"), stop
+        here, there = pin("newer"), pin("older")
+        assert here["kebabDrawn"] and not here["markDrawn"] and there["markDrawn"], (stop, here, there)
+    page.keyboard.press("Enter")
+    expect()(menu(page)).to_be_visible()
+    page.keyboard.press("Escape")
+    expect()(menu(page)).to_have_count(0)
+    assert newer.locator('.nav-project-kebab').evaluate("el => el === document.activeElement && el.matches(':focus-visible')")
+    assert pin("newer")["kebabDrawn"] and not pin("newer")["markDrawn"]
+    keyboard_focus(page, row(page, "older").locator('.nav-project-pin'))  # the keyboard leaves newer for the pinned row
+    left, pinned_kb = pin("newer"), pin("older")
+    assert left["markDrawn"] and not left["kebabDrawn"], left
+    assert pinned_kb["actGlyph"] and not pinned_kb["markDrawn"] and not pinned_kb["timeDrawn"], pinned_kb
+    page.evaluate("document.activeElement.blur()")
+    page.mouse.move(*middle(pin("newer")["label"]))
+    wait_row_paint(page, "newer")
+    hovered = pin("newer")
+    assert hovered["kebabDrawn"] and hovered["drawn"] and not hovered["markDrawn"] and pin("older")["markDrawn"], hovered
+    page.mouse.move(ui["width"] - 40, 300)
+    wait_row_paint(page, "newer")
+    assert pin("newer")["markDrawn"] and not pin("newer")["kebabDrawn"] and pin("older")["markDrawn"]
+    assert_time_edge_opens_row(page, "older", False, ui, producer_evidence_dir(tmp_path, "pin-webkit-mouse",
+                                                                                env="OUROBOROS_BROWSER_EVIDENCE_OUT"))
 
 
 # ---- Rooms beyond the feed: Find a project, Show more and a reference's own room --------------------------------
@@ -909,4 +1516,9 @@ def click_reference(page, project):
 def settle(page):
     """Let the shell's motion and its frame callbacks run under the installed clock."""
     page.clock.run_for(1000)
+    page.evaluate("""() => Promise.all(
+        document.getAnimations()
+            .filter((a) => a.playState === 'running' && Number.isFinite(a.effect?.getTiming?.().iterations))
+            .map((a) => a.finished.catch(() => null))
+    )""")
     page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")

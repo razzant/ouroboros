@@ -67,14 +67,18 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 // A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
-async function observerView() {
+async function observerView(t) {
     const view = await import('../modules/read_ahead.js?observer-main');
-    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    const setMode = (flag) => view.captureObserverMode({ href: `http://example.test/?observer=${flag}` },
+        { state: null, replaceState() {} });
+    // Distinct module instances still share a tab's storage, including in Node with Web Storage enabled.
+    t.after(() => setMode(0));
+    setMode(1);
     return view;
 }
 
-test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
-    const view = await observerView();
+test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async (t) => {
+    const view = await observerView(t);
     const first = harness({ revision: 161, seen: null, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
     first.api.observeMainRevision(161);
     await flush();
@@ -224,6 +228,23 @@ test('Main is read only by a paint made while it is on screen; a Project over it
     opened.release();
     await reading;
     assert.deepEqual([opened.paints, opened.writes], [[5], []], 'the paint ends under the Project: the read is withheld');
+});
+
+test('a Main paint already in flight earns no cursor credit if the archive covers it before the write', async () => {
+    const f = paintHarness({ hold: true });
+    let archive = false;
+    f.context.mainChat.archiveOpen = () => archive;
+    const reading = f.context.read();
+    archive = true;
+    f.release();
+    await reading;
+    await f.context.read();
+    assert.deepEqual([f.paints, f.writes], [[5], []], 'covered Main neither posts the old receipt nor starts a new one');
+    archive = false;
+    const visible = f.context.read();
+    f.release();
+    await visible;
+    assert.deepEqual([f.paints, f.writes], [[5, 5], [5]], 'the same revision is creditable on a visible paint');
 });
 
 test('the shared cursor only moves forward, and a write keeps what the server answers', async () => {

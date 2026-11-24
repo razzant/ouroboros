@@ -14,6 +14,7 @@ import heapq
 import json
 import pathlib
 import re
+from functools import cache
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 from ouroboros import dialogue_store as ds, dialogue_positions as dp
@@ -372,7 +373,8 @@ def _reached(conn: Any, tasks: Iterable[str]) -> set:
 
 
 def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, upper: Optional[int] = None,
-              gaps: Optional[set] = None, binding: Optional[dict] = None) -> Tuple[list, Dict[int, ds.Row], Callable[[Any], bool], int]:
+              gaps: Optional[set] = None, binding: Optional[dict] = None,
+              strict: bool = False, include_origin_rows: bool = True) -> Tuple[list, Dict[int, ds.Row], Callable[[Any], bool], int]:
     """The canonical room rule's indexed candidates, including late task bindings: ``(probe keys, the rows a binding
     names by chat and time, whether a candidate row is the room's, the frozen upper)``. ``gaps`` collects what a
     Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts.
@@ -382,10 +384,17 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
     from ouroboros.store import open_store, store_path
 
     chat = int(room_id)
-    projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
-    refs = source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None) if chat in projects else []
-    resolver = RoomResolver(root)
-    member = room_membership(chat, projects, refs, resolver)
+    registry = list_reserved_projects(root, strict=strict)
+    projects = {int(project["chat_id"]) for project in registry}
+
+    @cache
+    def origin_refs():
+        return (source_refs_for_project(root, chat, bindings={0: binding} if binding is not None else None)
+                if chat in projects else [])
+
+    refs = origin_refs() if include_origin_rows else []
+    resolver = RoomResolver(root, strict=strict, reserved={str(row["id"]): row for row in registry} if strict else None)
+    member = room_membership(chat, projects, refs if include_origin_rows else origin_refs, resolver)
     keys = [] if binding is not None else [("chat_id", chat)]
     identities = {}
     upper = ds.stream_end(root, stream) if upper is None else upper
@@ -410,9 +419,10 @@ def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, 
                 from ouroboros.room_appearances import read_gaps
 
                 gaps.update(read_gaps(root, chat, shown, lower, upper))
-            for entry in owner_message_entries(root, refs).values():  # every origin of the room in one read
-                if entry is not None and lower <= entry.seq < upper:
-                    identities[entry.seq] = entry
+            if include_origin_rows:
+                for entry in owner_message_entries(root, refs).values():
+                    if entry is not None and lower <= entry.seq < upper:
+                        identities[entry.seq] = entry
     return keys, identities, lambda row: member(_row_chat_id(row), row), upper
 
 
@@ -468,3 +478,32 @@ def iter_room_rows(root: Any, room_id: Any, *, from_addr: Any = None, to_addr: A
         return True
     filtered = tasks is not None or after is not None or before is not None
     return _addressed(root, room_rows(root, room_id, lower=lower, upper=upper, gaps=gaps), selected if filtered else None)
+
+
+def recent_outbound_task_ids(root, room_id: int, *, row_limit: int, task_limit: int) -> list[str]:
+    """The room chain’s bounded outbound root candidates, without display-only rows."""
+    from ouroboros.presence_owner_contact import private_main_row
+    from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES
+
+    keys, _, admits, upper = room_keys(root, room_id, strict=True, include_origin_rows=False)
+    entries = ds.probe_rows(root, 'chat', keys, before=upper,
+                                        limit=row_limit, max_bytes=2 * 1024 * 1024)
+    tasks = {}
+    for entry in entries:
+        row = entry.row
+        task = row.get('task_id')
+        if (isinstance(task, str) and task and row.get('direction') == 'out'
+                and not row.get('parent_task_id') and not row.get('subagent_task_id')
+                and row.get('root_task_id') in (None, '', task)
+                and row.get('type') not in ROOM_FIXED_ROW_TYPES and not private_main_row(row)):
+            try:
+                if not admits(row):
+                    continue
+            except ValueError as exc:
+                if exc.args != ('project_source_unknown',):
+                    raise
+                continue  # one unprovable task cannot authorize disclosure or hide its proved neighbours
+            tasks[task] = None
+            if len(tasks) == task_limit:
+                break
+    return list(tasks)

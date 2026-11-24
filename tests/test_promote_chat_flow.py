@@ -747,20 +747,6 @@ def test_promote_event_names_project_from_display_name(tmp_path, monkeypatch):
     assert enqueued[0]["title"] == "Airi Research"  # persisted on the task
 
 
-def test_derive_project_name_prefers_title(tmp_path):
-    """_derive_project_name uses the model-coined short title over the objective
-    so a converted card never shows a truncated sentence or a bare id (v6.33.0)."""
-    from ouroboros.gateway.projects import _derive_project_name
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-    write_task_result(
-        tmp_path, "tt01", STATUS_RUNNING,
-        title="Tic-tac-toe game",
-        objective="make an html page with a tic-tac-toe game that tracks score",
-    )
-    assert _derive_project_name(tmp_path, "tt01") == "Tic-tac-toe game"
-
-
 def test_promote_event_enqueues_first_class_task(tmp_path, monkeypatch):
     """The supervisor handler enqueues a pooled OWNER task (not a subagent),
     registers the project, and carries the chat thread."""
@@ -1569,36 +1555,6 @@ def test_project_from_task_endpoint_creates_binding(tmp_path):
     assert project_binding_for_task(tmp_path, "abc123")["project_id"] == "task-abc123"
 
 
-def test_project_from_task_auto_names_from_objective(tmp_path):
-    """One-click convert (owner P1): with NO name supplied the project name is
-    derived from the task's own objective, not the live progress headline, and
-    long objectives are collapsed/truncated. No human input, no extra LLM call."""
-    import asyncio
-    import json
-
-    from ouroboros.gateway.projects import api_project_from_task
-    from ouroboros.projects_registry import get_project
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
-
-    long_objective = "Собрать конкурентный обзор   рынка облачных GPU\nи свести в таблицу за квартал"
-    write_task_result(tmp_path, "obj01", STATUS_RUNNING, objective=long_objective)
-
-    class _Req:
-        def __init__(self):
-            self.app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path))
-
-        async def json(self):
-            return {"task_id": "obj01", "id": "task-obj01"}  # no name → derive
-
-    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
-    name = payload["project"]["name"]
-    assert "\n" not in name and "  " not in name  # whitespace collapsed
-    assert name.startswith("Собрать конкурентный обзор")
-    assert len(name) <= 60
-    assert name != "task-obj01"  # not the bare id fallback
-    assert get_project(tmp_path, "task-obj01")["name"] == name
-
-
 def test_project_from_task_reuses_explicit_title_without_inline_light_call(tmp_path, monkeypatch):
     """An already-authored title is the Project name; conversion must not buy a
     second naming request while a complete human title already exists."""
@@ -1636,108 +1592,36 @@ def test_project_from_task_reuses_explicit_title_without_inline_light_call(tmp_p
     assert payload["project"]["name"] == "Ракетный стенд 🚀"
 
 
-def test_project_from_task_uses_neutral_name_when_nothing_derivable(tmp_path):
-    """Nothing derivable (no title/objective/description) → a NEUTRAL 'New project'
-    name, never the bare task id (the owner explicitly rejects task-… names)."""
+@pytest.mark.parametrize("task_id, objective_hint", [
+    ("noobj", ""), ("live9", "исследуй рынок облачных GPU и собери таблицу"),
+    ("skill_lifecycle_install_travel-planner_job1", ""),
+])
+def test_project_from_task_rejects_unwitnessed_objective_and_client_hint(tmp_path, monkeypatch, task_id, objective_hint):
     import asyncio
     import json
 
+    from ouroboros import project_naming
     from ouroboros.gateway.projects import api_project_from_task
+    from ouroboros.projects_registry import get_project, project_binding_for_task
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("no source: do not call Light")
+
+    monkeypatch.setattr(project_naming, "llm_project_name_async", forbidden)
+    write_task_result(tmp_path, task_id, STATUS_RUNNING, objective="An unverified stored objective")
 
     class _Req:
         def __init__(self):
             self.app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path))
 
         async def json(self):
-            return {"task_id": "noobj", "id": "task-noobj"}
+            return {"task_id": task_id, "id": "task-unwitnessed", "objective_hint": objective_hint}
 
-    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
-    assert payload["project"]["name"] == "New project"
-    assert payload["project"]["name"] != "task-noobj"
-
-
-def test_project_from_task_names_skill_lifecycle_task(tmp_path):
-    """A skill-lifecycle (non-human-text) task carries no owner request, so naming
-    derives a human label from the synthetic skill_lifecycle_<kind>_<target>_<job>
-    id instead of dead-ending at 'New project' (P1)."""
-    import asyncio
-    import json
-
-    from ouroboros.gateway.projects import api_project_from_task
-
-    class _Req:
-        def __init__(self):
-            self.app = types.SimpleNamespace(
-                state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
-            )
-
-        async def json(self):
-            return {
-                "task_id": "skill_lifecycle_install_travel-planner-notion-ai-obsidian_job1",
-                "id": "task-skl1",
-            }
-
-    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
-    name = payload["project"]["name"]
-    assert name != "New project"
-    assert name.startswith("Install skill")
-    assert "travel-planner" in name
-    assert len(name) <= 60
-
-
-def test_project_from_task_uses_objective_hint_for_in_progress_direct_chat(tmp_path):
-    """A still in-progress DIRECT chat task has no server-side title/objective/queue
-    source, so the frontend's objective_hint (the owner's original request) names
-    the project — not 'New project' or the bare id (P1, scope-review fix)."""
-    import asyncio
-    import json
-
-    from ouroboros.gateway.projects import api_project_from_task
-
-    class _Req:
-        def __init__(self):
-            self.app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path))
-
-        async def json(self):
-            return {"task_id": "live9", "id": "task-live9",
-                    "objective_hint": "исследуй рынок облачных GPU и собери таблицу"}
-
-    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
-    name = payload["project"]["name"]
-    assert name.startswith("исследуй рынок облачных GPU")
-    assert name not in ("New project", "task-live9")
-    assert len(name) <= 60
-
-
-def test_project_from_task_auto_names_from_live_queue_snapshot(tmp_path):
-    """An in-progress conversion (no task_result objective written yet) derives the
-    name from the LIVE queue snapshot, not the bare task id (F1 — fixes the observed
-    task-id fallback when converting a still-running card)."""
-    import asyncio
-    import json
-
-    from ouroboros.gateway.projects import api_project_from_task
-
-    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        json.dumps({
-            "running": [{"id": "live01", "task": {"id": "live01", "objective": "Изучить рынок облачных GPU и собрать таблицу"}}],
-            "pending": [],
-        }),
-        encoding="utf-8",
-    )
-
-    class _Req:
-        def __init__(self):
-            self.app = types.SimpleNamespace(state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path))
-
-        async def json(self):
-            return {"task_id": "live01", "id": "task-live01"}  # no name, no task_result
-
-    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
-    name = payload["project"]["name"]
-    assert name.startswith("Изучить рынок облачных GPU")
-    assert name != "task-live01"  # not the bare id fallback
+    resp = asyncio.run(api_project_from_task(_Req()))
+    assert resp.status_code == 409 and json.loads(resp.body)["reason_code"] == "project_name_source_unavailable"
+    assert get_project(tmp_path, "task-unwitnessed") is None
+    assert project_binding_for_task(tmp_path, task_id) is None
 
 
 def test_all_task_project_bindings_exposes_project_id(tmp_path):

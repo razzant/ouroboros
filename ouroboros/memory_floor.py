@@ -31,7 +31,8 @@ from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ord
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
-from ouroboros.section_floor import PROTECTED, predicted_section, relocated_text, retain_section, section_views
+from ouroboros.section_floor import (PROTECTED, capture_system_projection, predicted_section, projection_fields,
+                                     relocated_text, retain_section, section_views)
 
 log = logging.getLogger(__name__)
 
@@ -75,11 +76,21 @@ class ViewFit:
 
     @cached_property
     def story(self) -> str:
-        return mv.render_story(self.snapshot, self.level)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_story(self.snapshot, self.level, part=witness.part)
+        self.story_selection = witness.selections()
+        return text
 
     @cached_property
     def room(self) -> str:
-        return mv.render_room(self.snapshot, self.level, floor_note=self.note)
+        from ouroboros.context_assembly_trace import RoomWitness
+
+        witness = RoomWitness(self.snapshot)
+        text = mv.render_room(self.snapshot, self.level, floor_note=self.note, observe=witness.observe, part=witness.part)
+        self.room_pieces = witness.pieces
+        return text
 
     @cached_property
     def story_chars(self) -> int:
@@ -666,7 +677,7 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     authored restore with an advisory capacity deficit; dispatch fits it later.
     ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
-    from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
+    from ouroboros.context_fit import _governance_blocks, _request_tokens
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -681,7 +692,6 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
                       lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot,
                       preference=old.get("preference"))
-    story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
     facts = view_facts(snapshot, level, window_tokens=old.get("window_tokens"), mode=mode,
                        allowances={"margin": old.get("allowance_tokens"), "physical": old.get("physical_allowance_tokens"),
                                    "budget": old.get("budget_allowance_tokens")},
@@ -696,12 +706,16 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     receipts = shown.memory_facts.get("host_sections_addressed", ())
     if receipts:
         facts["host_sections_addressed"] = receipts
-    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts), mv.story_is_whole(level))
+    selected = ViewFit(snapshot, level, note, facts)
+    story, room = selected.story, selected.room
+    system, observation = capture_system_projection(plan.core, governance, story, room, mode,
+        section_views(sections, receipts), receipts, mv.story_is_whole(level), shown=selected,
+        facts=view_receipt(snapshot, story, room, facts))
     tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
                             current_messages=plan.messages_for(mode))
     projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
-        memory_facts=view_receipt(snapshot, story, room, facts), estimated_tokens=tokens,
-        calibrated_tokens=int(tokens * shown.calibration_ratio))
+        estimated_tokens=tokens, calibrated_tokens=int(tokens * shown.calibration_ratio),
+        **projection_fields(system, observation))
     return dataclasses.replace(plan, **{f"{mode}_projection": projection})
 
 

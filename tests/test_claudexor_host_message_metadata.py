@@ -115,3 +115,46 @@ def test_deepseek_send_copy_keeps_reasoning_echo_and_user_json(monkeypatch):
     assert sent == expected and messages == before
     assert sent["messages"][0]["reasoning_content"] == "Exact prior reasoning"
     assert sent["messages"][0]["tool_calls"][0]["function"]["arguments"] == arguments
+
+
+def test_main_contributions_stay_out_of_claudexor_wire_even_if_report_fails(claudexor_setup, monkeypatch):  # noqa: F811
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ouroboros import context_assembly_trace, loop_llm_call
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.loop_round_limits import _note_owner_contribution
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+    from tests._usage_store_testing import ledger_rows
+
+    root, gateway, client = claudexor_setup
+    gateway.results.append(deepcopy(gateway.results[0]))
+    gateway.dispatch.append(gateway.dispatch[0])
+    messages = [{'role': 'user', 'content': 'My incoming message', HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND}]
+    addr = 'row:1@2026-11-23T00:25:00+00:00#1234567890ab'
+    slot = SimpleNamespace(last_owner_delivery={'source_row_address': addr})
+    _note_owner_contribution(slot, messages[0], 'direct_input')
+    monkeypatch.setattr(loop_llm_call, 'current_model_wait', lambda: SimpleNamespace(tool_context=slot))
+    context = PhysicalAttemptContext('owner_low', 'low', 'cold_estimate', '', '', None, None, False, False)
+
+    def send():
+        loop_llm_call._send_main_candidate(client, {'messages': messages, 'model': MODEL}, model=MODEL,
+            use_local=False, deadline_ts=None, physical_context=context, candidate_predicate=None,
+            canonical_messages=messages)
+        manifests = [row['candidate_manifest_ref'] for row in ledger_rows(root) if row.get('candidate_manifest_ref')]
+        return json.loads(Path(manifests[-1]['path']).read_text(encoding='utf-8'))
+
+    facts = send()
+    assert facts['late_contributions']['entries'] == [{
+        'family': 'owner_input', 'form': 'direct_input', 'path': '$.messages[0]',
+        'row_address': addr, 'status': 'carrier_located'}]
+
+    def broken(*args):
+        raise RuntimeError('optional report failed')
+
+    monkeypatch.setattr(context_assembly_trace, 'prepared_inventory', broken)
+    facts = send()
+    assert facts['prepared_inventory'] == {'status': 'unavailable'}
+    assert len(gateway.creates) == len(gateway.acks) == 2
+    assert all(upload[0]['messages'] == [{'role': 'user', 'content': 'My incoming message'}] for upload in gateway.uploads)
+    assert HOST_CONTEXT_KIND_KEY in messages[0]

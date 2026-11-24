@@ -989,10 +989,7 @@ status sentence's or a composer chip's dot is its tone, §4).
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
 
-In a Project row the mark owns one reserved trailing column, so it sits at one x
-across rows whatever the name length; while the row's controls are drawn (a pointer's hover or the keyboard in the
-row, on touch a focused ⋯ or its open menu, the Pin with the keyboard) it gives way as the time does, and its words
-stay in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
+In a Project row the mark owns one trailing column at a fixed x across rows, beside a pinned row's resting pin; while controls are drawn (hover, keyboard focus in the row, or on touch a focused ⋯ or the menu it opened) it gives way (a pinned row's time stays on hover), its words kept in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
 census fact kept in the accessible name. The Projects have no header and no mark of their own: each row
 carries its own, and what waits for the owner in any of them also shows as the amber dot on Ouroboros's
 picture (§10 "Navigation"). An activity repaint keeps the row and menu
@@ -1459,12 +1456,12 @@ reader; composer files stay.
 ### History edges
 
 An initial read shows one disabled `Loading saved history…` pill at the feed edge,
-not a second loading sentence in the header; where this origin kept the room's
-newest text, a bounded preview stands instead under one `Saved text preview ·
-updating` line: plain words under their speakers, no times, actions or read credit
-(`web/modules/chat_preview.js`). The first canonical page replaces it, a passage the
-owner selected staying until released; a failed read leaves it `not current` beside
-Retry; a refused session, sign-out or a deletion seen here erases only this copy. Task activity remains separate.
+not a header sentence; where this browser kept the room's newest text under the proven
+data profile, a bounded preview stands under one `Saved text preview · updating`
+line: plain words under their speakers, no times, actions or read credit
+(`web/modules/chat_preview.js`). The first canonical page replaces it, a selected
+passage staying until released; a failed read leaves it `not current` beside Retry; a
+refused session, sign-out or deletion erases only this copy. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
@@ -2475,8 +2472,9 @@ attention or a bare outcome (owner 16.09: real work is a card, a greeting is
 nothing). Reviews, children, evidence, narration or tool errors give managed
 roots and direct turns the same card: a coined name or narration headline
 (`Task activity` when finished without either; untitled while Working), status,
-host-attested Stop, and `Turn into project` in Main unless already bound. Bound
-direct turns route later rows to their Project like `move_to_project`. The foot
+host-attested Stop, and `Turn into project` in Main unless bound. A naming refusal
+explains why and leaves the card and button for explicit retry. Bound turns route
+later rows like `move_to_project`. The foot
 holds metadata and one action row: [Reply], Turn into project, Resume, Stop…,
 one primary; on a root they share one band, the row right, wrapping whole
 (owner 30.10, B). Nested children stay inside their root, carry no root control,
@@ -2755,7 +2753,11 @@ cards keep their edges rather than taking the shared fade.
   size that failed to save stays on screen and says so under the list until
   a later change saves it; nothing retries on its own.
 - **Beautiful Context.** One neutral button stands after the cards and the board's save note and
-  opens its frame in place below itself; the frame follows the card palette.
+  opens its frame in place below itself; the frame follows the card palette. On a supported Windows
+  shell, **Open recent requests** opens a separate local window: choose a familiar conversation, see
+  the newest readable request in the offered list and optionally compare with the next readable
+  earlier entry. Missing copies are named and remain selectable. The browser's
+  local file import and example remain available; source versions and exact positions stay folded.
 
 ### Storage
 
@@ -2973,23 +2975,27 @@ all reviewers on the selected Main model, including its account and processing
 choice. It is disclosed as one model for every review, not diversity.
 Summary shows it before a separate Start saves it; later manual edits stay
 authoritative. Completion without the automatic preset
-leaves later configuration to Settings. Summary names exactly the assignments
-the one atomic Finish saves, including deep self-review. Reviewers remain
-editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
+leaves later configuration to Settings. Summary leads with the first hour's choices, one row each in the rail's
+order: connections, Main by source and model (a pinned account too), Access, Consciousness where offered, Skills with
+Change, the limits; where a first state is to come its copy says Start also begins the first conversation. One
+«Models, agents and reviewers» disclosure names exactly the assignments the one atomic Finish saves, each role
+whole, including deep self-review; it opens itself only when a note under the card starts asking to check them.
+Reviewers remain editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled. When a subscription serves a model, Summary says
 what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
 Consciousness is its own step only before a first state exists, on a new data root or after an owner Reset (owner
-decision 2026-11-20, replacing the unchecked Summary offer of 2026-11-04): one large switch of the wizard's two
-choices, its positions in Dashboard › Consciousness words, starting on. Where any state exists the step is absent,
+decision 2026-11-20): one large switch of the wizard's two choices, its positions in Dashboard › Consciousness
+words, starting on. Where any state exists the step is absent,
 whatever the state says: setup never changes it, so clicking through lifts no owner or Panic stop, and Dashboard ›
-Consciousness is the place to change it. What the positions mean leads as the step's copy at body size; beneath the
-switch, in meta size: on a subscription alone that its wakes use the quota (said once), the autonomy, allowance and
-own-task limit it runs under now, and where to change it later. The copy says that, on, its wakes go on within the
-allowance even before the first reply, and that Start begins the first conversation in either position (owner
-2026-11-21). Review & start lands on it; its Continue goes on
-(Skills, then Summary), one row there. The choice rides the one save: no command, no row in Main. Summary labels the
+Consciousness is the place to change it. Its copy asks what Ouroboros does while the owner is away and says Start
+begins the first conversation in either position (owner 2026-11-21); each choice answers under its name: Off works
+only on what was asked, connected places heard, not answered; On also wakes within the allowance, even before the
+first reply, and answers in places made Active (Advises: its words wait). Beneath, under «While it's on», in meta
+size, what it runs under now: the autonomy, the allowance (on a subscription alone, with the quota its wakes use:
+said once, together) and the own-task limit; then where to change it later. Review & start lands on it; its Continue goes on
+(Skills, then Summary). The choice rides the one save: no command, no row in Main. Summary labels the
 model row Consciousness model, so it does not read as this choice.
 
 Skills is its own step after Consciousness (owner 2026-11-21: «показать что есть много крутых скилов анимированным
@@ -3004,9 +3010,9 @@ pitches are written to keep each row on one line at 980 px; where the step is na
 takes two, the title and then what it gives with its mark, one rhythm instead of breaks mid-sentence, never cut. The
 groups, by category with built-ins first (his 7A of 2026-10-17), flow down two columns where each keeps 400px, each
 group whole in its column, and one column below that and on a phone; a group's head is its name only, and categories
-of a single skill close the list together as «More». The maintainer's recommended skills are
-ticked; the box is the chosen thing. Inside a group what works at once leads, recommended first, and what needs a key
-or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
+of a single skill close the list together as «More». Recommended skills are ticked where the host can confirm them
+(voice: its matching key); explicit ticks and unticks stay. Inside a group what works at once leads, recommended first, and what
+needs a key or an account comes last; the hub's category order stays. Tick all and Untick all head the list; an empty choice
 installs nothing. Under the list one muted line counts the catalog's other skills, «24 more skills in the catalog,
 after start» (his 4A of 2026-11-21), from the sources already read; while none is read there is no line. Where the
 hub's skills come from and how they install is one small sentence under the list (Official
@@ -3016,8 +3022,7 @@ moves no row; a refresh keeps the ticks, focus and the row being read. Entering 
 short sequence, the owner's «анимированный список»: each comes on `--motion-open` by position and opacity, a 30 ms beat
 after the one above it in its own column, so both columns start at once and build at one pace, 700 ms in all; the
 boxes answer from the first frame, a repaint or the hub's late list never plays it again, and reduced motion shows the
-list as it ends. Review & start passes it; Summary keeps one row back to
-it. Nothing installs before Start.
+list as it ends. Review & start passes it. Nothing installs before Start.
 
 A skill that declares a connection card stands first in the step as that card (the Telegram skill's «Phone via
 Telegram»; owner 2026-11-21, 3A: the QR right in the wizard), its box the skill's tick, with Connect. Open, it shows the
@@ -3408,8 +3413,9 @@ from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it firs
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Its Working folder… shows and repairs
 missing, unusable or unset bindings. No folder stays until a folder is chosen. It names work keeping
 its folder before Save. Closing during Save reports an unknown outcome; reopening reads afresh. Pins lead the one list, one `--space-2`
-of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing
-reads as one more Project; their tooltip and accessible name say Pinned. Within each group the newest message
+of air before the next shown row their only boundary: no caption, tint, rule or column. A pinned row keeps a quiet
+pin glyph at rest beside its shifted time where the hover Pin sits, swapping to Unpin in place only on the Pin's own
+hover or keyboard focus (mark-only on touch; chosen ink on the active row); its tooltip and accessible name say Pinned. Within each group the newest message
 leads: what Unread (§4) counts, the owner's own, of System rows only a work's end or a reminder; unread only
 marks. The list rests on the pins and the fifty newest others, the rest a step away (owner's choice A1): the
 field matches every Project's name, older and closed ones too, by its letters (any case or accent, each word

@@ -306,7 +306,7 @@ _ENDING_FIELDS = (
     "final_answer", "terminal_origin", "terminal_host_notice", "terminal_provider_notice", "terminal_provider_cause",
     "terminal_salvage_path",
     "trace_summary", "trace_refs", "model_execution", "completion_observations", "tool_calls", "resource_limit",
-    "child_status", "wake_summary", "suggested_name", "wake_silent", "fold_read", "owner_message_sent",
+    "child_status", "wake_summary", "suggested_name", "model_coined_name", "wake_silent", "fold_read", "owner_message_sent",
     "_result_text_present", "cancel_origin", "schedule_name", "review_overrides", "finalization_recovery",
     "body_adoptions",
     *_TERMINAL_ACCOUNTING_SCRUB_FIELDS,
@@ -337,12 +337,14 @@ def canonical_name_fields(canonical_fields: Dict[str, Any]) -> tuple:
     A ``title`` is authorship, and every write that names a titled run lands on the canonical record: admission,
     a Continue author's adopted subject (``adopt_continued_work_name``) with its successor's ``Continue:`` claim
     (``update_focus``), and a direct turn's namer. The execution-side namers (the closing sentence, a wake's cause)
-    name only untitled runs, so a replica of a titled run holds a copy that may predate the canonical name. An
-    untitled record keeps taking its execution's name; a slot the canonical record lacks still takes the replica's.
+    name only untitled runs, so a replica of a titled run holds a copy that may predate the canonical name. A model
+    namer can attest an untitled canonical row's title; otherwise it takes the replica's name.
     """
+    fields = ("title", "suggested_name", "model_coined_name")
+    coined = canonical_fields.get("model_coined_name")
     if not str(canonical_fields.get("title") or "").strip():
-        return ()
-    return tuple(field for field in ("title", "suggested_name") if field in canonical_fields)
+        return fields[1:] if coined and coined == canonical_fields.get("suggested_name") else ()
+    return tuple(field for field in fields if field in canonical_fields)
 
 
 def project_replica_task_result_fields(

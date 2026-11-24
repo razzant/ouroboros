@@ -39,6 +39,7 @@ import './settings_local_model.js';
 // The first-level page last opened on this device (docs/DESIGN.md "Settings": a section lands on its first page the
 // first time, later on the last one opened on the device). A stored page no longer registered falls back to Models.
 const LAST_PAGE_KEY = 'ouroboros.settings.last-page';
+const RETURN_RESET_ABOUT = 'ouroboros.settings.return-reset-about';
 function readLastFirst() {
     try { return String(globalThis.localStorage?.getItem(LAST_PAGE_KEY) || ''); } catch { return ''; }
 }
@@ -382,6 +383,10 @@ export function initSettings(ctx = {}) {
     window.addEventListener('pagehide', (event) => {
         resetSecretReveals(page);
         if (event.persisted) return;
+        // A confirmed profile change may reopen About in this same tab. No page data or receipt crosses the reload.
+        if (ws?.foreignProfile?.() && shown() && state.settingsPath === 'computer/about') {
+            try { globalThis.sessionStorage?.setItem(RETURN_RESET_ABOUT, '1'); } catch { /* settings stay reachable manually */ }
+        }
         resize?.disconnect();
         if (frame) cancelAnimationFrame(frame);
         disposeFade();
@@ -396,6 +401,20 @@ export function initSettings(ctx = {}) {
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
     return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data),
+        returnResetAbout() {
+            try {
+                const session = globalThis.sessionStorage;
+                if (session?.getItem(RETURN_RESET_ABOUT) !== '1') return;
+                session.removeItem(RETURN_RESET_ABOUT);
+            } catch { return; }
+            return openFromOutside('computer/about').then((opened) => {
+                const about = top();
+                if (opened && about?.path === 'computer/about') {
+                    about.el.querySelector('[data-settings-fold]')?.setAttribute('open', '');
+                }
+                return opened;  // About reads the serving profile's Reset receipt itself.
+            });
+        },
         capture(opener) {
             const snapshot = sectionLevels.capture(), own = ownChosen;
             const origin = homeEl.contains(opener) ? [] : levels;

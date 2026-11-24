@@ -6,6 +6,7 @@ split); loop.py re-exports every name."""
 from __future__ import annotations
 
 from ouroboros.context_fit import _physical_context_for_fit, extract_plain_text_from_content, reclaim_low_water_margin
+from ouroboros.context_assembly_trace import bind_contribution_input, carry_contributions, settle_copied_contributions
 
 from ouroboros.config import runtime_setting
 
@@ -120,7 +121,7 @@ def observe_authoring_response(tool_ctx: Any, model: str, *, forced: bool = Fals
 
 
 def _adopt_fallback_route(ctx: Any, candidate: _RoundModelCallContext, messages: list, tool_schemas: list, mode: str) -> tuple:
-    """An answered fallback adopts its sanitized transcript, measured plan and priced schema list together.
+    """An answered fallback adopts its sanitized transcript and its rows' notes, measured plan and priced schema list.
 
     The loop and discovery still hold the resident list by reference. The accepted call already recorded the
     measured facts; never replace them with a raw estimate or replay its reasoning to another family unsanitized."""
@@ -129,6 +130,7 @@ def _adopt_fallback_route(ctx: Any, candidate: _RoundModelCallContext, messages:
     if tool_schemas is not None:
         tool_schemas[:] = candidate.tool_schemas
     plan, slot = candidate.context_fit_plan, candidate.tools._ctx
+    settle_copied_contributions(slot, messages)
     slot.active_model, slot.active_use_local = candidate.active_model, candidate.active_use_local
     if plan is not None:
         slot.context_fit_plan, slot.messages, slot.active_context_mode = plan, messages, mode
@@ -136,11 +138,13 @@ def _adopt_fallback_route(ctx: Any, candidate: _RoundModelCallContext, messages:
     return ctx.active_model, ctx.active_use_local, plan, mode
 
 
-def _fallback_rows(source, model):
-    """Copy the acting frame; no route may inherit another trial's narrowing, even in the same family."""
+def _fallback_rows(source, model, slot=None):
+    """Copy the acting frame; no route may inherit another trial's narrowing, even in the same family (its notes: ``carry_contributions``)."""
     plan, messages, schemas, mode, acting = source
     rows = LLMClient.sanitize_reasoning_on_model_switch(messages, acting, model)
-    return plan, copy.deepcopy(messages) if rows is messages else rows, None if schemas is None else list(schemas), mode
+    rows = copy.deepcopy(messages) if rows is messages else rows
+    carry_contributions(slot, messages, rows)
+    return plan, rows, None if schemas is None else list(schemas), mode
 
 
 def _route_candidates(tool_ctx: Any, active_model: str, active_use_local: bool, acting_role: str,
@@ -188,6 +192,7 @@ def _run_cross_model_fallback_chain(
     from ouroboros.model_wait import current_model_wait
     from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS as _cooldown_kinds
     from ouroboros.primary_route_observation import failure_facts, fallback_adoption_text, fallback_route_words, own_call_record, route_facts_text
+    from ouroboros.route_choice import explicit
 
     def _cooled(model: str, use_local: bool, role: str) -> None:
         if str(accumulated_usage.get("_last_llm_error_kind") or "") in _cooldown_kinds:
@@ -203,7 +208,14 @@ def _run_cross_model_fallback_chain(
         return (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
                 and waiter is not None and waiter.waits_allowed)
 
+    def owner_switched(role: str) -> bool:  # a card's Switch during this walk; an earlier card's choice is no new one
+        # ``TaskModelWait.wait`` stores a NEW entry on every Switch, even one naming the held binding again; Retry and
+        # auto-continue leave the entry as it was. So identity, never equal fields, tells this walk's Switch.
+        entry = waiter.overrides.get(role) if waiter is not None else None
+        return bool(entry) and entry is not held_choices.get(role)
+
     waiter = current_model_wait()
+    held_choices = dict(waiter.overrides) if waiter is not None else {}  # the role entries themselves, not copies
     _cooled(active_model, active_use_local, str(getattr(context_fit_plan, "model_role", "") or "main"))
     primary_context_usage = _snapshot_context_fit_usage(accumulated_usage)
     attempt_cap = _fcd.attempts_per_model()
@@ -234,9 +246,10 @@ def _run_cross_model_fallback_chain(
         if context_fit_plan is not None:
             _adopt_view_facts(slot, context_fit_plan, active_context_mode)
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
+        settle_copied_contributions(slot)  # the failed trial's copies go; the restored rows kept their notes
 
     def prepare(model, use_local, role, is_primary, predecessor, *, account=None, defer=True):
-        basis, rows, schemas, mode = _fallback_rows(source, model)
+        basis, rows, schemas, mode = _fallback_rows(source, model, slot)
         if is_primary is not None:
             tell_failed_attempt(rows, predecessor, fallback_route_words(slot, model, use_local, role, waiter, pin_note=True))
         plan, mode = _loop()._rebind_context_fit_plan(basis, tools, rows, model=model, use_local=use_local,
@@ -244,6 +257,7 @@ def _run_cross_model_fallback_chain(
             publish=is_primary is None)
         if is_primary is None:  # an already acting route retries in its own canonical lists
             messages[:] = rows
+            settle_copied_contributions(slot, messages)
             if tool_schemas is not None:
                 tool_schemas[:] = schemas
             rows, schemas = messages, tool_schemas
@@ -272,7 +286,7 @@ def _run_cross_model_fallback_chain(
             round_idx=round_idx, answered=answered, own_call=own_call)
         if not is_primary:
             slot.route_wait_on_primary = False
-        adopt_fallback(slot, is_primary, entry_failure, role)
+        adopt_fallback(slot, is_primary, entry_failure, role, explicit("wait_card") if owner_switched(call.model_role) else None)
         emit_progress(fallback_adoption_text(slot, model, local, role, waiter, accumulated_usage,
                                              answered=answered, own_call=own_call, fresh=fresh))
         return model, local, plan, mode
@@ -287,7 +301,7 @@ def _run_cross_model_fallback_chain(
     msg, adopted, fresh = None, False, True  # fresh: the last call left a failure row of its own (fallback_reason_text)
     # ABI-4: typed ResolvedModelTarget rows cross to strings only at the transport boundary; every chain
     # row uses the single global USE_LOCAL_FALLBACK flag, the primary keeps its own locality.
-    for fallback_model, fallback_role, fallback_use_local, is_primary in rows:
+    for index, (fallback_model, fallback_role, fallback_use_local, is_primary) in enumerate(rows):
         binding = route_binding(fallback_model, fallback_use_local, fallback_role, overrides=waiter.overrides if waiter else None)
         if _fcd.is_cooling_down(*binding) or (recovering_output and not output_recovery.fallback_untried(accumulated_usage, binding)):
             continue  # a skipped route is not announced or prepared, and leaves the walk's facts as they were
@@ -301,7 +315,9 @@ def _run_cross_model_fallback_chain(
                       f"{fallback_reason_text(accumulated_usage, previous_model, previous_use_local, entry=not tried, fresh=fresh)}",  # the predecessor's class and own sentence
                       incident={"task_incident": "model_lane_attempt", "toast_once": f"{task_id}:model_lane_attempt:{round_idx}:{fallback_model}"})
         _disclose_unknown(messages, "The previous attempt ended without a usable answer; the host is trying a configured alternative.")
-        candidate_call = prepare(fallback_model, fallback_use_local, fallback_role, is_primary, facts)
+        # A candidate defers its resource wait only while a later route, the owner question or the round's own wait follows.
+        defer = recovering_output or task_type == "presence" or own_wait or _asks_owner() or _route_follows(rows[index + 1:])
+        candidate_call = prepare(fallback_model, fallback_use_local, fallback_role, is_primary, facts, defer=defer)
         if recovering_output and not output_recovery.fallback_untried(accumulated_usage, output_recovery.binding(candidate_call)):
             restore_acting_view()
             continue  # preparation may outlive a change to an already-spent account; keep the existing late check
@@ -359,6 +375,8 @@ def _run_cross_model_fallback_chain(
         local = resumed.get("use_local", override.get("use_local", getattr(failed, "active_use_local", active_use_local)))
         retry_call = prepare(model, local, role, getattr(failed, "fallback_is_primary", None),
             getattr(failed, "fallback_predecessor", {}), account=account, defer=False)
+        if owner_switched(role):  # this card's Switch holds for the rest of the task, as ``_reprepare_waiting_main`` records it
+            slot.route_choice = explicit("wait_card")
         slot._pending_handover_reason = "owner_wait"
         meta_before = accumulated_usage.get("_last_llm_call_meta")
         msg, _cost, retry_mode = _loop()._call_round_model(retry_call)
@@ -988,7 +1006,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     if getattr(ctx, "fallback_source", None) is not None:
         from ouroboros.primary_route_observation import fallback_route_words
 
-        plan, prepared, schemas, mode = _fallback_rows(ctx.fallback_source, model)
+        plan, prepared, schemas, mode = _fallback_rows(ctx.fallback_source, model, ctx.tools._ctx)
         if schemas is not None:
             ctx.tool_schemas[:] = schemas
         ctx.context_fit_plan, ctx.active_context_mode = plan, mode
@@ -996,6 +1014,7 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
             ctx.tools._ctx, model, use_local, role, current_model_wait(), pin_note=True))
     else:
         prepared = LLMClient.sanitize_reasoning_on_model_switch(ctx.messages, ctx.active_model, model)
+        carry_contributions(ctx.tools._ctx, ctx.messages, prepared, adopt=True)  # the acting rows' copies replace them
     if native_reset:
         from ouroboros.llm_messages import drop_source_native_messages, reset_native_messages
 
@@ -1056,8 +1075,8 @@ def _reprepare_waiting_main(ctx: _RoundModelCallContext, kwargs: dict):
     if provider_for_model(model) == "claudexor":
         kwargs["bypass_response_cache"] = False
     physical = with_attempt_prefix(_physical_context_for_fit(disposition, ctx.context_fit_plan), ctx.accumulated_usage) if disposition else None
-    if physical is not None:  # the remaining attempts of this call send under the new route's measurement
-        ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = physical
+    if physical is not None:
+        physical = ctx.accumulated_usage[REBOUND_PHYSICAL_CONTEXT_KEY] = bind_contribution_input(physical, kwargs, ctx.messages, ctx.tools._ctx)
     return PreparedModelCall(kwargs, physical, current_physical_attempt_predicate())
 
 

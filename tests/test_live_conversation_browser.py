@@ -510,9 +510,8 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     open_calls_settings(page)
     form = page.locator('[data-extension-settings-form][data-skill="live_conversation"]')
     catalogs = subscription_ui['call_config']['catalogs']
-    expect(page.locator('#page-skills')).to_contain_text(
-        'The call skills are on by default. To talk, turn on Calls (beta), choose an engine and add its API key in '
-        'Settings → Accounts and keys, under the keys the skills request. Gemini and OpenAI do not serve Russia or Belarus.')
+    setup_help = page.locator('#extension-settings-sections .settings-extension-components > .settings-section-copy')
+    expect(setup_help).to_contain_text('Russia or Belarus')  # General disclosure, independent of the selected engine's help.
     by_id = {catalog['id']: catalog for catalog in catalogs}
     expect(form.locator('[name="provider"] option')).to_have_count(len(catalogs))
     assert form.locator('[name="provider"] option').evaluate_all('(nodes) => nodes.map(n => n.value)') == list(by_id)

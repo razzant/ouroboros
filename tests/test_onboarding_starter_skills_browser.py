@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._wizard_walk import step_order
+from tests._wizard_walk import step_order, walk
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
@@ -142,6 +142,60 @@ def test_summary_change_returns_to_the_step_with_the_ticks_kept(subscription_ui)
     assert "1 will install" in page.locator(ROW).inner_text()
     page.click("#next-btn")
     assert _completion(ui)[0]["starter_skills"] == ["ouroboros/duckduckgo"]
+
+
+def test_voice_defaults_follow_accounts_but_explicit_choices_reach_start(subscription_ui, tmp_path, monkeypatch):
+    from ouroboros.skill_starter import starter_groups
+    from tests.test_skill_starter import _HUB_ROW, _stub_hub_snapshots, _voice_entry
+
+    ui = subscription_ui
+    # The real projection from bundled manifests and an inert Hub snapshot, in a disposable Settings world.
+    rows = [{"id": "builtin", "name": "Built in", "kind": "builtin", "trust": "trusted", "confirmed": True}]
+    hub_voice = {**_voice_entry("fixture_voice", ["OPENAI_API_KEY", "VOICE_REGION"]), "title": "Fixture voice"}
+    _stub_hub_snapshots(monkeypatch, {tmp_path: [hub_voice]})
+    repo = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: {"OPENAI_API_KEY": "fixture-saved-openai-key"})
+    answer = starter_groups(tmp_path, rows=[*rows, _HUB_ROW], repo_dir=repo)
+    ui["bootstrap"]["initialState"]["openaiKey"] = ui["bootstrap"]["secretPlaceholder"]
+    page = _skills_step(ui, answer=answer, width=980)
+    openai = _row(page, "builtin/openai_realtime").locator("input")
+    gemini = _row(page, "builtin/gemini_live").locator("input")
+    grok = _row(page, "builtin/grok_realtime").locator("input")
+    uncertain = _row(page, "ouroboros/fixture_voice").locator("input")
+    openai.wait_for()
+    assert openai.is_checked() and not gemini.is_checked() and not grok.is_checked() and not uncertain.is_checked()
+    capture(page, "starter-voice-saved-key")
+    gemini.check()  # manual on, even without a key
+
+    def edit_openai(value):
+        walk(page, "skills", "accounts")
+        field = page.locator("#openai-key")
+        if not field.is_visible():
+            page.locator('[data-collapse="api-access"] > summary').click()
+        field.fill(value)
+        page.click("#quick-start-btn")
+        if "consciousness" in step_order(page):
+            page.wait_for_selector("[data-consciousness-step]")
+            page.click("#next-btn")
+        openai.wait_for()
+
+    edit_openai("")
+    assert not openai.is_checked() and gemini.is_checked()
+    capture(page, "starter-voice-key-cleared")
+    edit_openai("fixture-new-openai-key")
+    assert openai.is_checked() and gemini.is_checked() and not uncertain.is_checked()
+    openai.uncheck()  # manual off beats the key, even if Accounts changes it again
+    uncertain.check()
+    edit_openai("fixture-replaced-openai-key")
+    assert not openai.is_checked() and gemini.is_checked() and uncertain.is_checked()
+    page.click("#next-btn")
+    page.locator(ROW).wait_for()
+    page.click("#next-btn")
+    posted = _completion(ui)[0]
+    assert posted["OPENAI_API_KEY"] == "fixture-replaced-openai-key"
+    assert {item for item in posted["starter_skills"] if item in {
+        "builtin/gemini_live", "builtin/grok_realtime", "builtin/openai_realtime"}} == {"builtin/gemini_live"}
+    assert "ouroboros/fixture_voice" in posted["starter_skills"]
 
 
 def test_untick_all_installs_nothing_and_an_unreadable_list_keeps_the_host_default(subscription_ui):

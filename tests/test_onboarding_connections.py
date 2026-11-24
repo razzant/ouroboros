@@ -122,19 +122,20 @@ def test_the_step_sees_the_card_s_words_but_never_its_function_keys_or_routes(sk
 
 
 def test_the_starter_item_carries_the_card_and_drops_the_code_from_its_prerequisites(skills, tmp_path, monkeypatch):
-    offer = [{"id": "builtin/demo", "name": "demo", "source_id": "builtin", "category": ["messaging"],
+    rows = [{"id": "distribution", "name": "Built in", "kind": "builtin", "trust": "review"}]
+    offer = [{"id": "distribution/demo", "name": "demo", "source_id": "distribution", "category": ["messaging"],
               "needs_keys": ["DEMO_TOKEN", "DEMO_CODE", "DEMO_REGION"]},
-             {"id": "builtin/other", "name": "other", "source_id": "builtin", "category": ["messaging"],
+             {"id": "distribution/other", "name": "other", "source_id": "distribution", "category": ["messaging"],
               "needs_keys": ["DEMO_CODE"]}]
     monkeypatch.setattr(skill_starter, "_offer", lambda *a, **k: [dict(item) for item in offer])
     monkeypatch.setattr(skill_starter, "starter_ids", lambda *a, **k: [])
     monkeypatch.setattr("ouroboros.skill_source_catalog.snapshot_for", lambda *a, **k: (None, {}))
-    items = {item["id"]: item for group in skill_starter.starter_groups(tmp_path, rows=[])["groups"]
-             for item in group["items"]}
-    assert items["builtin/demo"]["connection"]["skill"] == "demo"
-    assert items["builtin/demo"]["needs_keys"] == ["DEMO_TOKEN", "DEMO_REGION"], "the code the card fills is no prerequisite"
-    assert "connection" not in items["builtin/other"] and items["builtin/other"]["needs_keys"] == ["DEMO_CODE"]
-    assert skill_starter.starter_groups(tmp_path, rows=[])["catalog_more"] is None, "no source read: no count"
+    groups = skill_starter.starter_groups(tmp_path, rows=rows)
+    items = {item["name"]: item for group in groups["groups"] for item in group["items"]}
+    assert items["demo"]["connection"]["skill"] == "demo"
+    assert items["demo"]["needs_keys"] == ["DEMO_TOKEN", "DEMO_REGION"], "the code the card fills is no prerequisite"
+    assert "connection" not in items["other"] and items["other"]["needs_keys"] == ["DEMO_CODE"]
+    assert groups["catalog_more"] is None, "no source read: no count"
 
 
 def _client(*routes: Route, drive_root: pathlib.Path | None = None) -> TestClient:

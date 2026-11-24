@@ -76,11 +76,12 @@ function fakeServer(routes, values = {}) {
 }
 
 /** Mount `path` the way the shell does and show it; `asked` collects the questions the page asked first. */
-async function open(t, path, { values = {}, answer = true } = {}) {
+async function open(t, path, { values = {}, answer = true, routes = {} } = {}) {
     forgetSettingRows();
     forgetUnsavedRules();
     const env = setup(t);
     const server = fakeServer(env.routes, values);
+    for (const [route, body] of Object.entries(routes)) env.routes.set(route, response(body));
     const asked = [];
     const opened = [];
     const container = new NodeStub();
@@ -673,6 +674,39 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     assert.equal(fold.querySelector('summary').textContent, 'More: reset all data');
     assert.ok(fold.querySelector('[data-reset-all]'));
     assert.deepEqual(about.server.posts, []);
+    assert.equal(about.meta('computer:reset'),
+        'Clears saved conversations, memory and settings. Earlier Project notes are set aside. Code and working folders stay.');
+});
+
+test('a Reset result is one short line with the path of the earlier Project notes to copy; what was removed, kept or went wrong waits behind Details', async (t) => {
+    // A dot folder is hidden in a file manager, so the line carries the whole path under this data folder.
+    const path = '/Users/example/Ouroboros/data/projects/.before-reset-20260101-0123abcd';
+    const folder = { projects_set_aside: 'projects/.before-reset-20260101-0123abcd', projects_set_aside_path: path };
+    const result = async (answer) => {
+        const about = await open(t, 'computer/about', { routes: { '/api/reset': answer } });
+        await settle();
+        return about.row('computer:reset').querySelector('[data-setting-result]');
+    };
+    const behind = (node) => node.querySelector('details')?.querySelector('.ui-result-details').textContent ?? null;
+    const done = await result({ status: 'complete', deleted: ['memory', 'settings.json'], retained_logs: ['server.log'], ...folder });
+    const shown = done.querySelector('[data-reset-notes-path]');
+    assert.deepEqual([shown.textContent, shown.className], [path, 'ui-result-details']);
+    assert.equal(done.children[0], shown, 'the path follows its sentence, before Details');
+    assert.ok(done.textContent.startsWith('Reset complete. Earlier Project notes are in this folder:' + path + 'Details'));
+    assert.equal(behind(done), 'Removed: memory, settings.json\nKept for diagnostics: server.log');
+    const none = await result({ status: 'complete', deleted: ['memory'], retained_logs: [], projects_set_aside: null,
+        projects_set_aside_path: null });
+    assert.deepEqual([none.textContent, none.querySelector('[data-reset-notes-path]'), behind(none)],
+        ['Reset complete.DetailsRemoved: memory', null, 'Removed: memory']);
+    // An interrupted Reset names what it already removed and where moved notes wait, all behind Details.
+    const cut = await result({ status: 'interrupted', error: '[Errno 18] Cross-device link', deleted: ['memory'], ...folder });
+    assert.equal(cut.dataset.tone, 'warn');
+    assert.ok(cut.textContent.startsWith('Reset was interrupted. To finish, confirm Reset all data again.Details'));
+    assert.equal(behind(cut), '[Errno 18] Cross-device link\nAlready removed: memory\n'
+        + 'Project notes moved before the interruption are in ' + path);
+    assert.equal(cut.querySelector('[data-reset-notes-path]'), null);
+    const asked = await result({ status: 'requested' });
+    assert.deepEqual([asked.textContent, behind(asked)], ['Reset requested. Waiting for restart.', null]);
 });
 
 test('the home opens every one of these pages by the path its row names', () => {
@@ -827,4 +861,105 @@ test('Your rules follows the reads made anywhere: its own fails while a newer on
     gates[2].resolve(200);
     await elsewhere;
     assert.deepEqual(facts(), ['Ask before paying.', false, ''], 'the read that lands is the page\'s too');
+});
+
+test('About takes up the Reset it accepted on the page-shown event, and holds every other answer off it', async (t) => {
+    const about = await open(t, 'computer/about', { routes: { '/api/reset': { status: 'complete', deleted: ['memory'],
+        retained_logs: [], projects_set_aside: null, projects_set_aside_path: null } } });
+    const result = () => about.row('computer:reset').querySelector('[data-setting-result]');
+    assert.equal(result().textContent, 'Reset complete.DetailsRemoved: memory', 'the receipt a read answered stands');
+    let reads = 0, posts = 0, next = null;
+    about.routes.set('/api/reset', async () => { reads += 1; return response(next || { status: 'none' }); });
+    about.routes.set('/api/reset/v1', async () => { posts += 1;
+        return response({ status: 'requested', restarting: true, reset_id: 'reset-7' }); });
+    const pressed = about.container.querySelector('[data-reset-all]').fire('click');
+    await settle();
+    const confirm = globalThis.document.body.querySelector('[role="dialog"]');
+    await confirm.parentElement.fire('click', { target: confirm.querySelector('[data-confirm-ok]') });
+    await settle();
+    // The durable write has answered: the acceptance already stands in the row, with the receipt it replaced kept
+    // apart as the previous one, while the informational dialog is still open.
+    const alert = globalThis.document.body.querySelector('[role="dialog"]');
+    assert.match(globalThis.document.body.textContent, /Ouroboros is restarting/);
+    assert.equal(result().textContent,
+        'Reset requested. Waiting for restart.DetailsPrevious receipt:\nReset complete.\nRemoved: memory');
+    assert.equal(reads, 1, 'one read after the acceptance');
+    // A matching `requested` is the acknowledgement, not an outcome: the binding and the receipt kept beside it stay.
+    next = { status: 'requested', reset_id: 'reset-7' };
+    await about.shown();
+    assert.equal(result().textContent,
+        'Reset requested. Waiting for restart.DetailsPrevious receipt:\nReset complete.\nRemoved: memory');
+    // After it, an answer naming another Reset still cannot stand as this Reset's outcome.
+    next = { status: 'interrupted', error: 'processes_unconfirmed:1', deleted: [], reset_id: 'another-reset' };
+    await about.shown();
+    assert.equal(result().textContent,
+        'Reset requested. Waiting for restart.DetailsPrevious receipt:\nReset complete.\nRemoved: memory');
+    // A real none is an answer for an unbound open, never a completion of the Reset this page accepted.
+    next = { status: 'none' };
+    await about.shown();
+    assert.equal(result().textContent,
+        'Reset requested. Waiting for restart.DetailsPrevious receipt:\nReset complete.\nRemoved: memory');
+    // An answer naming this Reset establishes its outcome, and that outcome stands: no request line and no other
+    // answer replaces what this Reset did.
+    next = { status: 'complete', deleted: ['memory', 'uploads'], retained_logs: ['server.log'], reset_id: 'reset-7' };
+    await about.shown();
+    assert.equal(result().textContent, 'Reset complete.DetailsRemoved: memory, uploads\nKept for diagnostics: server.log');
+    next = { status: 'requested', reset_id: 'reset-7' };
+    await about.shown();
+    assert.equal(result().textContent, 'Reset complete.DetailsRemoved: memory, uploads\nKept for diagnostics: server.log');
+    next = { status: 'complete', deleted: ['archive'], retained_logs: [], reset_id: 'another-reset' };
+    await about.shown();
+    assert.equal(result().textContent, 'Reset complete.DetailsRemoved: memory, uploads\nKept for diagnostics: server.log');
+    next = { status: 'unknown' };
+    await about.shown();
+    assert.equal(result().textContent, 'Reset complete.DetailsRemoved: memory, uploads\nKept for diagnostics: server.log');
+    assert.equal(posts, 1, 'reading the outcome never resends the request');
+    await alert.parentElement.fire('click', { target: alert.querySelector('[data-confirm-ok]') });
+    await pressed;
+});
+
+test('About lets no read sent before the acceptance, and no failed read, take the accepted Reset\'s row', async (t) => {
+    const about = await open(t, 'computer/about', { routes: { '/api/reset': { status: 'complete', deleted: ['memory'],
+        retained_logs: [], projects_set_aside: null, projects_set_aside_path: null } } });
+    const result = () => about.row('computer:reset').querySelector('[data-setting-result]');
+    const gates = [];
+    about.routes.set('/api/reset', async () => { const gate = deferred(); gates.push(gate); return gate.promise; });
+    about.routes.set('/api/reset/v1', async () => response({ status: 'requested', restarting: true, reset_id: 'reset-9' }));
+    const before = about.shown();  // a read the page sent before the acceptance
+    await settle();
+    assert.equal(gates.length, 1);
+    const pressed = about.container.querySelector('[data-reset-all]').fire('click');
+    await settle();
+    const confirm = globalThis.document.body.querySelector('[role="dialog"]');
+    await confirm.parentElement.fire('click', { target: confirm.querySelector('[data-confirm-ok]') });
+    await settle();
+    const alert = globalThis.document.body.querySelector('[role="dialog"]');
+    assert.equal(gates.length, 2, 'one read after the acceptance');
+    // Even naming the same Reset, an answer sent before the acceptance cannot certify it: its place is the older one.
+    gates[0].resolve(response({ status: 'complete', deleted: ['archive'], retained_logs: [], reset_id: 'reset-9' }));
+    await before;
+    await settle();
+    assert.equal(result().textContent,
+        'Reset requested. Waiting for restart.DetailsPrevious receipt:\nReset complete.\nRemoved: memory');
+    gates[1].resolve(response({ status: 'interrupted', error: 'processes_unconfirmed:1', deleted: [], reset_id: 'reset-9' }));
+    await settle();
+    assert.equal(result().textContent,
+        'Reset was interrupted. To finish, confirm Reset all data again.Detailsprocesses_unconfirmed:1');
+    // A failed read never clears the receipt the row already holds.
+    about.routes.set('/api/reset', async () => { throw new Error('offline'); });
+    await about.shown();
+    assert.equal(result().textContent,
+        'Reset was interrupted. To finish, confirm Reset all data again.Detailsprocesses_unconfirmed:1');
+    await alert.parentElement.fire('click', { target: alert.querySelector('[data-confirm-ok]') });
+    await pressed;
+});
+
+test('About takes a bare none for what an ordinary open may read, and names an unreadable witness as unknown', async (t) => {
+    const about = await open(t, 'computer/about', { routes: { '/api/reset': { status: 'none' } } });
+    const result = () => about.row('computer:reset').querySelector('[data-setting-result]');
+    assert.equal(result().textContent, '', 'none: nothing about a Reset is on record');
+    about.routes.set('/api/reset', async () => response({ status: 'unknown' }));
+    await about.shown();
+    assert.equal(result().textContent, 'The last Reset could not be confirmed.',
+        'an unreadable witness is a different answer, and it is shown as unknown rather than as that none');
 });

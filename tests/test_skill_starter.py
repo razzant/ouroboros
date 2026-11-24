@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -51,6 +52,92 @@ def test_explicit_empty_starter_list_installs_nothing(setup, value, monkeypatch)
     monkeypatch.setattr("ouroboros.skill_source_catalog.refresh_source",
                         lambda *a, **k: pytest.fail("an empty list needs no fetch"))
     assert skill_starter.run_starter(drive, None, origin="first_start", repo_dir=repo)["requested"] == []
+
+
+_BUNDLED_SOURCE = {"id": "builtin", "name": "Built in", "kind": "builtin", "trust": "trusted", "confirmed": True}
+_BODY = Path(__file__).resolve().parents[1]
+_VOICE_KEYS = {"builtin/gemini_live": "GEMINI_API_KEY", "builtin/grok_realtime": "XAI_API_KEY",
+               "builtin/openai_realtime": "OPENAI_API_KEY"}
+
+
+def test_first_setup_voice_ticks_use_only_the_bundled_providers_flat_keys(tmp_path, monkeypatch):
+    settings = {"GEMINI_API_KEY": "fixture-gemini-key", "XAI_API_KEY": "  ",
+                "OPENAI_COMPATIBLE_BASE_URL": "https://dedicated.example.invalid/v1",
+                "OPENAI_COMPATIBLE_API_KEY": "fixture-dedicated-key",
+                "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "named", "api_key": "fixture-named-key"}]}
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: settings)
+
+    def offer():
+        reply = skill_starter.starter_groups(tmp_path, rows=[_BUNDLED_SOURCE], repo_dir=_BODY)
+        assert "fixture-" not in json.dumps(reply), "an offer exposes presence, not settings values"
+        return {item["id"]: item for group in reply["groups"] for item in group["items"]}
+
+    items = offer()
+    assert {slug: row["default_with_keys"] for slug, row in items.items() if "default_with_keys" in row} == {
+        slug: {key: key == "GEMINI_API_KEY"} for slug, key in _VOICE_KEYS.items()}
+    assert {slug for slug in _VOICE_KEYS if items[slug]["recommended"]} == {"builtin/gemini_live"}
+    assert items["builtin/device_voice"]["recommended"] and items["builtin/live_conversation"]["recommended"]
+    assert not items["builtin/browser_speech"]["recommended"]
+    settings.update(OPENAI_API_KEY="fixture-openai-key", XAI_API_KEY="fixture-xai-key")
+    assert all(offer()[slug]["recommended"] for slug in _VOICE_KEYS)
+    settings["OPENAI_BASE_URL"] = "https://example.invalid/compatible"
+    openai = offer()["builtin/openai_realtime"]
+    assert openai["default_with_keys"] == {"OPENAI_API_KEY": False}
+    assert not openai["recommended"], "even with a separate compatible address the legacy field is not OpenAI"
+    settings.pop("OPENAI_COMPATIBLE_BASE_URL")
+    assert not offer()["builtin/openai_realtime"]["recommended"], "a legacy address alone is not OpenAI"
+    settings[skill_starter.STARTER_SETTING] = ["builtin/openai_realtime"]
+    assert {slug for slug, row in offer().items() if row["recommended"]} == {"builtin/openai_realtime"}
+    settings[skill_starter.STARTER_SETTING] = []
+    assert not any(row["recommended"] or "default_with_keys" in row for row in offer().values())
+    settings.pop(skill_starter.STARTER_SETTING)
+    skill_starter.write_marker(tmp_path, state="upgrade")
+    assert not any("default_with_keys" in row for row in offer().values())
+
+
+def test_first_setup_voice_presence_counts_the_effective_operator_settings(tmp_path, monkeypatch):
+    from ouroboros import config, settings_integrity
+
+    operator = {"OPENAI_API_KEY": "fixture-operator-key",
+                "OUROBOROS_SKILL_SOURCES": json.dumps([dict(_BUNDLED_SOURCE, id="distribution", managed=True)])}
+    document = {"OPENAI_COMPATIBLE_BASE_URL": "https://dedicated.example.invalid/v1"}
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([_BUNDLED_SOURCE]))
+    monkeypatch.setattr(settings_integrity, "skill_environ", lambda: operator)
+    monkeypatch.setattr(config, "load_settings", lambda: config.settings_of_document(document))
+
+    for legacy, present in [("", True), (" https://legacy.example.invalid/v1 ", False)]:
+        operator["OPENAI_BASE_URL"] = legacy
+        reply = skill_starter.starter_groups(tmp_path, repo_dir=_BODY)
+        openai = next(item for group in reply["groups"] for item in group["items"]
+                      if item["id"] == "distribution/openai_realtime")
+        assert openai["builtin"] is True
+        assert openai["default_with_keys"] == {"OPENAI_API_KEY": present}
+        assert openai["recommended"] is present
+
+
+def test_onboarding_fallback_selects_voice_after_save_once_and_keeps_an_explicit_choice(tmp_path, monkeypatch):
+    from ouroboros import config, settings_integrity
+
+    source = dict(_BUNDLED_SOURCE, id="distribution", managed=True)
+    settings = {"OPENAI_API_KEY": "fixture-openai-key"}
+    voice = {key.replace("builtin/", "distribution/", 1) for key in _VOICE_KEYS}
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([_BUNDLED_SOURCE]))
+    monkeypatch.setattr(settings_integrity, "skill_environ", lambda: {"OUROBOROS_SKILL_SOURCES": json.dumps([source])})
+    monkeypatch.setattr(config, "load_settings", lambda: config.settings_of_document(settings))
+    monkeypatch.setattr(skill_starter, "_install_one", lambda *_: {"status": "installed"})
+
+    def run(ids=None, *, where=tmp_path, origin="onboarding"):
+        return set(skill_starter.run_starter(where, ids, origin=origin, repo_dir=_BODY)["requested"])
+
+    first = run()
+    assert first & voice == {"distribution/openai_realtime"}
+    assert {"distribution/device_voice", "distribution/live_conversation"} <= first
+    skill_starter.write_marker(tmp_path, state="pending")  # an earlier first-pass choice, before a hub retry
+    settings.pop("OPENAI_API_KEY")
+    assert run() == first, "the background retry does not reopen a settled built-in checkbox"
+    assert run([], where=tmp_path / "cleared") == set()
+    assert run(["distribution/gemini_live"], where=tmp_path / "manual") == {"distribution/gemini_live"}
+    assert voice <= run(where=tmp_path / "headless", origin="first_start")
 
 
 @pytest.mark.parametrize("turn_on", [False, True])
@@ -351,3 +438,193 @@ def test_shared_test_seam_keeps_the_starter_off_unless_a_test_opts_in(tmp_path, 
     with pytest.MonkeyPatch.context() as patch, seam(marked("starter_skills"), patch):
         assert skill_starter.after_onboarding(tmp_path / "opted-in", None) == "scheduled"
         assert skill_starter.join_starters(timeout=60) and ran.is_set()
+
+
+_HUB_ROW = {"id": "ouroboros", "name": "Official", "kind": "hub", "trust": "trusted", "part": "official",
+            "confirmed": True}
+
+
+def _voice_entry(name, keys):
+    return {"name": name, "digest": f"fixture-{name}", "permissions": ["realtime_provider"], "needs_keys": keys}
+
+
+def _stub_hub_snapshots(monkeypatch, snapshots):
+    """Inert Official snapshots at the cache boundary; the built-in projection stays real."""
+    from ouroboros import skill_source_catalog
+
+    def read(drive, _row):
+        entries = snapshots.get(drive)
+        if entries is not None:
+            return {"entries": entries,
+                    "official": {e["name"]: {"digest": e["digest"], "recommended": True} for e in entries}}
+
+    real = skill_source_catalog.snapshot_for
+
+    def fake(drive, row, **kw):
+        if row["kind"] != "hub":
+            return real(drive, row, **kw)
+        snapshot = read(drive, row)
+        return snapshot, {"state": "ready" if snapshot is not None else "reading"}
+
+    monkeypatch.setattr(skill_source_catalog, "snapshot_for", fake)
+    monkeypatch.setattr(skill_source_catalog, "read_snapshot", read)
+
+
+def test_official_hub_voice_default_is_gated_by_the_hosts_own_keys_only(tmp_path, monkeypatch):
+    entries = [
+        _voice_entry("gemini_live", ["GEMINI_API_KEY"]),
+        _voice_entry("novel_voice", ["NOVEL_PROVIDER_KEY"]),
+        _voice_entry("with_optional_setting", ["GEMINI_API_KEY", "VOICE_REGION"]),
+        _voice_entry("with_two_providers", ["GEMINI_API_KEY", "XAI_API_KEY"]),
+        _voice_entry("no_declared_keys", []),
+        {"name": "calendar", "digest": "synthetic-c", "permissions": ["net"], "needs_keys": ["GEMINI_API_KEY"]},
+    ]
+    _stub_hub_snapshots(monkeypatch, {tmp_path: entries})
+
+    class FixtureSettings(dict):
+        def get(self, key, default=None):
+            assert key not in {"NOVEL_PROVIDER_KEY", "VOICE_REGION"}, "an unsupported declaration adds no settings read"
+            return super().get(key, default)
+
+    settings = FixtureSettings(GEMINI_API_KEY="fixture-gemini-key", XAI_API_KEY="fixture-xai-key")
+    monkeypatch.setattr("ouroboros.settings_integrity.skill_settings", lambda: settings)
+
+    def offer():
+        reply = skill_starter.starter_groups(tmp_path, rows=[_BUNDLED_SOURCE, _HUB_ROW], repo_dir=_BODY)
+        assert "fixture-" not in json.dumps(reply), "an offer exposes presence, not settings values"
+        return {item["id"]: item for group in reply["groups"] for item in group["items"]}
+
+    items = offer()
+    assert items["ouroboros/gemini_live"]["default_with_keys"] == {"GEMINI_API_KEY": True}
+    assert items["ouroboros/gemini_live"]["recommended"]
+    for item in entries[1:-1]:
+        row = items[f"ouroboros/{item['name']}"]
+        assert row["default_with_keys"] == {} and not row["recommended"], row
+    # The voice gate does not reach a non-voice skill even when it names a known key.
+    assert "default_with_keys" not in items["ouroboros/calendar"] and items["ouroboros/calendar"]["recommended"]
+    settings["GEMINI_API_KEY"] = ""
+    items = offer()
+    assert items["ouroboros/gemini_live"]["default_with_keys"] == {"GEMINI_API_KEY": False}
+    assert not items["ouroboros/gemini_live"]["recommended"]
+    settings[skill_starter.STARTER_SETTING] = []
+    assert not any("default_with_keys" in item for item in offer().values()), "an explicit empty choice wins"
+
+
+def test_onboarding_fallback_drops_keyless_official_hub_voice_but_headless_keeps_it(tmp_path, monkeypatch):
+    from ouroboros import settings_integrity, skill_source_catalog
+
+    snapshots = {}
+    _stub_hub_snapshots(monkeypatch, snapshots)
+    entries = [_voice_entry("openai_realtime", ["OPENAI_API_KEY"]), _voice_entry("gemini_live", ["GEMINI_API_KEY"]),
+               _voice_entry("unconfirmed_voice", ["OPENAI_API_KEY", "VOICE_REGION"]),
+               {"name": "fixture_calendar", "digest": "synthetic", "permissions": ["net"], "needs_keys": ["VOICE_REGION"]}]
+    settings = {"OUROBOROS_SKILL_SOURCES": json.dumps([_BUNDLED_SOURCE, _HUB_ROW]),
+                "OPENAI_API_KEY": "fixture-openai-key"}
+    monkeypatch.setattr(settings_integrity, "skill_settings", lambda: settings)
+    openai, gemini, unconfirmed, calendar = (f"ouroboros/{e['name']}" for e in entries)
+    attempted = []
+
+    def refresh(drive, row):
+        assert not any(item.startswith("ouroboros/") for root, item in attempted if root == drive) or drive in snapshots
+        snapshots[drive] = list(entries)  # the first actual read, not a warm offer
+
+    def install(drive, item_id, *_):
+        prior = (drive, item_id) in attempted
+        attempted.append((drive, item_id))
+        return {"status": "pending" if item_id == openai and drive == tmp_path and not prior else "installed"}
+
+    monkeypatch.setattr(skill_source_catalog, "refresh_source", refresh)
+    monkeypatch.setattr(skill_starter, "_install_one", install)
+
+    def run(root=tmp_path, origin="onboarding", ids=None):
+        return skill_starter.run_starter(root, ids, origin=origin, repo_dir=_BODY)
+
+    assert skill_source_catalog.read_snapshot(tmp_path, _HUB_ROW) is None
+    first = run()
+    assert first["state"] == "pending"
+    assert openai in first["requested"] and first["results"][openai]["status"] == "pending"
+    assert calendar in first["requested"] and not {gemini, unconfirmed}.intersection(first["requested"])
+    assert not {(tmp_path, gemini), (tmp_path, unconfirmed)}.intersection(attempted)
+
+    # Existing ticks and unticks stay when effective settings change. A freshly read Hub row still gets a decision.
+    settings.update(OPENAI_API_KEY="", GEMINI_API_KEY="fixture-gemini-key", XAI_API_KEY="fixture-xai-key")
+    entries.append(_voice_entry("grok_realtime", ["XAI_API_KEY"]))
+    second = run()
+    assert second["state"] == "done" and second["results"][openai]["status"] == "installed"
+    assert second["requested"] == [*first["requested"], "ouroboros/grok_realtime"]
+
+    headless = run(tmp_path / "headless", "first_start")
+    assert {openai, gemini, unconfirmed, calendar} <= set(headless["requested"])
+    assert run(tmp_path / "manual", ids=[unconfirmed])["requested"] == [unconfirmed]
+    settings[skill_starter.STARTER_SETTING] = [unconfirmed]
+    assert run(tmp_path / "configured")["requested"] == [unconfirmed]
+
+
+def _file_only_official_hub(root):
+    """An Official hub folder as the catalog parses it: a hosted skill whose manifest is read, and a pointer entry
+    whose manifest lies in an author repository nothing here fetches. Files only: no git, no network."""
+    from tests._skill_source_fixtures import entry, write_skill
+
+    hub = root / "hub"
+    (hub / "entries").mkdir(parents=True)
+    (hub / "hub.json").write_text(json.dumps({"schema_version": 2, "name": "Fixture", "maintainer": "m"}),
+                                  encoding="utf-8")
+    write_skill(hub / "skills", "hosted_calendar")
+    entries = {"hosted_calendar": entry("hosted_calendar", "1" * 64),
+               "author_hosted": entry("author_hosted", "2" * 64, source={
+                   "kind": "git", "repo": "https://example.invalid/author/skill", "path": "", "commit": "3" * 40})}
+    for name, value in entries.items():
+        (hub / "entries" / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
+    (hub / "official.json").write_text(json.dumps({"schema_version": 1, "maintainer": "m", "endorsements": [
+        {"name": name, "digest": value["digest"], "recommended": True} for name, value in entries.items()]}),
+        encoding="utf-8")
+    return hub
+
+
+def test_unread_pointer_manifest_is_unknown_not_non_voice_and_only_the_owner_ticks_it(tmp_path, monkeypatch):
+    """Onboarding leaves an Official release it cannot read to the owner; headless defaults and ticks are unchanged."""
+    import copy
+
+    from ouroboros import settings_integrity, skill_source_catalog as catalog, skill_source_git
+
+    hub = _file_only_official_hub(tmp_path)
+    row = {**_HUB_ROW, "url": "https://example.invalid/fixture-hub"}  # a row the settings reader accepts
+    snapshot = catalog.parse_hub_tree(hub)
+    assert not snapshot["problems"], snapshot["problems"]
+    hosted_id, pointer_id = "ouroboros/hosted_calendar", "ouroboros/author_hosted"
+
+    def items(shown):
+        return {item["name"]: item for item in catalog.items_for(row, shown)}
+
+    facts = {"type", "needs_keys", "permissions"}
+    assert items(snapshot)["hosted_calendar"]["permissions"] == [], "a read manifest that declares nothing is known"
+    assert not facts & set(items(snapshot)["author_hosted"]), "an unread one has no facts, not empty ones"
+    older = copy.deepcopy(snapshot)  # a snapshot cached before this: a pointer stored empty lists it never read
+    next(e for e in older["entries"] if e["name"] == "author_hosted").update(type="", needs_keys=[], permissions=[])
+    assert not facts & set(items(older)["author_hosted"])
+
+    def refuse(*_args, **_kwargs):
+        pytest.fail("neither the offer nor the installer's defaults fetch a release")
+
+    monkeypatch.setattr(catalog, "checkout_at_commit", refuse)
+    monkeypatch.setattr(skill_source_git, "checkout_at_commit", refuse)
+    snapshots = {}
+    _stub_hub_snapshots(monkeypatch, snapshots)
+    snapshots[tmp_path] = snapshot["entries"]
+    monkeypatch.setattr(settings_integrity, "skill_settings",
+                        lambda: {"OUROBOROS_SKILL_SOURCES": json.dumps([_BUNDLED_SOURCE, row])})
+    reply = skill_starter.starter_groups(tmp_path, rows=[_BUNDLED_SOURCE, row], repo_dir=_BODY)
+    offer = {item["id"]: item for group in reply["groups"] for item in group["items"]}
+    assert offer[hosted_id]["recommended"] and "default_with_keys" not in offer[hosted_id]
+    assert not offer[pointer_id]["recommended"] and offer[pointer_id]["default_with_keys"] == {}
+
+    monkeypatch.setattr(skill_starter, "_install_one", lambda *_args: {"status": "installed"})
+    monkeypatch.setattr(catalog, "refresh_source", lambda drive, _row, **_kw: snapshots.update({drive: snapshot["entries"]}))
+
+    def run(name, ids, origin):
+        return skill_starter.run_starter(tmp_path / name, ids, origin=origin, repo_dir=_BODY)["requested"]
+
+    wizard = run("wizard", None, "onboarding")
+    assert hosted_id in wizard and pointer_id not in wizard, "no default from facts the host does not hold"
+    assert pointer_id in run("headless", None, "first_start"), "the headless default list is unchanged"
+    assert run("manual", [pointer_id], "onboarding") == [pointer_id], "an explicit tick installs it"

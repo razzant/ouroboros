@@ -171,6 +171,39 @@ test('an address no page registers lands on the home with its last part searched
     assert.deepEqual(pages(), ['test-known']);
 });
 
+test('a confirmed profile change hands About to the successor tab once and it only reads the serving receipt', async (t) => {
+    const key = 'ouroboros.settings.return-reset-about';
+    const saved = new Map();
+    const previous = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: {
+        setItem: (name, value) => saved.set(name, value), getItem: (name) => saved.get(name) ?? null,
+        removeItem: (name) => saved.delete(name),
+    } });
+    t.after(() => previous ? Object.defineProperty(globalThis, 'sessionStorage', previous) : delete globalThis.sessionStorage);
+    const old = world(t);
+    let foreign = false;
+    const oldShell = initSettings({ ...old, ws: { on() {}, foreignProfile: () => foreign } });
+    await oldShell.open('computer/about');
+    foreign = true;
+    old.env.window.dispatchEvent({ type: 'pagehide', persisted: false });
+    foreign = false;  // the outgoing shell must not mark a later ordinary navigation
+    assert.deepEqual([...saved], [[key, '1']], 'only a navigation marker crosses the reload');
+
+    const next = world(t);
+    const path = '/example/projects/.before-reset-20260101-0123abcd';
+    next.env.routes.set('/api/reset', async (_url, init = {}) => {
+        assert.ok(!init.method || init.method === 'GET');
+        return { ok: true, json: async () => ({ status: 'complete', projects_set_aside_path: path, reset_id: '0123abcd' }) };
+    });
+    const nextShell = initSettings({ ...next, ws: { on() {} } });
+    assert.equal(await nextShell.returnResetAbout(), true);
+    await settle();
+    assert.equal(next.state.settingsPath, 'computer/about');
+    assert.equal(next.content.querySelector('[data-reset-notes-path]').textContent, path);
+    assert.equal(nextShell.returnResetAbout(), undefined);
+    assert.equal(saved.size, 0);
+});
+
 // The fixture's element, also reading a selector of two parts (`A B`, a descendant) as a browser does: Back now stands in
 // the page's header (79fac1cf4), found there as `.app-page-header [data-shell-back]` (web/modules/settings.js).
 class DescendantStub extends Stub {

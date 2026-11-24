@@ -81,9 +81,9 @@ def _schema_names(names: Iterable[str] | None) -> tuple[str, ...]:
 def select_tool_schemas(
     canonical_schemas: Sequence[Dict[str, Any]], *, context_mode: str = "max",
     schema_names: Iterable[str] | None = None,
-    unavailable_reasons: Mapping[str, str] | None = None, standing: bool = True,
+    unavailable_reasons: Mapping[str, str] | None = None, standing: bool = True, observation_slot: Any = None,
 ) -> ToolSchemaSelection:
-    """Pure selection from one permitted snapshot, retaining its canonical order.
+    """Select from one permitted snapshot in canonical order, optionally carrying host witnesses off wire.
 
     ``standing=False`` keeps only the selectors (a live call's own base: its feature names its tools)."""
     available = {schema["function"]["name"] for schema in canonical_schemas}
@@ -92,8 +92,13 @@ def select_tool_schemas(
         for name in _schema_names(schema_names)
     )
     selected = set(requested) | (NANO_RESIDENT_SCHEMA_NAMES if standing else NANO_SCHEMA_META_NAMES)
-    schemas = tuple(deepcopy(schema) for schema in canonical_schemas
-                    if context_mode != "nano" or schema["function"]["name"] in selected)
+    originals = tuple(schema for schema in canonical_schemas
+                      if context_mode != "nano" or schema["function"]["name"] in selected)
+    schemas = tuple(deepcopy(schema) for schema in originals)
+    if observation_slot is not None:
+        from ouroboros.context_assembly_trace import carry_schema_origins
+
+        carry_schema_origins(observation_slot, originals, schemas)
     reasons = unavailable_reasons or {}
     absent = tuple(name for name in requested if name not in available)
     return ToolSchemaSelection(
@@ -122,7 +127,8 @@ def initial_tool_schemas(
     on_demand = getattr(registry, "on_demand_schema_names", frozenset)()
     requested = set(_schema_names(schema_names))
     return [schema for schema in select_tool_schemas(registry.schemas(), context_mode=context_mode,
-                                                     schema_names=schema_names, standing=standing).schemas
+                                                     schema_names=schema_names, standing=standing,
+                                                     observation_slot=getattr(registry, '_ctx', None)).schemas
             if schema["function"]["name"] not in on_demand or schema["function"]["name"] in requested]
 
 

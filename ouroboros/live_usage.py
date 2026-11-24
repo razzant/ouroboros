@@ -313,6 +313,7 @@ def _settlement(quote, evidence, usage, raw_usage, status):
     normalized = {**dict(usage), "cost_evidence": evidence, "cost_basis": "litellm_modalities",
                   "cost_coverage": "complete" if cost is not None else "partial",
                   "price_source": f"litellm@{quote['fetched_at']}" if quote else "unknown"}
+    normalized.pop("_reported_token_usage", None)  # Engine usage is not the HTTP parser's receipt.
     # Compatibility counters contain text only; all modalities and their cache
     # split remain in evidence, so old readers never see audio as prompt text.
     for source, target in (("text_input_tokens", "prompt_tokens"), ("text_output_tokens", "completion_tokens")):

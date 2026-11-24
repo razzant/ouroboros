@@ -179,10 +179,10 @@ def _settlement_failure(monkeypatch, active, *, fail_unresolved):
             raise RuntimeError("ledger settlement append refused")
         return real_settle(reservation, usage, **kwargs)
 
-    def unresolved(reservation, reason):
+    def unresolved(reservation, reason, **kwargs):
         if active["paid"] and fail_unresolved:
             raise RuntimeError("ledger unresolved append refused")
-        return real_unresolved(reservation, reason)
+        return real_unresolved(reservation, reason, **kwargs)
 
     monkeypatch.setattr(ua, "settle_attempt", settle)
     monkeypatch.setattr(ua, "mark_unresolved", unresolved)

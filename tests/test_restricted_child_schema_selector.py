@@ -234,7 +234,7 @@ def test_a_cold_continuation_keeps_the_loaded_late_schema_and_a_callable_selecto
     prepared = harness.prepare(tmp_path, monkeypatch, mode="low", frozen=frozen, loaded=[chosen],
                                history=[{"role": "assistant", "tool_calls": [{"function": {"name": chosen}}]}])
     _tools, state, messages, _trace, enabled, _projections = prepared
-    state["route"]["active_model"] = OPENAI
+    harness.resume_on(monkeypatch, state, OPENAI)
     resident = harness.restore(prepared)
     assert chosen in _names(resident) and "enable_tools" in _names(resident) and len(resident) == 128
     assert cold._ctx._actor_loaded_tool_names is enabled and chosen in enabled

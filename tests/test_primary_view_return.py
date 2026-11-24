@@ -160,6 +160,7 @@ def test_a_failed_primary_row_leaves_the_acting_view(tmp_path, monkeypatch, rese
 @pytest.mark.parametrize('switch', ['unchanged', 'account', 'model'])
 def test_the_deferred_fallback_owns_its_view_and_schema_facts_only_when_it_answers(tmp_path, monkeypatch, routes, switch):
     from copy import deepcopy
+    from ouroboros.route_choice import explicit
 
     monkeypatch.setattr(config, "fallback_candidate_targets", lambda **_kw: [SimpleNamespace(model_id="reserve")])
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_: False)
@@ -220,12 +221,15 @@ def test_the_deferred_fallback_owns_its_view_and_schema_facts_only_when_it_answe
             assert (model, mode, selected) == ("primary", "max", plan)
             assert messages == original and schemas == before_schemas
             assert getattr(tools._ctx, "_route_left_out_tool_names", None) is None
+            assert getattr(tools._ctx, "route_choice", None) is None  # an unanswered Switch keeps the acting choice
         else:
             assert (model, mode) == ('roomy' if switch == 'model' else 'reserve', calls[-1])
             assert selected is tools._ctx.context_fit_plan and messages[0] == selected.projection(mode).system_message()
             assert messages[-1]["content"] == "Notice on the retried route only."
             assert tools._ctx._route_left_out_tool_names == {"ceiling_final"}
-            assert tools._ctx.route_choice['source'] == 'fallback' and tools._ctx.route_wait_on_primary is False
+            # Retry adopts the configured fallback; the card's Switch, of an account or a model, is the owner's choice.
+            assert tools._ctx.route_choice == explicit('fallback' if switch == 'unchanged' else 'wait_card')
+            assert tools._ctx.route_wait_on_primary is False
 
 
 def test_a_discarded_same_family_send_carries_the_capability_change_to_the_next_route(tmp_path, monkeypatch):

@@ -55,6 +55,21 @@ def test_strict_and_lenient_readers_share_one_parse_until_a_bind_moves_it(bound,
     assert registry.project_binding_for_task(bound, "t2")["project_id"] == "alpha"
 
 
+def test_display_bindings_place_a_card_only_by_an_exact_positive_binding(bound):
+    """The display map keeps the binding its writer stored and places nothing for any other spelling of one."""
+    path = registry._bindings_path(bound)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    kept = data["bindings"]["t1"]
+    odd = {"string-chat": {"project_chat_id": str(kept["project_chat_id"])}, "boolean-chat": {"project_chat_id": True},
+           "negative-chat": {"project_chat_id": -5}, "padded-id": {"project_id": " alpha "},
+           "number-id": {"project_id": 7}}
+    data["bindings"].update({tid: {**kept, **change, "task_id": tid} for tid, change in odd.items()})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    shown = registry.all_task_project_bindings(bound, strict=True)
+    assert set(shown) == {"t1"} and shown["t1"]["project_id"] == "alpha"
+    assert registry.all_task_bindings(bound) == {"t1": kept["project_chat_id"]}
+
+
 def test_a_failed_bind_leaves_no_trace_in_any_reader(bound, monkeypatch):
     _read_everything(bound)  # the shared parse is warm
 

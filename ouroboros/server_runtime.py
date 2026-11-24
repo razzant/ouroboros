@@ -541,3 +541,14 @@ async def ws_heartbeat_loop(
             "type": "heartbeat",
             "ts": utc_now_iso(),
         })
+
+
+def start_ws_heartbeat(
+    loop: asyncio.AbstractEventLoop,
+    bind_broadcast_loop: Callable[[asyncio.AbstractEventLoop], None],
+    has_clients_fn: Callable[[], bool],
+    broadcast_fn: Callable[[dict], Awaitable[None]],
+) -> asyncio.Task[None]:
+    """Bind thread-side broadcasts before starting this generation's heartbeat."""
+    bind_broadcast_loop(loop)
+    return asyncio.create_task(ws_heartbeat_loop(has_clients_fn, broadcast_fn), name="ws-heartbeat")

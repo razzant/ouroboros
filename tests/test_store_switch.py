@@ -96,6 +96,77 @@ def receipt(root: pathlib.Path) -> dict:
     return json.loads((root / store_switch.RECEIPT_REL).read_text(encoding="utf-8"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX exchanges the Project lock with a directory")
+@pytest.mark.parametrize("deferred", [False, True], ids=["direct-rollback", "deferred-update"])
+def test_switch_hands_the_registry_to_the_previous_file_writer(tmp_path, monkeypatch, deferred):
+    from ouroboros import platform_layer, project_registry_recovery as recovery, projects_registry as projects
+
+    root = tmp_path / "data"
+    room = projects.create_project(root, "room", name="Before handoff")
+    path, witness = recovery.registry_path(root), recovery.witness_path(root)
+    lock, partner = path.with_suffix(".json.lock"), path.with_name(".projects.registry-writer")
+    saved = path.read_bytes()
+    recovery.rename_exclusive(lock, partner, exchange=True)  # the on-disk layout left by a stopped writer
+    os.utime(partner)  # a private file may still have a fresh timestamp
+
+    target = "a" * 40
+    needs = dict(facts=False, money=False, handles=False, dialogue=False, threads=deferred)
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *_: needs)
+    monkeypatch.setattr(store_switch, "lacks_wake_chain_reader", lambda *_: False)
+    monkeypatch.setattr(store_switch, "rev_parse", lambda *_: target)
+
+    def previous_writer(*_):
+        assert lock.is_file() and partner.is_dir()
+        assert path.read_bytes() == witness.read_bytes() == saved
+        fd = platform_layer.acquire_exclusive_file_lock(lock, timeout_sec=0)
+        assert fd is not None
+        try:
+            data = json.loads(path.read_bytes())
+            assert data["_schema_version"] == 2 and data["projects"][0]["chat_id"] == room["chat_id"]
+            data["projects"][0]["name"] = "After handoff"
+            atomic_write_json(path, data)
+            witness.touch()
+        finally:
+            platform_layer.release_exclusive_file_lock(lock, fd)
+        return True, "saved"
+
+    door = "update_replace" if deferred else "ui_rollback"
+    ok, _, pending = store_switch.switch_or_reset(root, tmp_path, target_sha=target, target_ref="older",
+                                                  reason="test", door=door, reset=previous_writer)
+    assert ok and pending is deferred
+    if deferred:
+        assert lock.is_dir()  # recording intent never converts a writer's name
+        report = store_switch.run_switch_seam(root, repo_dir=tmp_path, owner=previous_writer)
+        assert report["status"] == "switched"
+    assert projects.get_project(root, "room")["name"] == "After handoff"
+    assert not lock.exists() and recovery._released_proof(path) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX writer gate")
+def test_project_handoff_preserves_a_held_exchange(tmp_path):
+    from ouroboros import project_registry_recovery as recovery, projects_registry as projects
+
+    projects.create_project(tmp_path, "room")
+    path = recovery.registry_path(tmp_path)
+    lock, partner = path.with_suffix(".json.lock"), path.with_name(".projects.registry-writer")
+    with recovery.writer_lock(path):
+        held, private = lock.stat(), partner.stat()
+        assert "TimeoutError" in store_switch._hand_off_stores(tmp_path)
+        assert os.path.samestat(held, lock.stat()) and os.path.samestat(private, partner.stat())
+    assert store_switch._hand_off_stores(tmp_path) == ""
+    assert lock.is_file() and recovery._released_proof(path)
+
+
+def test_project_handoff_leaves_an_unrecognized_directory_in_place(tmp_path):
+    lock = tmp_path / "state/projects.json.lock"
+    lock.mkdir(parents=True)
+    retained = lock / "retained.txt"
+    retained.write_bytes(b"keep")
+    assert store_switch._hand_off_stores(tmp_path)
+    assert retained.read_bytes() == b"keep"
+    assert not lock.with_name(".projects.registry-writer").exists()
+
+
 # ---- intent, needs, pin --------------------------------------------------------------
 
 def test_the_intent_is_write_once_and_typed(tmp_path):

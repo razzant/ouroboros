@@ -105,9 +105,11 @@ def register(api):
                                    initial_tools=INITIAL_TOOLS)
     api.register_route("config", settings, methods=["GET", "POST"])
     api.register_settings_section("conversation", title="Calls (beta)", schema={"components": [
-        {"type": "markdown", "text": "The call skills are on by default. To talk, turn on Calls (beta), choose an engine "
-         "and add its API key in Settings → Accounts and keys, under the keys the skills request. Gemini and OpenAI do not "
-         "serve Russia or Belarus."},
+        {"type": "markdown", "text": "Calls (beta) are off by default. If an engine is missing, search for its provider "
+         "(Gemini, Grok or OpenAI) in Extensions → Browse and install its voice skill. Enable it in Extensions → Skills, "
+         "allowing the skill's requested keys and permissions if auto-grant is off. Add the matching API key in Settings "
+         "→ Accounts and keys. Then choose the engine here and turn on Calls (beta). "
+         "Gemini Live and OpenAI Realtime are not available in Russia or Belarus."},
         {"type": "form", "route": "config", "method": "POST", "fields": [
             {"name": "enabled", "type": "checkbox", "label": "Calls (beta)", "default": False},
             {"name": "provider", "type": "select", "label": "Engine", "default": DEFAULTS["provider"], "options": []},

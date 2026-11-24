@@ -82,7 +82,8 @@ class ProcessingNotStarted(RuntimeError):
     def __init__(self, error: BaseException, *, reason: str):
         super().__init__(str(error))
         self.processing_reason = reason
-        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error"):
+        for name in ("body", "code", "type", "status_code", "response", "stream_usage", "response_body_error",
+                     "_chat_usage_receipt"):
             if hasattr(error, name):
                 setattr(self, name, getattr(error, name))
 

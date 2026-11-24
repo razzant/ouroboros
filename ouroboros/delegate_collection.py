@@ -280,8 +280,7 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
     if fd is None:  # only contention is another collector; any other refusal keeps the platform's cause
         return ({"status": "pending", "reason": "collection_in_progress"} if held.get("reason") == "contention"
                 else {"status": "pending", "reason": "collection_lock_unavailable", "lock_outcome": dict(held)})
-    capture = None
-    transient = False
+    capture, accepted, transient = None, False, False
     retention = {}
     errors = []
     owned_gateway = None
@@ -291,16 +290,17 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             return {"status": "unavailable", "reason": "custody_missing"}
         if entry.named_evidence:
             saved_named_evidence(root, entry)  # addressed validation; never called by tick
-        due = allow_review or collection_due(entry, generation=generation, recapture=recapture)
+        prepared = delegate_capture_job.ready_result_owed(entry)
+        due = allow_review or (output_retry and prepared) or collection_due(entry, generation=generation, recapture=recapture)
         if not due and not (output_retry and (output_owed(entry) or not entry.settled)):
             return {"status": "pending" if collection_pending(entry) else "collected",
-                    "workspace_capture": capture_projection(root, entry), "errors": []}
+                    "workspace_capture": capture_projection(root, entry, reader_task_id=staging_task_id), "errors": []}
         output_attempt = entry.collection_attempt.get("output") or {}
         retry_output = output_owed(entry) and (output_retry or recapture or not output_attempt
             or output_attempt.get("terminal_sha") != entry.terminal_source.get("sha256")
             or (output_attempt.get("retry") == "transient" and output_attempt.get("generation") != generation))
         if (gateway is None and gateway_factory is not None
-                and (retry_output or (not background and capture_required(entry)))):
+                and (retry_output or (not background and not prepared and capture_required(entry)))):
             try:  # the run's own engine (``execution_domain``), else the caller's discovery
                 owned_gateway = gateway = run_gateway(entry, gateway_factory)
             except Exception:
@@ -347,7 +347,7 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
         if (due and entry is not None and not (stopped is not None and stopped())
                 and not disposition_refusal(root, entry)):
             try:
-                if background and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
+                if (background or prepared) and (entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory") \
                         and not is_in_place_run(entry):  # an in-place run's capture is its fixed projection
                     capture = delegate_capture_job.request_or_result(root, entry, generation=generation, recapture=retry_capture)
                     if capture.get("status") != "pending":
@@ -361,7 +361,10 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
                 errors.append(f"capture:{type(exc).__name__}")
                 transient |= failure_retry(exc) == "transient" or (capture or {}).get("retry") == "transient"
                 _collection_failure(entry, "capture", exc, failures)
+                if capture and capture.get("status") in delegate_capture_job.READY:
+                    capture = capture_projection(root, current.run(root, run_id) or entry, reader_task_id=staging_task_id)
             else:
+                accepted = True
                 if failures is not None:
                     failures.pop("capture", None)
         entry = current.run(root, run_id)
@@ -369,7 +372,7 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             closing = stopped is not None and stopped()
             # Named evidence and evidence-only cleanup come AFTER full output
             # retention. Mutating results remain the author's decision.
-            if not closing and capture and entry.output_complete and entry.output_source:
+            if not closing and accepted and capture and entry.output_complete and entry.output_source:
                 try:
                     capture = retain_run_evidence(root, entry, capture, gateway, recapture=retry_capture,
                                                   named=(capture.get("named_evidence") or {}) if background else None)
@@ -449,7 +452,9 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
     A Git run's saved named-evidence summary rides along, so saved-result and
     retry-successor delivery keep its status and reader. A Git or skill run's recorded
     decision rides with its disposer; an engine directory keeps its own block."""
+    from ouroboros.delegate_capture_job import READY, manifest_recorded, ordinary_git
     from ouroboros.delegate_directory import in_place_block
+    from ouroboros.tools.delegate_integration import capture_receipt_unwritten
 
     if is_in_place_run(entry):
         return in_place_block(entry)
@@ -458,7 +463,8 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
         return None
     cap_dir = c.delegated_capture_dir(root, entry.task_id, entry.run_id if directory else c.capture_key(entry))
     try:
-        manifest = json.loads((cap_dir / "workspace_patch.json").read_text(encoding="utf-8"))
+        raw = (cap_dir / "workspace_patch.json").read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
         if not isinstance(manifest, dict):  # well-formed JSON that is no manifest reads as unreadable
             raise ValueError("a capture manifest is a JSON object")
     except (OSError, ValueError) as exc:
@@ -473,22 +479,37 @@ def capture_projection(root, entry, *, reader_task_id="") -> dict | None:
         return {"status": "pending", "note": "Body capture is still owed; no patch was applied. integrate_delegated_patch "
                 "prepares a finished run's capture itself and returns it for inspection first.",
                 "patch_disposition": entry.patch_disposed or "pending"}
-    other_reader = bool(reader_task_id and reader_task_id != entry.task_id)
     if directory:
         from ouroboros.delegate_directory import directory_capture_block
         block = directory_capture_block(root, entry, manifest)
     else:
         from ouroboros.tools.delegate_integration import _capture_block
         block = _capture_block(entry, cap_dir, manifest)
-        summary, named = saved_named_evidence(root, entry)
-        if named:  # another task reads it by absolute artifact path, as the patch and manifest below
-            block["named_evidence"] = ({**named, "summary_read": {"root": "artifact_store", "path": str(summary)}}
-                                       if other_reader and named.get("summary_read") else named)
-    if other_reader:
-        for kind in ("patch", "manifest"):
-            if block.get(f"{kind}_read") and block.get(f"{kind}_artifact"):
-                block[f"{kind}_read"] = {"root": "artifact_store", "path": block[f"{kind}_artifact"]}
+        _summary, named = saved_named_evidence(root, entry)
+        if named:
+            block["named_evidence"] = named
+    if ordinary_git(entry) and block["status"] in READY and not manifest_recorded(entry, raw):
+        block = capture_receipt_unwritten(block)
+    block = capture_readers(block, entry, reader_task_id)
     return block if directory else _decided(entry, block)
+
+
+def capture_readers(block, entry, task_id):
+    """Another admitted reader (retry successor, orphan) gets the starter's exact capture files by absolute
+    artifact path, even before publication: the patch, the manifest and the named-evidence summary. Only a
+    summary the starter's own capture folder holds is addressed; the reader still validates every path."""
+    if not block or not task_id or task_id == entry.task_id:
+        return block
+    shown = {**block, **{f"{kind}_read": {"root": "artifact_store", "path": block[f"{kind}_artifact"]}
+                         for kind in ("patch", "manifest") if block.get(f"{kind}_read") and block.get(f"{kind}_artifact")}}
+    named, home = block.get("named_evidence"), pathlib.Path(str(block.get("manifest_artifact") or "")).parent
+    relative = pathlib.PurePosixPath(str(((named or {}).get("summary_read") or {}).get("path") or ""))
+    if (isinstance(named, dict) and block.get("manifest_artifact") and len(relative.parts) == 4
+            and relative.parts[:2] == ("delegated_runs", home.name) and relative.name == "summary.json"
+            and relative.parts[2].startswith("evidence")):
+        shown["named_evidence"] = {**named, "summary_read": {
+            "root": "artifact_store", "path": str(home / relative.parts[2] / "summary.json")}}
+    return shown
 
 
 _RUNTIMES: dict[str, "BodyRuntime"] = {}

@@ -135,10 +135,11 @@ def test_a_registry_that_vouches_for_no_room_leaves_the_map_and_its_revision_sta
     assert torn["task_bindings_revision"] == "" and torn["task_bindings_unchanged"] is False
 
 
-def test_the_registry_witness_alone_moves_the_publication_stamp(read_state):
-    """A registry lost beside its commit witness is an unknown room set; with the witness gone too it is a fresh
-    install's empty one. The publication's stamp follows the witness, so a held answer never outlives it."""
+def test_removing_the_witness_moves_the_stamp_but_a_surviving_binding_keeps_rooms_unknown(read_state):
     root, read = read_state
+    healthy = read()
+    assert [row["id"] for row in healthy["projects"]] == ["alpha"]
+    assert healthy["project_listable_count"] == 1 and healthy["project_chat_ids"]
     (root / "state" / "projects.json").unlink()
     lost = registry.bindings_revision(root)
     assert lost and registry.bindings_revision(root) == lost and read()["project_chat_ids"] is None
@@ -146,7 +147,9 @@ def test_the_registry_witness_alone_moves_the_publication_stamp(read_state):
     assert registry.bindings_revision(root) == lost, "a touched witness is no new production"
     (root / "state" / "projects.json.committed").unlink()
     assert registry.bindings_revision(root) not in ("", lost), "the witness's removal is a new production"
-    assert read()["project_chat_ids"] == []
+    unknown = read(healthy["task_bindings_revision"])
+    assert (unknown["projects"], unknown["project_listable_count"], unknown["project_chat_ids"]) == ([], None, None)
+    assert unknown["task_bindings_unchanged"] is True, "the surviving binding still has the same wire address"
 
 
 def test_a_store_changed_within_a_clock_tick_names_the_map_it_sent(read_state, monkeypatch):

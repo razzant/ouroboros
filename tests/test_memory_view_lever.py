@@ -101,6 +101,169 @@ def test_a_selection_declares_whether_the_story_it_shows_is_whole():
         assert block['text'][declared['chars']:] == story and (story == mv.render_story(snap)) is whole, address
 
 
+def _host_section_fixture(tmp_path, monkeypatch):
+    """One captured input; only external sources are doubled. Also replayed at dd7de5d3."""
+    from ouroboros import context, context_sections
+    from ouroboros.context_runtime_facts import snapshot_labelled
+    from ouroboros.memory import Memory
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, compose_book, load_reference_book
+    from ouroboros.section_floor import HostSection, capture_sections, labelled_section
+    from tests import _nano_context_fixture as shape
+    from tests._memory_view_synthetic import conversation
+
+    workpad = tmp_path / 'workpad.md'
+    workpad.write_text('Working notes', encoding='utf-8')
+    monkeypatch.setattr('ouroboros.project_facts.project_workpad_path', lambda *_: workpad)
+    monkeypatch.setattr('ouroboros.tools.project_journal.journal_tail_digest', lambda *_: 'One milestone')
+    monkeypatch.setattr(context_sections, '_shared_understanding',
+                        lambda *_: (HostSection('shared_understanding', 'Shared'), None))
+    monkeypatch.setattr(context_sections, 'knowledge_navigation_sections', lambda *_a, **_kw: [
+        HostSection('knowledge_index', 'Global knowledge'), HostSection('project_knowledge_index', 'Project knowledge')])
+    heads = context_sections.build_knowledge_sections(SimpleNamespace(drive_path=lambda name: tmp_path / name),
+                                                      project_id='fixture')
+    now = '2026-11-22T10:20:00+00:00'
+    rows = {
+        'progress.jsonl': {'text': 'Read a synthetic notebook'},
+        'tools.jsonl': {'tool': 'read_file', 'args': {'path': 'tides.md'}, 'status': 'ok', 'result_preview': 'Table'},
+        'events.jsonl': {'type': 'fixture_milestone'},
+    }
+    memory = Memory(drive_root=tmp_path)
+    monkeypatch.setattr(memory, 'read_task_recent', lambda name, task, _limit: (
+        [{'ts': now, **rows[name]}], dict(task_id=task, shown=1, matched=1, live_size=1, live_window=1)))
+    recent = context.build_recent_sections(memory, None, 'inspect-fixture')
+    recent = [labelled_section(part, lambda text: snapshot_labelled(text, now)) for part in recent]
+
+    # Keep source references portable. Their real full/operative forms are inputs to this replay.
+    monkeypatch.setattr('ouroboros.review_state.make_repo_key', lambda *_a, **_kw: 'fixture-checkout')
+    runtime, pool, continuity, roster, skills = shape.host_sections(tmp_path, monkeypatch)
+    stable = [roster, pool, HostSection('identity', '## Identity\n\nSynthetic operator.'),
+              context._world_section('# World\n\n## Devices\n\nSynthetic observatory.\n'),
+              HostSection('always_on_skills', '## Always-in-context skills\n\nSynthetic chart skill.'),
+              '## My human\'s standing rules\n\nKeep the synthetic log.']
+    dynamic = ['## Health Invariants\n\nNo synthetic warning.',
+               '## Review seat activity\n\nOne synthetic answer.', '## Review records\n\nOne synthetic review.',
+               HostSection('scratchpad', '## Scratchpad\n\nVerify the next tide.'),
+               HostSection('registry', '## Memory Registry\n\nTide notebook.', '## Memory Registry\n\nTides'),
+               skills, HostSection('drive_state', '## Drive state\n\nOne fixture generation.'), runtime,
+               '## Task Contract Discipline\n\nOne local comparison.', continuity, *recent]
+    books = []
+    for name, entry in BOOK_ENTRYPOINTS.items():
+        chapter = f'{name}/fixture.md'
+        docs = {entry: f'# {name.title()}\n\nFixture book.\n\n## Chapters\n\n- [Fixture]({chapter})\n',
+                f'docs/{chapter}': f'# Fixture\n\nIntroduction to {name}.\n\n## Detail\n\nThe full {name} example.\n'}
+        books.append(load_reference_book(tmp_path, name, lambda path: docs[path].encode('utf-8')))
+    inputs = {book.book_id + '_md': compose_book(book) for book in books}
+    seed, snap = plan()
+    snap = replace(snap, conversations=[conversation(0, words=2)])
+    return replace(seed.core, reference_books=tuple(books), docs_need_development=True, **inputs,
+                   semi_stable_text='\n\n'.join(stable), semi_stable_sections=capture_sections(stable, prefix='stable'),
+                   dynamic_head_text='\n\n'.join(heads), dynamic_head_sections=capture_sections(heads, prefix='head'),
+                   dynamic_text='\n\n'.join(dynamic), dynamic_sections=capture_sections(dynamic, prefix='dynamic'),
+                   memory_view_json=mv.snapshot_json(snap),
+                   connections=('## Connections\n\nFull fixture index.', '## Connections\n\nFixture outline.'))
+
+
+def _host_section_observation(core, mode, folded, tmp_path, monkeypatch):
+    from ouroboros import capability_evidence as ce, context_fit as cf
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.tools.compact_context import get_tools
+
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
+    schemas = [{'type': 'function', 'function': get_tools()[0].schema}]
+    p = cf.build_context_fit_plan(None, core, {'id': 'inspect-fixture'}, preferred_mode=mode,
+        route_resolver=lambda *_a, **_kw: ({'provider': 'test', 'model': 'fixture'},
+            ce.CapabilityEvidence(1_000_000, 'confirmed', 'metadata', 'fixture-route')), tool_schemas=schemas)
+    if folded:
+        p = floor.select_view(p, mode, ['F5:page-000'])
+    ctx = SimpleNamespace(context_fit_plan=p, active_context_mode=mode)
+    messages = p.messages_for(mode)
+    record_context_view(ctx, messages, schemas, fit_measurement={})
+    inspect = _compact_context(ctx, inspect=True)
+    tool_rows = [
+        {'role': 'assistant', 'tool_calls': [{'id': 'call_inspect', 'type': 'function',
+          'function': {'name': 'compact_context', 'arguments': '{"inspect":true}'}}]},
+        {'role': 'tool', 'tool_call_id': 'call_inspect', 'content': inspect},
+    ]
+    wire = json.dumps({'messages': project_wire_messages(messages), 'tools': schemas},
+                      ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    next_wire = json.dumps({'messages': project_wire_messages([*messages, *tool_rows]), 'tools': schemas},
+                           ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return p, inspect, wire, next_wire
+
+
+@pytest.mark.parametrize('mode', ['max', 'low', 'nano'])
+@pytest.mark.parametrize('folded', [False, True], ids=['whole', 'folded'])
+def test_compact_context_inspect_keeps_base_governance_addresses(mode, folded, tmp_path, monkeypatch):
+    from ouroboros import context_sections, section_floor
+
+    core = _host_section_fixture(tmp_path, monkeypatch)
+    p, inspect, wire, next_wire = _host_section_observation(core, mode, folded, tmp_path, monkeypatch)
+    seen = json.loads(inspect)
+    assert seen['memory_view_status'] == 'observed_snapshot' and 'next_offset' not in seen
+    host = [row for row in seen['units'] if row['kind'] == 'host']
+    books = ['governance_2'] if mode == 'max' else ['architecture_map', 'development_map']
+    expected_ids = [
+        'subagents', 'review_pool', 'identity', 'world', 'always_on_skills', 'stable_5',
+        'shared_understanding', 'knowledge_index', 'project_knowledge_index', 'head_3', 'head_4',
+        'dynamic_0', 'dynamic_1', 'dynamic_2', 'scratchpad', 'registry', 'installed_skills', 'drive_state',
+        'runtime', 'dynamic_8', 'review_continuity', 'dynamic_10', 'dynamic_11', 'dynamic_12',
+        'governance_0', 'governance_1', *books, 'governance_3' if mode == 'max' else 'governance_4',
+    ]
+    protected = {'identity', 'scratchpad', 'shared_understanding'}
+    assert [(row['view_address'], row['section_id'], row['protected']) for row in host] == [
+        ('host:' + key, key, key in protected) for key in expected_ids]
+
+    local_families = {group['family'] for row in p.projection(mode).assembly_witnesses for group in row['groups']}
+    assert {'system', 'bible', 'architecture', 'development', 'project_journal', 'project_workpad', 'connections',
+            'recent_progress', 'recent_tools', 'recent_events', 'story'} <= local_families
+    assert (b'The full development example.' in wire) is (mode == 'max')
+    assert (b'Page 0.' in wire) is (not folded)
+
+    # No report labels in the pre-observer representation. If a producer introduces a public ID
+    # instead, the literal inventory above detects it even if this byte comparison happened to agree.
+    with monkeypatch.context() as plain:
+        plain.setattr(section_floor, 'report_text', lambda text, _family: text)
+        plain.setattr(context_sections, 'report_text', section_floor.report_text)
+        historical, old_inspect, old_wire, old_next_wire = _host_section_observation(
+            _host_section_fixture(tmp_path, plain), mode, folded, tmp_path, plain)
+    assert (p.core_sha256, inspect, wire, next_wire) == (historical.core_sha256, old_inspect, old_wire, old_next_wire)
+
+
+def test_story_fold_rebinds_witness_to_the_selected_render(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from ouroboros import capability_evidence as ce, context_fit as cf
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+
+    p, snap = plan()
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: tmp_path)
+    monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *_a, **_kw: 1.0)
+    p = cf.build_context_fit_plan(None, p.core, {'id': 'witness-fixture'}, preferred_mode='max',
+        route_resolver=lambda *_a, **_kw: ({'provider': 'test', 'model': 'fixture'},
+            ce.CapabilityEvidence(1_000_000, 'confirmed', 'metadata', 'fixture-route')), tool_schemas=[])
+
+    def story_witness(projection, expected_form):
+        witness, group = next((item, part) for item in projection.assembly_witnesses for part in item['groups']
+                              if part['family'] == 'story')
+        block = json.loads(projection.system_content_json)[witness['block']]
+        text = block['text']
+        assert group['form'] == expected_form
+        assert block[SHARED_HEAD_KEY]['story_whole'] is (expected_form == 'whole_view')
+        assert witness['carrier_sha256'] == sha256(text.encode()).hexdigest()
+        level = floor.kept_level(snap, projection.memory_facts)
+        assert text[group['start']:group['start'] + group['chars']] == mv.render_story(snap, level)
+        return group['chars']
+
+    before = story_witness(p.max_projection, 'whole_view')
+    ctx = SimpleNamespace(context_fit_plan=p, active_context_mode='max')
+    messages = p.messages_for('max')
+    record_context_view(ctx, messages, [])
+    assert 'requested' in _compact_context(ctx, view_address=['F5:page-000'])
+    _run_round_compaction(messages, _context(tmp_path, ctx, [], monkeypatch))
+    assert ctx._context_view_receipt['status'] == 'applied'
+    assert story_witness(ctx.context_fit_plan.max_projection, 'shorter') < before
+
+
 def test_a_selection_keeps_what_the_starts_request_took_with_no_memory():
     """3A: Low's missed target at the start names what the request took with no memory (``floor.no_memory_tokens``),
     the start's fact. A selection the mind makes keeps it, so the mode chooser can warn while later sends still miss

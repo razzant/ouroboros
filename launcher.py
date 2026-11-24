@@ -35,6 +35,7 @@ def _rehome_legacy_handoff() -> None:
             "rehome_legacy_handoff"](args)
 
 
+_reset_legacy_input = bool(os.environ.get("OUROBOROS_LAUNCHER_HANDOFF"))
 if __name__ == "__main__":
     _rehome_legacy_handoff()
 
@@ -69,9 +70,10 @@ from ouroboros.launcher_bootstrap import (
     install_deps,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
-    automatic_launch_allowed,
+    automatic_launch_allowed, launch_settings, apply_launcher_bind,
     sync_existing_repo_from_bundle,
 )
+from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
 from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
 from ouroboros.launcher_onboarding import (
@@ -456,18 +458,13 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> Optional[subprocess.Popen]:
     global _agent_proc, _agent_job, _agent_start
     # Stdlib-only; import before spawning so broken server imports cannot leave its pipe undrained.
     from ouroboros.process_logging import copy_capped_output
+    from ouroboros.settings_integrity import skill_settings
 
-    settings = _load_settings()
-    _apply_settings_to_env(settings)
+    settings, protection = launch_settings(DATA_DIR, SETTINGS_PATH, lambda: skill_settings(_load_settings),
+                                           _apply_settings_to_env, attest_password=not _reset_legacy_input)
     env = embedded_python_env(DATA_DIR, host_environment() if IS_LINUX else os.environ.copy())
     env["PYTHONPATH"] = str(REPO_DIR)
-    # Environment owns the bind host (config.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV).
-    # Merged settings include the unauthored 127.0.0.1 default: setdefault supplies
-    # it only when absent, preserving the operator override the export exclusion protects.
-    saved_host = str(settings.get("OUROBOROS_SERVER_HOST") or "").strip()
-    host_source = "environment" if str(env.get("OUROBOROS_SERVER_HOST") or "").strip() else "settings"
-    if saved_host:
-        env.setdefault("OUROBOROS_SERVER_HOST", saved_host)
+    host_source = apply_launcher_bind(env, settings, protection)
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env["OUROBOROS_DATA_DIR"] = str(DATA_DIR)
     env["OUROBOROS_REPO_DIR"] = str(REPO_DIR)
@@ -873,8 +870,7 @@ def _await_server_ready(port: int, abort_event=None, lifecycle_thread=None) -> t
     return False, _generation_port or port
 
 
-def _load_settings() -> dict:
-    return load_settings()
+_load_settings = load_settings
 
 
 def _save_settings(changes: dict) -> None:
@@ -1352,7 +1348,8 @@ def main(argv=()):
     if _shutdown_event.is_set():
         return
 
-    # Decide setup here; present only after the gateway serves. Lock/Git/bootstrap precede the server.
+    if not _reset_legacy_input:  # before the first projection, including onboarding
+        os.environ.setdefault(PROJECTED_SETTINGS_ENV, "{}")
     onboarding_settings, onboarding_required = _prepare_first_run_settings()
     if _shutdown_event.is_set():
         return

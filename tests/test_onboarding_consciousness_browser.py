@@ -47,11 +47,13 @@ OFFLINE = {
 }
 MOCK_MODEL = "openai-compatible::mock-model"
 STEP = "[data-consciousness-step]"
-LIMITS = ("Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not "
-          "change itself. Up to $15.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own "
-          "tasks at once.")
-# The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A); the meaning leads as its copy.
-STEP_TEXT = f"Off {FIRST_RUN['off']} On {FIRST_RUN['on']} {LIMITS} {FIRST_RUN['door']}"
+LIMITS = ("While it's on Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It "
+          "does not change itself. Up to $15.00 a day in recorded spending. Subscription quota is separate. At most 2 of "
+          "its own tasks at once.")
+# The step's words are the host's (consciousness_view.first_run_words, owner 15.11, 5A): its question leads as its copy,
+# and each position says what it does while the owner is away.
+STEP_TEXT = (f"Off {FIRST_RUN['off']} {FIRST_RUN['offAway']} On {FIRST_RUN['on']} {FIRST_RUN['onAway']} {LIMITS} "
+             f"{FIRST_RUN['door']}")
 
 
 def _provider(llm_url: str) -> dict:
@@ -277,7 +279,7 @@ def test_a_first_setup_is_born_on_with_no_command_and_main_holds_no_system_row(s
             page.goto(srv.url + "/onboarding", wait_until="networkidle", timeout=60_000)
             _fresh_accounts_and_models(page, srv.llm_url)
             assert page.locator(".step-title").inner_text() == "Consciousness"
-            assert _text(page, ".step-copy") == FIRST_RUN["meaning"]
+            assert _text(page, ".step-copy") == FIRST_RUN["lead"]
             assert _text(page, STEP) == STEP_TEXT
             assert page.locator('[data-consciousness-choice="on"]').get_attribute("aria-pressed") == "true"
             page.screenshot(path=str(out / "first-setup-consciousness-step-webkit-light.png"), full_page=True)

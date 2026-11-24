@@ -203,3 +203,96 @@ def test_a_clarification_reaches_the_turn_answering_my_human_with_one_reply_or_o
                 shutil.copytree(root / "logs", evidence / "logs", dirs_exist_ok=True)
             (evidence / "facts.json").write_text(json.dumps(facts, indent=2, default=str), encoding="utf-8")
     assert server.proc.poll() is not None
+
+
+def test_finished_main_turn_waits_for_a_model_title_before_it_becomes_a_project(wait_clone, tmp_path):
+    from threading import Event
+
+    from playwright.sync_api import expect, sync_playwright
+
+    original = "Plot the northern streams and label the reservoir."
+    answer = "The reservoir is marked in the sketch."
+    title = "Northern stream map"
+    accept_title = Event()
+
+    class NamingStub(ScriptedStubModel):
+        def _answer(self, body, seq):
+            if any(message_text(item).startswith("Name this project from the owner's request")
+                   for item in body.get("messages", [])):
+                return "naming", {"role": "assistant", "content": title if accept_title.is_set() else '""'}
+            return super()._answer(body, seq)
+
+    evidence = producer_evidence_dir(tmp_path / "evidence", "project-model-title",
+                                     env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    facts = {"original": original, "title": title}
+    with NamingStub([{"tool": "read_file", "arguments": {"root": "system_repo", "path": "VERSION"}}],
+                    final_answer=answer) as stub:
+        root = tmp_path / "instance" / "data"
+        root.mkdir(parents=True)
+        settings = root / "settings.json"
+        write_settings_file(settings, keyless_settings(stub, OUROBOROS_MAX_WORKERS=1))
+        server = KeylessIsolatedServer(wait_clone, root, settings)
+        oracle = ArtifactOracle(root)
+        server.start(ready_timeout=90)
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch()
+                try:
+                    page = browser.new_page(viewport={"width": 1100, "height": 750}, reduced_motion="reduce")
+                    page.goto(server.base_url, wait_until="domcontentloaded")
+                    _send(page, original)
+                    expect(_bubble(page, answer)).to_be_visible(timeout=70_000)
+                    card = page.locator('#chat-messages .chat-live-card[data-task-id]').last
+                    tid = card.get_attribute("data-task-id")
+                    result = wait_durable_result(oracle, tid, timeout=45)
+                    assert result["status"] == "completed" and result.get("origin_message_ref")
+                    assert result.get("origin_message_text") == original
+                    assert wait_until(lambda: tid not in _turn_ids(oracle), 30)
+                    assert wait_until(lambda: "naming" in stub.kinds(), 30)  # await the separate first-work title
+                    facts["task_id"] = tid
+                    page.reload(wait_until="domcontentloaded")
+                    card = page.locator(f'#chat-messages .chat-live-card[data-task-id="{tid}"]')
+                    button = card.locator('[data-turn-into-project]')
+                    before = stub.kinds().count("naming")
+                    facts["before_clicks"] = before
+                    with page.expect_response(lambda response: response.url.endswith("/api/projects/from-task")) as refused:
+                        button.click()
+                    assert refused.value.status == 409
+                    assert refused.value.json()["reason_code"] == "project_name_unavailable"
+                    expect(page.get_by_text("The naming model gave no title, so the work stayed in Main. "
+                                            "Press Turn into project to try again.", exact=True)).to_be_visible()
+                    expect(button).to_be_enabled()
+                    assert not page.request.get(f"{server.base_url}/api/projects").json()["projects"]
+                    assert stub.kinds().count("naming") == before + 1
+                    page.screenshot(path=str(evidence / "refused.png"), full_page=True, animations="disabled")
+
+                    accept_title.set()
+                    page.get_by_role("button", name="Dismiss notice").click()
+                    with page.expect_response(lambda response: response.url.endswith("/api/projects/from-task")) as created:
+                        button.click()
+                    assert created.value.status == 200
+                    project = created.value.json()["project"]
+                    assert project["name"] == title and stub.kinds().count("naming") == before + 2
+                    expect(card.locator(".chat-live-project-name")).to_have_text(title)
+                    assert len(page.request.get(f"{server.base_url}/api/projects").json()["projects"]) == 1
+                    for cid in (1, project["chat_id"]):
+                        messages = page.request.get(f"{server.base_url}/api/chat/history?chat_id={cid}").json()["messages"]
+                        assert sum(row.get("role") == "user" and row.get("text") == original for row in messages) == 1
+                    sent = [data for kind, data in stub.calls if kind == "naming"]
+                    assert all(original in message_text(row["messages"][-1]) for row in sent[-2:])
+                    page.reload(wait_until="domcontentloaded")
+                    expect(card.locator(".chat-live-project-name")).to_have_text(title)
+                    phase = card.locator("[data-live-phase]")
+                    expect(phase).to_have_text("Done", timeout=30_000)
+                    expect(phase).to_be_visible()
+                    facts["reloaded_phase"] = phase.inner_text()
+                    assert stub.kinds().count("naming") == before + 2
+                    page.screenshot(path=str(evidence / "converted.png"), full_page=True, animations="disabled")
+                    facts["passed"] = True
+                finally:
+                    browser.close()
+        finally:
+            server.stop()
+            facts["model_calls"] = stub.kinds()
+            (evidence / "facts.json").write_text(json.dumps(facts, indent=2), encoding="utf-8")
+    assert server.proc.poll() is not None

@@ -291,6 +291,272 @@ def test_clean_eof_after_finish_still_returns_received_answer(isolated):
     assert ledger_rows(isolated)[0]["cost_usd"] == 0.25
 
 
+@pytest.mark.parametrize("start_usage, delta_usage, expected", [
+    pytest.param(None, None, None, id="omitted"),
+    pytest.param({}, None, {}, id="empty-start"),
+    pytest.param(None, {}, {}, id="empty-delta"),
+    pytest.param({"input_tokens": 7}, {"output_tokens": 0},
+                 {"input_tokens": 7, "completion_tokens": 0}, id="merged-counters"),
+])
+def test_completed_anthropic_stream_keeps_missing_usage_distinct_from_empty(
+        isolated, start_usage, delta_usage, expected):
+    message = {"id": "msg-native", "type": "message", "role": "assistant", "content": [], "total_cost_usd": 0.25}
+    delta = {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+    for body, usage in ((message, start_usage), (delta, delta_usage)):
+        if usage is not None:
+            body["usage"] = usage
+    frames = [{"type": "message_start", "message": message}, delta, {"type": "message_stop"}]
+    wire = Wire([("data: " + json.dumps(frame_data) + "\n\n").encode() for frame_data in frames])
+    request = ua.AttemptRequest(model="anthropic::fixture", provider="anthropic", reservation_usd=2.0,
+                                drive_root=isolated)
+    ua.execute_physical_attempt(request, lambda: consume_stream(wire, native=True))
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    if expected is None:
+        assert "provider_token_receipt" not in row
+    else:
+        assert row["provider_token_receipt"] == expected
+
+
+NATIVE_COUNTERS = {"input_tokens": 9, "cache_read_input_tokens": 0, "output_tokens": 1}
+NATIVE_ERROR = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+NATIVE_DELTA = {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}
+
+
+def native_start(usage=None, *, price=None):
+    message = {"id": "msg-native", "type": "message", "role": "assistant", "content": []}
+    if usage is not None:
+        message["usage"] = usage
+    if price is not None:
+        message["total_cost_usd"] = price  # the envelope's own price, never a usage object
+    return {"type": "message_start", "message": message}
+
+
+def native_wire(events, **ending):
+    return Wire([("data: " + json.dumps(event) + "\n\n").encode() for event in events], **ending)
+
+
+def send_native(isolated, wire):
+    """One native Messages send through the physical-attempt owner that must fail: its error and ledger row."""
+    request = ua.AttemptRequest(model="anthropic::fixture", provider="anthropic", reservation_usd=2.0,
+                                drive_root=isolated)
+    with pytest.raises(Exception) as caught:
+        ua.execute_physical_attempt(request, lambda: consume_stream(wire, native=True))
+    row, = ledger_rows(isolated)
+    return caught.value, row
+
+
+@pytest.mark.parametrize("ending", ["socket", "eof", "error-frame"])
+@pytest.mark.parametrize("price", [None, 0.25], ids=["unpriced", "envelope-price"])
+@pytest.mark.parametrize("usage, expected", [
+    pytest.param(None, None, id="no-usage-object"),
+    pytest.param({}, {}, id="empty-usage-object"),
+    pytest.param({"input_tokens": 9}, {"input_tokens": 9}, id="cache-read-unreported"),
+    pytest.param(NATIVE_COUNTERS, {"input_tokens": 9, "cached_tokens": 0, "completion_tokens": 1},
+                 id="cache-read-reported-zero"),
+])
+def test_interrupted_native_stream_reports_observed_counters_apart_from_price(isolated, usage, expected, price, ending):
+    """The receipt holds what the wire's actual usage objects said, with or without a price: a reported zero is a
+    count, an unreported counter stays unknown, an empty usage object differs from none at all, and an envelope price
+    alone invents no usage. The attempt's money is what it was before the receipt existed."""
+    from ouroboros.context_attempt_reader import read_attempt
+
+    events = [native_start(usage, price=price), *([NATIVE_ERROR] if ending == "error-frame" else [])]
+    wire = native_wire(events, read_error=RuntimeError("synthetic read interrupted") if ending == "socket" else None)
+    error, row = send_native(isolated, wire)
+    if price is None:  # message_start's counters are a lower bound: they never become money
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None and not row.get("cost_final")
+        assert getattr(error, "stream_usage", None) is None
+        assert all(row.get(key) is None for key in ("prompt_tokens", "completion_tokens", "cached_tokens"))
+    else:
+        assert row["state"] == "settled" and row["cost_usd"] == price and row["cost_final"] is True
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    for exported in (row, facts):
+        assert ("provider_token_receipt" in exported) is (expected is not None)
+        if expected is not None:
+            assert exported["provider_token_receipt"] == expected
+
+
+def test_interrupted_native_receipt_keeps_the_latest_counter_of_each_frame_beside_the_price(isolated):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    delta = {**NATIVE_DELTA, "usage": {"output_tokens": 9, "cost": 0.4}}
+    _, row = send_native(isolated, native_wire([native_start(NATIVE_COUNTERS), delta],
+                                               read_error=RuntimeError("synthetic read interrupted")))
+    assert row["state"] == "settled" and row["cost_usd"] == 0.4 and row["cost_final"] is True
+    expected = {"input_tokens": 9, "cached_tokens": 0, "completion_tokens": 9}
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("start_usage, nested, envelope, priced, expected", [
+    pytest.param(None, None, {"input_tokens": 13, "cache_read_input_tokens": 0}, True,
+                 {"input_tokens": 13, "cached_tokens": 0}, id="envelope-usage-with-price"),
+    pytest.param(None, None, {"input_tokens": 13, "cache_read_input_tokens": 0}, False,
+                 {"input_tokens": 13, "cached_tokens": 0}, id="envelope-usage-unpriced"),
+    pytest.param(None, {"input_tokens": 5, "cache_read_input_tokens": 3, "output_tokens": 2},
+                 {"input_tokens": 13, "cache_read_input_tokens": 0}, True,
+                 {"input_tokens": 13, "cached_tokens": 0, "completion_tokens": 2}, id="error-detail-then-envelope"),
+    pytest.param(NATIVE_COUNTERS, None, {"input_tokens": 13}, True,
+                 {"input_tokens": 13, "cached_tokens": 0, "completion_tokens": 1}, id="later-than-message-start"),
+])
+def test_native_error_frame_usage_reaches_the_receipt_in_wire_order(isolated, start_usage, nested, envelope, priced,
+                                                                    expected):
+    """An error frame's own usage is an observed usage object like any other (as in Chat): the error's detail first,
+    the frame's own object over it, both after earlier frames. Its price is settled apart from the receipt."""
+    from ouroboros.context_attempt_reader import read_attempt
+
+    error_frame = {**NATIVE_ERROR, "usage": {**envelope, **({"cost": 0.25} if priced else {})}}
+    if nested is not None:
+        error_frame["error"] = {**NATIVE_ERROR["error"], "usage": nested}
+    _, row = send_native(isolated, native_wire([native_start(start_usage), error_frame]))
+    if priced:
+        assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    else:
+        assert row["state"] == "unresolved" and row.get("cost_usd") is None and not row.get("cost_final")
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+def test_native_close_failure_after_terminal_keeps_the_price_and_invents_no_usage(isolated):
+    events = [native_start(price=0.25), NATIVE_DELTA, {"type": "message_stop"}]
+    _, row = send_native(isolated, native_wire(events, close_error=RuntimeError("synthetic close failure")))
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    assert "provider_token_receipt" not in row
+
+
+@pytest.mark.parametrize("usage, expected", [
+    pytest.param(None, None, id="no-usage-object"),
+    pytest.param({}, {}, id="empty-usage-object"),
+    pytest.param(NATIVE_COUNTERS, {"input_tokens": 9, "cached_tokens": 0, "completion_tokens": 1}, id="counters"),
+])
+def test_completed_native_reply_parked_unresolved_keeps_what_the_wire_said(isolated, monkeypatch, usage, expected):
+    """A reply that arrived whole but could not be settled is parked unresolved; its receipt is what it was."""
+    from ouroboros.context_attempt_reader import read_attempt
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("synthetic settlement failure")
+
+    monkeypatch.setattr(ua, "settle_attempt", refuse)
+    wire = native_wire([native_start(usage, price=0.25), NATIVE_DELTA, {"type": "message_stop"}])
+    request = ua.AttemptRequest(model="anthropic::fixture", provider="anthropic", reservation_usd=2.0,
+                                drive_root=isolated)
+    assert ua.execute_physical_attempt(request, lambda: consume_stream(wire, native=True)).model_dump()["content"] == []
+    row, = ledger_rows(isolated)
+    assert row["state"] == "unresolved" and row.get("cost_usd") is None
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    for exported in (row, facts):
+        assert ("provider_token_receipt" in exported) is (expected is not None)
+        if expected is not None:
+            assert exported["provider_token_receipt"] == expected
+
+
+def test_native_receipt_belongs_to_its_own_attempt():
+    from ouroboros.llm_stream import AnthropicAccumulator
+
+    accumulator = AnthropicAccumulator(attempt_id="attempt-a")
+    start = native_start({"input_tokens": 9, "cache_read_input_tokens": 0})
+    accumulator.accept(start["type"], json.dumps(start))
+    assert accumulator.token_receipt.for_attempt("attempt-a") == {"input_tokens": 9, "cached_tokens": 0}
+    assert accumulator.token_receipt.for_attempt("attempt-b") is None
+    assert AnthropicAccumulator().token_receipt.counts is None  # an older caller names no attempt and saw no usage
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_interrupted_openrouter_receipt_keeps_latest_counters_separate_from_price(isolated, asynchronous):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    failure = RuntimeError("synthetic read interrupted")
+    chunks = [frame(usage={"cost": 0.25, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}}),
+              frame(usage={"prompt_tokens": 7, "completion_tokens": 5}),
+              frame(usage={"cached_tokens": 0})]
+    with pytest.raises(RuntimeError) as caught:
+        run_driver(Wire(chunks, read_error=failure), asynchronous=asynchronous)
+    assert caught.value is failure
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    expected = {"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}
+    assert {key: row[key] for key in expected} == expected
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("close_fails", [False, True], ids=["completed", "close-failed"])
+def test_chat_receipt_resolves_aliases_per_frame_after_done(isolated, asynchronous, close_fails):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    wire = Wire([
+        frame(usage={"cost": 0.25, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}}),
+        frame(usage={"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}),
+        frame(usage={"cached_tokens": False, "cache_write_tokens": 2**53}, finish="stop"),
+        b"data: [DONE]\n\n",
+    ], close_error=RuntimeError("synthetic close failure") if close_fails else None)
+    if close_fails:
+        with pytest.raises(RuntimeError, match="synthetic close failure"):
+            run_driver(wire, asynchronous=asynchronous)
+    else:
+        result = run_driver(wire, asynchronous=asynchronous)
+        assert "_chat_usage_receipt" not in result.model_dump()
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_final"] is True and row["cost_usd"] == 0.25
+    assert row["cached_tokens"] == 1  # Neither normalization nor the price uses the independent receipt.
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    expected = {"prompt_tokens": 7, "completion_tokens": 5, "cached_tokens": 0}
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_chat_error_frame_receipt_orders_its_detail_before_the_frames_own_object(isolated, asynchronous):
+    """The order the native error frame shares (``ChatUsageReceipt.observe_frame``): the error's own usage first,
+    the frame's own object over it, and only the counters the frame leaves unsaid stay from the detail."""
+    from ouroboros.context_attempt_reader import read_attempt
+    from ouroboros.llm_stream import ProviderStreamError
+
+    detail = {"prompt_tokens": 5, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 3}}
+    error_frame = ("data: " + json.dumps({"id": "gen-fixture", "usage": {"cost": 0.25, "prompt_tokens": 7, "cached_tokens": 0},
+                                          "error": {"code": 400, "message": "synthetic refusal", "usage": detail}})
+                   + "\n\n").encode()
+    with pytest.raises(ProviderStreamError):
+        run_driver(Wire([error_frame]), asynchronous=asynchronous)
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_usd"] == 0.25 and row["cost_final"] is True
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    expected = {"prompt_tokens": 7, "completion_tokens": 2, "cached_tokens": 0}
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("witnessed", [False, True], ids=["absent-usage", "explicit-empty-usage"])
+def test_chat_price_only_envelope_never_synthesizes_a_usage_receipt(isolated, asynchronous, witnessed):
+    wire = Wire([b'data: {"total_cost_usd": 0.25}\n\n', frame(usage={} if witnessed else None)],
+                read_error=RuntimeError("synthetic read interrupted"))
+    with pytest.raises(RuntimeError, match="synthetic read interrupted"):
+        run_driver(wire, asynchronous=asynchronous)
+    row, = ledger_rows(isolated)
+    assert row["state"] == "settled" and row["cost_final"] is True and row["cost_usd"] == 0.25
+    assert ("provider_token_receipt" in row) is witnessed
+    if witnessed:
+        assert row["provider_token_receipt"] == {}
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_unpriced_chat_interruption_reads_observed_counters_on_the_same_attempt(isolated, asynchronous):
+    from ouroboros.context_attempt_reader import read_attempt
+
+    error = RuntimeError("synthetic read interrupted before any price")
+    wire = Wire([frame(usage={"prompt_tokens_details": {"cached_tokens": 1}}), frame(usage={"cached_tokens": 0})],
+                read_error=error)
+    with pytest.raises(RuntimeError) as caught:
+        run_driver(wire, asynchronous=asynchronous)
+    assert caught.value is error and getattr(error, "stream_usage", None) is None
+    row, = ledger_rows(isolated)
+    assert row["attempt_id"] == error.stream_receipt["attempt_id"]
+    assert row["state"] == "unresolved" and row.get("cost_usd") is None and not row.get("cost_final")
+    facts, _ = read_attempt(isolated, "money-task", row["attempt_id"], report_facts=True)
+    assert row["provider_token_receipt"] == facts["provider_token_receipt"] == {"cached_tokens": 0}
+
+
 @pytest.mark.parametrize(("usage", "asynchronous"), [
     pytest.param({"prompt_tokens": 2}, False, id='usage0-False'),
     pytest.param({"cost": 0.125, "prompt_tokens": 2}, True, id='usage1-True'),

@@ -504,7 +504,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     border-radius: var(--radius-inner);
     font-size: var(--type-body);
     font-family: inherit;
-    text-align: left;
+    text-align: start;
     position: relative;
 }
 
@@ -561,7 +561,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex: 0 0 auto;
     min-height: 56px;
     gap: var(--space-3);
-    padding: var(--space-2) calc(var(--nav-kebab-w) + var(--space-1) + 1px) var(--space-2) var(--space-2);
+    padding-block: var(--space-2);
+    padding-inline: var(--space-2) calc(var(--nav-kebab-w) + var(--space-1) + 1px);
     border-radius: var(--radius-object);
     --nav-ouro-fill: var(--voice-ouroboros);  /* the card's fill, named once: the picture's dot is ringed in it */
     background: var(--nav-ouro-fill);
@@ -636,7 +637,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
 }
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
-.nav-ouro-line1 > .unread-badge { order: 2; margin-right: var(--space-1); }
+.nav-ouro-line1 > .unread-badge { order: 2; margin-inline-end: var(--space-1); }
 .nav-ouro-line1 > .nav-mark-slot {
     order: 3;
     flex: 0 0 18px;
@@ -9372,7 +9373,7 @@ html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-bloc
     overflow-wrap: anywhere;
 }
 
-/* A Project row's item: the row and, over its end, its ⋯ (and its Pin over the time); no glyph and no stripe. A
+/* A Project row's item: the row and, over its end, its ⋯ (and its Pin beside or over the time); no stripe. A
    deleting item keeps the grid that gives `Deleting…` its column. */
 .nav-project-item {
     display: grid;
@@ -9385,7 +9386,7 @@ html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-bloc
 }
 
 /* Pinned Projects lead the same list: the first row shown after them keeps one step of air, the way the sidebar's
-   zones part. No caption, tint, rule or column and no glyph at rest, so nothing reads as one more Project (DESIGN
+   zones part. No caption, tint, rule or column; a pinned row keeps its quiet pin glyph beside its time (DESIGN
    "Shell"). */
 .nav-project-item[data-after-pins] {
     margin-top: var(--space-2);
@@ -9403,7 +9404,8 @@ html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-bloc
     gap: 2px;
     height: 48px;
     min-height: 48px;
-    padding: 6px calc(var(--nav-kebab-w) + var(--space-1)) 6px var(--space-3);
+    padding-block: 6px;
+    padding-inline: var(--space-3) calc(var(--nav-kebab-w) + var(--space-1));
     border-radius: var(--radius-object);
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -9413,7 +9415,7 @@ html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-bloc
 .nav-project-item:not(.is-deleting) > .nav-project-kebab {
     position: absolute;
     top: 50%;
-    right: 2px;
+    inset-inline-end: 2px;
     transform: translateY(-50%);
 }
 .nav-project-row.active ~ .nav-project-kebab { color: var(--tone-crimson-ink); }
@@ -9471,6 +9473,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     min-height: 16px;
     transform: translateX(-1px);
 }
+[dir="rtl"] .nav-project-line2 > .nav-mark-slot { transform: translateX(1px); }
 /* A row with nothing to say under its name keeps its lines where every row has them: the name and the time on the
    first, the mark on the second line's end (absolute, below), so a one-line name never drops the time onto the mark. */
 .nav-project-row[data-solo] { justify-content: flex-start; }
@@ -9484,7 +9487,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 .nav-project-row[data-solo] .nav-project-line2 {
     position: absolute;
-    right: calc(var(--nav-kebab-w) + var(--space-1));
+    inset-inline-end: calc(var(--nav-kebab-w) + var(--space-1));
     bottom: 6px;
     width: 18px;
 }
@@ -9514,7 +9517,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 
 .nav-project-deleting-status {
     justify-self: end;
-    padding-right: 3px;
+    padding-inline-end: 3px;
     color: var(--text-meta);
     font-size: var(--type-meta);
     white-space: nowrap;
@@ -9602,7 +9605,9 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 @media (hover: hover) {
     .nav-project-kebab { opacity: 0; }
     .nav-project-item:hover .nav-project-kebab,
-    .nav-project-item:focus-within .nav-project-kebab {
+    .nav-project-pin:focus-visible ~ .nav-project-kebab,
+    .nav-project-row:focus-visible ~ .nav-project-kebab,
+    .nav-project-kebab:focus-visible {
         opacity: 1;
     }
     .nav-project-kebab:hover {
@@ -9624,53 +9629,117 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     outline-offset: -2px;
 }
 
-/* A row's Pin or Unpin: the ⋯'s quiet control over the time on the name's line, in no column of its own. It is drawn
-   while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger (no hover)
-   presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
-   the row keeps its hover under it (the rows' hover rule). */
+/* A row's Pin or Unpin: the ⋯'s quiet control on the name's line, in no column of its own. On an unpinned row it is
+   drawn over the time only while a pointer hovers the row or the keyboard is on it. On a pinned row the same point
+   holds the quiet pin glyph at rest beside the shifted time (never moving), and swaps to the slashed Unpin glyph only
+   while a pointer hovers the Pin button itself or keyboard focus is on it; hovering the row keeps the resting pin and
+   time while drawing ⋯. On a primary fine hovering pointer that visible pinned button is hit-testable at rest so
+   entering it directly in one move swaps to Unpin immediately (a hybrid finger still opens the row in projects_nav.js);
+   on touch a pinned row's glyph stays mark-only (never a pointer target, even after keyboard focus) so a finger opens
+   the row and a long press opens the menu with Unpin. Over the chosen row it takes the row's ink, and the row keeps
+   its hover under it (the rows' hover rule). */
 .nav-project-pin {
-    /* The time gives way to it while it is drawn. */
+    /* Box [W-56, W-30] clear of ⋯ (inset-inline-end: 2px, width: 28px -> 30px); 2px start padding keeps the 16px glyph
+       centred at W-42, 3px clear of a pinned row's shifted time, whose last 3px (to W-53) lie over the box's start and
+       stay the row's (below). */
     position: absolute;
     z-index: 1;  /* over the row, which follows it */
     top: 3px;
-    right: calc(var(--nav-kebab-w) + var(--space-1) + 1px - 5px);
-    width: var(--nav-control-h);
+    inset-inline-end: calc(var(--nav-kebab-w) + 2px);
+    width: calc(var(--nav-control-h) - 2px);
     height: 24px;
+    padding-inline-start: 2px;
     opacity: 0;
     pointer-events: none;
 }
+.nav-project-pin[data-action="unpin"] > svg:first-child { display: var(--pin-rest, block); }
+.nav-project-pin[data-action="unpin"] > svg:last-child { display: var(--pin-act, none); }
+/* A pinned row's resting glyph stays visible; base keeps it mark-only (`pointer-events: none` outranks `:focus-visible`,
+   so coarse touch stays mark-only even after keyboard focus; Enter/Space never need pointer-events). */
+.nav-project-item[data-pinned] > .nav-project-pin {
+    opacity: 1;
+    pointer-events: none;
+}
+.nav-project-item[data-pinned]:not(.is-deleting) {
+    --pin-shift: calc(16px + var(--space-1));
+}
+/* Its time stands over the Pin's box (the item's own stack): a press on its last letter opens the room, never Unpin. */
+.nav-project-item[data-pinned]:not(.is-deleting) .nav-project-time {
+    margin-inline-end: var(--pin-shift);
+    position: relative;
+    z-index: 2;
+}
+/* What a drawn Pin needs of its row's time: the Pin's width past the row's end padding and the line's gap, less what a
+   pinned row's time already keeps. While the Pin is drawn (the keyboard, or a hovering pointer below) the time keeps at
+   least that, so no letter of the name lies behind the glyph or the keyboard's ring; a time already that wide changes
+   nothing, and at rest every time keeps its own width. */
+.nav-project-item {
+    --pin-room: calc(var(--nav-control-h) - var(--space-1) - var(--space-2) - var(--pin-shift, 0px));
+}
 .nav-project-pin:focus-visible {
+    --pin-rest: none;
+    --pin-act: block;
     opacity: 1;
     pointer-events: auto;
     color: var(--text-primary);
 }
-.nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time { visibility: hidden; }
+.nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time { visibility: hidden; min-inline-size: var(--pin-room); }
 @media (hover: hover) {
-    .nav-project-item:hover .nav-project-time { visibility: hidden; }
+    .nav-project-item:not([data-pinned]):hover .nav-project-time { visibility: hidden; }
+    .nav-project-item:not([data-pinned]):not(.is-deleting):hover .nav-project-time { min-inline-size: var(--pin-room); }
 }
-/* The row's mark gives way while the row's controls are drawn, as its time does: its moving dots never stand beside
-   the ⋯ as a second three-dot glyph, and a focused Pin's ring never lies on it. Its words stay in the row's name. The
-   ⋯ is drawn with a pointer's hover or the keyboard anywhere in the row, on touch while it is focused or its menu open
-   (below), over the row's end, where the time gives way to it as to the Pin; the Pin while it has the keyboard. */
+/* The row's mark gives way while the row's controls are drawn: its moving dots never stand beside the ⋯ as a second
+   three-dot glyph, and a focused Pin's ring never lies on it. Its words stay in the row's name. A pinned row's time
+   and resting glyph stay under a hovering pointer. The ⋯ is drawn with a pointer's hover or the keyboard anywhere in
+   the row, on touch only while it is focused or the menu it opened is open (below; a long press opens the menu at the
+   finger and leaves the row's end as it is), where the time and pinned glyph give way to it; the Pin hides the time and
+   mark while it has the keyboard. */
 .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot { visibility: hidden; }
 @media (hover: hover) {
-    .nav-project-item:is(:hover, :focus-within) .nav-mark-slot { visibility: hidden; }
+    .nav-project-item:hover .nav-mark-slot,
+    .nav-project-row:focus-visible .nav-mark-slot { visibility: hidden; }
+    .nav-project-row:has(~ .nav-project-kebab:focus-visible) {
+        --nav-row-mark: hidden;
+    }
+    .nav-project-row .nav-mark-slot { visibility: var(--nav-row-mark, visible); }
 }
 @media (pointer: coarse) {
-    /* The row asks of the ⋯ after it (:has() stays in its own compound) and its end reads the answer. */
+    /* Touch keeps the 44px centred focus target flush to the row's end; only pinned rows park their resting glyph at the text edge. */
+    .nav-project-pin {
+        inset-inline-end: 0;
+        width: var(--nav-control-h);
+        padding-inline-start: 0;
+    }
+    .nav-project-item[data-pinned] > .nav-project-pin {
+        justify-content: flex-end;
+        padding-inline-end: calc(var(--space-1) + 1px);
+    }
+    /* The row and its Pin ask of the ⋯ after them (:has() stays in its own compound) so its end gives way to ⋯. */
     .nav-project-row:has(~ .nav-project-kebab:is([data-focused], [aria-expanded="true"])) {
         --nav-row-end: hidden;
     }
     .nav-project-row :is(.nav-mark-slot, .nav-project-time) { visibility: var(--nav-row-end, visible); }
+    .nav-project-pin:has(~ .nav-project-kebab:is([data-focused], [aria-expanded="true"])) { visibility: hidden; }
 }
-.nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
 @media (hover: hover) {
     .nav-project-item:hover > .nav-project-pin {
         opacity: 1;
         pointer-events: auto;
     }
-    .nav-project-pin:hover { color: var(--text-primary); }
+    .nav-project-pin:hover {
+        --pin-rest: none;
+        --pin-act: block;
+        color: var(--text-primary);
+    }
 }
+@media (hover: hover) and (pointer: fine) {
+    /* On a primary fine pointer the already-visible pinned button is hit-tested at rest, so entering it directly in
+       one move evaluates :hover immediately (coarse keeps base pointer-events: none). */
+    .nav-project-item[data-pinned] > .nav-project-pin {
+        pointer-events: auto;
+    }
+}
+.nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
 
 /* Touch: a long press opens the row's menu, so the ⋯ takes no room and no finger, and the row's words are not a
    selection or a callout under the held finger. The ⋯ stays in the tab order: focused (the keyboard, or assistive
@@ -11256,6 +11325,27 @@ html[data-layout="stack"] .project-panel {
         padding: calc(var(--space-3) + var(--inset-top)) var(--space-3) calc(var(--space-4) + var(--inset-bottom));
     }
 }
+
+/* Saved messages while the project list can't be read (room_archive.js): the reader's chrome over plain words under
+   their speakers, one reading measure; rooms are the reader's view choice, its chosen one the views' wash. Nothing in
+   it is a control of the conversation: no row actions, no composer. */
+.room-archive-column { max-width: var(--document-reader-measure); margin: 0 auto; }
+.room-archive-rooms { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.room-archive-room { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-archive-room[aria-pressed="true"] { color: var(--tone-crimson-soft-ink); background: var(--tone-crimson-soft); }
+.room-archive-note { margin-block: var(--space-2) 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.room-archive-note[hidden], .room-archive-edge[hidden], .room-archive-status[hidden] { display: none; }
+.room-archive-edge { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding-block: var(--space-4) var(--space-2); }
+.room-archive-edge .room-archive-note { margin: 0; text-align: center; }
+.room-archive-feed { display: grid; gap: var(--space-4); margin-block: var(--space-3); padding: 0; list-style: none; }
+.room-archive-speaker { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.room-archive-text { color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-archive-row.is-system .room-archive-text { color: var(--text-secondary); font-size: var(--type-body); }
+.room-archive-files { margin-top: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.room-archive-status { display: grid; justify-items: start; gap: var(--space-2); margin-block: var(--space-3); color: var(--text-meta); }
+.room-archive-status p { margin: 0; }
+.room-archive-status [hidden] { display: none; }
+.room-archive-limit { margin-block: var(--space-3); }
 
 /* Share (message_share.js, DESIGN "Replies"): the reader's chrome around exactly what would leave, as tall as that
    and no taller; on a phone the reader's full sheet with the ways out at its foot. */

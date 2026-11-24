@@ -26,9 +26,14 @@ _ROW_SQL = (f"SELECT {usage_store.TASK_PAGE_COLUMNS}, {usage_store.ATTEMPT_ROW} 
 # short facts at most), its file trace (the seal's one entry) and its sizes.
 _PAGE_GAP_FACTS = ("task_id", "attempt_id", "ledger_state", "provider_body", "transport_observation", "model",
                    "provider", "ts_reserved", "ts_dispatched", "ts_final", "settle_reason", "failure", "file_trace",
-                   "sha256", "redacted_ref")
+                   "sha256", "redacted_ref", "context_fit", "authored_prefix", "ledger_usage", "provider_token_receipt",
+                   "assembly_source_map", "prepared_inventory", "late_contributions")
 _FACT_CHARS = 200  # a failure's fact is a type or code: a longer one is free text, never carried
 _CMD_PLAIN = re.compile(r"[A-Za-z0-9_.:\\/+-]+")  # what cmd.exe and the Windows argument parser pass on unquoted
+_FIT_WORDS = ("preferred_mode", "rendered_mode", "mode_cause", "measurement_basis")
+_FIT_COUNTS = ("target_total_tokens", "capacity_total_tokens", "response_reserve_tokens", "no_memory_tokens")
+_FIT_FLAGS = ("context_target_miss", "automatic_pass_used", "window_witness_bound")
+_USAGE_COUNTS = ("prompt_tokens", "cached_tokens", "cache_write_tokens", "completion_tokens")
 
 
 class _RecordTooLarge(Exception):
@@ -97,6 +102,34 @@ def _recorded_life(row: dict, lifecycle: dict) -> dict:
     return {"transport_observation": _transport_observation(row), **facts, **({"failure": failure} if failure else {})}
 
 
+def _small_facts(source: dict, words=(), counts=(), flags=()) -> dict:
+    facts = {key: value for key in words if isinstance(value := source.get(key), str) and 0 < len(value) <= _FACT_CHARS}
+    facts.update({key: value for key in counts if type(value := source.get(key)) is int and value >= 0})
+    facts.update({key: value for key in flags if type(value := source.get(key)) is bool})
+    return facts
+
+
+def _assembly_facts(row: dict) -> dict:
+    """Attempt-local observations, not a reconstruction from the current settings or retained body.
+
+    The allowlist excludes route/account fingerprints, raw provider data and application paths. Prefix is the
+    logical comparison in the task's host slot, not a byte comparison or a provider cache verdict.
+    """
+    usage = _small_facts(row, counts=_USAGE_COUNTS)
+    facts = {"ledger_usage": usage} if usage else {}
+    if isinstance(receipt := row.get("provider_token_receipt"), dict):
+        facts["provider_token_receipt"] = _small_facts(receipt, counts=(*_USAGE_COUNTS, "input_tokens"))
+    if isinstance(context := row.get("physical_context"), dict):
+        fit = _small_facts(context, _FIT_WORDS, _FIT_COUNTS, _FIT_FLAGS)
+        if fit:
+            facts["context_fit"] = fit
+        if isinstance(prefix := context.get("prefix"), dict):
+            prefix_facts = _small_facts(prefix, ("departs", "block"), ("index", "of"))
+            if prefix_facts:
+                facts["authored_prefix"] = prefix_facts
+    return facts
+
+
 def _portable(ref: dict, root: Path) -> dict:
     """A blob ref a report may carry: its path relative to the data root, else none, so no folder of this computer
     travels with a report; its sha256, size, kind and encoding still name the record."""
@@ -128,6 +161,7 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
                 "provider_body": "not_observed", "file_trace": "not_recorded", "body": "not_one_attempt"}, None
     if report_facts:
         facts.update(_recorded_life(row, dict(life)))
+        facts.update(_assembly_facts(row))
     ref = row.get("candidate_manifest_ref")
     if not isinstance(ref, dict) or not ref:
         # A row written from usage reported once the work was under way (a live conversation's) never had a request
@@ -155,6 +189,12 @@ def read_attempt(root: Path, task_id: str, attempt_id: str, *, max_bytes: int | 
                 != (digest, size, basis)):
             raise ValueError("Attempt and model send seal differ")
         facts["file_trace"] = manifest.get("file_trace", "not_recorded")
+        if isinstance(layout := manifest.get('assembly_source_map'), list):
+            facts['assembly_source_map'] = layout
+        if isinstance(inventory := manifest.get('prepared_inventory'), dict):
+            facts['prepared_inventory'] = inventory
+        if isinstance(contributions := manifest.get('late_contributions'), dict):
+            facts['late_contributions'] = contributions
         projection = manifest.get("redacted_projection_ref")
         if not isinstance(projection, dict) or not projection:
             return {**facts, "body": "not_recorded"}, None

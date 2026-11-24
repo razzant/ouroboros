@@ -21,10 +21,11 @@
  * portal's successor's frames, so that successor's census row is its whole present there.
  */
 import { apiClient, fetchTaskDetailStrict } from './api_client.js';
+import { tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { isTerminalTaskDetail, normalizeLogTs, taskPresentation } from './log_events.js';
 import { censusTaskFacts, liveCardLabel, syncParkedPhase } from './task_phase_chip.js';
-import { boundActivityPreview, projectIdFromTask, refitCollapsedActivity, renderCollapsedActivity, taskCostProjection } from './chat_activity.js';
+import { boundActivityPreview, refitCollapsedActivity, renderCollapsedActivity, taskCostProjection } from './chat_activity.js';
 import { DURABLE_RECEIPTS, receiptNotice } from './project_handoff.js';
 import { nameProjectReference, projectReference } from './project_reference.js';
 import { admittedSuccessor } from './task_episodes.js';
@@ -307,6 +308,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     /** One door for every binding source; true when the DOM changed. */
     function bind(record, project = {}) {
         if (!isMain || !record || record.isSubagent || !project?.id) return false;
+        delete record.root.dataset.projectCreating;
         const fresh = !isPortal(record);
         if (record.root.dataset.projectId !== project.id) {
             if (!fresh) {
@@ -526,12 +528,16 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         });
     }
 
+    // The typed refusals that leave the work in Main. Their one sentence is the server's 409 `error`
+    // (``project_placement.NAMING_REFUSALS``), shown as written; this card only picks its translation key.
+    const NAMING_REFUSALS = new Set(['project_name_source_unavailable', 'project_name_unavailable',
+        'continuation_pending', 'continuation_family_too_long']);
+
     // Conversion keeps the card: the same node becomes the work's portal (status, latest line, meta,
     // its controls and the Project reference), so the work never disappears from Main. The timeline
     // lives in the room from now on; the task keeps running and keeps its Stop.
     function converted(record, { project, handoff_receipt }) {
         return onDomWrite(() => {
-            delete record.root.dataset.projectCreating;
             const changed = bind(record, project || {});
             // A binding whose Main receipt is not durable keeps its visible gap mark (the toast says why).
             if (handoff_receipt && !DURABLE_RECEIPTS.has(handoff_receipt)) record.root.dataset.receipt = handoff_receipt;
@@ -550,9 +556,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         const btn = record.turnProjectBtn;
         if (btn) { btn.disabled = true; btn.textContent = liveCardLabel.creatingProject(); }
         try {
-            // One-click convert (owner P1): no name prompt, no extra LLM call. The SERVER names the
-            // project and adopts the project the task's owner message already has.
-            const payload = await apiClient.projectFromTask(taskId, projectIdFromTask(taskId), '');
+            // The server owns the destination id, reuses a proven title or tries Light once; task controls stay independent.
+            const payload = await apiClient.projectFromTask(taskId);
             const project = payload?.project;
             if (!project?.id || payload?.binding?.project_id !== project.id) {
                 throw new Error('Project binding response is unconfirmed; check the Project list before retrying.');
@@ -563,9 +568,19 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             const notice = receiptNotice(payload.handoff_receipt);
             if (notice) showToast(notice, 'warn');
         } catch (exc) {
-            showToast(`Project conversion not confirmed: ${exc.message || exc}`, 'error');
+            if (isPortal(record)) return; // A concurrent reply may already have bound the card.
+            const reason = exc?.body?.reason_code;
+            const detail = NAMING_REFUSALS.has(reason)
+                ? tr(`task.card.project_refused.${reason}`, exc.message)
+                : `Project conversion not confirmed: ${exc.message || exc}`;
+            showToast(detail, 'error', { dismissLabel: tr('toast.dismiss', 'Dismiss notice') });
+        } finally {
             delete record.root.dataset.projectCreating;
-            if (btn) { btn.disabled = false; btn.textContent = liveCardLabel.turnIntoProject(); }
+            const current = record.turnProjectBtn;
+            if (!isPortal(record) && current) {
+                current.disabled = false;
+                current.textContent = liveCardLabel.turnIntoProject();
+            }
         }
     }
 
@@ -583,7 +598,8 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         btn.type = 'button';
         btn.className = 'btn btn-sm btn-default ui-hit-area';
         btn.dataset.turnIntoProject = '1';
-        btn.textContent = liveCardLabel.turnIntoProject();
+        btn.disabled = record.root.dataset.projectCreating === '1';
+        btn.textContent = btn.disabled ? liveCardLabel.creatingProject() : liveCardLabel.turnIntoProject();
         btn.addEventListener('click', (event) => {
             event.stopPropagation();
             turnIntoProject(record);

@@ -1,5 +1,5 @@
 import './api_types.js';
-import { clearChatPreviews } from './chat_preview.js';
+import { clearChatPreviews, documentScope, provenScope } from './chat_preview.js';
 
 /**
  * Single browser-side gateway client. Keep backend calls here so UI modules
@@ -575,14 +575,29 @@ export const apiClient = {
     startHarnessMaintenance,
     harnessMaintenanceOperation,
     cancelHarnessMaintenance,
-    /** Read a recent window, replay a room-bound page, or read around a task or exact row address. */
-    chatHistory: ({ chatId = 1, cursor = null, around = null, signal } = {}) => {
+    /** Read a recent window, replay a room-bound page, or read around a task or exact row address.
+     * Independently of socket readiness, a scoped document consumes only a match from the serving generation. */
+    chatHistory: async ({ chatId = 1, cursor = null, around = null, signal } = {}) => {
+        const scope = documentScope(globalThis.document);
         const params = new URLSearchParams();
         if (chatId !== 1) params.set('chat_id', String(chatId));
         if (cursor) params.set('cursor', cursor);
         if (around) params.set('around', around);  // `task:<id>` or canonical `row:…`
         const query = params.toString();
-        return fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
+        const data = await fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
+        const servingScope = provenScope(data?.profile_scope);
+        if (scope && servingScope !== scope) {
+            throw Object.assign(new Error('History does not belong to this data profile.'), { foreignProfile: true, servingScope });
+        }
+        return data;
+    },
+    /** While Main's history refuses for the Project registry: one read-only page of a saved room (`room_archive.py`),
+     * oldest first; `before` is a page's `next_cursor`. Reads only: it acknowledges nothing.
+     * @returns {Promise<import('./client_contract_types.js').ChatArchiveResponse>} */
+    chatArchive: ({ room = 'main', before = null, signal } = {}) => {
+        const params = new URLSearchParams({ room: String(room) });
+        if (before) params.set('before', before);
+        return fetchJson(`/api/chat/archive?${params}`, { cache: 'no-store', signal });
     },
     /** One bounded read of a room's saved messages as candidates for the words `q`, newest first; `cursor` continues older.
      * @returns {Promise<import('./client_contract_types.js').ChatSearchResponse>} */
@@ -742,7 +757,10 @@ export const apiClient = {
     /** One Project by its id while active or deleting; an empty list when it is neither.
      *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
     projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
-    projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
+    /** `id` and `name` are optional; the server owns the default destination (leave `id` out for it).
+     *  @param {string} taskId @param {string=} id @param {string=} name */
+    projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task',
+        { task_id: taskId, ...(id ? { id } : {}), ...(name ? { name } : {}) }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
     projectUpdate: (projectId, update) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`,

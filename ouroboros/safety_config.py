@@ -116,7 +116,13 @@ def _migrate_consciousness_safety(raw: dict, *, lock_held: bool) -> dict:
 
     cfg._guard_live_settings_write()
     migrated = {**raw, key: normalize_safety_mode(raw.get("OUROBOROS_SAFETY_MODE", "full"))}
-    write_text_atomic(cfg.SETTINGS_PATH, cfg.serialize_settings(migrated))
+    try:
+        with cfg._settings_integrity.settings_publication_boundary(cfg.DATA_DIR):
+            write_text_atomic(cfg.SETTINGS_PATH, cfg.serialize_settings(migrated))
+    except cfg._settings_integrity.SettingsPublicationRefused:
+        # A proven unfinished Reset or an unproved profile: persist nothing and take no
+        # post-save action (no event); the upgrade retries on the next locked load.
+        return migrated
     append_jsonl(cfg.DATA_DIR / "logs" / "events.jsonl", {
         "type": "safety_settings_migration", "actor": "migration", "ts": utc_now_iso(),
         "key": key, "value": migrated[key],

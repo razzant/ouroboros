@@ -365,12 +365,16 @@ def architecture_context_section(
         return generate_doc_nav_map(
             text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
         )
-    return "## ARCHITECTURE.md\n\n" + text
+    from ouroboros.section_floor import report_text
+
+    return report_text("## ARCHITECTURE.md\n\n" + text, "architecture")
 
 
 def whole_development_book(text: str) -> str:
     """The composed handbook as its own context block: entrypoint and every chapter."""
-    return "## DEVELOPMENT.md\n\n" + text
+    from ouroboros.section_floor import report_text
+
+    return report_text("## DEVELOPMENT.md\n\n" + text, "development")
 
 
 def reference_doc_sections(

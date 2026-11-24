@@ -743,6 +743,9 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 "candidate_measurement_kind": request.candidate_measurement_kind,
                 "physical_context": asdict(request.physical_context) if request.physical_context is not None else None,
                 "file_witness": getattr(request.physical_context, "base_prompt_source", None),  # the seal's check only
+                "bible_witness": getattr(request.physical_context, "bible_source", None),
+                "assembly_witnesses": getattr(request.physical_context, "assembly_witnesses", ()),
+                "contribution_input": getattr(request.physical_context, "contribution_input", None),
             },
         )
         host_step("physical_candidate")

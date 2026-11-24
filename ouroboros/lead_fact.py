@@ -120,9 +120,9 @@ def publish_lead(ctx: Any, **route: Any) -> None:
     ctx._lead_last_request_id = request_id  # an applied act retires the host projection's pending route
 
 
-def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str) -> None:
-    """Publish after adoption, never while the chain is merely trying a row."""
-    ctx.route_choice = route_choice.after_fallback(ctx, is_primary)
+def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str, choice: Mapping | None = None) -> None:
+    """Publish after adoption, never while the chain is merely trying a row; an owner's ``choice`` stays the owner's."""
+    ctx.route_choice = dict(choice) if choice else route_choice.after_fallback(ctx, is_primary)
     ctx._lead_return_from = None
     ctx._lead_role = role
     ctx._lead_cause = str(failure.get("failure_code") or "configured fallback")
