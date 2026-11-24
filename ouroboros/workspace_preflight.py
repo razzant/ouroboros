@@ -19,6 +19,7 @@ import uuid
 from typing import Any, Dict, Iterable, List, NamedTuple, Tuple
 
 from ouroboros import work_domain
+from ouroboros.session_scratch import _owned_directory
 from ouroboros.platform_layer import (
     IS_LINUX,
     IS_MACOS,
@@ -261,34 +262,7 @@ def route_grants_auxiliary_roots(row: Dict[str, Any]) -> bool:
     return isinstance(control, dict) and control.get("auxiliaryWritableRoots") is True
 
 
-def _owned_directory(base: Any, parts: Tuple[str, ...], execution: pathlib.Path) -> pathlib.Path:
-    """``base``/``parts`` as real directories, each made empty when missing and never reached through
-    a link, outside every Git working tree and apart from the execution tree, or ``ValueError``."""
-    from ouroboros.test_environment import git_ancestor
-
-    if not str(base or "").strip():
-        raise ValueError("no host root to hold it")
-    path = pathlib.Path(base).resolve()  # the host's own root is trusted; nothing below it may be a link
-    path.mkdir(parents=True, exist_ok=True)
-    for part in parts:
-        if pathlib.Path(part).name != part or part in ("", ".", ".."):
-            raise ValueError(f"unsafe folder name {part!r}")
-        path = path / part
-        try:
-            os.mkdir(path)
-        except FileExistsError:
-            pass
-        if not stat.S_ISDIR(os.lstat(path).st_mode):  # a link, even to a folder, is never granted
-            raise ValueError(f"{path} is not a real directory")
-    ancestor = git_ancestor(path)
-    if ancestor is not None:
-        raise ValueError(f"{path} is inside the Git working tree {ancestor}")
-    if path == execution or path in execution.parents or execution in path.parents:
-        raise ValueError(f"{path} overlaps the execution tree {execution}")
-    return path
-
-
-def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
+def _session_scratch(owner: pathlib.Path, execution: pathlib.Path, private: bool = False) -> pathlib.Path:
     """One short workspace; its container's record stays in the ungranted task drive until its task is
     over (``release_finished_scratch``) or the drive retires, whichever comes first.
 
@@ -296,14 +270,14 @@ def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Pa
     serialized using the existing file lock; no process owns an in-memory cleanup obligation.
     """
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-    from ouroboros.session_scratch import prepare_session_scratch
+    from ouroboros.session_scratch_allocation import prepare_session_scratch
 
     lock = owner / "prepare.lock"
     fd = acquire_exclusive_file_lock(lock, timeout_sec=5, stale_sec=120, owner_aware_stale=True)
     if fd is None:
         raise OSError(f"session scratch preparation is busy: {owner}")
     try:
-        return prepare_session_scratch(owner / "scratch.json", execution)
+        return prepare_session_scratch(owner / "scratch.json", execution, private)
     finally:
         release_exclusive_file_lock(lock, fd)
 
@@ -550,17 +524,19 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
 
 def session_service_directories(gateway: Any, route_id: str, *, access: str, mode: str, data_root: Any,
                                 drive_root: Any, task_id: str, key: str, execution_root: Any,
-                                holder: Any = None) -> ServiceDirectories:
+                                holder: Any = None, private: bool = False) -> ServiceDirectories:
     """The directories one writable session may write besides its copy, made and named once (#1775).
 
     An Agent start gets a short physical scratch under ``session_scratch_parent()`` (macOS and
-    Linux ``/var/tmp``, out of the OS cleaners: its holder's release is the one remover), recorded
+    Linux ``/var/tmp``, which the OS may still age: its holder's release is the one remover), recorded
     under ``task_drives/<task_id>/session_scratch_owners/<key>`` in the starting task's own
     drive, when it is ``workspace_write`` on a route that negotiates auxiliary writable roots, or
     ``full``. Only the former is granted it, with the shared download cache's ``uv``/``pip``/``npm``
     folders: these exact directories, never the temp parent or ownership records. Full access
     reaches the scratch already, so no catalog is read and nothing is sent: the host only owns and
-    names it. No install, no links, and no Git ancestor. The engine never creates, captures or
+    names it. ``private`` (a full in-place run) puts a NEW scratch in one ``<home>/.obs-<id>`` child
+    when the home qualifies (``test_environment.private_scratch_problem``), else under the shared parent. No install,
+    no links, and no Git ancestor. The engine never creates, captures or
     deletes them; the instructions declare the scratch disposable before use
     (``DISPOSABLE_SCRATCH``); the record is noted under its task (``OPEN_SCRATCH_DIR``), the custody
     pass retires it once that task is over (``release_finished_scratch``), or its drive's settlement
@@ -570,9 +546,7 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
     when that copy is released (``session_scratch.release_seat_scratch``) and is noted under no
     task, which therefore holds nothing for it (#2706, #2707). A route without that capability
     prepares nothing, and a folder that cannot be made grants nothing either: both are a typed
-    ``limitation`` and the start goes on without the field. Read-only, and a ``workspace_write``
-    ``tool_policy`` route, keep their on-demand behavior: nothing is made. A retry replays its
-    recorded request and never comes here.
+    ``limitation`` and the start goes on without the field. A retry replays its recorded request and never comes here.
     """
     if mode != "agent" or access not in ("workspace_write", "full"):
         return ServiceDirectories()
@@ -594,7 +568,7 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
         caches = ((work_download_caches(execution) if granted else []) if work_domain.managed() else
                   [_owned_directory(data_root, (PACKAGE_DOWNLOADS_DIRNAME, name), execution)
                    for name, _variable in (_CACHE_VARIABLES if granted else ())])
-        scratch = _session_scratch(owner, execution)
+        scratch = _session_scratch(owner, execution, private)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return ServiceDirectories(limitation=f"{'service_directories_unavailable' if granted else SCRATCH_UNAVAILABLE}: "
                                              f"{type(exc).__name__}: {exc}")

@@ -47,6 +47,157 @@ def git_ancestor(path: Path):
     return None
 
 
+# A strict socket consumer (#4093) refuses a socket below any directory others may write, which ``/var/tmp`` is,
+# sticky or not. A full in-place run's NEW scratch is therefore one unambiguously named child of the physical home,
+# ``<home>/.obs-<8 chars>`` (``session_scratch_allocation.prepare_session_scratch``, made atomically 0700 by ``mkdtemp``, so no
+# shared parent is ever published or judged), when the home qualifies (``private_scratch_problem``).
+PRIVATE_SCRATCH_PREFIX = ".obs-"
+SUN_PATH = 104 if sys.platform == "darwin" else 108  # AF_UNIX path bytes, the NUL included
+# The deepest real nested manager socket below the home: ``/.obs-<8>/w`` (16 B), safe_test's ``/ob-<8>.noindex``
+# (20 B, ``scripts/safe_test.py``), pytest's ``/p<8>/tmp`` (14 B, ``tests/conftest.py``), and CPython's
+# ``/pymp-<8>/listener-<8>`` (32 B): 82 bytes total, so AF_UNIX's final bind limit (``SUN_PATH - 1``) leaves at most
+# 21 bytes for the home on macOS (104) and 25 on Linux (108). Separately, CPython on macOS can enforce its own
+# stricter ``TMPDIR`` check in ``multiprocessing`` and fall back to another temp dir below the raw AF_UNIX limit.
+SOCKET_LAYOUT = "/.obs-12345678/w/ob-12345678.noindex/p12345678/tmp/pymp-12345678/listener-12345678"
+
+# Known OS-managed path families a private home must not sit under: the shared temp cleaners
+# (``/tmp``, systemd-tmpfiles ``/var/tmp``), the per-user runtime services (Linux ``/run``, with
+# ``/run/user/<uid>`` under it; ``/var/run`` its usual physical alias) and macOS's per-user temp
+# trees (``/var/folders``), plus the absolute folders this process's ``OS_TEMP_VARIABLES`` name. Judged
+# component-wise on the given and symlink-resolved spelling of both sides, then by bounded directory
+# identity (``st_dev``, ``st_ino``) across those already-selected existing roots and ancestors so a
+# case-insensitive volume alias is also caught while distinct directories on case-sensitive volumes stay
+# separate; ``/`` is never a family. The variables only veto a NEW placement: no record's release depends on
+# them. There is no general mount/ACL judgment, and a home under some other site-local ephemeral mount is
+# judged by its chain alone (a residual).
+OS_EPHEMERAL_ROOTS = (Path("/tmp"), Path("/var/tmp"), Path("/run"), Path("/var/run"), Path("/var/folders"))
+OS_TEMP_VARIABLES = ("TMPDIR", "TEMP", "TMP", "XDG_RUNTIME_DIR")
+
+
+def ephemeral_ancestor(path) -> str:
+    """Why PATH is, or sits under, a known OS-managed root (``OS_EPHEMERAL_ROOTS``) or an absolute folder this
+    process's ``OS_TEMP_VARIABLES`` name, whether matched lexically (including symlink aliases) or by bounded
+    directory identity (``st_dev``, ``st_ino``) among existing selected roots and ancestors (covering
+    case-insensitive volume aliases without conflating distinct directories on case-sensitive volumes), else "":
+    a private home there would be cleaned with the OS's own temp state. Reads only (containment by path
+    components, never a string prefix: a ``/tmporary`` is no OS root); ordinary ``OSError`` on stat returns a
+    refusal so callers keep shared fallback; nothing is created, made writable or promised here, and ``/`` is
+    never a family."""
+    try:
+        named = [("the OS-managed root", root) for root in OS_EPHEMERAL_ROOTS]
+        for variable in OS_TEMP_VARIABLES:
+            value = os.environ.get(variable, "")
+            if os.path.isabs(value):  # a relative or empty value names no folder to judge
+                named.append((f"${variable}", Path(value)))
+        resolved_named = [(label, root, Path(os.path.realpath(root))) for label, root in named]
+        families = [(label, spelling) for label, root, resolved in resolved_named for spelling in (root, resolved)]
+        spellings = (Path(path), Path(os.path.realpath(path)))
+    except (OSError, RuntimeError, ValueError):  # a path that cannot even be resolved names no family
+        return f"{path} cannot be resolved to judge its OS-managed family"
+    for spelling in spellings:
+        for label, root in families:
+            if root != root.parent and (root == spelling or root in spelling.parents):
+                return f"{spelling} is {'' if root == spelling else 'under '}{label} {root}"
+    root_ids: dict[tuple[int, int], tuple[str, Path]] = {}
+    for label, root, resolved in resolved_named:
+        if root == root.parent or resolved == resolved.parent:
+            continue
+        try:
+            info = os.stat(root)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            return f"{root} cannot be read ({type(exc).__name__})"
+        if (info.st_mode & 0o170000) == 0o040000 and info.st_ino:
+            root_ids.setdefault((info.st_dev, info.st_ino), (label, root))
+    if root_ids:
+        seen_dirs: set[Path] = set()
+        for spelling in (spellings[0],) if spellings[0] == spellings[1] else spellings:
+            for directory in (spelling, *spelling.parents):
+                if directory == directory.parent or directory in seen_dirs:
+                    continue
+                seen_dirs.add(directory)
+                try:
+                    info = os.stat(directory)
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError as exc:
+                    return f"{directory} cannot be read ({type(exc).__name__})"
+                if (info.st_mode & 0o170000) == 0o040000 and (match := root_ids.get((info.st_dev, info.st_ino))):
+                    label, root = match
+                    return f"{spelling} is {'' if directory == spelling else 'under '}{label} {root}"
+    return ""
+
+
+def _own_uid() -> int:
+    return os.geteuid() if hasattr(os, "geteuid") else -1  # a private home exists only where users have one
+
+
+def private_scratch_home() -> Path | None:
+    """The physical home (HOME honoured) on macOS and Linux, else None. A name only, never judged or made here."""
+    home = os.path.expanduser("~") if _short_temp_platform() else ""
+    try:
+        return Path(home).resolve() if os.path.isabs(home) else None
+    except (OSError, RuntimeError):
+        return None
+
+
+def unsafe_ancestor(path, *, absent_ok: bool = True) -> str:
+    """Why an existing component from PATH up to ``/`` fails the POSIX owner/mode check for a private ancestor, nearest
+    first, else "": each must be a real directory owned by root or this user with no group or other write bit (a
+    sticky bit does not excuse). ACLs, mount options and effective access are not examined. A component that does not
+    exist is skipped, a leaf not made yet, unless ABSENT_OK is False. Reads only."""
+    for directory in (Path(path), *Path(path).parents):
+        try:
+            seen = os.lstat(directory)
+        except FileNotFoundError:
+            if absent_ok:
+                continue
+            return f"{directory} does not exist"
+        except OSError as exc:
+            return f"{directory} cannot be read ({type(exc).__name__})"
+        if (seen.st_mode & 0o170000) != 0o040000 or seen.st_uid not in (0, _own_uid()) or seen.st_mode & 0o022:
+            return f"{directory} is not a directory only root or you can write"
+    return ""
+
+
+def issued_scratch_problem(scratch) -> str:
+    """Why the ISSUED SCRATCH (``<home>/.obs-<id>/w``) fails the POSIX owner/mode check now, else "": the chain from
+    ``/`` through the scratch itself is read as it exists, its container and ``w`` included (``unsafe_ancestor``
+    without an absent leaf). A missing, linked, foreign, group/other-writable or unreadable component is the
+    problem; a read that failed claims nothing."""
+    return f"{scratch} is not an absolute path" if not os.path.isabs(scratch) else unsafe_ancestor(scratch, absent_ok=False)
+
+
+def private_scratch_problem(home) -> str:
+    """Why a NEW private scratch may not be made under HOME, or "" when it may; reads only, nothing is created.
+    (f) HOME round-trips strict UTF-8 (no surrogate-escaped filesystem bytes); (d) the deepest nested socket fits
+    under AF_UNIX's limit, counted in BYTES; (e) no known OS-managed ephemeral family (``ephemeral_ancestor``);
+    (a) no Git ancestor; (b) every existing component from HOME to ``/`` passes ``unsafe_ancestor``. A failed read
+    of any is the problem, never an escaped error."""
+    room = SUN_PATH - 1 - len(SOCKET_LAYOUT)
+    if home is None or home == home.parent:
+        return "no home directory"
+    text = str(home)
+    try:
+        encoded = os.fsencode(text)
+        if encoded != text.encode("utf-8") or encoded.decode("utf-8") != text:
+            return "home path cannot round-trip strict UTF-8"
+    except UnicodeError:
+        return "home path cannot round-trip strict UTF-8"
+    if (size := len(encoded)) > room:
+        return f"{home} is {size} bytes, over the {room} a nested socket leaves"
+    if problem := ephemeral_ancestor(home):
+        return problem
+    try:
+        ancestor = git_ancestor(home)
+    except OSError as exc:  # Python 3.10 ``Path.exists`` raises on an unreadable directory
+        return f"{home} cannot be read ({type(exc).__name__})"
+    if ancestor is not None:
+        return f"{home} is inside the Git working tree {ancestor}"
+    return unsafe_ancestor(home)
+
+
 def settings_keys() -> set[str]:
     """Read the settings vocabulary without importing the settings runtime."""
     keys = set()
@@ -291,8 +442,8 @@ def owned_process_temp():
     """A fresh declared temp for one real process tree, directly beneath the run's owner root.
 
     TMPDIR decides where a child's multiprocessing listens, and AF_UNIX caps that path (104 bytes on
-    macOS, 108 on Linux; CPython 3.14 on macOS leaves a TMPDIR of 64 bytes or more for the shared
-    /tmp). A case's descriptive tmp_path is too deep, so only its temp moves here: HOME, settings and
+    macOS, 108 on Linux; on macOS, CPython multiprocessing can also reject a long TMPDIR and fall back
+    to another temp dir below the raw AF_UNIX bind limit). A case's descriptive tmp_path is too deep, so only its temp moves here: HOME, settings and
     data stay in the case. The owner OUROBOROS_TEST_TEMP_ROOT names (safe_test, the commit gate)
     releases it with its run once every process is proven gone, never at a case's stop or restart.
     An explicit long --temp-parent stays the caller's choice and fails where a socket does not fit.

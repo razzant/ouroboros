@@ -532,7 +532,8 @@ def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: A
     The delegating task's drive owns the short scratch, keyed by the snapshot. A same-tree
     continuation from another task can receive a different scratch. ``in_place`` is the invocation
     of an in-place run, which has no copy: at full access it gets its own scratch, named and never
-    granted; a ``workspace_write`` one gets none, since that would be a new grant. A skill payload,
+    granted, in a private child of the home where it qualifies (``private``); a ``workspace_write``
+    one gets none, since that would be a new grant. A skill payload,
     an engine directory copy and any other session without a copy get none; a retry replays
     recorded old paths and never comes here, even if the original task's drive or the OS already
     retired them."""
@@ -545,7 +546,7 @@ def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: A
                    data_root=canonical_data_root(ctx), drive_root=getattr(ctx, "drive_root", ""),
                    task_id=str(getattr(ctx, "task_id", "") or ""),
                    key=snapshot.snapshot_id if snapshot is not None else f"in-place-{in_place}",
-                   execution_root=execution_root)
+                   execution_root=execution_root, private=snapshot is None)
 
 
 def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocation_id: str, target_root: str) -> Any:

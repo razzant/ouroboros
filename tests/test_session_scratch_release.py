@@ -15,11 +15,20 @@ import errno
 import json
 import os
 import pathlib
+import stat
 import tempfile
 
 import pytest
 
-from ouroboros import delegate_custody, headless, owner_keep, session_scratch, task_custody, test_environment
+from ouroboros import (
+    delegate_custody,
+    headless,
+    owner_keep,
+    session_scratch,
+    session_scratch_allocation,
+    task_custody,
+    test_environment,
+)
 from ouroboros.workspace_preflight import (
     OPEN_SCRATCH_DIR,
     SESSION_SCRATCH_DIRNAME,
@@ -28,7 +37,8 @@ from ouroboros.workspace_preflight import (
 )
 from tests._shared import retire_synthetic_retention
 from tests._store_shared import seed_result
-from tests.test_session_service_directories import GRANTED, _Catalog, _prepare, _synthetic_temp_parent  # noqa: F401
+from tests._private_scratch import _synthetic_temp_parent, qualifying_home  # noqa: F401 -- autouse fixture
+from tests.test_session_service_directories import GRANTED, _Catalog, _prepare
 
 OVER = lambda _task_id: False  # noqa: E731 -- the supervisor's probe: proven not live
 
@@ -461,6 +471,117 @@ def test_a_record_under_the_legacy_tmp_parent_still_releases_and_a_foreign_paren
     with pytest.raises(OSError, match="invalid scratch ownership record"):
         session_scratch.release_session_scratch(data / "task_drives" / "task-2")
     assert stray.is_dir()
+
+
+POSIX = pytest.mark.skipif(os.name != "posix", reason="the private scratch home is a macOS and Linux path")
+
+
+@POSIX
+def test_the_home_names_only_exact_schema_2_children_and_slash_is_never_a_parent(tmp_path, monkeypatch):
+    """The home is no generic parent: only ``<home>/.obs-<8 chars>`` of a schema-2 (nonce) record is nameable there,
+    never a legacy device/inode record, an unrelated ``obs-*``/hidden folder, or a child of ``/``."""
+    home = qualifying_home(tmp_path, monkeypatch)
+    fixed = {test_environment.session_scratch_parent().resolve(), test_environment.default_temp_parent().resolve()}
+    assert fixed <= set(session_scratch.scratch_parents()) and home not in session_scratch.scratch_parents()
+    for variable in test_environment.OS_TEMP_VARIABLES:  # a placement veto, never cleanup authority
+        monkeypatch.setenv(variable, str(tmp_path / "temp-variable"))
+    assert (tmp_path / "temp-variable").resolve() not in session_scratch.scratch_parents()
+    named = session_scratch._container_named
+    assert named(home / ".obs-abcd1234", 2) and named(home / ".obs-ab_d1234", 2)
+    assert not named(home / ".obs-abcd1234", 1)  # a legacy record never names the home
+    for other in (".obs-abc", ".obs-ABCD1234", ".obs-abcd12345", ".obs", "obs-abcd1234", ".obsabcd1234", ".obs-notes-x"):
+        assert not named(home / other, 2)
+    assert not named(home / "sub" / ".obs-abcd1234", 2) and not named(tmp_path / ".obs-abcd1234", 2)
+    monkeypatch.setenv("HOME", "/")  # ``/`` is never a parent a record may name
+    assert not named(pathlib.Path("/.obs-abcd1234"), 2)
+    monkeypatch.setenv("HOME", "not/absolute")  # no home at all
+    assert not named(home / ".obs-abcd1234", 2) and fixed <= set(session_scratch.scratch_parents())
+
+
+@POSIX
+def test_a_legacy_record_under_the_home_is_refused_and_a_schema_2_home_record_needs_its_nonce(tmp_path, monkeypatch):
+    home = qualifying_home(tmp_path, monkeypatch)
+    data, scratch = _started(tmp_path, access="full", key="in-place-1", private=True)
+    record = _record(data, "task-1", "in-place-1")
+    row = json.loads(record.read_text(encoding="utf-8"))
+    assert session_scratch.recorded_scratch(record) == scratch.parent  # the real schema-2 shape reads
+    legacy = {"path": row["path"], "identity": [scratch.parent.lstat().st_dev, scratch.parent.lstat().st_ino]}
+    record.write_text(json.dumps(legacy), encoding="utf-8")  # the same container as a legacy device/inode record
+    with pytest.raises(ValueError, match="does not name a session scratch directory"):
+        session_scratch.recorded_scratch(record)
+    record.write_text(json.dumps({**row, "nonce": "0" * 32}), encoding="utf-8")  # another nonce: identity unverified
+    with pytest.raises(session_scratch.ScratchIdentityMismatch):
+        session_scratch.recorded_scratch(record)
+    assert scratch.parent.parent == home and scratch.is_dir()
+
+
+@POSIX
+def test_reopening_a_matched_private_record_restores_a_missing_w_in_mode_0700_and_other_kinds_keep_their_mode(
+        tmp_path, monkeypatch):
+    qualifying_home(tmp_path, monkeypatch)
+    execution = tmp_path / "copy"
+    execution.mkdir()
+    data, scratch = _started(tmp_path, access="full", key="in-place-1", private=True)
+    shared_data, shared = _started(tmp_path, task_id="task-2", key="snap-2")
+    old = os.umask(0o002)  # a plain mkdir would give 0775
+    try:
+        for container in (scratch.parent, shared.parent):
+            (container / "w" / "env" / "pyvenv.cfg").unlink()
+            (container / "w" / "env").rmdir()
+            (container / "w").rmdir()
+        again = session_scratch_allocation.prepare_session_scratch(_record(data, "task-1", "in-place-1"), execution, True)  # reopen: same request, same record
+        again_shared = session_scratch_allocation.prepare_session_scratch(_record(shared_data, "task-2", "snap-2"), execution)
+    finally:
+        os.umask(old)
+    assert again == scratch and stat.S_IMODE(again.lstat().st_mode) == 0o700
+    assert again_shared == shared and stat.S_IMODE(again_shared.lstat().st_mode) == 0o775  # not widened or narrowed
+    assert sorted(entry.name for entry in os.scandir(scratch.parent.parent) if entry.name.startswith(".obs-")) == [scratch.parent.name]
+
+
+def test_private_home_child_prefilters_non_private_names_before_reading_home(tmp_path, monkeypatch):
+    def forbidden():
+        raise AssertionError("ordinary shared names must not resolve HOME")
+
+    monkeypatch.setattr(test_environment, "private_scratch_home", forbidden)
+    assert session_scratch.private_home_child(tmp_path / "obs-12345678") is False
+    assert session_scratch.private_home_child(tmp_path / ".obs-short") is False
+    home = (tmp_path / "home").resolve()
+    monkeypatch.setattr(test_environment, "private_scratch_home", lambda: home)
+    assert session_scratch.private_home_child(home / ".obs-12345678") is True
+    assert session_scratch.private_home_child(tmp_path / ".obs-12345678") is False
+
+
+@POSIX
+@pytest.mark.parametrize("released", ["home", "shared"])
+def test_a_home_record_and_a_shared_record_each_release_exactly_their_container_and_keep_the_other(tmp_path, monkeypatch,
+                                                                                                    released):
+    """(The legacy ``/tmp`` record and a foreign parent are the neighbouring test above.)"""
+    home = qualifying_home(tmp_path, monkeypatch)
+    over, open_ = "completed", "running"  # only the task whose record is to release is over: the other one holds
+    data, under_home = _started(tmp_path, task_id="task-1", access="full", key="in-place-1", private=True,
+                                status=over if released == "home" else open_)
+    _data, under_shared = _started(tmp_path, task_id="task-2", key="snap-2", status=over if released == "shared" else open_)
+    assert under_home.parent.parent == home
+    assert under_shared.parent.parent == test_environment.session_scratch_parent().resolve()
+    assert release_finished_scratch(data, OVER)["released"]
+    assert task_custody.remove_custody_trash(data)["removed"] == 1
+    gone, kept = (under_home, under_shared) if released == "home" else (under_shared, under_home)
+    assert not gone.parent.exists() and kept.is_dir()
+
+
+@POSIX
+def test_a_home_record_still_releases_after_the_home_stopped_qualifying_but_not_after_the_home_changed(tmp_path, monkeypatch):
+    home = qualifying_home(tmp_path, monkeypatch)
+    data, scratch = _started(tmp_path, access="full", key="in-place-1", private=True)
+    _other, kept = _started(tmp_path, task_id="task-2", status="running", access="full", key="in-place-2", private=True)
+    monkeypatch.setattr(test_environment, "SUN_PATH", 104)  # the home is now too long for new nested socket layouts
+    assert test_environment.private_scratch_problem(home)  # it no longer qualifies for a NEW scratch ...
+    assert release_finished_scratch(data, OVER)["released"]  # ... yet its recorded child releases: no selector in it
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.parent.exists() and home.is_dir()
+    monkeypatch.setenv("HOME", str(tmp_path))  # another HOME names no such child: held and kept, never guessed
+    with pytest.raises(ValueError, match="does not name a session scratch directory"):
+        session_scratch.recorded_scratch(_record(data, "task-2", "in-place-2"))
+    assert kept.is_dir()
 
 
 @pytest.mark.parametrize("reason", ["the live process table could not be enumerated", "debug retention"],
