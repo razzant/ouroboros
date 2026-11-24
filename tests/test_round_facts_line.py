@@ -466,10 +466,42 @@ def test_a_same_round_reprepare_sends_a_part_that_became_due_and_reuses_the_row_
     failed = {"read": "failed", "code": "daemon_unreachable", "confirmed_at": "2026-11-21T14:09:00+00:00"}
     _store_census(tmp_path, 0.5, **failed)
     assert append_context_facts(context) is True and "engine not read since" in _quota_of(context.messages[-1])
+    from ouroboros.loop_model_call import _presend_context_fit
+
+    with _presend_context_fit(context) as admit:  # a candidate carried it: the verdict is in view
+        assert admit(SimpleNamespace(physical_context=None))
     _store_census(tmp_path, 0.5, pending=True, **failed)  # an account disabled while the engine is unread
     assert append_context_facts(context) is True
     assert _quota_of(context.messages[-1]) == "quota " + census.UNCONFIRMED
     assert append_context_facts(context) is False
+
+
+@pytest.mark.parametrize("carried", [False, True])
+def test_an_unsent_row_is_corrected_when_its_quota_state_changes_under_the_same_signature(tmp_path, monkeypatch, carried):
+    """A facts row of this round no candidate carried (``loop_messages._unsent_facts_row``) is told against the view as
+    sent: a failed census part prepared but never sent, then an account disabled while the engine is unread (the
+    census signature unchanged). The reprepare corrects that row in place; nothing in the sent view was confirmed, so
+    nothing is unconfirmed. Once a candidate carried the failed part, the same change is a new row beside it."""
+    from ouroboros import subscription_census as census
+    from ouroboros.loop_model_call import _presend_context_fit
+
+    context = _census_ctx(tmp_path, monkeypatch)
+    failed = {"read": "failed", "code": "daemon_unreachable", "confirmed_at": "2026-11-21T14:09:00+00:00"}
+    _store_census(tmp_path, 0.5, **failed)
+    assert append_context_facts(context) is True
+    first = context.messages[-1]
+    assert "engine not read since" in _quota_of(first)
+    if carried:
+        with _presend_context_fit(context) as admit:
+            assert admit(SimpleNamespace(physical_context=None))
+    _store_census(tmp_path, 0.5, pending=True, **failed)  # the same signature, a pending mark
+    assert append_context_facts(context) is True
+    rows = [row for row in context.messages if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME]
+    if carried:
+        assert rows == [first, context.messages[-1]] and _quota_of(rows[-1]) == "quota " + census.UNCONFIRMED
+    else:
+        assert rows == [context.messages[-1]] and _quota_of(rows[-1]) == ""
+    assert append_context_facts(context) is False  # the corrected row is current: reused
 
 
 def test_a_pending_census_keeps_what_is_in_view_also_across_a_same_round_reprepare(tmp_path, monkeypatch):

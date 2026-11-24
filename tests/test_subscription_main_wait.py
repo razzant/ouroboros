@@ -41,8 +41,11 @@ def main_call(live_wait, monkeypatch):
                             active_model=MODEL, active_context_mode="max", messages=messages,
                             context_fit_plan=plan, event_queue=events, drive_logs=lambda: root / "logs")
     controller.tool_context = inner
-    # A Main registry: both discovery selectors are callable (``tool_policy.usable_selectors``).
-    tools = SimpleNamespace(_ctx=inner, callable_rows=lambda namespace="": [{"name": n} for n in META_TOOL_NAMES])
+    # A Main registry: both discovery selectors are callable (``tool_policy.usable_selectors``); ``schemas`` answers
+    # the gateway check a cold rebind makes on the current tool list (``initial_tool_schemas`` → ``registry.schemas()``).
+    tools = SimpleNamespace(_ctx=inner, schemas=lambda: [{"type": "function", "function": {
+        "name": name, "description": "d", "parameters": {"type": "object"}}} for name in sorted(META_TOOL_NAMES)],
+                            callable_rows=lambda namespace="": [{"name": n} for n in META_TOOL_NAMES])
     ctx = loop._RoundModelCallContext(
         llm=client, messages=messages, tools=tools, context_fit_plan=plan,
         active_model=MODEL, tool_schemas=[], active_effort="medium", max_retries=3,

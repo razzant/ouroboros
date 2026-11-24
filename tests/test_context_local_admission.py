@@ -147,3 +147,86 @@ def test_exact_fit_reaches_ordinary_round_dispatch(lane, monkeypatch):
     # estimator count of the bytes it answered, so this route keeps its own calibration.
     anchor, floor = main_input_anchor(ctx.accumulated_usage, plan)
     assert (anchor.input_tokens, anchor.estimate_tokens, floor) == (10_050, admitted[-1], 10_050)
+
+
+@pytest.mark.parametrize("needs_arch,ordinary_first", [(False, False), (True, False), (True, True)])
+def test_book_map_retry_submits_each_step_to_exact_local_admission(tmp_path, monkeypatch, needs_arch, ordinary_first):
+    import re
+    from ouroboros import context_fit as fit, memory_floor, loop_model_call, loop_round_limits
+    from ouroboros.context_measurement import _physical_context_for_fit
+    from ouroboros.local_model_server import input_fingerprint
+    from ouroboros.llm_attempt import _physical_candidate, main_context_fit_refusal
+    from ouroboros.loop_messages import append_context_facts
+    from tests import test_required_development_book as books
+    from tests.test_loop_compaction import _ctx as facts_ctx
+
+    monkeypatch.setattr(fit, "main_output_reserve_tokens", lambda **kw: books.RESERVE)
+    monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *a, **kw: 1.0)
+    monkeypatch.setattr("ouroboros.capability_evidence.resolve_main_token_density", lambda *a, **kw: (1.0, "fresh_route_usage"))
+    core = books.booked(books._core(tmp_path, required=True, memory=False), tmp_path,
+                        headings=600, body="Its practice. " * 10)
+    window = 109_177
+    plan = books._plan(tmp_path, core, "low", window, source="local_health")
+    ctx = facts_ctx(tmp_path)
+    ctx.active_model, ctx.active_context_mode = plan.model, "low"
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = plan
+    ctx.tool_schemas, ctx.messages[:] = books.SCHEMAS, plan.messages_for("low")
+    superseded = {"role": "assistant", "content": "A superseded host observation. " * 30}
+    if ordinary_first:
+        ctx.messages.append(superseded)
+    assert append_context_facts(ctx, money={}) and books._rows(plan) == []
+    measured = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
+
+    def request(candidate):
+        payload = _physical_candidate(dict(messages=candidate.messages, tools=candidate.tool_schemas,
+                                           model=plan.model, max_tokens=books.RESERVE))
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        count = len(re.findall(r"[a-zA-Z]+|[0-9]|[^a-zA-Z0-9\s]", text)) + (4_000 if needs_arch else 0)
+        native = dict(supported=True, input_is_exact=True, native_input_sha256=input_fingerprint(payload),
+                      input_tokens=count, context_window=window)
+        with ua.bind_physical_attempt_context(_physical_context_for_fit(measured, plan)):
+            candidate_request = _attempt_request({"provider": "local", "resolved_model": plan.model,
+                "base_url": "http://127.0.0.1:1", "local_input_measurement": native}, payload)
+        assert candidate_request.prompt_tokens_exact == count
+        return candidate_request
+
+    before = request(ctx)
+    refusal = loop_model_call._refused_candidate(main_context_fit_refusal(before))
+    target, slack = loop_model_call._refusal_target(ctx, measured, refusal)
+    assert target - slack > 0
+    sends = []
+    original_pass = loop_model_call._apply_refusal_pass
+
+    def apply_pass(c, steps, *args, **kwargs):
+        if ordinary_first and steps == loop_model_call.REFUSAL_PASSES[0]:
+            c.messages.remove(superseded)
+            return True
+        return original_pass(c, steps, *args, **kwargs)
+
+    def dispatch(c, disposition, *, candidate_predicate=None, **kwargs):
+        loop.seal_task_transcript(c.messages)
+        append_context_facts(c, money={})
+        maps = books._rows(c.context_fit_plan)
+        sends.append(maps)
+        candidate = request(c)
+        assert candidate_predicate(candidate)
+        answer = None
+        with _presend_context_fit(c) as admit:
+            if not admit(candidate):
+                raise ua.PhysicalAttemptPreconditionFailed("exact local size refusal", attempt_id=str(len(sends)))
+            answer = {"role": "assistant", "content": "The exact request fits."}
+        return answer, 0.0
+
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", apply_pass)
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    answer, cost, mode = loop_model_call._recover_context_overflow(ctx, refusal, 0.0)
+    assert answer and mode == "low" and cost == 0
+    expected = ([[]] if ordinary_first else []) + [["development_map"]]
+    if needs_arch:
+        expected += [["development_map", "architecture_map"]]
+    assert sends == expected  # a distinct exact refusal precedes each further map step
+    assert books._rows(ctx.context_fit_plan) == expected[-1]
+    if not needs_arch:
+        assert "Mechanism 599 — lines" in ctx.messages[0]["content"][0]["text"]
+        after = loop_round_limits._measure_trial_candidate(ctx, ctx.messages)
+        assert measured.measurement.estimated_input_tokens - after.measurement.estimated_input_tokens < target - slack

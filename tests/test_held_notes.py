@@ -1111,6 +1111,131 @@ def test_only_a_physical_head_step_reasks_the_early_route_question(world, monkey
     assert target_only.low_projection.memory_facts["floor"]["target_missed"]
 
 
+@pytest.mark.parametrize("mismatch", [None, "late_row", "changed_schema", "changed_title", "changed_chapter", "outlined_index"],
+                         ids=["matching_frame", "late_row", "changed_schema", "changed_title_same_price",
+                              "changed_chapter_refit", "outlined_index_refit"])
+def test_a_cold_return_replays_the_book_map_it_sent_beside_whole_heads_and_memory(world, monkeypatch, mismatch):
+    """#3649 on an inert capture: a running work's request showed its required handbook's own map as its chapter list
+    (the final sender's step, ``memory_floor.step_book_map``) beside two whole held heads. The continuation carries that
+    map receipt, so the restored process's own fit replays the frame with
+    the list, and the restore's rebind (``owner_wait.rebind_restored_route``) keeps it: the heads stay whole and memory
+    keeps its forms; nothing of theirs pays for a map the answer never read. The same holds where the restore itself
+    adds a late row or adopts a changed schema, so the saved frame no longer matches and the held view is refit:
+    the yielded book map stays yielded, and ARCHITECTURE's map, shown whole, stays whole (#3649). Where chapter text or
+    title changed (whether at the same uncut price or with added headings), the short chapter list stays short, retains
+    the current full map behind a fresh reader, never reuses the old reader, and leaves the historical source untouched.
+    The restore prices its tools by M2's own reconciliation (``continuation_tools.reconcile_restored_tools``): where it
+    adopts the current catalog (here a list saved before the MCP gateway existed, ``_gateway_due``), the changed schema
+    and its own notice reach the restored request beside the DEVELOPMENT list's reader, ARCHITECTURE's map and both heads."""
+    from ouroboros import owner_wait
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS, observe_send
+    from tests._reference_book_fixtures import booked
+
+    _write(world, "a", "A held note. " * 1_500, summary="First summary.")
+    _write(world, "b", "Another held note. " * 1_500, summary="Second summary.")
+    if mismatch == "outlined_index":
+        _write(world, "ordinary", "Ordinary note.", claims=(), summary="Summary only in the whole index. " * 9_000)
+
+    def floor(plan):
+        return (plan.low_projection.memory_facts.get("floor") or {}).get("steps")
+
+    def map_rows(plan):
+        return [row for row in plan.low_projection.memory_facts.get("host_sections_addressed", ())
+                if row["section_id"] in memory_floor.BOOK_MAPS]
+
+    window = 400_000
+    saved = [{"type": "function", "function": {"name": "read_loaded_source", "description": "Read a loaded source.",
+                                                "parameters": {"type": "object"}}}]
+    sent = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    core = booked(replace(_core(world, TASK, sent), development_required=True), world[0].repo_dir.parent,
+                  headings=600, body="Its practice. " * 10)
+    first = _plan(world, 65_000 if mismatch == "outlined_index" else window, mode="low", ctx=sent, core=core,
+                  tool_schemas=saved)
+    accepted = first
+    while mismatch != "outlined_index" and not any(row["section_id"] == "development_map" for row in map_rows(accepted)):
+        accepted = memory_floor.step_book_map(accepted, "low")  # its required handbook's yields, its own map included
+    assert _index(accepted) == ("outline" if mismatch == "outlined_index" else "whole")
+    assert not _cuts(accepted) and "Rule 599 — lines" not in _blocks(accepted)[0]["text"]
+    sent.context_fit_plan, sent.active_context_mode = accepted, "low"
+    messages = accepted.messages_for("low")
+    observe_send(sent, messages, round_idx=1, tools=saved)
+    record_context_view(sent, messages, saved)
+    state = json.loads(json.dumps(continuation_state(sent, messages, {}, {}, 1, saved, set())))
+    originals = map_rows(accepted)
+    original = next(row for row in originals if row["section_id"] == "development_map")
+    reader = original["reader"]
+    source = read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode()
+    old_block = state["context_observations"]["_last_context_observation"]["messages"][0]["content"][0]["text"]
+    assert reader in old_block and "- Change:" in old_block and "Rule 599 — lines" in source
+    assert "Change (navigation map)" in source
+
+    restored = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    captured = replace(core, held_note_resume=held_notes.restored_capture(state))
+    if mismatch == "changed_title":
+        captured = booked(captured, world[0].repo_dir.parent, headings=600, body="Its practice. " * 10,
+                          development_title="Rework")
+    elif mismatch == "changed_chapter":
+        captured = booked(captured, world[0].repo_dir.parent, headings=612, body="Updated chapter practice. " * 12,
+                          development_title="Rework")
+    cold = _plan(world, window, mode="low", ctx=restored, core=captured, tool_schemas=saved)
+    assert (cold.low_projection.memory_facts["held_note_request_tokens"] == state[held_notes.CAPTURE_KEY]["frame"][-1]) is (
+        mismatch != "changed_chapter")
+    assert [row["section_id"] for row in map_rows(cold)] == [row["section_id"] for row in originals]
+    for key in ("_last_context_observation", *OBSERVER_STATE_ATTRS):  # what the continuation's observations restore
+        setattr(restored, key, getattr(sent, key, None))
+    restored.context_fit_plan, restored.active_context_mode = cold, "low"
+    monkeypatch.setattr("ouroboros.loop.get_context_mode", lambda: "low")
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: _route(window))
+    monkeypatch.setattr(owner_wait, "_continuation_fit_route", lambda *_a, **_kw: ({
+        "model": "fixture", "use_local_model": False, "model_role": "main", "model_route": {},
+        "credential_profile_id": None}, ""))
+    from ouroboros.tool_capabilities import MCP_GATEWAY_TOOL_NAME
+
+    changed = [{"type": "function", "function": {"name": MCP_GATEWAY_TOOL_NAME, "description": "Call an MCP tool.",
+                                                  "parameters": {"type": "object"}}},
+               {"type": "function", "function": {"name": "read_loaded_source", "description": "source " * 120,
+                                                  "parameters": {"type": "object"}}}]
+    current = changed if mismatch == "changed_schema" else saved  # what this process's registry serves now
+    restored._actor_loaded_tool_names, restored.active_model, restored.active_use_local = set(), "fixture", False
+    registry = SimpleNamespace(_ctx=restored, schemas=lambda: current, get_schema_by_name=lambda name: next(
+        (schema for schema in current if schema["function"]["name"] == name), None))
+    resumed = [json.loads(json.dumps(row)) for row in messages]
+    if mismatch in {"late_row", "outlined_index"}:  # a row the restore adds before its first send
+        resumed.append({"role": "user", "content": "A late notice the restore added before its first send. " * 40})
+    restoring = {**state, "messages": resumed}
+    plan, mode = owner_wait.rebind_restored_route(registry, restoring, resumed)
+    priced = [shown.low_projection.memory_facts.get("held_note_request_tokens") for shown in (cold, plan)]
+    assert (priced[0] != priced[1]) is (mismatch in {"late_row", "changed_schema", "outlined_index"})
+    assert mode == "low" and _held(plan) == _held(accepted) and not _cuts(plan) and floor(plan) == floor(accepted)
+    block = resumed[0]["content"][0]["text"]
+    assert ("Mechanism 599 — lines" in block) is (mismatch != "outlined_index")
+    assert _index(plan) == "whole"
+    if mismatch in {"changed_title", "changed_chapter"}:
+        assert [row["section_id"] for row in map_rows(plan)] == [row["section_id"] for row in originals]
+        updated = next(row for row in map_rows(plan) if row["section_id"] == "development_map")
+        assert updated["reader"] != reader and updated["source_ref"] != original["source_ref"]
+        assert reader not in block and updated["reader"] in block
+        assert "## Engineering (chapters)" in block and "Rework (navigation map)" not in block
+        current_map = read_actor_source_bytes(core.section_root, core.section_task_id, updated["source_ref"]).decode()
+        assert "Rework (navigation map)" in current_map and ("Rule 611 — lines" in current_map) is (mismatch == "changed_chapter")
+        tool_registry = ToolRegistry(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root)
+        tool_registry._ctx.task_id = TASK["id"]
+        assert "Rework (navigation map)" in tool_registry.execute(
+            "read_file", {"root": "artifact_store", "path": updated["source_ref"]["path"]})
+        assert read_actor_source_bytes(core.section_root, core.section_task_id, original["source_ref"]).decode() == source
+    else:
+        assert map_rows(plan) == originals and reader in block and "## Engineering (chapters)" in block
+    payload = "\n".join(part["text"] for part in resumed[0]["content"])  # the restored request's whole system row
+    assert "A held note. " * 1_500 in payload and "Another held note. " * 1_500 in payload  # both heads, whole
+    notices = [row["content"] for row in resumed if "The tool set changed since this task's last request" in str(
+        row.get("content"))]
+    assert restoring["tool_schemas"] == current  # the catalog the next send carries
+    assert (notices == [f"[SYSTEM NOTICE]\nThe tool set changed since this task's last request: +added "
+                        f"{MCP_GATEWAY_TOOL_NAME}; \u2212removed none; ~changed read_loaded_source."]) is (mismatch == "changed_schema")
+
+
 def test_required_handbook_joins_after_the_ordinary_map_frame_has_fit(world):
     head = "A held note. " * 5_000
     _write(world, "a", head, summary="First summary.")
@@ -1573,6 +1698,45 @@ def test_a_saved_form_replays_only_at_the_same_density_and_request_cost(world, m
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     recalibrated = _plan(world, window, mode="low", core=resumed)
     assert not _cuts(recalibrated) and _held(recalibrated) == _held(recomputed)
+
+
+@pytest.mark.parametrize("preferred,window", [("low", 48_000), ("max", 200_000)], ids=["summary", "lower_mode"])
+def test_the_next_start_preview_of_a_cold_return_is_a_fresh_start_while_the_return_keeps_its_frame(
+        world, monkeypatch, preferred, window):
+    """#3649: ``memory_read``'s pairwise start (``memory_floor.counterfactual_starts``) of a cold return fits a fresh
+    start of the same material. The return replays what its saved frame sent: the head's summary, and Low in the
+    owner's Max. A fresh start at that window holds the head whole and keeps the owner's mode, and so does the arm
+    whose request prices like that frame (saved before any reply); an arm with a changed story is fresh either way.
+    The preview writes nothing and leaves the return's capture as it was."""
+    head = "The held head before the frame changed. " * 1_200
+    _write(world, "saved", head, summary="An authored summary.")
+    ctx = ToolContext(repo_dir=world[0].repo_dir, drive_root=world[0].drive_root, task_id=TASK["id"])
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.6)
+    whole = _plan(world, 60_000, mode="low", ctx=ctx)
+    tight = _plan(world, whole.projected_tokens_with_tools("low", []) // 2 + RESERVE, mode=preferred, ctx=ctx)
+    carried = _rebind(monkeypatch, ctx, tight, tight.messages_for("low"), window)  # a new route before any reply
+    assert carried.initial_mode == "low" and _cuts(carried) == [("saved", "summary")]
+    capture = json.loads(json.dumps(held_notes.continuation_capture(carried, "low")))[held_notes.CAPTURE_KEY]
+    returned = _plan(world, window, mode=preferred, core=replace(tight.core, held_note_resume=capture))
+    cold = context_fit.restored_start(returned, list(tight.start))
+    assert cold.initial_mode == "low" and _cuts(cold) == _cuts(carried) and _held(cold) == _held(carried)
+
+    now = memory_view.snapshot_from_json(tight.core.memory_view_json)
+    arms = {"now": now, "with this selection": replace(now, story=synthetic.pages(2, 3_000))}
+    assert memory_view.story_chars(arms["with this selection"]) > memory_view.story_chars(now)  # another price
+    files = sorted(path for path in Path(world[0].drive_root).rglob("*") if path.is_file())
+    pairwise = memory_floor.counterfactual_starts(cold, arms)
+    assert sorted(path for path in Path(world[0].drive_root).rglob("*") if path.is_file()) == files
+    assert cold.core.held_note_resume == capture
+    for name in ("with this selection", "now"):
+        fresh = _plan(world, window, mode=preferred,
+                      core=replace(tight.core, memory_view_json=memory_view.snapshot_json(arms[name])))
+        facts = fresh.projection(fresh.initial_mode).memory_facts
+        assert pairwise["arms"][name] == {
+            "mode": fresh.initial_mode, "max_room": facts.get("max_room"),
+            "steps": dict((facts.get("floor") or {}).get("steps") or {}),
+            "host": [(row["section_id"], row["tokens_saved"]) for row in facts.get("host_sections_addressed", ())]}, name
+    assert pairwise["arms"]["now"]["mode"] == preferred and not pairwise["arms"]["now"]["host"]
 
 
 def test_cold_replay_prices_the_restored_tail_and_resident_schemas(world, monkeypatch):

@@ -561,3 +561,77 @@ def test_only_the_owners_own_call_speech_can_be_cited(host_world, monkeypatch, k
     if basis:
         assert basis['cited'] == 'Use the other one' and basis['source'] == 'live_call'
     assert carried_owner_corpus(host.ctx) == before
+
+
+
+
+@pytest.mark.parametrize('host_world', [('max', 400_000, 'estimator')], indirect=True)
+def test_primary_voice_start_room_policy_pays_its_frames_keeps_opened_sessions_untouched(host_world, monkeypatch):
+    """The original case of the book maps through the real ``session_candidate``, one world and one stub session: a story
+    of long old pages a Max start lowered to Low by the window has not folded, and a voice window that refuses the first
+    request. Before the call opens, the physical frame (reply reserve and the first send's own room kept) is paid by the
+    old pages' written beginnings and both detailed maps stay whole; the same preparation without the ``unsent_start``
+    that ``session_candidate`` hands its floor rung yields the maps first. An opened session whose request fits asks no
+    start room and is not touched."""
+    from ouroboros import context_fit as fit, context_layout, memory_view
+    from ouroboros.contracts.live_conversation import LiveOptions
+    from ouroboros.realtime_setup import measure_session_wire, session_candidate
+    from ouroboros.reference_books import load_reference_book
+    from tests import _memory_view_synthetic as syn
+
+    host, factory = host_world.host, host_world.provider['session']
+    host.model = replace(host.model, facts=replace(host.model.facts, basis='estimator'))
+    story = [dict(page, lead_rule=1, text=f'Old project {n} ended with its decision. Detail {n}: ' + syn.prose(6_000))
+             for n, page in enumerate(syn.pages(80, 0))]
+    core = replace(host.plan.core, memory_view_json=memory_view.snapshot_json(syn.snapshot(story=story)))
+    base = fit.build_context_fit_plan(host_world.env, core, host_world.task, preferred_mode='max', tool_schemas=host.schemas,
+                                      nano_base=host.plan.start_nano_base, route_resolver=host.turn.resolve_route)
+    options = LiveOptions(instructions='Call feature instructions. ' * 20, languages=('en-US',))
+    maps = [context_layout.book_navigation(load_reference_book(host_world.env.repo_dir, book))
+            for book in ('architecture', 'development')]
+
+    def text_of(messages):
+        content = messages[0]['content']
+        return content if isinstance(content, str) else '\n'.join(block['text'] for block in content)
+
+    def pages_of(text):  # old pages shown whole, and at their written beginning alone
+        began = [n for n in range(80) if f'Old project {n} ended with its decision.' in text]
+        return sum(f'Detail {n}:' in text for n in began), sum(f'Detail {n}:' not in text for n in began)
+
+    def prepare(window, *, opened=False, unsent_start=True):
+        host.model = replace(host.model, facts=replace(host.model.facts, conversation_window_tokens=window))
+        host.plan = host.ctx.context_fit_plan = base
+        host.messages[:] = copy.deepcopy(base.messages_for(base.initial_mode))
+        host._session_opened = opened
+        with monkeypatch.context() as patch:
+            if not unsent_start:  # exactly the experimental argument, as an older ``session_candidate`` called it
+                reproject = fit.ContextFitPlan.reproject_for_route
+                patch.setattr(fit.ContextFitPlan, 'reproject_for_route', lambda self, **kw: reproject(
+                    self, **{key: value for key, value in kw.items() if key != 'unsent_start'}))
+            session, _, evidence = session_candidate(host, factory, options)
+        return text_of(session.wire['messages']), evidence
+
+    assert base.initial_mode == 'low' and base.preferred_mode == 'max'  # no owner target: only a window folds this view
+    base_text = text_of(base.messages_for('low'))
+    assert all(whole_map in base_text for whole_map in maps) and pages_of(base_text) == (80, 0)
+    host.messages[:] = copy.deepcopy(base.messages_for('low'))
+    whole = measure_session_wire(host, base, host.messages, host.schemas, factory, options)[2]['fit']['measurement'][
+        'estimated_input_tokens']
+    reserve = host.model.facts.working_reserve_tokens
+    refused = whole + reserve - whole // 16  # the first request exceeds the window by a sixteenth: a physical refusal
+
+    text, evidence = prepare(refused)
+    assert [row['rung'] for row in evidence['recovery']] == ['floor']  # the wire refused; the floor rung walked
+    assert all(whole_map in text for whole_map in maps)  # every heading and line range of both books, as authored
+    assert pages_of(text)[1]  # at least one old page stepped to its written beginning
+    room, measurement = evidence['work_room'], evidence['fit']['measurement']
+    assert room['first_send'] and 0 < room['requested_tokens'] <= room['remaining_tokens'] and room['deficit_tokens'] == 0
+    assert measurement['capacity_deficit_tokens'] == 0 and measurement['response_reserve_tokens'] == reserve
+
+    bare, evidence = prepare(refused, unsent_start=False)  # the same preparation, only that argument removed
+    assert [row['rung'] for row in evidence['recovery']] == ['floor']
+    assert not all(whole_map in bare for whole_map in maps)  # without it the maps are the first host forms to yield
+
+    for window, opened in ((whole + reserve, True), (None, False)):  # an open session whose request fits; an unknown window
+        text, evidence = prepare(window, opened=opened)
+        assert text == base_text and evidence['recovery'] == [] and evidence['work_room']['requested_tokens'] == 0

@@ -180,7 +180,8 @@ def estimate_context_prompt_tokens(
 
 def required_book_addition(plan: Any, mode: str) -> int:
     """What this task's directly required handbook adds to ``mode``'s view of ``plan``, its start note included
-    (estimator tokens; 0 without a captured core): the window charges it, and no automatic choice is sized by it."""
+    (estimator tokens; 0 without a captured core). The window charges it; no target, memory or transcript narrowing
+    is sized by it. A first request that cannot go out with it yields only maps for it (``ContextCore.required_book_tokens``)."""
     core = getattr(plan, "core", None)
     return 0 if core is None else core.required_book_tokens(mode) + int(
         (plan.projection(mode).memory_facts or {}).get(BOOK_NOTE_KEY) or 0)
