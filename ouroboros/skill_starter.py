@@ -133,13 +133,15 @@ def _voice_default_keys(item: Dict[str, Any], settings: Dict[str, Any],
     keys = item.get("needs_keys") or []
     if not keys or frozenset(keys) not in supported:
         return {}
-    from ouroboros.provider_models import legacy_openai_base
+    from ouroboros.provider_models import PROVIDER_KINDS, legacy_openai_base
     from ouroboros.secret_masking import looks_masked_secret
+
+    openai_key = PROVIDER_KINDS["openai"].flat_key("api_key")  # the kind table names the built-in OpenAI key
 
     def present(key: str) -> bool:
         value = settings.get(key)
         return (isinstance(value, str) and bool(value.strip()) and not looks_masked_secret(value)
-                and not (key == "OPENAI_API_KEY" and legacy_openai_base(settings)))
+                and not (key == openai_key and legacy_openai_base(settings)))
 
     return {key: present(key) for key in keys}
 

@@ -262,6 +262,7 @@ def _connection_cases():
     from starlette.testclient import TestClient
 
     from ouroboros import onboarding_connections, skill_starter, store
+    from ouroboros.skill_sources import derived_sources
     from tests.test_onboarding_connections import _skill
 
     offer = [{"id": "builtin/demo", "name": "demo", "source_id": "builtin", "category": ["messaging"],
@@ -279,7 +280,9 @@ def _connection_cases():
             restore.enter_context(patch(target, value))
         restore.enter_context(patch.object(skill_starter, "_offer", lambda *_a, **_k: [dict(item) for item in offer]))
         restore.enter_context(patch.object(skill_starter, "starter_ids", lambda *_a, **_k: []))
-        groups = skill_starter.starter_groups(root, rows=[])
+        # The offer's source: the step tells a built-in skill, and so its card, by the built-in row it reads.
+        builtin = [row for row in derived_sources({}) if row["kind"] == "builtin"]
+        groups = skill_starter.starter_groups(root, rows=builtin)
         app = Starlette(routes=[Route(check, endpoint=onboarding_connections.api_connection_identity, methods=["POST"])])
         with TestClient(app) as client:
             for name, token in (("qr", "1:gallery-synthetic-token"), ("refused", "2:gallery-synthetic-token")):
