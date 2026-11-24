@@ -210,6 +210,7 @@ ouroboros/ — agent core and shared runtime (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
   mcp_client.py — identity, masks, names, launch admission; mcp_discovery.py — manager-owned joinable listing/settle (§6 MCP)
   mcp_schema.py — literal-safe metadata; mcp_catalog.py — catalogs; mcp_oauth.py — MCP sign-in; oauth_engine.py — OAuth
+  service_sign_in.py, service_sign_in_declaration.py — skills' sign-ins to the services they declare (§13)
   mcp_headers.py, mcp_import.py — origin-bound headers, draft import
   mcp_task_session.py, mcp_browser_guard.py, skill_mcp.py — task stdio sessions, browser policy, skill binding
   safety.py — Safety Supervisor call (§6 Safety Supervisor outcomes)
@@ -250,7 +251,7 @@ ouroboros/ — agent core and shared runtime (§6)
   memory_form_facts.py — form receipts and the sources holding the room (§6)
   chronicle_lead.py — lead instruction and evidence of its delivery in tool descriptions (§6)
   capability_evidence.py, response_limits.py, density_probe.py — sourced capability, token-density and maximum-response evidence (`data/state/capability_evidence.json`; windows size sends and grant no review authority); the bounded cold-start review-density probe, re-exported by capability_evidence (§6 Prompt size, density and windows)
-  context_layout.py — doc-layout SSOT; `book_navigation` in Low/Nano, full ARCHITECTURE in Max; reduction relocates, never silently truncates (§6 Context fitting)
+  context_layout.py — doc-layout SSOT; reduction relocates (§6 Context fitting)
   reference_books.py — ordered book reader/validator; free worktree balance vs cached official merge-base, unknown if unavailable, nonblocking (DEVELOPMENT "Documentation contract")
   local_model_server.py — read-only local formatter measurement and serving-process probe
   context_compaction.py, context_source_view.py, context_renewal.py, context_health.py, arrival_notes.py — atomic compaction, source-address recovery, same-task renewal, dated provenance capsules named at arrival, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
@@ -489,11 +490,12 @@ ouroboros/ — agent core and shared runtime (§6)
     marketplace.py, skill_sources.py, skill_my_skills.py — ClawHub; sources, catalog, installs; My skills
     skill_source_contracts.py — Source/catalog/install envelopes; browser twin skill_source_contract_types.js
     mcp.py — MCP HTTP surface over the shared MCPManager
+    sign_in.py, sign_in_contracts.py — the owner's sign-in steps and status for skills' services (§13)
     claudexor_accounts.py — thin owned-daemon status/login/account proxies; no auth logic or browser token; only a successful read proves absence (§3 Agent accounts; §4)
     claudexor_passive.py, claudexor_contracts.py — passive quota read and envelope types (docs/PASSIVE_QUOTA_READ.md)
     claudexor_quota.py — Owned-daemon refresh/reset/receipt proxies; catalog negotiation, exact key/body and typed errors, no start/retry/browser token (§3 Agent accounts; §4)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
-    host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
+    host_service.py, host_notify.py, host_sign_in.py — Loopback-only Host Service API, /notify `skill_notice` rows, a skill's own sign-in tokens (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
     history_paging.py, history_chronology.py, chat_search.py, chat_archive.py, recall.py — dialogue pages/search/read-only archive, Project `latest_arrival`, neighbour door; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Physical-attempt ledger projections: dashboard, UTC room days, cache periods, root detail

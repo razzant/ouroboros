@@ -19,6 +19,7 @@ SIZE_REFUSAL_KEY = "_context_size_refusal"  # in a task's usage: its round's lat
 #: queued as their calls end (``llm_observability.SendRefusals``) and told once by the next facts row.
 REFUSED_SENDS_KEY = "_refused_sends"
 _REFUSED_SEND_KIND = "ouroboros_refused_send"
+FRESH_FACTS_KEY = "_context_facts_fresh"  # in a task's usage: its newest facts row's digest until a call may carry it out
 _REFUSAL_BASES = {"provider_stated": "provider stated",
                   "exact_local_count": "derived from an exact local count before sending",
                   "anchored_estimate": "derived from a refusal that stated no number"}

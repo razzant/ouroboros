@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pathlib
 import threading
 import time
@@ -1188,7 +1189,7 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
 
     Only ``cost_hard_stop_pct`` advances, within authorized room, avoiding another
     pause at the same threshold. Hard tree/global caps stay; producer allowances
-    never expand, and disabled/unknown ceilings never re-arm (owner Q10).
+    are not this profile's refresh, and disabled/unknown ceilings never re-arm (owner Q10).
     Read the current wallet, cumulative tree spend and actual root cap strictly
     from the ledger (the owner may have raised it), own cost from restored usage.
     Unavailable wallet, degraded/stale tree or unknown spend refuses refresh:
@@ -1207,7 +1208,7 @@ def _refresh_planning_threshold(ctx: Any, budget_remaining_usd: Optional[float],
     authority = task_pacing.cost_stop_authority(ctx)
     if authority != task_pacing.COST_STOP_EXPLICIT:
         # A producer allowance, or an inherited number whose author is unverified,
-        # keeps its existing bound: Resume never widens it.
+        # keeps its existing bound without a separate producer decision on this grant.
         reason = ("producer_allowance_not_expanded" if authority == task_pacing.COST_STOP_PRODUCER
                   else "policy_unverified_not_expanded")
         return {"refreshed": False, "reason": reason, "authority": authority, "ceiling_usd": old.ceiling_usd}
@@ -1292,6 +1293,25 @@ def _reopen_owner_fence(ctx: Any, usage: Dict[str, Any], *, fence_id: str = "", 
                 state=STATE_RESUMED)
 
 
+def _ceiling_words(refresh: Dict[str, Any]) -> str:
+    """The disclosure's clause on this Resume's money, in amounts however small: the room the owner added and, when the
+    total budget leaves less of it now, that observation beside it (never in the ceiling's place); else the current
+    producer ceiling, which an earlier Resume may have moved from the one the wake started with."""
+    from ouroboros.cost_projection import usd_text
+
+    def amount(key: str) -> Optional[float]:
+        value = refresh.get(key)
+        return float(value) if type(value) in (int, float) and math.isfinite(value) else None
+
+    room, now, ceiling = amount("additional_usd"), amount("available_now_usd"), amount("ceiling_usd")
+    if room is not None:
+        less = f" (the total budget leaves {usd_text(now)} of it now)" if now is not None and now < room else ""
+        return f"; the owner granted {usd_text(room)} of additional known room for this wake{less}"
+    if refresh.get("reason") == "producer_allowance_not_expanded" and ceiling is not None:
+        return f"; the current {usd_text(ceiling)} producer ceiling still binds for this Resume"
+    return ""
+
+
 def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], grant: Dict[str, Any],
                        refresh: Dict[str, Any], messages: list) -> None:
     """The resumed model's first facts: UNKNOWN host rows and how it continued, or its wake."""
@@ -1336,12 +1356,7 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         subject = authority_subject(row.get("cause"))
         detail = f"it could not read {subject}" if subject else str(row.get("reason_text") or "saved decision unreadable")
         kind = f"technical pause ({detail})"
-    held = ""
-    if refresh.get("reason") == "producer_allowance_not_expanded" and refresh.get("ceiling_usd") is not None:
-        # Said, not implied: Resume keeps the allowance the task was launched with.
-        held = (f"; the ${float(refresh['ceiling_usd']):.2f} producer allowance this task was launched with "
-                "still binds, never extended by Resume even if its producer's window has since freed more, "
-                "so known spend still at it pauses the task again before another model call")
+    held = _ceiling_words(refresh)
     from ouroboros.working_checkpoint import close_unanswered_calls
 
     close_unanswered_calls(messages, kind)
@@ -1389,6 +1404,7 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
     pause, one after it this source, never an older saved locator (#1716).
     """
     from ouroboros.owner_wait import rebind_restored_route, restore_continuation_state
+    from ouroboros.consciousness_allowance import RESUMED_ALLOWANCE_KEY
     from ouroboros.task_pacing import restore_cost_ceiling
     from ouroboros.working_checkpoint import HOLD_UNWRITABLE, save_resumed
 
@@ -1398,10 +1414,14 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
     root = pathlib.Path(ctx.budget_drive_root or ctx.drive_root)
     grant = dict(row.get("grant") or {})
     # The start's own authority, never the saved number alone (#1128).
-    ctx._cost_ceiling = restore_cost_ceiling(ctx, state.get("cost_ceiling"))
+    renewed = grant.get(RESUMED_ALLOWANCE_KEY)
+    ctx._cost_ceiling = restore_cost_ceiling(ctx, state.get("cost_ceiling"), producer_resume=renewed)
     refresh: Dict[str, Any] = {"refreshed": False, "reason": "not_a_money_rail" if row.get("reason") == REASON_AUTHORITY else "hard_rail"}
     graceful = str(row.get("rail") or "") in GRACEFUL_RAILS
-    if graceful:
+    if renewed:
+        refresh = {"refreshed": True, "reason": "own_wake_allowance", "ceiling_usd": ctx._cost_ceiling.ceiling_usd,
+                   **{key: renewed[key] for key in ("additional_usd", "available_now_usd") if key in renewed}}
+    elif graceful:
         refresh = _refresh_planning_threshold(ctx, budget_remaining_usd, usage)
     waiter = getattr(ctx, "model_wait_context", None)
     restored, published, exposure = len(messages), "", getattr(ctx, "_sleep_interaction_seen", None)
@@ -1441,7 +1461,9 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
             set_budget_pause(root, ctx.task_id, consumed,
                              expected_pause_id=str(row.get("pause_id") or ""),
                              expected_state=STATE_RESUME_GRANTED,
-                             expected_grant_id=str(grant.get("grant_id") or ""))
+                             expected_grant_id=str(grant.get("grant_id") or ""),
+                             row_update=(lambda current: {**current, RESUMED_ALLOWANCE_KEY: {
+                                 k: v for k, v in renewed.items() if k != "available_now_usd"}}) if renewed else None)
             break
         except Exception as exc:
             ctx._budget_paused_sec, ctx._sleep_interaction_seen = live[0], exposure  # unshown with its disclosure

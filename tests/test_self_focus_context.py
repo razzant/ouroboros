@@ -90,6 +90,15 @@ def test_main_focus_is_retained_in_sent_tail_after_folding_and_revised(main_loop
         assert all(HOST_CONTEXT_KIND_KEY not in row for row in rows)
 
 
+def _sent(ctx):
+    """A candidate carrying this round's facts row passed its admission (``loop_model_call._presend_context_fit``)."""
+    from types import SimpleNamespace
+    from ouroboros.loop_model_call import _presend_context_fit
+
+    with _presend_context_fit(ctx) as admit:
+        assert admit(SimpleNamespace(physical_context=None))
+
+
 def test_same_round_focus_change_appends_without_rewriting_sent_history(tmp_path):
     ctx = _ctx(tmp_path)
     ctx.context_fit_plan = None
@@ -98,6 +107,7 @@ def test_same_round_focus_change_appends_without_rewriting_sent_history(tmp_path
     before = deepcopy(ctx.messages)
     assert "First working thought" in _facts(before)
     assert not append_context_facts(ctx)
+    _sent(ctx)  # the row went out: sent history from here on
     _record(tmp_path, "Revised working thought", date="2026-10-10T12:01:00Z")
     assert append_context_facts(ctx)
     assert ctx.messages[:len(before)] == before
@@ -157,6 +167,7 @@ def test_unreadable_record_is_not_quarantined_and_recovery_refreshes_same_round(
     signature = result_signature(tmp_path, "task")
     assert append_context_facts(ctx)
     assert "Retain this dated thought" in _facts(ctx.messages)
+    _sent(ctx)  # the row went out: sent history from here on
     before = deepcopy(ctx.messages)
     outage = unreadable_result(monkeypatch, "task", root=tmp_path)
     assert append_context_facts(ctx)
@@ -306,3 +317,31 @@ def test_a_direct_turn_still_reads_the_line_it_published(tmp_path, monkeypatch):
     line = _facts(ctx.messages)
     assert "self-authored focus, the line my human reads under this work's name, written 5 min ago" in line
     assert "Answering the estimate question" in line and "focus: none" not in line
+
+
+def test_unsent_replacement_keeps_full_focus_and_quota_on_the_surviving_transcript(tmp_path, monkeypatch):
+    """A row of this round no candidate carried is replaced by one told against the view as sent: the whole focus and
+    the due quota part are told again, never as already whole in an earlier row; once a candidate carried it, the next
+    round's row points back to it."""
+    from tests.test_round_facts_line import _census_ctx, _store_census, _quota_of
+
+    ctx = _census_ctx(tmp_path, monkeypatch)
+    _record(tmp_path, "The focus a fresh row alone carries.")
+    _store_census(tmp_path)
+    assert append_context_facts(ctx)
+    pending = deepcopy(ctx.messages[-1])
+    assert _quota_of(pending) and "The focus a fresh row alone carries." in pending["content"]
+    assert not append_context_facts(ctx)  # unchanged preparation is stable too
+    ctx.messages.append({"role": "user", "content": "A newly arrived instruction."})
+    assert append_context_facts(ctx)
+    assert pending not in ctx.messages
+    assert _quota_of(ctx.messages[-1]) == _quota_of(pending)
+    assert "The focus a fresh row alone carries." in _facts(ctx.messages)
+    assert "whole in an earlier facts row" not in _facts(ctx.messages)
+    delivered = deepcopy(ctx.messages[-1])
+    _sent(ctx)
+    ctx.round_idx += 1
+    assert append_context_facts(ctx)
+    assert delivered in ctx.messages
+    assert "whole in an earlier facts row" in _facts(ctx.messages)
+    assert not _quota_of(ctx.messages[-1])

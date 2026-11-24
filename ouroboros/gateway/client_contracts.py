@@ -921,6 +921,7 @@ class TaskResumeResponse(TypedDict, total=False):
     grant_id: str
     grant_generation: int
     paused_duration_sec: float
+    consciousness_resume: Dict[str, float]  # additional_usd (decided at the wake's own allowance grant), available_now_usd (what the total budget leaves of it)
     eligible_descendants: List[str]
     held_siblings: List[str]
     rebound_held_siblings: List[str]

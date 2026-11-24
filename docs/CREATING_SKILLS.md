@@ -2157,6 +2157,57 @@ def register(api):
     keys = api.get_settings(["OPENROUTER_API_KEY"])
 ```
 
+### Signing in to a service
+
+On a core whose Host Service `GET /identity` answers `sign_in_version: 1`, the core holds a skill's sign-ins to the
+services it declares: the owner signs in on the skill's card (choosing one of the issuer's clients first: personal and
+IT-approved clients sit side by side), and the skill asks the Host Service for its own tokens. Declare each service
+in a top-level `sign_in` list of the manifest (never inside `contributes`; an older core keeps the key unused):
+
+```yaml
+sign_in:
+  - id: google                      # [a-z0-9_]{1,40}, unique within the skill
+    label: Google                    # shown as "Signed in to Google"
+    issuer: https://accounts.google.com   # HTTPS; metadata by RFC 8414, then OpenID discovery
+    # endpoints: {authorization: …, token: …, revocation: …, identity: …}   # only without published metadata
+    # identity: {subject: sub, label: email}                                 # only these two keys: the identity endpoint's field names
+    scopes: [openid, email, "https://www.googleapis.com/auth/calendar.events"]   # required, 1–64
+    scope_labels: {"https://www.googleapis.com/auth/calendar.events": "events"}
+    # Other spellings the provider may return for one declared scope (never requested, never a broader right):
+    scope_spellings: {email: ["https://www.googleapis.com/auth/userinfo.email"]}
+    optional_scopes: [{scope: "https://mail.google.com/", label: "Permanent deletion", default: false}]
+    authorize_params: {access_type: offline, prompt: consent}   # never response_type, client_id, redirect_uri,
+                                                                # state, code_challenge*, scope, login_hint, resource
+    accounts: many                  # one | many
+    optional: true                  # the skill works without it: no tray while nothing is signed in
+    notes: {client: "…", refused: "…", refresh_rejected: "…"}    # your words, shown verbatim (≤ 600 chars each)
+```
+
+A declaration carries no credentials (`client_id`/`client_secret` are refused): clients belong to each installation.
+`scope_spellings` lists alternate response words for one declared permission. The card shows each literal before
+consent; only primary words are requested. This is not permission to widen an earlier grant. `skill_preflight`
+reports invalid entries (`sign_in_schema`). Each skill and account has its own grant. A new sign-in and its return need the skill's current bytes admitted as the Host Service admits them (executable review in any mode, enabled); leaving one never does.
+The Host Service routes take the skill from `x-skill-token`, never from the body:
+
+- `GET /sign-in/accounts` → `{ok, services: [{id, label, accounts: [{key, label, subject, verified, state, reason?,
+  scope, client_label, via, legacy_generation?, connection_id?}]}]}`. A store that cannot be read answers `SIGN_IN_UNAVAILABLE` (503), never an empty list; `legacy_generation` comes from the saved grant. A confirmed account's opaque `connection_id` stays through refreshes and its subject's later consent (any client); a sign-in after Disconnect gets another. A missing one proves nothing.
+- `POST /sign-in/token` `{service, account?, rejected?, required_scope?, min_valid?, connection_id?}` (account may be omitted when one is
+  signed in; `rejected`: the access token the provider just refused, refreshed once; `min_valid`: 0–300 seconds the
+  token must stay valid; `required_scope`: what a call lacked, within your declaration; `connection_id`: the one a write
+  expects, any other or none being `409 connection_changed`) → `200 {ok, access_token,
+  token_type, expires_at (epoch seconds), scope, account: {key, label}, connection_id?}`; `409 {ok: false, code: "SIGN_IN_REQUIRED",
+  reason, service, account, note, hint}` (hand `hint` to the mind; `note` is your `refresh_rejected` text when that is
+  the reason); `503 SIGN_IN_UNAVAILABLE` (the provider did not answer; the grant is kept); `404 {ok: false, error, reason, hint}`
+  with no account to use (`unknown_service`, `unknown_account`, `account_required`, `not_signed_in`, `no_usable_account`; hand `hint` to the mind); `403` the token floor. Cache the token until `expires_at`; never log it.
+- `POST /sign-in/handover` `{service, recover?, clients: [{client_id, client_secret?, label_hint, return_hint: "loopback" |
+  "exact:<address>"}], grants: [{legacy_key, legacy_generation?, previous_legacy_generation?, label, subject?, client_id,
+  connection_id?, tokens: {refresh_token, access_token?, expires_at?, scope?}}]}` moves saved grants. Supply the old token's exact known
+  scope, not today's requested scope; an unknown scope requires sign-in. The host confirms the subject with the provider. For a repeat handover after the skill's local consent changed, name its
+  non-secret generation, the last one the host acknowledged (`null` for an untagged predecessor) and, if you hold it, that transfer's `connection_id`; the host replaces only the connection that transfer recorded and that is still current (else `connection_changed`). Only a verified same-subject handover is
+  replaced; card consent and withdrawal win. `{legacy_key, result, reason?, account?, via?, legacy_generation?, connection_id?}` echoes
+  a generation only after filing or retaining the same confirmed account, with the `connection_id` recorded for that transfer; a confirmed account listing its `legacy_generation` also confirms one. Never refresh a grant the host holds. A `refused` grant adds `exchange`: `none` (this request never sent that refresh token, being refused before its exchange or its own refresh never having left, and the host records nothing else for it: no other attempt, no transfer of that generation or token, no break of its account; only then, and only for your own first fresh submission of it, may your own copy keep serving), `saved` (an unreachable provider stopped your grant's own attempt, whose provider answer is kept: send the same body with `recover: true`) or `unknown` (anything else, never repeated: the owner signs in on the card). `recover: true` imports no client and starts no transfer: a confirmed receipt (only for the same legacy key, generation and refresh token) or a refusal already known comes back before any provider call, a kept answer is filed, and nothing kept is `handover_not_started` with `unknown`. An exchange that left or was answered is never displaced by another token's (`handover_unconfirmed`). Only a `429` the rate limit gave before reading the body adds `handover_started: false`, a fact of that request alone.
+- An owner's Disconnect or Revoke first appends a non-secret row to `sign_in_withdrawn.json` in your state folder: `{v: 1, accounts: [{service, account, subject?, legacy_key?, legacy_generation?, connection_id?, via, at}]}`; a repeated break adds its own row. A record the host cannot read is never replaced: the withdrawal fails until it can be read. Check it before your own path serves an account, on any core; a file you cannot read is unknown, never empty. A version of your skill that does not read it, such as one rolled back to, is not protected by it.
+
 ### Provider sign-in return
 
 Redirect to `<public base>/onboarding/static/provider-return.html`. This builtin page survives custom/disabled main UI
@@ -2171,9 +2222,11 @@ in your state directory. Register POST `oauth/complete`; the page forwards `{sta
 provider sent one. The skill validates its issued state, compares a present `iss` with the issuer it asked (RFC 9207;
 a provider that advertises `authorization_response_iss_parameter_supported` must send it), handles denial, exchanges
 credentials and stores tokens. The page neither validates grants nor owns tokens. A state `{v:1,mcp:<server>,nonce}` is
-the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`.
+the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`; `{v:1,sign_in:<skill>,
+svc:<service>,nonce}` is a declared service's sign-in, posted to `/api/sign-in`. A skill's own `oauth/complete` flow
+remains the path on cores without `sign_in_version`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
-The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
+The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported; after a declared service's `answer_saved` (the provider's answer is kept, only the account read waits) it offers Finish sign-in, which sends the same return again from the page's memory on the owner's press.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.
 
 ### Reading memory

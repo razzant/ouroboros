@@ -187,3 +187,31 @@ def test_host_grant_receipts_are_control_state_not_part_of_a_skills_state(tmp_pa
     assert is_skill_control_plane_path(receipt.with_suffix(".json.lock"), root)
     assert is_skill_control_plane_path(receipt.with_name(f".{receipt.name}.tmp.fixture"), root)
     assert not is_skill_control_plane_path(skill_state_dir_path(root, "fixture") / receipt.name, root)
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "expected"),
+    [
+        ("state/sign_in", True),
+        ("state/sign_in/clients.json", True),
+        ("state/sign_in/clients.lock", True),
+        ("state/sign_in/grants/demo_skill/demo_svc/pending.json", True),
+        ("State/Sign_In/grants/demo_skill/demo_svc/a-0123456789abcdef0123.json", True),
+        ("state/sign_in/../memory/clients.json", False),
+        ("clients.json", False),
+        ("pending.json", False),
+        ("memory/clients.json", False),
+        ("skills/external/demo_skill/clients.json", False),
+        ("state/skills/demo_skill/clients.json", False),
+        ("state/skills/demo_skill/sign_in_withdrawn.json", False),
+    ],
+)
+def test_sign_in_state_path_classification_table(tmp_path, rel_path, expected):
+    from ouroboros.tools import core_secret_paths
+
+    data_root = tmp_path / "data"
+    target = data_root.joinpath(*rel_path.split("/"))
+    assert is_skill_owner_state_target(target, data_root) is expected
+    assert is_skill_control_plane_path(target, data_root) is expected
+    assert core_secret_paths._is_runtime_secret_data_path(rel_path) is expected
+    assert core_secret_paths._is_runtime_secret_data_path(rel_path, include_owner_state=False) is expected

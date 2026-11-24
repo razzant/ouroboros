@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.extension_ui_validation import WIDGET_START_MODES
+from ouroboros.installation_stop import confirm_absent
 from ouroboros.store import StoreError
 from ouroboros.gateway._helpers import json_error, request_drive_root, request_json_or
 from ouroboros.utils import atomic_write_json, read_json_dict
@@ -454,14 +455,9 @@ async def api_ui_preferences_get(request: Request) -> JSONResponse:
     try:
         stored = read_json_dict(path)
         if stored is None:
-            # Only a lookup that finds nothing (no file, its folder not created yet) is new; exists() would also say
-            # False for a lookup that failed (ENOTDIR, and on Python 3.14 any OSError), which falls through to below.
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                raise ValueError("saved UI preferences are not a readable JSON object")
+            # Only a lookup that finds nothing below a real directory (no file, its folder not created yet) is new;
+            # exists() swallows OSError, and Windows reports a non-directory parent as FileNotFoundError too.
+            confirm_absent(path)
         return JSONResponse(_preferences_of(stored))
     except Exception:
         # The defaults stand in for a saved file that cannot be read, or that may exist where it cannot be looked up

@@ -19,12 +19,12 @@ from ouroboros.context import build_incoming_user_content
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, WHOLE_CATEGORY
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.llm import LLMClient
-from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
+from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_tool_execution import prune_reclaim_trace_refs, reclaim_trace_refs
 from ouroboros.loop_transport import TransportWaitEpisode, finalize_now_transport_terminal as _finalize_now_transport_terminal
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR, rewrite_view, sanction_rewrite, size_pass_host_rows
+from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR, departure, rewrite_view, sanction_rewrite, size_pass_host_rows
 from ouroboros.usage_accounting import invalidate_task_cache_splits
 from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, _narrow_round_deadline, _owner_stop_control_is_current, _owner_stop_window_elapsed, handle_finalize_now_entry  # noqa: F401 -- _owner_stop_control_is_current stays a facade surface
 
@@ -1447,6 +1447,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
 
     trials = (route_schema_trials(ctx.tools, ctx.messages, ctx.tool_schemas, mode, plan.model, plan.provider == "local")
               if capacity is not None else None)
+    unread = start_unread(ctx.tools._ctx, getattr(ctx, "accumulated_usage", None))
     def project(room):
         return plan.reproject_for_route(
             window_tokens=int(capacity or 0), known_window=capacity is not None, admitted=True,
@@ -1458,7 +1459,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
             refused_tokens=(int(saving) if saving or (saving == 0 and slack)
                             else max(1, int(measurement.capacity_deficit_tokens or 0))),
             **({"slack_tokens": int(room)} if room else {}),
-            **({"telling_floor": True} if telling_floor else {}),
+            **({"telling_floor": True} if telling_floor else {}), unsent_start=unread,
         )
 
     rebound = project(slack)
@@ -1503,4 +1504,97 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
         "window_tokens": rebound.window_tokens,
         "input_tokens_estimate": measurement.estimated_input_tokens,
     })
+    return True
+
+
+COLD_RETURN_ATTR = "_cold_returned"  # on a task's tool context: this process resumed it from a continuation
+
+
+def start_unread(slot: Any, usage: Any = None) -> bool:
+    """No request of this work has been read: none recorded as sent or restored as observed (``departure`` has no
+    baseline), no reply read its input (``transcript_prefix.note_prefix_answer``'s count in ``usage``, by default the
+    slot's; an output-limited or empty reply counts though no prefix was kept) and no cold return
+    (``owner_wait.rebind_restored_route``), where an absent record proves nothing. Only such a view is still its
+    start (``ContextFitPlan.reproject_for_route(unsent_start=...)``, ``_shorten_book_map``)."""
+    from ouroboros.transcript_prefix import _answer
+
+    usage = getattr(slot, "_accumulated_usage", None) if usage is None else usage
+    return (departure(slot, (), None) == (0, "no_baseline") and not _answer(usage)[0]
+            and not getattr(slot, COLD_RETURN_ATTR, False))
+
+
+def _record_presend_fit_refusal(ctx: Any, refused: Dict[str, Any]) -> None:
+    """Record a pre-dispatch context-fit refusal on ``ctx`` and emit its checkpoint."""
+    ctx.accumulated_usage.update({
+        REFUSED_CANDIDATE_KEY: refused, "_last_llm_error_kind": "context_overflow", "reason_code": "context_overflow",
+        "_last_llm_error": "No result room in the final candidate; pre-send size recovery.",
+        "_last_llm_provider_message": "", "_last_llm_status_code": None, "_last_llm_provider_code": "",
+        "_last_llm_provider_fields": {}, "_last_llm_provider_answer": {}, "_last_llm_provider_message_cut": False,
+        "_last_llm_size_refusal": None,
+    })
+    ctx.accumulated_usage["_last_llm_failure"] = {
+        "model": ctx.active_model, "failure_code": "context_overflow",
+        "error": ctx.accumulated_usage["_last_llm_error"],
+    }
+    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
+        "checkpoint_kind": "context_fit_refused", "round": ctx.round_idx, **refused,
+    })
+
+
+def pre_admission_size_refusal(
+    usage: Dict[str, Any], prior_refused: Any, prior_capture: Any, current_capture: Any, *, admitted: bool,
+) -> bool:
+    """Whether a call ended in a proven pre-admission size refusal with zero sends (such as local exact
+    ``bound_reply_allowance`` before dispatch): no candidate passed admission, no new physical capture exists,
+    no unresolved transport attempt exists, and a fresh ``REFUSED_CANDIDATE_KEY`` record was stamped."""
+    refused = usage.get(REFUSED_CANDIDATE_KEY)
+    return (not admitted and current_capture is prior_capture and refused is not None and refused is not prior_refused
+            and not isinstance(usage.get(TRANSPORT_DEATHS_KEY), dict))
+
+
+def book_yield_due(ctx: Any) -> bool:
+    """Whether the refused view still takes its directly required handbook's yields (``_shorten_book_map``): an unread
+    (``start_unread``) integrating Low start carrying that handbook (its optional maps, then ``BOOK_MAPS``); an
+    unread Nano start takes only an optional map such as DESIGN, never ARCH/DEV. A helper's or nanny's Low view
+    (``context_fit._integrating``) takes none, as the reviewed 23.11 gate kept it."""
+    from ouroboros import memory_floor
+    from ouroboros.context_fit import _integrating
+
+    mode = str(getattr(ctx, "active_context_mode", "") or "")
+    plan = ctx.context_fit_plan
+    core = getattr(plan, "core", None)
+    if (mode not in ("low", "nano") or core is None or getattr(plan, f"{mode}_projection", None) is None
+            or not core.required_book_tokens(mode) or not start_unread(ctx.tools._ctx, ctx.accumulated_usage)):
+        return False
+    facts = plan.projection(mode).memory_facts or {}
+    if mode == "low":
+        return _integrating(core, facts.get("role"))
+    rows = {row.get("section_id") for row in facts.get("host_sections_addressed", ())}
+    return any(part.section_id in memory_floor.OPTIONAL_STEPS and part.section_id not in rows
+               for part in core.dynamic_head_sections)
+
+
+def _shorten_book_map(ctx: Any) -> bool:
+    """An unread start's request that cannot go out with its directly required handbook takes the book's next yield
+    (``memory_floor.step_book_map``: optional maps, then in an integrating Low start its own map then ARCHITECTURE's;
+    owner 23.11.2026, 1), one per refusal, so the sender prices each candidate before another refusal asks more.
+    Memory, mode, schemas and reserves stay as chosen; a view a reply read keeps its forms."""
+    from ouroboros import memory_floor
+
+    if not book_yield_due(ctx):  # A helper's Low view never reaches the map step.
+        return False
+    mode = str(getattr(ctx, "active_context_mode", "") or "")
+    if (stepped := memory_floor.step_book_map(ctx.context_fit_plan, mode)) is None:
+        return False
+    ctx.context_fit_plan = ctx.tools._ctx.context_fit_plan = stepped
+    ctx.messages[:] = stepped.reproject_transcript(ctx.messages, mode)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "book_map_shortened")
+    ctx.tools._ctx.messages = ctx.messages
+    from ouroboros.loop_model_call import _adopt_view_facts, _shown
+
+    _adopt_view_facts(ctx.tools._ctx, stepped, mode)
+    _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {  # one owner-visible fact per yield
+        "checkpoint_kind": "context_fit_low_retry", "round": ctx.round_idx, "route_fp": str(stepped.route_fp or ""),
+        "book_map": stepped.projection(mode).memory_facts["host_sections_addressed"][-1]["section_id"],
+        **_shown(stepped, mode), "owner_visible": True})
     return True

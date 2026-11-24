@@ -102,6 +102,22 @@ def trust_gap(name: Any, skill_dir: Any, content_hash: Any) -> str:
     return "" if content_hash and content_hash == row.content_hash else "changed"
 
 
+def admission_refusal(loaded: Any) -> str:
+    """Why this skill's current bytes may not act for the owner now, "" when they may: ``not_installed``; ``not_reviewed`` (the
+    review gate admits no execution of these exact bytes in the current mode: a verdict, an acceptance or Cyber Pro's own judgment,
+    as ``skill_review_gate`` decides); ``disabled`` (the effective switch); ``not_trusted`` (an execution domain does not run this
+    package, ``trust_gap``). The one answer the Host Service's token check and a service sign-in's start and return read."""
+    if loaded is None:
+        return "not_installed"
+    if not loaded.review.gate_for(loaded.content_hash)["executable_review"]:
+        return "not_reviewed"
+    if not loaded.enabled:
+        return "disabled"
+    if loaded.manifest.is_extension() and trust_gap(loaded.name, loaded.skill_dir, loaded.content_hash):
+        return "not_trusted"
+    return ""
+
+
 def trust_state(skill: Any) -> Optional[dict]:
     """How an extension's code stands under an execution domain, for Skills: ``{"state": "trusted"}`` or
     ``{"state": "untrusted", "reason", "detail"}``, ``administered`` naming whether its doors refuse every change but

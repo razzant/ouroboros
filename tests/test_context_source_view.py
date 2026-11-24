@@ -422,10 +422,14 @@ def test_main_emergency_measurement_uses_sealed_final_facts_without_mutating_liv
     assert measured and not any(is_live for is_live, _rows in measured)
     # What dispatch actually prepares includes the same new host facts and seal.
     seal_task_transcript(ctx.messages)
-    append_context_facts(ctx)
+    assert append_context_facts(ctx)
+    facts_rows = [row for row in ctx.messages if row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME]
+    assert facts_rows == [ctx.messages[-1]]
+    assert facts_rows[0]["content"] == ctx.accumulated_usage["_context_facts_line"]
     after = cc._context_tokens_for_messages(ctx.messages, 1.0)
     assert receipt.reclaimed_tokens == before - after
-    assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in measured[-1][1])
+    last_trial_rows = next(rows for is_live, rows in reversed(measured) if not is_live)
+    assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in last_trial_rows)
     # The applied pass keeps its round's record of the rows the first show did not count; a later
     # round's pass that changes nothing names nothing (C2 S3; Astra RV4).
     from types import SimpleNamespace

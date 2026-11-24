@@ -17,6 +17,7 @@ as ``removal`` and the Skills card renders exactly that, never its own derivatio
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import pathlib
 import shutil
@@ -48,6 +49,59 @@ def removal_action(loaded: Any, record: Any) -> str:
     if location == "external" and record is None:
         return "delete" if str(getattr(loaded, "source", "") or "") in {"self_authored", "external"} else ""
     return "uninstall"
+
+
+@contextlib.contextmanager
+def _own_sign_ins(name: str, services: Any, drive: pathlib.Path):
+    """Hold every sign-in lock of one skill across its explicit deletion, in the writers' order (``service_sign_in``: each service's
+    pending lock, then its saved accounts', the clients' last), each taken once and never waited for: a lock a sign-in step holds is a
+    ``SignInRequired`` (``sign_in_busy``) before anything changes. Its begin, complete, token and handover then wait the deletion out
+    and find no skill. Yields ``(forget, left)``: ``forget()`` removes the skill's account and pending files and its own handover
+    client rows and raises on any failure; once the block ends ``left`` names the folders that kept other content. Emptied folders
+    go by ``rmdir``; nothing else is deleted."""
+    import errno
+
+    from ouroboros import oauth_engine, service_sign_in as sign_in
+    from ouroboros.service_sign_in_declaration import _ID
+
+    files: list = []
+    left: list = []
+    with sign_in.at_data_dir(drive), contextlib.ExitStack() as held:
+        if sign_in.canonical_skill_name(name) != name:  # no sign-in exists under another name
+            yield (lambda: None), left
+            return
+        folder = sign_in._grant(name, "x", "pending").path.parent.parent  # this skill's grants, no other skill's
+        if folder.is_symlink() or any((folder / str(service)).is_symlink() for service in services):  # never follow a link out of the grants
+            raise oauth_engine.SignInRequired("sign_in_storage_unavailable", "a sign-in folder is a link; nothing was deleted")
+        found = [path.name for path in folder.iterdir() if path.is_dir() and not path.is_symlink() and _ID.fullmatch(path.name)] if folder.is_dir() else []
+        for service in sorted({*services, *found}):
+            pending = sign_in._grant(name, service, "pending")
+            held.enter_context(oauth_engine.lock_all([pending]))
+            accounts = [sign_in._grant(name, service, path.stem) for path in sign_in._account_files(name, service)]  # none can appear now
+            held.enter_context(oauth_engine.lock_all(accounts))
+            files += [*(grant.path for grant in accounts), pending.path]
+        registry = sign_in._clients_file()
+        if registry.path.is_file() or files:  # a first registration may be writing before the file exists; no empty registry is written
+            held.enter_context(oauth_engine.lock_all([registry]))
+
+        def forget() -> None:
+            for path in files:
+                path.unlink(missing_ok=True)
+            rows = sign_in.clients() if registry.path.is_file() else []
+            kept = [row for row in rows if row.get("source") != f"handover:{name}"]
+            if len(kept) != len(rows):
+                oauth_engine._save_sign_in(registry, {"clients": kept})
+
+        yield forget, left
+    for path in [*sorted({file.parent for file in files}), folder]:
+        try:
+            path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                raise
+            left.append(f"{path.parent.name}/{path.name}" if path != folder else path.name)
 
 
 def delete_local_skill(
@@ -89,9 +143,21 @@ def delete_local_skill(
     state_dir = state_root / loaded.name
     if state_root.is_symlink() or state_dir.is_symlink() or not state_dir.is_relative_to(state_root):
         return refuse(f"refusing to delete unsafe state path for {loaded.name!r}", 500)
+    from ouroboros import oauth_engine
+    from ouroboros.service_sign_in_declaration import declared
     from ouroboros.skill_grant_follow import end_receipt
 
-    with _lifecycle_lock_for(loaded.name):
+    with _lifecycle_lock_for(loaded.name), contextlib.ExitStack() as owned:
+        try:  # every sign-in lock of this skill, taken before anything changes and held to the end
+            forget, left = owned.enter_context(_own_sign_ins(loaded.name, declared(loaded), drive))
+        except oauth_engine.SignInRequired as exc:
+            return refuse(f"a sign-in step of {loaded.name!r} holds its lock, or its sign-ins cannot be read ({exc.reason}); "
+                          "nothing was deleted; try again", 409)
+        try:  # before any file of the skill: a failure leaves it installed, to delete again
+            forget()  # explicit deletion forgets its sign-ins; uninstall keeps them, as it keeps grants
+        except Exception as exc:
+            return refuse(f"the sign-ins of {loaded.name!r} could not all be forgotten ({type(exc).__name__}); some may already be gone, "
+                          "the skill itself was not deleted; delete it again to finish", 500)
         extension_loader.unload_extension(loaded.name)
         shutil.rmtree(payload_dir)
         end_receipt(drive, loaded.name)  # the installation ended: a later folder of this name starts unconfirmed
@@ -113,7 +179,7 @@ def delete_local_skill(
         "ok": True, "skill": loaded.name, "source": loaded.source,
         "content_hash": loaded.content_hash, "deleted_payload_root": requested_root,
         "deleted_state": deleted_state, "extension_action": "extension_unloaded",
-        "extension_reason": "deleted",
+        "extension_reason": "deleted", **({"sign_ins_left": left} if left else {}),
     }
 
 

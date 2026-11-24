@@ -787,14 +787,14 @@ def test_an_exhausted_skip_whose_later_window_read_failed_says_its_amount_unknow
     assert known.startswith("Daily allowance spent ($391.50 of $390.00 in the last 24 h); next check "), known
 
 
-HELD_NOTE = ("Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance does "
-             "not raise it. Stop now on its card ends it and frees the clock for its next check.")
+HELD_NOTE = ("No spending estimate is available for Resume. Raising the limit alone resumes nothing. "
+             "Stop now on its card ends it and frees the clock for its next check.")
 
 
 @pytest.mark.parametrize("cause,ceiling,said", [
-    ("allowance", 2.99, "Wake-up w1 stopped at the allowance it had left when it started ($2.99)."),
-    ("allowance_and_cap", 50.0, "Wake-up w1 stopped at the allowance it had left when it started ($50.00, the per-task "
-     "cap too)."),
+    ("allowance", 2.99, "Wake-up w1 stopped at its allowance ($2.99)."),
+    ("allowance", 0.004, "Wake-up w1 stopped at its allowance ($0.0040)."),  # a positive sub-cent ceiling stays an amount
+    ("allowance_and_cap", 50.0, "Wake-up w1 stopped at its allowance ($50.00, the per-task cap too)."),
     ("launch_ceiling", 2.99, "Wake-up w1 is paused at the spending limit it started with; its card shows why. "
      "The next wake-up follows it."),
     ("per_task_cap", 10.0, "Wake-up w1 is paused at the per-task cost cap it started with; its card shows why. "
@@ -813,6 +813,27 @@ def test_the_held_wake_sentence_names_only_a_proven_launch_limit(cause, ceiling,
     # Off still wins over any hold, and a note the snapshot carried from an earlier hold never outlives it.
     off = view.describe_consciousness_state({**snapshot, "detail_note": HELD_NOTE}, False)
     assert off["status"] == "disabled" and "detail_note" not in off
+
+
+@pytest.mark.parametrize("pause,cause,ceiling", [
+    (_pause("owner_pause", reason="owner", basis=None), "owner", None),
+    (_pause("model_sleep", reason="sleep", scope="task", basis=None), "sleep", None),
+    (_pause("billing_authority_unreadable", reason="authority", basis=None), "technical", None),
+    (_pause(), "allowance", 2.99),  # a money stop falls back to the launch stamp, which a never-renewed wake still proves
+])
+def test_an_unreadable_task_record_loses_only_what_it_would_have_proven(tmp_path, monkeypatch, pause, cause, ceiling):
+    """Only a money stop reads the task record (the ceiling an earlier Resume may have moved): an owner Pause, a sleep or a
+    technical pause keeps its type from the pause row, and a record that cannot be read costs nothing else."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata, "budget_pause": pause})
+    monkeypatch.setattr("supervisor.consciousness_carriers.live_task_rows", lambda _ids: {"wake-x": {"metadata": metadata}})
+    assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": cause, "ceiling_usd": ceiling}
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("task store busy")
+
+    monkeypatch.setattr("ouroboros.task_results.load_task_result", unreadable)
+    assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": cause, "ceiling_usd": ceiling}
 
 
 def test_an_unreadable_pause_leaves_the_cause_unknown(monkeypatch, tmp_path):

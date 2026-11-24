@@ -135,6 +135,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/mcp/status",
     "POST /api/mcp/refresh",
     "POST /api/mcp/sign-in",
+    "POST /api/sign-in",
+    "GET /api/sign-in/status",
     "POST /api/mcp/test",
     "POST /api/mcp/import/preview",
     "GET /api/review-pool",
@@ -390,7 +392,8 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                 note="a timeout is not a refusal: retry with the same action_nonce"),
     "POST /api/tasks/{task_id}/resume": Shape("200:TaskResumeResponse 400,404,409,503:ErrorResponse", "TaskResumeRequest",
                                               note="a budget-paused task; not idempotent: a repeat is refused; "
-                                                   "a 409 may list acceptable_unknown ids to name in the body"),
+                                                   "a 409 may list acceptable_unknown ids to name in the body; "
+                                                   "an owner Resume at an own wake's allowance may include consciousness_resume"),
     "POST /api/decisions": Shape(
         "200,202:DecisionResponse 400,404:ErrorResponse 409:DecisionResponse|ErrorResponse 501,503:ErrorResponse",
         "DecisionRequest", note="request_id is the idempotency key; the first answer wins (a card press: unless once)"),
@@ -601,6 +604,12 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/sign-in": Shape("200:McpSignInResponse 400,404:ErrorResponse", "McpSignInRequest",
                                    note="begin answers the provider page; a refused step is 200 with ok false"),
+    "POST /api/sign-in": Shape("200:SignInResponse 400,404:ErrorResponse", "SignInRequest",
+                               note="a skill's service sign-in; begin answers the provider page; a refused step "
+                                    "is 200 with ok false"),
+    "GET /api/sign-in/status": Shape("200:SignInStatusResponse 503:SignInStatusProblem",
+                                     note="503: a saved sign-in, client or account list cannot be read (reason "
+                                          "sign_in_storage_unavailable); the answer is never an empty list"),
     "POST /api/mcp/test": Shape("200:McpTestResponse 400,404,409:ErrorResponse", "McpTestRequest",
                                 note="connects once and saves nothing; a failed test is 200 with ok false"),
     "POST /api/mcp/import/preview": Shape("200,400:MCPImportPreviewResponse", "MCPImportPreviewRequest",

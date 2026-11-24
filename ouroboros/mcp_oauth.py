@@ -33,7 +33,7 @@ import httpx
 
 from ouroboros import config, oauth_engine
 from ouroboros.oauth_engine import SIGN_IN_REQUIRED, SIGNED_IN
-from ouroboros.oauth_engine import RETURN_PATH, parse_return  # noqa: F401 -- MCP's route, tool and tests read a paste here
+from ouroboros.oauth_engine import parse_return  # noqa: F401 -- MCP's route, tool and tests read a paste here
 from ouroboros.utils import read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -258,7 +258,7 @@ class StoredBearer(httpx.Auth):
 def redirect_uri(return_base: str = "") -> str:
     """The builtin return page under ``return_base`` when that is loopback or HTTPS (an MCP rule), else
     under this server's loopback address; a browser elsewhere then hands its address back by paste."""
-    return oauth_engine.redirect_uri(return_base)
+    return oauth_engine.redirect_uri(return_base, "loopback_or_https")
 
 
 def server_of(state: str) -> str:
@@ -331,7 +331,7 @@ async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_
     scope = oauth_engine.union(get_client_metadata_scopes((doc.get("challenge") or {}).get("scope"), prm, metadata),
                                (doc.get("tokens") or {}).get("scope"), doc.get("required_scope"))
     resource = str(prm.resource) if prm and prm.resource else None  # RFC 8707 where the server published PRM
-    url = await oauth_engine.authorize(_grant(cfg), endpoints, client, scope,
+    url = await oauth_engine.authorize(_grant(cfg), endpoints, client, scope, {},
                                        functools.partial(oauth_engine.state, "mcp", cfg.id), issuer=issuer,
                                        resource=resource)
     return {"server": cfg.id, "url": url, "redirect_uri": client["redirect_uri"]}
@@ -340,7 +340,8 @@ async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_
 async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] = None, error: str = "",
                    error_description: str = "") -> Dict[str, Any]:
     """Finish the pending sign-in from the provider's return; returns ``{ok, server, scope}``."""
-    server_of(state)  # an MCP server's return (route syntax): another recipient's is refused before any read
+    if server_of(state) != cfg.id:
+        raise ValueError("not a sign-in return for this MCP server")
     doc = await oauth_engine.complete(_grant(cfg), {"state": state, "code": code, "iss": iss, "error": error,
                                                     "error_description": error_description})
     from ouroboros import mcp_catalog  # after the sign-in lock: the two locks never nest

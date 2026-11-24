@@ -163,6 +163,7 @@ def collect_routes(
     from ouroboros.gateway.harness_maintenance import harness_maintenance_routes
     from ouroboros.gateway.settings import api_review_pool
     from ouroboros.gateway.mcp import mcp_routes
+    from ouroboros.gateway.sign_in import sign_in_routes
     from ouroboros.gateway.models import (
         api_local_model_install_runtime,
         api_local_model_start,
@@ -356,6 +357,7 @@ def collect_routes(
             methods=["POST"],
         ),
         *mcp_routes(),
+        *sign_in_routes(),
         # Agent accounts (D30): thin proxies of the owned Claudexor daemon's
         # own account surface; zero auth logic on this side.
         Route("/api/review-pool", endpoint=api_review_pool, methods=["GET"]),

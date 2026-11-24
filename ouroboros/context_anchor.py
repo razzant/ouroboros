@@ -254,6 +254,7 @@ def measured_units(refused_density: Optional[float], measurement: Any,
                  for value in tokens)
 
 
+#: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
 
 

@@ -1489,6 +1489,12 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
     line-height: var(--line-meta);
 }
 .ui-field-inline { flex-direction: row; align-items: center; flex-wrap: wrap; }
+label.ui-field-inline:has(> input.ui-checkbox[type="radio"]) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    overflow-wrap: anywhere;
+}
 .ui-field-help { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .ui-control {
     box-sizing: border-box;

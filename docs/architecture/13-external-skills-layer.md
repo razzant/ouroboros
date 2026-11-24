@@ -40,11 +40,15 @@ Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/t
 
 ### Extension import and isolation
 
-`_stage_extension_import_tree` shares complete `__extension_imports/` trees by one full content/runtime/dependency digest: 65 characters shorter than two, not arbitrary depth. Kept while the payload is current or an owner lives. Review/grants bind exact bytes. Local delete unloads and removes payload and the entire state directory under the lifecycle lock, without a tombstone or deferred cleanup. Same-name installs across sources preserve shared state/grants.
+`_stage_extension_import_tree` shares complete `__extension_imports/` trees by one full content/runtime/dependency digest (65 characters shorter than two; depth still matters) while current or owned. Review/grants bind exact bytes. Local Delete refuses name collisions; under lifecycle and sign-in locks it unloads and removes payload, state, own sign-ins and handover clients without provider calls, tombstone or deferred cleanup. Same-name installs share state/grants.
 
 Per-call children proxy tools/routes/WS/UI/settings/companions (loader, scrubbed env). `extension_process_runner.py`: 1 MiB input excluding tool context; 512 KiB result plus bounded `step_stop`. `get_stop_state` refusals annotate errors or type `OWNER_OPERATION_REFUSED`; reports stay data. Persistent tasks run in-process or as companions. `extension-loop` (`EventBus.start_loop`): Host Service start, `finally` teardown; blocking off HTTP/Stop/Pause; async routes/WS on HTTP loop, sync subscribers on publisher thread, WS disclosure off-loop. Capabilities, not platforms. Server loads replace `extension_catalog.json` via a child; workers reuse by `catalog_identity` (hashed, values unstored), never failures. In-process: namespaces, permissions, per-skill tracking, atomic unload.
 
 `skill_repair_admission.py` binds Repair to exact bytes (§6); unmatched writes only advance observation. Bucket/name selects the payload, not a reduced profile. No Git copy required or forced unload for review.
+
+### Service sign-in
+
+`sign_in` declares providers/scopes. `service_sign_in.py` freezes the card's literal ceiling or keeps the old grant's exact scope. `oauth_engine.py` (also MCP) records one exchange and unmet scopes; filing takes pending then account locks before cleanup. Disconnect forgets locally; Revoke forgets only after the provider confirms every token. Host Service returns only the skill's own scoped bearer (§12), never refresh tokens or client secrets.
 
 ### Live Conversation and provider packages
 

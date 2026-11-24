@@ -97,6 +97,10 @@ WHOLE_CATEGORY = 2**31 - 1
 # at a measured Max wall, BIBLE P1). Any books still held and unseen bodies yield after a further refusal,
 # then memory's rest and a just-chosen body last (owner 2A, ``loop_model_call._apply_refusal_pass``).
 REFUSAL_PASSES = (("host_copies", "bodies", "floor"), ("books", "unseen_bodies"))
+# After them a directly required handbook's excess on the refused view takes one yield per further refusal: optional
+# maps, then the book's own map, then ARCHITECTURE's (owner 23.11.2026, 1), each offered on the view the provider or the
+# final sender actually refused (``loop_round_limits.book_yield_due``), so a Max start the passes lowered reaches them.
+BOOK_YIELD_PASSES = (("book_yield:1",), ("book_yield:2",), ("book_yield:3",))
 # A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
 # ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
 REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "

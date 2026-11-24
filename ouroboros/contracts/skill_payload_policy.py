@@ -347,10 +347,20 @@ def is_skill_payload_control_filename(path_text: str) -> bool:
 
 
 def is_skill_owner_state_target(target: Path, data_root: Path) -> bool:
-    """Return True for the host receipt store and protected per-skill state files."""
+    """Return True for the host receipt store, sign-in state and protected per-skill state files."""
     target_path = Path(target)
-    root = Path(data_root).resolve(strict=False)
-    for candidate in (target_path, target_path.resolve(strict=False)):
+    raw_root = Path(data_root)
+    root = raw_root.resolve(strict=False)
+    resolved_target = target_path.resolve(strict=False)
+    sign_in_pairs = [(target_path, raw_root), (target_path, root), (resolved_target, root)]
+    if target_path.name not in ("", ".", ".."):
+        sign_in_pairs.append((target_path.parent.resolve(strict=False) / target_path.name, root))
+    for candidate, base in sign_in_pairs:
+        with suppress(OSError, ValueError):
+            parts = candidate.relative_to(base).parts
+            if ".." not in parts and len(parts) >= 2 and parts[0].lower() == "state" and parts[1].lower() == "sign_in":
+                return True
+    for candidate in (target_path, resolved_target):
         if _is_grant_receipts_filename(candidate.name):
             with suppress(OSError):
                 if candidate.parent.resolve(strict=False) == skill_grant_receipts_path(root).parent.resolve(strict=False):

@@ -545,6 +545,11 @@ def _widget_schema_findings(skill_dir: pathlib.Path, manifest: Optional[SkillMan
         findings.append({"item": "contributions_schema", "source": "manifest.contributes",
                          "ok": not problems, "verified": True,
                          "detail": "; ".join(problems) if problems else "valid contributions"})
+    if manifest is not None and manifest.raw_extra.get("sign_in") is not None:
+        from ouroboros.service_sign_in_declaration import parse as parse_sign_in
+        problems = parse_sign_in(manifest.raw_extra["sign_in"])[1]
+        findings.append({"item": "sign_in_schema", "source": "manifest.sign_in", "ok": not problems, "verified": True,
+                         "detail": "; ".join(problems) if problems else "valid sign-in declaration"})
     if manifest is not None and isinstance(manifest.ui_tab, dict):
         findings.append(_validate_widget_render(manifest.ui_tab.get("render"), source="manifest.ui_tab.render"))
     entry_name = str(manifest.entry or "plugin.py") if manifest is not None else "plugin.py"

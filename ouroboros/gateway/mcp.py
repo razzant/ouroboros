@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ouroboros.config import load_settings
-from ouroboros.gateway._helpers import json_error, request_json_or
+from ouroboros.gateway._helpers import json_error, request_base, request_json_or
 from ouroboros.mcp_client import (
     canonical_server_id,
     get_manager,
@@ -73,12 +73,6 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
         return json_error(f"{type(exc).__name__}: MCP refresh failed")
 
 
-def _request_base(request: Request) -> str:
-    """Where this browser reached the server (its Origin, the deployment prefix kept): the sign-in returns there."""
-    origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
-    return origin.rstrip("/") + str(request.scope.get("root_path") or "")
-
-
 async def api_mcp_sign_in(request: Request) -> JSONResponse:
     """POST /api/mcp/sign-in — one step of a remote server's sign-in (``mcp_oauth``); ``complete`` lists it."""
     from ouroboros import mcp_oauth
@@ -87,8 +81,8 @@ async def api_mcp_sign_in(request: Request) -> JSONResponse:
     if not isinstance(body, dict) or body.get("action") not in ("begin", "complete", "sign_out"):
         return json_error("supply action begin, complete or sign_out", 400)
     try:
-        if body.get("returned_url"):
-            body = {**body, **mcp_oauth.parse_return(body["returned_url"])}
+        if body["action"] == "complete" and body.get("returned_url"):
+            body = {"action": "complete", **mcp_oauth.parse_return(body["returned_url"])}
         state = str(body.get("state") or "")
         server_id = (mcp_oauth.server_of(state) if body["action"] == "complete"
                      else canonical_server_id(body.get("server_id") or ""))
@@ -105,7 +99,7 @@ async def api_mcp_sign_in(request: Request) -> JSONResponse:
 
     try:
         if body["action"] == "begin":
-            result = await run(mcp_oauth.begin(cfg, return_base=_request_base(request),
+            result = await run(mcp_oauth.begin(cfg, return_base=request_base(request),
                                                client_id=str(body.get("client_id") or ""),
                                                client_secret=str(body.get("client_secret") or "")))
         elif body["action"] == "complete":

@@ -152,9 +152,10 @@ def test_the_client_capture_pairs_the_refusal_with_the_estimate_it_submitted(tmp
     seen = []
     monkeypatch.setattr(context_fit.ContextFitPlan, "reproject_for_route", lambda self, **kw: seen.append(kw) or self)
     floor_ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode="low", messages=plan.messages_for("low"),
-                                tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[])  # a round's registry
+                                tool_schemas=[], tools=SimpleNamespace(_ctx=SimpleNamespace()), accumulated_usage={})
     assert not loop_round_limits._coarsen_memory_view(floor_ctx, at_refusal, saving=max(1, target - slack))
     assert (seen[0]["ratio"], seen[0]["refused_tokens"]) == (stated / estimate, excess)  # no second conversion
+    assert seen[0]["unsent_start"] is True  # this fixture has neither an answered prefix nor a cold return
     # A pre-send prediction of the next candidate is no provider count: it resets the density.
     lmc._refusal_target(ctx, SimpleNamespace(measurement=_measurement()),
                         SimpleNamespace(predicted_free_tokens=-100, predicted_slack_tokens=30_000))

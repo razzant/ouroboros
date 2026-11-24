@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import pathlib
 import queue
 
@@ -70,6 +71,27 @@ def _next_round_pays(ctx: Any) -> bool:
     return paid_admission("local" if ctx.active_use_local else provider_for_model(str(ctx.active_model or "")), None)
 
 
+def _strict_tree_settled_usd(tree_info: Any, ctx: Any, tool_ctx: Any) -> float:
+    """Fresh, non-degraded tree known spend for a resumed wake (and its members); never falls back to own cost."""
+    from ouroboros.usage_accounting import current_usage_scope
+
+    scope = current_usage_scope()
+    root_id = str((scope.root_task_id if scope is not None else "")
+                  or getattr(tool_ctx, "root_task_id", "") or getattr(ctx, "task_id", "") or "")
+    settled = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
+    detail = ("unreadable" if not isinstance(tree_info, dict)
+              else "integrity_degraded" if tree_info.get("integrity_degraded")
+              else "settled_unknown" if (type(settled) not in (int, float)
+                                         or not math.isfinite(float(settled)) or float(settled) < 0)
+              else "")
+    if detail:
+        raise BillingAuthorityUnavailable(
+            f"tree accounting unavailable ({detail}) for resumed wake {root_id}",
+            kind="unreadable", cause="tree_accounting_unavailable", root_task_id=root_id,
+        )
+    return float(settled)
+
+
 def _check_budget_limits(
     ctx: "_RoundLimitContext",
     budget_remaining_usd: Optional[float],
@@ -126,11 +148,22 @@ def _check_budget_limits(
         )
     if cost_ceiling is None or cost_ceiling.state != task_pacing.COST_CEILING_ACTIVE:
         return None
-    # A tree-capped ceiling is the ROOT's money (its fence covers the tree); a
-    # global-share ceiling is global money.
-    pause_scope = "root" if cost_ceiling.root_cap_usd is not None else "global"
-    tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC)
-    tree_cost = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
+    tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    # The prospective wrap-up probes are an explicit profile's authored margin. A
+    # producer allowance stops when known spend reaches it, never one call early.
+    authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
+    policy = None if tool_ctx is None else task_pacing.cost_stop_policy(tool_ctx)
+    own_wake = bool(policy and policy.get("own_wake_allowance"))
+    resumed_wake = bool(policy and policy.get("resumed_wake_allowance"))
+    # A tree-capped or own-clock wake ceiling is the ROOT's money (its fence covers the tree);
+    # a global-share ceiling is global money.
+    pause_scope = "root" if (cost_ceiling.root_cap_usd is not None or own_wake) else "global"
+    if resumed_wake:
+        tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=0.0, strict=True)
+        tree_cost: Optional[float] = _strict_tree_settled_usd(tree_info, ctx, tool_ctx)
+    else:
+        tree_info = _loop()._loop_tree_accounting(refresh=True, max_age_sec=_loop()._TREE_ACCOUNTING_MAX_STALE_SEC)
+        tree_cost = tree_info.get("settled_usd") if isinstance(tree_info, dict) else None
     deciding, spend_basis = task_pacing.resolve_deciding_spend(
         tree_cost_usd=tree_cost,
         task_cost_usd=task_cost,
@@ -147,11 +180,7 @@ def _check_budget_limits(
     # very number that paused the task; the ledger fence at the full cap still
     # arbitrates every send. A stop that needs no wrap-up room at all
     # (``wrapup_fits is False``) is unchanged.
-    tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     last_fit_relaxed = bool(getattr(tool_ctx, "_budget_resume_last_fit_relaxed", False))
-    # The prospective wrap-up probes are an explicit profile's authored margin. A
-    # producer allowance stops when known spend reaches it, never one call early.
-    authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
     explicit = authority == task_pacing.COST_STOP_EXPLICIT
     continuation_view = None  # populated only when pricing temporarily replaces the pending ordinary fit
     if explicit and prompt_estimate > 0 and (

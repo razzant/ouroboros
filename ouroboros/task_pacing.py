@@ -418,16 +418,14 @@ COST_STOP_EXPLICIT, COST_STOP_PRODUCER, COST_STOP_NONE, COST_STOP_UNKNOWN = (
     "explicit", "producer", "none", "unknown")
 
 
-def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
-    """Who authored the number a member inherited, from the root's canonical row.
+def _root_cost_stop_fact(scope: Any) -> Tuple[str, Optional[float], bool, bool]:
+    """``(authority, value, own_wake, resumed_wake)`` authored on the root's canonical row.
 
-    ONE strict read, only for the ambiguous member (an inherited number, no
-    explicit percentage of its own): the number cannot say whether the root took
-    it from an explicit profile (returned: that percentage), a producer allowance
-    (returned: its actual value) or the removed default (a child scheduled before
-    the upgrade; a readable root with neither). A root row that cannot be read,
-    or lacks its contract, is ``unknown``: the caller keeps the number, never
-    guessing either way."""
+    ONE strict read for an ambiguous member (an inherited number, no explicit percentage of its
+    own): tells explicit profile, producer allowance (including an initial or renewed own-clock
+    wake without ``task_contract``), removed default, or unreadable (``unknown``: keep number)."""
+    from ouroboros.consciousness_allowance import resumed_allowance
+    from ouroboros.consciousness_authority import is_own_clock_wake
     from ouroboros.contracts.task_contract import normalize_budget_profile
     from ouroboros.task_results import load_task_result
 
@@ -435,15 +433,34 @@ def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
         row = load_task_result(pathlib.Path(scope.drive_root), scope.root_task_id, strict=True)
     except Exception:
         log.warning("Root %s cost-stop authority unreadable", getattr(scope, "root_task_id", ""), exc_info=True)
-        return COST_STOP_UNKNOWN, None
-    contract = row.get("task_contract") if isinstance(row, dict) else None
-    if not isinstance(contract, dict):
-        return COST_STOP_UNKNOWN, None
-    pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
-    if pct is not None:
-        return COST_STOP_EXPLICIT, float(pct)
+        return COST_STOP_UNKNOWN, None, False, False
+    if not isinstance(row, dict):
+        return COST_STOP_UNKNOWN, None, False, False
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    own_wake = is_own_clock_wake(meta)
+    renewal = resumed_allowance(row)
+    contract = row.get("task_contract")
+    if isinstance(contract, dict):
+        pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
+        if pct is not None:
+            return COST_STOP_EXPLICIT, float(pct), False, False
+    elif not renewal and not own_wake:
+        return COST_STOP_UNKNOWN, None, False, False
+    if renewal:
+        limit = _positive(renewal.get("ceiling_usd"))
+        return (COST_STOP_PRODUCER, limit, True, True) if limit is not None else (COST_STOP_UNKNOWN, None, True, True)
     producer = recorded_producer_ceiling(row)
-    return (COST_STOP_PRODUCER, producer) if producer is not None else (COST_STOP_NONE, None)
+    if producer is not None:
+        return COST_STOP_PRODUCER, producer, own_wake, False
+    if own_wake and not isinstance(contract, dict):
+        return COST_STOP_UNKNOWN, None, True, False
+    return COST_STOP_NONE, None, False, False
+
+
+def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
+    """Who authored the number a member inherited, from the root's canonical row."""
+    authority, value, _own, _resumed = _root_cost_stop_fact(scope)
+    return authority, value
 
 
 def recorded_producer_ceiling(row: Dict[str, Any]) -> Optional[float]:
@@ -451,6 +468,10 @@ def recorded_producer_ceiling(row: Dict[str, Any]) -> Optional[float]:
     strictly positive, else ``None``: what a member's root authored (``_root_cost_stop_authority``) and the TOTAL a
     Continue hands on unchanged, its stop comparing the whole work's group spend (``loop_budget``)."""
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    from ouroboros.consciousness_allowance import resumed_allowance
+
+    if renewal := resumed_allowance(row):
+        return _positive(renewal.get("ceiling_usd"))
     return _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
 
 
@@ -490,21 +511,42 @@ def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
     # may still carry the number, the record its metadata keeps decides.
     metadata = getattr(ctx, "task_metadata", None)
     lifted = isinstance(metadata, dict) and isinstance(metadata.get("producer_allowance_lifted"), dict)
+    own_wake = resumed_wake = False
     if profile.get("cost_hard_stop_pct") is not None:
         authority = COST_STOP_EXPLICIT
     elif _positive(root_ceiling) is None or lifted:
         authority, root_ceiling = COST_STOP_NONE, None
     elif not non_root_member:
         authority = COST_STOP_PRODUCER
+        from ouroboros.consciousness_allowance import resumed_allowance
+        from ouroboros.consciousness_authority import is_own_clock_wake
+        from ouroboros.task_results import load_task_result
+
+        if is_own_clock_wake(metadata):
+            own_wake = True
+            budget_root = (getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+                           or (getattr(scope, "drive_root", None) if scope is not None else None))
+            task_id = str(getattr(ctx, "task_id", "") or (getattr(scope, "task_id", "") if scope is not None else "") or "")
+            if budget_root and task_id:
+                try:
+                    if renewed := resumed_allowance(load_task_result(pathlib.Path(budget_root), task_id, strict=True) or {}):
+                        resumed_wake = True
+                        if (limit := _positive(renewed.get("ceiling_usd"))) is None:
+                            raise ValueError("unreadable renewed wake ceiling")
+                        root_ceiling = limit
+                except (OSError, ValueError, TypeError, RuntimeError):
+                    authority, resumed_wake = COST_STOP_UNKNOWN, True
     else:
-        authority, value = _root_cost_stop_authority(scope)
+        authority, value, own_wake, resumed_wake = _root_cost_stop_fact(scope)
         if authority == COST_STOP_EXPLICIT:
             # The root's authored percentage governs the member it handed its number to.
             profile = {**profile, "cost_hard_stop_pct": int(value)}
         elif authority != COST_STOP_UNKNOWN:
             root_ceiling = value
     return {"authority": authority, "profile": profile, "root_cap_usd": root_cap,
-            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling, "producer_allowance_lifted": lifted}
+            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling,
+            "producer_allowance_lifted": lifted, "own_wake_allowance": own_wake,
+            "resumed_wake_allowance": resumed_wake}
 
 
 def _resolve_from_inputs(inputs: Dict[str, Any], budget_remaining_usd: Optional[float]) -> CostCeiling:
@@ -558,12 +600,13 @@ def cost_stop_authority(ctx: Any) -> str:
     return str(cost_stop_policy(ctx)["authority"])
 
 
-def restore_cost_ceiling(ctx: Any, saved: Any) -> Optional[CostCeiling]:
+def restore_cost_ceiling(ctx: Any, saved: Any, *, producer_resume=None) -> Optional[CostCeiling]:
     """The ceiling a cold continuation (budget pause, owner-wait restart) resumes under.
 
     Every restore re-reads the start's authority, never the saved number alone:
     an explicit percentage keeps its saved threshold (Q10 Resume moves it later);
-    a producer allowance is re-read at its actual value (no old margin kept); a
+    a producer allowance is re-read at its actual value (including an own wake's
+    consumed renewal, or the very grant being taken up; no old margin kept); a
     stop saved under the removed default is dropped, disclosed in the basis; an
     unreadable authority keeps the bound it had (``legacy_policy_unverified``),
     never re-armed or widened, until a later restore can read it. ``None`` only
@@ -571,6 +614,25 @@ def restore_cost_ceiling(ctx: Any, saved: Any) -> Optional[CostCeiling]:
     start. Callers assign the result."""
     previous = CostCeiling(**saved) if isinstance(saved, dict) else None
     inputs = _cost_stop_inputs(ctx)
+    from ouroboros.consciousness_authority import is_own_clock_wake
+
+    if (inputs["authority"] in {COST_STOP_PRODUCER, COST_STOP_UNKNOWN}
+            and not inputs["non_root_member"] and is_own_clock_wake(getattr(ctx, "task_metadata", None))):
+        inputs["own_wake_allowance"] = True
+        if producer_resume:
+            try:
+                if (limit := _positive(producer_resume.get("ceiling_usd"))) is None:
+                    raise ValueError("unreadable renewed wake ceiling")
+                inputs.update(authority=COST_STOP_PRODUCER, root_ceiling_usd=limit, resumed_wake_allowance=True)
+            except (OSError, ValueError, TypeError, RuntimeError):
+                # A failed read is not permission to recover a larger carried value.
+                if previous and (prior := _positive(previous.ceiling_usd)) is not None:
+                    carried = _positive(inputs["root_ceiling_usd"])
+                    previous = replace(previous, ceiling_usd=min(prior, carried) if carried is not None else prior)
+                inputs.update(authority=COST_STOP_UNKNOWN, resumed_wake_allowance=True)
+        elif inputs["authority"] == COST_STOP_UNKNOWN and previous and (prior := _positive(previous.ceiling_usd)) is not None:
+            carried = _positive(inputs["root_ceiling_usd"])
+            previous = replace(previous, ceiling_usd=min(prior, carried) if carried is not None else prior)
     _remember_cost_stop_policy(ctx, inputs)
     if inputs["authority"] == COST_STOP_EXPLICIT:
         return previous

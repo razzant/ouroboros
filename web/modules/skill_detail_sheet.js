@@ -8,6 +8,7 @@ import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { bindRenderedMarkdown, mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { mountConnectorPlaces } from './connector_places.js';
+import { mountSkillSignIn } from './skill_sign_in.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
     catalogWhoHtml, connectsServices, declaredPermissionWords, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
@@ -90,7 +91,7 @@ function detailsHtml(item, installed) {
  * entry; without it the sheet shows what the card had. Review says one thing, as the sheet opened: an installed
  * copy's own recorded review, else how a new install goes while its source's setting holds (`policy`).
  */
-export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement, access }) {
+export function openSkillDetailSheet({ item, installed = null, policy = null, actionsHtml = '', onAction = () => {}, readDetail = null, returnFocus = document.activeElement, access, signIn = null }) {
     // `access`: undefined in Browse, where the catalog's entry says what a skill can use. The Installed sheet passes the
     // loaded row's own `{permissions, needs_keys}` (its parsed manifest and grants), or null when none was read: the
     // catalog entry, cached or fetched, is then never its access.
@@ -109,11 +110,11 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
             <button type="button" class="btn btn-default document-reader-close" data-sheet-close>Close</button>
         </div>
-        <div class="document-reader-body skills-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
+        <div class="document-reader-body skills-sheet-body scroll-fade-y is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><section class="skills-sheet-section" data-sheet-sign-ins hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
     </div>`;
     const body = dialog.querySelector('[data-sheet-body]');
     const content = dialog.querySelector('[data-sheet-content]');
-    let disposePlaces = null;
+    let disposePlaces = null, disposeSignIn = null;
     let closed = false;
     let disposeFocus = null;
     const disposeFade = bindScrollFade(body);
@@ -123,6 +124,7 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
         closed = true;
         controller?.abort();
         disposePlaces?.();
+        disposeSignIn?.();
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
@@ -187,6 +189,7 @@ export function openSkillDetailSheet({ item, installed = null, policy = null, ac
         const places = dialog.querySelector('[data-sheet-places]'); places.hidden = false;
         disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close });
     }
+    if (installed && signIn) disposeSignIn = mountSkillSignIn(dialog.querySelector('[data-sheet-sign-ins]'), installed.name, signIn);
     read();
     return {
         close,
