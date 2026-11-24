@@ -151,6 +151,8 @@ class ContextFitPlan:
         return replace(self, max_projection=max_projection, low_projection=low_projection, nano_projection=nano_projection,
                        initial_mode=initial_mode, start=start, first_contact_normal=None)
 
+    requested_load_window: Optional[int] = None  # the selected physical load, including Auto (0)
+
     def start_schema_names(self, mode: str) -> Optional[Tuple[str, ...]]:
         """The schema names the start priced, selected for ``mode`` as the start selected them (a live call's own
         Nano base, else the standing work set); None when the start priced none or was not captured."""
@@ -556,6 +558,8 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
                                                          credential_profile_id=account)["credential_profile_id"])
     from ouroboros.response_limits import bind_context_route
     bind_context_route(route, settings)
+    from ouroboros.server_window import bind_native_load
+    bind_native_load(route, task.get("load_window_binding") or {}, settings, role)
     return route, settings
 
 
@@ -591,8 +595,10 @@ def resolve_context_fit_route(
         route["options"] = {**route["options"], **{key: getattr(evidence, key) for key in (
             "source_id", "credential_profile_id", "account_fingerprint")}}
         route["window_observation_fp"] = route_observation_scope(route, settings, target=route.get("_resolved_target"))
-    window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
-                                   settings=settings))
+    target = route.get("_resolved_target") or {}
+    window = route.get("bound_role_window") if target.get("requested_load_window") is not None else None
+    if window is None:
+        window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"], settings=settings))
     return route, with_role_window(evidence, window)
 
 
@@ -1387,9 +1393,13 @@ def build_context_fit_plan(
     counted("request_forms")
     levels, sized = start_room(view_task, role), {}
 
+    from ouroboros.llm_ollama import OllamaUpgradeRequired
+
     def answer(ask: Callable[[], Tuple[Dict[str, Any], Any]]) -> Tuple[Dict[str, Any], Any]:
         try:  # a child probes its own route too: its parent's warm evidence is no fact about it
             return ask()
+        except OllamaUpgradeRequired:
+            raise
         except Exception:
             log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
             # A cold start asks about its next send; the original task may name another route.
@@ -1407,7 +1417,7 @@ def build_context_fit_plan(
                                                     working_reserve_tokens=working_reserve)[1]
         scope = route.get("window_observation_fp", evidence.route_fp)
         bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
+        window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))
         provider = str(route.get("provider") or "")
         if provider not in sized:  # the whole request measured once per provider, however many answers are framed
             sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider,
@@ -1424,12 +1434,16 @@ def build_context_fit_plan(
 
     def project(state, user_content_json, **options):
         provider = str(state.route.get("provider") or "")
-        return _view_projections(core, governance, user_content_json,
-            preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
-            known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
-            working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
-            sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages,
-            ratio=state.ratio, work_room_levels=levels, **options)
+        try:
+            return _view_projections(core, governance, user_content_json,
+                preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
+                known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
+                working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
+                sized=(rows, schemas, sized[provider]), nano_base=nano_base, current_messages=current_messages,
+                ratio=state.ratio, work_room_levels=levels, **options)
+        except MinimumViewUnfit as unfit:  # the refusal names the serving program it would have gone to
+            unfit.server_program = ((state.route.get("_resolved_target") or {}).get("ollama_record") or {}).get("protocol")
+            raise
 
     def walk(state):
         try:
@@ -1576,6 +1590,7 @@ def build_context_fit_plan(
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
+        requested_load_window=window_record.load,  # the load its record was resolved for, never another scope's
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
         start_nano_base=nano_base,
         start_reasoning_effort=reasoning_effort,

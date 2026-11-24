@@ -53,6 +53,7 @@ def bind_round_route(tools: ToolRegistry, messages: List[Dict[str, Any]], route:
     if not pending_tool_budget:
         ctx.context_fit_plan = plan
         ctx._restored_context_model_role = None  # ordinary handover ends the saved actor
+        ctx._restored_native_load_window = None
         publish_lead(ctx)
     return model, local, effort, plan, mode
 

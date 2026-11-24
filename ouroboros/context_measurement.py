@@ -131,27 +131,30 @@ def estimate_context_prompt_tokens(
     )
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REPLY_SOURCE_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
 
-    def project(value: Any) -> Any:
-        if isinstance(value, dict):
-            if any(custody_private_key(key) for key in value):
-                value = context_custody_proxy(value)
-            # A realtime engine's own wire shapes are images too: OpenAI's ``input_image`` and Gemini's
-            # ``inlineData`` (28.10: four screenshots in a Gemini renewal counted as 309k tokens of base64).
-            media = value.get("inlineData")
-            if (str(value.get("type") or "") in {"image", "image_url", "input_image"}
-                    or (isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/"))):
-                return {
-                    "type": str(value.get("type") or "image"),
-                    "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT,
-                }
-            return {
-                str(key): project(item)
-                for key, item in value.items()
-                if str(key) != "_context_capsule"
-            }
+    def project(value: Any, *, part: bool = False) -> Any:
         if isinstance(value, list):
-            return [project(item) for item in value]
-        return value
+            return [project(item, part=part) for item in value]
+        if not isinstance(value, dict):
+            return value
+        private = {key: item for key, item in value.items() if custody_private_key(key)}
+        if private:
+            value = {**{key: item for key, item in value.items() if key not in private},
+                     **context_custody_proxy(private)}
+        media = value.get("inlineData")
+        if part and (value.get("type") in ("image", "image_url", "input_image")
+                     or isinstance(media, dict) and str(media.get("mimeType") or "").startswith("image/")):
+            return {"type": value.get("type") or "image", "image_token_proxy": "#" * IMAGE_BLOCK_CHAR_EQUIVALENT}
+        # Descend through chat content and the two realtime event envelopes. Function arguments,
+        # tool schemas and other JSON are opaque even when their keys resemble an image block.
+        row = dict(value)
+        row.pop("_context_capsule", None)
+        if row.get("type") == "function_call_output" and isinstance(row.get("output"), list):
+            row["output"] = project(row["output"], part=True)
+        for key in ("content", "parts", "events", "item", "clientContent", "turns"):
+            child = row.get(key)
+            if isinstance(child, list) or key in ("item", "clientContent") and isinstance(child, dict):
+                row[key] = project(child, part=key in ("content", "parts"))
+        return row
 
     from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
@@ -230,6 +233,7 @@ class MainFitMeasurement:
     # Low's missed target: the start's request with no memory at all, reply reserve included (``floor.no_memory_tokens``).
     no_memory_tokens: Optional[int] = None
     window_boundary_tokens: Optional[int] = None
+    requested_load_window: Optional[int] = None
     window_record: InitVar[Optional[WindowRecord]] = None  # carried only to the actual admission predicate
 
     def __post_init__(self, window_record):
@@ -379,6 +383,7 @@ def measure_main_fit(
     measurement = MainFitMeasurement(
         window=window_projection(current, under_way=True),
         view_kind=plan.view_kind,
+        requested_load_window=getattr(plan, "requested_load_window", None),
         route_fp=str(plan.route_fp or ""),
         round_id=str(round_id or ""),
         profile=profile,
@@ -469,6 +474,7 @@ def _physical_context_for_fit(disposition: MainFitDisposition, plan: Any = None)
         response_reserve_tokens=measurement.response_reserve_tokens,
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
+        requested_load_window=getattr(measurement, "requested_load_window", None),
         required_book_tokens=measurement.required_book_tokens, preferred_mode=measurement.preferred_mode,
         mode_cause=measurement.mode_cause, no_memory_tokens=measurement.no_memory_tokens,
         window_boundary_tokens=measurement.window_boundary_tokens,

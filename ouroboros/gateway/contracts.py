@@ -56,7 +56,7 @@ from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-expo
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
     ClaudexorLoginJobProblem,
     ExtensionsIndexResponse, LocalModelStatusResponse, MarketplaceInstalledResponse, MarketplaceSearchResponse,
-    McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
+    McpStatusResponse, ModelCatalogResponse, OpenAICompatibleModelsResponse, SkillLifecycleQueueResponse,
 )
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
     ScheduleActionResponse, ScheduledTasksResponse, ScheduleDeleteResponse, ScheduleUpsertResponse,
@@ -1039,13 +1039,6 @@ class SkillPublishPreflightResponse(TypedDict):
     repair_hint: str
 
 
-class OpenAICompatibleModelsResponse(TypedDict):
-    """``POST /api/openai-compatible/models``: upstream ``data[].id`` in upstream order."""
-
-    models: List[str]
-    error: NotRequired[str]
-
-
 class ProviderTestRequest(TypedDict):
     provider_id: str
     overrides: NotRequired[Dict[str, str]]  # flat keys; with ``connection``, that row's field names
@@ -1057,6 +1050,8 @@ class ProviderTestRequest(TypedDict):
 class ProviderTestResponse(TypedDict):
     ok: bool
     error: NotRequired[str]
+    caution: NotRequired[str]  # the request went to a server that named no program, whatever the outcome
+    code: NotRequired[Literal["ollama_guard_consent", "ollama_guard_held", "ollama_guard_unavailable"]]  # a failed Test's withheld send: consent needed, an address hold, an Ollama to upgrade
 
 
 class ExecutorRef(TypedDict, total=False):

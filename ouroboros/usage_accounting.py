@@ -258,16 +258,14 @@ class AttemptRequest:
     physical_context: Optional[PhysicalAttemptContext] = None
     # Route-locality fact (additive): base_url host is localhost/127.0.0.1/::1 (loopback OpenAI-compatible installs — Ollama / LM Studio / vLLM).
     route_is_loopback: bool = False
-    # Density uses the fit estimator's count (0 = old producer), while budget
-    # reservation retains the conservative raw-base64 estimate above.
+    # Density uses a bounded image proxy. Reservation uses the raw-base64 estimate above.
     prompt_tokens_bounded_estimate: int = 0
     global_limit_source: str = ""
     global_limit_revision: Optional[str] = None
     processing_preference: str = ""
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
-    # The same canonical candidate without its Main clock line (``send_clock``);
-    # None when the candidate carries none. An identity, never a row field.
+    # Digest without the Main clock line, when present. Never a row field.
     candidate_clock_free_sha256: Optional[str] = None
     effort: Optional[Dict[str, Any]] = None
     allow_live_fetch: bool = True
@@ -283,6 +281,8 @@ class AttemptRequest:
     provider_routing_pinned: Optional[bool] = None
     unpriced_add_on: bool = False  # Token rates alone cannot price this sealed request.
     opencode_go: bool = False  # the exact dispatched route, not a response-supplied billing claim
+    candidate_image_digests: Optional[tuple[str, ...]] = None
+    prompt_count_basis: str = "prompt"  # evaluated includes backend padding; empty skips calibration
 
     def settlement_policy(self) -> dict:
         return {key: True for key in ("provider_reported_cost_only", "unpriced_add_on") if getattr(self, key)}
@@ -330,7 +330,7 @@ class PhysicalAttemptCapture:
     prompt_tokens_exact: Optional[int] = None  # same candidate's serving-tokenizer count; 0 is a count
     context_window_tokens_exact: Optional[int] = None
     provider_reported_cost_only: bool = False
-
+    candidate_image_digests: Optional[tuple[str, ...]] = None
 
 @contextlib.contextmanager
 def usage_scope(scope: UsageScope) -> Iterator[UsageScope]:
@@ -1167,7 +1167,7 @@ def settle_attempt(
     if not reservation.provider_reported_cost_only:
         stash_task_cache_split(
             (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model,
-            int(fields.get("cached_tokens") or 0), provider=reservation.provider,
+            fields.get("cached_tokens"), provider=reservation.provider,
             ttl_seconds=3600.0 if fields["prompt_cache_ttl"] == "1h" else 300.0,
             processing_mode=observed_processing_mode(reservation.provider, fields),
         )
@@ -1292,8 +1292,7 @@ def record_received_attempt(request: AttemptRequest, usage: Dict[str, Any], *, c
 
 
 def _observe_token_density(request: AttemptRequest, usage: Optional[Dict[str, Any]]) -> None:
-    # Lives beside the density store (capability_evidence) since this module's
-    # size ceiling; the settlement paths keep this historical seam name.
+    # Both settlement paths use the density store's measurement basis.
     from ouroboros.capability_evidence import observe_token_density
 
     observe_token_density(request, usage, drive_root_resolver=_drive_root)
@@ -1401,6 +1400,7 @@ def _record_attempt_capture(
         candidate_measurement_kind=request.candidate_measurement_kind,
         max_completion_tokens=max(0, int(request.max_completion_tokens or 0)),
         candidate_raw_sha256=request.candidate_raw_sha256,
+        candidate_image_digests=request.candidate_image_digests,
         candidate_raw_size_bytes=request.candidate_raw_size_bytes,
         candidate_context_sha256=request.candidate_context_sha256,
         candidate_context_size_bytes=request.candidate_context_size_bytes,

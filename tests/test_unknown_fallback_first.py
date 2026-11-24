@@ -501,7 +501,7 @@ def test_a_declared_wait_ends_a_content_refused_round_and_without_one_the_spare_
 
 
 def test_primary_return_rebinds_role_and_leaves_auto_unpinned(monkeypatch):
-    from ouroboros.loop_model_call import _apply_round_route_overrides
+    from ouroboros.loop_routes import _apply_round_route_overrides
 
     calls = []
     monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan",

@@ -1011,6 +1011,13 @@ class OpenAICompatibleModelsRequest(TypedDict):
     apiKeySetting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
+class OpenAICompatibleModelsResponse(TypedDict):
+    """``POST /api/openai-compatible/models``: upstream ``data[].id`` in upstream order."""
+
+    models: List[str]
+    error: NotRequired[str]
+
+
 class LocalModelStartRequest(TypedDict):
     """``POST /api/local-model/start``: the request stays open while the model downloads; then poll
     ``GET /api/local-model/status`` (downloading, loading, ready or error). Not idempotent."""
@@ -1469,7 +1476,7 @@ __all__ = [
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",
     "ModelCatalogItem", "ModelCatalogApiSource", "ModelCatalogResponse", "ModelProcessingEndpoint", "ModelProcessing",
-    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
+    "ModelProcessingResponse", "OpenAICompatibleModelsRequest", "OpenAICompatibleModelsResponse", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
     "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
     "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",

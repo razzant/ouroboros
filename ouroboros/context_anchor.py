@@ -105,7 +105,10 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
     cache_bearing = bool(last.get("cached_tokens") or last.get("cache_write_tokens"))
     if cache_bearing and provider not in _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS:
         return
-    if gateway_double_counted_cache(real, int(last.get("cached_tokens") or 0)):
+    capacity = last.get("capacity_input_tokens")
+    if capacity is not None and (type(capacity) is not int or capacity < 0):
+        return
+    if capacity is None and gateway_double_counted_cache(real, int(last.get("cached_tokens") or 0)):
         return  # twice the real input would double every estimate and lift the floor above the window for good
     key = _anchor_model_key(plan)
     anchors = usage.get(INPUT_ANCHOR_KEY)
@@ -114,16 +117,30 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
                     "rewrite_epoch": int(rewrite_epoch),
                     **({"transcript_tokens": transcript} if isinstance(transcript, int) and transcript > 0 else {})}
     usage[INPUT_ANCHOR_KEY] = anchors
-    floors = usage.setdefault(ACCEPTED_INPUTS_KEY, {})
-    floors[key] = max(int(floors.get(key) or 0), real)
+    from ouroboros.context_window import observation_scope, record_observation
+    accepted, scope = real if capacity is None else min(real, capacity), observation_scope(plan)
+    # A native send carries the load statement it was dispatched under (``llm_ollama._load_statement``): its
+    # acceptance is capacity only for that load. This task's floor is kept under that statement's order and read
+    # under the order current at a fit (``main_input_anchor``), and ``record_observation``'s conditional write drops
+    # the durable row once a newer statement was published, as ``record_refusal`` binds a refusal to its dispatch.
+    # A statement of another scope or without a number (the read lost to a newer one, the store was busy) binds
+    # neither. The answer, its paid usage, the anchor above and the density witness stay recorded either way.
+    # No statement at all is an ordinary provider's: floor and row are written as before.
+    statement = last.get("ollama_load_statement")
+    pair = statement if isinstance(statement, (list, tuple)) and len(statement) == 2 else ()
+    order = pair[1] if pair and type(pair[1]) is int and str(pair[0] or "") == scope else None
+    if statement is None or order is not None:
+        floors, slot = usage.setdefault(ACCEPTED_INPUTS_KEY, {}), key if statement is None else f"{key}|{order}"
+        floors[slot] = max(int(floors.get(slot) or 0), accepted)
     if getattr(plan, "route_fp", "") and getattr(plan, "window_witness_bound", True):
         from ouroboros.capability_evidence import canonical_evidence_root, record_token_density, MAIN_DENSITY_BASIS
-        from ouroboros.context_window import observation_scope, record_observation
         from ouroboros.provider_models import normalize_model_identity
         root = canonical_evidence_root()
-        record_observation(root, observation_scope(plan), accepted=real, kind="input",
-                           reserve=int(usage.get("_context_response_reserve_tokens", plan.output_reserve_tokens) or 0),
-                           transmitted=int(usage.get("_context_reply_allowance_tokens") or 0))
+        if statement is None or order is not None:
+            record_observation(root, scope, accepted=accepted, kind="input",
+                               reserve=int(usage.get("_context_response_reserve_tokens", plan.output_reserve_tokens) or 0),
+                               transmitted=int(usage.get("_context_reply_allowance_tokens") or 0),
+                               read_sequence=order)
         record_token_density(root, normalize_model_identity(plan.model), prompt_chars=estimate * 4,
                              prompt_tokens=real, route_fp=plan.route_fp, basis=MAIN_DENSITY_BASIS,
                              view_kind=getattr(plan, "view_kind", ""))
@@ -135,12 +152,16 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
 
     A different model or provider (a fallback, an owner switch) has no anchor here; an account or server
     rotation has its own route fingerprint and inherits neither anchor nor floor. ``rewrite_epoch`` is the slot's current count of
-    sanctioned rewrites (``transcript_prefix.rewrite_epoch``); None treats the view as rewritten.
+    sanctioned rewrites (``transcript_prefix.rewrite_epoch``); None treats the view as rewritten. On a native load
+    the floor is the largest input accepted under the runner's current statement (``context_window.load_order``): an
+    answer of an earlier load, or one that names none, still anchors the estimate and floors nothing.
     """
     if not isinstance(usage, Mapping) or plan is None or not getattr(plan, "window_witness_bound", True):
         return None, None
-    key = _anchor_model_key(plan)
-    floor = (usage.get(ACCEPTED_INPUTS_KEY) or {}).get(key)
+    from ouroboros.context_window import load_order
+
+    key, order = _anchor_model_key(plan), load_order(plan)
+    floor = (usage.get(ACCEPTED_INPUTS_KEY) or {}).get(key if order is None else f"{key}|{order}")
     anchors = usage.get(INPUT_ANCHOR_KEY)
     row = anchors.get(key) if isinstance(anchors, Mapping) else None
     anchor = None
@@ -254,6 +275,7 @@ def measured_units(refused_density: Optional[float], measurement: Any,
                  for value in tokens)
 
 
+#: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
 
 

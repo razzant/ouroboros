@@ -901,7 +901,6 @@ from ouroboros.loop_nudges import (  # noqa: E402, F401 -- intentional public re
 )
 from ouroboros.loop_model_call import (  # noqa: E402, F401 -- intentional public re-exports
     _adopt_fallback_route,
-    _apply_round_route_overrides,
     _recover_failed_round,
     _snapshot_context_fit_usage,
     _restore_context_fit_usage,
@@ -994,5 +993,6 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _prepare_forced_prompt,
 )
 
+from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
 from ouroboros.loop_routes import bind_round_route, after_mail
 from ouroboros.route_choice import initial_round_route as _initial_round_route

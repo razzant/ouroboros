@@ -469,7 +469,6 @@ def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:
         kind == "provider_outcome_unknown" and not new_generation_after_unknown(tool_ctx, usage))
 
 
-from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
 from ouroboros.loop_routes import adopt_ordinary_first_contact, first_contact_guard, first_contact_route  # noqa: E402
 
 
@@ -491,6 +490,7 @@ def _rebind_context_fit_plan(
     restoring_held: bool = False,
     publish: bool = True,
     schema_trials: Optional[Callable] = None,  # cold restore owns reconciliation and publication
+    load_window_binding: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -504,6 +504,7 @@ def _rebind_context_fit_plan(
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
+    from ouroboros.context_window import estimator_ratio, native_load_window_binding, resolve_window, route_window_kwargs
 
     role = model_role or getattr(plan, "model_role", "main")
     shown_mode = start_mode or getattr(plan, "initial_mode", None)
@@ -520,13 +521,15 @@ def _rebind_context_fit_plan(
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
         "credential_profile_id": credential_profile_id, **({"model_route_preferred": True} if route_is_preference else {}),
     }
+    task["load_window_binding"] = native_load_window_binding(plan) if load_window_binding is None else load_window_binding
     try:
+        # An Ollama too old for its guard is such a failure too: the send's own read refuses it before any
+        # generation, as one configured route's failure, and a walk goes on (``llm_ollama.OllamaUpgradeRequired``).
         route, evidence = timed("rebind.route", _context_fit_route, task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
     plan, start_mode = first_contact_route(plan, start_mode, route, tools._ctx, messages)  # an unsent start hint
-    from ouroboros.context_window import estimator_ratio, resolve_window, route_window_kwargs
     # Account/server changes have their own anchors and durable window observations.
     scope = route.get("window_observation_fp", evidence.route_fp)
     anchor, _accepted = main_input_anchor(getattr(tools._ctx, "_accumulated_usage", None), SimpleNamespace(
@@ -535,7 +538,7 @@ def _rebind_context_fit_plan(
     preferred = preferred if preferred in {"low", "max", "nano"} else "max"
     output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
     bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-    window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)  # before density: it caps the key
+    window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope, load=(route.get("_resolved_target") or {}).get("requested_load_window"))  # before density: it caps the key
     window_tokens, known_window = window.total_equivalent, window.usable is not None
     shape = {"provider": str(route.get("provider") or ""),  # the request as the next send shapes it, as a round measures it
              "reasoning_effort": str((getattr(tools._ctx, "active_effort", "") if reasoning_effort is None
@@ -564,6 +567,7 @@ def _rebind_context_fit_plan(
         status=str(getattr(evidence, "status", "") or ""),
         stale=bool(getattr(evidence, "stale", False)),
         model_role=task["model_role"],
+        requested_load_window=window.load,
         model_route=evidence_model_route(evidence, str(route.get("model") or model)) if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
         **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
@@ -873,12 +877,11 @@ def _dispatch_round_model(
     max_tokens: Optional[int] = None,  # the strict-shrink retry's ceiling: the failed attempt's sent allowance
 ) -> Tuple[Any, float]:
     from ouroboros.model_wait import current_model_wait
-    from ouroboros.loop_messages import _pending_owner_input_kinds
-    from ouroboros.loop_transport import emit_model_substitution, transport_repeat_stop_requested
+    from ouroboros.loop_messages import _pending_owner_input_kinds, append_context_facts
+    from ouroboros.loop_transport import emit_model_substitution, emit_route_notice, transport_repeat_stop_requested
     from ouroboros.owner_mailbox import OwnerMailboxPeek
     from ouroboros.send_clock import main_clock_policy
     from ouroboros.subagent_bootstrap import is_configured_api_child
-    from ouroboros.loop_messages import append_context_facts
     from ouroboros.capability_breakage import append_change_row
 
     _loop()._retire_main_reasoning(ctx)
@@ -944,6 +947,7 @@ def _dispatch_round_model(
             **({"max_tokens": int(max_tokens)} if max_tokens else {}),
         )
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
+    emit_route_notice(ctx.accumulated_usage, getattr(ctx, "emit_progress", None))
     if hint.rebound:  # a start hint read for another scope went unsent: its ordinary view goes instead, once
         return _dispatch_round_model(ctx, adopt_ordinary_first_contact(ctx, disposition), attempt_cap=attempt_cap,
                                      candidate_predicate=candidate_predicate, max_tokens=max_tokens)
@@ -958,13 +962,12 @@ def _dispatch_round_model(
         ctx.tools._ctx._deferred_resource_refusal = deferral
         if primary and not waiter.waits_allowed:  # typed at once: the terminal may come before any chain
             ctx.accumulated_usage[RESOURCE_REFUSAL_KEY] = deferral.terminal(fallbacks_tried=[], owner_wait="not_allowed")
+    from ouroboros.primary_route_observation import own_call_record, record_round_route_result
     if result[0] is not None:
-        from ouroboros.primary_route_observation import own_call_record
         call = own_call_record(ctx.accumulated_usage, True, previous_call, None)
         author = call.get("model") or ctx.active_model
         observe_authoring_response(ctx.tools._ctx, author)
         ctx.tools._ctx._completion_observation["model"] = author
-    from ouroboros.primary_route_observation import record_round_route_result
     record_round_route_result(ctx, role, accepted=result[0] is not None)
     observed = ctx.accumulated_usage.get("_model_route")
     if (plan is not None and isinstance(observed, dict)
@@ -1395,7 +1398,6 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
 from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
 WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
 REBOUND_VIEW_STEP = "rebound_view"  # or the view the refusal's route rebind narrowed
-#: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 
 
 def _refusal_window(ctx: _RoundModelCallContext, fit: Any,

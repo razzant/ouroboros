@@ -46,7 +46,7 @@ Naming/translation share one deadline across preparation, slots and recovery; na
 
 ### Default settings
 
-One row per key (`settings_defaults.py`). Env-only rows have no settings.json carrier; alias and `(migrated)` rows name retired keys converted at read.
+`settings_defaults.py` has one row per key. Env-only keys skip settings.json; alias/`(migrated)` rows convert retired keys on read.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -54,8 +54,9 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OPENAI_API_KEY | "" | Official direct-OpenAI credential |
 | OPENAI_API_SURFACE | "" | OpenAI API: empty/`chat_completions` = Chat, `responses` (a new key's; rows: `api_surface`) |
 | OPENAI_BASE_URL | "" | Legacy compatible endpoint (only with `OPENAI_API_KEY`) |
-| OPENAI_COMPATIBLE_API_KEY | "" | OpenAI-compatible endpoint credential |
-| OPENAI_COMPATIBLE_BASE_URL | "" | OpenAI-compatible endpoint; only with its own key (blank = no auth) |
+| OPENAI_COMPATIBLE_API_KEY | "" | Compatible endpoint credential |
+| OPENAI_COMPATIBLE_BASE_URL | "" | Compatible endpoint; own key or no auth |
+| OPENAI_COMPATIBLE_CONTINUE_UNCONFIRMED | "" | Unnamed server's consent URL, saved as an id (§6) |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Cloud.ru credential |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru base URL |
 | GIGACHAT_CREDENTIALS | "" | GigaChat auth key |
@@ -87,7 +88,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_ACCOUNTS | {} | Role-owned managed-account pins; empty = Auto |
 | OUROBOROS_PROCESSING_PREFERENCE | "" | Global standard/fast/economy, empty uses adapter default |
 | OUROBOROS_MODEL_PROCESSING_PREFERENCES | {} | Role tiers inherit global when empty. Only `main` also accepts `ultrafast` |
-| OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role-owned context sizing assertions; zero = Auto; grants no reviewer authority |
+| OUROBOROS_MODEL_CONTEXT_WINDOWS | {} | Role-owned context sizing assertions; zero = Auto; grants no reviewer authority. Ollama loads follow `llm_ollama_policy.py`; a larger load needs RAM/VRAM |
 | OUROBOROS_MODEL_VISION | "" | Vision model (empty inherits) |
 | OUROBOROS_IMAGE_INPUT_MODE | auto | Send-time image routing (`vision_routing.py`) |
 | OUROBOROS_VISION_CAPTION_TIMEOUT_SEC | 90 | Caption-generation ceiling |
