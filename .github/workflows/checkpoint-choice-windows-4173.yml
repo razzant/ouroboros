@@ -1,0 +1,32 @@
+name: Checkpoint choice on Windows (targeted qualification)
+'on':
+  push:
+    branches: ['qa/m2-4173-windows-d241c649']
+permissions:
+  contents: read
+jobs:
+  checkpoint:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'd241c649c96661ddcb94a0c9258f0a1ffa193a3b'
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+      - name: Exercise model choices and actual checkpoints
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -ne 'd241c649c96661ddcb94a0c9258f0a1ffa193a3b') { throw 'Unexpected candidate' }
+          $python = (Get-Command python).Source
+          $nodes = @(
+            'tests/test_quota_rotation_fallback.py::test_intermediate_checkpoint_after_wait_card_matches_adoption'
+            'tests/test_quota_rotation_fallback.py::test_work_lost_during_a_walk_for_an_unfinished_reply_resumes_on_the_live_route'
+            'tests/test_output_exhaustion_recovery.py::test_the_execution_that_heard_no_known_end_keeps_its_configured_route'
+            'tests/test_primary_view_return.py::test_the_deferred_fallback_owns_its_view_and_schema_facts_only_when_it_answers'
+            'tests/test_live_start_room.py::test_a_new_nano_setup_can_raise_the_reply_after_pricing_its_wire'
+          )
+          & $python scripts/safe_test.py --timeout 420 -- $python -m pytest -n 0 -p no:cacheprovider -o 'addopts=' -vv @nodes
+          exit $LASTEXITCODE
