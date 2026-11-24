@@ -989,10 +989,7 @@ status sentence's or a composer chip's dot is its tone, §4).
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
 
-In a Project row the mark owns one reserved trailing column, so it sits at one x
-across rows whatever the name length; while the row's controls are drawn (a pointer's hover or the keyboard in the
-row, on touch a focused ⋯ or its open menu, the Pin with the keyboard) it gives way as the time does, and its words
-stay in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
+In a Project row the mark owns one trailing column at a fixed x across rows, beside a pinned row's resting pin; while controls are drawn (hover, keyboard focus in the row, or on touch a focused ⋯ or the menu it opened) it gives way (a pinned row's time stays on hover), its words kept in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
 census fact kept in the accessible name. The Projects have no header and no mark of their own: each row
 carries its own, and what waits for the owner in any of them also shows as the amber dot on Ouroboros's
 picture (§10 "Navigation"). An activity repaint keeps the row and menu
@@ -3415,8 +3412,9 @@ from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it firs
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Its Working folder… shows and repairs
 missing, unusable or unset bindings. No folder stays until a folder is chosen. It names work keeping
 its folder before Save. Closing during Save reports an unknown outcome; reopening reads afresh. Pins lead the one list, one `--space-2`
-of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing
-reads as one more Project; their tooltip and accessible name say Pinned. Within each group the newest message
+of air before the next shown row their only boundary: no caption, tint, rule or column. A pinned row keeps a quiet
+pin glyph at rest beside its shifted time where the hover Pin sits, swapping to Unpin in place only on the Pin's own
+hover or keyboard focus (mark-only on touch; chosen ink on the active row); its tooltip and accessible name say Pinned. Within each group the newest message
 leads: what Unread (§4) counts, the owner's own, of System rows only a work's end or a reminder; unread only
 marks. The list rests on the pins and the fifty newest others, the rest a step away (owner's choice A1): the
 field matches every Project's name, older and closed ones too, by its letters (any case or accent, each word

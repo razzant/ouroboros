@@ -160,9 +160,11 @@ def test_an_accepted_retry_names_its_recorded_selection_and_lineage_only_where_c
     registry, engine = _delegating(tmp_path, monkeypatch)
     ctx = registry._ctx
     ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # Project work without a folder
-    # The scripted engine knows one root; the start's own scratch scope registers as a new project (``None``: an
-    # answer without ``created``, so no engine trait is learned for the tests after this one).
-    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    # The scripted engine knows one root; the start's own scratch scope registers as a new project. The start reads the
+    # registration through its receipt; this one is an engine answer carrying only an id (no ``created``, root or
+    # store), so no engine trait is learned for the tests after this one.
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration_receipt", lambda _self, _root: {
+        "id": "prj-scratch", "created": None, "registration_root": None, "registration_store_id": None})
     drive = tmp_path / "task_drives" / ctx.task_id
     drive.mkdir(parents=True, exist_ok=True)
     (drive / "one.md").write_text("known", encoding="utf-8")
@@ -202,7 +204,8 @@ def test_an_accepted_retry_decides_its_lineage_line_from_its_own_recorded_reques
         ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     else:
         ctx.workspace_root, ctx.workspace_mode = str(folder), "external"
-    monkeypatch.setattr(_REAL_GATEWAY, "project_registration", lambda _self, _root: ("prj-scratch", None))
+    monkeypatch.setattr(_REAL_GATEWAY, "project_registration_receipt", lambda _self, _root: {
+        "id": "prj-scratch", "created": None, "registration_root": None, "registration_store_id": None})
     drive = tmp_path / "task_drives" / ctx.task_id
     drive.mkdir(parents=True, exist_ok=True)
     (drive / "brief.md").write_text("first attempt", encoding="utf-8")
