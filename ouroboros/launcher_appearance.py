@@ -189,20 +189,31 @@ class NativeAppearance:
 
     def _before_show(self) -> None:
         """pywebview ``before_show`` (synchronous, the form's UI thread): take the handle, write the first tint."""
+        if self._read_form():
+            self._subscribe_preferences()
+            self._apply(shown=False)
+
+    def paint_shown(self, window: Any) -> None:
+        """Set the initial caption of a shown offline window on its UI thread, without a live preference subscription."""
+        if _WINDOWS:
+            self._window = window
+            if self._read_form():
+                self._apply(shown=True)
+
+    def _read_form(self) -> bool:
         form = getattr(self._window, "native", None)
         try:
             hwnd = int(form.Handle.ToInt64())
         except Exception:
             log.warning("No native window handle; the caption keeps the system tint.", exc_info=True)
-            return
+            return False
         with self._lock:
             if self._closed:
-                return
+                return False
             self._form, self._hwnd = form, hwnd
             # The form exists, so its colour is fixed: whoever set it (``paint_room`` or the caller) is done.
             self._theme = self._theme or palette_of_background(getattr(self._window, "background_color", ""))
-        self._subscribe_preferences()
-        self._apply(shown=False)
+        return True
 
     def _post(self, form: Any) -> bool:
         try:

@@ -229,6 +229,11 @@ def test_real_sends_leave_the_fact_on_their_ledger_rows(main_call):
     traces = [read_attempt(ctx.drive_root, ctx.task_id, row["attempt_id"])[0]["file_trace"] for row in rows]
     assert [trace if trace == "not_recorded" else [(row["source_path"], row["source_sha256"]) for row in trace]
             for trace in traces] == [[("prompts/SYSTEM.md", digest)], [("prompts/SYSTEM.md", digest)], "not_recorded"]
+    reports = [read_attempt(ctx.drive_root, ctx.task_id, row["attempt_id"], report_facts=True)[0] for row in rows]
+    assert [report["authored_prefix"]["departs"] for report in reports] == ["first", "append", "system"]
+    for report, row in zip(reports, rows):
+        assert report["context_fit"]["rendered_mode"] == row["physical_context"]["rendered_mode"]
+        assert "route_fp" not in report["context_fit"] and "from_route" not in report["authored_prefix"]
 
 
 def test_one_reader_names_the_class_in_the_providers_own_order():

@@ -874,17 +874,19 @@ class _SavedCarrier:
 
     def reentered(self, ctx: Any, messages: list) -> None:
         """The conversation's facts since the park, appended once its saved state is restored."""
-        from ouroboros.presence_continuation import conversation_lost, reentry_note
+        from ouroboros.presence_continuation import conversation_lost, record_reentry_contribution, reentry_note
 
         if self.restored_wait or not self.lease.held() or conversation_lost(ctx):
             return
-        note = reentry_note(self.binding, ctx, parked_by=self.parked_by)
+        observation = {}
+        note = reentry_note(self.binding, ctx, parked_by=self.parked_by, observation=observation)
         lift = (getattr(ctx, "task_metadata", None) or {}).get("producer_allowance_lifted")
         if isinstance(lift, Mapping):  # said, not implied (#2566)
             note += (f"\nThe owner's own Resume moved this turn off its ${float(lift.get('ceiling_usd') or 0):.2f} "
                      "producer allowance: it runs on the ordinary project budget now. Its tree cap, the shared Total "
                      "budget and its deadline still bind, and the spend so far still counts.")
         messages.append({"role": "user", "content": note})
+        record_reentry_contribution(ctx, messages[-1], observation)
         self.binding.restored = False
 
     def leave(self) -> None:

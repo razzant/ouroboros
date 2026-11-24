@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import pathlib
 from typing import Any, Dict
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient
+from ouroboros.physical_attempt_context import PhysicalAttemptContext
 from tests._usage_store_testing import ledger_rows
 
 
 class _Response:
     _payload = {
         "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 2, "cost": 0.0},
+        "usage": {"prompt_tokens": 50, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0}, "cost": 0.0},
     }
 
     def model_dump(self):
@@ -59,12 +61,12 @@ def _rows(root: pathlib.Path):
     return ledger_rows(root)
 
 
-def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None):
+def _dispatch(root: pathlib.Path, task_id: str, payload=None, target=None, *, category=None, response_factory=_Response):
     client = LLMClient(api_key="unused")
     scope = _scope(root, task_id)  # other modules bind their own scope here (tests/test_boot_dependency_sync.py)
     with ua.usage_scope(scope if category is None else dataclasses.replace(scope, category=category)):
         client._create_chat_completion_with_retries(
-            lambda **_candidate: _Response(),
+            lambda **_candidate: response_factory(),
             payload if payload is not None else _payload(),
             target if target is not None else _target(),
         )
@@ -120,15 +122,44 @@ def context_reports(root: pathlib.Path, monkeypatch, capsys) -> dict:
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *args, **kwargs: 0.01)
     (root / "state").mkdir(parents=True)
     payload = _payload()
+    system = 'You answer from the tide table.'
+    bible = '- Heights in metres.'
+
+    def witness(path: str, content: str) -> tuple:
+        digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+        return path, digest, len(content), digest
+
     payload["messages"] = [
-        {"role": "system", "content": [{"type": "text", "text": "You answer from the tide table.\n\n## Rules\n\n- Heights in metres."}]},
+        {"role": "system", "content": [{"type": "text", "text": f'{system}\n\n## BIBLE.md\n\n{bible}'}]},
         {"role": "user", "content": "Can the Marigold berth at 14?\nShe arrives at 06:30.\n"
                                     "OPENAI_API_KEY=sk-secret-model-send-seal <b>now</b>"},
         {"role": "assistant", "content": None, "tool_calls": [
             {"id": "call_1", "type": "function", "function": {"name": "inspect", "arguments": '{"berth": 14}'}}]},
         {"role": "tool", "tool_call_id": "call_1", "content": "open\nfenders replaced"},
     ]
-    attempts = [_dispatch(root, "report-task", payload=copy.deepcopy(payload))["attempt_id"] for _ in range(2)]
+    fit = PhysicalAttemptContext(
+        profile="task_local_low", rendered_mode="low", measurement_basis="fresh_route_usage",
+        route_fp="private-fixture-route", round_id="1", capacity_total_tokens=100_000,
+        target_total_tokens=None, context_target_miss=False, automatic_pass_used=True,
+        preferred_mode="max", mode_cause="window", response_reserve_tokens=4096,
+        prefix={"departs": "system", "block": "shared understanding", "index": 2, "of": 5},
+        base_prompt_source=witness('prompts/SYSTEM.md', system), bible_source=witness('BIBLE.md', bible),
+    )
+    from ouroboros.context_assembly_trace import bind_contribution_input, note_contribution
+    from types import SimpleNamespace
+
+    typed = copy.deepcopy(payload)
+    typed['messages'][1]['_host_context_kind'] = 'owner_words'
+    slot = SimpleNamespace()
+    note_contribution(slot, typed['messages'][1], 'owner_input', form='direct_input')
+    fit = bind_contribution_input(fit, typed, typed['messages'], slot)
+    with ua.bind_physical_attempt_context(fit):
+        first = _dispatch(root, "report-task", payload=copy.deepcopy(payload))["attempt_id"]
+    attempts = [first, _dispatch(root, "report-task", payload=copy.deepcopy(payload))["attempt_id"]]
+    noisy = copy.deepcopy(payload)
+    noisy['messages'][-1]['content'] += '\n' + 'Tide sensor background output.\n' * 5_000
+    noisy_id = _dispatch(root, "report-task", payload=noisy)["attempt_id"]
+    media_id = _dispatch_staged_media(root, monkeypatch, fit)
     failed, retried = _rejected_then_answered(root, "retry-task", monkeypatch, payload=copy.deepcopy(payload))
     _settle_abandoned(root, failed)
 
@@ -142,4 +173,48 @@ def context_reports(root: pathlib.Path, monkeypatch, capsys) -> dict:
         over_limit = report("report-task", attempts[0])
     return {"attempts": attempts, "first": report("report-task", attempts[0]),
             "second": report("report-task", attempts[1]), "over_limit": over_limit,
+            "noisy": report("report-task", noisy_id), "media": report("media-task", media_id),
             "failed": (failed, report("retry-task", failed)), "retried": (retried, report("retry-task", retried))}
+
+
+def _dispatch_staged_media(root, monkeypatch, fit):
+    from types import SimpleNamespace
+
+    from PIL import Image
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.context import build_incoming_user_content
+    from ouroboros.context_assembly_trace import bind_contribution_input, note_contribution
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    task = 'media-task'
+    folder = task_artifact_dir_path(root, task, create=True) / 'attachments'
+    folder.mkdir(exist_ok=True)
+    manifest = []
+    for index in range(6):
+        name = f'harbor-{index}.png'
+        Image.new('RGB', (24, 24), (80 + index, 120, 180)).save(folder / name)
+        manifest.append({'relpath': f'attachments/{name}', 'is_image': True})
+    observed = {}
+    entry = {'text': 'Where did the attachment go?', 'attachment_manifest': manifest}
+    row = {'role': 'user', 'content': build_incoming_user_content(entry, root, task, attachment_facts=observed)}
+    assert observed['manifest_pixels'] == 5 and observed['manifest_path_only'] == 0
+    assert observed['attachment_items'][-1] == {'number': 6, 'decision': 'image_count_limit'}
+    with monkeypatch.context() as m:
+        m.setenv('OUROBOROS_IMAGE_INPUT_MODE', 'off')
+        projected = prepare_messages_for_send([row], routing=VisionRoutingContext('not/vision', object(), {}))
+    slot = SimpleNamespace()
+    note_contribution(slot, row, 'attachment_manifest', observation=observed)
+    logical = {**_payload(), 'messages': projected}
+
+    class MixedUsage(_Response):
+        # The ledger's totals include non-text traffic; the cache subtraction is not a text subtotal.
+        _payload = {**_Response._payload, 'usage': {
+            'prompt_tokens': 1000, 'completion_tokens': 100, 'cost': 0.0,
+            'prompt_tokens_details': {'audio_tokens': 5, 'cached_tokens': 100},
+            'completion_tokens_details': {'audio_tokens': 8},
+        }}
+
+    with ua.bind_physical_attempt_context(bind_contribution_input(fit, logical, [row], slot)):
+        return _dispatch(root, task, payload={**logical, 'messages': project_wire_messages(projected)},
+                         response_factory=MixedUsage)['attempt_id']

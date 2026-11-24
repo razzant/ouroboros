@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-A9eEN/GLzr6taFlNRWX2LYqbyKsA3t/FlC3BrlN9hT4='; style-src 'sha256-DhRwNtTvs87f8adtZRdFj4k9b4NkjO/8nSpS4DxWJ3Y='; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-E984XqEs7OsHk5QxQpYiEt2m/QGz2sxrUEDzHh5J9aw='; style-src 'sha256-/KTbH1jeDiGk8K0b5vqXra/ufr1sXxppR8D570wsODk='; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Beautiful Context</title><style>
@@ -28,13 +28,22 @@ h1, h2 { font-size: 16px; line-height: 1.3; font-weight: 600; }
 h2 { margin-block: 24px 8px; }
 h2 small, .meta, dt, #report-help, .note { font-size: 12px; line-height: 1.35; font-weight: 400; color: var(--meta); }
 #lead { margin-block: 4px 12px; color: var(--meta); }
-.open { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.open:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+#archive:not([hidden]) { display: grid; gap: 12px; margin-block-end: 16px; }
+.archive-selects { display: grid; gap: 8px 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+.archive-selects label { display: grid; gap: 4px; min-width: 0; font-weight: 600; }
+.archive-selects select { min-width: 0; max-width: 100%; min-height: 44px; padding: 6px 9px; font: inherit;
+  color: FieldText; background: Field; border: 1px solid var(--meta); border-radius: 10px; }
+.archive-selects select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pick { position: relative; display: inline-flex; }
-.button { padding: 6px 16px; border-radius: 999px; background: var(--capsule); box-shadow: var(--rest); font-weight: 600; }
+.button { display: inline-flex; align-items: center; min-block-size: 44px; box-sizing: border-box; padding: 6px 16px;
+  border: 0; border-radius: 999px; background: var(--capsule); color: inherit; font: inherit; box-shadow: var(--rest); font-weight: 600; cursor: pointer; }
 .pick:hover .button { background: var(--capsule-hover); }
+.button:enabled:hover { background: var(--capsule-hover); }
+.button:disabled, .archive-selects select:disabled { opacity: 0.58; box-shadow: none; cursor: not-allowed; }
 .pick:active .button { filter: var(--press); }
-#report-file { position: absolute; z-index: 1; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
-#report-file:focus-visible + .button, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pick input { position: absolute; z-index: 1; inset: 0; inline-size: 100%; block-size: 100%; opacity: 0; cursor: pointer; }
+.pick input:focus-visible + .button, .button:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 #report-status[data-tone="bad"] { color: var(--ouro-error, var(--bad)); }
 #report-help { margin-block-start: 12px; }
 #report-help ol { padding-inline-start: 20px; }
@@ -43,13 +52,18 @@ code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 summary { cursor: pointer; border-radius: 12px; }
 #report-result { margin-block-start: 24px; }
 #explain { margin-block: 4px 12px; }
+#source-versions { font-family: inherit; }
+.overview { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  border-radius: 12px; overflow: hidden; margin-block-end: 12px; }
+.overview > div { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 12px; background: var(--tray); }
+.overview dd { font-weight: 600; }
 dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; }
 dd { margin: 0; min-width: 0; }
 .callout { margin-block-start: 12px; padding: 12px 16px; border-radius: 12px; background: var(--tray); }
 .callout strong { font-weight: 600; color: var(--ouro-warn, var(--warn)); }
 .rows { display: grid; gap: 4px; }
 .row { border-radius: 12px; background: var(--tray); }
-.row > summary { display: grid; grid-template-columns: 0.75rem 1.5rem 5.5rem minmax(0, 1fr) max-content; gap: 8px;
+.row > summary { display: grid; grid-template-columns: 0.75rem 1.5rem 7rem minmax(0, 1fr) max-content; gap: 8px;
   align-items: baseline; padding: 8px 12px; list-style: none; }
 .rows[data-kind="tools"] > .row > summary, .rows[data-kind="functions"] > .row > summary {
   grid-template-columns: 0.75rem 1.5rem minmax(0, 14rem) minmax(0, 1fr) max-content; }
@@ -63,20 +77,32 @@ dd { margin: 0; min-width: 0; }
 .part > .meta { display: block; margin-block-end: 4px; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .part > .said { font: inherit; }
+.more > summary, #report-help > summary { min-block-size: 36px; box-sizing: border-box; }
 .more { margin-block-start: 8px; }
 .more > summary { padding-block: 8px; font-weight: 600; }
 .more > pre, .more > dl, .more > .note { padding-block-end: 8px; }
 @media (max-width: 34rem) {
+  dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  dd + dt { margin-block-start: 8px; }
   .row > summary, .rows[data-kind] > .row > summary { grid-template-columns: 0.75rem 1.5rem minmax(0, 1fr) max-content; }
   .row > summary .what { grid-area: 2 / 1 / 3 / -1; }
   .row > summary .how { grid-area: 1 / 4; }
 }
 </style></head>
 <body><main><h1>Beautiful Context</h1>
-<p id="lead">Read one model request the way this computer recorded it. The file you open stays in this frame: nothing is uploaded or kept.</p>
-<div class="open"><span class="pick"><input type="file" id="report-file" accept=".json,application/json"><label class="button" for="report-file">Open local report</label></span>
-<span id="report-status" role="status"></span></div>
-<details id="report-help"><summary>How to make a report</summary><ol>
+<p id="lead">See what went into a model request and what changed between requests.</p>
+<section id="archive" hidden aria-label="Recent requests">
+<div class="archive-selects">
+<label>Conversation<select id="archive-room" disabled></select></label>
+<label>Request<select id="archive-attempt" disabled></select></label></div>
+<div class="open"><button type="button" class="button" id="archive-compare" disabled>Compare with previous</button>
+<button type="button" class="button" id="archive-reload">Refresh list</button></div>
+<p class="note">Recent requests linked to replies in Main and your projects. Some requests may not appear in this list.</p>
+</section>
+<div class="open" id="report-opening"><span class="pick"><input type="file" id="report-file" accept=".json,application/json"><label class="button" for="report-file">Open local report</label></span>
+<button class="button" type="button" id="report-example">Try an example</button>
+</div><p id="report-status" role="status"></p>
+<details id="report-help"><summary>How to get your own report</summary><p>Opened files stay here: nothing is uploaded or saved by this view.</p><ol>
 <li>Take the task's full ID from Dashboard › Logs: open the task's entry, then one of its events. The record under the event shows it as <code>subagent_task_id</code> when the event has one, else as <code>task_id</code>. The ID beside a Logs entry is cut to 8 characters, and a Context Lens chart is named by a hash; neither is a full task ID.</li>
 <li>In a terminal, from a separate source checkout of this version (never the running one), list that task's attempts, newest first: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID</code>, where DATA is this installation's data folder.</li>
 <li>Write one attempt's report into a private folder that is not synced: <code>python -m ouroboros.context_attempt_reader --data-root DATA TASK_ID --attempt ATTEMPT_ID --report &gt; report.json</code></li>
@@ -85,12 +111,23 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 <section id="report-result" hidden>
 <h2 id="headline"></h2>
 <p id="explain"></p>
-<dl id="attempt-facts"></dl>
-<p class="callout" id="privacy"><strong>Private text can remain.</strong> Only known secret patterns are masked, so names, messages and file paths stay readable. Keep this file on this computer; it is not meant to be forwarded automatically.</p>
+<p class="callout" id="privacy"><strong>Private text can remain.</strong> The saved copy masks known secret patterns. It can still contain names, messages and file paths. Keep this file on this computer; it is not meant to be forwarded automatically.</p>
+<dl class="overview" id="overview"></dl>
+<details class="more" id="comparison"><summary>Compare with another report</summary>
+<p class="note">This compares the two saved copies with known secrets masked. The ledger can record zero even if the provider gave no number.</p>
+<div class="open" id="comparison-opening"><span class="pick"><input type="file" id="comparison-file" accept=".json,application/json"><label class="button" for="comparison-file">Open second local report</label></span></div>
+<p class="note" id="comparison-status" role="status"></p><dl id="comparison-facts"></dl>
+<details id="comparison-technical" hidden><summary>Technical details of the comparison</summary><dl id="comparison-identities"></dl></details></details>
+<h2 id="composition">What went into the request</h2>
+<p class="note" id="source-limit"></p>
+<details class="more" id="origins" open><summary>Where these blocks came from</summary><pre id="source-versions"></pre>
+<details><summary>Source versions and exact positions</summary><pre id="source-technical"></pre></details></details>
 <div id="request"></div>
+<details class="more" id="technical"><summary>Technical details</summary>
+<dl id="attempt-facts"></dl><h2>How this request was built</h2><dl id="build-facts"></dl>
 <details class="more"><summary>Stored JSON</summary><p class="note" id="stored-note"></p><pre id="stored-body"></pre></details>
-<details class="more"><summary>Recorded source versions</summary><pre id="source-versions"></pre></details>
 <details class="more" id="record"><summary>All recorded facts of this attempt</summary><pre id="record-body"></pre></details>
+</details>
 </section></main><script>
 'use strict';
 const byId = (id) => document.getElementById(id);
@@ -98,6 +135,7 @@ const input = byId('report-file');
 const status = byId('report-status');
 const result = byId('report-result');
 const fields = byId('attempt-facts');
+const build = byId('build-facts');
 const request = byId('request');
 const stored = byId('stored-body');
 const maxBytes = 48 * 1024 * 1024;
@@ -129,6 +167,7 @@ const size = (chars) => (chars < 1000 ? `${chars} chars` : `${count(Math.round(c
 const bytes = (number) => (number < 1024 ? `${number} byte${number === 1 ? '' : 's'}`
   : number < 1024 * 1024 ? `${count(Math.ceil(number / 1024))} KiB` : `${count(Math.ceil(number / 1024 / 102.4) / 10)} MiB`);
 const pretty = (value) => JSON.stringify(value, null, 2);
+const MESSAGE_ROLES = new Map([['system', 'Instructions'], ['user', 'User input'], ['assistant', 'Model'], ['tool', 'Tool result']]);
 function element(tag, className, content) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -243,8 +282,10 @@ function indentJson(source) {
 // One pass over the text, at most once.
 let spans = null;
 function sourceSpans() {
-  if (spans) return spans;
-  spans = new WeakMap();
+  return spans ??= indexSpans(source, body);
+}
+function indexSpans(source, body) {
+  const index = new WeakMap();
   let at = 0;
   const token = /[^,\]}\s]*/y;
   const blank = () => { while (at < source.length && ' \t\n\r'.includes(source[at])) at += 1; };
@@ -263,6 +304,7 @@ function sourceSpans() {
     const open = source[at];
     if (open === '{' || open === '[') {
       const members = open === '{' ? new Map() : null;  // an array's text is its own: no span per element
+      let duplicateKeys = false;
       at += 1;
       blank();
       for (let index = 0; source[at] !== (open === '{' ? '}' : ']'); index += 1) {
@@ -270,17 +312,18 @@ function sourceSpans() {
         if (members) { blank(); at += 1; blank(); }
         const from = at;
         walk(node !== null && typeof node === 'object' ? node[key] : undefined);
+        if (node === body && members?.has(key)) duplicateKeys = true;
         members?.set(key, [from, at]);
         blank();
         if (source[at] === ',') { at += 1; blank(); }
       }
       at += 1;
-      if (node !== null && typeof node === 'object') spans.set(node, { at: [start, at], members });
+      if (node !== null && typeof node === 'object') index.set(node, { at: [start, at], members, duplicateKeys });
     } else if (open === '"') string();
     else { token.lastIndex = at; token.exec(source); at = token.lastIndex; }
   };
-  try { blank(); walk(body); } catch { spans = new WeakMap(); }  // without spans a value is shown as parsed
-  return spans;
+  try { blank(); walk(body); } catch { return new WeakMap(); }  // without spans a value is shown as parsed
+  return index;
 }
 const rawMember = (holder, key) => {
   const at = holder !== null && typeof holder === 'object' ? sourceSpans().get(holder)?.members?.get(key) : null;
@@ -361,7 +404,8 @@ function section(title, key, masked) {
     const [role, said] = rowWords(item, key);
     const path = `$.${key}${Array.isArray(body[key]) ? `[${index}]` : ''}`;
     const hidden = masked.has(path);
-    head.append(element('span', 'meta', String(index + 1)), element('span', 'role', role),
+    const label = MESSAGE_ROLES.get(role) || role;
+    head.append(element('span', 'meta', String(index + 1)), element('span', 'role', key === 'messages' || key === 'input' ? label : role),
       element('span', 'what', said.slice(0, 240).split('\n', 1)[0]),
       element('span', 'meta how', size(JSON.stringify(item).length) + (hidden ? ' · secret masked' : '')));
     row.append(head);
@@ -385,11 +429,86 @@ function clear() {
   body = null;
   source = '';
   spans = null;
-  for (const node of [fields, request, stored, byId('stored-note'), byId('source-versions'), byId('record-body')]) node.replaceChildren();
+  firstReport = null;
+  clearComparison();
+  for (const node of [fields, build, request, stored, ...['headline', 'explain', 'stored-note', 'source-limit',
+    'source-versions', 'source-technical', 'record-body', 'overview'].map(byId)]) node.replaceChildren();
   for (const node of result.querySelectorAll('details')) node.open = false;
 }
-function add(label, value) {
-  if (value) fields.append(element('dt', '', label), element('dd', '', value));
+function add(label, value, list = fields) {
+  if (value) list.append(element('dt', '', label), element('dd', '', value));
+}
+const FIT_BASIS = new Map([
+  ['fresh_route_usage', 'Calibrated on recent usage from this route'],
+  ['fresh_model_usage', 'Calibrated on recent usage from this model'],
+  ['refused_input', 'Calibrated on a size refusal'],
+  ['cold_estimate', 'Estimated without a recent measurement'],
+]);
+const FIT_CAUSE = new Map([
+  ['memory', 'Memory did not fit the preferred view'],
+  ['request', 'The request itself left too little room'],
+  ['route', 'The route’s window took the room needed by the preferred view'],
+  ['window', 'The preferred view did not fit the window'],
+  ['after_start', 'The task lowered its view after starting'],
+]);
+const PREFIX_WORDS = new Map([
+  ['first', 'No earlier answered request on this task’s comparison slot'],
+  ['route', 'No earlier answered request on this route in the task’s comparison slot'],
+  ['unrecorded', 'No earlier comparison basis was retained'],
+  ['tools', 'First change: tool declarations'],
+  ['system', 'First change: system blocks'],
+  ['messages', 'First change: message history'],
+  ['append', 'The earlier prefix stayed in place'],
+]);
+const knownCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const tokenWords = (value) => knownCount(value) ? `${count(value)} tokens` : 'Not recorded';
+const MODE_NAMES = new Map([['max', 'Max'], ['low', 'Low'], ['nano', 'Nano']]);
+// Older reports used a different name for the same normalized ledger counters.
+const ledgerUsage = (facts) => facts.ledger_usage ?? facts.reported_usage;
+const reportedUsage = (facts) => isRecord(facts.provider_token_receipt) ? facts.provider_token_receipt : null;
+const REPORTED_COUNTS = [['prompt_tokens', 'Prompt'], ['input_tokens', 'Native input field'],
+  ['completion_tokens', 'Output'], ['cached_tokens', 'Cache read'], ['cache_write_tokens', 'Cache write']];
+function showBuild(facts) {
+  const write = (label, value) => add(label, value, build);
+  const fit = isRecord(facts.context_fit) ? facts.context_fit : null;
+  const applied = fit && MODE_NAMES.get(fit.rendered_mode);
+  const chosen = fit && MODE_NAMES.get(fit.preferred_mode);
+  write('Context mode', applied ? `${applied}${chosen && chosen !== applied ? ` · chosen ${chosen}` : ''}` : 'Not recorded');
+  if (fit) {
+    const cause = FIT_CAUSE.get(fit.mode_cause);
+    if (cause) write('Why the view changed', cause);
+    write('Sizing basis', FIT_BASIS.get(fit.measurement_basis) || 'Not recorded');
+    write('Total capacity used for planning', tokenWords(fit.capacity_total_tokens));
+    if (knownCount(fit.target_total_tokens)) {
+      write('Mode target', tokenWords(fit.target_total_tokens) + (fit.context_target_miss === true ? ' · exceeded' : ''));
+    }
+    if (knownCount(fit.response_reserve_tokens)) write('Reply reserve', tokenWords(fit.response_reserve_tokens));
+    if (knownCount(fit.no_memory_tokens)) write('Start without memory (with reply reserve)', tokenWords(fit.no_memory_tokens));
+    if (fit.window_witness_bound === true && knownCount(fit.capacity_total_tokens)) {
+      write('Window evidence', 'The planner had a bound window observation');
+    }
+    if (typeof fit.automatic_pass_used === 'boolean') write('Automatic fit pass', fit.automatic_pass_used ? 'Used' : 'Not used');
+  }
+  const prefix = isRecord(facts.authored_prefix) ? facts.authored_prefix : {};
+  const word = PREFIX_WORDS.get(prefix.departs);
+  const indexed = ['system', 'messages'].includes(prefix.departs) && knownCount(prefix.index);
+  write('Host prefix within this task', word ? word + (indexed ? ` · position ${prefix.index + 1}` : '')
+    + (prefix.departs === 'system' && typeof prefix.block === 'string' ? ` · ${prefix.block}` : '') : 'Not recorded');
+  const usage = ledgerUsage(facts);
+  const total = usage?.prompt_tokens;
+  const cached = usage?.cached_tokens;
+  const split = knownCount(total) && total > 0 && knownCount(cached) && cached <= total;
+  write('Ledger input', tokenWords(total));
+  write('Ledger cache read', tokenWords(cached)
+    + (split ? ` · ${(cached / total).toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 })} of input` : ''));
+  if (split) write('Input outside the recorded cache read', tokenWords(total - cached));
+  write('Ledger cache write', tokenWords(usage?.cache_write_tokens));
+  write('Ledger output', tokenWords(usage?.completion_tokens));
+  const reported = reportedUsage(facts);
+  write('Provider token receipt', reported ? 'Recorded for this attempt' : 'Not recorded for this attempt');
+  if (reported) for (const [key, label] of REPORTED_COUNTS) {
+    if (knownCount(reported[key]) || key === 'cached_tokens') write(`Provider · ${label}`, tokenWords(reported[key]));
+  }
 }
 const SECTIONS = [['system', 'System'], ['instructions', 'Instructions'], ['messages', 'Messages'], ['input', 'Input'],
   ['tools', 'Tools'], ['functions', 'Functions']];
@@ -426,12 +545,31 @@ function gapWords(facts) {
   }
   return ABSENT.get(facts.body) || ['This report holds no request body', `The reader gave the reason "${text(facts.body)}".`];
 }
-function show(facts, name) {
+function overviewItem(label, value) {
+  const card = element('div');
+  card.append(element('dt', '', label), element('dd', '', value));
+  byId('overview').append(card);
+}
+function show(facts, name, example = false) {
   const absent = body === null;
   const [headline, why] = absent ? gapWords(facts)
-    : ['Request recorded for this attempt', 'This is the host’s historical copy, saved before sending with known secrets masked. It is not the provider’s receipt.'];
-  byId('headline').textContent = headline;
-  byId('explain').textContent = why;
+    : ['Request recorded for this attempt', 'This copy was saved before sending, with known secrets masked. It shows what the app prepared, not what the provider received.'];
+  byId('headline').textContent = example ? 'Example: a visit to the library' : headline;
+  byId('explain').textContent = example ? 'A fictional request showing how a message, instructions and tools fit together. Nothing was sent to a model.' : why;
+  byId('composition').hidden = absent;
+  byId('origins').hidden = example;
+  byId('origins').open = !example;
+  byId('source-limit').hidden = example;
+  if (!absent) {
+    const items = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : null;
+    const tools = Array.isArray(body.tools) ? body.tools : Array.isArray(body.functions) ? body.functions : null;
+    const mode = MODE_NAMES.get(facts.context_fit?.rendered_mode);
+    const chosen = MODE_NAMES.get(facts.context_fit?.preferred_mode);
+    if (mode) overviewItem('Context mode', chosen && chosen !== mode ? `${mode} used · ${chosen} selected` : mode);
+    if (items) overviewItem(Array.isArray(body.messages) ? 'Messages' : 'Input items', count(items.length));
+    if (tools) overviewItem('Tools offered', count(tools.length));
+    if (!example) overviewItem('Cache read in ledger', tokenWords(ledgerUsage(facts)?.cached_tokens));
+  }
   add('Attempt', text(facts.attempt_id));
   add('Task', text(facts.task_id));
   if (facts.body === 'not_one_attempt') add('Ledger row', text(facts.ledger_kind));
@@ -444,7 +582,8 @@ function show(facts, name) {
     add('Transport', TRANSPORT.get(facts.transport_observation) || 'Transport receipt not confirmed');
     add('Failure', failureWords(facts.failure));
   }
-  byId('privacy').hidden = absent;
+  byId('privacy').hidden = absent || example;
+  showBuild(facts);
   // The one whole copy of the request in this frame; a report of a gap names its gap here too.
   stored.textContent = absent ? `Request body unavailable: ${text(facts.body)}` : source;
   byId('stored-note').textContent = absent ? '' : `One line of ${count(source.length)} characters, exactly as recorded.`;
@@ -469,20 +608,324 @@ function show(facts, name) {
     && typeof row.source_path === 'string' && typeof row.source_sha256 === 'string') : [];
   // The first reader wrote `not_recorded` beside `not_linked` without opening any record: as unknown as `not_read`.
   const unread = facts.file_trace === 'not_read' || (facts.file_trace === 'not_recorded' && facts.body === 'not_linked');
-  byId('source-versions').textContent = trace.length ? trace.map((row) => [row.source_path, 'File SHA-256: ' + row.source_sha256,
-    'Contribution SHA-256: ' + text(row.text_sha256), 'Contribution: ' + text(row.contribution)].join('\n')).join('\n\n')
-    : unread ? 'Not read: this report did not open the attempt’s sealed record, so the source versions it recorded are unknown.'
-    : 'No supported source versions were recorded. Other files and offsets remain unknown.';
+  const layout = Array.isArray(facts.assembly_source_map) ? facts.assembly_source_map.filter(isRecord) : [];
+  const manifest = isRecord(facts.prepared_inventory) ? facts.prepared_inventory : null;
+  const late = isRecord(facts.late_contributions) ? facts.late_contributions : null;
+  add('Source coverage', layout.length ? 'Assembly groups recorded; not every original item is traced'
+    : trace.length ? 'Some sources observed; no complete origin map'
+    : unread ? 'Sealed source record not read' : 'No source versions recorded', build);
+  byId('source-limit').textContent = layout.length ? 'This map follows the captured assembly. The prepared request counts include later input, even when its origins were not traced. This is not a count of everything in the archives.'
+    : trace.length ? 'Some sources have a recorded version. For the rest, this report cannot say why they were included or left out.'
+    : 'No initial assembly map is available in this report. Later observations, when available, are listed below.';
+  byId('source-versions').textContent = (manifest ? preparedWords(manifest) + '\n\n' : '')
+    + (layout.length ? layoutWords(layout) : sourceSummary(trace, unread))
+    + (late ? '\n\n' + contributionWords(late) : '');
+  byId('source-technical').textContent = (trace.length || !layout.length ? sourceWords(trace, unread) : 'Positions are in prepared text before redaction, not in the saved copy.')
+    + (layout.length ? '\n\nCaptured assembly coordinates and source addresses:\n' + pretty(layout) : '')
+    + (late ? '\n\nLater contributions:\n' + pretty(late) : '')
+    + (manifest ? '\n\nPrepared request inventory:\n' + pretty(manifest) : '');
   byId('record-body').textContent = pretty(facts);
-  status.textContent = `Showing ${name}.`;
+  status.textContent = example ? '' : `Showing ${name}.`;
   result.hidden = false;
 }
+const SOURCE_NAMES = new Map(Object.entries({
+  system: 'Base instructions', bible: 'Constitution', architecture: 'Architecture reference',
+  development: 'Development handbook', design_bible: 'Design reference', identity: 'Identity', world: 'World map',
+  scratchpad: 'Working notes', story: 'Story and settled retellings', memory_fit_notes: 'Memory fitting notes',
+  registry: 'Source register', shared_understanding: 'Shared understanding', knowledge_index: 'Knowledge index',
+  project_knowledge_index: 'Project knowledge index', project_workpad: 'Project workpad',
+  project_journal: 'Project journal', room: 'Current conversation', inactive_room: 'Current conversation unavailable',
+  other_conversations: 'Other conversations', other_conversation: 'Other conversation',
+  held_note: 'Relevant knowledge note', runtime: 'Runtime facts', drive_state: 'Saved application state',
+  owner_words: 'Governing words', marks: 'Memory marks', late_reviews: 'Late reviews',
+  connections: 'Tool connections', installed_skills: 'Skill catalog', always_on_skills: 'Resident skills',
+  recent_progress: 'Recent progress', recent_tools: 'Recent tool activity', recent_events: 'Recent events',
+}));
+const SOURCE_FORMS = new Map(Object.entries({
+  chapter_map: 'chapter overview', chapter_links: 'chapter links', whole_book: 'whole book',
+  whole_view: 'whole captured view', shorter: 'shorter form', summary: 'summary', count: 'count and reader',
+  framing: 'section framing', rendered: 'as assembled',
+}));
+function sourceForm(group) {
+  if (group.family === 'design_bible') {
+    if (group.form === 'rendered') return 'Design bible section in full; rest as table of contents';
+    if (group.form === 'shorter' && isRecord(group.retained_source)
+        && typeof group.retained_source.path === 'string' && group.retained_source.path.trim()) {
+      return 'table of contents only; Design bible retained';
+    }
+  }
+  return SOURCE_FORMS.get(group.form) || 'form not recorded';
+}
+function layoutWords(layout) {
+  const rows = new Map();
+  for (const block of layout) {
+    for (const group of Array.isArray(block.groups) ? block.groups.filter(isRecord) : []) {
+      const name = SOURCE_NAMES.get(group.family) || 'Other context section';
+      const form = sourceForm(group);
+      const reason = group.reason === 'physical_window' ? ' · to fit the model window'
+        : group.reason === 'mode_or_start_allowance' ? ' · to fit the starting allowance' : '';
+      const position = block.status === 'located' ? '' : ' · position not verified';
+      const key = `${name} · ${form}${reason}${position}`;
+      const counts = rows.get(key) || { entries: 0, chars: 0 };
+      counts.entries++;
+      if (Number.isSafeInteger(group.chars) && group.chars >= 0) counts.chars += group.chars;
+      rows.set(key, counts);
+    }
+  }
+  const lines = Array.from(rows, ([key, stats]) => `${key} · ${count(stats.chars)} characters${stats.entries > 1 ? ` across ${count(stats.entries)} parts` : ''}`);
+  const omitted = layout.reduce((total, block) => total + (Number.isSafeInteger(block.groups_omitted) && block.groups_omitted > 0
+    ? block.groups_omitted : 0), 0);
+  if (omitted) lines.push(`${count(omitted)} more source groups were not recorded in this map.`);
+  return lines.join('\n');
+}
+function contributionWords(late) {
+  const names = new Map(Object.entries({owner_input: 'Your messages', protected_input: 'Protected instructions or messages', reply_context: 'Quoted replies',
+    outward_reply: 'Earlier replies', return_context: 'What changed while away', task_mail: 'Mail from work',
+    place_arrival: 'Messages from places', presence_reentry: 'Conversation on return', tool_result: 'Tool results', result_selection: 'Tool result views',
+    tool_schema: 'Tool definitions', checkpoint: 'Checkpoint views', attachment_image: 'Images',
+    attachment_manifest: 'Attached files', skill_snapshot: 'Skill snapshots'}));
+  const forms = new Map(Object.entries({pixels: 'pixels', replaced_by_text: 'replaced by text', evicted: 'kept as a reference',
+    caption: 'replaced by a caption', caption_after_refusal: 'caption after provider refusal', caption_failed: 'caption failed',
+    caption_unavailable: 'no caption available', images_off: 'images turned off', transport_marker: 'transport cannot carry pixels',
+    refusal_marker: 'provider refused pixels', preparation_failed: 'image preparation failed',
+    partial_retained: 'shortened; original retained', partial_unavailable: 'shortened; original unavailable',
+    selected_result: 'selected view; full extent not established', result_view: 'extent not recorded',
+    source_view: 'read back from a checkpoint', summarized: 'retold', unrecorded: 'invocation not recorded'}));
+  const attachmentReasons = new Map(Object.entries({prepared_pixels: 'image prepared before route selection',
+    image_count_limit: 'image limit reached; not opened', image_byte_limit: 'above the automatic size limit',
+    not_selected_as_image: 'not selected for image reading', unreadable_entry: 'entry unavailable', missing_source: 'no staged source',
+    invalid_source: 'staged source rejected', unreadable_source: 'source could not be opened',
+    source_identity_changed: 'source no longer matches the staged copy', image_preparation_failed: 'image could not be prepared'}));
+  const groups = new Map(), details = [];
+  for (const row of Array.isArray(late.entries) ? late.entries.filter(isRecord) : []) {
+    const origin = new Map([['builtin', 'built-in'], ['extension', 'extension'], ['mcp', 'MCP']]).get(row.origin);
+    const kind = names.get(row.family) || 'Other contribution';
+    const title = origin ? `${kind} (${origin})` : kind;
+    if (Array.isArray(row.attachment_items)) {
+      const lines = row.attachment_items.slice(0, 32).filter(isRecord).map((item) =>
+        `Entry ${count(item.number)} · ${attachmentReasons.get(item.decision) || 'decision unavailable'}`);
+      const omitted = Number.isSafeInteger(row.attachment_items_omitted) ? row.attachment_items_omitted : 0;
+      if (omitted > 0) lines.push(`${count(omitted)} further entries not listed`);
+      details.push(...lines);
+    }
+    const attachments = row.family === 'attachment_manifest' && (row.manifest_unavailable ? 'file list unavailable'
+      : `${count(row.manifest_items)} entries considered · ${count(row.manifest_path_only)} non-image or path-only entries`
+        + (Number.isSafeInteger(row.manifest_pixels) ? ` · ${count(row.manifest_pixels)} opened as images before routing` : ''));
+    const label = attachments ? `${title}: ${attachments}` : forms.has(row.form) ? `${title}, ${forms.get(row.form)}` : title;
+    const tally = groups.get(label) || [0, 0, 0];
+    tally[row.status === 'located' ? 0 : row.status === 'carrier_located' ? 1 : 2]
+      += Number.isSafeInteger(row.count) && row.count > 0 ? row.count : 1;
+    groups.set(label, tally);
+  }
+  const lines = [...groups].map(([name, [located, carrier, unknown]]) => [name,
+    located ? `${count(located)} matched to the request` : '',
+    carrier ? `${count(carrier)} with a matching request row` : '',
+    unknown ? `${count(unknown)} without a verified position` : ''].filter(Boolean).join(' · '));
+  const omitted = [late.entries_omitted, late.logical_rows_omitted, late.logical_tools_omitted, late.row_notes_omitted]
+    .some((value) => Number.isSafeInteger(value) && value > 0);
+  return ['Later contributions', ...(lines.length ? lines : [late.status === 'unavailable'
+    ? 'These observations could not be recorded.' : 'No typed contributions were recorded.']),
+    ...details,
+    ...(omitted ? ['The report covers only part of the working transcript or tool catalog.'] : []),
+    ...(late.physical_position_scan === 'incomplete_or_unsupported'
+      ? ['Positions could not be checked across the whole prepared request.'] : [])].join('\n');
+}
+function preparedWords(manifest) {
+  const names = new Map(Object.entries({messages: 'Messages', input: 'Input items', system: 'System input',
+    instructions: 'Instructions', tools: 'Tool definitions', functions: 'Function definitions'}));
+  const lines = ['Prepared request'];
+  for (const row of Array.isArray(manifest.fields) ? manifest.fields.filter(isRecord) : []) {
+    if (!names.has(row.field) || !Number.isSafeInteger(row.items) || row.items < 0) continue;
+    const located = Number.isSafeInteger(row.items_with_origin) && row.items_with_origin >= 0
+      && row.items_with_origin <= row.items ? row.items_with_origin : 0;
+    lines.push(`${names.get(row.field)} · ${count(row.items)} · ${count(row.items - located)} without an exact source anchor`);
+  }
+  if (Number.isSafeInteger(manifest.other_fields) && manifest.other_fields > 0) {
+    lines.push(`Other request fields · ${count(manifest.other_fields)} · no source map`);
+  }
+  return lines.length > 1 ? lines.join('\n') : 'Prepared request inventory unavailable.';
+}
+function sourceSummary(trace, unread) {
+  const lines = trace.map((row) => `${row.source_path} · ${row.contribution === 'core_constitution'
+    ? 'Constitution carried with the base instructions' : 'Base instructions at the start of the request'}`);
+  return lines.length ? lines.join('\n\n') : sourceWords(trace, unread);
+}
+function sourceWords(trace, unread) {
+  if (!trace.length) return unread
+    ? 'The sealed record was not read; its source versions are unknown.'
+    : 'No source versions were recorded for this attempt.';
+  const words = new Map([
+    ['leading_system_prefix', 'Base instructions · carried at the start of the system text'],
+    ['core_constitution', 'Constitution · carried with the base instructions in every context mode'],
+  ]);
+  const lines = trace.map((row) => {
+    const part = row.prepared_text;
+    const located = isRecord(part) && typeof part.path === 'string' && Number.isSafeInteger(part.start_char)
+      && Number.isSafeInteger(part.end_char) && part.start_char >= 0 && part.end_char > part.start_char;
+    return [row.source_path, words.get(row.contribution) || 'Assembly rule not recorded',
+      `File SHA-256: ${row.source_sha256}`, `Normalized text SHA-256: ${text(row.text_sha256)}`,
+      located ? `${part.path} · characters [${count(part.start_char)}, ${count(part.end_char)}) in prepared text before redaction`
+        : 'Exact range not recorded; the seal recorded the contribution, not its length.'].join('\n');
+  });
+  return [...lines, 'Unlisted sources and their selection rules are not mapped by this report.'].join('\n\n');
+}
 let generation = 0;
+byId('report-example').addEventListener('click', () => {
+  ++generation;
+  clear();
+  delete status.dataset.tone;
+  const facts = { task_id: 'example', attempt_id: 'example-request', body: 'redacted_host_candidate', context_fit: { rendered_mode: 'max' } };
+  body = {
+    messages: [
+      { role: 'system', content: 'You help plan visits to the city library.' },
+      { role: 'user', content: 'Can I return a book on Sunday?' },
+    ],
+    tools: [{ type: 'function', function: { name: 'library_hours', description: 'Look up opening hours for one branch.' } }],
+  };
+  source = JSON.stringify(body);
+  firstReport = { facts, size: source.length };
+  show(facts, 'a fictional example', true);
+});
 function refuse(epoch, reason) {
   if (epoch !== generation) return;
   status.dataset.tone = 'bad';
   status.textContent = `Cannot read this Beautiful Context JSON report: ${reason}`;
 }
+const comparisonInput = byId('comparison-file');
+const comparisonStatus = byId('comparison-status');
+const comparisonFacts = byId('comparison-facts');
+const comparison = byId('comparison');
+let firstReport = null;
+let comparisonGeneration = 0;
+function clearComparison() {
+  ++comparisonGeneration;
+  comparisonInput.value = '';
+  comparisonStatus.textContent = '';
+  comparisonFacts.replaceChildren();
+  if (!byId('archive').hidden) {
+    comparison.hidden = true;
+    comparison.open = false;
+  }
+  const details = byId('comparison-technical');
+  details.hidden = true;
+  details.open = false;
+  byId('comparison-identities').replaceChildren();
+}
+function comparedFields(secondSource, secondBody, secondSpans) {
+  const first = sourceSpans().get(body);
+  const second = secondSpans.get(secondBody);
+  if (first?.duplicateKeys || second?.duplicateKeys) return ['Unavailable: a copy repeats a top-level field'];
+  const a = first?.members, b = second?.members;
+  if (!a || !b) return ['Unavailable: could not locate the stored fields'];
+  const names = new Set([...a.keys(), ...b.keys()]);
+  return [...names].filter((key) => !a.has(key) || !b.has(key)
+    || source.slice(...a.get(key)) !== secondSource.slice(...b.get(key)));
+}
+function firstChangedItem(a, b, secondSource, secondSpans) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return '';
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const left = sourceSpans().get(a[i])?.at, right = secondSpans.get(b[i])?.at;
+    if (!left || !right) return 'Unavailable: an item has no exact span';
+    if (source.slice(...left) !== secondSource.slice(...right)) return `Item ${count(i + 1)} differs`;
+  }
+  return a.length === b.length ? 'Same recorded item text and order'
+    : `Item ${count(Math.min(a.length, b.length) + 1)} is only in the ${a.length > b.length ? 'first' : 'second'} copy`;
+}
+function showComparison(second, parsed) {
+  const { facts } = second;
+  const write = (label, value) => add(label, value, comparisonFacts);
+  const ids = byId('comparison-identities');
+  ids.replaceChildren();
+  add('Selected task / attempt', `${firstReport.facts.task_id} / ${firstReport.facts.attempt_id}`, ids);
+  add('Compared task / attempt', `${facts.task_id} / ${facts.attempt_id}`, ids);
+  byId('comparison-technical').hidden = false;
+  if (body === null || parsed === null) {
+    write('Stored request comparison', 'Unavailable: at least one report has no stored body');
+  } else if (source === second.stored_json) {
+    write('Stored request comparison', 'Identical redacted JSON');
+  } else {
+    const encoder = new TextEncoder();
+    const a = encoder.encode(source), b = encoder.encode(second.stored_json);
+    let common = 0;
+    while (common < a.length && common < b.length && a[common] === b[common]) common += 1;
+    const kind = common === a.length && common === b.length ? 'The copies have identical UTF-8 encodings'
+      : common === a.length ? 'The second copy extends the first'
+      : common === b.length ? 'The second copy is a shorter prefix' : 'The copies differ';
+    write('Stored request comparison', `${kind} · ${count(common)} identical UTF-8 bytes at the start`);
+    const secondSpans = indexSpans(second.stored_json, parsed);
+    const changed = comparedFields(second.stored_json, parsed, secondSpans);
+    write('Top-level field changes', changed.length ? changed.slice(0, 12).join(', ') + (changed.length > 12
+      ? ` · ${count(changed.length - 12)} more` : '') : 'No value text changed; field order or outer formatting differs');
+    for (const [key, label] of [['messages', 'Messages'], ['input', 'Input items'], ['tools', 'Tools']]) {
+      if (!changed.includes(key)) continue;
+      const item = firstChangedItem(body[key], parsed[key], second.stored_json, secondSpans);
+      if (item) write(`First difference · ${label}`, item);
+    }
+  }
+  for (const [key, label] of [['prompt_tokens', 'Ledger input'], ['cached_tokens', 'Ledger cache read'],
+    ['cache_write_tokens', 'Ledger cache write']]) {
+    write(`${label}: first → second`, `${tokenWords(ledgerUsage(firstReport.facts)?.[key])} → ${tokenWords(ledgerUsage(facts)?.[key])}`);
+  }
+  const left = reportedUsage(firstReport.facts), right = reportedUsage(facts);
+  const status = (receipt) => receipt ? 'Recorded' : 'Not recorded';
+  write('Provider token receipt: first → second', `${status(left)} → ${status(right)}`);
+  for (const [key, label] of REPORTED_COUNTS) {
+    if (key === 'cached_tokens' || knownCount(left?.[key]) || knownCount(right?.[key])) {
+      write(`Provider ${label.toLowerCase()}: first → second`, `${tokenWords(left?.[key])} → ${tokenWords(right?.[key])}`);
+    }
+  }
+}
+async function decodeReport(file) {
+  let decoded;
+  try {
+    decoded = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+  } catch {
+    throw new Error('the file is not UTF-8 text. Write it with a redirection that keeps its bytes (a POSIX shell or cmd.exe).');
+  }
+  let report;
+  try { report = JSON.parse(decoded); } catch {
+    throw new Error('the file is not complete JSON. The export was cut short, or this is another kind of file.');
+  }
+  return parseReport(report);
+}
+function parseReport(report) {
+  if (!isRecord(report) || report.format !== 'ouroboros.context-report/1') throw new Error('this JSON is another kind of document.');
+  const { facts, stored_json } = report;
+  let parsed = null;
+  try {
+    if (!isRecord(facts) || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
+        || (stored_json !== null && typeof stored_json !== 'string')) throw new Error('facts');
+    if (stored_json !== null && !isRecord(parsed = JSON.parse(stored_json))) throw new Error('body');
+  } catch { throw new Error('its attempt facts or its request body are damaged. Export it again.'); }
+  return { report, parsed };
+}
+function openReport({ report, parsed }, name, length) {
+  firstReport = { facts: report.facts, size: length };
+  body = parsed;
+  source = report.stored_json || '';
+  show(report.facts, name);
+}
+comparisonInput.addEventListener('change', async () => {
+  const file = comparisonInput.files[0];
+  clearComparison();
+  const epoch = comparisonGeneration;
+  if (!file || !firstReport) return;
+  if (firstReport.size + file.size > maxBytes) {
+    comparisonStatus.textContent = `Together these reports exceed ${bytes(maxBytes)}. The first report stays open.`;
+    return;
+  }
+  comparisonStatus.textContent = 'Reading the second report…';
+  try {
+    const { report, parsed } = await decodeReport(file);
+    if (epoch !== comparisonGeneration) return;
+    showComparison(report, parsed);
+    comparisonStatus.textContent = 'The request body shown is from the first report.';
+  } catch (error) {
+    if (epoch !== comparisonGeneration) return;
+    comparisonFacts.replaceChildren();
+    comparisonStatus.textContent = `Cannot compare: ${error.message}`;
+  }
+});
 input.addEventListener('change', async () => {
   const file = input.files[0];
   input.value = '';
@@ -496,31 +939,163 @@ input.addEventListener('change', async () => {
   }
   if (!file.size) return refuse(epoch, 'the file is empty. A failed export leaves an empty file; run the reader again and read what it says in the terminal.');
   status.textContent = 'Reading the selected file…';
-  let report;
+  let decoded;
   try {
-    report = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
-  } catch {
-    return refuse(epoch, 'the file is not UTF-8 text. Write it with a redirection that keeps its bytes (a POSIX shell or cmd.exe).');
-  }
-  try {
-    report = JSON.parse(report);
-  } catch {
-    return refuse(epoch, 'the file is not complete JSON. The export was cut short, or this is another kind of file.');
-  }
-  const facts = isRecord(report) ? report.facts : null;
-  if (!isRecord(report) || report.format !== 'ouroboros.context-report/1') return refuse(epoch, 'this JSON is another kind of document.');
-  let parsed = null;
-  try {
-    if (!isRecord(facts) || typeof facts.task_id !== 'string' || typeof facts.attempt_id !== 'string'
-        || (report.stored_json !== null && typeof report.stored_json !== 'string')) throw new Error('facts');
-    if (report.stored_json !== null && !isRecord(parsed = JSON.parse(report.stored_json))) throw new Error('body');
-  } catch {
-    return refuse(epoch, 'its attempt facts or its request body are damaged. Export it again.');
+    decoded = await decodeReport(file);
+  } catch (error) {
+    return refuse(epoch, error.message);
   }
   if (epoch !== generation) return;
-  body = parsed;
-  source = report.stored_json || '';
-  show(facts, file.name);
+  openReport(decoded, file.name, file.size);
 });
+// Only the launcher's URL-less native document opts in; the ordinary iframe never sends a message or reads this API.
+function bindArchive(api) {
+  const room = byId('archive-room'), attempt = byId('archive-attempt'), compare = byId('archive-compare');
+  let rows = [];
+  let pending = Promise.resolve();
+  const issue = (epoch, fn) => {
+    const read = pending.then(() => epoch === generation ? fn() : { ok: false });
+    pending = read.catch(() => {});
+    return read;
+  };
+  const options = (select, values, label, key) => {
+    select.replaceChildren(...values.map((value, index) => {
+      const option = element('option', '', label(value, index));
+      option.value = value[key];
+      return option;
+    }));
+    select.disabled = values.length === 0;
+  };
+  const change = (message) => {
+    const epoch = ++generation;
+    clear();
+    compare.disabled = true;
+    status.textContent = message;
+    delete status.dataset.tone;
+    return epoch;
+  };
+  const unwrap = ({ ok, value, error }) => {
+    if (!ok) throw new Error(error || 'The saved record is unavailable.');
+    return value;
+  };
+  const label = (row, index) => {
+    const position = index === 0 ? 'Latest' : index === 1 ? 'Previous' : `Earlier ${index}`;
+    return `${position} · ${when(row.at) || 'Time not recorded'}`;
+  };
+  const readCandidate = async (epoch, index) => {
+    const attemptId = rows[index].attempt_id;
+    const document = unwrap(await issue(epoch, () => api.report(attemptId)));
+    return { ...parseReport(JSON.parse(document)), length: new TextEncoder().encode(document).length };
+  };
+  const recentReadable = async (epoch, start, active) => {
+    const gaps = [];
+    let firstGap = null;
+    for (let index = start; index < rows.length; index += 1) {
+      if (!active()) return null;
+      try {
+        const candidate = await readCandidate(epoch, index);
+        if (!active()) return null;
+        if (candidate.parsed !== null) return { candidate, index, gaps };
+        firstGap ??= { candidate, index };
+      } catch {
+        if (!active()) return null;
+      }
+      gaps.push(label(rows[index], index));
+    }
+    return { gaps, firstGap };
+  };
+  const gapWords = (gaps) => gaps.length ? `No readable copy: ${gaps.join('; ')}.` : '';
+  const selectAttempt = async (automatic = false) => {
+    const index = attempt.selectedIndex;
+    if (!rows[index]) return;
+    const epoch = change('Opening the saved request…');
+    try {
+      const found = automatic ? await recentReadable(epoch, index, () => epoch === generation)
+        : { candidate: await readCandidate(epoch, index), index, gaps: [] };
+      if (epoch !== generation || !found) return;
+      const { candidate, index: chosen, gaps } = found.candidate ? found : { ...found, ...found.firstGap };
+      if (!candidate) {
+        status.textContent = [gapWords(gaps), 'Change conversations or reopen the viewer to try again.'].filter(Boolean).join(' ');
+        return;
+      }
+      attempt.selectedIndex = chosen;
+      openReport(candidate, label(rows[chosen], chosen), candidate.length);
+      status.textContent = gapWords(gaps);
+      compare.disabled = candidate.parsed === null || !rows[chosen + 1];
+    } catch (error) {
+      if (epoch === generation) status.textContent = error.message;
+    }
+  };
+  const selectRoom = async () => {
+    const epoch = change('Finding recent requests…');
+    const roomId = Number(room.value);
+    rows = [];
+    options(attempt, [], label, 'attempt_id');
+    try {
+      const found = unwrap(await issue(epoch, () => api.requests(roomId)));
+      if (epoch !== generation) return;
+      rows = found;
+      options(attempt, rows, (row, index) => `${label(row, index)} · ${row.model || 'Model not recorded'}`, 'attempt_id');
+      if (!rows.length) status.textContent = 'No saved requests in this conversation’s recent history.';
+      else await selectAttempt(true);
+    } catch (error) {
+      if (epoch === generation) status.textContent = error.message;
+    }
+  };
+  compare.addEventListener('click', async () => {
+    const earlierIndex = attempt.selectedIndex + 1;
+    const earlier = rows[earlierIndex];
+    if (!earlier || !firstReport) return;
+    clearComparison();
+    const epoch = comparisonGeneration;
+    comparison.hidden = false;
+    comparison.open = true;
+    compare.disabled = true;
+    comparisonStatus.textContent = 'Reading the previous request…';
+    try {
+      const found = await recentReadable(generation, earlierIndex, () => epoch === comparisonGeneration);
+      if (epoch !== comparisonGeneration || !found) return;
+      const { candidate, index, gaps } = found;
+      const gap = gapWords(gaps);
+      if (!candidate || firstReport.size + candidate.length > maxBytes) {
+        comparisonStatus.textContent = [gap, candidate
+          ? 'Together these reports are too large. The selected request stays open.'
+          : 'No readable earlier request in this list. The selected request stays open.'].filter(Boolean).join(' ');
+        return;
+      }
+      showComparison(candidate.report, candidate.parsed);
+      comparisonStatus.textContent = [`Selected request compared with ${label(rows[index], index)}. The figures run from selected to earlier.`, gap].filter(Boolean).join(' ');
+    } catch (error) {
+      if (epoch === comparisonGeneration) comparisonStatus.textContent = error.message;
+    } finally {
+      if (epoch === comparisonGeneration) compare.disabled = false;
+    }
+  });
+  room.addEventListener('change', selectRoom);
+  attempt.addEventListener('change', () => selectAttempt());
+  const load = async () => {
+    const previous = room.value, epoch = change('Opening your conversations…');
+    room.disabled = true;
+    rows = [];
+    options(attempt, [], label, 'attempt_id');
+    try {
+      const items = unwrap(await issue(epoch, () => api.rooms()));
+      if (epoch !== generation) return;
+      options(room, items, (item) => item.name, 'id');
+      if (items.some((item) => String(item.id) === previous)) room.value = previous;
+      await selectRoom();
+    } catch (error) {
+      if (epoch === generation) status.textContent = error.message;
+    }
+  };
+  byId('archive-reload').addEventListener('click', load);
+  for (const id of ['report-opening', 'report-help', 'comparison-opening']) byId(id).hidden = true;
+  byId('archive').hidden = false;
+  load();
+}
+if (document.documentElement.hasAttribute('data-private-archive') && window.parent === window) {
+  window.addEventListener('pywebviewready', () => bindArchive(window.pywebview.api), { once: true });
+  for (const event of ['dragover', 'drop']) window.addEventListener(event, (e) => e.preventDefault());
+}
 window.addEventListener('pagehide', () => { ++generation; input.value = ''; clear(); }, { once: true });
 </script></body></html>

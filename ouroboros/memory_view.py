@@ -1250,7 +1250,7 @@ def _pages_line(status: Mapping[str, Any]) -> str:
 STORY_STEPS = ("F3", "F5l", "F5", "F5a", "F7")  # F7 affects only the story's human quotes
 
 
-def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> str:
+def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, part=_rendered) -> str:
     """Block B's tail, ``## My story``: the settled retellings, then the pages not yet folded, then the status.
 
     Every unfolded retold record is whole, then my parts and selected accounts, then the pages no
@@ -1263,7 +1263,7 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     """
     key = _story_key(level)
     counted("view_renders", key=("story", id(snapshot), key))
-    return _story_text(snapshot, dict(key))
+    return _story_text(snapshot, dict(key), part=part)
 
 
 def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
@@ -1494,14 +1494,14 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]], part=_ren
     return "\n".join(lines)
 
 
-def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> str:
-    """Block C's memory middle: a helper's owner words, late reviews, marks, this room, then my other conversations.
-
-    ``level`` is the physical floor's (the empty level renders the full view); ``floor_note`` closes the block:
-    ``### Physical floor``, or ``### Memory check`` when it notes only a Nano view's reader path. Before the import
-    has completed the room is its heading and one line naming the reason and a reader working without the chronicle."""
+def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "", observe=None, part=_rendered) -> str:
+    """Block C: a helper's owner words, late reviews, marks, this room, then my other conversations.
+    The floor's empty level renders the full view. Its closing note is ``### Physical floor`` or ``### Memory check``
+    for a Nano reader path. While import is pending, the room names the gap and a reader without the chronicle.
+    An observer sees the same named pieces before the blank-line join."""
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
-    texts = _room_parts(snapshot, dict(level.addressed), lambda _key, make: make())
+    draw = (lambda key, make: observe(key, make())) if observe is not None else lambda _key, make: make()
+    texts = _room_parts(snapshot, dict(level.addressed), draw, part=part)
     return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
 
 

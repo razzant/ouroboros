@@ -153,7 +153,11 @@ def _append_or_merge_user_content(
         prefix = prior_text.rstrip() + "\n\n---\n\n" if prior_text else ""
         merged = (([{"type": "text", "text": prefix}] if prefix else []) + list(content)
                   if isinstance(content, list) else prefix + str(content or ""))
-    messages[-1] = {**messages[-1], "content": merged}
+    from ouroboros.context_assembly_trace import move_contributions
+
+    prior_row = messages[-1]
+    messages[-1] = {**prior_row, "content": merged}
+    move_contributions(slot, prior_row, messages[-1])
 
 
 def _owner_marked_content(content: Any) -> Any:
@@ -269,6 +273,11 @@ def append_addressed_task_message(messages, ctx, entry, task_id, event_queue, *,
     history = "[Previous-attempt mailbox history; not a new delivery]\n" if recovered else ""
     deliver_task_message(entry, task_id, event_queue,
                          lambda text: _loop()._append_or_merge_user_message(messages, history + text, slot=ctx, kind=words))
+    from ouroboros.context_assembly_trace import note_contribution  # the row this delivery reached, live or recovered
+
+    arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
+    note_contribution(ctx, messages[-1], "place_arrival" if provenance == "place_event" else "task_mail",
+                      source=arrival.get("source_event_id") or entry.get("msg_id"), form="containing_row")
 
 
 def restore_acknowledged_task_mail(ctx, drive_root, messages, seen):

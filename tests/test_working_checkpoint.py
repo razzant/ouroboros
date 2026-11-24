@@ -259,6 +259,22 @@ def _registry(tmp_path, monkeypatch, task_id, attempt):
     return registry
 
 
+def _mail_sources(call):
+    """The send seam's own reading of this request's task-mail facts: each fact's source hash, beside the text of
+    the one prepared row it located ("" where it located none)."""
+    from ouroboros.context_assembly_trace import bind_contribution_input, verified_contributions
+    from ouroboros.llm_messages import project_wire_messages
+    from ouroboros.loop_messages import _extract_plain_text_from_content
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+
+    fit = PhysicalAttemptContext("owner_max", "max", "cold_estimate", "", "", None, None, False, False)
+    wire = {"messages": project_wire_messages(call.messages)}
+    bound = bind_contribution_input(fit, wire, call.messages, call.tools._ctx)
+    rows = [_extract_plain_text_from_content(row.get("content")) for row in wire["messages"]]
+    return [(fact["source_id_sha256"], rows[int(fact["path"][11:-1])] if "path" in fact else "")
+            for fact in verified_contributions(wire, bound.contribution_input)["entries"] if fact["family"] == "task_mail"]
+
+
 def _saved_working_state(tmp_path, monkeypatch, task_id):
     """The dead attempt 1: a batch accepted, one call answered, one not."""
     from types import SimpleNamespace
@@ -324,6 +340,7 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
 @pytest.mark.parametrize("start", ["first", "restored", "unfrozen", "unusable"])
 def test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery(tmp_path, monkeypatch, start):
     from ouroboros import loop
+    from ouroboros.context_assembly_trace import digest
     from ouroboros.owner_mailbox import _ack_path, PROVENANCE_INDEPENDENT_TASK, write_task_message
     from tests.test_loop_transport_wait import _loop_kwargs
 
@@ -356,11 +373,12 @@ def test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery(
     before = ack_path.read_bytes() if ack_path.exists() else b""
     registry = _registry(tmp_path, monkeypatch, task_id, 1 if start == "first" else 2)
     registry._ctx.working_recovery = task.get("_working_recovery")
-    seen, events = [], queue.Queue()
+    seen, events, mail_sources = [], queue.Queue(), []
 
     def dispatch(call, disposition, *, candidate_predicate=None, **kwargs):
         seen.append("\n".join(loop._extract_plain_text_from_content(row.get("content"))
                               for row in call.messages if row.get("role") == "user"))
+        mail_sources.append(_mail_sources(call))
         call.tools._ctx._round_response_facts = {
             "finish_reason_present": True, "finish_reason": "commentary" if len(seen) == 1 else "stop",
         }
@@ -385,8 +403,17 @@ def test_same_task_retry_rebuilds_acknowledged_ordinary_mail_without_redelivery(
         assert text.count(history) == 2 * int(start in {"unfrozen", "unusable"})
         if start in {"unfrozen", "unusable"}:
             assert history + ordinary in text and history + relayed in text
-    assert [text.count("[Message from independent task other-root]\nexact independent note") for text in seen] == [
-        int(start in {"first", "restored"})] * 2
+    independent = "[Message from independent task other-root]\nexact independent note"
+    assert [text.count(independent) for text in seen] == [int(start in {"first", "restored"})] * 2
+    # Each delivery this run made, live or recovered, is one producer fact on the exact row that carries the letter;
+    # the restored checkpoint's rows carry no receipt of the dead attempt's deliveries, so none is invented.
+    letters = {"ordinary": ordinary, "relayed": relayed, "independent": independent}
+    delivered = {"first": ("ordinary", "relayed", "independent"), "restored": ()}.get(start, ("ordinary", "relayed"))
+    for sources in mail_sources:
+        assert sorted(source for source, _row in sources) == sorted(digest(msg_id) for msg_id in delivered)
+        for msg_id in delivered:
+            (row,) = [row for source, row in sources if source == digest(msg_id)]
+            assert letters[msg_id] in row and row.startswith(history) is (start != "first")
     assert ("could not be restored" in seen[0]) is (start == "unusable")
     assert ("continued from its working checkpoint" in seen[0]) is (start == "restored")
     injections = [row["source_task_id"] for row in events.queue if row.get("type") == "task_message_injected"]
