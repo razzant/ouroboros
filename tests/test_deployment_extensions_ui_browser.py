@@ -253,7 +253,7 @@ def test_required_extensions_in_skills_settings_and_the_worker(direct_server_wit
                 notice.wait_for(state="visible", timeout=30_000)
                 text = notice.inner_text()
                 assert "error_tracker" in text and "It needs your grant for SENTRY_DSN." in text, text
-                assert NOTES not in text and "Ordinary work waits until it runs." in text
+                assert NOTES not in text and "Ordinary work waits until it’s ready." in text
                 card = page.locator(f'.skills-card[data-skill="{NOTES}"]')
                 assert card.locator("[data-required-by-organization]").is_visible()
                 toggle = card.locator(".skills-toggle")
@@ -315,7 +315,7 @@ def test_required_extensions_in_skills_settings_and_the_worker(direct_server_wit
             _skills(page, url, "light", 1400)
             notice = page.locator("[data-skills-org-requirements]")
             notice.wait_for(state="visible", timeout=30_000)
-            assert "Work goes on while it isn’t running." in notice.inner_text()
+            assert "Ordinary work can continue." in notice.inner_text()
             _shot(page, evidence, "managed-warn-skills-light-1400", notice)
             _answered(page, data_dir, calls, _ask(page, url, "Reply briefly."))
             _shot(page, evidence, "managed-warn-chat-light-1400")

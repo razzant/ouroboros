@@ -371,11 +371,11 @@ def reconcile_extension(
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
             _finalize_extension_reconcile(state, drive_root, subject, reason="reconcile_load_error", health_stamp=health_stamp)
             return state
+        granted = frozenset((state.get("grant_status") or {}).get("granted_keys") or [])
         with _lock:
             bundle = _extensions.get(skill_name)
-        granted = frozenset((state.get("grant_status") or {}).get("granted_keys") or [])
-        for api in bundle.api_instances if bundle and "grant_status" in state else ():
-            api._granted_upper = api._granted_upper & granted  # a narrowed grant stops at once on every path below
+            for api in bundle.api_instances if bundle and "grant_status" in state else ():
+                api._granted_upper = api._granted_upper & granted  # narrow before every exit below
         if was_live and subject is not None:
             if bundle and bundle.runtime_identity:
                 was_live = bundle.runtime_identity == extension_import_identity(subject)

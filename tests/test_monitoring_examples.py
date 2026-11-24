@@ -282,10 +282,16 @@ def test_the_real_sdk_reports_accepted_refused_and_unreachable_without_stopping_
     manage(install, monkeypatch, {"version": 1, "extensions": {"when_unmet": "hold", "required": [{
         "name": "error_tracker", "path": str(loaded.skill_dir), "content_hash": loaded.content_hash,
         "settings": {"SENTRY_DSN": dsn}}]}})
-    assert extension_loader.reconcile_extension("error_tracker", install.data, load_settings)["reason"] == "missing_grants"
+    # Loading without the key is allowed; that is separate from being ready for the organization's requirement.
+    # No value is passed before the grant.
+    assert extension_loader.reconcile_extension("error_tracker", install.data, load_settings)["reason"] == "ready"
+    assert [(row["state"], row["reason"]) for row in state_rows(install.data)] == [("unmet", "grants")]
+    ungranted = extension_loader.list_routes()["/api/extensions/error_tracker/status"]["handler"](None)
+    assert ungranted["idle"].startswith("Not configured") and dsn not in json.dumps(ungranted)
     save_skill_grants(install.data, loaded.name, ["SENTRY_DSN"], content_hash=loaded.content_hash,
                       requested_keys=["SENTRY_DSN"], granted_permissions=[], requested_permissions=[])
     assert extension_loader.reconcile_extension("error_tracker", install.data, load_settings)["live_loaded"]
+    assert [row["state"] for row in state_rows(install.data)] == ["met"]
     status = extension_loader.list_routes()["/api/extensions/error_tracker/status"]["handler"]
     local = []
     handler = logging.Handler()
