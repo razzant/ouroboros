@@ -9,6 +9,9 @@ from starlette.testclient import TestClient
 
 from ouroboros.task_results import write_task_result
 
+# Import host_call before another test temporarily replaces host_service._authenticated
+# (a lazy first import during a Places fixture would otherwise bind that fixture's stub).
+from ouroboros.gateway import host_call  # noqa: F401
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME, create_host_service_app
 from ouroboros.event_bus import CHAT_OUTBOUND, publish_event
 from ouroboros.skill_loader import (compute_content_hash, requested_skill_permissions, save_enabled, save_review_state,
