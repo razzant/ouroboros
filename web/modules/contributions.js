@@ -249,9 +249,16 @@ export function draftPort(room) {
     };
 }
 
-/** A contribution's `open.tab`: the Widgets page, at that skill's card (app.js listens). */
-export function openSkillWidgets(skill) {
-    globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-widgets', { detail: { skill: String(skill || '') } }));
+/** The Widgets page at a skill's card (app.js listens): a contribution's `open.tab` names the skill, a placed card's
+ *  door also its own `key` (`<skill>:<tab_id>`). */
+export function openSkillWidgets(skill, key = '') {
+    globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:open-widgets', { detail: { skill: String(skill || ''), key: String(key || '') } }));
+}
+
+/** The live card in `page` that an `ouro:open-widgets` detail names: the card of its `key`, else the skill's first. */
+export function widgetCardOf(page, { skill = '', key = '' } = {}) {
+    const cards = [...(page?.querySelectorAll?.('[data-widget-key]') || [])].filter((card) => !card.hasAttribute('data-widget-removed'));
+    return cards.find((card) => (key ? card.dataset.widgetKey === key : card.dataset.widgetKey.startsWith(`${skill}:`))) || null;
 }
 
 const defaultNotice = (text, tone = 'info') => showToast(text, tone);

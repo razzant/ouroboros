@@ -17,6 +17,7 @@ import { createInlineFit, mountCardApp } from './card_frames.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad, START_SETTLE_MS } from './holds.js';
 import { errorWords } from './ui_primitives.js';
 import { escapeHtmlText as escapeHtml } from './utils.js';
+import { widgetCodeHoldKey } from './widget_card.js';
 import { widgetPublication } from './widget_list.js';
 import { frameHeight, mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
 import { mountDeclarativeWidget } from './widgets.js';
@@ -130,7 +131,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
     const closeKey = (record) => `card:${record.id}`;
     const codeHold = (record) => (record.framedKind === 'app'
         ? { key: `app:${record.id}`, rev: String(record.data?.app?.sha256 || '') }
-        : { key: `widget:${record.tab?.skill}:${record.tab?.tab_id}`, rev: String(record.tab?.revision ?? '') });
+        : { key: widgetCodeHoldKey(record.tab), rev: String(record.tab?.revision ?? '') });
     const heldReason = (record) => {
         if (holds.reason(closeKey(record)) === 'owner') return 'owner';
         const code = codeHold(record);

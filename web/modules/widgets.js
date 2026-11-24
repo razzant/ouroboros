@@ -28,6 +28,8 @@ import {
     syncWidgetCardControls,
     syncWidgetCardMore,
     WIDGET_START_MODES,
+    widgetCodeHoldKey,
+    widgetStartsOnShow,
     withWidgetStartMode,
 } from './widget_card.js';
 import {
@@ -137,14 +139,16 @@ const widgetMounting = new Map();
 const widgetMountControllers = new Set();
 const widgetMessageHandlers = new Set();
 const widgetSessionState = new Map();
+/** A placement that left its page's list keeps no declarative session state for its return (the eviction
+ *  `patchWidgetCards` makes for a board card); call it after the mount's disposer wrote its last snapshot. */
+export const forgetWidgetSessionState = (key) => { widgetSessionState.delete(key); };
 // The start ledger (holds.js) keeps two facts for a framed card on this device:
 // the owner's Stop (`board:<key>`, until Start or a launch-policy change to Auto /
 // Keep running) and a start of its code the page did not outlive
-// (`widget:<skill>:<tab_id>` at its revision). Either shows the facade instead
+// (`widgetCodeHoldKey`, at its revision). Either shows the facade instead
 // of starting the card by itself.
 const holds = getHolds();
 const stopHoldKey = (tab) => `board:${widgetKey(tab)}`;
-const codeHoldKey = (tab) => `widget:${tab.skill}:${tab.tab_id}`;
 let widgetsWsBridgeBound = false;
 // What the page knows of each framed card's geometry in this page session: the content height its frame last
 // reported (`natural`, at the card's revision; forgotten when the card leaves the list), so a remount — returning to
@@ -715,23 +719,30 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
     return dispose;
 }
 
-async function mountTab(card, tab, mountSignal = null, board = null) {
-    const mount = card.querySelector('[data-widget-mount]');
+/** The one dispatch of a tab into `mount` by its render kind, for the board's cards and Costs' placements (costs_widgets.js):
+ *  its disposer, or nothing. `board` is a framed card's frame policy (widget_module.js), `messageHandlers` the page's
+ *  WebSocket handler set, `key` the session key a declarative mount keeps its state under (the tab's own when empty). */
+export async function mountTabInto(mount, tab, { signal = null, messageHandlers = widgetMessageHandlers, board = null, key = '' } = {}) {
     const render = tab.render || {};
-    if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers, board);
+        return mountRouteIframeWidget(mount, tab, render, signal, null, messageHandlers, board);
     }
     // A kept living card is Ouroboros's, not a skill's: no route, its presses go to the card's decisions.
     if (tab.pinned_card) return mountPinnedCard(mount, tab);
     if (render.kind === 'declarative') {
-        return mountDeclarativeWidget(mount, tab, render);
+        return mountDeclarativeWidget(mount, key ? { ...tab, key } : tab, render);
     }
     if (render.kind === 'module' && render.entry) {
-        return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers, null, board);
+        return mountModuleWidget(mount, tab, render, signal, messageHandlers, null, board);
     }
     mount.innerHTML = `<div class="muted">Widget render kind <code>${escapeHtml(render.kind || 'unknown')}</code> is not supported yet.</div>`;
     return null;
+}
+
+async function mountTab(card, tab, mountSignal = null, board = null) {
+    const mount = card.querySelector('[data-widget-mount]');
+    if (!mount) return;
+    return mountTabInto(mount, tab, { signal: mountSignal, board });
 }
 
 // A framed disposer settles asynchronously (dispose → child ack, ≤ 1 s); track
@@ -859,7 +870,7 @@ async function mountTabOnce(card, tab, key, isCurrent) {
     // load and one host second clear it.
     let settle = () => {};
     const framed = isFramedWidget(tab) && !tab.pinned_card;
-    const starting = () => { settle = holds.starting(codeHoldKey(tab), tab.revision); };
+    const starting = () => { settle = holds.starting(widgetCodeHoldKey(tab), tab.revision); };
     const board = framed ? boardFrameOf(tab, starting) : null;
     if (framed && !board) starting();
     try {
@@ -1208,8 +1219,7 @@ export function initWidgets(ctx = {}) {
     // Framed card, effective policy `auto` or `retain` (both start on show; only
     // `retain` survives leaving), and the ledger holds neither the owner's Stop
     // nor a start of this revision the page did not outlive (nor `?hold=all`).
-    const startsOnShow = (tab) => effectiveStartMode(tab, uiPreferences) !== 'manual'
-        && !holds.reason(stopHoldKey(tab)) && !holds.reason(codeHoldKey(tab), tab.revision);
+    const startsOnShow = (tab) => widgetStartsOnShow(tab, uiPreferences, holds, stopHoldKey(tab));
 
     // Mount one card and keep its head controls truthful: the facade stands in
     // while it starts (idempotent — never over a settling frame), a failed mount
@@ -1246,7 +1256,7 @@ export function initWidgets(ctx = {}) {
         renderWidgetFacade(card.querySelector('[data-widget-mount]'), tab, isBoardFrame(tab) ? facadeHeight(tab) : 0);
         fitCard(key);
         syncWidgetCardControls(card, 'stopped', mode);
-        setWidgetCardNote(card, HELD_LINES[holds.reason(codeHoldKey(tab), tab.revision)] || '');
+        setWidgetCardNote(card, HELD_LINES[holds.reason(widgetCodeHoldKey(tab), tab.revision)] || '');
     }
 
     async function stopWidgetByOwner(card, tab) {
@@ -1258,7 +1268,7 @@ export function initWidgets(ctx = {}) {
 
     async function startWidgetByOwner(card, tab) {
         holds.release(stopHoldKey(tab));
-        holds.release(codeHoldKey(tab));
+        holds.release(widgetCodeHoldKey(tab));
         await startWidget(card, tab, isCurrentFor(renderGeneration));
     }
 

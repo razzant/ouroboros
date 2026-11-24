@@ -2,8 +2,8 @@
    (the shared sandbox / permissions set, the module document CSP, the parent side of the one
    streaming bridge — fetch relay, abort, skill WebSocket event forwarding — plus the resize
    bridge and source-load timeout).
-   widgets.js keeps the page host, the mountTab dispatcher, the card registry and the
-   declarative renderer; every mount here returns its disposer to that dispatcher. */
+   widgets.js keeps the page host, the one dispatcher by render kind (`mountTabInto`, the board's and Costs'), the card
+   registry and the declarative renderer; every mount here returns its disposer to that dispatcher. */
 
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePrefix } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -147,7 +147,8 @@ async function openRouteLease(tab, mountSignal) {
     }
 }
 
-// `board` is a Widgets card's frame policy (absent for a frame in a message): `starting()` records the start in the
+// `board` is a Widgets card's frame policy (absent for a frame in a message), on the board or on the page its author
+// placed it (`where`: `costs`, which its fault reports name; `board` when absent): `starting()` records the start in the
 // ledger (holds.js) at the moment the frame gets its document, never during the downloads before it; `geometry()`
 // answers boardFrameGeometry for the card as it is now; `measured(natural, held, at)` hears each content height the
 // frame reports, whether its reporter stopped there (`held`, the extra its document keeps asking for) and the frame's
@@ -326,7 +327,7 @@ function attachFrameBridge(iframe, mount, tab, {
     // The fault a card shows also reaches the host's event log once per kind+message, under this mount's own
     // identity (captured now, never the frame's words). Best effort: no retry, and a failed report changes nothing.
     const faultIdentity = { skill: String(tab.skill || ''), tab_id: String(tab.tab_id || ''),
-        revision: String(tab.revision ?? ''), where: inline ? 'message' : 'board' };
+        revision: String(tab.revision ?? ''), where: inline ? 'message' : (board?.where || 'board') };
     const reportedFaults = new Set();
     const reportFault = (msg) => {
         const message = faultText(msg.message, 500);

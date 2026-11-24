@@ -11,6 +11,8 @@ import {
     syncWidgetCardControls,
     WIDGET_START_MODE_LABELS,
     WIDGET_START_MODES,
+    widgetCodeHoldKey,
+    widgetStartsOnShow,
     withWidgetStartMode,
 } from '../modules/widget_card.js';
 import { WIDGET_WIDTH_STEPS } from '../modules/widget_size.js';
@@ -63,6 +65,20 @@ test('retain is the third policy: it starts like auto and keeps only a FRAMED ca
     assert.equal(isRetainedWidget(tab({ kind: 'declarative', schema_version: 1, components: [] }), { widget_start_mode: { 'demo:main': 'retain' } }), false);
     assert.equal(isRetainedWidget(null, {}), false);
     assert.equal(isRetainedWidget(undefined, null), false);
+});
+
+test('a card starts by itself where it is shown only under a launch policy read as not Manual and no hold of it', () => {
+    const framed = tab({ kind: 'module', entry: 'widget.js', start: 'auto' }, { revision: 'r2' });
+    const holds = (reasons = {}) => ({ reason: (key, rev = '') => reasons[`${key}@${rev}`] || reasons[key] || '' });
+    assert.equal(widgetCodeHoldKey(framed), 'widget:demo:main', 'the one key every place holds a widget\'s code by');
+    assert.equal(widgetStartsOnShow(framed, {}, holds(), 'costs:demo:main'), true);
+    assert.equal(widgetStartsOnShow(framed, null, holds(), 'costs:demo:main'), false, 'unread: the owner\'s Manual is unknown');
+    assert.equal(widgetStartsOnShow(framed, { widget_start_mode: { 'demo:main': 'manual' } }, holds(), 'board:demo:main'), false);
+    assert.equal(widgetStartsOnShow(framed, {}, holds({ 'costs:demo:main': 'owner' }), 'costs:demo:main'), false, 'that place\'s Stop');
+    assert.equal(widgetStartsOnShow(framed, {}, holds({ 'costs:demo:main': 'owner' }), 'board:demo:main'), true, 'another place\'s Stop is its own');
+    assert.equal(widgetStartsOnShow(framed, {}, holds({ 'widget:demo:main@r2': 'start' }), 'board:demo:main'), false, 'a start the page did not outlive');
+    assert.equal(widgetStartsOnShow(framed, {}, holds({ 'widget:demo:main@r1': 'start' }), 'board:demo:main'), true, 'a new revision starts');
+    assert.equal(widgetStartsOnShow(tab({ kind: 'declarative', schema_version: 1, components: [] }), null, holds(), 'x'), true, 'host-drawn');
 });
 
 function fakeCard() {

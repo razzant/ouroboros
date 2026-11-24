@@ -9,6 +9,8 @@ import { readConsciousness, readConsciousnessFromState } from './consciousness_a
 import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
+import { mountCostProjectDays } from './cost_project_days.js';
+import { mountCostsWidgets } from './costs_widgets.js';
 import { READ_OK, STATUS_READ_LIFETIME_MS, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
@@ -340,11 +342,16 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             <p class="dashboard-settings-lead">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
             <div data-costs-subscriptions><p class="dashboard-settings-lead">Reading…</p></div>
         </section>
+        <div class="costs-widgets" data-costs-widgets></div>
+        <div id="costs-rooms"></div>
         <div id="costs-period"></div>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
     const periodCard = mountCostPeriod(page.querySelector('#costs-period'));  // its own read: the period governs that card alone
+    const roomsCard = mountCostProjectDays(page.querySelector('#costs-rooms'));  // its own read: one room, day by day
+    // The widgets their authors place on Costs (the Quotas widget's bars, history and pace), each the board's own frame.
+    const placed = mountCostsWidgets(page.querySelector('[data-costs-widgets]'), { ws });
     const budgetCard = page.querySelector('.costs-budget');
     // The rows are drawn once and never redrawn: a refresh of the tab repaints the spend, the tables and the allowance's
     // facts around them, and `limits.paint()` only writes a fresh value into a field the owner is not in.
@@ -561,8 +568,10 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     }
 
     // The period card reads through the same gate; `ifIdle` leaves a read it has out alone.
-    const loadPeriod = (options) => { if (pageDrawn()) periodCard.reload(options); };
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); loadPeriod(); });
+    const loadPeriod = (options) => { if (pageDrawn()) { periodCard.reload(options); roomsCard.reload(options); } };
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => {
+        loadCosts(); loadAllowance(); loadSubscriptions(); loadPeriod(); if (pageDrawn()) placed.refresh();
+    });
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
@@ -600,6 +609,8 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         reads.clear();
         out.forEach((control) => control.abort());
         periodCard.leave();
+        roomsCard.leave();
+        placed.leave();
         returned = false;
     };
     // A showing: the page is drawn anew (opened, its tab chosen, the window widened, the Dashboard returned to), so it reads
@@ -613,6 +624,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             if (!reads.has(kind)) load();
         }
         loadPeriod({ ifIdle: true });
+        if (pageDrawn()) placed.show();
     }
     const listeners = [];
     const listen = (type, handler) => { window.addEventListener(type, handler); listeners.push([type, handler]); };
@@ -633,7 +645,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     const offReconnect = ws?.on?.('open', (event) => {
         if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden) loadLimits();
     });
-    listen('ouro:language-changed', paintGaps);
+    listen('ouro:language-changed', () => { paintGaps(); roomsCard.repaint(); });
     listen('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};
         if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }
@@ -641,5 +653,5 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         if (row === 'TOTAL_BUDGET') loadCosts();
         if (row === ALLOWANCE_KEY) loadAllowance();
     });
-    return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); } };
+    return { destroy() { offReconnect?.(); offNotes(); listeners.forEach(([type, handler]) => window.removeEventListener(type, handler)); clearTimeout(allowanceExpiry); leaveCosts(); placed.destroy(); } };
 }

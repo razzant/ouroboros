@@ -1097,7 +1097,7 @@
  */
 
 /**
- * `GET /api/cost-breakdown`; a 503 carries `accounting.available: false` (unknown, never zero).
+ * `GET /api/cost-breakdown`; a 503 is `CostBreakdownUnavailableResponse`.
  * @typedef {Object} CostBreakdownResponse
  * @property {number=} total_cost
  * @property {number=} total_calls
@@ -1113,6 +1113,73 @@
  * @property {Object} accounting
  * @property {Object=} unattributed
  * @property {Object=} period  only with `?period=24h|7d|30d`: that period's models and cache writes (cost_period.js)
+ * @property {(ProjectDaysView|ProjectDaysUnavailable)=} project_days  only with `?project_days=<selector>&days=7|30`
+ */
+
+/**
+ * `GET /api/cost-breakdown?view=project_days`: the room view alone, without reading the page's totals; its refusal
+ * answers 200 as in the combined response (cost_project_days.js).
+ * @typedef {Object} CostProjectDaysResponse
+ * @property {ProjectDaysView|ProjectDaysUnavailable} project_days
+ */
+
+/**
+ * `GET /api/cost-breakdown` 503: the ledger cannot be read, so spend is unknown, never zero; a requested room view is
+ * refused with its own selector (`ledger_unavailable`), never dropped.
+ * @typedef {Object} CostBreakdownUnavailableResponse
+ * @property {string} error  "Physical-attempt accounting unavailable"
+ * @property {CostAccountingUnavailable} accounting
+ * @property {ProjectDaysUnavailable=} project_days
+ */
+
+/**
+ * @typedef {Object} CostAccountingUnavailable
+ * @property {false} available
+ * @property {'physical_attempt_ledger'} authority
+ * @property {false} cost_final
+ * @property {'ledger_unavailable'} error_code
+ */
+
+/**
+ * One room's spend by UTC calendar day over [`since`, `until`) (ISO UTC: the oldest day's midnight to the request),
+ * records with a known date only: `selector` is `project:<id>` (closed projects too), `main` or `unassigned` (records
+ * outside Main and the projects: other rooms such as places, or none known; a deleted project's records stay its own,
+ * never Main's or these); `rows` are the days with records, newest first, `[]` when there are none. A null amount is
+ * unknown, never zero; 0 is a measured zero.
+ * @typedef {Object} ProjectDaysView
+ * @property {true} available
+ * @property {string} selector
+ * @property {7|30} days
+ * @property {'UTC'} timezone
+ * @property {string} since
+ * @property {string} until
+ * @property {ProjectDayCost[]} rows
+ * @property {Omit<ProjectDayCost, 'day'>} total  the whole span, aggregated before rounding
+ * @property {boolean} integrity_degraded  ledger-wide: earlier journal rows were quarantined, so sums or this slice may be incomplete
+ */
+
+/**
+ * A view refused: selector or span unknown, or the ledger or room assignments cannot be read.
+ * @typedef {Object} ProjectDaysUnavailable
+ * @property {false} available
+ * @property {string} selector
+ * @property {'unknown_selector'|'unknown_days'|'ledger_unavailable'|'project_source_unavailable'} error_code
+ */
+
+/**
+ * @typedef {Object} ProjectDayCost
+ * @property {string} day  YYYY-MM-DD, UTC
+ * @property {?number} settled_usd  the known parts (estimated and partial included); null when none has a price
+ * @property {?number} confirmed_usd  the confirmed part of settled_usd
+ * @property {?number} estimated_usd  the estimated part of settled_usd
+ * @property {'confirmed'|'estimated'|'mixed'|'unknown'} price_basis  which prices were present, even when zero
+ * @property {number} unknown_unmetered  records without a full price
+ * @property {number} non_final_rows
+ * @property {number} accounting_open_rows  the ledger's open accounting: the two counts below and settled estimates
+ * @property {number} open_rows  calls with no recorded outcome (reserved, dispatched)
+ * @property {number} unresolved_rows  calls ended unreconciled (an answer may have arrived) or with an unknown outcome
+ * @property {number} physical_calls
+ * @property {number} subscription_sessions
  */
 
 /**

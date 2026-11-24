@@ -1382,7 +1382,7 @@
  * @property {string} skill
  * @property {string} tab_id
  * @property {string} revision
- * @property {'board'|'message'} where
+ * @property {'board'|'costs'|'message'} where
  * @property {'error'|'rejection'|'csp'} kind
  * @property {string} message
  * @property {string} source

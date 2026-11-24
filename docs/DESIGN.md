@@ -316,17 +316,16 @@ Authored label strings should read as sentence case; CSS must not manufacture
 caps with `text-transform`.
 
 **A secondary page orders by meaning, not paint** (audit №9, owner
-2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
-whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Budget leads with two limit's cards (§5 "A limit's
-card"), Total budget and Consciousness, last 24 hours, each with its own `Not counted:` line and its money at
-the limit's own precision, and the rows that edit the three limits follow them; while that limit holds a wake, its
-card names the wake with its door and “If its charges stay as they are, there is room again by HH:MM ZONE”
-(rounded up, zone named, else unknown). Activity names a
-work whole in primary ink above its facts; a duration reads in seconds below a
-minute, then in minutes or hours, and one the row lacks is absent, never `0s`. A narrow temporary-space tray puts
-a qualified size under its group's name. A widget card's ⋮ menu and move handle
-are one quiet pair at its head's end; its lifecycle controls wrap below them.
+2026-10-28T22:09Z). Costs leads with the known spend and, in that card,
+whether it is final, its unresolved upper bound and what is unknown; composition,
+hold and technical counts follow, quieter. Budget leads with Total budget and Consciousness, last 24 hours (§5 "A
+limit's card"), then the three limits' edit rows; a card whose limit holds a wake names it with its door and “If its
+charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown). Activity names a
+work whole in primary ink above its facts; a duration reads in seconds below a minute, then minutes or hours; a
+missing one is absent, never `0s`. A narrow temporary-space tray puts a qualified size under its group's name. A widget
+card's ⋮ menu and move handle are one quiet pair at its head's end; lifecycle controls wrap below. Costs shows a
+placed widget whole and a chosen room's daily spend (owner 2026-11-22), the pair a door to Widgets, content the
+author's, order the owner's.
 
 ## 3. Foreground and state colour
 
@@ -2160,7 +2159,7 @@ leads), each chip is listed in "+" under its skill's name. A skill's trusted pag
 only through its small context (its provider, a notice, words into the draft)
 and never draws into the composer or the feed. A module that fails is off for
 this page with one notice naming it; the rest of the page keeps working.
-The owner hides or shows each placed control (chip, "+" item, reply action) without turning its skill off, in the skill's Details and its widget card's ⋮ menu, one saved choice every window follows.
+The owner hides or shows each placed control (chip, "+" item, reply action) in the skill's Details or its card's ⋮ menu, one saved choice for all windows; skill and card stay, and Stop / Start is separate.
 
 **A start the page did not outlive is not repeated by itself.** A page
 module, a skill's module or route frame and an app card are code the core did

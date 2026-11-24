@@ -754,6 +754,12 @@ export const apiClient = {
     /** Every active and deleting Project, uncapped (the sidebar reads it only when asked to look beyond its feed).
      *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
     projectList: ({ signal } = {}) => fetchJson('/api/projects?all=1', { cache: 'no-store', signal }),
+    /** One room's spend on each day of the last `days` (7 or 30): `selector` is `project:<id>`, `main` or `unassigned`. The
+     *  breakdown's `view=project_days` answers that view alone (its rows and span total, or a typed refusal), never
+     *  reading the page's totals again for it.
+     *  @returns {Promise<import('./management_contract_types.js').CostProjectDaysResponse>} */
+    costProjectDays: (selector, days, { signal } = {}) => fetchJson(`/api/cost-breakdown?${new URLSearchParams({
+        view: 'project_days', project_days: selector, days: String(days) })}`, { cache: 'no-store', signal }),
     /** One Project by its id while active or deleting; an empty list when it is neither.
      *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
     projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),

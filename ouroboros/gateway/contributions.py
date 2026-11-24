@@ -167,6 +167,7 @@ async def api_extension_host_asset(request: Request) -> Response:
 
 class UiPreferencesResponse(TypedDict):
     ok: NotRequired[bool]
+    unreadable: NotRequired[bool]  # GET: true when a saved file exists but cannot be read; every value is then the default, none the owner's choice
     voice: dict[str, str]
     contributions: dict[str, list[str]]
     widget_order: list[str]
