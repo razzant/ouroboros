@@ -183,7 +183,8 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
     Main's newest page and an older one, a Project whose retained origin copy wears its receipt with its row gone,
     also when the page's read of its Project's refs failed or predates the binding (the copy then asks for itself).
     A page asks an id as its row looks it up (``str``): one another writer saved as a number, zero too, is asked and
-    worn; a null or empty id asks nothing."""
+    worn; a null or empty id asks nothing. An origin is asked as its copy looks it up (``str(id or "")``), so an older
+    origin ref naming the number 0 asks nothing either."""
     from ouroboros import chat_annotations, dialogue_store, project_dialogue
     from ouroboros.chat_chain import format_address, row_address
     from ouroboros.dialogue_provenance import recorded_author
@@ -293,3 +294,15 @@ def test_a_page_resolves_only_the_receipts_its_owner_messages_can_wear(tmp_path,
                  for message in json.loads(body)["messages"] if message["role"] == "user"}
         assert shown.get("origin-gone") == "delivered", f"{name}: the retained copy lost its receipt"
         assert (page_asked, page_parsed) == ([alpha_ids, {"origin-gone"}], 2), name
+
+    # Astra w4 3: an older partial origin ref (a room, a time and a checksum) on a newest page showing no owner id. Its
+    # copy looks a number 0 up as "", so the page asks nothing and opens no journal; one naming an id asks that id.
+    for client_id, ids in ((0, set()), ("legacy-origin", {"legacy-origin"})):
+        legacy = {"chat_id": 1, "client_message_id": client_id, "ts": "2020-01-01T00:00:00Z", "text_sha256": "e" * 64}
+
+        def refs(*_args, _legacy=legacy, **_kwargs):  # the page's read of its refs, the partial one resolved
+            return [_legacy]
+
+        body, page_asked, _resolved, page_parsed = read({"chat_id": str(gamma)}, refs=refs)
+        assert body == read({"chat_id": str(gamma)}, unscoped=True, refs=refs)[0], client_id
+        assert (page_asked, page_parsed) == ([ids], len(ids)), f"an origin ref naming {client_id!r}"

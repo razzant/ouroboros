@@ -1426,8 +1426,9 @@ def _assemble_history_response(
     owners = (entry for entry in selections["chat"][0] if entry.get("role") != "system"  # the rows that wear receipts
               and str(entry.get("direction", "")).lower() == "in" and not declared_author(entry))
     # Receipts for its owner rows and, on the newest page that renders them, its origins; never the install's others.
-    asked = {str(cmid) for entry in (*owners, *(project_source_refs if recent and n_human > 0 else ()))
-             if (cmid := entry.get("client_message_id")) not in (None, "")}  # as its row looks it up; null: none asked
+    asked = {str(cmid) for entry in owners if (cmid := entry.get("client_message_id")) not in (None, "")}  # 0 too
+    asked |= {str(ref.get("client_message_id") or "")  # an origin as its copy looks one up (_origin_fallback_rows)
+              for ref in (project_source_refs if recent and n_human > 0 else ())} - {""}
     chat_annotations = page_receipts(data_dir, asked)
     historical_terminals: Dict[str, dict] = {}
     replay_evidence: list = []
