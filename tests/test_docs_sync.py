@@ -263,6 +263,7 @@ def test_prompt_tool_names_resolve_to_registered_tools(tmp_path):
         ("prompts/SAFETY.md", universe),
         ("prompts/CONSCIOUSNESS.md", wake_universe),
         ("prompts/FOCUS.md", universe | set(FOCUS_PLACEHOLDERS)),
+        ("prompts/FIRST_MEETING.md", universe),
     ):
         text = (root / rel).read_text(encoding="utf-8")
         unresolved = _prompt_backticked_identifiers(text) - allowed
