@@ -305,7 +305,8 @@ def test_late_result_turn_preserves_room_binding_and_delivers_locally_only(tmp_p
     events_chat_delivery._send_message({**owed, "type": "send_message", "_delivery_replay": True}, delivery_ctx)
     assert already_delivered(tmp_path, owed["delivery_id"], task_id="late-2") is True
     assert outbound == [] and subscribers == []
-    assert [row.row["text"] for row in dialogue_store.iter_rows(tmp_path, "chat") if row.row.get("chat_id") == room_id] == [
+    assert [row.row["text"] for row in dialogue_store.iter_rows(tmp_path, "chat")
+            if row.row.get("chat_id") == room_id and row.row.get("direction") == "out"] == [
         "Local note", "Replayed local note"]
 
     events_ord = []

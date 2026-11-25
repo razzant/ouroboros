@@ -9,7 +9,7 @@ neighbour door over the words reader (``gateway/recall.py``; its JSDoc twins are
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict as ReferenceTypedDict, Union
+from typing import Any, Dict, List, Optional, Union
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
 from ouroboros.gateway.reference_contracts import ChatReplyReference, HostNoticeField
@@ -162,7 +162,7 @@ class DeclaredAuthor(TypedDict, total=False):
     key_id: str
 
 
-class AgentNoteFields(ReferenceTypedDict, total=False):  # same metaclass as HostNoticeField on Python 3.10
+class AgentNoteFields(TypedDict, total=False):
     """The program's author and optional letter id, on both the live echo and its history row."""
 
     declared_author: DeclaredAuthor  # an agent's note in Main: never the owner's words

@@ -62,7 +62,6 @@ def test_continue_admits_a_root_a_note_opened_and_keeps_the_machine_words_apart(
     assert outcome["ok"], outcome
     successor = outcome["successor_task_id"]
     assert successor.startswith("pred-1-c")
-    from supervisor import queue as q
     from supervisor import workers
 
     pending = next(task for task in workers.PENDING if task["id"] == successor)

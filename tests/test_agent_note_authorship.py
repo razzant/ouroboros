@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import cli, dialogue_provenance, owner_mailbox, owner_words
+from ouroboros import cli, dialogue_provenance
 from ouroboros.dialogue_provenance import (admission_note, agent_note_heading, agent_note_text, owner_speech,
                                            recorded_author, recorded_person, row_author, run_origin)
 from ouroboros.gateway import agent_note, control
