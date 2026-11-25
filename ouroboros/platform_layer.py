@@ -1348,7 +1348,7 @@ if IS_WINDOWS:
         _JOB_OBJECT_LIMIT_BREAKAWAY_OK, _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, _JOBOBJECTINFOCLASS_EXTENDED,
         _JOBOBJECTINFOCLASS_PROCESS_ID_LIST, _JOBOBJECT_BASIC_PROCESS_ID_LIST, _PROCESS_SET_QUOTA, _PROCESS_TERMINATE,
         _PROCESS_SUSPEND_RESUME, _CREATE_SUSPENDED, _JOBOBJECT_BASIC_LIMIT_INFORMATION, _IO_COUNTERS,
-        _ExtendedLimitInfo,
+        _ExtendedLimitInfo, _ntdll, restrict_to_owner,
     )
 
 
@@ -1550,10 +1550,6 @@ def resume_process(pid: int) -> bool:
     if not IS_WINDOWS:
         return False
     try:
-        _ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
-        # Full-width HANDLE, as in the kernel32 declarations above.
-        _ntdll.NtResumeProcess.restype = ctypes.c_int32
-        _ntdll.NtResumeProcess.argtypes = (ctypes.wintypes.HANDLE,)
         handle = _kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
         if not handle:
             log.warning("OpenProcess(%d) failed for resume", pid)

@@ -556,20 +556,25 @@ def _receipt(facts: Mapping[str, Any], late: bool, lang: str) -> str:
 
 
 def _echo(answer: str) -> str:
-    return _clip_u16(answer, _ANSWER_ECHO_MAX)
+    return _clip_u16(answer, _ANSWER_ECHO_MAX, content=True)
 
 
-def _clip_u16(text: str, units: int) -> str:
-    """``text`` within ``units`` UTF-16 units, an ellipsis marking a cut."""
+def _clip_u16(text: str, units: int, *, content: bool = False) -> str:
+    """``text`` within ``units`` UTF-16 units, an ellipsis marking a cut.
+
+    By default ``units`` is the whole result, so a cut pays for its marker out of them;
+    with ``content`` the units are the kept text and the marker stands outside, which is
+    how a plain preview has always cut: ``units`` of it, then the ellipsis.
+    """
+    if units <= 0:
+        return ""
     if _u16len(text) <= units:
         return text
-    if units <= 1:
-        return "…" if units >= 1 else ""
-    budget, kept = units - 1, []
+    budget, kept = units - (0 if content else 1), []
     for char in text:
-        budget -= _u16len(char)
-        if budget < 0:
+        if budget < _u16len(char):
             break
+        budget -= _u16len(char)
         kept.append(char)
     return "".join(kept) + "…"
 

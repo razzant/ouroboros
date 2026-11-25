@@ -1161,6 +1161,26 @@ def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
     assert clock.start().startswith("Consciousness on:") and held.saved()[1] == (True, None)
 
 
+def test_only_my_humans_start_after_a_panic_returns_what_linked_ouroboroses_are_owed(held, monkeypatch):
+    """My human's start after a Panic is their return (``peer_replies.resume_returned``, every link); their start after
+    an ordinary Off, and the mind's own start, resume nothing new."""
+    from ouroboros import server_control
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP
+    from ouroboros import peer_replies
+
+    returned: list = []
+    monkeypatch.setattr(peer_replies, "resume_returned", lambda root, **kw: returned.append(kw))
+    held.clock.stop(source=OWNER_STOP)
+    assert held.clock.start().startswith("Consciousness on:") and returned == []
+    held.state.update_state(server_control._panic_controls, confirm=server_control.PANIC_CONTROL_KEYS)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    clock.stop(source=AGENT_STOP)
+    assert held.saved()[1] == (True, "panic")
+    clock.start(source=AGENT_STOP)
+    assert returned == [] and clock.enabled is False
+    assert clock.start().startswith("Consciousness on:") and returned == [{}]
+
+
 def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
     from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
     from supervisor.state import StateUnavailable, mark_unconfirmed

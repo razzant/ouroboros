@@ -177,8 +177,17 @@ def _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, r
     OuroborosAgent._persist_running_record(types.SimpleNamespace(env=types.SimpleNamespace(drive_root=tmp_path)),
                                            dict(restored))
     if own_card:  # a later answer to the root's own card, delivered while it reads
+        from ouroboros.owner_quiz import quiz_states
+
         _ask(bridge, tmp_path, restored["id"], "q-root", ROOT_QUESTION, ["2025", "2026"])
         _answer(tmp_path, restored["id"], "q-root", "req-root", option_index=1)
+        # The answer is really read before the Restart, by the run's own consumer: the live acknowledgement and
+        # the receipt on the question are what let Continue carry it as read history instead of leaving it unread.
+        drained = _drain(tmp_path, restored["id"], restored["metadata"], restored["text"])
+        own = [row for row in drained._owner_directives
+               if row.get("source_task_id") == restored["id"] and row.get("quiz_id") == "q-root"]
+        assert [(row["source"], row["content"]) for row in own] == [("owner_press", "2. 2026")]
+        assert quiz_states(tmp_path, restored["id"])["q-root"]["delivery"]["read_at"]
     monkeypatch.setattr(workers, "WORKERS", {})  # the worker slot is gone; the door settles the row
     _pool_events(workers, monkeypatch)
     _restart_door(tmp_path, monkeypatch, workers)
@@ -397,7 +406,16 @@ def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatc
             first["source_task_id"] = "other-task"
 
     if damage == "card_missing":
+        from ouroboros import dialogue_store
+
         _mutate_projection(tmp_path, WAKE, lambda quizzes: quizzes.pop("q-start"))
+        # Both carriers of the card go, never one: the projection row above and the canonical ``quiz_answer``
+        # history row, which ``owner_source._recorded_answered_quiz`` would otherwise still resolve for the
+        # carried answer. Exactly the synthetic row, inside ``tmp_path``.
+        with dialogue_store.transaction(tmp_path, write=True) as conn:
+            cut = conn.execute("DELETE FROM dialogue WHERE stream='chat' AND client_message_id=?",
+                               (f"quiz_answer:{WAKE}:q-start",))
+            assert cut.rowcount == 1, "exactly the synthetic canonical answer row"
     elif damage == "card_unanswered":
         _mutate_projection(tmp_path, WAKE, lambda quizzes: quizzes["q-start"].update(state="expired_terminal"))
     else:

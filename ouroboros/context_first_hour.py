@@ -16,7 +16,7 @@ judgement.
 - ``starter_skills``: the starter installer's outcome counts (``state/skill_starter.json``) where it ran.
 - ``startup_problems``: what the newest ``startup_verification`` row found wrong, from the events tail the health
   block reads (one read serves both); present only while that row counted issues.
-- ``first_meeting``: the one line that is not a reading: the owner's words for a first meeting
+- ``first_meeting``: the one line that is not a reading: the approved first-meeting guidance
   (``prompts/FIRST_MEETING.md``), carried only while a press of Start is on record (the state's ``first_meeting``
   record, which only a state minted after a setup's Finish carries, in a state read that is the current one: a state
   whose initialization record is missing or does not match is unknown, and carries none) and I KNOW I have not written
@@ -37,7 +37,7 @@ _EXCHANGE_WORDS = {(False, False): "my human and I have not written to each othe
                    (True, False): "my human has written to me; I have not written to them yet",
                    (False, True): "I have written to my human; they have not written to me yet",
                    (True, True): "my human and I have both written"}
-# The owner's words for a first meeting: absent until he approves their exact text.
+# Optional repository guidance, not an owner message or a permission grant.
 GUIDANCE_REL = pathlib.Path("prompts") / "FIRST_MEETING.md"
 _RESET_DELETES = "a Reset deletes memory, chats, logs, task results, uploads and settings"
 _STARTER_WORDS = {"fresh": "not run yet", "running": "installing", "pending": "waiting to retry", "done": "done"}
@@ -49,8 +49,8 @@ _STARTUP_READER = "its startup_verification row in logs/events.jsonl"
 
 def setup_fact(data_root: Any, repo_dir: Any = None) -> Dict[str, str]:
     """The ``setup`` key of ``data_root`` (the canonical data root); never raises, each line answers for itself.
-    While a press of Start is on record and I know I have not written to my human, it also carries the owner's
-    first-meeting words from ``repo_dir`` if they exist (``GUIDANCE_REL``)."""
+    While a press of Start is on record and I know I have not written to my human, it also carries the
+    first-meeting guidance from ``repo_dir`` if it exists (``GUIDANCE_REL``)."""
     root = pathlib.Path(data_root)
     fact = {"finished_at": _read(_finished_at, root), "state": _read(_state_origin, root)}
     controls = _read(_controls, root, {"owner_chat": "unknown: runtime state unreadable", "consciousness": "unknown"})
@@ -155,7 +155,7 @@ def _exchange(root: pathlib.Path) -> Tuple[str, Optional[bool]]:
 
 
 def _guidance(repo_dir: Any) -> str:
-    """The owner's words for a first meeting (``prompts/FIRST_MEETING.md``) once they exist; "" while they do not."""
+    """The first-meeting guidance (``prompts/FIRST_MEETING.md``) once it exists; "" while it does not."""
     try:
         return (pathlib.Path(repo_dir) / GUIDANCE_REL).read_text(encoding="utf-8").strip()
     except FileNotFoundError:

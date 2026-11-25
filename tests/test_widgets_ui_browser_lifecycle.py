@@ -20,6 +20,7 @@ import time
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data as _direct_server_with_data
+from tests.settings_section_helpers import press_nav
 
 direct_server_with_data = _direct_server_with_data
 
@@ -405,6 +406,9 @@ _HOST_FETCH_PROBE_SCRIPT = r"""
 
 
 def _click_nav(page, target: str) -> None:
+    if target == "skills":  # no row of its own: Settings' door (owner 24.11)
+        press_nav(page, target)
+        return
     page.evaluate(
         """(target) => {
             const button = [...document.querySelectorAll(`[data-nav-page="${target}"]`)]

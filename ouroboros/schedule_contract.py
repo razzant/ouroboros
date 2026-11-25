@@ -38,6 +38,10 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     # The words a tree carries (``owner_words.FIELD``/``SCHEDULE_FIELD``) and a control press
     # (``ui_control``) are minted for a helper or a pressed run, never by a template.
     "governing_owner_words", "governing_owner_words_absent", "governing_schedule_text", "ui_control",
+    # A linked Ouroboros's letter and its agent author (``peer_letters.CARRIED``) are stamped by the letter
+    # door alone. A schedule that letter's work wrote keeps them in its host writer's origin
+    # (``stamp_schedule_writer``), which the fired task takes them from; a template never carries them.
+    "peer_letter", "letter_author",
 })
 # Host facts a template legitimately holds, which only the schedule writers set
 # (``schedule_lifecycle``, ``tools.followup``): who supplied each text field and the

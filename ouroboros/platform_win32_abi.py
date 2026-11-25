@@ -1,7 +1,8 @@
-"""Private Win32 ABI declarations for platform_layer's process and lock primitives.
+"""Private Win32 ABI declarations for platform_layer's process, lock and file-ACL primitives.
 
 Signatures and ctypes layouts share one identity; operations remain in the public
-platform layer. Importing this module on another platform loads no native DLL.
+platform layer, which re-exports the one owner-only DACL call beside its declarations
+(``restrict_to_owner``). Importing this module on another platform loads no native DLL.
 """
 
 import sys
@@ -51,6 +52,32 @@ if sys.platform == "win32":
     ):
         _api = getattr(_kernel32, _api_name)
         _api.restype, _api.argtypes = _result_type, _argument_types
+
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+    _ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+    for _dll, _api_name, _result_type, _argument_types in (
+        (_advapi32, "ConvertStringSecurityDescriptorToSecurityDescriptorW", ctypes.wintypes.BOOL,
+         (ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)),
+        (_advapi32, "SetFileSecurityW", ctypes.wintypes.BOOL,
+         (ctypes.wintypes.LPCWSTR, ctypes.wintypes.DWORD, ctypes.c_void_p)),
+        (_kernel32, "LocalFree", ctypes.c_void_p, (ctypes.c_void_p,)),
+        # Full-width HANDLE, as in the kernel32 declarations above.
+        (_ntdll, "NtResumeProcess", ctypes.c_int32, (ctypes.wintypes.HANDLE,)),
+    ):
+        _api = getattr(_dll, _api_name)
+        _api.restype, _api.argtypes = _result_type, _argument_types
+
+    def restrict_to_owner(path: str) -> None:
+        """Protect ``path``'s DACL so only its owner (Owner Rights, S-1-3-4) has access; raise OSError if not set."""
+        descriptor = ctypes.c_void_p()
+        if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                "D:P(A;;FA;;;OW)", 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:  # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION: no inherited entries remain
+            if not _advapi32.SetFileSecurityW(path, 0x4 | 0x80000000, descriptor):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _kernel32.LocalFree(descriptor)
 
     # .value, not the HANDLE instance: with restype=HANDLE the calls return plain
     # ints (or None for NULL), and an int never equals a ctypes instance.

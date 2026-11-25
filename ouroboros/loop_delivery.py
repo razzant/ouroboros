@@ -1211,10 +1211,8 @@ def _prepare_delivery_candidate(content: Any, tools: ToolRegistry, limit_ctx: An
     quiet_held = not explicit and getattr(held, "quiet", False)  # replaced even by empty prose, never published
     from ouroboros.dialogue_provenance import presence_caller_binding
     from ouroboros.loop_messages import owner_reply_owed
-
-    # Prose after one-shot facts inherits a silent selection (delivery_facts), never while my human's reply is owed:
-    # it is then a fresh visible answer, and the replaced quiet bytes stay internal. A place-bound run's final is
-    # speech to its place, not to my human, so it keeps the inherited silence.
+    # Prose after one-shot facts inherits a silent selection (delivery_facts), but not while my human's reply is owed:
+    # then it is a fresh visible answer (a place-bound run's final is speech to its place, so it keeps the silence).
     keep_quiet = quiet_held and noted(held) and not (owner_reply_owed(tools._ctx)
                                                      and presence_caller_binding(tools._ctx) is None)
     if resumed and quiet_held:
@@ -1526,6 +1524,8 @@ def _no_tool_final_answer(
         solving_again()
         return held("focus_reply_refused")
     accept_focus_completion(tools._ctx, limit_ctx.accumulated_usage, _loop().TERMINAL_ORIGIN_MODEL_FINAL)
+    if isinstance(letter := getattr(tools._ctx, "_letter_reply", None), dict):  # what this final gives a letter's sender
+        limit_ctx.accumulated_usage.update(peer_reply=letter, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or a focus's records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     for key, value in (getattr(tools._ctx, "_completion_selected", None) or {}).items():

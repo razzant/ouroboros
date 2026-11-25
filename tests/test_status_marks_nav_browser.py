@@ -279,12 +279,10 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
     for case in ('mouse', 'narrow', 'touch'):
         seen, rest = facts[case], facts[case]['rest']
         assert seen['text'] == '99+' and seen['mark'], facts
-        if case in ('mouse', 'narrow'):
-            # The narrow card keeps Main Chat on its second line (783b1cf34, c374668b7).
-            assert seen['label']['top'] >= seen['badge']['bottom'], (case, facts)
-            assert seen['label']['right'] == pytest.approx(seen['mark']['right'], abs=0.5), (case, facts)
-        else:
-            assert seen['label']['right'] <= seen['badge']['left'] + 0.5, (case, facts)
+        # The narrow card keeps Main Chat on its second line (783b1cf34, c374668b7); a 390 px drawer's card is one too,
+        # its column giving the rail its width (owner 24.11, «Рельс снаружи»).
+        assert seen['label']['top'] >= seen['badge']['bottom'], (case, facts)
+        assert seen['label']['right'] == pytest.approx(seen['mark']['right'], abs=0.5), (case, facts)
         assert seen['badge']['right'] <= seen['mark']['left'] - 2, (case, facts)
         assert rest['mark'] is None, facts
         assert all(abs(rest['badge'][side] - seen['badge'][side]) <= 0.5 for side in seen['badge']), (case, facts)

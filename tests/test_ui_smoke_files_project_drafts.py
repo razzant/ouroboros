@@ -924,8 +924,8 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             _capture(page, f"files-{engine}-390-image")
             # Another page put in front drops the file's layer with the page's watch; Files shown again re-reads its
             # panes and the file alone is a layer once more.
-            page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
-            page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+            page.evaluate("document.querySelector('[data-nav-page=\"widgets\"]').click()")
+            page.wait_for_function("document.querySelector('#page-widgets').classList.contains('active')")
             assert page.evaluate("window.__ouroLayers.ids()") == []
             page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
             page.wait_for_function("window.__ouroLayers.ids().includes('files-file')")
@@ -960,8 +960,8 @@ def test_a_files_draft_kept_across_pages_says_when_its_file_changed_meanwhile(di
             status = page.locator("#files-preview-status")
 
             def away_and_back():
-                page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
-                page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+                page.evaluate("document.querySelector('[data-nav-page=\"widgets\"]').click()")
+                page.wait_for_function("document.querySelector('#page-widgets').classList.contains('active')")
                 page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
                 page.wait_for_function("document.querySelector('#page-files').classList.contains('active')")
 

@@ -348,7 +348,7 @@ class ToolRegistry:
         "core", "delegate", "edit_ops", "followup", "git", "git_pr", "git_rollback", "github",
         "health", "imagegen", "join_ledger", "knowledge", "mcp_sign_in", "media", "memory_tools", "plan_review",
         "preflight_review",
-        "project_journal", "presence",
+        "project_journal", "presence", "peer_letter", "peer_delegate",
         "recent_tasks",
         "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
         "skill_publish", "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree",

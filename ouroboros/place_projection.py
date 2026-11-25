@@ -98,7 +98,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     ``places.place_records`` read shared by a list; its circle and description facts join the place here, the
     circle's words only in a brief view (the list names them once, ``places_view``). ``switch`` is one
     ``switch_state`` read shared by a list (read here when absent): a full view says why the place is quiet now as
-    ``quiet`` (``consciousness_view.place_quiet``: derived on every read, never stored). ``facts`` is one
+    ``quiet`` (``consciousness_view.place_quiet``: derived on every read, never stored). A linked Ouroboros's place
+    also carries ``peer_effective`` (``peer_links.effective_permissions``), likewise derived. ``facts`` is one
     ``place_arrivals.place_facts`` read shared by a list (rooms only for a brief one; read here when absent)."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import place_facts
@@ -119,6 +120,16 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     result["circle"] = circle if brief or circle is None else {
         key: circle[key] for key in ("circle_id", "placed_by", "placed_at")}
     result["description"] = records.description(place.place_id)
+    linked = None
+    if place.connector == "ouroboros":
+        # A linked Ouroboros (peer_links): my human's stored choices, what is in effect now beside them and the link
+        # (no key). A paused, unconfirmed, unmarked or revoked link keeps its choices and reads as refusing here.
+        from ouroboros.peer_links import link_card, peer_facts_line, place_permissions
+
+        peer, switch = records.peer(place.place_id), switch_state(root) if switch is None else switch
+        linked = place_permissions(root, place, peer, switch=switch)
+        result.update(peer=peer, peer_effective=linked, peer_facts=peer_facts_line(peer, linked),
+                      link=link_card(root, place.place_id))
     cause = "place:" + place.place_id
     spend = next((item.get("usd") for item in (allowance or {}).get("spend_by_cause") or []
                   if item.get("cause") == cause), None)
@@ -135,9 +146,11 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     # Why it is quiet now, by its one cause (owner 15.11, 5A): on its human's screens, never inside the place.
     from ouroboros.consciousness_view import place_quiet
     from ouroboros.runtime_limits import get_consciousness_autonomy
-    quiet = place_quiet(place.state, switch=switch_state(root) if switch is None else switch,
-                        autonomy=get_consciousness_autonomy(), allowance=str((allowance or {}).get("status") or ""),
-                        limit_usd=(allowance or {}).get("limit_usd"))
+    # A link that accepts nothing here (or cannot be read) is not "hearing": its own facts say why, never the switch.
+    quiet = None if linked and not linked["messages"] else place_quiet(
+        place.state, switch=switch_state(root) if switch is None else switch,
+        autonomy=get_consciousness_autonomy(), allowance=str((allowance or {}).get("status") or ""),
+        limit_usd=(allowance or {}).get("limit_usd"), assignments=linked["assignments"] if linked else None)
     if quiet:
         result["quiet"] = quiet
     result.update(label=said_once(place.label or place.provider),
@@ -145,8 +158,11 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                   last_activity_at=own["last_activity_at"],
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
-    matches = matching_declarations(place, rows)
-    row = matches[0] if matches else {}
+    builtin = place.connector == "ouroboros"  # built in: letters arrive at /api/letters, no connector skill runs
+    matches = [] if builtin else matching_declarations(place, rows)
+    row = ({"readiness": {"text": "Built in", "tone": "ok"}, "destination": "vendor:ouroboros",
+            "wakes": ["direct_message", "from_bot"]} if builtin
+           else matches[0] if matches else {})
     suggestions = declared_wake_facts(matches) if place.legacy_binding_ids else list(row.get("wakes") or [])
     result.update(label=said_once(place.label or row.get("label") or place.provider),
                   reply_destination=place.destination,

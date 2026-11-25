@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.settings_browser_helpers import commit_row, open_settings, setting_row
+from tests.settings_section_helpers import open_extensions
 from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
@@ -196,7 +197,7 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         assert status.get_attribute('data-tone') == 'warn'
         assert len(writes) == 2, writes
         page.screenshot(path=str(evidence / 'costs-warning.png'))
-        page.locator('[data-nav-page="skills"]').click()
+        open_extensions(page)
         card = page.locator('.skills-card[data-skill="emoji-own"]')
         # What the skill needs is one sentence in a tray, its actions beside it, no glyph prefix.
         tray = card.locator('.skills-tray').first

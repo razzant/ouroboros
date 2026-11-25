@@ -353,10 +353,11 @@ def write_start_notice(registry: Any, messages: list) -> None:
     work was told: changed lines reach it as one typed tail row (``CHANGE_KIND``), as the notice the base wrote
     at every selection did; unchanged ones add nothing, and what the work was told of breaks is kept."""
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
-    from ouroboros.tool_policy import format_capability_omissions
+    from ouroboros.tool_policy import format_capability_omissions, routine_capability_omissions
 
     tool_ctx = getattr(registry, "_ctx", None)
-    omissions = registry.capability_omissions() if hasattr(registry, "capability_omissions") else []
+    omissions = routine_capability_omissions(
+        registry.capability_omissions() if hasattr(registry, "capability_omissions") else [])
     lines = format_capability_omissions(omissions)
     told = getattr(tool_ctx, _TOLD, None)
     if isinstance(told, dict):

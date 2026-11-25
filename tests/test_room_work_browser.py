@@ -218,6 +218,7 @@ class Transport:
     # -- transport
     def _connect(self, ws):
         self.sockets.append(ws)
+        ws.send(json.dumps({"type": "connection_profile", "profile_scope": setup_browser.PREVIEW_SCOPE}))
         ws.send(json.dumps({"type": "heartbeat"}))
 
     def body(self, *, ready=True):
@@ -252,11 +253,19 @@ class Transport:
         chat_id, around = int(query.get("chat_id", ["1"])[0]), query.get("around", [""])[0]
         if around:  # these rooms' saved history holds no message of the census-only work (gateway: ``absent``)
             self.around_reads.append(around)
-            route.fulfill(json={"messages": [], "has_more": False, "next_cursor": None, "page_cursor": None,
+            route.fulfill(json={"profile_scope": setup_browser.PREVIEW_SCOPE, "messages": [], "has_more": False,
+                                "next_cursor": None, "page_cursor": None,
                                 "window": {"complete": False, "truncated_by": ["page"]},
                                 "anchor": {"state": "absent", "task_id": around.partition(":")[2]}})
             return
-        route.fulfill(json={"messages": self.history.get(chat_id, []), "progress": []})
+        messages = self.history.get(chat_id, [])
+        source = f"chat:room-{chat_id}"
+        route.fulfill(json={"profile_scope": setup_browser.PREVIEW_SCOPE, "messages": messages, "progress": [],
+                            "has_more": False, "next_cursor": None, "page_cursor": f"page:{chat_id}",
+                            "window": {"complete": True, "truncated_by": []},
+                            "coverage": {"v": 1, "view": source, "upper": {"chat": len(messages), "progress": 0},
+                                         "spans": {"chat": {"from": 0, "to": len(messages), "chain": source, "gaps": []},
+                                                   "progress": None}}})
 
     def _tasks(self, route):
         request = route.request

@@ -198,14 +198,35 @@ def rest(page, timeout=5000):
 
 
 def nav_pages(page):
-    # The one registry of places (web/modules/pages.js): a new page is gated here with no further edit.
-    ids = page.evaluate("async () => (await import('/static/modules/pages.js')).PAGES.map(p => p.id)")
+    # The one registry of places (web/modules/pages.js): a new page is gated here with no further edit. A place behind a
+    # door (zone `door`: Extensions, owner 24.11) has no row of its own and is reached through that door (open_nav).
+    places = page.evaluate("async () => (await import('/static/modules/pages.js')).PAGES.map(p => [p.id, p.door || ''])")
     rows = page.locator('[data-nav-page]').evaluate_all('rows => rows.map(e=>e.dataset.navPage)')
-    assert sorted(ids) == sorted(rows), f'registry {ids} and rendered rows {rows} disagree'
-    return ids
+    assert sorted(id for id, door in places if not door) == sorted(rows), f'registry {places} and rendered rows {rows} disagree'
+    return [id for id, _door in places]
 
 
 def open_nav(page, name):
+    door = page.evaluate("async (name) => (await import('/static/modules/pages.js')).pageById(name)?.door || ''", name)
+    if door:
+        # A place behind a door is opened as a person opens it (Extensions: Settings → Connections → Extensions): the
+        # place that holds the door, its list back in view where one column shows a page, then the door's row.
+        open_nav(page, door)
+        opener = page.locator(f'#page-{door} [data-settings-open="page:{name}"]').first
+        while not opener.is_visible():
+            if page.locator('html').get_attribute('data-telegram-back') == 'back':
+                page.evaluate('Telegram.WebApp.BackButton.callback()')
+                rest(page)
+                continue
+            back = page.locator(f'#page-{door} .app-page-header .shell-back:visible').first
+            if not back.count():
+                break
+            back.click()
+            rest(page)
+        opener.click()
+        page.locator(f'#page-{name}').wait_for(state='visible')
+        rest(page)
+        return
     row = page.locator(f'[data-nav-page="{name}"]')
     toggle = page.locator('[data-mobile-nav-toggle]:visible').first
     # A one-column section page has Back in place of Places. Return through its real header controls.
@@ -308,6 +329,7 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
             if name == 'skills':
                 # Extensions is a place with pages, as the Dashboard is: every row of its list opens its page (one
                 # column: from the list, which Back returns to), and each is measured.
+                door = page.evaluate("async () => (await import('/static/modules/pages.js')).pageById('skills')?.door || ''")
                 rows = page.locator(root + ' [data-extensions-open]').all()
                 assert [row.get_attribute('data-extensions-open') for row in rows] == ['installed', 'tools', 'browse', 'sources']
                 rail = page.locator(root + ' [data-extensions-rail]')
@@ -334,8 +356,13 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                             back.click()
                         rail.wait_for(state='visible')
                         rest(page)
-                    elif width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
-                        failures[key + '/navigation'] = 'the Places control left the header'
+                    elif width < 720:
+                        # Beside its list one control leads the header: Extensions, reached through Settings' door
+                        # (owner 24.11), is a jump and leads with its Back to Settings, as base did for that door;
+                        # a place reached by its row leads with the Places control.
+                        lead = '[data-shell-back]' if door else '[data-mobile-nav-toggle]'
+                        if not page.locator(root + ' .app-page-header ' + lead).is_visible():
+                            failures[key + '/navigation'] = f'the leading control {lead} left the header'
                 continue
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')

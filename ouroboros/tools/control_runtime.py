@@ -308,6 +308,10 @@ def _request_deep_self_review(ctx: ToolContext, reason: str, reviewer: str = "")
     # episode or a delegated session), not a model key alone.
     from ouroboros.deep_self_review import deep_review_route, deep_review_unavailable_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if refusal := separate_work_refusal(getattr(ctx, "task_metadata", None), "a deep self-review"):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     reviewer = str(reviewer or "").strip()
     if reviewer:
         from ouroboros.tools.arg_feedback import argument_refusal
@@ -984,6 +988,11 @@ def _update_world(ctx: ToolContext, content: str | None = None, expected_revisio
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool, objective: str = "") -> str:
     """Toggle evolution mode on/off via supervisor event."""
+    from ouroboros.peer_letters import separate_work_refusal
+
+    if bool(enabled) and (refusal := separate_work_refusal(getattr(ctx, "task_metadata", None),
+                                                           "an evolution campaign")):
+        return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=refusal))
     if bool(enabled):
         # Reflect the light-mode hard block in the tool's own result so the agent
         # is not told "ON" while the supervisor silently refuses it.
@@ -1344,8 +1353,9 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  fold_read: bool = False, about_work: str = "") -> str:
     """Stage an author act; a finish that owes no one words may choose silence: a self-started run (an
     own-clock or focused wake, a schedule-born root without a Presence binding), which may leave a gist
-    for its human, a task that answers its place conversation or a program's note, or a root with no place binding
-    whose live text message of this run already reached a conversation its human reads, not the hidden task record
+    for its human, a task that answers its place conversation or a program's note, a letter's own root, whose
+    final is otherwise offered to the linked Ouroboros that wrote it, or a root with no place binding whose
+    live text message of this run already reached a conversation its human reads, not the hidden task record
     (``_spoke_live_to_my_human``), and whose contract owes no answer; inherited binding authority alone names
     no speaker."""
     request, error = completion_request(ctx, {
@@ -1400,13 +1410,18 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
     # the fold it would stand for goes with it.
     ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
                if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
-    if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)):
+    from ouroboros.peer_letters import is_letter_root
+
+    # A retained legacy binding resolves too; a letter's own root may keep its final from its sender (peer_letters).
+    if silent and not (self_started or carrier_now(ctx, metadata) or getattr(ctx, "_admission_author", None)
+                       or is_letter_root(metadata, str(getattr(ctx, "task_id", "") or ""))):
         if not _spoke_live_to_my_human(ctx):
             return None, ("silent needs a finish that owes no one words: a self-started run (a consciousness wake's "
                           "own turn, or a schedule-born root without a Presence binding), a task answering its own place "
-                          "conversation or a program's note, or a root without a place binding after its live text "
-                          "message of this run reached a conversation its human reads (send_user_message, accepted "
-                          "live, not queued; the hidden task record does not count)")
+                          "conversation, a program's note or the root of a letter from a linked Ouroboros, or a root "
+                          "without a place binding after its live text message of this run reached a conversation its "
+                          "human reads (send_user_message, accepted live, not queued; the hidden task record does not "
+                          "count)")
         from ouroboros.contracts.task_contract import answer_protocol_active, review_answer_required
 
         if review_answer_required(ctx) or answer_protocol_active(ctx):
